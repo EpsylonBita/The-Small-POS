@@ -1366,7 +1366,6 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         // Default categories
         const defaultCategories = [
           { id: "featured", name: t('modals.menu.featured'), icon: "⭐" },
-          { id: "combos", name: t('modals.menu.combos', 'Προσφορές & Κόμπο'), icon: "🎁" },
         ];
 
         // Combine default categories with database categories
@@ -1393,7 +1392,6 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         // Fallback to default categories
         setCategories([
           { id: "featured", name: t('modals.menu.featured'), icon: "⭐" },
-          { id: "combos", name: t('modals.menu.combos', 'Προσφορές & Κόμπο'), icon: "🎁" },
         ]);
       }
     };
@@ -1459,7 +1457,10 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     };
   }, [isOpen, t]);
 
-  // Load combos when modal opens
+  // Legacy combos are no longer exposed as an order-taking category. Keep
+  // their loader dormant unless a future internal navigation path explicitly
+  // selects the legacy category, avoiding an unnecessary request on every
+  // order-taking open.
   useEffect(() => {
     const loadCombos = async () => {
       try {
@@ -1471,10 +1472,10 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       }
     };
 
-    if (isOpen) {
+    if (isOpen && selectedCategory === 'combos') {
       loadCombos();
     }
-  }, [isOpen]);
+  }, [isOpen, selectedCategory]);
 
   // Handle combo selection
   const handleComboSelect = (combo: MenuCombo) => {

@@ -382,7 +382,7 @@ pub async fn sync_menu(db: &DbState) -> Result<Value, String> {
 
     let terminal_id_for_query = validate_terminal_id_for_query(&credentials.terminal_id)?;
     let path = format!(
-        "/api/pos/menu-sync?terminal_id={terminal_id_for_query}&last_sync=1970-01-01T00%3A00%3A00.000Z&include_inactive=false"
+        "/api/pos/menu-sync?terminal_id={terminal_id_for_query}&last_sync=1970-01-01T00%3A00%3A00.000Z&include_inactive=true"
     );
     let masked_terminal_id = mask_terminal_id(&credentials.terminal_id);
     trace!(

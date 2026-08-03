@@ -12,13 +12,13 @@ const menuManagementPageSource = () =>
 test('MenuManagementPage uses yellow selected tabs with strong black text', () => {
   const source = menuManagementPageSource();
 
-  assert.match(source, /useState<'categories' \| 'subcategories' \| 'ingredients' \| 'combos'>\('categories'\)/);
+  assert.match(source, /useState<'categories' \| 'subcategories' \| 'ingredients' \| 'offers'>\('categories'\)/);
   assert.match(source, /const getTabClass = \(tab: typeof activeTab\)/);
   assert.match(source, /'bg-yellow-500 text-black font-semibold border border-yellow-400'/);
   assert.match(source, /className=\{getTabClass\('categories'\)\}/);
   assert.match(source, /className=\{getTabClass\('subcategories'\)\}/);
   assert.match(source, /className=\{getTabClass\('ingredients'\)\}/);
-  assert.match(source, /className=\{getTabClass\('combos'\)\}/);
+  assert.match(source, /className=\{getTabClass\('offers'\)\}/);
   assert.doesNotMatch(source, /bg-blue-500\/30 text-blue-200 border border-blue-500\/50/);
   assert.doesNotMatch(source, /bg-blue-500 text-white/);
 });
@@ -63,7 +63,7 @@ test('MenuManagementPage uses neutral grey controls, white search outline, and y
   assert.match(source, /className=\{`\$\{gridCardClass\} \$\{!category\.is_active \? 'opacity-60 grayscale' : ''\}`\}/);
   assert.match(source, /className=\{`\$\{gridCardClass\} \$\{!item\.is_available \? 'opacity-60 grayscale' : ''\}`\}/);
   assert.match(source, /className=\{`\$\{gridCardClass\} \$\{!ingredient\.is_available \? 'opacity-60 grayscale' : ''\}`\}/);
-  assert.match(source, /className=\{`\$\{gridCardClass\} \$\{!combo\.is_active \? 'opacity-60 grayscale' : ''\}`\}/);
+  assert.match(source, /className=\{`\$\{gridCardClass\} \$\{!offer\.is_active \? 'opacity-60 grayscale' : ''\}`\}/);
   assert.doesNotMatch(source, /bg-gray-800\/50 border-gray-700/);
   assert.doesNotMatch(source, /bg-white border-gray-200/);
   assert.doesNotMatch(source, /bg-slate-800\/70/);
@@ -116,7 +116,7 @@ test('MenuManagementPage renders availability toggles as 44px semantic glass tou
   assert.match(source, /className=\{getAvailabilityToggleClass\(category\.is_active\)\}/);
   assert.match(source, /className=\{getAvailabilityToggleClass\(item\.is_available\)\}/);
   assert.match(source, /className=\{getAvailabilityToggleClass\(ingredient\.is_available\)\}/);
-  assert.match(source, /className=\{getAvailabilityToggleClass\(combo\.is_active\)\}/);
+  assert.match(source, /className=\{getAvailabilityToggleClass\(offer\.is_active\)\}/);
 
   // 44px, inline-flex centered, rounded glass surface with active press feedback + disabled state.
   assert.match(source, /inline-flex h-11 w-11 items-center justify-center rounded-2xl border backdrop-blur-md/);
@@ -153,7 +153,7 @@ test('MenuManagementPage renders a localized glass empty state for the offers ta
   const source = menuManagementPageSource();
 
   // Empty branch keyed on the filtered list, distinguishing search vs no-search.
-  assert.match(source, /if \(filteredCombos\.length === 0\)/);
+  assert.match(source, /if \(filteredOffers\.length === 0\)/);
   assert.match(source, /const isSearching = searchTerm\.trim\(\)\.length > 0/);
   assert.match(source, /data-menu-offers-empty/);
 
@@ -173,7 +173,7 @@ test('MenuManagementPage renders a localized glass empty state for the offers ta
 
   // Small centered glass surface (not a giant nested card): centered, rounded, blurred, amber accent.
   const emptyStart = source.indexOf('data-menu-offers-empty');
-  const emptyEnd = source.indexOf('filteredCombos.map', emptyStart);
+  const emptyEnd = source.indexOf('filteredOffers.map', emptyStart);
   assert.ok(emptyStart >= 0 && emptyEnd > emptyStart, 'empty-state region must precede the grid');
   const emptyRegion = source.slice(emptyStart, emptyEnd);
   assert.match(emptyRegion, /flex justify-center py-12/);
@@ -232,9 +232,11 @@ test('MenuManagementPage renders prices via formatCurrency, with no euro literal
   const source = menuManagementPageSource();
 
   assert.match(source, /import \{ formatCurrency \} from '\.\.\/utils\/format'/);
-  assert.match(source, /formatCurrency\(item\.base_price \|\| 0, 'EUR', language\)/);
+  assert.match(source, /import \{ resolveMenuItemPrice \} from '\.\.\/utils\/order-type-pricing'/);
+  assert.match(source, /resolveMenuItemPrice\(item, 'pickup'\)/);
+  assert.match(source, /item\.is_customizable \? t\('menu\.item\.from'\) : ''/);
+  assert.match(source, /formatCurrency\(getMenuItemDisplayPrice\(item\), 'EUR', language\)/);
   assert.match(source, /formatCurrency\(ingredient\.price, 'EUR', language\)/);
-  assert.match(source, /formatCurrency\(combo\.base_price \|\| 0, 'EUR', language\)/);
 
   // No raw euro glyph (U+20AC), no toFixed currency rendering, no UTF-8-as-cp1252 euro mojibake.
   assert.doesNotMatch(source, /€/);
@@ -246,7 +248,6 @@ test('MenuManagementPage localizes status labels and toast fallbacks via menu.* 
   const source = menuManagementPageSource();
 
   assert.match(source, /t\('menu\.unnamed', 'Unnamed'\)/);
-  assert.match(source, /t\('menu\.featured', 'Featured'\)/);
   assert.match(source, /t\('menu\.disable', 'Disable'\)/);
   assert.match(source, /t\('menu\.enable', 'Enable'\)/);
   assert.match(source, /t\('menu\.onlineRequired', 'This action requires an online connection\.'\)/);
@@ -266,10 +267,59 @@ test('MenuManagementPage uses aria-label, not native title tooltips, for icon-bu
   // Refresh icon button keeps its accessible name via aria-label.
   assert.match(source, /aria-label=\{refreshLabel\}/);
 
-  // Each availability/toggle icon button (category / menu item / ingredient / combo) carries an
+  // Each availability/toggle icon button (category / menu item / ingredient / offer) carries an
   // aria-label with the translated disable/enable action (or the offline-disabled message).
   assert.match(source, /aria-label=\{toggleAction\.message \|\| \(category\.is_active \? t\('menu\.disable', 'Disable'\) : t\('menu\.enable', 'Enable'\)\)\}/);
   assert.match(source, /aria-label=\{toggleAction\.message \|\| \(item\.is_available \? t\('menu\.disable', 'Disable'\) : t\('menu\.enable', 'Enable'\)\)\}/);
   assert.match(source, /aria-label=\{toggleAction\.message \|\| \(ingredient\.is_available \? t\('menu\.disable', 'Disable'\) : t\('menu\.enable', 'Enable'\)\)\}/);
-  assert.match(source, /aria-label=\{toggleAction\.message \|\| \(combo\.is_active \? t\('menu\.disable', 'Disable'\) : t\('menu\.enable', 'Enable'\)\)\}/);
+  assert.match(source, /aria-label=\{toggleAction\.message \|\| \(offer\.is_active \? t\('menu\.disable', 'Disable'\) : t\('menu\.enable', 'Enable'\)\)\}/);
+});
+
+test('MenuManagementPage reads and toggles the same catalog offers used by the cart', () => {
+  const source = menuManagementPageSource();
+
+  assert.match(source, /bridge\.branchData\.getCatalogOffers\(\{/);
+  assert.match(source, /catalog_type:\s*'menu'/);
+  assert.match(source, /include_inactive:\s*true/);
+  assert.match(source, /\/api\/pos\/offers\/\$\{encodeURIComponent\(id\)\}/);
+  assert.match(source, /method:\s*'PATCH'/);
+  assert.match(source, /body:\s*\{\s*is_active:\s*!currentStatus\s*\}/);
+  assert.doesNotMatch(source, /bridge\.menu\.getCombos\(\)/);
+  assert.doesNotMatch(source, /bridge\.menu\.updateCombo\(/);
+});
+
+test('menu sync preserves inactive rows and every order-type price used by management', () => {
+  const nativeMenuSource = readFileSync(
+    path.join(process.cwd(), 'src-tauri', 'src', 'menu.rs'),
+    'utf8',
+  );
+  const menuSyncRouteSource = readFileSync(
+    path.join(
+      process.cwd(),
+      '..',
+      'admin-dashboard',
+      'src',
+      'app',
+      'api',
+      'pos',
+      'menu-sync',
+      'route.ts',
+    ),
+    'utf8',
+  );
+
+  assert.match(nativeMenuSource, /include_inactive=true/);
+  for (const priceField of [
+    'price',
+    'base_price',
+    'pickup_price',
+    'delivery_price',
+    'dine_in_price',
+  ]) {
+    assert.match(
+      menuSyncRouteSource,
+      new RegExp(`\\b${priceField}\\b`),
+      `menu sync must preserve ${priceField}`,
+    );
+  }
 });

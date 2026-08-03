@@ -1934,6 +1934,8 @@ export interface PlatformBridge {
       branch_id?: string;
       catalogType?: string;
       catalog_type?: string;
+      includeInactive?: boolean;
+      include_inactive?: boolean;
     }): Promise<AdminApiBridgeResponse<any>>;
     validateCoupon(params: {
       code: string;
@@ -3401,6 +3403,8 @@ export class TauriBridge implements PlatformBridge {
       branch_id?: string;
       catalogType?: string;
       catalog_type?: string;
+      includeInactive?: boolean;
+      include_inactive?: boolean;
     }) => this.inv("branch-data:get-catalog-offers", params || {}),
     validateCoupon: (params: {
       code: string;

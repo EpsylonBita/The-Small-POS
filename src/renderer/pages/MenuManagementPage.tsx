@@ -8,6 +8,7 @@ import { getBridge, offEvent, onEvent } from '../../lib';
 import { getOfflineActionState } from '../services/offline-page-capabilities';
 import { pageMotionContainer, pageMotionItem } from '../components/ui/page-motion';
 import { formatCurrency } from '../utils/format';
+import { resolveMenuItemPrice } from '../utils/order-type-pricing';
 
 // Types
 interface MenuItem {
@@ -15,7 +16,12 @@ interface MenuItem {
   name: string;
   category_id: string;
   is_available: boolean;
+  is_customizable?: boolean;
+  price?: number;
   base_price: number;
+  pickup_price?: number;
+  delivery_price?: number;
+  dine_in_price?: number;
   image_url?: string;
   flavor_type?: 'savory' | 'sweet';
 }
@@ -29,15 +35,15 @@ interface Ingredient {
   item_color?: string;
 }
 
-interface Combo {
+interface CatalogOffer {
   id: string;
-  name_en: string;
-  name_el?: string;
-  base_price: number;
-  pickup_price?: number;
-  delivery_price?: number;
+  name: string;
+  description?: string | null;
+  catalog_type: 'menu' | 'product';
+  branch_id?: string | null;
   is_active: boolean;
-  is_featured?: boolean;
+  priority: number;
+  repeatable: boolean;
 }
 
 interface Category {
@@ -53,7 +59,7 @@ export const MenuManagementPage: React.FC = () => {
   const { t, i18n } = useTranslation();
   const { resolvedTheme } = useTheme();
   const language = i18n.language;
-  const [activeTab, setActiveTab] = useState<'categories' | 'subcategories' | 'ingredients' | 'combos'>('categories');
+  const [activeTab, setActiveTab] = useState<'categories' | 'subcategories' | 'ingredients' | 'offers'>('categories');
   const [loading, setLoading] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [isOnline, setIsOnline] = useState(navigator.onLine);
@@ -62,7 +68,7 @@ export const MenuManagementPage: React.FC = () => {
   const [categories, setCategories] = useState<Category[]>([]);
   const [menuItems, setMenuItems] = useState<MenuItem[]>([]);
   const [ingredients, setIngredients] = useState<Ingredient[]>([]);
-  const [combos, setCombos] = useState<Combo[]>([]);
+  const [offers, setOffers] = useState<CatalogOffer[]>([]);
   const toggleAction = getOfflineActionState('menu', 'toggle', isOnline);
 
   useEffect(() => {
@@ -107,8 +113,8 @@ export const MenuManagementPage: React.FC = () => {
         await loadMenuItems();
       } else if (activeTab === 'ingredients') {
         await loadIngredients();
-      } else if (activeTab === 'combos') {
-        await loadCombos();
+      } else if (activeTab === 'offers') {
+        await loadOffers();
       }
     } catch (error) {
       console.error('Error loading data:', error);
@@ -138,7 +144,17 @@ export const MenuManagementPage: React.FC = () => {
   const loadMenuItems = async () => {
     try {
       const result = await bridge.menu.getSubcategories();
-      setMenuItems(result || []);
+      setMenuItems((result || []).map((item: any) => ({
+        ...item,
+        // The order-taking menu resolves pickup/delivery/dine-in tiers from
+        // these exact fields. Keep the management view on the same normalized
+        // contract instead of presenting base_price as the sale price.
+        price: Number(item.price ?? item.base_price ?? 0),
+        base_price: Number(item.base_price ?? item.price ?? 0),
+        pickup_price: item.pickup_price == null ? undefined : Number(item.pickup_price),
+        delivery_price: item.delivery_price == null ? undefined : Number(item.delivery_price),
+        dine_in_price: item.dine_in_price == null ? undefined : Number(item.dine_in_price),
+      })));
     } catch (error) {
       console.error('Error loading menu items:', error);
       toast.error(t('menu.failedToLoadMenuItems', 'Failed to load menu items'));
@@ -155,12 +171,26 @@ export const MenuManagementPage: React.FC = () => {
     }
   };
 
-  const loadCombos = async () => {
+  const loadOffers = async () => {
     try {
-      const result = await bridge.menu.getCombos();
-      setCombos(result || []);
+      const result = await bridge.branchData.getCatalogOffers({
+        catalog_type: 'menu',
+        include_inactive: true,
+      });
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to load offers');
+      }
+
+      const payload = (result.data ?? {}) as {
+        success?: boolean;
+        offers?: CatalogOffer[];
+      };
+      if (payload.success === false) {
+        throw new Error('Failed to load offers');
+      }
+      setOffers(Array.isArray(payload.offers) ? payload.offers : []);
     } catch (error) {
-      console.error('Error loading combos:', error);
+      console.error('Error loading offers:', error);
       toast.error(t('menu.failedToLoadOffers', 'Failed to load offers'));
     }
   };
@@ -234,28 +264,51 @@ export const MenuManagementPage: React.FC = () => {
     }
   };
 
-  const toggleComboAvailability = async (id: string, currentStatus: boolean) => {
+  const toggleOfferAvailability = async (id: string, currentStatus: boolean) => {
     if (toggleAction.disabled) {
       toast.error(toggleAction.message || t('menu.onlineRequired', 'This action requires an online connection.'));
       return;
     }
 
-    const original = combos;
+    const original = offers;
     // Optimistic update
-    setCombos(prev => prev.map(c => c.id === id ? { ...c, is_active: !currentStatus } : c));
+    setOffers(prev => prev.map(offer =>
+      offer.id === id ? { ...offer, is_active: !currentStatus } : offer
+    ));
 
     try {
-      await bridge.menu.updateCombo(id, {
-        is_active: !currentStatus,
-      });
+      const result = await bridge.adminApi.fetchFromAdmin(
+        `/api/pos/offers/${encodeURIComponent(id)}`,
+        {
+          method: 'PATCH',
+          body: { is_active: !currentStatus },
+        },
+      );
+      const payload = result.data as { success?: boolean; error?: string } | undefined;
+      if (!result.success || payload?.success === false) {
+        throw new Error(result.error || payload?.error || 'Failed to update offer');
+      }
 
+      // Re-read the complete branch-scoped set after the write. This refreshes
+      // the native cache and confirms the server accepted the toggle.
+      await loadOffers();
       toast.success(t('menu.offerUpdated', 'Offer updated successfully'));
     } catch (error) {
-      console.error('Error updating combo:', error);
+      console.error('Error updating offer:', error);
       toast.error(t('menu.failedToUpdateOffer', 'Failed to update offer'));
-      setCombos(original);
+      setOffers(original);
     }
   };
+
+  const getMenuItemDisplayPrice = (item: MenuItem) =>
+    resolveMenuItemPrice(item, 'pickup');
+
+  const renderMenuItemPrice = (item: MenuItem) => (
+    <>
+      {item.is_customizable ? t('menu.item.from') : ''}
+      {formatCurrency(getMenuItemDisplayPrice(item), 'EUR', language)}
+    </>
+  );
 
   // Filter data based on search term
   const searchLower = searchTerm.toLowerCase();
@@ -274,9 +327,9 @@ export const MenuManagementPage: React.FC = () => {
     (ing.name || '').toLowerCase().includes(searchLower)
   );
 
-  const filteredCombos = combos.filter(combo =>
-    (combo.name_en || '').toLowerCase().includes(searchLower) ||
-    (combo.name_el || '').toLowerCase().includes(searchLower)
+  const filteredOffers = offers.filter(offer =>
+    (offer.name || '').toLowerCase().includes(searchLower) ||
+    (offer.description || '').toLowerCase().includes(searchLower)
   );
 
   const getTabClass = (tab: typeof activeTab) => `px-4 py-2 rounded-2xl transition-transform active:scale-[0.98] ${
@@ -328,8 +381,8 @@ export const MenuManagementPage: React.FC = () => {
         {t('menu.managementTabs.ingredients', 'Ingredients')}
       </button>
       <button
-        onClick={() => setActiveTab('combos')}
-        className={getTabClass('combos')}
+        onClick={() => setActiveTab('offers')}
+        className={getTabClass('offers')}
       >
         {t('menu.managementTabs.offers', 'Offers')}
       </button>
@@ -402,7 +455,7 @@ export const MenuManagementPage: React.FC = () => {
                 {item.name}
               </h3>
               <p className={`text-sm ${resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>
-                {formatCurrency(item.base_price || 0, 'EUR', language)}
+                {renderMenuItemPrice(item)}
               </p>
             </div>
             <button
@@ -460,15 +513,15 @@ export const MenuManagementPage: React.FC = () => {
     </motion.div>
   );
 
-  const renderCombos = () => {
-    // Round 235: offers/combos can be legitimately empty (none synced) or filtered to nothing by the
+  const renderOffers = () => {
+    // Offers can be legitimately empty (none synced) or filtered to nothing by the
     // search. Both used to leave a bare black grid; render a small centered glass empty state instead,
     // distinguishing no-data from no-search-results. UI only -- no data is created/refreshed here.
-    if (filteredCombos.length === 0) {
+    if (filteredOffers.length === 0) {
       const isSearching = searchTerm.trim().length > 0;
       return (
         <motion.div
-          key="combos-empty"
+          key="offers-empty"
           variants={pageMotionItem}
           data-menu-offers-empty
           className="flex justify-center py-12"
@@ -517,34 +570,31 @@ export const MenuManagementPage: React.FC = () => {
       );
     }
     return (
-      <motion.div key="combos" variants={pageMotionContainer} className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-      {filteredCombos.map((combo) => (
+      <motion.div key="offers" variants={pageMotionContainer} className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+      {filteredOffers.map((offer) => (
         <motion.div
-          key={combo.id}
+          key={offer.id}
           variants={pageMotionItem}
-          className={`${gridCardClass} ${!combo.is_active ? 'opacity-60 grayscale' : ''}`}
+          className={`${gridCardClass} ${!offer.is_active ? 'opacity-60 grayscale' : ''}`}
         >
           <div className="flex items-start justify-between mb-2">
             <div className="flex-1">
               <h3 className={`font-semibold ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
-                {(language === 'el' ? (combo.name_el || combo.name_en) : combo.name_en) || t('menu.unnamed', 'Unnamed')}
+                {offer.name || t('menu.unnamed', 'Unnamed')}
               </h3>
-              <p className={`text-sm ${resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>
-                {formatCurrency(combo.base_price || 0, 'EUR', language)}
-              </p>
-              {combo.is_featured && (
-                <span className="text-xs bg-yellow-100 text-yellow-800 px-2 py-0.5 rounded-full">
-                  {t('menu.featured', 'Featured')}
-                </span>
+              {offer.description && (
+                <p className={`mt-1 text-sm ${resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>
+                  {offer.description}
+                </p>
               )}
             </div>
             <button
-              onClick={() => toggleComboAvailability(combo.id, combo.is_active)}
+              onClick={() => toggleOfferAvailability(offer.id, offer.is_active)}
               disabled={toggleAction.disabled}
-              aria-label={toggleAction.message || (combo.is_active ? t('menu.disable', 'Disable') : t('menu.enable', 'Enable'))}
-              className={getAvailabilityToggleClass(combo.is_active)}
+              aria-label={toggleAction.message || (offer.is_active ? t('menu.disable', 'Disable') : t('menu.enable', 'Enable'))}
+              className={getAvailabilityToggleClass(offer.is_active)}
             >
-              {combo.is_active ? <Eye className="w-5 h-5" /> : <EyeOff className="w-5 h-5" />}
+              {offer.is_active ? <Eye className="w-5 h-5" /> : <EyeOff className="w-5 h-5" />}
             </button>
           </div>
         </motion.div>
@@ -586,7 +636,7 @@ export const MenuManagementPage: React.FC = () => {
           {activeTab === 'categories' && renderCategories()}
           {activeTab === 'subcategories' && renderMenuItems()}
           {activeTab === 'ingredients' && renderIngredients()}
-          {activeTab === 'combos' && renderCombos()}
+          {activeTab === 'offers' && renderOffers()}
         </>
       )}
     </motion.div>

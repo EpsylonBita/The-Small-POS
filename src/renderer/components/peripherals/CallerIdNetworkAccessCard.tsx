@@ -11,6 +11,12 @@ import {
 } from '../../services/CallerIdService'
 
 const UAC_CANCELLED_ERROR = 'CALLER_ID_FIREWALL_UAC_CANCELLED'
+const RULE_NOT_READY_ERROR = 'CALLER_ID_FIREWALL_RULE_NOT_READY'
+const CREATE_FAILED_ERROR = 'CALLER_ID_FIREWALL_CREATE_FAILED'
+const POSTCHECK_FAILED_ERROR = 'CALLER_ID_FIREWALL_POSTCHECK_FAILED'
+
+const isRepairIssue = (issue?: string) =>
+  Boolean(issue && !['none', 'rule_missing', 'unsupported'].includes(issue))
 
 export const CallerIdNetworkAccessCard: React.FC = () => {
   const { t } = useTranslation()
@@ -66,6 +72,17 @@ export const CallerIdNetworkAccessCard: React.FC = () => {
               'settings.peripherals.callerId.networkAccess.cancelled',
               'Windows administrator approval was cancelled',
             )
+          : message.includes(RULE_NOT_READY_ERROR) ||
+              message.includes(POSTCHECK_FAILED_ERROR)
+            ? t(
+                'settings.peripherals.callerId.networkAccess.ruleNotReady',
+                'Windows approved the request, but the safe Caller ID rule was not installed. Try once more; if it repeats, report the reason shown here.',
+              )
+            : message.includes(CREATE_FAILED_ERROR)
+              ? t(
+                  'settings.peripherals.callerId.networkAccess.createFailed',
+                  'Windows could not create the safe Caller ID rule. Check that Windows Firewall is running, then try again.',
+                )
           : t(
               'settings.peripherals.callerId.networkAccess.changeFailed',
               'Windows could not change Caller ID network access',
@@ -110,6 +127,12 @@ export const CallerIdNetworkAccessCard: React.FC = () => {
         'A broad Public-network rule was found. Turn this on to replace it with the safe Private-only rule.',
       )
     }
+    if (isRepairIssue(status.configurationIssue)) {
+      return t(
+        'settings.peripherals.callerId.networkAccess.ruleInvalid',
+        'The existing Caller ID rule is not safe or complete. Turn access on to replace it; Windows will show the exact repair result.',
+      )
+    }
     if (!status.configured) {
       return t(
         'settings.peripherals.callerId.networkAccess.permissionOff',
@@ -144,7 +167,9 @@ export const CallerIdNetworkAccessCard: React.FC = () => {
     ? t('settings.peripherals.callerId.networkAccess.ready', 'Ready')
     : configured
       ? t('settings.peripherals.callerId.networkAccess.ruleInstalled', 'Rule installed')
-      : t('settings.peripherals.callerId.networkAccess.permissionNeeded', 'Permission needed')
+      : isRepairIssue(status?.configurationIssue)
+        ? t('settings.peripherals.callerId.networkAccess.repairNeeded', 'Repair needed')
+        : t('settings.peripherals.callerId.networkAccess.permissionNeeded', 'Permission needed')
 
   return (
     <div className="rounded-2xl border liquid-glass-modal-border bg-white/5 px-4 py-3 space-y-3 dark:bg-black/10">

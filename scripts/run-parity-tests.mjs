@@ -93,6 +93,7 @@ const entryPoints = [
   path.join(testsRoot, 'renderer', 'release-1-4-33-i18n.test.ts'),
   path.join(testsRoot, 'renderer', 'featured-weekly-ranking.test.ts'),
   path.join(testsRoot, 'renderer', 'menu-featured-offers.test.ts'),
+  path.join(testsRoot, 'renderer', 'menu-management-page-ui.test.ts'),
   path.join(testsRoot, 'renderer', 'tip-and-floor-checkout.test.ts'),
   path.join(testsRoot, 'renderer', 'navigation-sidebar-ui.test.ts'),
   path.join(testsRoot, 'renderer', 'i18n-labels.test.ts'),

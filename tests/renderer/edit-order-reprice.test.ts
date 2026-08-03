@@ -8,6 +8,7 @@ import {
   resolveCartLineUnitPrice,
   reconcileHydratedUnitPrice,
 } from '../../src/renderer/utils/edit-order-pricing.ts';
+import { resolveMenuItemPrice } from '../../src/renderer/utils/order-type-pricing.ts';
 import { calculatePickupToDeliveryTotal } from '../../src/renderer/utils/pickup-to-delivery.ts';
 
 const menuModalSource = readFileSync(
@@ -47,6 +48,17 @@ test('resolveIngredientTierPrice mirrors handleAddToCart tier fallbacks', () => 
   assert.equal(resolveIngredientTierPrice(null, 'pickup'), 0);
   // A genuine 0 tier price is respected (free ingredient), not skipped.
   assert.equal(resolveIngredientTierPrice({ price: 0.9, delivery_price: 0 }, 'delivery'), 0);
+});
+
+test('resolveMenuItemPrice uses the synced base_price fallback without overriding pickup pricing', () => {
+  assert.equal(
+    resolveMenuItemPrice({ price: 0, base_price: 1, pickup_price: 0 }, 'pickup'),
+    1,
+  );
+  assert.equal(
+    resolveMenuItemPrice({ price: 0, base_price: 1, pickup_price: 3.8 }, 'pickup'),
+    3.8,
+  );
 });
 
 test('sumCustomizationUnitPrice handles the POS SelectedIngredient array shape', () => {

@@ -149,17 +149,59 @@ test('two qualifying savory items automatically produce the configured free Cola
   assert.equal(result.reward_actions[0]?.quantity, 1);
 });
 
-test('MenuModal always exposes the Combos & Offers category and passes ranking metadata', () => {
+test('MenuModal hides the legacy Combos & Offers category while preserving automatic offers', () => {
   const source = readFileSync(
     path.join(process.cwd(), 'src', 'renderer', 'components', 'modals', 'MenuModal.tsx'),
     'utf8',
   );
 
-  assert.match(source, /\{\s*id:\s*["']combos["'][\s\S]*?modals\.menu\.combos/);
+  assert.doesNotMatch(source, /\{\s*id:\s*["']combos["'][\s\S]*?modals\.menu\.combos/);
+  assert.match(source, /validateCatalogOffers\(\{\s*catalogType:\s*'menu'/);
+  assert.match(source, /createMenuRewardLine/);
+  assert.match(source, /is_offer_reward:\s*true/);
   assert.match(source, /const\s*\{\s*topSellerIds,\s*rankedTopSellerIds,\s*topSellers\s*\}\s*=\s*useFeaturedItems/);
   assert.match(source, /topSellers=\{topSellers\}/);
   assert.match(source, /categories=\{categories\}/);
   assert.match(source, /onShortcutNavigate=\{handleFeaturedShortcutNavigate\}/);
+});
+
+test('offer reward chips are localized consistently in every POS locale', () => {
+  const locales = ['en', 'el', 'de', 'fr', 'it'];
+  for (const locale of locales) {
+    const translations = JSON.parse(
+      readFileSync(
+        path.join(process.cwd(), 'src', 'locales', `${locale}.json`),
+        'utf8',
+      ),
+    );
+    const cart = translations.menu?.cart;
+    assert.equal(typeof cart?.autoOfferReward, 'string', `${locale} autoOfferReward`);
+    assert.equal(typeof cart?.freeLabel, 'string', `${locale} freeLabel`);
+    assert.equal(typeof cart?.offerDiscount, 'string', `${locale} offerDiscount`);
+    assert.match(
+      cart?.offerDiscountWithNames ?? '',
+      /\{\{names\}\}/,
+      `${locale} offerDiscountWithNames must preserve the names interpolation`,
+    );
+  }
+
+  const greekCart = JSON.parse(
+    readFileSync(path.join(process.cwd(), 'src', 'locales', 'el.json'), 'utf8'),
+  ).menu.cart;
+  assert.equal(greekCart.autoOfferReward, 'Προσφορά');
+  assert.equal(greekCart.freeLabel, 'Δωρεάν');
+  assert.equal(greekCart.offerDiscount, 'Προσφορές');
+
+  for (const component of [
+    'src/renderer/components/menu/MenuCart.tsx',
+    'src/renderer/components/modals/ProductCatalogModal.tsx',
+  ]) {
+    const source = readFileSync(path.join(process.cwd(), component), 'utf8');
+    assert.match(source, /menu\.cart\.autoOfferReward/);
+    assert.match(source, /menu\.cart\.freeLabel/);
+    assert.match(source, /menu\.cart\.offerDiscount/);
+    assert.match(source, /menu\.cart\.offerDiscountWithNames/);
+  }
 });
 
 test('Featured navigation shortcuts use the existing Lucide icon language without emoji fallbacks', () => {

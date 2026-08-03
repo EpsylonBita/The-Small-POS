@@ -29,6 +29,7 @@ export type OrderTypeTier = 'pickup' | 'delivery' | 'dine-in';
  */
 export interface TierPriceFields {
   price?: number | null;
+  base_price?: number | null;
   pickup_price?: number | null;
   delivery_price?: number | null;
   dine_in_price?: number | null;
@@ -68,22 +69,25 @@ export function resolveMenuItemPrice(
 ): number {
   if (!item) return 0;
 
-  const base = pick(item.price);
+  // Some synced menu rows keep the legacy base value in `base_price` while
+  // `price` is zero. Treat both fields as the same fallback tier so those
+  // products never appear free in management or order-taking views.
+  const base = pick(item.price, item.base_price);
 
-  const pickupTier = pick(item.pickup_price, item.pickupPrice);
-  const deliveryTier = pick(item.delivery_price, item.deliveryPrice);
-  const dineInTier = pick(item.dine_in_price, item.dineInPrice);
+  const pickupTier = pick(item.pickup_price, item.pickupPrice, base);
+  const deliveryTier = pick(item.delivery_price, item.deliveryPrice, base);
+  const dineInTier = pick(item.dine_in_price, item.dineInPrice, pickupTier, base);
 
   switch (orderType) {
     case 'delivery':
-      return deliveryTier ?? base ?? 0;
+      return deliveryTier ?? 0;
     case 'dine-in':
       // Dine-in falls back through pickup before base — intentional: many
       // restaurants set pickup + delivery but leave dine-in unset, and the
       // expected behaviour is "same as pickup", not "same as base".
-      return dineInTier ?? pickupTier ?? base ?? 0;
+      return dineInTier ?? 0;
     case 'pickup':
     default:
-      return pickupTier ?? base ?? 0;
+      return pickupTier ?? 0;
   }
 }

@@ -17,6 +17,7 @@ pub struct CallerIdFirewallStatus {
     pub public_network_active: bool,
     pub network_profile_known: bool,
     pub public_rule_present: bool,
+    pub configuration_issue: String,
 }
 
 impl CallerIdFirewallStatus {
@@ -29,13 +30,40 @@ impl CallerIdFirewallStatus {
             public_network_active: false,
             network_profile_known: false,
             public_rule_present: false,
+            configuration_issue: "unsupported".into(),
         }
+    }
+}
+
+fn validate_change_result(
+    action: &str,
+    status: CallerIdFirewallStatus,
+) -> Result<CallerIdFirewallStatus, String> {
+    match action {
+        "Install" if !status.configured || status.public_rule_present => Err(format!(
+            "CALLER_ID_FIREWALL_RULE_NOT_READY:{}",
+            status.configuration_issue
+        )),
+        "Remove" if status.configured => Err("CALLER_ID_FIREWALL_RULE_REMOVE_FAILED".into()),
+        _ => Ok(status),
+    }
+}
+
+fn elevated_helper_error(exit_code: u32) -> String {
+    match exit_code {
+        20 => "CALLER_ID_FIREWALL_DISCOVERY_FAILED".into(),
+        21 => "CALLER_ID_FIREWALL_PUBLIC_CLEANUP_FAILED".into(),
+        22 => "CALLER_ID_FIREWALL_RULE_CLEANUP_FAILED".into(),
+        23 => "CALLER_ID_FIREWALL_CREATE_FAILED".into(),
+        24 => "CALLER_ID_FIREWALL_PUBLIC_RULE_REMAINS".into(),
+        25 => "CALLER_ID_FIREWALL_POSTCHECK_FAILED".into(),
+        _ => format!("CALLER_ID_FIREWALL_HELPER_FAILED:{exit_code}"),
     }
 }
 
 #[cfg(target_os = "windows")]
 mod windows {
-    use super::CallerIdFirewallStatus;
+    use super::{elevated_helper_error, validate_change_result, CallerIdFirewallStatus};
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use std::{
         ffi::OsStr,
@@ -270,9 +298,7 @@ mod windows {
             ));
         }
         if exit_code != 0 {
-            return Err(format!(
-                "Windows did not apply the Caller ID network-access change (exit code {exit_code})"
-            ));
+            return Err(elevated_helper_error(exit_code));
         }
         Ok(())
     }
@@ -287,7 +313,7 @@ mod windows {
     ) -> Result<CallerIdFirewallStatus, String> {
         let paths = resolve_paths(app)?;
         run_elevated(&paths, action)?;
-        status(&paths)
+        validate_change_result(action, status(&paths)?)
     }
 
     #[cfg(test)]
@@ -317,13 +343,14 @@ mod windows {
         #[test]
         fn firewall_status_json_is_fail_closed_and_camel_case() {
             let status: CallerIdFirewallStatus = serde_json::from_str(
-                r#"{"supported":true,"configured":false,"privateNetworkActive":false,"publicNetworkActive":true,"networkProfileKnown":true,"publicRulePresent":true}"#,
+                r#"{"supported":true,"configured":false,"privateNetworkActive":false,"publicNetworkActive":true,"networkProfileKnown":true,"publicRulePresent":true,"configurationIssue":"rule_scope_mismatch"}"#,
             )
             .expect("parse status");
 
             assert!(!status.configured);
             assert!(status.public_network_active);
             assert!(status.public_rule_present);
+            assert_eq!(status.configuration_issue, "rule_scope_mismatch");
         }
     }
 }
@@ -405,5 +432,39 @@ mod tests {
         assert!(!status.configured);
         assert!(!status.private_network_active);
         assert!(!status.public_rule_present);
+    }
+
+    #[test]
+    fn install_rejects_a_successful_helper_when_the_rule_postcondition_is_missing() {
+        let status = CallerIdFirewallStatus {
+            supported: true,
+            configured: false,
+            private_network_active: true,
+            public_network_active: false,
+            network_profile_known: true,
+            public_rule_present: false,
+            configuration_issue: "rule_missing".into(),
+        };
+
+        let error = validate_change_result("Install", status)
+            .expect_err("install must fail closed when its rule is absent");
+
+        assert_eq!(error, "CALLER_ID_FIREWALL_RULE_NOT_READY:rule_missing");
+    }
+
+    #[test]
+    fn elevated_helper_exit_codes_preserve_the_failed_firewall_stage() {
+        assert_eq!(
+            elevated_helper_error(23),
+            "CALLER_ID_FIREWALL_CREATE_FAILED"
+        );
+        assert_eq!(
+            elevated_helper_error(25),
+            "CALLER_ID_FIREWALL_POSTCHECK_FAILED"
+        );
+        assert_eq!(
+            elevated_helper_error(99),
+            "CALLER_ID_FIREWALL_HELPER_FAILED:99"
+        );
     }
 }

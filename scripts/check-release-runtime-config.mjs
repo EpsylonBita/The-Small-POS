@@ -77,6 +77,9 @@ const staleGuardStep = workflow.slice(
   staleGuardStart,
   staleGuardNextStepStart < 0 ? workflow.length : staleGuardNextStepStart,
 );
+const staleGuardRunStart = staleGuardStep.indexOf('\n        run: |');
+const staleGuardRun =
+  staleGuardRunStart < 0 ? '' : staleGuardStep.slice(staleGuardRunStart);
 
 const requiredTokens = [
   'VITE_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}',
@@ -105,7 +108,11 @@ if (!concurrencyBlock.includes('cancel-in-progress: true')) {
 }
 
 for (const token of [
-  'git fetch origin "${{ github.ref_name }}"',
+  'SOURCE_REF: ${{ github.ref_name }}',
+  'SOURCE_SHA: ${{ github.sha }}',
+  'git fetch origin "$env:SOURCE_REF"',
+  '$releaseSha = "$env:SOURCE_SHA"',
+  '$remoteRef = "origin/$env:SOURCE_REF"',
   'git merge-base --is-ancestor',
   'git diff --quiet',
   'pos-tauri',
@@ -115,6 +122,10 @@ for (const token of [
   if (!staleGuardStep.includes(token)) {
     violations.push(`stale-publication guard is missing ${token}`);
   }
+}
+
+if (staleGuardRun.includes('${{ github.')) {
+  violations.push('stale-publication run script must not interpolate untrusted github context directly');
 }
 
 if (violations.length > 0) {

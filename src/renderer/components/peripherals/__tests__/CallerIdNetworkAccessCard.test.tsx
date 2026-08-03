@@ -42,6 +42,7 @@ const safeReadyStatus = {
   publicNetworkActive: false,
   networkProfileKnown: true,
   publicRulePresent: false,
+  configurationIssue: 'none',
 }
 
 describe('CallerIdNetworkAccessCard', () => {
@@ -123,5 +124,48 @@ describe('CallerIdNetworkAccessCard', () => {
       ),
     )
     expect(accessSwitch).toHaveAttribute('aria-checked', 'false')
+  })
+
+  it('does not announce success when the elevated helper leaves no usable rule', async () => {
+    mocks.getStatus.mockResolvedValue({
+      ...safeReadyStatus,
+      configured: false,
+      privateNetworkActive: false,
+      configurationIssue: 'rule_missing',
+    })
+    mocks.enable.mockRejectedValue(
+      new Error('CALLER_ID_FIREWALL_RULE_NOT_READY:rule_missing'),
+    )
+
+    render(<CallerIdNetworkAccessCard />)
+    const accessSwitch = await screen.findByRole('switch', {
+      name: 'Private network access',
+    })
+    await waitFor(() => expect(accessSwitch).not.toBeDisabled())
+
+    fireEvent.click(accessSwitch)
+
+    await waitFor(() =>
+      expect(mocks.toastError).toHaveBeenCalledWith(
+        'Windows approved the request, but the safe Caller ID rule was not installed. Try once more; if it repeats, report the reason shown here.',
+      ),
+    )
+    expect(mocks.toastSuccess).not.toHaveBeenCalled()
+  })
+
+  it('shows that a malformed existing rule needs repair instead of calling it permission off', async () => {
+    mocks.getStatus.mockResolvedValue({
+      ...safeReadyStatus,
+      configured: false,
+      privateNetworkActive: false,
+      configurationIssue: 'rule_scope_mismatch',
+    })
+
+    render(<CallerIdNetworkAccessCard />)
+
+    expect(
+      await screen.findByText(/existing Caller ID rule is not safe or complete/i),
+    ).toBeInTheDocument()
+    expect(screen.getByText('Repair needed')).toBeInTheDocument()
   })
 })

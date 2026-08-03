@@ -13,6 +13,7 @@ $ErrorActionPreference = 'Stop'
 $ruleName = 'TheSmallPOS-CallerID-PrivateLAN'
 $ruleDisplayName = 'The Small POS Caller ID (Private LAN)'
 $privateRuleCreated = $false
+$failureExitCode = 10
 
 function Get-LocalInboundRulesForExecutable {
   try {
@@ -228,20 +229,37 @@ function Test-InstallerOwnedRuleExact {
     [Parameter(Mandatory = $true)][string]$ExpectedExecutablePath
   )
 
+  (Get-InstallerOwnedRuleConfigurationIssue `
+    -Rules @($Rule) `
+    -ExpectedExecutablePath $ExpectedExecutablePath) -eq 'none'
+}
+
+function Get-InstallerOwnedRuleConfigurationIssue {
+  param(
+    [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Rules,
+    [Parameter(Mandatory = $true)][string]$ExpectedExecutablePath
+  )
+
+  if ($Rules.Count -eq 0) { return 'rule_missing' }
+  if ($Rules.Count -ne 1) { return 'rule_count_mismatch' }
+
+  $Rule = $Rules[0]
+
   if ($Rule.Name -ne 'TheSmallPOS-CallerID-PrivateLAN' -or
       $Rule.Direction.ToString() -ne 'Inbound' -or
       $Rule.Action.ToString() -ne 'Allow' -or
-      $Rule.Enabled.ToString() -ne 'True' -or
-      $Rule.Profile.ToString() -ne 'Private' -or
-      $Rule.EdgeTraversalPolicy.ToString() -ne 'Block' -or
-      -not (Test-MigrationReplacementDoesNotBroadenRule `
-        -Rule $Rule `
-        -ExpectedExecutablePath $ExpectedExecutablePath)) {
-    return $false
+      $Rule.Enabled.ToString() -ne 'True') {
+    return 'rule_identity_mismatch'
+  }
+  if ($Rule.Profile.ToString() -ne 'Private') {
+    return 'rule_profile_mismatch'
+  }
+  if ($Rule.EdgeTraversalPolicy.ToString() -ne 'Block') {
+    return 'rule_edge_mismatch'
   }
 
   $portFilters = @($Rule | Get-NetFirewallPortFilter -ErrorAction Stop)
-  if ($portFilters.Count -ne 1) { return $false }
+  if ($portFilters.Count -ne 1) { return 'rule_transport_mismatch' }
   $portFilter = $portFilters[0]
   $protocolIsUdp =
     (Test-ValueSetEquals -Value $portFilter.Protocol -ExpectedValues @('UDP')) -or
@@ -250,23 +268,29 @@ function Test-InstallerOwnedRuleExact {
       -not (Test-ValueSetEquals -Value $portFilter.LocalPort -ExpectedValues @('5060')) -or
       -not (Test-ValueSetEquals -Value $portFilter.RemotePort -ExpectedValues @('Any')) -or
       -not (Test-ValueSetEquals -Value $portFilter.DynamicTarget -ExpectedValues @('Any'))) {
-    return $false
+    return 'rule_transport_mismatch'
   }
 
   $addressFilters = @($Rule | Get-NetFirewallAddressFilter -ErrorAction Stop)
   if ($addressFilters.Count -ne 1 -or
       -not (Test-ValueSetEquals -Value $addressFilters[0].LocalAddress -ExpectedValues @('Any')) -or
       -not (Test-ValueSetEquals -Value $addressFilters[0].RemoteAddress -ExpectedValues @('LocalSubnet'))) {
-    return $false
+    return 'rule_scope_mismatch'
   }
 
   $applicationFilters = @($Rule | Get-NetFirewallApplicationFilter -ErrorAction Stop)
   if ($applicationFilters.Count -ne 1 -or
       $applicationFilters[0].Program -ne $ExpectedExecutablePath) {
-    return $false
+    return 'rule_program_mismatch'
   }
 
-  return $true
+  if (-not (Test-MigrationReplacementDoesNotBroadenRule `
+      -Rule $Rule `
+      -ExpectedExecutablePath $ExpectedExecutablePath)) {
+    return 'rule_constraints_mismatch'
+  }
+
+  return 'none'
 }
 
 function Get-LocalPublicAllowRulesForExecutable {
@@ -310,11 +334,10 @@ try {
       Get-NetFirewallRule -PolicyStore PersistentStore -ErrorAction Stop |
         Where-Object { $_.Name -eq $ruleName }
     )
-    $configured =
-      $ownedRules.Count -eq 1 -and
-      (Test-InstallerOwnedRuleExact `
-        -Rule $ownedRules[0] `
-        -ExpectedExecutablePath $ExecutablePath)
+    $configurationIssue = Get-InstallerOwnedRuleConfigurationIssue `
+      -Rules $ownedRules `
+      -ExpectedExecutablePath $ExecutablePath
+    $configured = $configurationIssue -eq 'none'
     $publicRulePresent = @(
       Get-LocalPublicAllowRulesForExecutable -ActiveOnly
     ).Count -gt 0
@@ -352,17 +375,20 @@ try {
       publicNetworkActive = [bool]$publicNetworkActive
       networkProfileKnown = [bool]$networkProfileKnown
       publicRulePresent = [bool]$publicRulePresent
+      configurationIssue = $configurationIssue
     } | ConvertTo-Json -Compress
     exit 0
   }
 
   if ($Action -eq 'Remove') {
+    $failureExitCode = 22
     Remove-InstallerOwnedRule
     Write-Output 'Caller ID Private-network firewall access removed.'
     exit 0
   }
 
   if ($Action -eq 'MigrateLegacyPublic') {
+    $failureExitCode = 20
     $activeLegacyPublicAllows = @(
       Get-ActiveLocalPublicCallerIdAllows
     )
@@ -375,22 +401,39 @@ try {
   # Preserve explicit Block and disabled rules. Once an active UDP-compatible
   # Allow proves prior consent, remove every active Public/Any Allow for this
   # exact executable before adding the narrower Private Caller ID rule.
+  $failureExitCode = 20
   $legacyPublicAllows = @(
     Get-LocalPublicAllowRulesForExecutable -ActiveOnly
   )
+  $failureExitCode = 21
   if ($legacyPublicAllows.Count -gt 0) {
     $legacyPublicAllows | Remove-NetFirewallRule -ErrorAction Stop | Out-Null
   }
+  $failureExitCode = 22
   Remove-InstallerOwnedRule
 
+  $failureExitCode = 23
   New-NetFirewallRule -Name $ruleName -DisplayName $ruleDisplayName -Description 'Allows the local Grandstream Caller ID pilot to reach The Small POS.' -Direction Inbound -Action Allow -Program $ExecutablePath -Protocol UDP -LocalPort 5060 -Profile Private -RemoteAddress LocalSubnet -EdgeTraversalPolicy Block -Enabled True -PolicyStore PersistentStore -ErrorAction Stop | Out-Null
   $privateRuleCreated = $true
 
+  $failureExitCode = 24
   $remainingActivePublicAllows = @(
     Get-LocalPublicAllowRulesForExecutable -ActiveOnly
   )
   if ($remainingActivePublicAllows.Count -gt 0) {
     throw 'One or more local Public inbound rules still grant access to The Small POS.'
+  }
+
+  $failureExitCode = 25
+  $installedRules = @(
+    Get-NetFirewallRule -PolicyStore PersistentStore -ErrorAction Stop |
+      Where-Object { $_.Name -eq $ruleName }
+  )
+  $installedRuleIssue = Get-InstallerOwnedRuleConfigurationIssue `
+    -Rules $installedRules `
+    -ExpectedExecutablePath $ExecutablePath
+  if ($installedRuleIssue -ne 'none') {
+    throw "The installed Private Caller ID rule did not pass its post-check: $installedRuleIssue"
   }
 
   Write-Output 'Caller ID firewall configured for Private local-network UDP 5060 only.'
@@ -405,5 +448,5 @@ try {
     }
   }
   Write-Error "Caller ID firewall setup failed: $failureMessage"
-  exit 1
+  exit $failureExitCode
 }

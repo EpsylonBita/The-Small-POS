@@ -53,6 +53,8 @@ struct CatalogOffersPayload {
     branch_id: Option<String>,
     #[serde(default, alias = "catalog_type")]
     catalog_type: Option<String>,
+    #[serde(default, alias = "include_inactive")]
+    include_inactive: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -145,6 +147,7 @@ fn estimate_payload_item_count(payload: &Value) -> Option<usize> {
         "terminals",
         "devices",
         "items",
+        "offers",
         "heatmapPoints",
         "zonePerformance",
     ] {
@@ -742,8 +745,20 @@ pub async fn branch_data_get_catalog_offers(
         .unwrap_or_default();
     let branch_id = resolve_branch_id(&db, payload.branch_id)?;
     let catalog_type = trimmed(payload.catalog_type).unwrap_or_else(|| "menu".to_string());
-    let scope_key = normalize_scope_key(&[Some(catalog_type.as_str())]);
-    let path = format!("/api/pos/offers?branch_id={branch_id}&catalog_type={catalog_type}");
+    // Keep the evaluation cache (active/current offers only) isolated from
+    // Menu Management's complete dataset. Otherwise opening management could
+    // overwrite the cache used by automatic cart evaluation with inactive
+    // rules.
+    let availability_scope = if payload.include_inactive {
+        "all"
+    } else {
+        "active"
+    };
+    let scope_key = normalize_scope_key(&[Some(catalog_type.as_str()), Some(availability_scope)]);
+    let path = format!(
+        "/api/pos/offers?branch_id={branch_id}&catalog_type={catalog_type}&include_inactive={}",
+        payload.include_inactive
+    );
     fetch_branch_scoped_payload(&db, &branch_id, CACHE_KEY_CATALOG_OFFERS, &scope_key, path).await
 }
 
@@ -876,7 +891,7 @@ pub async fn branch_data_get_bundle_status(
         cached_dataset_status_latest(&conn, &branch_id, CACHE_KEY_STAFF_SCHEDULE),
         cached_dataset_status(&conn, &branch_id, CACHE_KEY_DELIVERY_ZONES, "all"),
         cached_dataset_status(&conn, &branch_id, CACHE_KEY_COUPONS, "all"),
-        cached_dataset_status(&conn, &branch_id, CACHE_KEY_CATALOG_OFFERS, "menu"),
+        cached_dataset_status(&conn, &branch_id, CACHE_KEY_CATALOG_OFFERS, "menu::active"),
     ];
     let mut advisory_datasets = vec![
         sqlite_table_dataset_status(

@@ -50,6 +50,7 @@ export interface CallerIdFirewallStatus {
   publicNetworkActive: boolean
   networkProfileKnown: boolean
   publicRulePresent: boolean
+  configurationIssue: string
 }
 
 const CALLER_ID_REASON_CODES: CallerIdStatusReason[] = [

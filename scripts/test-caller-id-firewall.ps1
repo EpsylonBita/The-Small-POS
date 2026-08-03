@@ -55,6 +55,7 @@ Import-HelperFunction -Name 'Test-ValueSetContains'
 Import-HelperFunction -Name 'Test-ValueSetIsEmptyOrAny'
 Import-HelperFunction -Name 'Test-ValueSetEquals'
 Import-HelperFunction -Name 'Test-MigrationReplacementDoesNotBroadenRule'
+Import-HelperFunction -Name 'Get-InstallerOwnedRuleConfigurationIssue'
 Import-HelperFunction -Name 'Test-InstallerOwnedRuleExact'
 
 # The production function consumes NetSecurity pipeline objects. This mock
@@ -255,5 +256,20 @@ foreach ($case in $exactRuleCases) {
     -ExpectedExecutablePath 'C:\Program Files\The Small POS\the-small-pos.exe'
   Assert-Equal -Expected $case.Expected -Actual $actual -Message $case.Name
 }
+
+$validRuleIssue = Get-InstallerOwnedRuleConfigurationIssue `
+  -Rules @(New-InstallerOwnedRule) `
+  -ExpectedExecutablePath 'C:\Program Files\The Small POS\the-small-pos.exe'
+Assert-Equal -Expected 'none' -Actual $validRuleIssue -Message 'valid rule issue code'
+
+$missingRuleIssue = Get-InstallerOwnedRuleConfigurationIssue `
+  -Rules @() `
+  -ExpectedExecutablePath 'C:\Program Files\The Small POS\the-small-pos.exe'
+Assert-Equal -Expected 'rule_missing' -Actual $missingRuleIssue -Message 'missing rule issue code'
+
+$wrongScopeIssue = Get-InstallerOwnedRuleConfigurationIssue `
+  -Rules @(New-InstallerOwnedRule -RemoteAddress 'Any') `
+  -ExpectedExecutablePath 'C:\Program Files\The Small POS\the-small-pos.exe'
+Assert-Equal -Expected 'rule_scope_mismatch' -Actual $wrongScopeIssue -Message 'scope issue code'
 
 Write-Output "Caller ID firewall behavior tests passed: $($portCases.Count) port cases, $($migrationCases.Count) migration-scope cases, $($exactRuleCases.Count) exact-rule cases."

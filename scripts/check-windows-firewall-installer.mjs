@@ -124,11 +124,11 @@ requireContract(
   'the helper must expose install, migration, status, and removal actions only',
 )
 requireContract(
-  /function\s+Test-InstallerOwnedRuleExact\b/i.test(firewallHelperSource) &&
-    /\$Action\s+-eq\s+['"]Status['"][\s\S]*?Test-InstallerOwnedRuleExact/i.test(
+  /function\s+Get-InstallerOwnedRuleConfigurationIssue\b/i.test(firewallHelperSource) &&
+    /\$Action\s+-eq\s+['"]Status['"][\s\S]*?Get-InstallerOwnedRuleConfigurationIssue/i.test(
       firewallHelperSource,
     ),
-  'runtime status must verify the complete installer-owned rule instead of trusting its name',
+  'runtime status must classify the complete installer-owned rule instead of trusting its name',
 )
 requireContract(
   /\$Action\s+-eq\s+['"]Remove['"][\s\S]*?Remove-InstallerOwnedRule[\s\S]*?exit\s+0/i.test(
