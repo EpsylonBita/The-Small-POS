@@ -905,6 +905,8 @@ export const StaffScheduleView: React.FC = memo(() => {
         status?: string;
         submission_id?: string;
         shift_count?: number;
+        transport_available?: boolean;
+        message?: string;
       }>('/pos/plugins/ergani/schedules/publish', {
         start_date: periodStart,
         end_date: periodEnd,
@@ -917,11 +919,29 @@ export const StaffScheduleView: React.FC = memo(() => {
 
       const status = response.data?.status || 'queued';
       setErganiPublishStatus(status);
-      toast.success(
-        status === 'blocked'
-          ? t('staffSchedule.ergani.publishBlocked', 'Schedule queued but blocked until ERGANI setup is complete.')
-          : t('staffSchedule.ergani.publishQueued', 'Schedule publish queued for ERGANI.'),
-      );
+
+      // `not_filed` means the record exists locally but no transport will ever
+      // send it. Showing the success toast here is exactly what would let a
+      // Greek employer believe a legally-mandated declaration had been filed.
+      // react-hot-toast has no `warning` variant; a blank toast with a warning
+      // icon is its idiom, and it must not read as success.
+      if (status === 'not_filed') {
+        toast(
+          response.data?.message
+            || t(
+              'staffSchedule.ergani.publishNotFiled',
+              'Schedule saved locally only — NOT filed with ERGANI. You or your accountant must still declare it.',
+            ),
+          { icon: '⚠️', duration: 8000 },
+        );
+      } else if (status === 'blocked') {
+        toast(
+          t('staffSchedule.ergani.publishBlocked', 'Schedule queued but blocked until ERGANI setup is complete.'),
+          { icon: '⚠️', duration: 6000 },
+        );
+      } else {
+        toast.success(t('staffSchedule.ergani.publishQueued', 'Schedule publish queued for ERGANI.'));
+      }
     } catch (err: any) {
       setErganiPublishStatus('failed');
       toast.error(err?.message || t('staffSchedule.ergani.publishFailed', 'Failed to publish to ERGANI.'));
