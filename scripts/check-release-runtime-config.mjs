@@ -32,6 +32,11 @@ const verificationNextStepStart = workflow.indexOf(
 const buildStepMarker = '      - name: Build NSIS bundle';
 const buildStepStart = workflow.indexOf(buildStepMarker);
 const nextStepStart = workflow.indexOf('\n      - name:', buildStepStart + buildStepMarker.length);
+const concurrencyStart = workflow.indexOf('\nconcurrency:');
+const envStart = workflow.indexOf('\nenv:');
+const staleGuardMarker = '      - name: Refuse stale POS publication';
+const staleGuardStart = workflow.indexOf(staleGuardMarker);
+const syncStepStart = workflow.indexOf('      - name: Sync pos-tauri source to public repo');
 
 if (buildStepStart < 0) {
   console.error('POS release runtime config contract failed: Build NSIS bundle step is missing.');
@@ -43,6 +48,16 @@ if (verificationStepStart < 0) {
   process.exit(1);
 }
 
+if (concurrencyStart < 0 || envStart < concurrencyStart) {
+  console.error('POS release runtime config contract failed: release concurrency policy is missing.');
+  process.exit(1);
+}
+
+if (staleGuardStart < 0 || syncStepStart < staleGuardStart) {
+  console.error('POS release runtime config contract failed: stale-publication guard is missing before public sync.');
+  process.exit(1);
+}
+
 const verificationStep = workflow.slice(
   verificationStepStart,
   verificationNextStepStart < 0 ? workflow.length : verificationNextStepStart,
@@ -51,6 +66,16 @@ const verificationStep = workflow.slice(
 const buildStep = workflow.slice(
   buildStepStart,
   nextStepStart < 0 ? workflow.length : nextStepStart,
+);
+
+const concurrencyBlock = workflow.slice(concurrencyStart, envStart);
+const staleGuardNextStepStart = workflow.indexOf(
+  '\n      - name:',
+  staleGuardStart + staleGuardMarker.length,
+);
+const staleGuardStep = workflow.slice(
+  staleGuardStart,
+  staleGuardNextStepStart < 0 ? workflow.length : staleGuardNextStepStart,
 );
 
 const requiredTokens = [
@@ -69,6 +94,27 @@ if (!verificationStep.includes('npm run test:unit')) {
 
 if (buildStep.includes('SUPABASE_SERVICE_ROLE_KEY')) {
   violations.push('service-role credentials must never be injected into the renderer build');
+}
+
+if (!concurrencyBlock.includes('group: pos-tauri-public-release')) {
+  violations.push('all POS release refs must share one public-release concurrency group');
+}
+
+if (!concurrencyBlock.includes('cancel-in-progress: true')) {
+  violations.push('a newer POS release must cancel an older in-progress release');
+}
+
+for (const token of [
+  'git fetch origin "${{ github.ref_name }}"',
+  'git merge-base --is-ancestor',
+  'git diff --quiet',
+  'pos-tauri',
+  'branding/pos-desktop',
+  '.github/workflows/pos-tauri-auto-release.yml',
+]) {
+  if (!staleGuardStep.includes(token)) {
+    violations.push(`stale-publication guard is missing ${token}`);
+  }
 }
 
 if (violations.length > 0) {
