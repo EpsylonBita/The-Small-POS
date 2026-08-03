@@ -2699,7 +2699,8 @@
           "cancelled": "L’approvazione amministratore di Windows è stata annullata",
           "ruleNotReady": "Windows ha approvato la richiesta, ma la regola sicura per l’ID chiamante non è stata installata. Riprova; se accade di nuovo, segnala il motivo mostrato qui.",
           "createFailed": "Windows non ha potuto creare la regola sicura per l’ID chiamante. Verifica che Windows Firewall sia in esecuzione, quindi riprova.",
-          "changeFailed": "Windows non ha potuto modificare l’accesso di rete dell’ID chiamante"
+          "changeFailed": "Windows non ha potuto modificare l’accesso di rete dell’ID chiamante",
+          "diagnosticCode": "Codice diagnostico"
         },
         "enable": "Abilita identificazione chiamante",
         "sipServer": "Server SIP (IP)",
@@ -4612,17 +4613,18 @@
     "pinResetRequired": "Reimpostazione PIN richiesta. Imposta un nuovo PIN per continuare.",
     "setupPin": "Imposta PIN",
     "setupPinDesc": "Crea un PIN di 6 cifre per l'accesso amministratore",
-    "newPin": "Nuovo PIN (6+ cifre)",
+    "newPin": "Nuovo PIN (6 cifre)",
     "confirmPin": "Conferma PIN",
     "savePin": "Salva PIN",
     "createPin": "Crea PIN",
-    "pinTooShort": "Il PIN deve avere almeno 6 cifre",
+    "pinTooShort": "Il PIN deve contenere esattamente 6 cifre",
     "pinMismatch": "I PIN non corrispondono",
     "setupFailed": "Impostazione PIN non riuscita",
     "errors": {
       "enterPin": "Inserisci il PIN",
       "invalidPin": "Codice errato",
-      "loginFailed": "Accesso non riuscito. Riprovare."
+      "loginFailed": "Accesso non riuscito. Riprovare.",
+      "timeout": "L'accesso ha impiegato troppo tempo. Riprovare."
     },
     "backspace": "Cancella"
   },

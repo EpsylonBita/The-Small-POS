@@ -2699,7 +2699,8 @@
           "cancelled": "Die Windows-Administratorbestätigung wurde abgebrochen",
           "ruleNotReady": "Windows hat die Anfrage genehmigt, aber die sichere Anrufer-ID-Regel wurde nicht installiert. Versuchen Sie es erneut; falls es wieder passiert, melden Sie den hier angezeigten Grund.",
           "createFailed": "Windows konnte die sichere Anrufer-ID-Regel nicht erstellen. Prüfen Sie, ob die Windows-Firewall ausgeführt wird, und versuchen Sie es erneut.",
-          "changeFailed": "Windows konnte den Netzwerkzugriff für die Anrufer-ID nicht ändern"
+          "changeFailed": "Windows konnte den Netzwerkzugriff für die Anrufer-ID nicht ändern",
+          "diagnosticCode": "Diagnosecode"
         },
         "enable": "Anruferkennung aktivieren",
         "sipServer": "SIP-Server (IP)",
@@ -4612,17 +4613,18 @@
     "pinResetRequired": "PIN-Zurücksetzung erforderlich. Bitte legen Sie eine neue PIN fest, um fortzufahren.",
     "setupPin": "PIN einrichten",
     "setupPinDesc": "Erstellen Sie eine 6-stellige PIN für den Administratorzugang",
-    "newPin": "Neue PIN (6+ Ziffern)",
+    "newPin": "Neue PIN (6 Ziffern)",
     "confirmPin": "PIN bestätigen",
     "savePin": "PIN speichern",
     "createPin": "PIN erstellen",
-    "pinTooShort": "Die PIN muss mindestens 6 Ziffern enthalten",
+    "pinTooShort": "Die PIN muss genau 6 Ziffern enthalten",
     "pinMismatch": "PINs stimmen nicht überein",
     "setupFailed": "PIN-Einrichtung fehlgeschlagen",
     "errors": {
       "enterPin": "Bitte geben Sie Ihre PIN ein",
       "invalidPin": "Falscher Code",
-      "loginFailed": "Anmeldung fehlgeschlagen. Bitte versuchen Sie es erneut."
+      "loginFailed": "Anmeldung fehlgeschlagen. Bitte versuchen Sie es erneut.",
+      "timeout": "Die Anmeldung hat zu lange gedauert. Bitte versuchen Sie es erneut."
     },
     "backspace": "Löschtaste"
   },

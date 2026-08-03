@@ -153,6 +153,33 @@ describe('CallerIdNetworkAccessCard', () => {
     expect(mocks.toastSuccess).not.toHaveBeenCalled()
   })
 
+  it('keeps the safe firewall failure and diagnostic code visible inside settings', async () => {
+    mocks.getStatus.mockResolvedValue({
+      ...safeReadyStatus,
+      configured: false,
+      privateNetworkActive: false,
+      configurationIssue: 'rule_missing',
+    })
+    mocks.enable.mockRejectedValue(
+      new Error('CALLER_ID_FIREWALL_POSTCHECK_FAILED'),
+    )
+
+    render(<CallerIdNetworkAccessCard />)
+    const accessSwitch = await screen.findByRole('switch', {
+      name: 'Private network access',
+    })
+    await waitFor(() => expect(accessSwitch).not.toBeDisabled())
+
+    fireEvent.click(accessSwitch)
+
+    const persistentError = await screen.findByRole('alert')
+    expect(persistentError).toHaveTextContent(
+      'Windows approved the request, but the safe Caller ID rule was not installed.',
+    )
+    expect(persistentError).toHaveTextContent('Diagnostic code: POSTCHECK_FAILED')
+    expect(mocks.toastSuccess).not.toHaveBeenCalled()
+  })
+
   it('shows that a malformed existing rule needs repair instead of calling it permission off', async () => {
     mocks.getStatus.mockResolvedValue({
       ...safeReadyStatus,

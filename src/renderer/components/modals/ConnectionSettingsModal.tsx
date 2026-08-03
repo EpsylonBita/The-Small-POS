@@ -51,7 +51,7 @@ const CANCEL_BTN_MD =
 const DB_ACTION_GEOMETRY =
   'inline-flex min-h-[44px] items-center justify-center flex-shrink-0 px-4 py-2 rounded-xl transition-transform duration-150 active:scale-[0.98] font-medium text-sm whitespace-nowrap';
 const DB_REPAIR_BTN_MD = `${DB_ACTION_GEOMETRY} border-2 border-emerald-500/60 bg-emerald-500/15 text-emerald-700 dark:text-emerald-200 active:bg-emerald-500/25`;
-const DB_DANGER_BTN_MD = `${DB_ACTION_GEOMETRY} border-2 border-red-500 bg-red-600/30 text-red-300 active:bg-red-600/50`;
+const DB_DANGER_BTN_MD = `${DB_ACTION_GEOMETRY} border-2 border-red-500 bg-red-600/15 text-red-700 active:bg-red-600/25 dark:bg-red-600/30 dark:text-red-200 dark:active:bg-red-600/50`;
 
 interface Props {
   isOpen: boolean
@@ -915,20 +915,19 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
     },
   }
 
-  // Left-rail navigation. One entry per settings area, in the order an operator
-  // is most likely to reach for them. The icon chip is solid yellow with black
-  // strokes; the active row is highlighted in the render below.
+  // Left-rail navigation. Icons are standalone yellow line icons; the active row
+  // owns the selection surface so decorative icon tiles do not compete with it.
   const settingsNav: Array<{ id: SettingsSectionId; icon: React.ReactNode }> = [
-    { id: 'admin', icon: <Settings className="h-5 w-5 text-black" /> },
-    { id: 'connection', icon: <Wifi className="h-5 w-5 text-black" /> },
-    { id: 'printing', icon: <Printer className="h-5 w-5 text-black" /> },
-    { id: 'payments', icon: <CreditCard className="h-5 w-5 text-black" /> },
-    { id: 'waiter_devices', icon: <Smartphone className="h-5 w-5 text-black" /> },
-    { id: 'terminal', icon: <Monitor className="h-5 w-5 text-black" /> },
-    { id: 'security', icon: <Lock className="h-5 w-5 text-black" /> },
-    { id: 'hardware', icon: <Cable className="h-5 w-5 text-black" /> },
-    { id: 'database', icon: <Database className="h-5 w-5 text-black" /> },
-    { id: 'about', icon: <Info className="h-5 w-5 text-black" /> },
+    { id: 'admin', icon: <Settings className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" /> },
+    { id: 'connection', icon: <Wifi className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" /> },
+    { id: 'printing', icon: <Printer className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" /> },
+    { id: 'payments', icon: <CreditCard className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" /> },
+    { id: 'waiter_devices', icon: <Smartphone className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" /> },
+    { id: 'terminal', icon: <Monitor className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" /> },
+    { id: 'security', icon: <Lock className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" /> },
+    { id: 'hardware', icon: <Cable className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" /> },
+    { id: 'database', icon: <Database className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" /> },
+    { id: 'about', icon: <Info className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" /> },
   ]
 
   // Grouped left-rail navigation: three calm groups (daily / device / system) instead
@@ -950,14 +949,11 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
     { id: 'system', items: ['security', 'database', 'about'] },
   ]
 
-  // Calm, non-clickable header for a detail section: a yellow icon chip beside a
-  // plain title (and optional one-line help). The section content renders directly
-  // beneath it — no accordion toggle, nothing hidden behind a chevron.
+  // Calm, non-clickable header for a detail section: a standalone line icon beside
+  // a plain title (and optional one-line help).
   const sectionHeader = (icon: React.ReactNode, title: string, help?: string) => (
     <div className="flex items-center gap-3">
-      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-yellow-400 text-black ring-1 ring-yellow-500/55 shadow-[0_8px_20px_rgba(250,204,21,0.22)]">
-        {icon}
-      </span>
+      {icon}
       <div className="min-w-0">
         <span className="block font-semibold liquid-glass-modal-text">{title}</span>
         {help ? <span className="block text-xs liquid-glass-modal-text-muted">{help}</span> : null}
@@ -1041,13 +1037,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                           : 'liquid-glass-modal-border bg-white/5 liquid-glass-modal-text active:bg-white/10 dark:bg-black/10 dark:active:bg-white/5')
                       }
                     >
-                      <span
-                        className={
-                          'flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-yellow-400 text-black ring-1 ring-yellow-500/55 shadow-[0_8px_20px_rgba(250,204,21,0.22)]'
-                        }
-                      >
-                        {navItem?.icon}
-                      </span>
+                      {navItem?.icon}
                       <span className="min-w-0">
                         <span className="block break-words text-sm font-semibold leading-tight">
                           {sectionMeta[id].label}
@@ -1072,7 +1062,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
           className="rounded-2xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-black/10 px-4 py-4 space-y-4 transition-all"
         >
           {sectionHeader(
-            <Settings className="h-5 w-5 text-black" />,
+            <Settings className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" />,
             t('settings.deviceSetup.title', 'Device setup'),
             t('settings.deviceSetup.help', 'Link this register and see what it can do.'),
           )}
@@ -1269,7 +1259,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
         {activeSettingsSection === 'connection' && (
         <div id="settings-section-connection" className="rounded-2xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-black/10 px-4 pt-4 pb-5 space-y-2.5 transition-all">
           {sectionHeader(
-            <Wifi className="h-5 w-5 text-black" />,
+            <Wifi className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" />,
             t('modals.connectionSettings.connectionSettings'),
           )}
           <div>
@@ -1379,7 +1369,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
         {activeSettingsSection === 'security' && (
         <div id="settings-section-security" className="rounded-2xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-black/10 px-4 py-4 space-y-3 transition-all">
           {sectionHeader(
-            <Lock className="h-5 w-5 text-black" />,
+            <Lock className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" />,
             t('modals.connectionSettings.pinSetup', 'Local PIN'),
             pinResetRequired
               ? t('settings.deviceSetup.pinResetRequired', 'A new PIN is required at next sign-in.')
@@ -1559,7 +1549,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
 
         <div className="rounded-2xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-black/10 px-4 py-4 space-y-4 transition-all">
           {sectionHeader(
-            <Monitor className="h-5 w-5 text-black" />,
+            <Monitor className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" />,
             t('settings.terminal.title', 'Terminal'),
             t('settings.terminal.helpText', 'Local UX and operator preferences for this device'),
           )}
@@ -1646,7 +1636,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
         {activeSettingsSection === 'security' && (
         <div data-session-timeout-card className="rounded-2xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-black/10 px-4 py-4 space-y-4 transition-all">
           {sectionHeader(
-            <Timer className="h-5 w-5 text-black" />,
+            <Timer className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" />,
             t('modals.connectionSettings.security', 'Security'),
             sessionTimeoutEnabled
               ? (t('modals.connectionSettings.sessionTimeoutStatus', { minutes: sessionTimeoutMinutes }) || `Auto-logout after ${sessionTimeoutMinutes} min`)
@@ -1756,7 +1746,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
         {activeSettingsSection === 'database' && (
         <div id="settings-section-database" className="rounded-2xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-black/10 px-4 py-4 space-y-4 transition-all">
           {sectionHeader(
-            <Database className="h-5 w-5 text-black" />,
+            <Database className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" />,
             t('settings.database.management', 'Database Management'),
           )}
           <div className="flex flex-col gap-4 pb-24">
@@ -1946,7 +1936,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
         {activeSettingsSection === 'hardware' && (
         <div id="settings-section-hardware" className="rounded-2xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-black/10 px-4 py-4 space-y-4 transition-all">
           {sectionHeader(
-            <Cable className="h-5 w-5 text-black" />,
+            <Cable className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" />,
             t('settings.peripherals.title', 'Peripherals'),
             t('settings.peripherals.helpText', 'Configure external hardware devices'),
           )}
@@ -2315,7 +2305,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
         {activeSettingsSection === 'about' && (
         <div id="settings-section-about" className="rounded-2xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-black/10 px-4 py-4 space-y-3 transition-all">
           {sectionHeader(
-            <Info className="h-5 w-5 text-black" />,
+            <Info className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" />,
             t('modals.connectionSettings.about'),
             aboutData ? `v${aboutData.version}` : t('modals.connectionSettings.aboutSubtitle'),
           )}
@@ -2419,7 +2409,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
       isLoading={isClearingOperational}
       requireCheckbox={t('settings.database.confirmClearOperationalCheckbox', 'I understand that this will delete all orders, shifts, drawers, payments, and driver earnings')}
       details={
-        <ul className="list-disc list-inside space-y-1 text-white/70">
+        <ul className="list-disc list-inside space-y-1">
           <li>{t('settings.database.clearItem.orders', 'All orders')}</li>
           <li>{t('settings.database.clearItem.shifts', 'All staff shifts')}</li>
           <li>{t('settings.database.clearItem.drawers', 'All cash drawer sessions')}</li>
@@ -2440,7 +2430,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
       confirmText={t('common.actions.continue', 'Continue')}
       cancelText={t('common.actions.cancel', 'Cancel')}
       details={
-        <ul className="list-disc list-inside space-y-1 text-white/70">
+        <ul className="list-disc list-inside space-y-1">
           <li>{t('settings.database.factoryResetItem.orders', 'A local recovery snapshot will be created before data is cleared')}</li>
           <li>{t('settings.database.factoryResetItem.settings', 'All settings will be cleared')}</li>
           <li>{t('settings.database.factoryResetItem.terminal', 'Terminal configuration will be removed')}</li>
@@ -2462,7 +2452,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
       isLoading={isResetting}
       requireCheckbox={t('settings.database.factoryResetCheckbox', 'I understand that a local recovery snapshot will be created, all data will be cleared, and the app will restart')}
       details={
-        <div className="text-red-300 font-medium">
+        <div className="font-medium">
           {t('settings.database.factoryResetFinalWarning', 'The POS will create a local recovery snapshot, clear terminal data, and restart.')}
         </div>
       }

@@ -2699,7 +2699,8 @@
           "cancelled": "L’autorisation administrateur Windows a été annulée",
           "ruleNotReady": "Windows a approuvé la demande, mais la règle sécurisée d’identification de l’appelant n’a pas été installée. Réessayez ; si cela se reproduit, signalez la raison affichée ici.",
           "createFailed": "Windows n’a pas pu créer la règle sécurisée d’identification de l’appelant. Vérifiez que le pare-feu Windows fonctionne, puis réessayez.",
-          "changeFailed": "Windows n’a pas pu modifier l’accès réseau de l’identification de l’appelant"
+          "changeFailed": "Windows n’a pas pu modifier l’accès réseau de l’identification de l’appelant",
+          "diagnosticCode": "Code de diagnostic"
         },
         "enable": "Activer l'identification de l'appelant",
         "sipServer": "Serveur SIP (IP)",
@@ -4612,17 +4613,18 @@
     "pinResetRequired": "Réinitialisation du PIN requise. Veuillez définir un nouveau PIN pour continuer.",
     "setupPin": "Configurer le PIN",
     "setupPinDesc": "Créez un code PIN à 6 chiffres pour l'accès administrateur",
-    "newPin": "Nouveau PIN (6+ chiffres)",
+    "newPin": "Nouveau PIN (6 chiffres)",
     "confirmPin": "Confirmer le PIN",
     "savePin": "Enregistrer le PIN",
     "createPin": "Créer un PIN",
-    "pinTooShort": "Le PIN doit comporter au moins 6 chiffres",
+    "pinTooShort": "Le PIN doit comporter exactement 6 chiffres",
     "pinMismatch": "Les PIN ne correspondent pas",
     "setupFailed": "Échec de la configuration du PIN",
     "errors": {
       "enterPin": "Veuillez saisir votre PIN",
       "invalidPin": "Code incorrect",
-      "loginFailed": "Échec de la connexion. Veuillez réessayer."
+      "loginFailed": "Échec de la connexion. Veuillez réessayer.",
+      "timeout": "La connexion a pris trop de temps. Veuillez réessayer."
     },
     "backspace": "Retour arrière"
   },

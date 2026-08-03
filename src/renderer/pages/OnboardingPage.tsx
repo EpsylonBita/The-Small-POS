@@ -89,7 +89,7 @@ const OnboardingPage: React.FC = () => {
             initial="hidden"
             animate="show"
             variants={pageMotionContainer}
-            className="modern-scrollbar flex h-full min-h-0 flex-col items-center overflow-y-auto bg-zinc-900 p-4 text-white"
+            className="dark modern-scrollbar flex h-full min-h-0 flex-col items-center overflow-y-auto bg-zinc-900 p-4 text-white"
         >
             {/*
               Centered content that can outgrow short POS windows (setup card + RecoveryPanel).

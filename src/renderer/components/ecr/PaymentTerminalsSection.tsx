@@ -377,29 +377,25 @@ interface MiniStatCardProps {
   label: string
   value: number
   icon: typeof CreditCard
-  color: 'amber' | 'green' | 'gray' | 'red'
+  color: 'yellow' | 'green' | 'gray' | 'red'
 }
 
 const colorMap = {
-  amber: {
-    bg: 'bg-amber-500/20',
-    text: 'text-amber-400',
+  yellow: {
+    text: 'text-yellow-600 dark:text-yellow-300',
     shadow: '',
   },
   green: {
-    bg: 'bg-green-500/20',
-    text: 'text-green-400',
-    shadow: 'drop-shadow-[0_0_6px_rgba(34,197,94,0.5)]',
+    text: 'text-green-600 dark:text-green-300',
+    shadow: '',
   },
   gray: {
-    bg: 'bg-gray-500/20',
-    text: 'text-gray-400',
+    text: 'text-slate-500 dark:text-slate-400',
     shadow: '',
   },
   red: {
-    bg: 'bg-red-500/20',
-    text: 'text-red-400',
-    shadow: 'drop-shadow-[0_0_6px_rgba(239,68,68,0.5)]',
+    text: 'text-red-600 dark:text-red-300',
+    shadow: '',
   },
 }
 
@@ -408,9 +404,7 @@ const MiniStatCard: React.FC<MiniStatCardProps> = ({ label, value, icon: Icon, c
   return (
     <div className="rounded-2xl p-2 bg-white/5 dark:bg-gray-800/20 border liquid-glass-modal-border">
       <div className="flex items-center gap-2">
-        <div className={`w-7 h-7 rounded-md flex items-center justify-center ${colors.bg}`}>
-          <Icon size={14} className={`${colors.text} ${colors.shadow}`} />
-        </div>
+        <Icon size={18} className={`shrink-0 ${colors.text} ${colors.shadow}`} />
         <div>
           <p className="text-lg font-bold liquid-glass-modal-text">{value}</p>
           <p className="text-[10px] liquid-glass-modal-text-muted">{label}</p>
@@ -782,12 +776,7 @@ export const PaymentTerminalsSection: React.FC<Props> = ({
 
       {/* Title */}
       <div className="flex items-center gap-3 px-1">
-        <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-emerald-500/20">
-          <CreditCard
-            size={22}
-            className="text-emerald-400 drop-shadow-[0_0_8px_rgba(52,211,153,0.6)]"
-          />
-        </div>
+        <CreditCard size={24} className="shrink-0 text-green-600 dark:text-green-300" />
         <div>
           <h2 className="text-lg font-bold liquid-glass-modal-text">
             {t('settings.paymentTerminals.title', 'Payment Terminals')}
@@ -804,7 +793,7 @@ export const PaymentTerminalsSection: React.FC<Props> = ({
           icon={CreditCard}
           value={stats.total}
           label={t('ecr.stats.total', 'Total')}
-          color="amber"
+          color="yellow"
         />
         <MiniStatCard
           icon={CheckCircle}

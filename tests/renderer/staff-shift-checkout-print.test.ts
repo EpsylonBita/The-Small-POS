@@ -160,29 +160,19 @@ test('StaffShiftModal renders staff QR action in yellow with black text', () => 
   assert.doesNotMatch(modal, /bg-cyan-600 px-5 py-3 text-sm font-bold text-white/);
 });
 
-test('StaffShiftModal keeps check-in user icons and PIN action surfaces unfilled', () => {
+test('StaffShiftModal keeps check-in user icons standalone and PIN action surfaces unfilled', () => {
   const modal = source(staffShiftModalPath);
   const nonTransparentBackground = /(?:^|\s)(?:dark:)?(?:hover:)?bg-(?!transparent\b)/;
-  const iconSurfaces = [...modal.matchAll(/iconSurface:\s*'([^']+)'/g)].map((match) => match[1]);
   const buttonSurfaces = [...modal.matchAll(/buttonSurface:\s*'([^']+)'/g)].map((match) => match[1]);
 
-  // Non-cashier roles share FALLBACK_ROLE_PRESENTATION, so there are two distinct surface
-  // literals (fallback + cashier). Both must stay unfilled (asserted in the loops below).
-  assert.ok(iconSurfaces.length >= 2, 'expected an icon surface for the fallback + cashier presentations');
   assert.ok(buttonSurfaces.length >= 2, 'expected a button surface for the fallback + cashier presentations');
-
-  for (const value of iconSurfaces) {
-    assert.doesNotMatch(value, nonTransparentBackground);
-  }
 
   for (const value of buttonSurfaces) {
     assert.doesNotMatch(value, nonTransparentBackground);
   }
 
-  assert.match(
-    modal,
-    /border-slate-200\/70 bg-transparent dark:border-white\/10 dark:bg-transparent/,
-  );
+  assert.doesNotMatch(modal, /iconSurface:/, 'decorative icon-tile presentation tokens must be removed');
+  assert.match(modal, /<User className=\{`h-8 w-8 shrink-0/);
 });
 
 test('StaffShiftModal renders PIN step without the current-role wrapper or ready chip', () => {
@@ -233,7 +223,7 @@ test('ProgressStepper renders check-in step dots without filled shells', () => {
   assert.doesNotMatch(stepper, /rounded-full bg-current shadow-\[0_0_18px_currentColor\]/);
 });
 
-test('StaffShiftModal renders cashier-first role gate warning text in white', () => {
+test('StaffShiftModal renders cashier-first role gate with readable yellow semantic text', () => {
   const modal = source(staffShiftModalPath);
   const cashierFirstFallbacks = [
     'The first check-in for this business day must be a cashier.',
@@ -245,7 +235,7 @@ test('StaffShiftModal renders cashier-first role gate warning text in white', ()
 
   assert.match(
     modal,
-    /cashierFirstGateActive && \([\s\S]*text-sm text-white[\s\S]*<AlertTriangle className="mt-0\.5 h-5 w-5 shrink-0 text-white" \/>[\s\S]*<p className="text-white">/,
+    /cashierFirstGateActive && \([\s\S]*bg-yellow-50[\s\S]*text-yellow-900[\s\S]*<AlertTriangle className="mt-0\.5 h-5 w-5 shrink-0 text-yellow-700 dark:text-yellow-300" \/>[\s\S]*<p className="text-yellow-800 dark:text-yellow-100\/90">/,
   );
   for (const fallback of cashierFirstFallbacks) {
     assert.doesNotMatch(modal, new RegExp(fallback.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
@@ -296,7 +286,7 @@ test('StaffShiftModal renders role-selection chips as wrapperless text labels', 
   );
   assert.match(
     modal,
-    /<span className="text-xs font-semibold text-amber-600 dark:text-amber-200">[\s\S]*roleLockedUntilCashier/,
+    /<span className="text-xs font-semibold text-yellow-700 dark:text-yellow-200">[\s\S]*roleLockedUntilCashier/,
   );
   assert.doesNotMatch(
     modal,
@@ -321,7 +311,7 @@ test('StaffShiftModal renders cash-entry euro icon without a wrapper', () => {
   );
 });
 
-test('StaffShiftModal renders active shift cards with yellow card fill and neutral inner controls', () => {
+test('StaffShiftModal renders active shift cards with yellow card fill and standalone icons', () => {
   const modal = source(staffShiftModalPath);
 
   assert.match(
@@ -332,10 +322,8 @@ test('StaffShiftModal renders active shift cards with yellow card fill and neutr
     modal,
     /className=\{`w-full rounded-\[24px\] border p-4 text-left[\s\S]*\$\{activePresentation\.accentBorder\} \$\{activePresentation\.accentSurface\}`\}/,
   );
-  assert.match(
-    modal,
-    /className=\{`flex h-16 w-16 shrink-0 items-center justify-center rounded-\[20px\] border bg-black\/45 dark:bg-black\/45 \$\{activePresentation\.accentBorder\}`\}/,
-  );
+  assert.match(modal, /<User className=\{`h-8 w-8 shrink-0 \$\{activePresentation\.iconColor\}`\}/);
+  assert.doesNotMatch(modal, /bg-black\/45 dark:bg-black\/45 \$\{activePresentation\.accentBorder\}/);
   assert.match(
     modal,
     /className="inline-flex shrink-0 items-center gap-1 rounded-full border border-white\/20 bg-black\/45 px-3 py-1 text-xs font-semibold text-white/,
@@ -397,25 +385,26 @@ test('Greek staff-shift/staff-payment closeout copy uses Greek, not the English 
 
 // Round 338 (live POS QA, 1280x800 Greek/dark): the cashier checkout opened with the expected-amount summary
 // and the print + complete action rail below the fold, forcing a long scroll to reach the footer. The footer is
-// now PINNED -- it lives OUTSIDE the scrollable reconciliation body so it stays visible while the cards scroll
-// above it. This guards the layout (fill-the-modal shell + shrinkable scroll body + sibling footer) and proves
+// now FLOATS -- it lives OUTSIDE the scrollable reconciliation body and overlays the cards while they continue
+// behind it. This guards the layout (relative shell + shrinkable padded scroll body + absolute sibling footer) and proves
 // the checkout logic / disabled conditions are untouched. Touch-first: no hover, no native title on the footer.
-test('Round 338: the checkout action footer is pinned outside the scrollable reconciliation body', () => {
+test('Round 338: the checkout action footer floats over the scrollable reconciliation body', () => {
   const modal = source(staffShiftModalPath);
 
-  // The checkout pane fills the modal content box so the body can scroll while the footer pins. Check-in keeps
+  // The checkout pane fills the modal content box so the body can scroll while the footer floats. Check-in keeps
   // its capped-height behaviour; the shells are distinguished by data-testid.
   assert.match(
     modal,
-    /className=\{`flex \$\{effectiveMode === 'checkout' \? 'flex-1 min-h-0' : 'max-h-\[84vh\]'\} flex-col`\}/,
-    'the checkout shell must fill the modal (flex-1 min-h-0) so its body scrolls and the footer pins',
+    /className=\{`relative flex \$\{effectiveMode === 'checkout' \? 'flex-1 min-h-0' : 'max-h-\[84vh\]'\} flex-col`\}/,
+    'the checkout shell must fill the modal (flex-1 min-h-0) so its body scrolls and the footer floats',
   );
   assert.match(
     modal,
     /data-testid=\{effectiveMode === 'checkout' \? 'staff-checkout-shell' : 'staff-checkin-shell'\}/,
   );
 
-  // The reconciliation body is the single scroller and is allowed to shrink (min-h-0) inside the flex shell.
+  // The reconciliation body is the single scroller, extends beneath the floating footer, and keeps
+  // enough internal bottom space that its final controls remain reachable above the overlay.
   const scrollAnchor = 'data-testid="staff-shift-scroll-body"';
   const scrollIdx = modal.indexOf(scrollAnchor);
   assert.notEqual(scrollIdx, -1, 'the scrollable reconciliation body marker must exist');
@@ -424,11 +413,24 @@ test('Round 338: the checkout action footer is pinned outside the scrollable rec
   assert.match(scrollOpenTag, /min-h-0/);
   assert.match(scrollOpenTag, /overflow-y-auto/);
   assert.match(scrollOpenTag, /scrollbar-hide/);
+  assert.match(scrollOpenTag, /pb-36/);
 
   // The footer must be a SIBLING outside the scroll body. Its marker exists and renders after the body...
   const footerIdx = modal.indexOf('data-testid="staff-checkout-footer"');
   assert.notEqual(footerIdx, -1, 'the pinned checkout footer marker must exist');
   assert.ok(footerIdx > scrollIdx, 'the footer must render after the scrollable body');
+
+  const footerOpenTag = modal.slice(modal.lastIndexOf('<div', footerIdx), modal.indexOf('>', footerIdx) + 1);
+  assert.match(
+    footerOpenTag,
+    /absolute inset-x-0 bottom-0 z-20/,
+    'the expected-amount/action bar must overlay the reconciliation page instead of reserving a grey row',
+  );
+  assert.doesNotMatch(
+    footerOpenTag,
+    /bg-white|border-t|backdrop-blur/,
+    'the floating bar must not sit on a second white footer sheet',
+  );
 
   // ...and the scroll body's closing </div> immediately precedes the footer conditional, proving the footer is
   // a sibling rendered AFTER (outside) the overflow-y-auto region rather than nested within it. If anyone ever

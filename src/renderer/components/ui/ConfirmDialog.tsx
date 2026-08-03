@@ -50,27 +50,31 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
     const config = {
         info: {
             icon: Info,
-            color: 'text-amber-700 dark:text-amber-300',
-            bgIcon: 'bg-amber-400/18',
-            confirmVariant: 'primary' as const
+            color: 'text-yellow-700 dark:text-yellow-300',
+            confirmVariant: 'primary' as const,
+            detailsColor: 'liquid-glass-modal-text-muted',
+            checkboxColor: 'text-yellow-600 focus:ring-yellow-500/70 dark:text-yellow-400',
         },
         warning: {
             icon: AlertTriangle,
-            color: 'text-amber-700 dark:text-amber-300',
-            bgIcon: 'bg-amber-400/18',
-            confirmVariant: 'primary' as const
+            color: 'text-yellow-700 dark:text-yellow-300',
+            confirmVariant: 'primary' as const,
+            detailsColor: 'liquid-glass-modal-text-muted',
+            checkboxColor: 'text-yellow-600 focus:ring-yellow-500/70 dark:text-yellow-400',
         },
         error: {
             icon: XCircle,
             color: 'text-red-600 dark:text-red-400',
-            bgIcon: 'bg-red-500/20',
-            confirmVariant: 'error' as const
+            confirmVariant: 'error' as const,
+            detailsColor: 'text-red-700 dark:text-red-300',
+            checkboxColor: 'text-red-600 focus:ring-red-500/70 dark:text-red-400',
         },
         success: {
             icon: CheckCircle,
             color: 'text-emerald-700 dark:text-emerald-400',
-            bgIcon: 'bg-emerald-500/20',
-            confirmVariant: 'success' as const
+            confirmVariant: 'success' as const,
+            detailsColor: 'text-emerald-700 dark:text-emerald-300',
+            checkboxColor: 'text-emerald-600 focus:ring-emerald-500/70 dark:text-emerald-400',
         }
     }[variant];
 
@@ -91,9 +95,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
         >
             <div className="flex flex-col gap-6">
                 <div className="flex items-center gap-4">
-                    <div className={cn("p-3 rounded-full shrink-0", config.bgIcon)}>
-                        <Icon className={cn("w-6 h-6", config.color)} />
-                    </div>
+                    <Icon className={cn("h-7 w-7 shrink-0", config.color)} />
                     <div>
                         <h3 className="liquid-glass-modal-text text-xl font-bold mb-1">{title}</h3>
                         <p className="liquid-glass-modal-text-muted leading-relaxed">{message}</p>
@@ -102,7 +104,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
 
                 {details && (
                     <div className="liquid-glass-modal-inset rounded-2xl p-4 text-sm">
-                        {details}
+                        <div className={config.detailsColor}>{details}</div>
                     </div>
                 )}
 
@@ -128,7 +130,10 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
                             checked={isChecked}
                             onChange={(e) => setIsChecked(e.target.checked)}
                             disabled={isLoading}
-                            className="h-5 w-5 rounded-xl border-slate-400 bg-white text-amber-500 focus:ring-2 focus:ring-amber-500/70 focus:ring-offset-0 dark:border-white/30 dark:bg-black/40 dark:text-amber-400"
+                            className={cn(
+                                'h-5 w-5 rounded-xl border-slate-400 bg-white focus:ring-2 focus:ring-offset-0 dark:border-white/30 dark:bg-black/40',
+                                config.checkboxColor,
+                            )}
                         />
                         <span className="liquid-glass-modal-text text-sm select-none">{requireCheckbox}</span>
                     </label>

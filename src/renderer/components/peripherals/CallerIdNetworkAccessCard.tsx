@@ -18,12 +18,26 @@ const POSTCHECK_FAILED_ERROR = 'CALLER_ID_FIREWALL_POSTCHECK_FAILED'
 const isRepairIssue = (issue?: string) =>
   Boolean(issue && !['none', 'rule_missing', 'unsupported'].includes(issue))
 
+const extractDiagnosticCode = (message: string) => {
+  const match = message.match(
+    /CALLER_ID_FIREWALL_([A-Z_]+)(?::([a-z0-9_-]+))?/,
+  )
+  if (!match) return 'UNKNOWN'
+  return match[2] ? `${match[1]}:${match[2]}` : match[1]
+}
+
+interface FirewallFailure {
+  message: string
+  diagnosticCode: string
+}
+
 export const CallerIdNetworkAccessCard: React.FC = () => {
   const { t } = useTranslation()
   const [status, setStatus] = useState<CallerIdFirewallStatus | null>(null)
   const [checking, setChecking] = useState(true)
   const [changing, setChanging] = useState(false)
   const [loadFailed, setLoadFailed] = useState(false)
+  const [lastFailure, setLastFailure] = useState<FirewallFailure | null>(null)
 
   const refreshStatus = useCallback(async () => {
     setChecking(true)
@@ -46,6 +60,7 @@ export const CallerIdNetworkAccessCard: React.FC = () => {
   const changeAccess = async (enabled: boolean) => {
     if (changing) return
     setChanging(true)
+    setLastFailure(null)
     try {
       const nextStatus = enabled
         ? await callerIdEnableFirewall()
@@ -66,28 +81,31 @@ export const CallerIdNetworkAccessCard: React.FC = () => {
     } catch (error) {
       console.error('Failed to change Caller ID network access:', error)
       const message = error instanceof Error ? error.message : String(error)
-      toast.error(
-        message.includes(UAC_CANCELLED_ERROR)
+      const safeMessage = message.includes(UAC_CANCELLED_ERROR)
+        ? t(
+            'settings.peripherals.callerId.networkAccess.cancelled',
+            'Windows administrator approval was cancelled',
+          )
+        : message.includes(RULE_NOT_READY_ERROR) ||
+            message.includes(POSTCHECK_FAILED_ERROR)
           ? t(
-              'settings.peripherals.callerId.networkAccess.cancelled',
-              'Windows administrator approval was cancelled',
+              'settings.peripherals.callerId.networkAccess.ruleNotReady',
+              'Windows approved the request, but the safe Caller ID rule was not installed. Try once more; if it repeats, report the reason shown here.',
             )
-          : message.includes(RULE_NOT_READY_ERROR) ||
-              message.includes(POSTCHECK_FAILED_ERROR)
+          : message.includes(CREATE_FAILED_ERROR)
             ? t(
-                'settings.peripherals.callerId.networkAccess.ruleNotReady',
-                'Windows approved the request, but the safe Caller ID rule was not installed. Try once more; if it repeats, report the reason shown here.',
+                'settings.peripherals.callerId.networkAccess.createFailed',
+                'Windows could not create the safe Caller ID rule. Check that Windows Firewall is running, then try again.',
               )
-            : message.includes(CREATE_FAILED_ERROR)
-              ? t(
-                  'settings.peripherals.callerId.networkAccess.createFailed',
-                  'Windows could not create the safe Caller ID rule. Check that Windows Firewall is running, then try again.',
-                )
-          : t(
-              'settings.peripherals.callerId.networkAccess.changeFailed',
-              'Windows could not change Caller ID network access',
-            ),
-      )
+            : t(
+                'settings.peripherals.callerId.networkAccess.changeFailed',
+                'Windows could not change Caller ID network access',
+              )
+      setLastFailure({
+        message: safeMessage,
+        diagnosticCode: extractDiagnosticCode(message),
+      })
+      toast.error(safeMessage)
       await refreshStatus()
     } finally {
       setChanging(false)
@@ -179,7 +197,7 @@ export const CallerIdNetworkAccessCard: React.FC = () => {
             {ready ? (
               <ShieldCheck className="h-5 w-5 flex-shrink-0 text-emerald-600 dark:text-emerald-300" />
             ) : (
-              <ShieldAlert className="h-5 w-5 flex-shrink-0 text-amber-600 dark:text-amber-300" />
+              <ShieldAlert className="h-5 w-5 flex-shrink-0 text-yellow-700 dark:text-yellow-300" />
             )}
             <h4 id="caller-id-network-access-label" className="liquid-glass-modal-text text-sm font-semibold">
               {t(
@@ -192,7 +210,7 @@ export const CallerIdNetworkAccessCard: React.FC = () => {
                 className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${
                   ready
                     ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-200'
-                    : 'bg-amber-500/15 text-amber-800 dark:text-amber-200'
+                    : 'bg-yellow-400/15 text-yellow-900 dark:text-yellow-200'
                 }`}
               >
                 {badgeText}
@@ -214,11 +232,26 @@ export const CallerIdNetworkAccessCard: React.FC = () => {
         />
       </div>
 
+      {lastFailure && (
+        <div
+          role="alert"
+          className="rounded-xl border border-red-500/35 bg-red-500/10 px-3 py-2 text-xs text-red-800 dark:text-red-100"
+        >
+          <p>{lastFailure.message}</p>
+          <p className="mt-1 font-mono text-[11px] font-semibold">
+            {t(
+              'settings.peripherals.callerId.networkAccess.diagnosticCode',
+              'Diagnostic code',
+            )}: {lastFailure.diagnosticCode}
+          </p>
+        </div>
+      )}
+
       <div
         className={`flex items-start gap-2 rounded-xl border px-3 py-2 text-xs ${
           ready
             ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-800 dark:text-emerald-100'
-            : 'border-amber-500/30 bg-amber-500/10 text-amber-900 dark:text-amber-100'
+            : 'border-yellow-500/35 bg-yellow-400/10 text-yellow-900 dark:text-yellow-100'
         }`}
       >
         {busy ? (

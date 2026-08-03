@@ -2699,7 +2699,8 @@
           "cancelled": "Windows administrator approval was cancelled",
           "ruleNotReady": "Windows approved the request, but the safe Caller ID rule was not installed. Try once more; if it repeats, report the reason shown here.",
           "createFailed": "Windows could not create the safe Caller ID rule. Check that Windows Firewall is running, then try again.",
-          "changeFailed": "Windows could not change Caller ID network access"
+          "changeFailed": "Windows could not change Caller ID network access",
+          "diagnosticCode": "Diagnostic code"
         },
         "enable": "Enable Caller ID recognition",
         "sipServer": "SIP Server (IP)",
@@ -4612,17 +4613,18 @@
     "pinResetRequired": "PIN reset required. Please set a new PIN to continue.",
     "setupPin": "Setup PIN",
     "setupPinDesc": "Create a 6-digit PIN for admin access",
-    "newPin": "New PIN (6+ digits)",
+    "newPin": "New PIN (6 digits)",
     "confirmPin": "Confirm PIN",
     "savePin": "Save PIN",
     "createPin": "Create PIN",
-    "pinTooShort": "PIN must be at least 6 digits",
+    "pinTooShort": "PIN must contain exactly 6 digits",
     "pinMismatch": "PINs do not match",
     "setupFailed": "Failed to setup PIN",
     "errors": {
       "enterPin": "Please enter your PIN",
       "invalidPin": "Wrong code",
-      "loginFailed": "Login failed. Please try again."
+      "loginFailed": "Login failed. Please try again.",
+      "timeout": "Login took too long. Please try again."
     },
     "backspace": "Backspace"
   },

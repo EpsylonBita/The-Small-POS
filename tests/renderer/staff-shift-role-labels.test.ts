@@ -8,6 +8,10 @@ const modalSource = readFileSync(
   path.join(projectRoot, 'src', 'renderer', 'components', 'modals', 'StaffShiftModal.tsx'),
   'utf8',
 );
+const progressStepperSource = readFileSync(
+  path.join(projectRoot, 'src', 'renderer', 'components', 'ui', 'ProgressStepper.tsx'),
+  'utf8',
+);
 const loadLocale = (lng: string) =>
   JSON.parse(readFileSync(path.join(projectRoot, 'src', 'locales', `${lng}.json`), 'utf8'));
 
@@ -209,4 +213,67 @@ test('Round 313 (3rd follow-up): the check-in footer is hoisted out of the anima
   const pinEnd = modalSource.indexOf('data-testid="staff-role-section"', pinStart);
   const pinStep = modalSource.slice(pinStart, pinEnd);
   assert.doesNotMatch(pinStep, /checkInFooterClass/, 'the footer must not be inside the transformed pin-step body');
+});
+
+test('start-shift wizard uses the yellow brand accent without orange or amber UI tokens', () => {
+  const rolePresentationStart = modalSource.indexOf('const ROLE_PRESENTATIONS');
+  const rolePresentationEnd = modalSource.indexOf('const isErganiIntegration', rolePresentationStart);
+  const checkInStart = modalSource.indexOf('const renderRoleBadge');
+  const checkInEnd = modalSource.indexOf('// Debug logging', checkInStart);
+  assert.ok(rolePresentationStart > 0 && rolePresentationEnd > rolePresentationStart);
+  assert.ok(checkInStart > 0 && checkInEnd > checkInStart);
+
+  const startShiftTheme = [
+    modalSource.slice(rolePresentationStart, rolePresentationEnd),
+    modalSource.slice(checkInStart, checkInEnd),
+    progressStepperSource,
+  ].join('\n');
+
+  assert.match(startShiftTheme, /yellow-400/);
+  assert.doesNotMatch(
+    startShiftTheme,
+    /(?:amber|orange)-\d+/,
+    'the start-shift wizard must use the POS yellow accent instead of orange/amber',
+  );
+});
+
+test('start-shift disabled states keep readable text without fading the whole card', () => {
+  const busyCardStart = modalSource.indexOf('// Busy-elsewhere card');
+  const busyCardEnd = modalSource.indexOf(
+    'return (\n                        <motion.button',
+    modalSource.indexOf('if (busyInfo)', busyCardStart) + 1,
+  );
+  const checkInFooterStart = modalSource.indexOf('const renderCheckInFooter');
+  const checkInFooterEnd = modalSource.indexOf('// Debug logging', checkInFooterStart);
+  assert.ok(busyCardStart > 0 && busyCardEnd > busyCardStart);
+  assert.ok(checkInFooterStart > 0 && checkInFooterEnd > checkInFooterStart);
+
+  const busyCard = modalSource.slice(busyCardStart, busyCardEnd);
+  const footer = modalSource.slice(checkInFooterStart, checkInFooterEnd);
+  assert.doesNotMatch(busyCard, /\bopacity-\d+/, 'disabled staff cards must not dim all child text');
+  assert.match(footer, /disabled:text-slate-600/, 'disabled actions must retain readable light-theme text');
+});
+
+test('cashier-first notice uses readable semantic text on its light yellow surface', () => {
+  const noticeStart = modalSource.indexOf('{cashierFirstGateActive &&');
+  const noticeEnd = modalSource.indexOf('{selectedStaffRoles.map', noticeStart);
+  assert.ok(noticeStart > 0 && noticeEnd > noticeStart);
+  const notice = modalSource.slice(noticeStart, noticeEnd);
+
+  assert.match(notice, /bg-yellow-50/);
+  assert.match(notice, /text-yellow-900/);
+  assert.doesNotMatch(notice, /text-white/, 'white copy is unreadable on the light warning surface');
+});
+
+test('start-shift person icons are standalone without decorative rounded icon tiles', () => {
+  const checkInStart = modalSource.indexOf('const renderRoleBadge');
+  const checkInEnd = modalSource.indexOf('// Debug logging', checkInStart);
+  assert.ok(checkInStart > 0 && checkInEnd > checkInStart);
+  const checkIn = modalSource.slice(checkInStart, checkInEnd);
+
+  assert.doesNotMatch(
+    checkIn,
+    /flex h-(?:14|16) w-(?:14|16)[^"']*items-center justify-center[^"']*rounded[^"']*border/,
+  );
+  assert.match(checkIn, /<User className={`h-8 w-8 shrink-0/);
 });

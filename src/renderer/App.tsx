@@ -22,6 +22,7 @@ import SyncRecoveryModal, {
   type SyncRecoveryOpenContext,
 } from "./components/recovery/SyncRecoveryModal";
 import PageLoadMotion from "./components/ui/PageLoadMotion";
+import PortaledToaster from "./components/PortaledToaster";
 
 import { ActivityTracker } from "./services/ActivityTracker";
 import {
@@ -87,6 +88,7 @@ const INVALID_SESSION_IDENTITY_VALUES = new Set([
 
 const STARTUP_IPC_TIMEOUT_MS = 4000;
 const STARTUP_CONFIG_SYNC_TIMEOUT_MS = 2500;
+const AUTH_LOGIN_TIMEOUT_MS = 30_000;
 const CONFIGURED_TERMINAL_HINT_KEY = 'pos-terminal-configured';
 const PARITY_QUEUE_REFRESH_INTERVAL_MS = 15_000;
 const PARITY_SYNC_RETRY_INTERVAL_MS = 30_000;
@@ -406,7 +408,7 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
 
       toast.error(presentation.message, {
         duration: 8000,
-        icon: <AlertTriangle className="w-4 h-4 text-amber-500" />,
+        icon: <AlertTriangle className="w-4 h-4 text-yellow-500" />,
       });
     };
 
@@ -476,14 +478,14 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
 
       toast.custom(
         (toastInstance) => (
-          <div className="max-w-md rounded-2xl border border-amber-500/30 bg-slate-950/95 p-4 text-sm text-slate-100 shadow-2xl">
+          <div className="max-w-md rounded-2xl border border-yellow-500/30 bg-slate-950/95 p-4 text-sm text-slate-100 shadow-2xl">
             <div className="flex items-start gap-3">
-              <AlertTriangle className="mt-0.5 h-4 w-4 text-amber-400" />
+              <AlertTriangle className="mt-0.5 h-4 w-4 text-yellow-400" />
               <div className="space-y-3">
                 <p>{presentation.message}</p>
                 <div className="flex flex-wrap gap-2">
                   <button
-                    className="rounded-full bg-amber-500 px-3 py-1.5 text-xs font-semibold text-slate-950"
+                    className="rounded-full bg-yellow-400 px-3 py-1.5 text-xs font-semibold text-slate-950"
                     onClick={() => {
                       toast.dismiss(toastInstance.id);
                       void refreshTerminalConfig();
@@ -612,7 +614,7 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center">
         <div className="text-center">
-          <div className="w-16 h-16 border-4 border-t-transparent border-amber-400 rounded-full animate-spin mx-auto mb-4"></div>
+          <div className="w-16 h-16 border-4 border-t-transparent border-yellow-400 rounded-full animate-spin mx-auto mb-4"></div>
           <p className="text-gray-800">{t('app.loading')}</p>
         </div>
       </div>
@@ -1382,7 +1384,7 @@ function AppContent() {
       const result: any = await withStartupTimeout(
         bridge.auth.login(pin),
         'auth.login',
-        6000,
+        AUTH_LOGIN_TIMEOUT_MS,
       );
       console.log('[App.tsx handleLogin] IPC result:', JSON.stringify(result, null, 2));
 
@@ -1440,7 +1442,7 @@ function AppContent() {
       return false;
     } catch (err) {
       console.error('[App.tsx handleLogin] Exception caught:', err);
-      return false;
+      throw err;
     }
   };
 
@@ -1489,7 +1491,7 @@ function AppContent() {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center">
         <div className="text-center">
-          <div className="w-16 h-16 border-4 border-t-transparent border-amber-400 rounded-full animate-spin mx-auto mb-4"></div>
+          <div className="w-16 h-16 border-4 border-t-transparent border-yellow-400 rounded-full animate-spin mx-auto mb-4"></div>
           <p className="text-gray-800">{t('app.loading')}</p>
         </div>
       </div>
@@ -1638,7 +1640,7 @@ function AppContent() {
               }}
             />
 
-            <Toaster
+            <PortaledToaster
               position="top-center"
               containerStyle={TOAST_CONTAINER_STYLE}
               toastOptions={{

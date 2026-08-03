@@ -14,6 +14,17 @@ const modalPath = path.join(
 );
 
 const source = readFileSync(modalPath, 'utf8');
+const paymentTerminalsSectionSource = readFileSync(
+  path.join(
+    projectRoot,
+    'src',
+    'renderer',
+    'components',
+    'ecr',
+    'PaymentTerminalsSection.tsx',
+  ),
+  'utf8',
+);
 
 // Scope assertions to a single <button> by slicing from a marker inside its opening tag (or onClick
 // body) to its closing </button>. Lets us assert a native `title=` attribute on a control is gone
@@ -77,47 +88,51 @@ test('ConnectionSettingsModal exposes navigable settings sections via the hub le
   assert.doesNotMatch(source, /setShowPinSettings\(true\)/);
 });
 
-test('Round 367: Settings left-rail icon chips are solid yellow with black line icons', () => {
+test('Settings left-rail icons are standalone yellow line icons without decorative tiles', () => {
   const navStart = source.indexOf('const settingsNav: Array<{ id: SettingsSectionId; icon: React.ReactNode }>');
   assert.notEqual(navStart, -1, 'settingsNav must exist');
   const navEnd = source.indexOf('const settingsNavGroups', navStart);
   assert.notEqual(navEnd, -1, 'settingsNavGroups must follow settingsNav');
   const navBlock = source.slice(navStart, navEnd);
 
-  const blackIconCount = (navBlock.match(/className="h-5 w-5 text-black"/g) ?? []).length;
-  assert.equal(blackIconCount, 10, `all ten Settings nav icons must use black strokes (found ${blackIconCount})`);
-  assert.doesNotMatch(navBlock, /text-yellow-700|dark:text-yellow-200/);
+  const yellowIconCount = (navBlock.match(/className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300"/g) ?? []).length;
+  assert.equal(yellowIconCount, 10, `all ten Settings nav icons must use standalone yellow strokes (found ${yellowIconCount})`);
+  assert.doesNotMatch(navBlock, /text-black/);
 
-  const chipStart = source.indexOf('flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-yellow-400 text-black');
-  assert.notEqual(chipStart, -1, 'Settings nav icon chip must be full yellow with black icon color');
-  const chipEnd = source.indexOf('{navItem?.icon}', chipStart);
-  assert.notEqual(chipEnd, -1, 'Settings nav chip must wrap the nav icon');
-  const chipBlock = source.slice(chipStart, chipEnd);
-  assert.match(chipBlock, /ring-yellow-500\/55/);
-  assert.doesNotMatch(chipBlock, /bg-yellow-400\/(?:10|15|20|25)|ring-yellow-400\/(?:20|30|40)/);
+  const navRenderStart = source.indexOf('aria-current={isActive');
+  const navRenderEnd = source.indexOf('</button>', navRenderStart);
+  const navRender = source.slice(navRenderStart, navRenderEnd);
+  assert.match(navRender, /\{navItem\?\.icon\}/);
+  assert.doesNotMatch(navRender, /h-9 w-9|bg-yellow-400 text-black|ring-yellow-500/);
 });
 
-test('Round 368: Settings detail headers use solid yellow chips with black line icons', () => {
+test('Settings detail headers use standalone yellow line icons without decorative tiles', () => {
   const helperStart = source.indexOf('const sectionHeader = (icon: React.ReactNode, title: string, help?: string)');
   assert.notEqual(helperStart, -1, 'sectionHeader helper must exist');
   const helperEnd = source.indexOf('return (', helperStart);
   assert.notEqual(helperEnd, -1, 'sectionHeader helper must be declared before modal return');
   const helperBlock = source.slice(helperStart, helperEnd);
 
-  assert.match(helperBlock, /bg-yellow-400 text-black/);
-  assert.match(helperBlock, /ring-yellow-500\/55/);
-  assert.match(helperBlock, /shadow-\[0_8px_20px_rgba\(250,204,21,0\.22\)\]/);
-  assert.doesNotMatch(helperBlock, /bg-yellow-400\/15|ring-yellow-400\/30/);
+  assert.match(helperBlock, /\{icon\}/);
+  assert.doesNotMatch(helperBlock, /rounded-xl|bg-yellow|ring-yellow|shadow-/);
 
-  const sectionHeaderBlackIconCount = (
-    source.match(/sectionHeader\(\s*\n\s*<\w+ className="h-5 w-5 text-black"/g) ?? []
+  const sectionHeaderYellowIconCount = (
+    source.match(/sectionHeader\(\s*\n\s*<\w+ className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300"/g) ?? []
   ).length;
   assert.equal(
-    sectionHeaderBlackIconCount,
+    sectionHeaderYellowIconCount,
     8,
-    `all eight Settings detail header icons must use black strokes (found ${sectionHeaderBlackIconCount})`,
+    `all eight Settings detail header icons must use standalone yellow strokes (found ${sectionHeaderYellowIconCount})`,
   );
-  assert.doesNotMatch(source, /className="h-5 w-5 text-yellow-700 dark:text-yellow-200"/);
+  assert.doesNotMatch(source, /sectionHeader\(\s*\n\s*<\w+ className="h-5 w-5 text-black"/);
+});
+
+test('Payment terminal settings icons are standalone instead of nested in colored icon tiles', () => {
+  assert.doesNotMatch(paymentTerminalsSectionSource, /w-10 h-10 rounded-xl flex items-center justify-center/);
+  assert.doesNotMatch(paymentTerminalsSectionSource, /w-7 h-7 rounded-md flex items-center justify-center/);
+  assert.doesNotMatch(paymentTerminalsSectionSource, /\bbg:\s*'bg-(?:amber|green|gray|red)-500\/20'/);
+  assert.match(paymentTerminalsSectionSource, /<Icon size=\{18\} className=/);
+  assert.match(paymentTerminalsSectionSource, /<CreditCard\s+size=\{24\}/);
 });
 
 test('ConnectionSettingsModal keeps critical hardware and admin integrations wired', () => {
@@ -1524,10 +1539,15 @@ test('Round 305: PrintQueuePanel is touch-first and on-palette (no hover, no sky
   assert.doesNotMatch(panel, /group-hover:/);
   assert.doesNotMatch(panel, /dark:hover:/);
 
-  // (2) No off-theme sky/blue/indigo/violet/cyan/purple tokens (the Printer icon + Pause/Resume button used
-  // to be sky); the Printer icon is now amber (yellow/amber or neutral, never sky).
+  // (2) No off-theme sky/blue/indigo/violet/cyan/purple tokens. The printer/queue accent is POS yellow.
   assert.doesNotMatch(panel, /\b(?:bg|text|border|from|to|ring)-(?:sky|blue|indigo|violet|cyan|purple)-/);
-  assert.match(panel, /<Printer className="h-4 w-4 text-amber-300" \/>/);
+  assert.match(panel, /<Printer className="h-4 w-4 text-yellow-600 dark:text-yellow-300" \/>/);
+  assert.doesNotMatch(panel, /(?:amber|orange)-\d+/);
+
+  // Light theme owns explicit readable text/surfaces; dark variants are additive rather than white-only.
+  assert.match(panel, /bg-slate-100[^"']*text-slate-600/);
+  assert.match(panel, /text-slate-700[^"']*dark:text-slate-100/);
+  assert.doesNotMatch(panel, /text-white\/(?:35|45|55|60|80|90)/);
 
   // (3) Round 305 follow-up: the action cluster is a DELIBERATE EQUAL-WIDTH grid, not content-sized chips.
   // The container is full-width stacked cards on narrow widths (grid-cols-1 w-full) and a compact
@@ -1555,29 +1575,30 @@ test('Round 305: PrintQueuePanel is touch-first and on-palette (no hover, no sky
     assert.match(btn, /justify-center/, `${marker} must horizontally center its content`);
     assert.match(btn, /rounded-2xl/, `${marker} must use the Settings rounded-2xl family`);
     assert.match(btn, /active:bg-/, `${marker} must give active pressed feedback (not hover)`);
-    assert.match(btn, /disabled:opacity-60/, `${marker} must preserve its disabled state`);
+    assert.match(btn, /disabled:bg-slate-100/, `${marker} must preserve a clear disabled surface`);
+    assert.match(btn, /disabled:text-slate-500/, `${marker} must preserve readable disabled text`);
   }
 
   // (4) The queue list overflow region keeps its max-height + scrolling but hides the native rail.
-  assert.match(panel, /max-h-72 overflow-y-auto scrollbar-hide divide-y divide-white\/5/);
+  assert.match(panel, /max-h-72 overflow-y-auto scrollbar-hide divide-y divide-slate-200 dark:divide-white\/5/);
 
-  // (5) Semantic colour contract: destructive cancel stays rose, retry stays emerald, both with active
-  // feedback. (Top "Cancel pending" + each row Cancel are rose; the row Retry is emerald.)
+  // (5) Semantic colour contract: destructive cancel stays red, retry stays emerald, both with active
+  // feedback and readable light/dark variants.
   for (const marker of [
     'onClick={() => void cancelAllPending()}',
     'onClick={() => void handleCancelJob(job.id)}',
   ]) {
-    const rose = sliceButton(panel, marker);
-    assert.match(rose, /border-rose-400\/30/, `${marker} must keep its rose border`);
-    assert.match(rose, /bg-rose-500\/10/, `${marker} must keep its rose fill`);
-    assert.match(rose, /text-rose-100/, `${marker} must keep its rose text`);
-    assert.match(rose, /active:bg-rose-500\/20/, `${marker} must give rose active feedback`);
+    const destructive = sliceButton(panel, marker);
+    assert.match(destructive, /border-red-300/, `${marker} must expose a readable light red border`);
+    assert.match(destructive, /bg-red-50/, `${marker} must expose a readable light red fill`);
+    assert.match(destructive, /text-red-700/, `${marker} must expose readable light red text`);
+    assert.match(destructive, /dark:active:bg-red-500\/20/, `${marker} must give dark red active feedback`);
   }
   const retryRow = sliceButton(panel, 'onClick={() => void handleRetryJob(job.id)}');
-  assert.match(retryRow, /border-emerald-400\/30/);
-  assert.match(retryRow, /bg-emerald-500\/10/);
-  assert.match(retryRow, /text-emerald-100/);
-  assert.match(retryRow, /active:bg-emerald-500\/20/);
+  assert.match(retryRow, /border-emerald-300/);
+  assert.match(retryRow, /bg-emerald-50/);
+  assert.match(retryRow, /text-emerald-700/);
+  assert.match(retryRow, /dark:active:bg-emerald-500\/20/);
 
   // Behaviour preserved (UI-only round): every bridge.printer method + the empty state stay wired.
   for (const fn of ['listJobs', 'pauseQueue', 'resumeQueue', 'cancelAllJobs', 'cancelJob', 'retryJob']) {

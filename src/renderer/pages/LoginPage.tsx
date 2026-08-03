@@ -15,7 +15,8 @@ interface LoginPageProps {
     onLogin: (pin: string) => Promise<boolean>;
 }
 
-const LOGIN_REQUEST_TIMEOUT_MS = 8000;
+const isLoginTimeoutError = (error: unknown): boolean =>
+    error instanceof Error && /^auth\.login timed out after \d+ms$/.test(error.message);
 
 export default function LoginPage({ onLogin }: LoginPageProps) {
     const { t } = useI18n();
@@ -231,17 +232,16 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
             // Add a small delay for better UX
             await new Promise(resolve => setTimeout(resolve, 500));
 
-            const success = await Promise.race<boolean>([
-                onLogin(pin),
-                new Promise<boolean>((resolve) => {
-                    setTimeout(() => resolve(false), LOGIN_REQUEST_TIMEOUT_MS);
-                }),
-            ]);
+            const success = await onLogin(pin);
             if (!success) {
                 setError(t('login.errors.invalidPin'));
             }
         } catch (err) {
-            setError(t('login.errors.loginFailed'));
+            setError(
+                isLoginTimeoutError(err)
+                    ? t('login.errors.timeout', 'Login took too long. Please try again.')
+                    : t('login.errors.loginFailed'),
+            );
         } finally {
             setIsLoading(false);
         }
@@ -435,13 +435,7 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                             onMouseDown={(e) => e.stopPropagation()}
                         >
                             <div className="flex flex-col items-center mb-6">
-                                <div
-                                    className={`flex h-14 w-14 items-center justify-center rounded-full mb-3 ${
-                                        isDark ? 'bg-amber-500/15 ring-1 ring-amber-400/30' : 'bg-amber-500/10 ring-1 ring-amber-500/20'
-                                    }`}
-                                >
-                                    <Lock className={isDark ? 'text-amber-300' : 'text-amber-600'} size={24} aria-hidden="true" />
-                                </div>
+                                <Lock className="mb-3 h-8 w-8 text-yellow-600 dark:text-yellow-300" aria-hidden="true" />
                                 <h2
                                     id="setup-pin-title"
                                     className="text-2xl font-bold liquid-glass-modal-text text-center"
@@ -455,30 +449,34 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
 
                             <div className="space-y-5 mx-auto" style={{ maxWidth: '22rem' }}>
                                 <div>
-                                    <label className="liquid-glass-modal-text-muted text-sm font-medium block mb-2">
-                                        {t('login.newPin', 'New PIN (6+ digits)')}
+                                    <label htmlFor="setup-new-pin" className="liquid-glass-modal-text-muted text-sm font-medium block mb-2">
+                                        {t('login.newPin', 'New PIN (6 digits)')}
                                     </label>
                                     <input
+                                        id="setup-new-pin"
                                         type="password"
                                         inputMode="numeric"
                                         autoComplete="new-password"
                                         value={newPin}
-                                        onChange={(e) => setNewPin(e.target.value.replace(/\D/g, '').slice(0, 10))}
+                                        maxLength={6}
+                                        onChange={(e) => setNewPin(e.target.value.replace(/\D/g, '').slice(0, 6))}
                                         placeholder={pinPlaceholder}
                                         className="w-full liquid-glass-modal-input text-center text-xl tracking-[0.4em] py-3"
                                         autoFocus
                                     />
                                 </div>
                                 <div>
-                                    <label className="liquid-glass-modal-text-muted text-sm font-medium block mb-2">
+                                    <label htmlFor="setup-confirm-pin" className="liquid-glass-modal-text-muted text-sm font-medium block mb-2">
                                         {t('login.confirmPin', 'Confirm PIN')}
                                     </label>
                                     <input
+                                        id="setup-confirm-pin"
                                         type="password"
                                         inputMode="numeric"
                                         autoComplete="new-password"
                                         value={confirmPin}
-                                        onChange={(e) => setConfirmPin(e.target.value.replace(/\D/g, '').slice(0, 10))}
+                                        maxLength={6}
+                                        onChange={(e) => setConfirmPin(e.target.value.replace(/\D/g, '').slice(0, 6))}
                                         placeholder={pinPlaceholder}
                                         className="w-full liquid-glass-modal-input text-center text-xl tracking-[0.4em] py-3"
                                     />
@@ -488,7 +486,7 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                                     <p className="text-red-400 text-sm text-center" role="alert">{setupError}</p>
                                 )}
 
-                                <div className="flex gap-3 pt-2">
+                                <div className={`grid gap-3 pt-2 ${pinResetRequired ? 'grid-cols-1' : 'grid-cols-2'}`}>
                                     {!pinResetRequired && (
                                         <button
                                             onClick={() => {
@@ -497,7 +495,7 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                                                 setConfirmPin("");
                                                 setSetupError("");
                                             }}
-                                            className="flex-1 liquid-glass-modal-button"
+                                            className="min-w-0 whitespace-nowrap liquid-glass-modal-button text-sm sm:text-base"
                                         >
                                             {t('common.cancel', 'Cancel')}
                                         </button>
@@ -506,8 +504,8 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                                         onClick={async () => {
                                             setSetupError("");
 
-                                            if (newPin.length < 6) {
-                                                setSetupError(t('login.pinTooShort', 'PIN must be at least 6 digits'));
+                                            if (newPin.length !== 6) {
+                                                setSetupError(t('login.pinTooShort', 'PIN must contain exactly 6 digits'));
                                                 return;
                                             }
                                             if (newPin !== confirmPin) {
@@ -547,8 +545,8 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                                                 setIsLoading(false);
                                             }
                                         }}
-                                        disabled={isLoading || newPin.length < 6}
-                                        className="flex-1 liquid-glass-modal-button bg-green-600/20 active:bg-green-600/30 border border-green-500/30 text-green-200"
+                                        disabled={isLoading || newPin.length !== 6}
+                                        className="min-w-0 whitespace-nowrap liquid-glass-modal-button border border-green-500/40 bg-green-600/15 text-sm text-green-700 active:bg-green-600/25 sm:text-base dark:bg-green-600/20 dark:text-green-200 dark:active:bg-green-600/30"
                                     >
                                         {isLoading ? '...' : t('login.savePin', 'Save PIN')}
                                     </button>
