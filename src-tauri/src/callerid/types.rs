@@ -33,6 +33,38 @@ pub enum CallerIdStatusReason {
     Unknown,
 }
 
+/// Privacy-safe stage at which an inbound Caller ID candidate was rejected.
+/// This deliberately contains no packet content or caller identity.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CallerIdRejectionStage {
+    SipInvite,
+    RecordEncoding,
+    RecordEmpty,
+    RecordOversized,
+    RecordNul,
+    RecordNonAscii,
+    RecordUtf8,
+    RecordControl,
+    RecordTerminalLf,
+    RecordTerminalCrlf,
+    RecordTerminalCr,
+    RecordInternalControl,
+    RecordEmbeddedLf,
+    RecordEmbeddedCr,
+    RecordTab,
+    RecordOtherControl,
+    SyslogPriority,
+    DeviceEnvelope,
+    MacAddress,
+    Firmware,
+    ComponentLevel,
+    Uptime,
+    CallerIdEvent,
+    CallerNumber,
+    Unknown,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum CallerIdConnectorFamily {
@@ -136,6 +168,13 @@ pub struct CallerIdStatus {
     pub reason: Option<CallerIdStatusReason>,
     pub registered: bool,
     pub calls_detected: u64,
+    /// Privacy-safe transport diagnostics for the current app session.
+    /// These counters never include caller numbers or packet contents.
+    pub udp_packets_received: u64,
+    pub trusted_packets_received: u64,
+    pub caller_id_candidates: u64,
+    pub rejected_candidates: u64,
+    pub last_rejection_stage: Option<CallerIdRejectionStage>,
 }
 
 // ---------------------------------------------------------------------------

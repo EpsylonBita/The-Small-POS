@@ -16,11 +16,30 @@ import {
   type CallerIdRealtimeClient,
 } from '../services/CallerIdRealtimeService'
 import { showCallerIdToast } from '../components/callerid/CallerIdPopup'
-import { navigateToCallerIdCustomerSearch } from '../services/caller-id-customer-search'
+import {
+  formatCallerIdDisplayPhone,
+  navigateToCallerIdCustomerSearch,
+  normalizeCallerIdSearchPhone,
+} from '../services/caller-id-customer-search'
 
 interface CallerIdNotificationsOptions {
+  /** The signed-in POS session is allowed to receive caller events. */
+  active?: boolean
   realtimeReady?: boolean
   realtimeClient?: CallerIdRealtimeClient | null
+  onOpenCustomerSearch?: (request: CallerIdCustomerSearchRequest) => void
+}
+
+export interface CallerIdCustomerSearchRequest {
+  /** Number exactly as received from the validated Caller ID source. */
+  displayPhone: string
+  /** Canonical source number retained even when domestic display hides its prefix. */
+  canonicalPhone: string
+  /** Existing national-format lookup key used by the customer API. */
+  lookupPhone: string
+  homeCountryCode?: string
+  requestKey: string
+  onDisplayed: () => void
 }
 
 interface AcceptedCallState {
@@ -38,6 +57,7 @@ interface ValidatedLocalCallPayload {
   lineVersion: number
   providerEventId: string
   callerNumber: string | null
+  countryCode?: string | null
   presentation: 'allowed' | 'restricted'
   occurredAt: string
 }
@@ -50,6 +70,7 @@ const LOCAL_PHONE_REGEX = /^\+?\d{3,32}$/
 const PROVIDER_EVENT_ID_REGEX = /^[\x21-\x7e]{1,255}$/
 const LOCAL_PAYLOAD_KEYS = [
   'callerNumber',
+  'countryCode',
   'lineId',
   'lineName',
   'lineVersion',
@@ -60,16 +81,26 @@ const LOCAL_PAYLOAD_KEYS = [
   'sourceId',
   'sourceVersion',
 ] as const
+const LEGACY_LOCAL_PAYLOAD_KEYS = LOCAL_PAYLOAD_KEYS.filter(
+  (key) => key !== 'countryCode',
+)
 
 export function useCallerIdNotifications(options?: CallerIdNotificationsOptions) {
   const { isModuleEnabled } = useModules()
   const enabled = isModuleEnabled('plugin_integrations' as any)
+  const active = options?.active !== false
+  const notificationsActive = enabled && active
   const realtimeReady = options?.realtimeReady === true
   const realtimeClient = options?.realtimeClient ?? null
+  const onOpenCustomerSearch = options?.onOpenCustomerSearch
   const callEventsRef = useRef(new Map<string, AcceptedCallState>())
   const cleanupTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>())
+  const notificationsActiveRef = useRef(notificationsActive)
+  notificationsActiveRef.current = notificationsActive
 
   const handleCallEvent = useCallback((event: CallerIdBroadcastEvent) => {
+    if (!notificationsActiveRef.current) return
+
     const eventKey = callerIdEventKey(event)
     const existing = callEventsRef.current.get(eventKey)
     if (existing) {
@@ -96,15 +127,43 @@ export function useCallerIdNotifications(options?: CallerIdNotificationsOptions)
     }, LOCAL_EVENT_TTL_MS)
     cleanupTimersRef.current.set(eventKey, cleanupTimer)
 
+    const onDisplayed = () => {
+      if (!notificationsActiveRef.current) return
+      accepted.completion ??= { status: 'displayed' }
+      flushCallerIdCompletion(accepted)
+    }
+    const canonicalPhone = accepted.event.callerNumber.trim()
+    const displayPhone = formatCallerIdDisplayPhone(
+      canonicalPhone,
+      accepted.event.countryCode,
+    )
+    const lookupPhone = normalizeCallerIdSearchPhone(
+      accepted.event.callerNumber,
+    )
+    const canSearchCustomer =
+      accepted.event.presentation !== 'restricted' &&
+      lookupPhone.length >= 3
+
     try {
-      showCallerIdToast(accepted.event, {
-        onSearchCustomer: () =>
-          navigateToCallerIdCustomerSearch(accepted.event.callerNumber),
-        onDisplayed: () => {
-          accepted.completion ??= { status: 'displayed' }
-          flushCallerIdCompletion(accepted)
-        },
-      })
+      if (canSearchCustomer && onOpenCustomerSearch) {
+        onOpenCustomerSearch({
+          displayPhone,
+          canonicalPhone,
+          lookupPhone,
+          ...(accepted.event.countryCode
+            ? { homeCountryCode: accepted.event.countryCode }
+            : {}),
+          requestKey: eventKey,
+          onDisplayed,
+        })
+      } else {
+        showCallerIdToast(accepted.event, {
+          onSearchCustomer: canSearchCustomer
+            ? () => navigateToCallerIdCustomerSearch(accepted.event.callerNumber)
+            : undefined,
+          onDisplayed,
+        })
+      }
     } catch {
       accepted.completion = {
         status: 'failed',
@@ -112,7 +171,7 @@ export function useCallerIdNotifications(options?: CallerIdNotificationsOptions)
       }
       flushCallerIdCompletion(accepted)
     }
-  }, [])
+  }, [onOpenCustomerSearch])
 
   useEffect(() => {
     const clearAcceptedEvents = () => {
@@ -121,16 +180,16 @@ export function useCallerIdNotifications(options?: CallerIdNotificationsOptions)
       callEventsRef.current.clear()
     }
 
-    if (!enabled) {
+    if (!notificationsActive) {
       clearAcceptedEvents()
       return
     }
 
     return clearAcceptedEvents
-  }, [enabled])
+  }, [notificationsActive])
 
   useEffect(() => {
-    if (!enabled) {
+    if (!notificationsActive) {
       return
     }
 
@@ -144,10 +203,10 @@ export function useCallerIdNotifications(options?: CallerIdNotificationsOptions)
     return () => {
       offEvent(VALIDATED_LOCAL_CALL_CHANNEL, handleValidatedLocalCall)
     }
-  }, [enabled, handleCallEvent])
+  }, [notificationsActive, handleCallEvent])
 
   useEffect(() => {
-    if (!enabled) {
+    if (!notificationsActive) {
       return
     }
 
@@ -170,15 +229,18 @@ export function useCallerIdNotifications(options?: CallerIdNotificationsOptions)
         )
       },
     )
-  }, [enabled, handleCallEvent, realtimeClient, realtimeReady])
+  }, [notificationsActive, handleCallEvent, realtimeClient, realtimeReady])
 }
 
 function parseValidatedLocalCall(value: unknown): CallerIdBroadcastEvent | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   const keys = Object.keys(value).sort()
+  const matchesPayloadKeys = (expected: readonly string[]) =>
+    keys.length === expected.length &&
+    keys.every((key, index) => key === expected[index])
   if (
-    keys.length !== LOCAL_PAYLOAD_KEYS.length ||
-    keys.some((key, index) => key !== LOCAL_PAYLOAD_KEYS[index])
+    !matchesPayloadKeys(LOCAL_PAYLOAD_KEYS) &&
+    !matchesPayloadKeys(LEGACY_LOCAL_PAYLOAD_KEYS)
   ) {
     return null
   }
@@ -204,6 +266,10 @@ function parseValidatedLocalCall(value: unknown): CallerIdBroadcastEvent | null 
       ? typeof payload.callerNumber !== 'string' ||
         !LOCAL_PHONE_REGEX.test(payload.callerNumber)
       : payload.callerNumber !== null) ||
+    (payload.countryCode !== undefined &&
+      payload.countryCode !== null &&
+      (typeof payload.countryCode !== 'string' ||
+        !/^[A-Z]{2}$/.test(payload.countryCode))) ||
     typeof payload.occurredAt !== 'string'
   ) {
     return null
@@ -226,6 +292,7 @@ function parseValidatedLocalCall(value: unknown): CallerIdBroadcastEvent | null 
     timestamp: payload.occurredAt,
     lineId: payload.lineId,
     lineName: payload.lineName,
+    ...(payload.countryCode ? { countryCode: payload.countryCode } : {}),
     presentation: payload.presentation,
   }
 }
@@ -285,6 +352,9 @@ function mergeCallerIdEvent(
     sourceTerminalId: incoming.sourceTerminalId ?? existing?.sourceTerminalId ?? null,
     lineId: incoming.lineId ?? existing?.lineId,
     lineName: incoming.lineName ?? existing?.lineName,
+    ...((incoming.countryCode ?? existing?.countryCode)
+      ? { countryCode: incoming.countryCode ?? existing?.countryCode }
+      : {}),
     presentation: incoming.presentation ?? existing?.presentation,
     reportReceipt: incoming.reportReceipt ?? existing?.reportReceipt,
   }

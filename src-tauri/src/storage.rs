@@ -33,6 +33,27 @@ const KEY_SUPABASE_URL: &str = "supabase_url";
 const KEY_SUPABASE_ANON_KEY: &str = "supabase_anon_key";
 const KEY_GHOST_MODE_FEATURE_ENABLED: &str = "ghost_mode_feature_enabled";
 pub const KEY_CALLERID_SIP_PASSWORD: &str = "callerid_sip_password";
+pub const KEY_CALLERID_ACTIVATION_CACHE_MANIFEST: &str = "callerid_activation_cache_manifest_v1";
+pub const CALLERID_ACTIVATION_CACHE_BANK_A_KEYS: [&str; 8] = [
+    "callerid_activation_cache_a0_v1",
+    "callerid_activation_cache_a1_v1",
+    "callerid_activation_cache_a2_v1",
+    "callerid_activation_cache_a3_v1",
+    "callerid_activation_cache_a4_v1",
+    "callerid_activation_cache_a5_v1",
+    "callerid_activation_cache_a6_v1",
+    "callerid_activation_cache_a7_v1",
+];
+pub const CALLERID_ACTIVATION_CACHE_BANK_B_KEYS: [&str; 8] = [
+    "callerid_activation_cache_b0_v1",
+    "callerid_activation_cache_b1_v1",
+    "callerid_activation_cache_b2_v1",
+    "callerid_activation_cache_b3_v1",
+    "callerid_activation_cache_b4_v1",
+    "callerid_activation_cache_b5_v1",
+    "callerid_activation_cache_b6_v1",
+    "callerid_activation_cache_b7_v1",
+];
 /// Renderer-side authenticated session blob. Wave 1 C6 moved this out of
 /// renderer-accessible `localStorage` because the stored object includes
 /// `sessionId`, `staffId`, `branchId`, and `organizationId` — all of which
@@ -52,6 +73,23 @@ const ALL_KEYS: &[&str] = &[
     KEY_SUPABASE_ANON_KEY,
     KEY_GHOST_MODE_FEATURE_ENABLED,
     KEY_CALLERID_SIP_PASSWORD,
+    KEY_CALLERID_ACTIVATION_CACHE_MANIFEST,
+    CALLERID_ACTIVATION_CACHE_BANK_A_KEYS[0],
+    CALLERID_ACTIVATION_CACHE_BANK_A_KEYS[1],
+    CALLERID_ACTIVATION_CACHE_BANK_A_KEYS[2],
+    CALLERID_ACTIVATION_CACHE_BANK_A_KEYS[3],
+    CALLERID_ACTIVATION_CACHE_BANK_A_KEYS[4],
+    CALLERID_ACTIVATION_CACHE_BANK_A_KEYS[5],
+    CALLERID_ACTIVATION_CACHE_BANK_A_KEYS[6],
+    CALLERID_ACTIVATION_CACHE_BANK_A_KEYS[7],
+    CALLERID_ACTIVATION_CACHE_BANK_B_KEYS[0],
+    CALLERID_ACTIVATION_CACHE_BANK_B_KEYS[1],
+    CALLERID_ACTIVATION_CACHE_BANK_B_KEYS[2],
+    CALLERID_ACTIVATION_CACHE_BANK_B_KEYS[3],
+    CALLERID_ACTIVATION_CACHE_BANK_B_KEYS[4],
+    CALLERID_ACTIVATION_CACHE_BANK_B_KEYS[5],
+    CALLERID_ACTIVATION_CACHE_BANK_B_KEYS[6],
+    CALLERID_ACTIVATION_CACHE_BANK_B_KEYS[7],
     KEY_POS_SESSION,
 ];
 

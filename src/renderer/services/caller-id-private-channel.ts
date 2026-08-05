@@ -5,11 +5,13 @@ export const CALLER_ID_PRIVATE_CHANNEL_BOUNDARY = true
 export interface CallerIdReceivingLine {
   readonly id: string
   readonly name: string
+  readonly countryCode?: string
 }
 
 interface CallerIdReceivingLineWire {
   id: string
   name: string
+  countryCode?: string
   topic: string
 }
 
@@ -27,7 +29,13 @@ export function parseCallerIdReceivingLine(
   if (!value || typeof value !== 'object') return null
   const wire = value as CallerIdReceivingLineWire
   const topic = wire.topic
-  const line = { id: wire.id, name: wire.name }
+  const countryCode =
+    typeof wire.countryCode === 'string' && /^[A-Z]{2}$/.test(wire.countryCode)
+      ? wire.countryCode
+      : undefined
+  const line: CallerIdReceivingLine = countryCode
+    ? { id: wire.id, name: wire.name, countryCode }
+    : { id: wire.id, name: wire.name }
   if (
     !UUID_REGEX.test(line.id) ||
     typeof line.name !== 'string' ||

@@ -198,6 +198,7 @@ fn extract_terminal_id_from_body(body: Option<&Value>) -> Option<String> {
 pub struct AdminFetchError {
     message: String,
     status: Option<u16>,
+    code: Option<String>,
 }
 
 impl AdminFetchError {
@@ -205,18 +206,34 @@ impl AdminFetchError {
         Self {
             message: message.into(),
             status: None,
+            code: None,
         }
     }
 
+    #[cfg(test)]
     pub fn with_status(message: impl Into<String>, status: u16) -> Self {
         Self {
             message: message.into(),
             status: Some(status),
+            code: None,
+        }
+    }
+
+    fn with_status_and_code(message: impl Into<String>, status: u16, code: Option<String>) -> Self {
+        Self {
+            message: message.into(),
+            status: Some(status),
+            code,
         }
     }
 
     pub fn status(&self) -> Option<u16> {
         self.status
+    }
+
+    #[cfg(test)]
+    pub fn code(&self) -> Option<&str> {
+        self.code.as_deref()
     }
 }
 
@@ -274,7 +291,14 @@ fn looks_like_html_error_body(body: &str) -> bool {
 }
 
 fn admin_http_error_from_body(status: StatusCode, body_text: &str) -> AdminFetchError {
-    let detail = if let Ok(json) = serde_json::from_str::<Value>(body_text) {
+    let parsed_json = serde_json::from_str::<Value>(body_text).ok();
+    let code = parsed_json
+        .as_ref()
+        .and_then(|json| json.get("code"))
+        .and_then(Value::as_str)
+        .filter(|code| !code.is_empty() && code.len() <= 120)
+        .map(ToOwned::to_owned);
+    let detail = if let Some(json) = parsed_json {
         let message = json
             .get("error")
             .or_else(|| json.get("message"))
@@ -300,7 +324,7 @@ fn admin_http_error_from_body(status: StatusCode, body_text: &str) -> AdminFetch
         format!("{} (HTTP {})", status_error(status), status.as_u16())
     };
 
-    AdminFetchError::with_status(detail, status.as_u16())
+    AdminFetchError::with_status_and_code(detail, status.as_u16(), code)
 }
 
 // ---------------------------------------------------------------------------
@@ -588,5 +612,21 @@ mod tests {
         assert_eq!(unauthorized.status(), Some(401));
         assert_eq!(forbidden.status(), Some(403));
         assert_eq!(network.status(), None);
+    }
+
+    #[test]
+    fn typed_http_error_exposes_only_the_machine_readable_server_code() {
+        let entitlement = admin_http_error_from_body(
+            StatusCode::FORBIDDEN,
+            r#"{"error":"Caller ID is not active","code":"CALLER_ID_ENTITLEMENT_REQUIRED"}"#,
+        );
+        let unstructured = admin_http_error_from_body(
+            StatusCode::FORBIDDEN,
+            r#"{"error":"Caller ID is not active","code":{"forged":true}}"#,
+        );
+
+        assert_eq!(entitlement.code(), Some("CALLER_ID_ENTITLEMENT_REQUIRED"));
+        assert_eq!(unstructured.code(), None);
+        assert_eq!(AdminFetchError::statusless("offline").code(), None);
     }
 }

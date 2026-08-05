@@ -17,7 +17,7 @@ const TOAST_DURATION = 15_000
 export interface CallerIdToastContentProps {
   event: CallerIdBroadcastEvent
   toastId: string
-  onSearchCustomer: () => void
+  onSearchCustomer?: () => void
   onDisplayed?: () => void
 }
 
@@ -71,19 +71,21 @@ export function CallerIdToastContent({
       )}
 
       {/* Actions */}
-      <div className="flex gap-2 pl-[52px]">
-        <button
-          type="button"
-          onClick={() => {
-            toast.dismiss(toastId)
-            onSearchCustomer()
-          }}
-          className="flex min-h-9 items-center justify-center gap-1.5 rounded-lg bg-amber-400 px-3 py-1.5 text-xs font-semibold text-zinc-950 transition-transform active:scale-[0.98] active:bg-amber-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-200"
-        >
-          <Search className="w-3.5 h-3.5" />
-          {t('callerid.popup.searchCustomer', 'Search customer')}
-        </button>
-      </div>
+      {onSearchCustomer && (
+        <div className="flex gap-2 pl-[52px]">
+          <button
+            type="button"
+            onClick={() => {
+              toast.dismiss(toastId)
+              onSearchCustomer()
+            }}
+            className="flex min-h-9 items-center justify-center gap-1.5 rounded-lg bg-amber-400 px-3 py-1.5 text-xs font-semibold text-zinc-950 transition-transform active:scale-[0.98] active:bg-amber-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-200"
+          >
+            <Search className="w-3.5 h-3.5" />
+            {t('callerid.popup.searchCustomer', 'Search customer')}
+          </button>
+        </div>
+      )}
     </div>
   )
 }
@@ -94,7 +96,7 @@ export function CallerIdToastContent({
 export function showCallerIdToast(
   event: CallerIdBroadcastEvent,
   options?: {
-    onSearchCustomer: () => void
+    onSearchCustomer?: () => void
     onDisplayed?: () => void
   },
 ) {
@@ -114,7 +116,7 @@ export function showCallerIdToast(
         <CallerIdToastContent
           event={event}
           toastId={toastId}
-          onSearchCustomer={options?.onSearchCustomer ?? (() => {})}
+          onSearchCustomer={options?.onSearchCustomer}
           onDisplayed={options?.onDisplayed}
         />
       </div>

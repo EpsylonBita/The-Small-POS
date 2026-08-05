@@ -447,6 +447,9 @@ try {
       Write-Warning "Caller ID firewall rollback also failed: $($_.Exception.Message)"
     }
   }
-  Write-Error "Caller ID firewall setup failed: $failureMessage"
+  # `$ErrorActionPreference = 'Stop'` makes Write-Error terminating, which
+  # would skip the explicit stage exit below and collapse every failure to 1.
+  # Write directly to stderr so the native caller keeps the actionable code.
+  [Console]::Error.WriteLine("Caller ID firewall setup failed: $failureMessage")
   exit $failureExitCode
 }

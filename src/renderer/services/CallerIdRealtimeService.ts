@@ -30,6 +30,7 @@ export interface CallerIdBroadcastEvent {
   sourceTerminalId?: string | null
   lineId?: string
   lineName?: string
+  countryCode?: string
   presentation?: 'allowed' | 'restricted' | 'unknown'
   reportReceipt?: (receipt: CallerIdReceipt) => Promise<boolean>
 }
@@ -191,6 +192,9 @@ function parseFreshEvent(
     timestamp: event.occurredAt,
     lineId: event.lineId,
     lineName: expectedLine.name,
+    ...(expectedLine.countryCode
+      ? { countryCode: expectedLine.countryCode }
+      : {}),
     presentation: event.presentation,
   }
 }
@@ -203,6 +207,7 @@ function sameReceivingLineVersion(
     left &&
       left.line.id === right.line.id &&
       left.line.name === right.line.name &&
+      left.line.countryCode === right.line.countryCode &&
       left.version === right.version,
   )
 }

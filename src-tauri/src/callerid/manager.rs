@@ -7,10 +7,10 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 
-use super::types::{CallerIdStatus, CallerIdStatusReason, ListenerStatus};
+use super::types::{CallerIdRejectionStage, CallerIdStatus, CallerIdStatusReason, ListenerStatus};
 
 // ---------------------------------------------------------------------------
 // Inner state
@@ -22,6 +22,11 @@ struct Inner {
     reason: Option<CallerIdStatusReason>,
     registered: bool,
     calls_detected: u64,
+    udp_packets_received: u64,
+    trusted_packets_received: u64,
+    caller_id_candidates: u64,
+    rejected_candidates: u64,
+    last_rejection_stage: Option<CallerIdRejectionStage>,
     generation: u64,
     stop_epoch: u64,
     supervisor_cancel: Option<CancellationToken>,
@@ -36,6 +41,11 @@ impl Default for Inner {
             reason: None,
             registered: false,
             calls_detected: 0,
+            udp_packets_received: 0,
+            trusted_packets_received: 0,
+            caller_id_candidates: 0,
+            rejected_candidates: 0,
+            last_rejection_stage: None,
             generation: 0,
             stop_epoch: 0,
             supervisor_cancel: None,
@@ -77,6 +87,11 @@ impl CallerIdManager {
                 reason: i.reason,
                 registered: i.registered,
                 calls_detected: i.calls_detected,
+                udp_packets_received: i.udp_packets_received,
+                trusted_packets_received: i.trusted_packets_received,
+                caller_id_candidates: i.caller_id_candidates,
+                rejected_candidates: i.rejected_candidates,
+                last_rejection_stage: i.last_rejection_stage,
             })
             .unwrap_or(CallerIdStatus {
                 status: ListenerStatus::Error,
@@ -84,6 +99,11 @@ impl CallerIdManager {
                 reason: Some(CallerIdStatusReason::Unknown),
                 registered: false,
                 calls_detected: 0,
+                udp_packets_received: 0,
+                trusted_packets_received: 0,
+                caller_id_candidates: 0,
+                rejected_candidates: 0,
+                last_rejection_stage: None,
             })
     }
 
@@ -162,6 +182,53 @@ impl CallerIdManager {
                 return false;
             }
             inner.calls_detected = inner.calls_detected.saturating_add(1);
+            return true;
+        }
+        false
+    }
+
+    pub fn increment_udp_packets(&self, generation: u64) -> bool {
+        self.increment_diagnostic(generation, |inner| {
+            inner.udp_packets_received = inner.udp_packets_received.saturating_add(1);
+        })
+    }
+
+    pub fn increment_trusted_packets(&self, generation: u64) -> bool {
+        self.increment_diagnostic(generation, |inner| {
+            inner.trusted_packets_received = inner.trusted_packets_received.saturating_add(1);
+        })
+    }
+
+    pub fn increment_caller_id_candidates(&self, generation: u64) -> bool {
+        self.increment_diagnostic(generation, |inner| {
+            inner.caller_id_candidates = inner.caller_id_candidates.saturating_add(1);
+        })
+    }
+
+    pub fn record_rejected_candidate(
+        &self,
+        generation: u64,
+        stage: CallerIdRejectionStage,
+    ) -> bool {
+        let recorded = self.increment_diagnostic(generation, |inner| {
+            inner.rejected_candidates = inner.rejected_candidates.saturating_add(1);
+            inner.last_rejection_stage = Some(stage);
+        });
+        if recorded {
+            warn!(
+                ?stage,
+                "Caller ID candidate rejected at privacy-safe parse stage"
+            );
+        }
+        recorded
+    }
+
+    fn increment_diagnostic(&self, generation: u64, update: impl FnOnce(&mut Inner)) -> bool {
+        if let Ok(mut inner) = self.inner.lock() {
+            if inner.generation != generation {
+                return false;
+            }
+            update(&mut inner);
             return true;
         }
         false
@@ -288,8 +355,45 @@ mod tests {
         assert_eq!(status.status, ListenerStatus::Stopped);
         assert!(!status.registered);
         assert_eq!(status.calls_detected, 0);
+        assert_eq!(status.udp_packets_received, 0);
+        assert_eq!(status.trusted_packets_received, 0);
+        assert_eq!(status.caller_id_candidates, 0);
+        assert_eq!(status.rejected_candidates, 0);
+        assert_eq!(status.last_rejection_stage, None);
         assert!(status.error.is_none());
         assert!(status.reason.is_none());
+    }
+
+    #[tokio::test]
+    async fn privacy_safe_intake_diagnostics_are_generation_scoped() {
+        let mgr = Arc::new(CallerIdManager::new());
+        let generation = mgr
+            .replace_supervisor(
+                CancellationToken::new(),
+                move |_generation, cancel| async move {
+                    cancel.cancelled().await;
+                },
+            )
+            .await
+            .expect("diagnostic test generation");
+
+        assert!(mgr.increment_udp_packets(generation));
+        assert!(mgr.increment_trusted_packets(generation));
+        assert!(mgr.increment_caller_id_candidates(generation));
+        assert!(mgr.record_rejected_candidate(generation, CallerIdRejectionStage::DeviceEnvelope,));
+        assert!(!mgr.increment_udp_packets(generation.saturating_add(1)));
+
+        let status = mgr.get_status();
+        assert_eq!(status.udp_packets_received, 1);
+        assert_eq!(status.trusted_packets_received, 1);
+        assert_eq!(status.caller_id_candidates, 1);
+        assert_eq!(status.rejected_candidates, 1);
+        assert_eq!(
+            status.last_rejection_stage,
+            Some(CallerIdRejectionStage::DeviceEnvelope),
+        );
+
+        mgr.stop().await;
     }
 
     #[tokio::test]

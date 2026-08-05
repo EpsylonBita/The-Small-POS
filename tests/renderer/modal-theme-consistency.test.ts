@@ -136,9 +136,9 @@ test('generic confirmation and update dialogs use semantic modal text and inset 
 test('Caller ID settings use the shared light and dark modal theme contract', () => {
   assert.match(callerIdSection, /liquid-glass-modal-text/);
   assert.match(callerIdSection, /liquid-glass-modal-text-muted/);
-  assert.match(callerIdSection, /liquid-glass-modal-input/);
   assert.match(callerIdSection, /liquid-glass-modal-inset/);
   assert.match(callerIdSection, /liquid-glass-modal-footer/);
+  assert.match(callerIdSection, /liquid-glass-modal-button/);
 
   assert.doesNotMatch(callerIdSection, /(?:text|bg|border|placeholder)-zinc-(?:[1-9]00|950)/);
 });

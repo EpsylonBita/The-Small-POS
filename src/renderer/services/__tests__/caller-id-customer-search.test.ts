@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { navigateToCallerIdCustomerSearch } from '../caller-id-customer-search'
+import {
+  formatCallerIdDisplayPhone,
+  navigateToCallerIdCustomerSearch,
+} from '../caller-id-customer-search'
 
 describe('Caller ID customer search navigation', () => {
   afterEach(() => {
@@ -19,5 +22,22 @@ describe('Caller ID customer search navigation', () => {
       view: 'users',
       customerSearch: '6948128474',
     })
+  })
+
+  it('hides only the configured home-country prefix for display', () => {
+    expect(formatCallerIdDisplayPhone('+306948128474', 'GR'))
+      .toBe('694 812 8474')
+    expect(formatCallerIdDisplayPhone('+41779990214', 'GR'))
+      .toBe('+41779990214')
+    expect(formatCallerIdDisplayPhone('0041779990214', 'GR'))
+      .toBe('+41779990214')
+    expect(formatCallerIdDisplayPhone('00306948128474', 'GR'))
+      .toBe('694 812 8474')
+  })
+
+  it('fails safe to the canonical number when the installation country is unavailable', () => {
+    expect(formatCallerIdDisplayPhone('+41779990214')).toBe('+41779990214')
+    expect(formatCallerIdDisplayPhone('+41779990214', 'invalid'))
+      .toBe('+41779990214')
   })
 })

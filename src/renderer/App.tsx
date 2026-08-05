@@ -17,6 +17,7 @@ import { ErrorBoundary } from "./components/error/ErrorBoundary";
 import { ScreenCaptureControlRequestModal } from "./components/ScreenCaptureControlRequestModal";
 import { SyncNotificationManager } from "./components/SyncNotificationManager";
 import { SyncStatusIndicator } from "./components/SyncStatusIndicator";
+import { CallerIdCustomerSearchModalHost } from "./components/callerid/CallerIdCustomerSearchModalHost";
 import ConnectionSettingsModal from "./components/modals/ConnectionSettingsModal";
 import SyncRecoveryModal, {
   type SyncRecoveryOpenContext,
@@ -45,7 +46,10 @@ import { useBlockerRegistration } from "./hooks/useBlockerRegistration";
 import { useFreezeWatchdog } from "./hooks/useFreezeWatchdog";
 import { useMenuVersionPolling } from "./hooks/useMenuVersionPolling";
 import { useAppEvents } from "./hooks/useAppEvents";
-import { useCallerIdNotifications } from "./hooks/useCallerIdNotifications";
+import {
+  useCallerIdNotifications,
+  type CallerIdCustomerSearchRequest,
+} from "./hooks/useCallerIdNotifications";
 import { useAutoUpdater } from "./hooks/useAutoUpdater";
 import { useWindowState } from "./hooks/useWindowState";
 import { environment, updateAdminUrlFromSettings } from "../config/environment";
@@ -614,7 +618,7 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center">
         <div className="text-center">
-          <div className="w-16 h-16 border-4 border-t-transparent border-yellow-400 rounded-full animate-spin mx-auto mb-4"></div>
+          <div className="w-16 h-16 border-4 border-t-transparent border-amber-400 rounded-full animate-spin mx-auto mb-4"></div>
           <p className="text-gray-800">{t('app.loading')}</p>
         </div>
       </div>
@@ -732,6 +736,9 @@ function AppContent() {
   const [realtimeReady, setRealtimeReady] = useState(false);
   const [terminalRealtimeSession, setTerminalRealtimeSession] =
     useState<TerminalRealtimeSession | null>(null);
+  const [callerIdCustomerSearchQueue, setCallerIdCustomerSearchQueue] =
+    useState<CallerIdCustomerSearchRequest[]>([]);
+  const callerIdCustomerSearch = callerIdCustomerSearchQueue[0] ?? null;
   const { setStaff } = useShift();
   const autoUpdater = useAutoUpdater();
   const windowState = useWindowState();
@@ -828,6 +835,21 @@ function AppContent() {
   const closeSyncRecoveryModal = useCallback(() => {
     setShowSyncRecoveryModal(false);
     setSyncRecoveryContext(null);
+  }, []);
+
+  const openCallerIdCustomerSearch = useCallback(
+    (request: CallerIdCustomerSearchRequest) => {
+      setCallerIdCustomerSearchQueue((queue) =>
+        queue.some((pending) => pending.requestKey === request.requestKey)
+          ? queue
+          : [...queue, request],
+      );
+    },
+    [],
+  );
+
+  const closeCallerIdCustomerSearch = useCallback(() => {
+    setCallerIdCustomerSearchQueue((queue) => queue.slice(1));
   }, []);
 
   useEffect(() => {
@@ -955,9 +977,17 @@ function AppContent() {
 
   // Caller ID notifications (gated by module availability inside the hook)
   useCallerIdNotifications({
+    active: Boolean(user),
     realtimeReady: Boolean(user) && realtimeReady,
     realtimeClient: terminalRealtimeSession?.client ?? null,
+    onOpenCustomerSearch: openCallerIdCustomerSearch,
   });
+
+  useEffect(() => {
+    if (!user) {
+      setCallerIdCustomerSearchQueue([]);
+    }
+  }, [user]);
 
   useEffect(() => {
     if (typeof document === 'undefined') {
@@ -1491,7 +1521,7 @@ function AppContent() {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center">
         <div className="text-center">
-          <div className="w-16 h-16 border-4 border-t-transparent border-yellow-400 rounded-full animate-spin mx-auto mb-4"></div>
+          <div className="w-16 h-16 border-4 border-t-transparent border-amber-400 rounded-full animate-spin mx-auto mb-4"></div>
           <p className="text-gray-800">{t('app.loading')}</p>
         </div>
       </div>
@@ -1606,6 +1636,11 @@ function AppContent() {
                 }
               />
             </Routes>
+
+            <CallerIdCustomerSearchModalHost
+              request={callerIdCustomerSearch}
+              onClose={closeCallerIdCustomerSearch}
+            />
 
             <ConnectionSettingsModal
               isOpen={showConnectionSettings}

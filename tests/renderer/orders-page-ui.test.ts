@@ -2623,6 +2623,32 @@ test('Round 239: OrderTypeSelector gates dine-in by Tables, pickup always, deliv
   assert.match(source, /<PickupOrderIcon className="w-6 h-6" \/>/);
 });
 
+test('Caller ID handoff can continue as pickup without registering a customer', () => {
+  const source = orderDashboardSource();
+  const handlerStart = source.indexOf('const handleOrderTypeSelect = async (');
+  const pickupStart = source.indexOf('if (type === "pickup") {', handlerStart);
+  const pickupEnd = source.indexOf('if (type === "delivery") {', pickupStart);
+
+  assert.notEqual(handlerStart, -1, 'order-type handler must exist');
+  assert.notEqual(pickupStart, -1, 'pickup branch must exist');
+  assert.notEqual(pickupEnd, -1, 'pickup branch must end before delivery');
+
+  const pickupBranch = source.slice(pickupStart, pickupEnd);
+  assert.match(pickupBranch, /setSelectedOrderType\("pickup"\)/);
+  assert.match(pickupBranch, /setOrderType\("pickup"\)/);
+  assert.match(
+    pickupBranch,
+    /if \(!existingCustomer\) \{[\s\S]*?setCustomerInfo\(\{[\s\S]*?phone: callerIntent\?\.canonicalPhone \|\| ""/,
+    'pickup may carry the caller phone without requiring a saved customer',
+  );
+  assert.match(pickupBranch, /setShowMenuModal\(true\)/);
+  assert.doesNotMatch(
+    pickupBranch,
+    /setShowPhoneLookupModal|setShowAddCustomerModal/,
+    'pickup must not force lookup or customer registration',
+  );
+});
+
 // Round 264 (live QA): the legacy forms/OrderTypeSelector still used blue selected styling + a blue
 // focus ring. It now uses the POS yellow/amber selected treatment (yellow + black text in light, warm
 // yellow glass in dark), neutral glass inactive, rounded-2xl modern cards, and active-only press

@@ -967,134 +967,64 @@ const callerIdSource = readFileSync(
   'utf8',
 );
 
-test('Round 243: CallerIdSection is a progressive 3-step, child-friendly glass flow (no hover/title)', () => {
-  // Touch POS: no hover-only styles and no native title tooltips anywhere in the section.
+test('CallerIdSection is a server-managed 3-step FXO status flow', () => {
   assert.doesNotMatch(callerIdSource, /hover:/);
   assert.doesNotMatch(callerIdSource, /[^a-zA-Z]title=/);
+  assert.match(callerIdSource, /callerId\.serverManaged\.step1/);
+  assert.match(callerIdSource, /callerId\.serverManaged\.step2/);
+  assert.match(callerIdSource, /callerId\.serverManaged\.step3/);
+  assert.match(callerIdSource, /callerIdGetServerConfig/);
 
-  // Progressive 3-step structure with localized step labels.
-  assert.match(callerIdSource, /callerId\.steps\.choose/);
-  assert.match(callerIdSource, /callerId\.steps\.details/);
-  assert.match(callerIdSource, /callerId\.steps\.activate/);
-
-  // The three choices are presented plainly; the equal three-card grid is gone and the older PBX
-  // path is rendered de-emphasised (a slim secondary control, not a third equal card).
-  assert.match(callerIdSource, /'Provider preset'/);
-  assert.match(callerIdSource, /'Manual SIP'/);
-  assert.match(callerIdSource, /'Older PBX'/);
-  assert.doesNotMatch(callerIdSource, /grid gap-2 md:grid-cols-3/);
-
-  // Plain-language "what you need" checklist for non-legacy setups (items keyed dynamically).
-  assert.match(callerIdSource, /callerId\.checklist\.title/);
-  assert.match(callerIdSource, /callerId\.checklist\.\$\{item\.key\}/);
-  assert.match(callerIdSource, /key: 'server'/);
-  assert.match(callerIdSource, /key: 'username'/);
-  assert.match(callerIdSource, /key: 'password'/);
-
-  // Palette guard: black/white/grey/yellow + semantic green/red/amber only — no blue/purple family.
+  assert.doesNotMatch(callerIdSource, /Provider preset|Manual SIP|Older PBX/);
+  assert.doesNotMatch(callerIdSource, /sipServer|sipUsername|authUsername|passwordStored/);
+  assert.doesNotMatch(callerIdSource, /callerIdSaveConfig|callerIdTestConnection/);
   assert.doesNotMatch(callerIdSource, /\b(?:bg|text|border|from|to|ring)-(?:blue|purple|indigo|violet|sky|cyan)-/);
 });
 
-test('Round 243: optional technical fields live under the Advanced disclosure, not always-on', () => {
-  const advIdx = callerIdSource.indexOf('{showAdvanced && (');
-  assert.ok(advIdx > 0, 'an advanced disclosure block must exist');
-  // Auth Username, Transport, Outbound Proxy and Local Listen Port only render under showAdvanced.
-  for (const key of ['authUsername', 'transport', 'outboundProxy', 'listenPort']) {
-    const idx = callerIdSource.indexOf(`callerId.${key}`);
-    assert.ok(idx > advIdx, `${key} must live under the Advanced disclosure (after showAdvanced)`);
+test('CallerId Step 2 displays only the safe server-projected FXO fields', () => {
+  for (const field of ['deviceProfileKey', 'trustedDeviceIp', 'sourceChannel', 'listenPort']) {
+    assert.match(callerIdSource, new RegExp(`line\\.${field}`), `${field} must be visible`);
   }
-  // The existing auto-open behaviour (non-default transport / outbound proxy / listen port) is preserved.
-  assert.match(
-    callerIdSource,
-    /setShowAdvanced\(\s*normalized\.transport === 'tcp' \|\|\s*!!normalized\.outboundProxy \|\|\s*normalized\.listenPort !== 5060,?\s*\)/,
-  );
+  assert.match(callerIdSource, /line\.isReceivingTarget/);
+  assert.doesNotMatch(callerIdSource, /credentials|credentialVersion/);
 });
 
-test('Round 243: the router-only warning is quiet for normal state, prominent only when unsupported', () => {
-  // The prominent ShieldAlert caution card is gated on the unsupported_provider status reason...
-  assert.match(callerIdSource, /status\?\.reason === 'unsupported_provider' \? \([\s\S]*?<ShieldAlert/);
-  // ...and is the ONLY ShieldAlert render (no big always-on scary card).
-  const shieldUses = callerIdSource.match(/<ShieldAlert/g) || [];
-  assert.equal(shieldUses.length, 1, 'the router warning must render only inside the unsupported branch');
-  // The quiet fallback is a compact one-line note.
-  assert.match(callerIdSource, /callerId\.routerNoteCompact/);
+test('CallerId renders source, receiver-only, disabled and unassigned server states', () => {
+  assert.match(callerIdSource, /serverConfig\?\.enabled && hasAssignment/);
+  assert.match(callerIdSource, /sourceLines\.length === 0 && receivingLines\.length > 0/);
+  assert.match(callerIdSource, /!hasAssignment && !serverError/);
+  assert.match(callerIdSource, /ipTrustSourcePolicy === 'blocked'/);
 });
 
-test('Round 243: the action row is sticky/reachable with neutral/green/red 44px touch targets', () => {
-  // Sticky within the section (glass), so Test/Save stay reachable while scrolling the form.
-  assert.match(callerIdSource, /sticky bottom-0[^"]*backdrop-blur/);
-
-  // Test = neutral, >=44px, centered icon+text.
+test('CallerId uses one non-sticky refresh action instead of retired save/test controls', () => {
+  assert.doesNotMatch(callerIdSource, /sticky bottom-0|pb-32/);
   assert.match(
     callerIdSource,
-    /onClick=\{handleTest\}[\s\S]*?min-h-\[44px\][\s\S]*?items-center justify-center[\s\S]*?liquid-glass-modal-button/,
+    /onClick=\{handleRefresh\}[\s\S]*?liquid-glass-modal-button[\s\S]*?min-h-\[44px\][\s\S]*?items-center justify-center/,
   );
-  // Save & Activate = green when available, neutral grey when blocked (single gate), >=44px centered.
-  assert.match(
-    callerIdSource,
-    /onClick=\{handleSaveAndActivate\}[\s\S]*?min-h-\[44px\][\s\S]*?items-center justify-center[\s\S]*?saveAndActivateDisabled[\s\S]*?liquid-glass-modal-button liquid-glass-modal-text-muted[\s\S]*?bg-green-600/,
-  );
-  // Disable = red, >=44px centered.
-  assert.match(
-    callerIdSource,
-    /onClick=\{handleDisable\}[\s\S]*?min-h-\[44px\][\s\S]*?items-center justify-center[\s\S]*?bg-red-600/,
-  );
+  assert.doesNotMatch(callerIdSource, /handleSaveAndActivate|handleDisable|handleTest/);
 });
 
-test('Round 243: new CallerId step/checklist keys exist in every locale; setup names are plain', () => {
+test('server-managed CallerId labels exist in every locale and Greek copy is translated', () => {
   const GREEK = new RegExp('[\\u0370-\\u03FF]');
   for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
     const c = getKey(loadLocale(lng), 'settings.peripherals.callerId') as Record<string, any>;
     assert.ok(c, `${lng} missing callerId`);
-    for (const k of ['choose', 'details', 'activate']) {
-      assert.equal(typeof c.steps?.[k], 'string', `${lng} callerId.steps.${k} missing`);
+    for (const key of ['step1', 'step2', 'step3', 'centralBody', 'deviceIp', 'channel', 'port', 'refresh']) {
+      assert.equal(typeof c.serverManaged?.[key], 'string', `${lng} callerId.serverManaged.${key} missing`);
     }
-    for (const k of ['title', 'server', 'username', 'password']) {
-      assert.equal(typeof c.checklist?.[k], 'string', `${lng} callerId.checklist.${k} missing`);
-    }
-    assert.equal(typeof c.routerNoteCompact, 'string', `${lng} callerId.routerNoteCompact missing`);
-    assert.ok(c.setup?.generic?.length > 0 && c.setup?.legacy?.length > 0, `${lng} setup names missing`);
   }
-  // English plain-language setup names.
-  const en = getKey(loadLocale('en'), 'settings.peripherals.callerId') as Record<string, any>;
-  assert.equal(en.setup.generic, 'Manual SIP');
-  assert.equal(en.setup.legacy, 'Older PBX');
-  // Greek step + checklist labels are real translations.
   const el = getKey(loadLocale('el'), 'settings.peripherals.callerId') as Record<string, any>;
-  assert.match(el.steps.choose, GREEK);
-  assert.match(el.checklist.title, GREEK);
+  assert.match(el.serverManaged.step1, GREEK);
+  assert.match(el.serverManaged.centralBody, GREEK);
 });
 
-// --- Round 244 (live QA correction): sticky Step 3 bar no longer overlaps Step 2 content ----------
-
-test('Round 244: the non-action content reserves space so nothing renders under the sticky action bar', () => {
-  // All non-action content lives in its own body with reserved bottom space (pb-NN)...
-  assert.match(callerIdSource, /className="space-y-4 pb-\d\d"/);
-  // ...and the sticky action bar renders AFTER that reserved-space body (so the last field/caution
-  // card/advanced/router note clears the bar instead of sitting underneath it).
-  const bodyIdx = callerIdSource.search(/className="space-y-4 pb-\d\d"/);
-  const stickyIdx = callerIdSource.indexOf('sticky bottom-0');
-  assert.ok(bodyIdx > 0 && stickyIdx > bodyIdx, 'the sticky action bar must follow the reserved-space body');
-  // The bar uses the shared elevated modal surface plus blur, so transient scrolled content cannot
-  // bleed through and the contrast contract remains correct in both themes.
-  assert.match(callerIdSource, /liquid-glass-modal-footer[^"]*sticky bottom-0[^"]*backdrop-blur/);
-});
-
-test('Round 244: the Older PBX option separates title and help (block layout, no concatenated text)', () => {
-  const idx = callerIdSource.indexOf("applySetupType('legacy_pbx')");
-  assert.ok(idx > 0, 'the legacy/Older PBX setup control must exist');
-  const legacyBtn = callerIdSource.slice(idx, callerIdSource.indexOf('</button>', idx));
-
-  // Title and help are block-level on separate lines, so accessibility/text extraction does not
-  // concatenate them (e.g. "Παλαιό PBXΔιατηρεί...").
-  assert.match(legacyBtn, /className="block text-xs font-medium"[\s\S]*?setup\.legacy'/);
-  assert.match(legacyBtn, /className="mt-0\.5 block text-xs opacity-70"[\s\S]*?setup\.legacyHelp'/);
-  // The old inline (ml-2, non-block) concatenated layout is gone.
-  assert.doesNotMatch(legacyBtn, /className="ml-2 text-xs opacity-70"/);
-  assert.doesNotMatch(legacyBtn, /className="text-xs font-medium"/);
-
-  // It stays de-emphasised (slim secondary control, not an equal prominent card).
-  assert.match(legacyBtn, /w-full rounded-xl border/);
+test('CallerId Step 3 follows Step 2 in normal document flow and refreshes in parallel', () => {
+  const step2 = callerIdSource.indexOf('callerId.serverManaged.step2');
+  const step3 = callerIdSource.indexOf('callerId.serverManaged.step3');
+  assert.ok(step2 > 0 && step3 > step2, 'Step 3 must render after Step 2');
+  assert.match(callerIdSource, /liquid-glass-modal-footer space-y-3/);
+  assert.match(callerIdSource, /Promise\.allSettled\(\[\s*callerIdGetServerConfig\(\),\s*callerIdGetStatus\(\)/);
 });
 
 // --- Round 280 (live QA, Greek/light): the Settings hub still forced many Greek labels into ALL-CAPS

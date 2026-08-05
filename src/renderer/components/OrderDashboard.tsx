@@ -110,6 +110,12 @@ import { useDeliveryValidation } from "../hooks/useDeliveryValidation";
 import { useResolvedPosIdentity } from "../hooks/useResolvedPosIdentity";
 import { useTerminalSettings } from "../hooks/useTerminalSettings";
 import { useKioskOrderAutoPrint } from "../hooks/useKioskOrderAutoPrint";
+import {
+  resolveCallerIdOrderSelection,
+  subscribeToCallerIdOrderIntents,
+  type CallerIdOrderIntent,
+  type CallerIdRequestedOrderType,
+} from "../services/caller-id-order-flow";
 import { openExternalUrl } from "../utils/external-url";
 import { formatCompactOrderNumberForDisplay, getVisibleOrderNumber } from "../utils/orderNumberUtils";
 import { formatTableDisplayNumber } from "../utils/table-display";
@@ -1011,6 +1017,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     const [selectedOrderType, setSelectedOrderType] = useState<
       "pickup" | "delivery" | "dine-in" | null
     >(null);
+    const [pendingCallerIdOrderType, setPendingCallerIdOrderType] =
+      useState<CallerIdRequestedOrderType | null>(null);
 
     // State for split payment flow (rendered independently of MenuModal)
     const [splitPaymentData, setSplitPaymentData] = useState<{
@@ -1099,6 +1107,42 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     const activeAlertAudioRef = useRef<HTMLAudioElement | null>(null);
     const shiftRefreshArmedRef = useRef(false);
     const splitPaymentCompletedRef = useRef(false);
+    const callerIdOrderIntentRef = useRef<CallerIdOrderIntent | null>(null);
+
+    useEffect(() => subscribeToCallerIdOrderIntents((intent) => {
+      const callerCustomer = intent.customer
+        ? withMaterializedCustomerAddresses(
+            intent.customer as unknown as OrderFlowCustomer,
+          ) as OrderFlowCustomer
+        : null;
+
+      callerIdOrderIntentRef.current = intent;
+      setMenuSessionKey((session) => session + 1);
+      setExistingCustomer(callerCustomer);
+      setCustomerInfo(
+        callerCustomer
+          ? buildCustomerInfoFromOrderFlowCustomer(callerCustomer)
+          : null,
+      );
+      setPhoneNumber(intent.canonicalPhone);
+      setSpecialInstructions(
+        callerCustomer
+          ? buildCustomerInfoFromOrderFlowCustomer(callerCustomer).notes || ""
+          : "",
+      );
+      setSelectedOrderType(null);
+      setOrderType("pickup");
+      setDeliveryZoneInfo(null);
+      setRoomChargeContext(null);
+      setShowPhoneLookupModal(false);
+      setShowAddCustomerModal(false);
+      setShowMenuModal(false);
+      setShowRoomFlowModal(false);
+      setShowTableSelector(false);
+      setActiveTab("orders");
+      setPendingCallerIdOrderType(intent.requestedOrderType ?? null);
+      setShowOrderTypeModal(!intent.requestedOrderType);
+    }), []);
 
     const handleTableGridWheel = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
       const scrollTarget = tableGridScrollRef.current;
@@ -1813,6 +1857,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
     // Handle new order FAB click
     const handleNewOrderClick = () => {
+      callerIdOrderIntentRef.current = null;
+      setPendingCallerIdOrderType(null);
       setMenuSessionKey((session) => session + 1);
       setExistingCustomer(null);
       setCustomerInfo(null);
@@ -1824,49 +1870,11 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       setShowOrderTypeModal(true);
     };
 
-    // Handle order type selection (supports pickup, delivery, and dine-in/table)
-    const handleOrderTypeSelect = async (
-      type: "pickup" | "delivery" | "dine-in",
-    ) => {
-      setIsOrderTypeTransitioning(true);
-
-      // Smooth transition
-      await new Promise((resolve) => setTimeout(resolve, 300));
-
-      setShowOrderTypeModal(false);
-      setIsOrderTypeTransitioning(false);
-
-      if (type === "pickup") {
-        setSelectedOrderType("pickup");
-        setOrderType("pickup");
-        // For pickup orders, go directly to menu with basic customer info
-        setCustomerInfo({
-          name: "",
-          phone: "",
-          email: "",
-          address: {
-            street: "",
-            city: "",
-            postalCode: "",
-          },
-          notes: "",
-        });
-        setShowMenuModal(true);
-      } else if (type === "delivery") {
-        setSelectedOrderType("delivery");
-        setOrderType("delivery");
-        // For delivery orders, start with phone lookup
-        setShowPhoneLookupModal(true);
-      } else if (type === "dine-in") {
-        // For table orders, show table selector
-        setShowTableSelector(true);
-      }
-    };
-
     // --- Round 236: New Order -> Room / Service flows ---------------------------------------
 
     // New Order -> Room opens a small chooser (Room Order / Check-in / Create Reservation).
     const handleSelectRoomFlow = () => {
+      callerIdOrderIntentRef.current = null;
       setShowOrderTypeModal(false);
       setShowRoomFlowModal(true);
     };
@@ -1874,6 +1882,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     // New Order -> Service switches to the Services hub tab and opens the existing Create
     // Appointment modal. Its staff/service/day/time availability check is preserved untouched.
     const handleSelectServiceFlow = () => {
+      callerIdOrderIntentRef.current = null;
       setShowOrderTypeModal(false);
       setActiveTab("services");
       setServicesOpenCreateSignal((n) => n + 1);
@@ -2596,7 +2605,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     );
 
     // Handler for clicking on customer card - select and proceed directly to menu
-    const handleCustomerSelectedDirect = async (customer: any) => {
+    const handleCustomerSelectedDirect = async (
+      customer: any,
+      targetOrderType = orderType,
+    ) => {
       const orderFlowCustomer = customer as OrderFlowCustomer;
 
       if (pickupToDeliveryContext) {
@@ -2648,7 +2660,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       );
 
       // For delivery orders, validate that customer has an address
-      if (orderType === "delivery") {
+      if (targetOrderType === "delivery") {
         setDeliveryZoneInfo(null);
         const hasAddress =
           resolvedAddress?.street_address || normalizedCustomer.address;
@@ -2720,6 +2732,92 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       setShowPhoneLookupModal(false);
       setShowMenuModal(true);
     };
+
+    // The standard flow chooses an order type first. Caller ID intentionally
+    // reverses that sequence: lookup first, then this same module-aware chooser.
+    const handleOrderTypeSelect = async (
+      type: "pickup" | "delivery" | "dine-in",
+    ) => {
+      setIsOrderTypeTransitioning(true);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      setShowOrderTypeModal(false);
+      setIsOrderTypeTransitioning(false);
+
+      const callerIntent = callerIdOrderIntentRef.current;
+
+      if (type === "pickup") {
+        setSelectedOrderType("pickup");
+        setOrderType("pickup");
+
+        if (!existingCustomer) {
+          setCustomerInfo({
+            name: "",
+            phone: callerIntent?.canonicalPhone || "",
+            email: "",
+            address: {
+              street: "",
+              city: "",
+              postalCode: "",
+            },
+            notes: "",
+          });
+        }
+        callerIdOrderIntentRef.current = null;
+        setShowMenuModal(true);
+        return;
+      }
+
+      if (type === "delivery") {
+        setSelectedOrderType("delivery");
+        setOrderType("delivery");
+
+        if (callerIntent) {
+          const action = resolveCallerIdOrderSelection(
+            "delivery",
+            callerIntent,
+          );
+          callerIdOrderIntentRef.current = null;
+
+          if (action === "use-existing-customer" && existingCustomer) {
+            await handleCustomerSelectedDirect(existingCustomer, "delivery");
+            return;
+          }
+
+          setExistingCustomer(null);
+          setCustomerInfo(null);
+          setCustomerModalMode("new");
+          setPhoneNumber(callerIntent.canonicalPhone);
+          setShowAddCustomerModal(true);
+          return;
+        }
+
+        setShowPhoneLookupModal(true);
+        return;
+      }
+
+      callerIdOrderIntentRef.current = null;
+      setShowTableSelector(true);
+    };
+
+    useEffect(() => {
+      const requestedOrderType = pendingCallerIdOrderType;
+      if (!requestedOrderType) return;
+
+      setPendingCallerIdOrderType(null);
+      if (requestedOrderType === "room") {
+        handleSelectRoomFlow();
+        return;
+      }
+      if (requestedOrderType === "service") {
+        handleSelectServiceFlow();
+        return;
+      }
+
+      void handleOrderTypeSelect(requestedOrderType);
+      // The selected action is a one-shot in-memory handoff. The handler is
+      // intentionally consumed only when that handoff value changes.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [pendingCallerIdOrderType]);
 
     // Handler for "Add Address" button - open modal to add new address only
     const handleAddNewAddress = (customer: any) => {

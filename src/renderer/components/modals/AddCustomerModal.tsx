@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { MapPin, User, Phone, Mail, FileText, Building, Users, AlertTriangle, CheckCircle, Clock, Hash } from 'lucide-react';
+import { MapPin, User, Phone, Mail, FileText, Building, Users, AlertTriangle, CheckCircle, Clock, Hash, Minus, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { Customer } from '../../../shared/types/customer';
 import { customerService } from '../../services/CustomerService';
@@ -66,6 +66,11 @@ interface AddCustomerModalProps {
    * - 'editAddress': Editing an existing address (only address fields editable)
    */
   mode?: 'new' | 'edit' | 'addAddress' | 'editAddress';
+  /** Caller ID keeps this form mounted while its floating panel is minimized. */
+  callerIdWorkspace?: {
+    suspended: boolean;
+    onMinimize: () => void;
+  };
 }
 
 interface AddressAutocompleteProps {
@@ -393,6 +398,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
   initialPhone,
   initialCustomer,
   mode = 'new',
+  callerIdWorkspace,
 }) => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
@@ -1253,13 +1259,39 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
     return t('modals.addCustomer.title');
   };
 
+  if (callerIdWorkspace?.suspended) return null;
+
   return (
     <LiquidGlassModal
       isOpen={isOpen}
       onClose={onClose}
-      title={getModalTitle()}
-      size="sm"
-      className="!max-w-lg"
+      title={callerIdWorkspace ? undefined : getModalTitle()}
+      header={callerIdWorkspace ? (
+        <div className="liquid-glass-modal-header">
+          <h2 className="liquid-glass-modal-title">{getModalTitle()}</h2>
+          <div className="ml-4 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={callerIdWorkspace.onMinimize}
+              className="liquid-glass-modal-close"
+              aria-label={t('app.window.minimize', 'Minimize')}
+            >
+              <Minus className="h-5 w-5" />
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="liquid-glass-modal-close"
+              aria-label={t('common.actions.close', 'Close')}
+            >
+              <X className="h-5 w-5" />
+            </button>
+          </div>
+        </div>
+      ) : undefined}
+      ariaLabel={callerIdWorkspace ? getModalTitle() : undefined}
+      size={callerIdWorkspace ? 'lg' : 'sm'}
+      className={callerIdWorkspace ? '!max-w-4xl' : '!max-w-lg'}
       closeOnBackdrop={true}
       closeOnEscape={true}
     >

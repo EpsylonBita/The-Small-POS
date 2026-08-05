@@ -1,5 +1,24 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { User, Phone, MapPin, Trash2, Edit, Check, ArrowRight, Search, Ban, AlertTriangle, Mail } from 'lucide-react';
+import React, { useState, useEffect, useCallback, useId, useRef } from 'react';
+import {
+  AlertTriangle,
+  ArrowRight,
+  Ban,
+  BedDouble,
+  CalendarClock,
+  Check,
+  Edit,
+  Mail,
+  MapPin,
+  Minus,
+  Phone,
+  Search,
+  ShoppingBag,
+  Trash2,
+  Truck,
+  User,
+  UtensilsCrossed,
+  X,
+} from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import toast from 'react-hot-toast';
 import { posApiDelete, posApiGet } from '../../utils/api-helpers';
@@ -13,6 +32,7 @@ import {
   withMaterializedCustomerAddresses,
 } from '../../utils/customer-addresses';
 import { getBridge } from '../../../lib';
+import type { CallerIdRequestedOrderType } from '../../services/caller-id-order-flow';
 
 interface CustomerAddress {
   id: string;
@@ -57,16 +77,54 @@ interface Customer {
   banned_at?: string;
 }
 
-interface CustomerSearchModalProps {
+interface CustomerSearchModalBaseProps {
   isOpen: boolean;
   onClose: () => void;
-  onCustomerSelected: (customer: Customer) => void;
-  onAddNewCustomer: (phone: string) => void;
-  onAddNewAddress?: (customer: Customer) => void;
-  onEditCustomer?: (customer: Customer) => void;
   /** Pre-selected customer to show directly (e.g., after editing an address) */
   initialCustomer?: Customer | null;
+  /** Initial phone/name used by passive lookup flows such as incoming Caller ID. */
+  initialSearchTerm?: string;
+  /** Optional normalized API lookup key while the full number remains visible. */
+  initialLookupTerm?: string;
+  /** Forces a fresh lookup when a new event repeats the same search term. */
+  searchRequestKey?: string;
+  /** Fired after the visible modal has committed for this request. */
+  onDisplayed?: () => void;
+  /**
+   * Turns passive Caller ID lookup into a large, single-screen workspace.
+   * Search state stays mounted while the workspace is minimized.
+   */
+  callerIdWorkspace?: {
+    minimized: boolean;
+    enabledOrderTypes: CallerIdRequestedOrderType[];
+    onMinimize: () => void;
+    onOrderTypeSelected: (
+      orderType: CallerIdRequestedOrderType,
+      customer: Customer | null,
+      visiblePhone: string,
+    ) => void;
+  };
 }
+
+type CustomerSearchModalProps = CustomerSearchModalBaseProps & (
+  | {
+      lookupOnly: true;
+      /** Safe Caller ID actions; customer mutation controls remain hidden. */
+      onCustomerSelected?: (customer: Customer) => void;
+      onAddNewCustomer?: (phone: string) => void;
+      onContinueWithoutCustomer?: (phone: string) => void;
+      onAddNewAddress?: never;
+      onEditCustomer?: never;
+    }
+  | {
+      lookupOnly?: false;
+      onCustomerSelected: (customer: Customer) => void;
+      onAddNewCustomer: (phone: string) => void;
+      onContinueWithoutCustomer?: never;
+      onAddNewAddress?: (customer: Customer) => void;
+      onEditCustomer?: (customer: Customer) => void;
+    }
+);
 
 const resolveAddressStreet = (address?: Partial<CustomerAddress> | null): string => {
   if (!address) return '';
@@ -112,6 +170,21 @@ const normalizeCustomerAddresses = (addresses: any): CustomerAddress[] => {
   return addresses.map((address) => normalizeCustomerAddress(address));
 };
 
+const ModalDisplayedReporter: React.FC<{
+  requestKey?: string;
+  onDisplayed?: () => void;
+  displayedRequestRef: React.MutableRefObject<string | null>;
+}> = ({ requestKey, onDisplayed, displayedRequestRef }) => {
+  useEffect(() => {
+    const displayKey = requestKey ?? 'default-open';
+    if (displayedRequestRef.current === displayKey) return;
+    displayedRequestRef.current = displayKey;
+    onDisplayed?.();
+  }, [displayedRequestRef, onDisplayed, requestKey]);
+
+  return null;
+};
+
 export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
   isOpen,
   onClose,
@@ -120,19 +193,29 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
   onAddNewAddress,
   onEditCustomer,
   initialCustomer,
+  initialSearchTerm,
+  initialLookupTerm,
+  searchRequestKey,
+  onDisplayed,
+  onContinueWithoutCustomer,
+  lookupOnly = false,
+  callerIdWorkspace,
 }) => {
   const bridge = getBridge();
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const [searchQuery, setSearchQuery] = useState('');
+  const [lookupQuery, setLookupQuery] = useState('');
   const [customer, setCustomer] = useState<Customer | null>(null);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [searchTimeout, setSearchTimeout] = useState<ReturnType<typeof setTimeout> | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const searchInputId = useId();
   const searchDisposedRef = useRef(false);
   const searchRequestSeqRef = useRef(0);
+  const displayedRequestRef = useRef<string | null>(null);
   const [selectedAddressId, setSelectedAddressId] = useState<string | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
@@ -153,18 +236,35 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
   const isSearchRequestStale = (requestId: number) =>
     searchDisposedRef.current || requestId !== searchRequestSeqRef.current;
 
-  // Set customer from initialCustomer prop when modal opens
+  // Initialize either a pre-selected customer or a passive lookup request.
   useEffect(() => {
-    if (isOpen && initialCustomer) {
+    if (!isOpen) return;
+
+    nextSearchRequestId();
+    setCustomers([]);
+    setError(null);
+    setIsSearching(false);
+
+    if (initialCustomer) {
       setCustomer(withMaterializedCustomerAddresses({
         ...initialCustomer,
         addresses: normalizeCustomerAddresses(initialCustomer.addresses),
       }) as Customer);
       setSearchQuery(initialCustomer.phone || '');
-      setCustomers([]);
-      setError(null);
+      setLookupQuery(initialCustomer.phone || '');
+      return;
     }
-  }, [isOpen, initialCustomer]);
+
+    setCustomer(null);
+    setSearchQuery(initialSearchTerm?.trim() ?? '');
+    setLookupQuery(initialLookupTerm?.trim() || initialSearchTerm?.trim() || '');
+  }, [
+    isOpen,
+    initialCustomer,
+    initialLookupTerm,
+    initialSearchTerm,
+    searchRequestKey,
+  ]);
 
   // Auto-select default or first address when customer is found
   useEffect(() => {
@@ -331,7 +431,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
 
     // Set a new timeout for debounced search
     const newTimeout = setTimeout(() => {
-      searchCustomer(searchQuery);
+      searchCustomer(lookupQuery);
     }, 300); // 300ms delay
 
     setSearchTimeout(newTimeout);
@@ -342,80 +442,52 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
         clearTimeout(newTimeout);
       }
     };
-  }, [searchQuery, searchCustomer]);
+  }, [lookupQuery, searchCustomer, searchRequestKey]);
 
   // Manual search function (keeping for backward compatibility)
   const handleManualSearch = () => {
     if (searchTimeout) {
       clearTimeout(searchTimeout);
     }
-    searchCustomer(searchQuery);
+    searchCustomer(lookupQuery);
+  };
+
+  const buildSelectedCustomer = (): Customer | null => {
+    if (!customer) return null;
+
+    let addressToUse = selectedAddressId;
+    if (!addressToUse && customer.addresses && customer.addresses.length > 0) {
+      addressToUse = resolveSelectedCustomerAddress(customer)?.id ?? null;
+    }
+
+    const selectedAddr = addressToUse
+      ? customer.addresses?.find((address) => address.id === addressToUse)
+      : undefined;
+    if (!selectedAddr) return customer;
+
+    return {
+      ...customer,
+      address: resolveAddressStreet(selectedAddr) || customer.address || '',
+      city: selectedAddr.city,
+      postal_code: selectedAddr.postal_code,
+      floor_number: selectedAddr.floor_number,
+      notes: selectedAddr.notes || customer.notes,
+      coordinates: selectedAddr.coordinates ?? customer.coordinates,
+      latitude: selectedAddr.latitude ?? customer.latitude ?? null,
+      longitude: selectedAddr.longitude ?? customer.longitude ?? null,
+      selected_address_id: selectedAddr.id,
+    } as Customer;
   };
 
   const handleSelectCustomer = () => {
-    if (customer) {
-      // Debug: Log customer data before selection
-      console.log('[CustomerSearch] handleSelectCustomer - customer:', {
-        id: customer.id,
-        name: customer.name,
-        name_on_ringer: customer.name_on_ringer,
-        addressCount: customer.addresses?.length,
-        addresses: customer.addresses?.map(a => ({
-          id: a.id,
-          street: resolveAddressStreet(a),
-          notes: a.notes
-        }))
-      });
-
-      // Determine which address to use - either the explicitly selected one, or default/first
-      let addressToUse = selectedAddressId;
-
-      // If no address explicitly selected but customer has addresses, use default or first
-      if (!addressToUse && customer.addresses && customer.addresses.length > 0) {
-        const defaultAddr = resolveSelectedCustomerAddress(customer);
-        addressToUse = defaultAddr?.id ?? null;
-      }
-
-      // Use the selected/default address if available
-      if (addressToUse && customer.addresses) {
-        const selectedAddr = customer.addresses.find(a => a.id === addressToUse);
-        if (selectedAddr) {
-          const selectedStreet = resolveAddressStreet(selectedAddr) || customer.address || '';
-          console.log('[CustomerSearch] Selected address:', {
-            id: selectedAddr.id,
-            street: selectedStreet,
-            notes: selectedAddr.notes,
-            rawAddress: selectedAddr
-          });
-          const customerWithSelectedAddress = {
-            ...customer,
-            address: selectedStreet,
-            city: selectedAddr.city,
-            postal_code: selectedAddr.postal_code,
-            floor_number: selectedAddr.floor_number,
-            notes: selectedAddr.notes || customer.notes,
-            coordinates: selectedAddr.coordinates ?? customer.coordinates,
-            latitude: selectedAddr.latitude ?? customer.latitude ?? null,
-            longitude: selectedAddr.longitude ?? customer.longitude ?? null,
-            selected_address_id: selectedAddr.id
-          };
-          console.log('[CustomerSearch] Passing to OrderFlow:', {
-            name_on_ringer: customerWithSelectedAddress.name_on_ringer,
-            notes: customerWithSelectedAddress.notes
-          });
-          onCustomerSelected(customerWithSelectedAddress);
-          return;
-        }
-      }
-      // No address selected or no addresses, proceed with customer as-is
-      onCustomerSelected(customer);
-    }
+    const selectedCustomer = buildSelectedCustomer();
+    if (selectedCustomer) onCustomerSelected?.(selectedCustomer);
   };
 
   const handleAddNewCustomer = () => {
     // Pass the search query - if it looks like a phone number, use it as phone
     const isLikelyPhone = /^[0-9+\-\s()]+$/.test(searchQuery.trim());
-    onAddNewCustomer(isLikelyPhone ? searchQuery : '');
+    onAddNewCustomer?.(isLikelyPhone ? searchQuery : '');
     // Don't close here - let the parent handle the flow
     // onClose();
   };
@@ -475,6 +547,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
   const handleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
     setSearchQuery(value);
+    setLookupQuery(value);
 
     // Clear previous results immediately when typing
     if (value.length < searchQuery.length) { // User is deleting
@@ -492,6 +565,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
       searchDisposedRef.current = true;
       searchRequestSeqRef.current += 1;
       setSearchQuery('');
+      setLookupQuery('');
       setCustomer(null);
       setCustomers([]);
       setError(null);
@@ -584,25 +658,64 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
     }
   };
 
+  if (isOpen && callerIdWorkspace?.minimized) return null;
+
   return (
     <LiquidGlassModal
       isOpen={isOpen}
       onClose={onClose}
       title={t('modals.customerSearch.title')}
-      size="sm"
-      className="!max-w-md"
+      header={callerIdWorkspace ? (
+        <div className="liquid-glass-modal-header">
+          <h2 className="liquid-glass-modal-title">
+            {t('modals.customerSearch.title')}
+          </h2>
+          <div className="ml-4 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={callerIdWorkspace.onMinimize}
+              className="liquid-glass-modal-close"
+              aria-label={t('app.window.minimize', 'Minimize')}
+            >
+              <Minus className="h-5 w-5" />
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="liquid-glass-modal-close"
+              aria-label={t('common.actions.close', 'Close')}
+            >
+              <X className="h-5 w-5" />
+            </button>
+          </div>
+        </div>
+      ) : undefined}
+      ariaLabel={callerIdWorkspace ? t('modals.customerSearch.title') : undefined}
+      size={callerIdWorkspace ? 'xl' : 'sm'}
+      className={callerIdWorkspace ? '!max-w-6xl !max-h-[90vh]' : '!max-w-md'}
+      contentClassName={callerIdWorkspace ? '!px-6 !pb-6' : undefined}
       closeOnBackdrop={true}
       closeOnEscape={true}
       initialFocusRef={searchInputRef}
     >
+      <ModalDisplayedReporter
+        requestKey={searchRequestKey}
+        onDisplayed={onDisplayed}
+        displayedRequestRef={displayedRequestRef}
+      />
+
       {/* Search Input */}
       <div className="mb-6">
-        <label className="block text-sm font-medium mb-2 liquid-glass-modal-text">
+        <label
+          htmlFor={searchInputId}
+          className="block text-sm font-medium mb-2 liquid-glass-modal-text"
+        >
           {t('modals.customerSearch.searchLabel', 'Phone Number or Name')}
         </label>
         <div className="relative">
           <Search className={`absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 z-10 ${resolvedTheme === 'dark' ? 'text-white' : 'text-black'}`} />
           <input
+            id={searchInputId}
             ref={searchInputRef}
             type="text"
             value={searchQuery}
@@ -627,9 +740,31 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
       </div>
 
       {/* Error Message */}
-      {error && (
+      {error && (!callerIdWorkspace || error !== t('modals.customerSearch.customerNotFound')) && (
         <div className="mb-4 p-3 bg-red-500/10 border border-red-500/20 rounded-2xl text-red-600 dark:text-red-400 text-sm">
           {error}
+        </div>
+      )}
+
+      {callerIdWorkspace &&
+        !isSearching &&
+        error === t('modals.customerSearch.customerNotFound') && (
+        <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+          <p className="font-medium text-red-600 dark:text-red-400">
+            {t('modals.customerSearch.customerNotFound')}
+          </p>
+          <button
+            type="button"
+            onClick={handleAddNewCustomer}
+            className="min-h-12 rounded-xl border-2 border-emerald-600 bg-white px-6 py-3 font-semibold text-emerald-700 shadow-[0_5px_0_rgba(4,120,87,0.24),0_10px_22px_rgba(15,23,42,0.12)] transition-transform active:translate-y-1 active:shadow-sm dark:border-emerald-500 dark:bg-white dark:text-emerald-700"
+            style={{
+              backgroundColor: '#ffffff',
+              borderColor: '#16a34a',
+              color: '#15803d',
+            }}
+          >
+            {t('modals.customerSearch.addNewCustomer')}
+          </button>
         </div>
       )}
 
@@ -641,9 +776,10 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
           </p>
           <div className="max-h-60 overflow-y-auto space-y-3 pr-1 scrollbar-hide">
             {customers.map((c) => (
-              <div
+              <button
+                type="button"
                 key={c.id}
-                className={`relative mb-3 cursor-pointer rounded-2xl border p-4 transition-all ${
+                className={`relative mb-3 w-full cursor-pointer rounded-2xl border p-4 text-left transition-all ${
                   c.is_banned
                     ? 'border-red-500/50 bg-red-500/5'
                     : 'border-zinc-300/70 bg-zinc-100/85 active:bg-zinc-200/80 dark:border-zinc-700/70 dark:bg-zinc-800/80 dark:active:bg-zinc-700/70'
@@ -674,7 +810,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                     )}
                   </div>
                 </div>
-              </div>
+              </button>
             ))}
           </div>
         </div>
@@ -732,9 +868,11 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
 
           {customer.addresses && customer.addresses.length > 0 ? (
             // Multiple addresses - show a card for EACH address
-            <div className="mt-3 space-y-2">
+            <div className={callerIdWorkspace
+              ? 'mt-4 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3'
+              : 'mt-3 space-y-2'}>
               <p
-                className="mb-1 text-xs font-semibold uppercase tracking-wider"
+                className={`mb-1 text-xs font-semibold uppercase tracking-wider ${callerIdWorkspace ? 'md:col-span-2 xl:col-span-3' : ''}`}
                 style={{ color: resolvedTheme === 'dark' ? 'rgba(250, 204, 21, 0.85)' : '#ca8a04' }}
               >
                 {t('modals.customerSearch.addresses', 'Addresses')}
@@ -744,8 +882,16 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                 return (
                   <div
                     key={addr.id}
+                    role="button"
+                    tabIndex={0}
+                    aria-pressed={isSelected}
                     onClick={() => setSelectedAddressId(addr.id)}
-                    className={`w-full cursor-pointer rounded-lg p-2 transition-all ${isSelected
+                    onKeyDown={(event) => {
+                      if (event.key !== 'Enter' && event.key !== ' ') return;
+                      event.preventDefault();
+                      setSelectedAddressId(addr.id);
+                    }}
+                    className={`w-full cursor-pointer rounded-lg p-2 transition-all ${callerIdWorkspace ? 'min-h-[116px] !rounded-xl !p-4' : ''} ${isSelected
                       ? 'border-2 border-green-500/60 bg-transparent'
                       : 'border border-gray-200 bg-transparent active:border-gray-300 dark:border-white/10 dark:active:border-white/20'
                       }`}
@@ -772,7 +918,8 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                           </p>
                         )}
                       </div>
-                      {/* Edit and Delete buttons */}
+                      {/* Operational actions are intentionally hidden for passive Caller ID lookup. */}
+                      {!lookupOnly && (
                       <div className="flex items-center gap-1">
                         <button
                           onClick={(e) => {
@@ -841,6 +988,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
                       </div>
+                      )}
                     </div>
                   </div>
                 );
@@ -878,29 +1026,33 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
             </div>
           )}
 
-          {/* Continue Button - prominent, shows selected address */}
-          <button
-            onClick={handleSelectCustomer}
-            style={{
-              backgroundColor: '#16a34a',
-              color: '#ffffff',
-              borderColor: '#16a34a'
-            }}
-            className="w-full mt-4 py-3 px-6 rounded-xl font-medium flex items-center justify-center transition-all duration-300 border active:bg-green-700 dark:active:bg-green-600/30 active:scale-[0.98]"
-          >
-            <span>
-              {selectedAddressId && customer.addresses?.find(a => a.id === selectedAddressId)
-                ? t('modals.customerSearch.continueWithAddress', 'Continue with {{address}}', {
-                  address: resolveAddressStreet(customer.addresses.find(a => a.id === selectedAddressId))
-                })
-                : t('modals.customerSearch.continue', 'Continue')
-              }
-            </span>
-            <ArrowRight className="w-5 h-5" />
-          </button>
+          {!callerIdWorkspace && (!lookupOnly || Boolean(onCustomerSelected)) && (
+            <>
+              {/* Continue Button - prominent, shows selected address */}
+              <button
+                onClick={handleSelectCustomer}
+                style={{
+                  backgroundColor: '#16a34a',
+                  color: '#ffffff',
+                  borderColor: '#16a34a'
+                }}
+                className="w-full mt-4 py-3 px-6 rounded-xl font-medium flex items-center justify-center transition-all duration-300 border active:bg-green-700 dark:active:bg-green-600/30 active:scale-[0.98]"
+              >
+                <span>
+                  {selectedAddressId && customer.addresses?.find(a => a.id === selectedAddressId)
+                    ? t('modals.customerSearch.continueWithAddress', 'Continue with {{address}}', {
+                      address: resolveAddressStreet(customer.addresses.find(a => a.id === selectedAddressId))
+                    })
+                    : t('modals.customerSearch.continue', 'Continue')
+                  }
+                </span>
+                <ArrowRight className="w-5 h-5" />
+              </button>
 
-          {/* Action Buttons - Add Address, Edit Customer, Delete */}
-          <div className="flex gap-2 mt-3">
+              {!lookupOnly && (
+                <>
+                  {/* Action Buttons - Add Address, Edit Customer, Delete */}
+                  <div className="flex gap-2 mt-3">
             {/* Add Address Button */}
             {onAddNewAddress && (
               <button
@@ -944,12 +1096,104 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
             >
               <Trash2 className="w-4 h-4 text-red-500 dark:text-red-400" />
             </button>
-          </div>
+                  </div>
+                </>
+              )}
+            </>
+          )}
         </div>
       )}
 
-      {/* Add New Customer Option - Show when customer not found OR when customer is found (for different person with same phone) */}
-      {searchQuery.length >= 3 && !isSearching && (customer || error === t('modals.customerSearch.customerNotFound')) && (
+      {!callerIdWorkspace && onContinueWithoutCustomer && lookupQuery.length >= 3 && !isSearching && error === t('modals.customerSearch.customerNotFound') && (
+        <button
+          type="button"
+          onClick={() => onContinueWithoutCustomer(searchQuery.trim())}
+          className="mb-3 w-full rounded-xl border border-yellow-400/60 bg-yellow-400 px-6 py-3 font-semibold text-black transition-transform active:scale-[0.98]"
+        >
+          {t('modals.customerSearch.chooseOrderType', 'Continue to order type')}
+        </button>
+      )}
+
+      {callerIdWorkspace &&
+        !isSearching &&
+        (Boolean(customer) || error === t('modals.customerSearch.customerNotFound')) && (
+        <section
+          className="mb-4"
+          aria-labelledby="caller-id-order-actions-title"
+        >
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h3
+                id="caller-id-order-actions-title"
+                className="font-semibold liquid-glass-modal-text"
+              >
+                {t('orderFlow.selectOrderType', 'Select order type')}
+              </h3>
+              <p className="text-sm liquid-glass-modal-text-muted">
+                {customer
+                  ? t('modals.customerSearch.chooseAddressThenOrder', 'Choose an address for delivery, then continue directly.')
+                  : t('modals.customerSearch.pickupWithoutCustomer', 'Pickup can continue without registering a customer. Delivery requires customer details.')}
+              </p>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
+            {callerIdWorkspace.enabledOrderTypes.map((type) => {
+              const config = {
+                delivery: {
+                  label: t('orderFlow.deliveryOrder', 'Delivery'),
+                  icon: Truck,
+                  classes: 'border-yellow-500',
+                  iconClasses: 'text-yellow-600',
+                },
+                pickup: {
+                  label: t('orderFlow.pickupOrder', 'Pickup'),
+                  icon: ShoppingBag,
+                  classes: 'border-emerald-500',
+                  iconClasses: 'text-emerald-600',
+                },
+                'dine-in': {
+                  label: t('orderFlow.tableOrder', 'Table'),
+                  icon: UtensilsCrossed,
+                  classes: 'border-amber-500',
+                  iconClasses: 'text-amber-600',
+                },
+                room: {
+                  label: t('orderFlow.roomOrder', 'Room'),
+                  icon: BedDouble,
+                  classes: 'border-amber-500',
+                  iconClasses: 'text-amber-600',
+                },
+                service: {
+                  label: t('orderFlow.serviceOrder', 'Service'),
+                  icon: CalendarClock,
+                  classes: 'border-amber-500',
+                  iconClasses: 'text-amber-600',
+                },
+              }[type];
+              const Icon = config.icon;
+              return (
+                <button
+                  key={type}
+                  type="button"
+                  data-caller-id-order-type={type}
+                  onClick={() => callerIdWorkspace.onOrderTypeSelected(
+                    type,
+                    buildSelectedCustomer(),
+                    searchQuery.trim(),
+                  )}
+                  className={`flex min-h-[96px] flex-col items-center justify-center gap-2 rounded-2xl border-2 bg-white px-4 py-4 font-semibold text-slate-900 shadow-[0_7px_0_rgba(15,23,42,0.12),0_14px_28px_rgba(15,23,42,0.14)] transition-transform active:translate-y-1 active:shadow-sm dark:bg-white dark:text-slate-900 ${config.classes}`}
+                >
+                  <Icon className={`h-8 w-8 ${config.iconClasses}`} strokeWidth={1.8} />
+                  <span className="text-center text-sm leading-tight">{config.label}</span>
+                </button>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
+      {/* Add New Customer Option - only after an authoritative not-found result in Caller ID mode. */}
+      {!callerIdWorkspace && Boolean(onAddNewCustomer) && lookupQuery.length >= 3 && !isSearching && ((!lookupOnly && customer) || error === t('modals.customerSearch.customerNotFound')) && (
         <div className="p-4 bg-yellow-50 dark:bg-yellow-500/10 border border-yellow-200 dark:border-yellow-500/20 rounded-2xl">
           <p className="text-sm liquid-glass-modal-text-muted mb-3">
             {customer
@@ -972,17 +1216,19 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
       )}
 
       {/* Delete Confirmation Dialog */}
-      <ConfirmDialog
-        isOpen={showDeleteConfirm}
-        onClose={() => setShowDeleteConfirm(false)}
-        onConfirm={performDeleteCustomer}
-        title={t('modals.customerSearch.deleteCustomerTitle', 'Delete Customer')}
-        message={t('modals.customerSearch.confirmDelete')}
-        variant="error"
-        confirmText={t('common.delete', 'Delete')}
-        cancelText={t('common.cancel', 'Cancel')}
-        isLoading={isDeleting}
-      />
+      {!lookupOnly && (
+        <ConfirmDialog
+          isOpen={showDeleteConfirm}
+          onClose={() => setShowDeleteConfirm(false)}
+          onConfirm={performDeleteCustomer}
+          title={t('modals.customerSearch.deleteCustomerTitle', 'Delete Customer')}
+          message={t('modals.customerSearch.confirmDelete')}
+          variant="error"
+          confirmText={t('common.delete', 'Delete')}
+          cancelText={t('common.cancel', 'Cancel')}
+          isLoading={isDeleting}
+        />
+      )}
     </LiquidGlassModal>
   );
 };

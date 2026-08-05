@@ -5,8 +5,10 @@
 //! UDP parser is available only for server-authorized founder-pilot sources.
 //! Missing, ordinary, or unknown authorization remains fail-closed.
 
+use std::collections::hash_map::RandomState;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
+use std::hash::{BuildHasher, Hash, Hasher};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -22,11 +24,20 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use super::activation::{self, ActivationDecision, RuntimeActivation};
+use super::invite_policy::compiled_event_only_policy;
 use super::manager::CallerIdManager;
 use super::types::CallerIdConnectorFamily;
-use super::types::{CallerIdSourceConfig, CallerIdStatusReason};
+use super::types::{CallerIdRejectionStage, CallerIdSourceConfig, CallerIdStatusReason};
+use super::whozz::{
+    configured_channel as configured_whozz_channel, is_call_candidate as is_whozz_candidate,
+    parse_incoming_start as parse_whozz_incoming_start, WhozzIncomingCall, WhozzParseError,
+    WhozzUnitSerial,
+};
 
 const MAX_SIP_PACKET_BYTES: usize = 8 * 1024;
+const MAX_HT813_SYSLOG_PACKET_BYTES: usize = 2 * 1024;
+const HT813_SYSLOG_CALLER_ID_MARKER: &[u8] = b"SigCtrl::processFxoCallerIdReceived, number = ";
 const MAX_CALL_ID_BYTES: usize = 255;
 const DEFAULT_SIP_PORT: u16 = 5060;
 const FXO_DESTINATION_USER: &str = "callerid";
@@ -40,14 +51,26 @@ const PACKET_BURST_CAPACITY: usize = 30;
 const PACKET_RATE_WINDOW: Duration = Duration::from_secs(60);
 const EVENT_QUEUE_CAPACITY: usize = 32;
 const EVENT_POST_TIMEOUT: Duration = Duration::from_secs(5);
+const WHOZZ_RECENT_CALL_TTL: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LocalUdpSourceKind {
+    GrandstreamFxo,
+    WhozzEthernet {
+        channel: u8,
+        unit_serial: WhozzUnitSerial,
+    },
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrandstreamFxoSourceLine {
     pub source: CallerIdSourceConfig,
     pub name: String,
+    pub country_code: Option<String>,
     pub line_version: u64,
     pub is_receiving_target: bool,
     pub readiness_attempt: Option<ReadinessAttempt>,
+    source_kind: LocalUdpSourceKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +85,7 @@ pub struct ReadinessAttempt {
 pub enum Presentation {
     Allowed,
     Restricted,
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +93,67 @@ pub struct ParsedInvite {
     pub caller_number: Option<String>,
     pub presentation: Presentation,
     pub provider_event_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedHt813SyslogCallerId {
+    caller_number: Option<String>,
+    presentation: Presentation,
+}
+
+/// Normalizes the HT813 v1.0.17.3 UDP syslog framing observed during the
+/// founder pilot. The device appends a run of at least two LF bytes to an
+/// otherwise single ASCII record; the observed run length can vary between
+/// calls. We remove only that terminal run. Every embedded control byte and
+/// every multi-record shape remains fail-closed.
+fn certified_ht813_syslog_record(data: &[u8]) -> Result<&[u8], String> {
+    if data.is_empty() {
+        return Err("HT813 syslog packet is empty".into());
+    }
+    if data.len() > MAX_HT813_SYSLOG_PACKET_BYTES {
+        return Err("HT813 syslog packet is oversized".into());
+    }
+    if data.contains(&0) {
+        return Err("HT813 syslog packet contains NUL".into());
+    }
+    if !data.is_ascii() {
+        return Err("HT813 syslog packet contains non-ASCII bytes".into());
+    }
+    let terminal_lf_count = data.iter().rev().take_while(|&&byte| byte == b'\n').count();
+    let record = &data[..data.len() - terminal_lf_count];
+    if terminal_lf_count == 1 {
+        if record.ends_with(b"\r") {
+            return Err("HT813 syslog packet has a terminal CRLF".into());
+        }
+        return Err("HT813 syslog packet has a single terminal LF".into());
+    }
+    if record.is_empty() {
+        return Err("HT813 syslog record is empty after terminal LF framing".into());
+    }
+    if record.ends_with(b"\r") {
+        return Err(if terminal_lf_count > 0 {
+            "HT813 syslog packet has a terminal CRLF"
+        } else {
+            "HT813 syslog packet has a terminal CR"
+        }
+        .into());
+    }
+
+    let text = std::str::from_utf8(record)
+        .map_err(|_| "HT813 syslog packet is not valid UTF-8".to_string())?;
+    if record.contains(&b'\n') {
+        return Err("HT813 syslog packet contains an embedded LF".into());
+    }
+    if record.contains(&b'\r') {
+        return Err("HT813 syslog packet contains an embedded CR".into());
+    }
+    if record.contains(&b'\t') {
+        return Err("HT813 syslog packet contains a tab".into());
+    }
+    if text.bytes().any(|byte| byte.is_ascii_control()) {
+        return Err("HT813 syslog packet contains another ASCII control byte".into());
+    }
+    Ok(record)
 }
 
 #[derive(Debug, Deserialize)]
@@ -82,9 +167,10 @@ struct SourceLineWire {
     device_profile_key: String,
     connector_family: CallerIdConnectorFamily,
     source_channel: String,
+    country_code: Option<String>,
     version: u64,
     is_receiving_target: bool,
-    config: GrandstreamFxoConfigWire,
+    config: Value,
     credential_version: Option<u64>,
     credentials: Option<Value>,
     readiness_attempt: Option<ReadinessAttemptWire>,
@@ -102,6 +188,16 @@ struct GrandstreamFxoConfigWire {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WhozzEthernetConfigWire {
+    preset_id: String,
+    mode: String,
+    listen_port: u16,
+    trusted_device_ip: Option<String>,
+    unit_serial: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ReadinessAttemptWire {
     attempt_id: String,
     line_version: u64,
@@ -113,40 +209,18 @@ fn reviewed_profile_capacity(profile_key: &str) -> Option<usize> {
         "grandstream_ht813_fxo" => Some(1),
         "grandstream_ht841_fxo" => Some(4),
         "grandstream_ht881_fxo" => Some(8),
+        // The current worker owns one UDP socket per projected line. Whozz
+        // broadcasts all channels on one port, so multi-line support remains
+        // fail-closed until a single socket can route multiple line records.
+        "callerid_com_whozz_ethernet" => Some(1),
         _ => None,
     }
 }
 
-fn parse_source_line(value: &Value) -> Result<GrandstreamFxoSourceLine, String> {
-    let wire: SourceLineWire = serde_json::from_value(value.clone())
-        .map_err(|_| "Caller ID source line has an invalid shape".to_string())?;
-    let source_channel = wire.source_channel.trim();
-    if wire.adapter_type != "generic_sip"
-        || reviewed_profile_capacity(&wire.device_profile_key).is_none()
-        || wire.config.preset_id != wire.device_profile_key
-        || wire.connector_family != CallerIdConnectorFamily::AnalogFxo
-        || wire.config.mode != "pbx_ip_trust"
-        || wire.config.transport != "udp"
-        || wire.source_version == 0
-        || wire.version == 0
-        || wire.name.trim().is_empty()
-        || wire.name.chars().count() > 120
-        || source_channel.is_empty()
-        || source_channel.chars().count() > 80
-        || wire.credential_version.is_some()
-        || wire.credentials.is_some()
-    {
-        return Err("Caller ID source line is not a reviewed Grandstream FXO configuration".into());
-    }
-
-    if !(1024..=u16::MAX).contains(&wire.config.listen_port) {
-        return Err("Grandstream FXO listen port must be between 1024 and 65535".into());
-    }
-    let trusted_device_ip = wire
-        .config
-        .trusted_device_ip
+fn parse_private_device_ipv4(value: &str, provider: &str) -> Result<Ipv4Addr, String> {
+    let trusted_device_ip = value
         .parse::<Ipv4Addr>()
-        .map_err(|_| "Grandstream FXO trusted device must be an IPv4 address".to_string())?;
+        .map_err(|_| format!("{provider} trusted device must be an IPv4 address"))?;
     if !trusted_device_ip.is_private()
         || trusted_device_ip.is_loopback()
         || trusted_device_ip.is_unspecified()
@@ -154,8 +228,103 @@ fn parse_source_line(value: &Value) -> Result<GrandstreamFxoSourceLine, String> 
         || trusted_device_ip == Ipv4Addr::BROADCAST
         || matches!(trusted_device_ip.octets()[3], 0 | 255)
     {
-        return Err("Grandstream FXO trusted device must be a private RFC1918 IPv4 address".into());
+        return Err(format!(
+            "{provider} trusted device must be a private RFC1918 IPv4 address"
+        ));
     }
+    Ok(trusted_device_ip)
+}
+
+fn parse_source_line(value: &Value) -> Result<GrandstreamFxoSourceLine, String> {
+    let wire: SourceLineWire = serde_json::from_value(value.clone())
+        .map_err(|_| "Caller ID source line has an invalid shape".to_string())?;
+    let source_channel = wire.source_channel.trim();
+    let country_code = wire
+        .country_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| value.len() == 2 && value.bytes().all(|byte| byte.is_ascii_uppercase()))
+        .map(str::to_string);
+    if wire.source_version == 0
+        || wire.version == 0
+        || wire.name.trim().is_empty()
+        || wire.name.chars().count() > 120
+        || source_channel.is_empty()
+        || source_channel.chars().count() > 80
+        || (wire.country_code.is_some() && country_code.is_none())
+        || wire.credential_version.is_some()
+        || wire.credentials.is_some()
+    {
+        return Err("Caller ID source line is not a reviewed local connector configuration".into());
+    }
+
+    let (listen_port, trusted_device_ip, source_kind) = match wire.adapter_type.as_str() {
+        "generic_sip" => {
+            let config: GrandstreamFxoConfigWire = serde_json::from_value(wire.config.clone())
+                .map_err(|_| "Grandstream FXO source settings have an invalid shape".to_string())?;
+            if !matches!(
+                wire.device_profile_key.as_str(),
+                "grandstream_ht813_fxo" | "grandstream_ht841_fxo" | "grandstream_ht881_fxo"
+            ) || config.preset_id != wire.device_profile_key
+                || wire.connector_family != CallerIdConnectorFamily::AnalogFxo
+                || config.mode != "pbx_ip_trust"
+                || config.transport != "udp"
+            {
+                return Err(
+                    "Caller ID source line is not a reviewed Grandstream FXO configuration".into(),
+                );
+            }
+            if !(1024..=u16::MAX).contains(&config.listen_port) {
+                return Err("Grandstream FXO listen port must be between 1024 and 65535".into());
+            }
+            (
+                config.listen_port,
+                parse_private_device_ipv4(&config.trusted_device_ip, "Grandstream FXO")?,
+                LocalUdpSourceKind::GrandstreamFxo,
+            )
+        }
+        "analog_ethernet" => {
+            let config: WhozzEthernetConfigWire = serde_json::from_value(wire.config.clone())
+                .map_err(|_| "Whozz Ethernet source settings have an invalid shape".to_string())?;
+            if wire.device_profile_key != "callerid_com_whozz_ethernet"
+                || config.preset_id != wire.device_profile_key
+                || wire.connector_family != CallerIdConnectorFamily::AnalogFxo
+                || config.mode != "udp_broadcast"
+                || config.listen_port != 3520
+            {
+                return Err(
+                    "Caller ID source line is not a reviewed Whozz Ethernet configuration".into(),
+                );
+            }
+            let trusted_ip = config
+                .trusted_device_ip
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    "Whozz Ethernet requires a trustedDeviceIp before local listening can start"
+                        .to_string()
+                })?;
+            let unit_serial = WhozzUnitSerial::parse(config.unit_serial.trim())?;
+            (
+                config.listen_port,
+                parse_private_device_ipv4(trusted_ip, "Whozz Ethernet")?,
+                LocalUdpSourceKind::WhozzEthernet {
+                    channel: configured_whozz_channel(source_channel)?,
+                    unit_serial,
+                },
+            )
+        }
+        "analog_usb" if wire.device_profile_key == "artech_ad106_usb" => {
+            return Err(
+                "ARTECH AD106 USB Caller ID remains unavailable until the vendor HID report protocol is verified"
+                    .into(),
+            );
+        }
+        _ => {
+            return Err("Caller ID source line uses an unsupported local adapter".into());
+        }
+    };
     let readiness_attempt = wire
         .readiness_attempt
         .map(|attempt| {
@@ -186,12 +355,14 @@ fn parse_source_line(value: &Value) -> Result<GrandstreamFxoSourceLine, String> 
                 .map_err(|_| "Caller ID source line ID must be a UUID".to_string())?,
             source_channel: source_channel.to_string(),
             trusted_device_ip: IpAddr::V4(trusted_device_ip),
-            listen_port: wire.config.listen_port,
+            listen_port,
         },
         name: wire.name.trim().to_string(),
+        country_code,
         line_version: wire.version,
         is_receiving_target: wire.is_receiving_target,
         readiness_attempt,
+        source_kind,
     })
 }
 
@@ -215,11 +386,13 @@ fn validate_ip_trust_source_lines(value: &Value) -> Result<Vec<GrandstreamFxoSou
     let mut ports = HashSet::new();
     let mut source_channels = HashSet::new();
     for value in source_lines {
-        let is_generic_sip = value
+        let is_local_source = value
             .get("adapterType")
             .and_then(Value::as_str)
-            .is_some_and(|adapter| adapter == "generic_sip");
-        if !is_generic_sip {
+            .is_some_and(|adapter| {
+                matches!(adapter, "generic_sip" | "analog_ethernet" | "analog_usb")
+            });
+        if !is_local_source {
             continue;
         }
         let line = parse_source_line(value)?;
@@ -247,6 +420,7 @@ fn validate_ip_trust_source_lines(value: &Value) -> Result<Vec<GrandstreamFxoSou
                     || candidate.source.device_profile_key != line.source.device_profile_key
                     || candidate.source.connector_family != line.source.connector_family
                     || candidate.source.trusted_device_ip != line.source.trusted_device_ip
+                    || candidate.source_kind != line.source_kind
             })
         {
             return Err("Caller ID source channels do not match one reviewed FXO source".into());
@@ -270,15 +444,24 @@ fn parse_runtime_source_lines(value: &Value) -> Result<Vec<GrandstreamFxoSourceL
     if source_lines.len() > 16 {
         return Err("Caller ID source configuration has too many lines".into());
     }
+    let has_local_source = source_lines.iter().any(|line| {
+        line.get("adapterType")
+            .and_then(Value::as_str)
+            .is_some_and(|adapter| {
+                matches!(adapter, "generic_sip" | "analog_ethernet" | "analog_usb")
+            })
+    });
+    if !has_local_source {
+        return Ok(Vec::new());
+    }
     let has_ip_trust_source = source_lines.iter().any(|line| {
         line.get("adapterType")
             .and_then(Value::as_str)
-            .is_some_and(|adapter| adapter == "generic_sip")
+            .is_some_and(|adapter| matches!(adapter, "generic_sip" | "analog_ethernet"))
     });
-    if !has_ip_trust_source {
-        return Ok(Vec::new());
-    }
-    if value.get("ipTrustSourcePolicy").and_then(Value::as_str) != Some("founder_pilot") {
+    if has_ip_trust_source
+        && value.get("ipTrustSourcePolicy").and_then(Value::as_str) != Some("founder_pilot")
+    {
         return Err(
             "Caller ID IP-trust sources require an explicit founder-pilot entitlement".into(),
         );
@@ -286,11 +469,23 @@ fn parse_runtime_source_lines(value: &Value) -> Result<Vec<GrandstreamFxoSourceL
     validate_ip_trust_source_lines(value)
 }
 
+fn whozz_presentation(call: &WhozzIncomingCall) -> Presentation {
+    if call.restricted {
+        Presentation::Restricted
+    } else if call.caller_number.is_none() {
+        Presentation::Unknown
+    } else {
+        Presentation::Allowed
+    }
+}
+
 fn requires_udp_rebind(
     current: &GrandstreamFxoSourceLine,
     desired: &GrandstreamFxoSourceLine,
 ) -> bool {
-    current.source != desired.source || current.is_receiving_target != desired.is_receiving_target
+    current.source != desired.source
+        || current.source_kind != desired.source_kind
+        || current.is_receiving_target != desired.is_receiving_target
 }
 
 fn build_source_readiness_ack(
@@ -384,6 +579,188 @@ pub fn parse_invite(
         presentation,
         provider_event_id: provider_event_id.to_string(),
     })
+}
+
+fn parse_ht813_syslog_caller_id(
+    data: &[u8],
+    peer: SocketAddr,
+    line: &GrandstreamFxoSourceLine,
+) -> Result<ParsedHt813SyslogCallerId, String> {
+    if peer.ip() != line.source.trusted_device_ip {
+        return Err("Syslog packet did not come from the configured Grandstream source".into());
+    }
+    if line.source.device_profile_key != "grandstream_ht813_fxo" {
+        return Err("Passive syslog Caller ID is certified only for the HT813 profile".into());
+    }
+    let record = certified_ht813_syslog_record(data)?;
+    let text = std::str::from_utf8(record)
+        .map_err(|_| "HT813 syslog packet is not valid UTF-8".to_string())?;
+
+    let priority_end = text
+        .find('>')
+        .filter(|end| text.starts_with('<') && *end > 1 && *end <= 4)
+        .ok_or_else(|| "HT813 syslog priority is malformed".to_string())?;
+    let priority = text[1..priority_end]
+        .parse::<u16>()
+        .ok()
+        .filter(|priority| *priority <= 191)
+        .ok_or_else(|| "HT813 syslog priority is invalid".to_string())?;
+    let _ = priority;
+
+    let envelope = &text[priority_end + 1..];
+    let envelope = envelope
+        .strip_prefix(" HT813 [")
+        .ok_or_else(|| "Syslog record is not from an HT813".to_string())?;
+    let (mac, after_mac) = envelope
+        .split_once("] [")
+        .ok_or_else(|| "HT813 syslog MAC field is malformed".to_string())?;
+    if mac.len() != 17
+        || mac.split(':').count() != 6
+        || mac
+            .split(':')
+            .any(|octet| octet.len() != 2 || !octet.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        return Err("HT813 syslog MAC field is invalid".into());
+    }
+    let (firmware, body) = after_mac
+        .split_once("] GS_ATA: USER.DEBUG  ")
+        .ok_or_else(|| "HT813 syslog component or level is invalid".to_string())?;
+    if firmware.is_empty()
+        || firmware.len() > 32
+        || firmware
+            .split('.')
+            .any(|segment| segment.is_empty() || !segment.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return Err("HT813 syslog firmware field is invalid".into());
+    }
+    let (uptime, event) = body
+        .split_once(' ')
+        .ok_or_else(|| "HT813 syslog uptime is missing".to_string())?;
+    let mut uptime_parts = uptime.split('.');
+    if uptime_parts.next().map_or(true, |value| {
+        value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit())
+    }) || uptime_parts.next().map_or(true, |value| {
+        value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit())
+    }) || uptime_parts.next().is_some()
+    {
+        return Err("HT813 syslog uptime is invalid".into());
+    }
+
+    const CALLER_ID_MARKER: &str = "SigCtrl::processFxoCallerIdReceived, number = ";
+    let value = event
+        .strip_prefix(CALLER_ID_MARKER)
+        .filter(|value| !value.is_empty() && !value.contains(CALLER_ID_MARKER))
+        .ok_or_else(|| "HT813 syslog record is not the certified Caller ID event".to_string())?;
+    let lowered = value.to_ascii_lowercase();
+    if matches!(
+        lowered.as_str(),
+        "anonymous" | "private" | "restricted" | "unavailable" | "unknown" | "p" | "o"
+    ) {
+        return Ok(ParsedHt813SyslogCallerId {
+            caller_number: None,
+            presentation: Presentation::Restricted,
+        });
+    }
+
+    let digits = value.strip_prefix('+').unwrap_or(value);
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("HT813 syslog Caller ID is not a canonical phone number".into());
+    }
+
+    Ok(ParsedHt813SyslogCallerId {
+        caller_number: Some(normalize_phone(value)?),
+        presentation: Presentation::Allowed,
+    })
+}
+
+fn ht813_rejection_stage(error: &str) -> CallerIdRejectionStage {
+    if error.contains("packet is empty") {
+        CallerIdRejectionStage::RecordEmpty
+    } else if error.contains("packet is oversized") {
+        CallerIdRejectionStage::RecordOversized
+    } else if error.contains("contains NUL") {
+        CallerIdRejectionStage::RecordNul
+    } else if error.contains("non-ASCII bytes") {
+        CallerIdRejectionStage::RecordNonAscii
+    } else if error.contains("UTF-8") {
+        CallerIdRejectionStage::RecordUtf8
+    } else if error.contains("terminal CRLF") {
+        CallerIdRejectionStage::RecordTerminalCrlf
+    } else if error.contains("terminal LF") {
+        CallerIdRejectionStage::RecordTerminalLf
+    } else if error.contains("terminal CR") {
+        CallerIdRejectionStage::RecordTerminalCr
+    } else if error.contains("embedded LF") {
+        CallerIdRejectionStage::RecordEmbeddedLf
+    } else if error.contains("embedded CR") {
+        CallerIdRejectionStage::RecordEmbeddedCr
+    } else if error.contains("contains a tab") {
+        CallerIdRejectionStage::RecordTab
+    } else if error.contains("another ASCII control byte") {
+        CallerIdRejectionStage::RecordOtherControl
+    } else if error.contains("internal ASCII control byte") {
+        CallerIdRejectionStage::RecordInternalControl
+    } else if error.contains("ASCII control byte") {
+        CallerIdRejectionStage::RecordControl
+    } else if error.contains("size or encoding") || error.contains("exactly one ASCII record") {
+        CallerIdRejectionStage::RecordEncoding
+    } else if error.contains("priority") {
+        CallerIdRejectionStage::SyslogPriority
+    } else if error.contains("MAC field") {
+        CallerIdRejectionStage::MacAddress
+    } else if error.contains("firmware field") {
+        CallerIdRejectionStage::Firmware
+    } else if error.contains("component or level") {
+        CallerIdRejectionStage::ComponentLevel
+    } else if error.contains("uptime") {
+        CallerIdRejectionStage::Uptime
+    } else if error.contains("canonical phone number")
+        || error.contains("identity is not a phone number")
+        || error.contains("phone number has an invalid length")
+    {
+        CallerIdRejectionStage::CallerNumber
+    } else if error.contains("certified Caller ID event") {
+        CallerIdRejectionStage::CallerIdEvent
+    } else if error.contains("configured Grandstream source")
+        || error.contains("certified only for the HT813 profile")
+        || error.contains("not from an HT813")
+    {
+        CallerIdRejectionStage::DeviceEnvelope
+    } else {
+        CallerIdRejectionStage::Unknown
+    }
+}
+
+fn whozz_rejection_stage(error: WhozzParseError) -> CallerIdRejectionStage {
+    match error {
+        WhozzParseError::Empty => CallerIdRejectionStage::RecordEmpty,
+        WhozzParseError::Oversized => CallerIdRejectionStage::RecordOversized,
+        WhozzParseError::NonAsciiRecord => CallerIdRejectionStage::RecordNonAscii,
+        WhozzParseError::Envelope | WhozzParseError::Identity => {
+            CallerIdRejectionStage::DeviceEnvelope
+        }
+        WhozzParseError::Channel | WhozzParseError::Record => CallerIdRejectionStage::CallerIdEvent,
+        WhozzParseError::CallerNumber => CallerIdRejectionStage::CallerNumber,
+    }
+}
+
+fn whozz_provider_event_id(
+    source_id: Uuid,
+    packet_fingerprint: &str,
+    occurred_at: DateTime<Utc>,
+    occurrence_id: Uuid,
+) -> String {
+    // A byte-identical Whozz frame can represent another genuine call later
+    // in the same vendor timestamp minute. The canonical fingerprint is only
+    // a bounded local retransmission key; server idempotency also includes the
+    // accepted occurrence time and a per-occurrence UUID. No caller identity
+    // is exposed in the resulting provider event ID.
+    format!(
+        "whozz-{}-{}-{}-{packet_fingerprint}",
+        source_id.simple(),
+        occurred_at.timestamp_millis(),
+        occurrence_id.simple(),
+    )
 }
 
 pub fn build_sip_response(data: &[u8], status_code: u16) -> Result<Vec<u8>, String> {
@@ -637,12 +1014,24 @@ impl RecentCallIds {
         }
     }
 
+    #[cfg(test)]
     pub fn accept(&mut self, call_id: &str, now: Instant) -> bool {
-        self.entries
-            .retain(|_, seen_at| now.saturating_duration_since(*seen_at) <= self.ttl);
-        if self.entries.contains_key(call_id) {
+        if self.contains(call_id, now) {
             return false;
         }
+        self.commit(call_id, now);
+        true
+    }
+
+    fn contains(&mut self, call_id: &str, now: Instant) -> bool {
+        self.entries
+            .retain(|_, seen_at| now.saturating_duration_since(*seen_at) <= self.ttl);
+        self.entries.contains_key(call_id)
+    }
+
+    fn commit(&mut self, call_id: &str, now: Instant) {
+        self.entries
+            .retain(|_, seen_at| now.saturating_duration_since(*seen_at) <= self.ttl);
         if self.entries.len() >= self.capacity {
             if let Some(oldest) = self
                 .entries
@@ -654,7 +1043,6 @@ impl RecentCallIds {
             }
         }
         self.entries.insert(call_id.to_string(), now);
-        true
     }
 
     #[cfg(test)]
@@ -937,6 +1325,37 @@ async fn run_connector_supervisor(
     let mut ticker = tokio::time::interval(CONFIG_POLL_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+    // The native runtime is always part of the POS binary.  On a cold offline
+    // boot it may activate only from a terminal-bound, unexpired lease that
+    // was previously stored in the OS credential vault.
+    if let Some(terminal_id) = crate::storage::get_credential("terminal_id") {
+        match activation::load_cached_snapshot(terminal_id.trim(), Utc::now()) {
+            Ok(Some(decision)) => {
+                if let Err(error) = reconcile_activation_decision(
+                    &app_handle,
+                    &manager,
+                    generation,
+                    &cancel,
+                    &mut active,
+                    decision,
+                )
+                .await
+                {
+                    cancel_active_lines(&mut active).await;
+                    manager.set_error(generation, error, CallerIdStatusReason::InvalidConfig);
+                }
+            }
+            Ok(None) => {}
+            Err(_) => {
+                manager.set_error(
+                    generation,
+                    "Caller ID offline activation cache is invalid".into(),
+                    CallerIdStatusReason::InvalidConfig,
+                );
+            }
+        }
+    }
+
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
@@ -964,30 +1383,83 @@ async fn run_connector_supervisor(
                 };
                 match result {
                     Ok(config) => {
-                        let desired = match parse_runtime_source_lines(&config) {
-                            Ok(lines) => lines,
+                        let Some(terminal_id) = crate::storage::get_credential("terminal_id") else {
+                            cancel_active_lines(&mut active).await;
+                            manager.set_error(
+                                generation,
+                                "Caller ID terminal identity is unavailable".into(),
+                                CallerIdStatusReason::AuthFailed,
+                            );
+                            continue;
+                        };
+                        let decision = match activation::store_online_snapshot(
+                            &config,
+                            terminal_id.trim(),
+                            Utc::now(),
+                        ) {
+                            Ok(decision) => decision,
                             Err(_) => {
                                 cancel_active_lines(&mut active).await;
                                 manager.set_error(
                                     generation,
-                                    "Caller ID source configuration is invalid".into(),
+                                    "Caller ID activation policy is invalid".into(),
                                     CallerIdStatusReason::InvalidConfig,
                                 );
                                 continue;
                             }
                         };
-                        reconcile_active_lines(
+                        if let Err(error) = reconcile_activation_decision(
                             &app_handle,
                             &manager,
                             generation,
                             &cancel,
                             &mut active,
-                            desired,
-                        ).await;
+                            decision,
+                        ).await {
+                            cancel_active_lines(&mut active).await;
+                            manager.set_error(
+                                generation,
+                                error,
+                                CallerIdStatusReason::InvalidConfig,
+                            );
+                        }
                     }
                     Err(error) => {
                         if configuration_error_requires_worker_shutdown(error.status()) {
+                            if let Some(terminal_id) = crate::storage::get_credential("terminal_id") {
+                                if let Err(cache_error) = activation::persist_online_revocation(
+                                    terminal_id.trim(),
+                                    Utc::now(),
+                                ) {
+                                    warn!(
+                                        error = %cache_error,
+                                        "Caller ID online revocation could not be persisted"
+                                    );
+                                }
+                            }
                             cancel_active_lines(&mut active).await;
+                        } else if let Some(terminal_id) = crate::storage::get_credential("terminal_id") {
+                            // Ordinary network failures preserve the source only while the
+                            // last server-issued lease remains valid.  Expiry transitions
+                            // to bridge-only and stops Caller ID emission.
+                            match activation::load_cached_snapshot(terminal_id.trim(), Utc::now()) {
+                                Ok(Some(decision)) => {
+                                    if let Err(cache_error) = reconcile_activation_decision(
+                                        &app_handle,
+                                        &manager,
+                                        generation,
+                                        &cancel,
+                                        &mut active,
+                                        decision,
+                                    ).await {
+                                        warn!(error = %cache_error, "Caller ID cached activation could not be applied");
+                                        cancel_active_lines(&mut active).await;
+                                    }
+                                }
+                                Ok(None) | Err(_) => {
+                                    cancel_active_lines(&mut active).await;
+                                }
+                            }
                         }
                         manager.set_error(
                             generation,
@@ -1003,6 +1475,47 @@ async fn run_connector_supervisor(
             }
         }
     }
+}
+
+async fn reconcile_activation_decision(
+    app_handle: &tauri::AppHandle,
+    manager: &Arc<CallerIdManager>,
+    generation: u64,
+    supervisor_cancel: &CancellationToken,
+    active: &mut HashMap<Uuid, ActiveLine>,
+    decision: ActivationDecision,
+) -> Result<(), String> {
+    match decision.mode {
+        RuntimeActivation::CallerIdSource => {
+            let desired = parse_runtime_source_lines(&decision.config)
+                .map_err(|_| "Caller ID source configuration is invalid".to_string())?;
+            reconcile_active_lines(
+                app_handle,
+                manager,
+                generation,
+                supervisor_cancel,
+                active,
+                desired,
+            )
+            .await;
+        }
+        RuntimeActivation::InactiveTerminal => {
+            cancel_active_lines(active).await;
+            manager.set_listening(generation, 0);
+        }
+        RuntimeActivation::BridgeOnly => {
+            // Subscription/lease state gates Caller ID only.  The future
+            // managed telephony engine consumes the retained bridge config
+            // independently and must never be torn down here.
+            cancel_active_lines(active).await;
+            manager.set_listening(generation, 0);
+            info!(
+                expires_at = %decision.expires_at,
+                "Caller ID runtime entered bridge-only safety mode"
+            );
+        }
+    }
+    Ok(())
 }
 
 async fn reconcile_active_lines(
@@ -1215,8 +1728,15 @@ async fn run_udp_line(
     event_sender: mpsc::Sender<PendingEvent>,
     cancel: CancellationToken,
 ) {
+    let response_policy = compiled_event_only_policy();
+    let syslog_fingerprint_state = RandomState::new();
     let mut buffer = vec![0_u8; MAX_SIP_PACKET_BYTES + 1];
-    let mut recent_calls = RecentCallIds::new(RECENT_CALL_CAPACITY, RECENT_CALL_TTL);
+    let recent_call_ttl = if matches!(&line.source_kind, LocalUdpSourceKind::WhozzEthernet { .. }) {
+        WHOZZ_RECENT_CALL_TTL
+    } else {
+        RECENT_CALL_TTL
+    };
+    let mut recent_calls = RecentCallIds::new(RECENT_CALL_CAPACITY, recent_call_ttl);
     let mut rate_limiter = EventRateLimiter::new(EVENT_RATE_LIMIT, EVENT_RATE_WINDOW);
     let mut packet_limiter = PacketTokenBucket::new(
         PACKET_BURST_CAPACITY,
@@ -1236,43 +1756,149 @@ async fn run_udp_line(
                         continue;
                     }
                 };
+                manager.increment_udp_packets(generation);
                 // The peer boundary is checked before parsing and before any
                 // response, preventing the UDP socket from becoming a
                 // reflection surface for other LAN or public senders.
                 if peer.ip() != line.source.trusted_device_ip {
                     continue;
                 }
+                manager.increment_trusted_packets(generation);
+                let packet = &buffer[..length];
+                let is_sip_candidate = matches!(&line.source_kind, LocalUdpSourceKind::GrandstreamFxo)
+                    && packet.starts_with(b"INVITE ");
+                let is_ht813_syslog_candidate = matches!(&line.source_kind, LocalUdpSourceKind::GrandstreamFxo)
+                    && packet.starts_with(b"<")
+                    && packet
+                        .windows(HT813_SYSLOG_CALLER_ID_MARKER.len())
+                        .any(|window| window == HT813_SYSLOG_CALLER_ID_MARKER);
+                let is_whozz_call_candidate = matches!(
+                    &line.source_kind,
+                    LocalUdpSourceKind::WhozzEthernet { .. }
+                ) && is_whozz_candidate(packet);
+                if !is_sip_candidate && !is_ht813_syslog_candidate && !is_whozz_call_candidate {
+                    continue;
+                }
+                manager.increment_caller_id_candidates(generation);
                 let now = Instant::now();
                 if !packet_limiter.allow(now) {
                     continue;
                 }
-                let packet = &buffer[..length];
-                let invite = match parse_invite(packet, peer, &line) {
-                    Ok(invite) => invite,
-                    Err(_) => continue,
-                };
-                let trying = match build_sip_response(packet, 100) {
-                    Ok(response) => response,
-                    Err(_) => continue,
-                };
-                let busy = match build_sip_response(packet, 486) {
-                    Ok(response) => response,
-                    Err(_) => continue,
-                };
-                let _ = socket.send_to(&trying, peer).await;
-                let _ = socket.send_to(&busy, peer).await;
-
-                if !recent_calls.accept(&invite.provider_event_id, now)
-                    || !rate_limiter.allow(now)
+                let (mut invite, deduplication_id, is_sip_invite, whozz_fingerprint) = if is_sip_candidate {
+                    let invite = match parse_invite(packet, peer, &line) {
+                        Ok(invite) => invite,
+                        Err(_) => {
+                            manager.record_rejected_candidate(
+                                generation,
+                                CallerIdRejectionStage::SipInvite,
+                            );
+                            continue;
+                        }
+                    };
+                    let deduplication_id = format!("sip:{}", invite.provider_event_id);
+                    (invite, deduplication_id, true, None)
+                } else if is_ht813_syslog_candidate {
+                    let syslog = match parse_ht813_syslog_caller_id(packet, peer, &line) {
+                        Ok(syslog) => syslog,
+                        Err(error) => {
+                            manager.record_rejected_candidate(
+                                generation,
+                                ht813_rejection_stage(&error),
+                            );
+                            continue;
+                        }
+                    };
+                    let mut hasher = syslog_fingerprint_state.build_hasher();
+                    // Hash the logical single record, not its optional terminal LF run,
+                    // so framing variation cannot bypass retransmission dedupe.
+                    let Ok(record) = certified_ht813_syslog_record(packet) else {
+                        continue;
+                    };
+                    record.hash(&mut hasher);
+                    let deduplication_id = format!("syslog:{:016x}", hasher.finish());
+                    let invite = ParsedInvite {
+                        caller_number: syslog.caller_number,
+                        presentation: syslog.presentation,
+                        provider_event_id: format!("ht813-syslog-{}", Uuid::new_v4()),
+                    };
+                    (invite, deduplication_id, false, None)
+                } else if let LocalUdpSourceKind::WhozzEthernet {
+                    channel,
+                    unit_serial,
+                } = &line.source_kind
                 {
+                    let call = match parse_whozz_incoming_start(
+                        packet,
+                        *channel,
+                        Some(unit_serial),
+                    ) {
+                        Ok(Some(call)) => call,
+                        Ok(None) => continue,
+                        Err(error) => {
+                            manager.record_rejected_candidate(
+                                generation,
+                                whozz_rejection_stage(error),
+                            );
+                            continue;
+                        }
+                    };
+                    let presentation = whozz_presentation(&call);
+                    let packet_fingerprint = call.packet_fingerprint;
+                    let deduplication_id =
+                        format!("whozz:{}:{packet_fingerprint}", line.source.line_id);
+                    let invite = ParsedInvite {
+                        caller_number: call.caller_number,
+                        presentation,
+                        // Filled only after the occurrence passes bounded
+                        // retransmission/rate checks below.
+                        provider_event_id: String::new(),
+                    };
+                    (invite, deduplication_id, false, Some(packet_fingerprint))
+                } else {
                     continue;
+                };
+                // Passive observation is the only safe production fallback
+                // until the managed Baresip bridge owns both SIP call legs.
+                // A Caller ID observer must not answer or terminate the HT813
+                // transaction because that can also stop the PSTN voice path.
+                if is_sip_invite {
+                    for status in response_policy.response_statuses() {
+                        if let Ok(response) = build_sip_response(packet, *status) {
+                            let _ = socket.send_to(&response, peer).await;
+                        }
+                    }
+                }
+
+                if recent_calls.contains(&deduplication_id, now) || !rate_limiter.allow(now) {
+                    continue;
+                }
+                let occurred_at = Utc::now();
+                if let Some(packet_fingerprint) = whozz_fingerprint.as_deref() {
+                    invite.provider_event_id = whozz_provider_event_id(
+                        line.source.source_id,
+                        packet_fingerprint,
+                        occurred_at,
+                        Uuid::new_v4(),
+                    );
                 }
                 let pending = PendingEvent {
                     invite,
-                    occurred_at: Utc::now(),
+                    occurred_at,
                 };
                 if event_sender.try_send(pending).is_ok() {
+                    recent_calls.commit(&deduplication_id, now);
                     manager.increment_calls(generation);
+                    if matches!(&line.source_kind, LocalUdpSourceKind::WhozzEthernet { .. }) {
+                        info!(
+                            line_id = %line.source.line_id,
+                            "Passive Whozz Caller ID event queued without sending to the device"
+                        );
+                    } else if !is_sip_invite {
+                        info!(
+                            line_id = %line.source.line_id,
+                            "Passive HT813 Caller ID event queued without touching the voice path"
+                        );
+                    }
                 } else {
                     warn!(
                         line_id = %line.source.line_id,
@@ -1369,6 +1995,7 @@ fn build_event_body(source: &CallerIdSourceConfig, pending: &PendingEvent) -> Va
     let presentation = match pending.invite.presentation {
         Presentation::Allowed => "allowed",
         Presentation::Restricted => "restricted",
+        Presentation::Unknown => "unknown",
     };
     serde_json::json!({
         "sourceId": source.source_id,
@@ -1385,6 +2012,7 @@ fn build_local_event_body(line: &GrandstreamFxoSourceLine, pending: &PendingEven
     let presentation = match pending.invite.presentation {
         Presentation::Allowed => "allowed",
         Presentation::Restricted => "restricted",
+        Presentation::Unknown => "unknown",
     };
     serde_json::json!({
         "schemaVersion": 1,
@@ -1392,6 +2020,7 @@ fn build_local_event_body(line: &GrandstreamFxoSourceLine, pending: &PendingEven
         "sourceVersion": line.source.source_version,
         "lineId": line.source.line_id,
         "lineName": line.name,
+        "countryCode": line.country_code,
         "lineVersion": line.line_version,
         "providerEventId": pending.invite.provider_event_id,
         "callerNumber": pending.invite.caller_number,
@@ -1420,6 +2049,44 @@ mod tests {
     const LINE_ID: &str = "018f7684-1436-7d3d-a3f8-58b1bf600dbd";
     const SOURCE_ID: &str = "018f7684-1436-7d3d-a3f8-58b1bf600da0";
 
+    #[test]
+    fn whozz_provider_event_ids_are_occurrence_unique_and_source_scoped() {
+        let source_id = Uuid::parse_str(SOURCE_ID).unwrap();
+        let fingerprint = "0123456789abcdef0123456789abcdef";
+        let first_time = DateTime::parse_from_rfc3339("2026-08-04T18:30:00.123Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let second_time = first_time + chrono::Duration::minutes(1);
+        let first_occurrence = Uuid::parse_str("018f7684-1436-7d3d-a3f8-58b1bf600db1").unwrap();
+        let second_occurrence = Uuid::parse_str("018f7684-1436-7d3d-a3f8-58b1bf600db2").unwrap();
+
+        let first = whozz_provider_event_id(source_id, fingerprint, first_time, first_occurrence);
+        assert_eq!(
+            first,
+            whozz_provider_event_id(source_id, fingerprint, first_time, first_occurrence,),
+            "publisher retries for one accepted PendingEvent must retain its ID"
+        );
+        let later_call =
+            whozz_provider_event_id(source_id, fingerprint, second_time, second_occurrence);
+        assert_ne!(
+            first, later_call,
+            "the same vendor frame on a later genuine call must not collide"
+        );
+        assert_ne!(
+            first,
+            whozz_provider_event_id(source_id, fingerprint, first_time, second_occurrence,),
+            "two accepted occurrences in the same millisecond must remain unique"
+        );
+        assert!(!first.contains("5558675309"));
+
+        let other_source = Uuid::parse_str("018f7684-1436-7d3d-a3f8-58b1bf600da2").unwrap();
+        assert_ne!(
+            first,
+            whozz_provider_event_id(other_source, fingerprint, first_time, first_occurrence,),
+            "different physical sources must not share an ingestion idempotency key"
+        );
+    }
+
     fn source_line() -> serde_json::Value {
         json!({
             "id": LINE_ID,
@@ -1430,6 +2097,7 @@ mod tests {
             "deviceProfileKey": "grandstream_ht813_fxo",
             "connectorFamily": "analog_fxo",
             "sourceChannel": "fxo-1",
+            "countryCode": "GR",
             "version": 4,
             "isReceivingTarget": true,
             "config": {
@@ -1442,6 +2110,84 @@ mod tests {
             "credentialVersion": null,
             "credentials": null
         })
+    }
+
+    fn whozz_source_line() -> serde_json::Value {
+        json!({
+            "id": LINE_ID,
+            "name": "Whozz line 1",
+            "adapterType": "analog_ethernet",
+            "sourceId": SOURCE_ID,
+            "sourceVersion": 7,
+            "deviceProfileKey": "callerid_com_whozz_ethernet",
+            "connectorFamily": "analog_fxo",
+            "sourceChannel": "line-1",
+            "countryCode": "GR",
+            "version": 4,
+            "isReceivingTarget": true,
+            "config": {
+                "presetId": "callerid_com_whozz_ethernet",
+                "mode": "udp_broadcast",
+                "trustedDeviceIp": "192.168.1.80",
+                "listenPort": 3520,
+                "unitSerial": "000000844884"
+            },
+            "credentialVersion": null,
+            "credentials": null
+        })
+    }
+
+    #[test]
+    fn accepts_only_a_fixed_private_peer_and_reviewed_whozz_identity() {
+        let parsed = parse_source_line(&whozz_source_line()).expect("reviewed Whozz source");
+        assert_eq!(
+            parsed.source.trusted_device_ip,
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 80))
+        );
+        assert_eq!(parsed.source.listen_port, 3520);
+        assert!(matches!(
+            parsed.source_kind,
+            LocalUdpSourceKind::WhozzEthernet {
+                channel: 1,
+                unit_serial: _
+            }
+        ));
+
+        for address in ["", "8.8.8.8", "127.0.0.1", "192.168.1.0", "router.local"] {
+            let mut invalid = whozz_source_line();
+            invalid["config"]["trustedDeviceIp"] = json!(address);
+            assert!(
+                parse_source_line(&invalid).is_err(),
+                "Whozz peer {address:?} must fail closed"
+            );
+        }
+
+        let mut invalid_serial = whozz_source_line();
+        invalid_serial["config"]["unitSerial"] = json!("NOT-A-SERIAL");
+        assert!(parse_source_line(&invalid_serial).is_err());
+
+        let mut missing_serial = whozz_source_line();
+        missing_serial["config"]
+            .as_object_mut()
+            .unwrap()
+            .remove("unitSerial");
+        assert!(
+            parse_source_line(&missing_serial).is_err(),
+            "Whozz must fail closed unless the packet identity is configured"
+        );
+
+        let mut wrong_port = whozz_source_line();
+        wrong_port["config"]["listenPort"] = json!(5060);
+        assert!(parse_source_line(&wrong_port).is_err());
+    }
+
+    #[test]
+    fn artech_ad106_remains_fail_closed_until_vendor_hid_protocol_is_verified() {
+        let mut value = whozz_source_line();
+        value["adapterType"] = json!("analog_usb");
+        value["deviceProfileKey"] = json!("artech_ad106_usb");
+        let error = parse_source_line(&value).expect_err("AD106 cannot source unverified frames");
+        assert!(error.contains("vendor HID report protocol is verified"));
     }
 
     fn reviewed_source_line(
@@ -1459,6 +2205,7 @@ mod tests {
             "deviceProfileKey": profile,
             "connectorFamily": "analog_fxo",
             "sourceChannel": source_channel,
+            "countryCode": "GR",
             "version": 4,
             "isReceivingTarget": true,
             "config": {
@@ -1495,11 +2242,31 @@ mod tests {
     fn preserves_server_selected_local_receiving_target() {
         let receiving = parse_source_line(&source_line()).unwrap();
         assert!(receiving.is_receiving_target);
+        assert_eq!(receiving.country_code.as_deref(), Some("GR"));
 
         let mut source_only = source_line();
         source_only["isReceivingTarget"] = json!(false);
         let source_only = parse_source_line(&source_only).unwrap();
         assert!(!source_only.is_receiving_target);
+    }
+
+    #[test]
+    fn accepts_legacy_cached_lines_without_country_and_rejects_invalid_country() {
+        let mut legacy = source_line();
+        legacy
+            .as_object_mut()
+            .expect("source line object")
+            .remove("countryCode");
+        assert_eq!(
+            parse_source_line(&legacy)
+                .expect("legacy cached source line")
+                .country_code,
+            None,
+        );
+
+        let mut invalid = source_line();
+        invalid["countryCode"] = json!("Greece");
+        assert!(parse_source_line(&invalid).is_err());
     }
 
     async fn installed_test_generation(manager: &Arc<CallerIdManager>) -> (u64, CancellationToken) {
@@ -1961,6 +2728,43 @@ mod tests {
         .into_bytes()
     }
 
+    fn ht813_syslog_caller_id(number: &str) -> Vec<u8> {
+        format!(
+            "<15> HT813 [ec:74:d7:b4:8a:18] [1.0.17.3] GS_ATA: USER.DEBUG  \
+             2090.670 SigCtrl::processFxoCallerIdReceived, number = {number}"
+        )
+        .into_bytes()
+    }
+
+    fn ht813_unrelated_syslog(sequence: usize) -> Vec<u8> {
+        format!(
+            "<15> HT813 [ec:74:d7:b4:8a:18] [1.0.17.3] GS_ATA: USER.DEBUG  \
+             2090.{sequence:03} Nuvoton::run(), unrelated debug event"
+        )
+        .into_bytes()
+    }
+
+    fn runtime_test_line(listen_port: u16) -> GrandstreamFxoSourceLine {
+        GrandstreamFxoSourceLine {
+            source: CallerIdSourceConfig {
+                source_id: Uuid::parse_str(SOURCE_ID).unwrap(),
+                source_version: 7,
+                device_profile_key: "grandstream_ht813_fxo".into(),
+                connector_family: CallerIdConnectorFamily::AnalogFxo,
+                line_id: Uuid::parse_str(LINE_ID).unwrap(),
+                source_channel: "fxo-1".into(),
+                trusted_device_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                listen_port,
+            },
+            name: "Runtime test".into(),
+            country_code: Some("GR".into()),
+            line_version: 1,
+            is_receiving_target: true,
+            readiness_attempt: None,
+            source_kind: LocalUdpSourceKind::GrandstreamFxo,
+        }
+    }
+
     #[test]
     fn rejects_ip_trust_without_an_explicit_founder_pilot_policy() {
         parse_runtime_source_lines(&reviewed_source("grandstream_ht813_fxo", 1))
@@ -1970,6 +2774,18 @@ mod tests {
         unknown_policy["ipTrustSourcePolicy"] = json!("unknown");
         parse_runtime_source_lines(&unknown_policy)
             .expect_err("unknown policy must not produce a runtime listener config");
+
+        let whozz = json!({
+            "enabled": true,
+            "sourceLines": [whozz_source_line()]
+        });
+        parse_runtime_source_lines(&whozz)
+            .expect_err("Whozz IP trust must not bypass the founder-pilot policy");
+
+        let mut blocked_whozz = whozz;
+        blocked_whozz["ipTrustSourcePolicy"] = json!("blocked");
+        parse_runtime_source_lines(&blocked_whozz)
+            .expect_err("a blocked Whozz entitlement must remain fail-closed");
     }
 
     #[test]
@@ -1982,6 +2798,43 @@ mod tests {
 
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].source.device_profile_key, "grandstream_ht813_fxo");
+
+        let whozz = json!({
+            "enabled": true,
+            "ipTrustSourcePolicy": "founder_pilot",
+            "sourceLines": [whozz_source_line()]
+        });
+        let parsed = parse_runtime_source_lines(&whozz)
+            .expect("the scoped founder pilot can bind a reviewed Whozz listener");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(
+            parsed[0].source.device_profile_key,
+            "callerid_com_whozz_ethernet"
+        );
+    }
+
+    #[test]
+    fn whozz_missing_non_restricted_identity_is_reported_as_unknown() {
+        let unknown = WhozzIncomingCall {
+            caller_number: None,
+            restricted: false,
+            packet_fingerprint: "0123456789abcdef0123456789abcdef".into(),
+        };
+        assert_eq!(whozz_presentation(&unknown), Presentation::Unknown);
+
+        let allowed = WhozzIncomingCall {
+            caller_number: Some("2101234567".into()),
+            restricted: false,
+            packet_fingerprint: "1123456789abcdef0123456789abcdef".into(),
+        };
+        assert_eq!(whozz_presentation(&allowed), Presentation::Allowed);
+
+        let restricted = WhozzIncomingCall {
+            caller_number: None,
+            restricted: true,
+            packet_fingerprint: "2123456789abcdef0123456789abcdef".into(),
+        };
+        assert_eq!(whozz_presentation(&restricted), Presentation::Restricted);
     }
 
     #[test]
@@ -2102,6 +2955,150 @@ mod tests {
             &line,
         )
         .is_err());
+    }
+
+    #[test]
+    fn passive_ht813_syslog_rejects_noncanonical_number_text() {
+        let line = parse_source_line(&source_line()).unwrap();
+        let peer = SocketAddr::new(line.source.trusted_device_ip, 514);
+
+        for value in [
+            "2101234567 ",
+            "210-123-4567",
+            "+30+2101234567",
+            "12",
+            "123456789012345678901234567890123",
+            "unknown-value",
+        ] {
+            assert!(
+                parse_ht813_syslog_caller_id(&ht813_syslog_caller_id(value), peer, &line).is_err(),
+                "noncanonical syslog Caller ID must be rejected: {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn passive_ht813_syslog_accepts_only_the_trusted_certified_device_envelope() {
+        let line = parse_source_line(&source_line()).unwrap();
+        let peer = SocketAddr::new(line.source.trusted_device_ip, 514);
+        let parsed =
+            parse_ht813_syslog_caller_id(&ht813_syslog_caller_id("+302101234567"), peer, &line)
+                .expect("certified HT813 syslog fixture");
+        assert_eq!(parsed.caller_number.as_deref(), Some("+302101234567"));
+        assert_eq!(parsed.presentation, Presentation::Allowed);
+
+        for terminal_lf_run in [b"\n\n".as_slice(), b"\n\n\n", b"\n\n\n\n\n"] {
+            let mut observed_wire_record = ht813_syslog_caller_id("2101234567");
+            observed_wire_record.extend_from_slice(terminal_lf_run);
+            let parsed = parse_ht813_syslog_caller_id(&observed_wire_record, peer, &line)
+                .expect("certified HT813 record with its observed terminal LF run");
+            assert_eq!(parsed.caller_number.as_deref(), Some("2101234567"));
+        }
+
+        let wrong_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 71)), 514);
+        assert!(parse_ht813_syslog_caller_id(
+            &ht813_syslog_caller_id("2101234567"),
+            wrong_peer,
+            &line,
+        )
+        .is_err());
+
+        let mut wrong_profile = line.clone();
+        wrong_profile.source.device_profile_key = "grandstream_ht841_fxo".into();
+        assert!(parse_ht813_syslog_caller_id(
+            &ht813_syslog_caller_id("2101234567"),
+            peer,
+            &wrong_profile,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn passive_ht813_syslog_rejects_malformed_or_multirecord_datagrams() {
+        let line = parse_source_line(&source_line()).unwrap();
+        let peer = SocketAddr::new(line.source.trusted_device_ip, 514);
+        let valid = ht813_syslog_caller_id("2101234567");
+        let mut nul = valid.clone();
+        nul.push(0);
+        let mut nul_then_lf = valid.clone();
+        nul_then_lf.extend_from_slice(b"\0\n");
+        let mut lf_then_nul = valid.clone();
+        lf_then_nul.extend_from_slice(b"\n\0");
+        let mut invalid_utf8 = valid.clone();
+        invalid_utf8.push(0xff);
+        let mut multiline = valid.clone();
+        multiline.extend_from_slice(b"\r\n<15> second-record");
+        let mut terminal_crlf = valid.clone();
+        terminal_crlf.extend_from_slice(b"\r\n");
+        let mut terminal_cr = valid.clone();
+        terminal_cr.push(b'\r');
+        let mut single_lf = valid.clone();
+        single_lf.push(b'\n');
+        let mut embedded_lf = valid.clone();
+        embedded_lf.extend_from_slice(b"\n<15> second-record\n\n");
+        let mut embedded_tab = valid.clone();
+        embedded_tab.push(b'\t');
+        let mut embedded_control = valid.clone();
+        embedded_control.push(0x01);
+        let mut embedded_del = valid.clone();
+        embedded_del.push(0x7f);
+        let oversized = vec![b'A'; MAX_HT813_SYSLOG_PACKET_BYTES + 1];
+        let embedded_marker = String::from_utf8(valid.clone())
+            .unwrap()
+            .replace(
+                "SigCtrl::processFxoCallerIdReceived, number = ",
+                "OtherComponent::log, text = SigCtrl::processFxoCallerIdReceived, number = ",
+            )
+            .into_bytes();
+        let malformed_sip = format!(
+            "INVITE sip:callerid@192.168.1.20:5060 SIP/2.0\r\nX-Debug: {}\r\n\r\n",
+            String::from_utf8(valid).unwrap()
+        )
+        .into_bytes();
+
+        for packet in [
+            Vec::new(),
+            nul,
+            nul_then_lf,
+            lf_then_nul,
+            invalid_utf8,
+            multiline,
+            terminal_crlf,
+            terminal_cr,
+            single_lf,
+            embedded_lf,
+            embedded_tab,
+            embedded_control,
+            embedded_del,
+            b"\n".to_vec(),
+            oversized,
+            embedded_marker,
+            malformed_sip,
+        ] {
+            assert!(parse_ht813_syslog_caller_id(&packet, peer, &line).is_err());
+        }
+    }
+
+    #[test]
+    fn passive_ht813_syslog_preserves_private_presentation_without_a_number() {
+        let line = parse_source_line(&source_line()).unwrap();
+        let peer = SocketAddr::new(line.source.trusted_device_ip, 514);
+
+        for sentinel in [
+            "anonymous",
+            "private",
+            "restricted",
+            "unavailable",
+            "unknown",
+            "P",
+            "O",
+        ] {
+            let parsed =
+                parse_ht813_syslog_caller_id(&ht813_syslog_caller_id(sentinel), peer, &line)
+                    .expect("known private presentation sentinel");
+            assert_eq!(parsed.presentation, Presentation::Restricted);
+            assert_eq!(parsed.caller_number, None);
+        }
     }
 
     #[test]
@@ -2304,7 +3301,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn udp_runtime_replies_100_then_486_and_publishes_one_event_per_call_id() {
+    async fn udp_runtime_observes_invites_without_answering_or_terminating_the_voice_leg() {
         let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let listen_port = socket.local_addr().unwrap().port();
         let line = GrandstreamFxoSourceLine {
@@ -2319,9 +3316,11 @@ mod tests {
                 listen_port,
             },
             name: "Runtime test".into(),
+            country_code: Some("GR".into()),
             line_version: 1,
             is_receiving_target: true,
             readiness_attempt: None,
+            source_kind: LocalUdpSourceKind::GrandstreamFxo,
         };
         let manager = Arc::new(CallerIdManager::new());
         let generation = manager
@@ -2355,18 +3354,12 @@ mod tests {
             .await
             .unwrap();
         let mut response = vec![0_u8; 2_048];
-        let (trying_length, _) =
-            tokio::time::timeout(Duration::from_secs(1), client.recv_from(&mut response))
+        assert!(
+            tokio::time::timeout(Duration::from_millis(75), client.recv_from(&mut response))
                 .await
-                .unwrap()
-                .unwrap();
-        assert!(response[..trying_length].starts_with(b"SIP/2.0 100 Trying\r\n"));
-        let (busy_length, _) =
-            tokio::time::timeout(Duration::from_secs(1), client.recv_from(&mut response))
-                .await
-                .unwrap()
-                .unwrap();
-        assert!(response[..busy_length].starts_with(b"SIP/2.0 486 Busy Here\r\n"));
+                .is_err(),
+            "the observation-only fallback must not create or terminate a SIP call leg"
+        );
         let first = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
             .await
             .unwrap()
@@ -2377,14 +3370,12 @@ mod tests {
             .send_to(&packet, (Ipv4Addr::LOCALHOST, listen_port))
             .await
             .unwrap();
-        for expected in [b"SIP/2.0 100".as_slice(), b"SIP/2.0 486".as_slice()] {
-            let (length, _) =
-                tokio::time::timeout(Duration::from_secs(1), client.recv_from(&mut response))
-                    .await
-                    .unwrap()
-                    .unwrap();
-            assert!(response[..length].starts_with(expected));
-        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(75), client.recv_from(&mut response))
+                .await
+                .is_err(),
+            "INVITE retransmissions must also remain passive"
+        );
         assert!(
             tokio::time::timeout(Duration::from_millis(50), receiver.recv())
                 .await
@@ -2392,6 +3383,274 @@ mod tests {
             "INVITE retransmission must not enqueue a second server event"
         );
         assert_eq!(manager.get_status().calls_detected, 1);
+
+        cancel.cancel();
+        task.await.unwrap();
+        manager.stop().await;
+    }
+
+    #[tokio::test]
+    async fn udp_runtime_publishes_passive_ht813_syslog_caller_id_without_touching_voice() {
+        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let listen_port = socket.local_addr().unwrap().port();
+        let line = GrandstreamFxoSourceLine {
+            source: CallerIdSourceConfig {
+                source_id: Uuid::parse_str(SOURCE_ID).unwrap(),
+                source_version: 7,
+                device_profile_key: "grandstream_ht813_fxo".into(),
+                connector_family: CallerIdConnectorFamily::AnalogFxo,
+                line_id: Uuid::parse_str(LINE_ID).unwrap(),
+                source_channel: "fxo-1".into(),
+                trusted_device_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                listen_port,
+            },
+            name: "Passive syslog runtime test".into(),
+            country_code: Some("GR".into()),
+            line_version: 1,
+            is_receiving_target: true,
+            readiness_attempt: None,
+            source_kind: LocalUdpSourceKind::GrandstreamFxo,
+        };
+        let manager = Arc::new(CallerIdManager::new());
+        let generation = manager
+            .replace_supervisor(
+                CancellationToken::new(),
+                move |_generation, supervisor_cancel| async move {
+                    supervisor_cancel.cancelled().await;
+                },
+            )
+            .await
+            .expect("runtime test generation");
+        let (sender, mut receiver) = mpsc::channel(4);
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(run_udp_line(
+            socket,
+            line,
+            Arc::clone(&manager),
+            generation,
+            sender,
+            cancel.clone(),
+        ));
+        let client = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let logical_packet = ht813_syslog_caller_id("00447799887766");
+        let mut packet = logical_packet.clone();
+        packet.extend_from_slice(b"\n\n\n");
+
+        client
+            .send_to(&packet, (Ipv4Addr::LOCALHOST, listen_port))
+            .await
+            .unwrap();
+
+        let first = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("trusted HT813 syslog must create a local Caller ID event")
+            .expect("one queued Caller ID event");
+        assert_eq!(
+            first.invite.caller_number.as_deref(),
+            Some("00447799887766")
+        );
+        assert_eq!(first.invite.presentation, Presentation::Allowed);
+        assert!(first.invite.provider_event_id.starts_with("ht813-syslog-"));
+        assert!(!first.invite.provider_event_id.contains("00447799887766"));
+        let status = manager.get_status();
+        assert_eq!(status.calls_detected, 1);
+        assert_eq!(status.udp_packets_received, 1);
+        assert_eq!(status.trusted_packets_received, 1);
+        assert_eq!(status.caller_id_candidates, 1);
+        assert_eq!(status.rejected_candidates, 0);
+
+        let mut response = vec![0_u8; 2_048];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(75), client.recv_from(&mut response))
+                .await
+                .is_err(),
+            "passive syslog observation must never send SIP or voice-path packets"
+        );
+
+        client
+            .send_to(&logical_packet, (Ipv4Addr::LOCALHOST, listen_port))
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), receiver.recv())
+                .await
+                .is_err(),
+            "the optional terminal LF run must not bypass logical-record deduplication"
+        );
+        let status = manager.get_status();
+        assert_eq!(status.calls_detected, 1);
+        assert_eq!(status.udp_packets_received, 2);
+        assert_eq!(status.trusted_packets_received, 2);
+        assert_eq!(status.caller_id_candidates, 2);
+        assert_eq!(status.rejected_candidates, 0);
+
+        let malformed_candidate =
+            b"<15> HT813 malformed SigCtrl::processFxoCallerIdReceived, number = 2101234567";
+        client
+            .send_to(malformed_candidate, (Ipv4Addr::LOCALHOST, listen_port))
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), receiver.recv())
+                .await
+                .is_err(),
+            "a rejected candidate must not enqueue an event"
+        );
+        let status = manager.get_status();
+        assert_eq!(status.calls_detected, 1);
+        assert_eq!(status.udp_packets_received, 3);
+        assert_eq!(status.trusted_packets_received, 3);
+        assert_eq!(status.caller_id_candidates, 3);
+        assert_eq!(status.rejected_candidates, 1);
+        assert_eq!(
+            status.last_rejection_stage,
+            Some(CallerIdRejectionStage::DeviceEnvelope),
+        );
+
+        cancel.cancel();
+        task.await.unwrap();
+        manager.stop().await;
+    }
+
+    #[tokio::test]
+    async fn passive_syslog_retry_is_not_suppressed_when_the_event_queue_was_full() {
+        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let listen_port = socket.local_addr().unwrap().port();
+        let line = GrandstreamFxoSourceLine {
+            source: CallerIdSourceConfig {
+                source_id: Uuid::parse_str(SOURCE_ID).unwrap(),
+                source_version: 7,
+                device_profile_key: "grandstream_ht813_fxo".into(),
+                connector_family: CallerIdConnectorFamily::AnalogFxo,
+                line_id: Uuid::parse_str(LINE_ID).unwrap(),
+                source_channel: "fxo-1".into(),
+                trusted_device_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                listen_port,
+            },
+            name: "Queue recovery test".into(),
+            country_code: Some("GR".into()),
+            line_version: 1,
+            is_receiving_target: true,
+            readiness_attempt: None,
+            source_kind: LocalUdpSourceKind::GrandstreamFxo,
+        };
+        let manager = Arc::new(CallerIdManager::new());
+        let generation = manager
+            .replace_supervisor(
+                CancellationToken::new(),
+                move |_generation, supervisor_cancel| async move {
+                    supervisor_cancel.cancelled().await;
+                },
+            )
+            .await
+            .expect("runtime test generation");
+        let (sender, mut receiver) = mpsc::channel(1);
+        sender
+            .try_send(PendingEvent {
+                invite: ParsedInvite {
+                    caller_number: None,
+                    presentation: Presentation::Restricted,
+                    provider_event_id: "occupied".into(),
+                },
+                occurred_at: Utc::now(),
+            })
+            .unwrap();
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(run_udp_line(
+            socket,
+            line,
+            Arc::clone(&manager),
+            generation,
+            sender,
+            cancel.clone(),
+        ));
+        let client = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let packet = ht813_syslog_caller_id("2101234567");
+
+        client
+            .send_to(&packet, (Ipv4Addr::LOCALHOST, listen_port))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(manager.get_status().calls_detected, 0);
+        receiver.recv().await.expect("pre-filled queue item");
+
+        client
+            .send_to(&packet, (Ipv4Addr::LOCALHOST, listen_port))
+            .await
+            .unwrap();
+        let retried = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("queue recovery must allow the same datagram to be retried")
+            .expect("retried Caller ID event");
+        assert_eq!(retried.invite.caller_number.as_deref(), Some("2101234567"));
+        assert_eq!(manager.get_status().calls_detected, 1);
+
+        client
+            .send_to(&packet, (Ipv4Addr::LOCALHOST, listen_port))
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(75), receiver.recv())
+                .await
+                .is_err(),
+            "a successfully queued datagram must be deduplicated"
+        );
+
+        cancel.cancel();
+        task.await.unwrap();
+        manager.stop().await;
+    }
+
+    #[tokio::test]
+    async fn unrelated_ht813_debug_stream_does_not_starve_the_caller_id_event() {
+        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let listen_port = socket.local_addr().unwrap().port();
+        let manager = Arc::new(CallerIdManager::new());
+        let generation = manager
+            .replace_supervisor(
+                CancellationToken::new(),
+                move |_generation, supervisor_cancel| async move {
+                    supervisor_cancel.cancelled().await;
+                },
+            )
+            .await
+            .expect("runtime test generation");
+        let (sender, mut receiver) = mpsc::channel(4);
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(run_udp_line(
+            socket,
+            runtime_test_line(listen_port),
+            Arc::clone(&manager),
+            generation,
+            sender,
+            cancel.clone(),
+        ));
+        let client = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+
+        for sequence in 0..=PACKET_BURST_CAPACITY {
+            client
+                .send_to(
+                    &ht813_unrelated_syslog(sequence),
+                    (Ipv4Addr::LOCALHOST, listen_port),
+                )
+                .await
+                .unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        client
+            .send_to(
+                &ht813_syslog_caller_id("2101234567"),
+                (Ipv4Addr::LOCALHOST, listen_port),
+            )
+            .await
+            .unwrap();
+
+        let event = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("unrelated debug records must not consume the Caller ID packet budget")
+            .expect("one queued Caller ID event");
+        assert_eq!(event.invite.caller_number.as_deref(), Some("2101234567"));
 
         cancel.cancel();
         task.await.unwrap();
@@ -2417,6 +3676,26 @@ mod tests {
         assert_eq!(body["providerEventId"], "body-call@ht813");
         assert_eq!(body["presentation"], "allowed");
         assert!(body.get("readinessAttemptId").is_none());
+    }
+
+    #[test]
+    fn event_body_reports_a_missing_non_restricted_whozz_number_as_unknown() {
+        let pending = PendingEvent {
+            invite: ParsedInvite {
+                caller_number: None,
+                presentation: Presentation::Unknown,
+                provider_event_id: "whozz-source-fingerprint".into(),
+            },
+            occurred_at: DateTime::parse_from_rfc3339("2026-07-28T12:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        };
+
+        let source = parse_source_line(&whozz_source_line()).unwrap().source;
+        let body = build_event_body(&source, &pending);
+
+        assert_eq!(body["presentation"], "unknown");
+        assert!(body["callerNumber"].is_null());
     }
 
     #[test]
@@ -2469,6 +3748,7 @@ mod tests {
         assert_eq!(body["sourceVersion"], 7);
         assert_eq!(body["lineId"], LINE_ID);
         assert_eq!(body["lineName"], "Cosmote line");
+        assert_eq!(body["countryCode"], "GR");
         assert_eq!(body["lineVersion"], 4);
         assert_eq!(body["providerEventId"], "local-display-call@ht813");
         assert_eq!(body["callerNumber"], "2101234567");

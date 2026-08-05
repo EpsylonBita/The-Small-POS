@@ -218,7 +218,7 @@ mod windows {
 
     fn encoded_elevated_command(paths: &FirewallPaths, action: &str) -> String {
         let command = format!(
-            "& '{}' -Action '{}' -ExecutablePath '{}'",
+            "& '{}' -Action '{}' -ExecutablePath '{}'; exit $LASTEXITCODE",
             powershell_single_quote(&paths.helper),
             action,
             powershell_single_quote(&paths.executable),
@@ -325,6 +325,27 @@ mod windows {
             let quoted =
                 powershell_single_quote(Path::new("C:\\Program Files\\Owner's POS\\app.exe"));
             assert_eq!(quoted, "C:\\Program Files\\Owner''s POS\\app.exe");
+        }
+
+        #[test]
+        fn elevated_command_propagates_the_helper_stage_exit_code() {
+            let paths = FirewallPaths {
+                helper: PathBuf::from(r"C:\Program Files\The Small POS\caller-id-firewall.ps1"),
+                executable: PathBuf::from(r"C:\Program Files\The Small POS\the-small-pos.exe"),
+                powershell: PathBuf::from(
+                    r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+                ),
+            };
+
+            let encoded = encoded_elevated_command(&paths, "Install");
+            let bytes = STANDARD.decode(encoded).expect("decode elevated command");
+            let utf16 = bytes
+                .chunks_exact(2)
+                .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+                .collect::<Vec<_>>();
+            let command = String::from_utf16(&utf16).expect("decode UTF-16 command");
+
+            assert!(command.ends_with("; exit $LASTEXITCODE"));
         }
 
         #[test]

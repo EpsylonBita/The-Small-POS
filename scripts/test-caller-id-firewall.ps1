@@ -272,4 +272,15 @@ $wrongScopeIssue = Get-InstallerOwnedRuleConfigurationIssue `
   -ExpectedExecutablePath 'C:\Program Files\The Small POS\the-small-pos.exe'
 Assert-Equal -Expected 'rule_scope_mismatch' -Actual $wrongScopeIssue -Message 'scope issue code'
 
+# The helper must preserve its own stage code even though it writes a useful
+# diagnostic to stderr. Write-Error is terminating under the helper's
+# ErrorActionPreference=Stop and would reduce every failure to a generic 1.
+$helperSource = [System.IO.File]::ReadAllText((Resolve-Path $HelperPath))
+if ($helperSource -match 'Write-Error\s+"Caller ID firewall setup failed') {
+  throw 'Firewall helper failure reporting must not use terminating Write-Error.'
+}
+if ($helperSource -notmatch '\[Console\]::Error\.WriteLine\("Caller ID firewall setup failed:') {
+  throw 'Firewall helper must write its failure detail directly to stderr.'
+}
+
 Write-Output "Caller ID firewall behavior tests passed: $($portCases.Count) port cases, $($migrationCases.Count) migration-scope cases, $($exactRuleCases.Count) exact-rule cases."

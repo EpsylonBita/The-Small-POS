@@ -1,6 +1,6 @@
 [package]
 name = "the-small-pos"
-version = "1.4.59"
+version = "1.4.60"
 description = "The Small POS - Desktop point-of-sale (Tauri v2)"
 authors = ["The Small Team <dev@thesmall.app>"]
 edition = "2021"
@@ -10,8 +10,15 @@ rust-version = "1.77.2"
 name = "the_small_pos_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
 
+[features]
+default = []
+# Reproduces the pre-bridge founder-lab behavior. Never enable in production:
+# a passive Caller ID observer returning 486 can terminate an HT813 PSTN call.
+callerid-unsafe-legacy-busy-rejection = []
+
 [build-dependencies]
 tauri-build = { version = "2.6.3", features = [] }
+base64 = "0.22"
 
 [dependencies]
 # Tauri v2 core
@@ -24,6 +31,7 @@ tauri-plugin-updater = "2.10.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
+ring = "0.17"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 font8x8 = { version = "0.3", default-features = false, features = ["unicode"] }
 rusttype = "0.9"
