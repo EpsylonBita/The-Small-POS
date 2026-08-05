@@ -90,11 +90,17 @@ const CONNECTIVITY_TIMEOUT: Duration = Duration::from_secs(10);
 /// - strip a trailing `/api` segment
 /// - ensure a scheme is present (https, or http for localhost)
 pub fn normalize_admin_url(url: &str) -> String {
-    let mut url = url.trim().to_string();
+    let raw = url.trim();
+    if raw.is_empty() {
+        return String::new();
+    }
+
+    let lower_raw = raw.to_ascii_lowercase();
+    let mut url = raw.to_string();
 
     // Ensure scheme
-    if !url.starts_with("http://") && !url.starts_with("https://") {
-        if url.starts_with("localhost") || url.starts_with("127.0.0.1") {
+    if !lower_raw.starts_with("http://") && !lower_raw.starts_with("https://") {
+        if lower_raw.starts_with("localhost") || lower_raw.starts_with("127.0.0.1") {
             url = format!("http://{url}");
         } else {
             url = format!("https://{url}");
@@ -114,6 +120,19 @@ pub fn normalize_admin_url(url: &str) -> String {
     // Strip trailing slashes again (in case "/api/" was present)
     while url.ends_with('/') {
         url.pop();
+    }
+
+    let Ok(parsed) = url::Url::parse(&url) else {
+        return String::new();
+    };
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return String::new();
+    }
+    let Some(host) = parsed.host_str() else {
+        return String::new();
+    };
+    if host.eq_ignore_ascii_case("http") || host.eq_ignore_ascii_case("https") {
+        return String::new();
     }
 
     url
@@ -560,6 +579,16 @@ mod tests {
                 .get(POS_CLIENT_VERSION_HEADER)
                 .and_then(|value| value.to_str().ok()),
             Some(POS_CLIENT_VERSION)
+        );
+    }
+
+    #[test]
+    fn normalize_admin_url_rejects_scheme_only_and_nested_scheme_hosts() {
+        assert_eq!(normalize_admin_url("https:"), "");
+        assert_eq!(normalize_admin_url("https://https:"), "");
+        assert_eq!(
+            normalize_admin_url("https://admin.example.com/api/"),
+            "https://admin.example.com"
         );
     }
 

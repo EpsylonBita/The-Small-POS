@@ -1642,9 +1642,9 @@ pub async fn terminal_config_refresh(
 #[cfg(test)]
 mod dto_tests {
     use super::{
-        parse_settings_set_payload, parse_settings_update_local_payload,
-        parse_terminal_config_get_setting_payload, payload_admin_url_for_switch,
-        payload_terminal_id_for_switch, terminal_connection_changed,
+        normalized_admin_url_for_switch, parse_settings_set_payload,
+        parse_settings_update_local_payload, parse_terminal_config_get_setting_payload,
+        payload_admin_url_for_switch, payload_terminal_id_for_switch, terminal_connection_changed,
         terminal_runtime_emit_signature, SettingsSetPayload,
     };
 
@@ -1680,6 +1680,18 @@ mod dto_tests {
             None,
             Some("terminal-1"),
             None,
+            Some("https://admin.example.com"),
+        ));
+    }
+
+    #[test]
+    fn terminal_connection_changed_does_not_wipe_same_terminal_when_repairing_invalid_url() {
+        let poisoned_url = normalized_admin_url_for_switch(Some("https://https:".to_string()));
+        assert!(poisoned_url.is_none());
+        assert!(!terminal_connection_changed(
+            Some("terminal-1"),
+            Some("terminal-1"),
+            poisoned_url.as_deref(),
             Some("https://admin.example.com"),
         ));
     }

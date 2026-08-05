@@ -171,7 +171,9 @@ fn is_syncable_system_setting(setting_key: &str) -> bool {
 fn is_local_only_terminal_setting(setting_key: &str) -> bool {
     matches!(
         setting_key.trim().to_ascii_lowercase().as_str(),
-        "display_brightness"
+        "admin_dashboard_url"
+            | "admin_url"
+            | "display_brightness"
             | "screen_timeout"
             | "touch_sensitivity"
             | "audio_enabled"
@@ -1477,6 +1479,33 @@ mod tests {
             db::get_setting(&conn, "ui", "theme").is_none(),
             "ui remains a fully local-only category"
         );
+    }
+
+    #[test]
+    fn cache_snapshot_does_not_replace_local_admin_connection_settings() {
+        let db = test_db();
+        set_terminal_setting(&db, "admin_dashboard_url", "https://admin.example.com");
+        let payload = serde_json::json!({
+            "settings": {
+                "terminal": {
+                    "admin_dashboard_url": "https:",
+                    "admin_url": "https:"
+                }
+            }
+        });
+
+        let updated = cache_terminal_settings_snapshot(&db, &payload).expect("cache snapshot");
+        let conn = db.conn.lock().expect("lock db");
+
+        assert!(!updated
+            .iter()
+            .any(|key| key == "terminal.admin_dashboard_url"));
+        assert!(!updated.iter().any(|key| key == "terminal.admin_url"));
+        assert_eq!(
+            db::get_setting(&conn, "terminal", "admin_dashboard_url").as_deref(),
+            Some("https://admin.example.com")
+        );
+        assert!(db::get_setting(&conn, "terminal", "admin_url").is_none());
     }
 
     #[test]
