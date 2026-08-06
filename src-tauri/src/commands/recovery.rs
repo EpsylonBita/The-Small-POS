@@ -1000,8 +1000,9 @@ pub async fn recovery_execute_action(
             }))
         }
         "repairOrderUpdateReplayBlockers" => {
-            // Safe recovery only: this retries failed order UPDATE replays and
-            // then promotes payments that were waiting on those parent updates.
+            // Safe recovery only: this retries requests that provably never
+            // left the POS because of the historical `https://https/...` URL,
+            // then repairs failed order replays and their dependent payments.
             // It does not delete, void, or mutate local order/payment rows.
             let admin_url = load_admin_url(&db)?;
             let api_key = load_pos_api_key()?;
@@ -1014,7 +1015,8 @@ pub async fn recovery_execute_action(
                 || stats.remaining_parent_wait_blockers > 0
             {
                 return Err(format!(
-                    "Order replay repair retried {} parent insert row(s), {} update row(s), repaired {} parent link(s), quarantined {} stale parent-wait row(s), and force-requeued {} settled table close row(s), but {} parent insert row(s) still fail, {} order update row(s) still fail, and {} row(s) still wait for a parent remote order. Last parent insert error: {} Last order error: {}{}",
+                    "Order replay repair retried {} malformed-URL row(s), {} parent insert row(s), {} update row(s), repaired {} parent link(s), quarantined {} stale parent-wait row(s), and force-requeued {} settled table close row(s), but {} parent insert row(s) still fail, {} order update row(s) still fail, and {} row(s) still wait for a parent remote order. Last parent insert error: {} Last order error: {}{}",
+                    stats.requeued_malformed_admin_url_failures,
                     stats.requeued_parent_order_inserts,
                     stats.requeued_orders,
                     stats.repaired_parent_orders,
@@ -1044,13 +1046,17 @@ pub async fn recovery_execute_action(
                 "success": true,
                 "requiresRefresh": true,
                 "message": format!(
-                    "Order replay repair requeued {} parent insert row(s), attached {} parent remote order link(s), requeued {} parent-wait row(s), quarantined {} stale parent-wait row(s), retried {} order update row(s), force-requeued {} settled table close row(s). Parent pass processed {}, failed {}, conflicts {}. Update pass processed {}, failed {}, conflicts {}. Promoted {} waiting payment(s). Payment pass processed {}, failed {}, conflicts {}. Table-close pass processed {}, failed {}, conflicts {}.",
+                    "Order replay repair requeued {} malformed-URL row(s), requeued {} parent insert row(s), attached {} parent remote order link(s), requeued {} parent-wait row(s), quarantined {} stale parent-wait row(s), retried {} order update row(s), force-requeued {} settled table close row(s). Malformed-URL pass processed {}, failed {}, conflicts {}. Parent pass processed {}, failed {}, conflicts {}. Update pass processed {}, failed {}, conflicts {}. Promoted {} waiting payment(s). Payment pass processed {}, failed {}, conflicts {}. Table-close pass processed {}, failed {}, conflicts {}.",
+                    stats.requeued_malformed_admin_url_failures,
                     stats.requeued_parent_order_inserts,
                     stats.repaired_parent_orders,
                     stats.requeued_parent_wait_orders,
                     stats.quarantined_stale_parent_wait_orders,
                     stats.requeued_orders,
                     stats.forced_table_session_closes,
+                    stats.malformed_admin_url_pass.as_ref().map(|value| value.processed).unwrap_or(0),
+                    stats.malformed_admin_url_pass.as_ref().map(|value| value.failed).unwrap_or(0),
+                    stats.malformed_admin_url_pass.as_ref().map(|value| value.conflicts).unwrap_or(0),
                     stats.parent_insert_pass.as_ref().map(|value| value.processed).unwrap_or(0),
                     stats.parent_insert_pass.as_ref().map(|value| value.failed).unwrap_or(0),
                     stats.parent_insert_pass.as_ref().map(|value| value.conflicts).unwrap_or(0),

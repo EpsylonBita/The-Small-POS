@@ -4474,6 +4474,8 @@ pub(crate) fn requeue_failed_order_validation_rows(db: &DbState) -> Result<usize
 
 #[derive(Debug)]
 pub(crate) struct OrderUpdateReplayRepairStats {
+    pub requeued_malformed_admin_url_failures: usize,
+    pub malformed_admin_url_pass: Option<sync_queue::SyncResult>,
     pub requeued_parent_order_inserts: usize,
     pub parent_insert_pass: Option<sync_queue::SyncResult>,
     pub requeued_orders: usize,
@@ -4491,6 +4493,29 @@ pub(crate) struct OrderUpdateReplayRepairStats {
     pub last_parent_order_insert_error: Option<String>,
     pub last_order_error: Option<String>,
     pub last_parent_wait_error: Option<String>,
+}
+
+fn is_malformed_admin_url_failure_sql() -> &'static str {
+    "status IN ('failed', 'conflict')
+       AND error_message IS NOT NULL
+       AND lower(error_message) LIKE '%error sending request for url (https://https/%'"
+}
+
+fn requeue_malformed_admin_url_failures(conn: &Connection) -> Result<usize, String> {
+    let sql = format!(
+        "UPDATE parity_sync_queue
+         SET status = 'pending',
+             attempts = 0,
+             last_attempt = NULL,
+             error_message = NULL,
+             next_retry_at = NULL,
+             retry_delay_ms = 1000,
+             claim_generation = claim_generation + 1
+         WHERE {}",
+        is_malformed_admin_url_failure_sql()
+    );
+    conn.execute(sql.as_str(), [])
+        .map_err(|e| format!("requeue malformed admin URL failures: {e}"))
 }
 
 fn is_failed_order_insert_parent_blocker_sql() -> &'static str {
@@ -5461,6 +5486,19 @@ pub(crate) async fn repair_order_update_replay_blockers(
     admin_url: &str,
     api_key: &str,
 ) -> Result<OrderUpdateReplayRepairStats, String> {
+    // v1.4.60 could persist a scheme-only admin URL as `https:`. The queue
+    // then built `https://https/...`, so these requests provably never reached
+    // any backend. Replaying only that exact failure signature is safe and is
+    // required before parent-order recovery can see the original INSERT rows.
+    let requeued_malformed_admin_url_failures = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        requeue_malformed_admin_url_failures(&conn)?
+    };
+    let malformed_admin_url_pass = if requeued_malformed_admin_url_failures > 0 {
+        Some(sync_queue::process_queue(&db.conn, admin_url, api_key).await?)
+    } else {
+        None
+    };
     let requeued_parent_order_inserts = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         requeue_or_recreate_parent_order_inserts(&conn)?
@@ -5513,6 +5551,8 @@ pub(crate) async fn repair_order_update_replay_blockers(
     };
 
     Ok(OrderUpdateReplayRepairStats {
+        requeued_malformed_admin_url_failures,
+        malformed_admin_url_pass,
         requeued_parent_order_inserts,
         parent_insert_pass,
         requeued_orders,
@@ -26568,6 +26608,98 @@ mod tests {
         assert_eq!(insert_attempts, 0);
         assert!(insert_error.is_none());
         assert_eq!(update_status, "conflict");
+    }
+
+    #[test]
+    fn malformed_admin_url_failures_are_requeued_without_touching_other_network_failures() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        for (id, table_name, operation, error_message) in [
+            (
+                "queue-poisoned-order-insert",
+                "orders",
+                "INSERT",
+                "Network error: error sending request for url (https://https/api/pos/orders)",
+            ),
+            (
+                "queue-poisoned-order-update",
+                "orders",
+                "UPDATE",
+                "Network error: error sending request for url (https://https/api/pos/orders/remote-order)",
+            ),
+            (
+                "queue-poisoned-fiscal-submit",
+                "fiscal_submission",
+                "INSERT",
+                "Network error: error sending request for url (https://https/api/plugins/fiscal/submit)",
+            ),
+            (
+                "queue-real-offline-failure",
+                "orders",
+                "INSERT",
+                "Network error: error sending request for url (https://admin.example.com/api/pos/orders)",
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO parity_sync_queue (
+                     id, table_name, record_id, operation, data, organization_id,
+                     created_at, attempts, retry_delay_ms, priority, module_type,
+                     conflict_strategy, version, status, error_message, next_retry_at
+                 ) VALUES (
+                     ?1, ?2, ?1, ?3, '{}', 'org-test', datetime('now'), 50, 60000,
+                     1, 'orders', 'server-wins', 1, 'failed', ?4,
+                     '2026-08-06T03:00:00Z'
+                 )",
+                params![id, table_name, operation, error_message],
+            )
+            .unwrap();
+        }
+
+        let requeued = requeue_malformed_admin_url_failures(&conn).unwrap();
+        assert_eq!(requeued, 3);
+
+        for queue_id in [
+            "queue-poisoned-order-insert",
+            "queue-poisoned-order-update",
+            "queue-poisoned-fiscal-submit",
+        ] {
+            let (status, attempts, error_message, next_retry_at): (
+                String,
+                i64,
+                Option<String>,
+                Option<String>,
+            ) = conn
+                .query_row(
+                    "SELECT status, attempts, error_message, next_retry_at
+                     FROM parity_sync_queue
+                     WHERE id = ?1",
+                    params![queue_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .unwrap();
+            assert_eq!(status, "pending");
+            assert_eq!(attempts, 0);
+            assert!(error_message.is_none());
+            assert!(next_retry_at.is_none());
+        }
+
+        let (status, attempts, error_message): (String, i64, Option<String>) = conn
+            .query_row(
+                "SELECT status, attempts, error_message
+                 FROM parity_sync_queue
+                 WHERE id = 'queue-real-offline-failure'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "failed");
+        assert_eq!(attempts, 50);
+        assert_eq!(
+            error_message.as_deref(),
+            Some(
+                "Network error: error sending request for url (https://admin.example.com/api/pos/orders)"
+            )
+        );
     }
 
     #[test]
