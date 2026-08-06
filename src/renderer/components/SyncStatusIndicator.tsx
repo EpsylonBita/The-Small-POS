@@ -2732,7 +2732,15 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
 
               <section className="mt-5 rounded-3xl border border-yellow-400/15 bg-[#0c0c0c] p-5">
                 <h4 className="text-lg font-black text-white">Support actions</h4>
-                <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+                  <button
+                    type="button"
+                    onClick={handleOpenRecovery}
+                    className="inline-flex min-h-[54px] items-center justify-center gap-2 rounded-2xl border border-yellow-300 bg-yellow-400 px-4 text-sm font-black text-black active:bg-yellow-300"
+                  >
+                    <Database className="h-5 w-5" />
+                    {t('sync.dashboard.openRecovery', { defaultValue: 'Open Recovery Center' })}
+                  </button>
                   <button
                     onClick={loadSystemHealth}
                     disabled={systemLoading}

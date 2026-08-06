@@ -8,7 +8,7 @@
 use std::collections::hash_map::RandomState;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
-use std::hash::{BuildHasher, Hash, Hasher};
+use std::hash::BuildHasher;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1808,14 +1808,15 @@ async fn run_udp_line(
                             continue;
                         }
                     };
-                    let mut hasher = syslog_fingerprint_state.build_hasher();
                     // Hash the logical single record, not its optional terminal LF run,
                     // so framing variation cannot bypass retransmission dedupe.
                     let Ok(record) = certified_ht813_syslog_record(packet) else {
                         continue;
                     };
-                    record.hash(&mut hasher);
-                    let deduplication_id = format!("syslog:{:016x}", hasher.finish());
+                    let deduplication_id = format!(
+                        "syslog:{:016x}",
+                        syslog_fingerprint_state.hash_one(record)
+                    );
                     let invite = ParsedInvite {
                         caller_number: syslog.caller_number,
                         presentation: syslog.presentation,

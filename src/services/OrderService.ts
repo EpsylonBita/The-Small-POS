@@ -242,127 +242,6 @@ export class OrderService {
     return [];
   }
 
-  private orderIdentityKeys(order: Record<string, unknown>): Set<string> {
-    const keys = new Set<string>();
-    const add = (prefix: string, value: unknown) => {
-      if (typeof value !== 'string') return;
-      const normalized = value.trim();
-      if (!normalized) return;
-      keys.add(`${prefix}:${normalized.toLowerCase()}`);
-    };
-
-    [
-      order.id,
-      order.supabase_id,
-      order.supabaseId,
-      order.client_order_id,
-      order.clientOrderId,
-      order.client_request_id,
-      order.clientRequestId,
-      order.local_order_id,
-      order.localOrderId,
-    ].forEach((value) => add('id', value));
-
-    [
-      order.order_number,
-      order.orderNumber,
-      order.display_order_number,
-      order.displayOrderNumber,
-    ].forEach((value) => add('ord', value));
-
-    const plugin = normalizeOptionalText(order.plugin) || normalizeOptionalText(order.platform);
-    const externalId =
-      normalizeOptionalText(order.external_plugin_order_id) ||
-      normalizeOptionalText(order.externalPluginOrderId) ||
-      normalizeOptionalText(order.external_platform_order_id) ||
-      normalizeOptionalText(order.externalPlatformOrderId);
-    if (plugin && externalId) {
-      keys.add(`ext:${plugin.toLowerCase()}:${externalId.toLowerCase()}`);
-    }
-
-    return keys;
-  }
-
-  private async recoverAdminOrdersIntoLocalLedger(
-    bridge: ReturnType<OrderService['getBridge']>,
-    localOrders: Order[],
-  ): Promise<Order[]> {
-    if (!bridge?.sync?.fetchOrders || !bridge?.orders?.saveFromRemote || !bridge?.orders?.getAll) {
-      return localOrders;
-    }
-
-    try {
-      const remoteResult: any = await bridge.sync.fetchOrders({ limit: 250, offset: 0 });
-      if (!remoteResult?.success) {
-        debugLogger.warn('Admin order recovery fetch failed', remoteResult, 'OrderService');
-        return localOrders;
-      }
-
-      const remoteOrdersRaw = this.extractOrderRecords(remoteResult);
-      if (remoteOrdersRaw.length === 0) {
-        return localOrders;
-      }
-
-      const localKeys = new Set<string>();
-      localOrders.forEach((order) => {
-        this.orderIdentityKeys(order as unknown as Record<string, unknown>).forEach((key) =>
-          localKeys.add(key),
-        );
-      });
-
-      let materialized = 0;
-      for (const remoteOrder of remoteOrdersRaw as Record<string, unknown>[]) {
-        const remoteKeys = this.orderIdentityKeys(remoteOrder);
-        const remoteId = normalizeOptionalText(remoteOrder.id);
-        const hasRemoteIdentityLocally = remoteId
-          ? localKeys.has(`id:${remoteId.toLowerCase()}`)
-          : false;
-        const hasAnyLocalMatch = [...remoteKeys].some((key) => localKeys.has(key));
-
-        if (hasRemoteIdentityLocally) {
-          continue;
-        }
-
-        if (!hasAnyLocalMatch && materialized >= 50) {
-          continue;
-        }
-
-        const response: any = await bridge.orders.saveFromRemote({
-          orderData: remoteOrder,
-          suppressAutoPrint: true,
-          recoverySource: 'order_list_admin_recovery',
-        });
-        if (response?.success && !response?.ignored) {
-          materialized += 1;
-          this.orderIdentityKeys(remoteOrder).forEach((key) => localKeys.add(key));
-          const localOrderId = (response as any)?.orderId || (response as any)?.data?.orderId;
-          if (typeof localOrderId === 'string' && localOrderId.trim()) {
-            localKeys.add(`id:${localOrderId.trim().toLowerCase()}`);
-          }
-        }
-      }
-
-      if (materialized === 0) {
-        return localOrders;
-      }
-
-      const refreshed: any = await bridge.orders.getAll();
-      const refreshedOrders = refreshed?.data ?? refreshed;
-      if (Array.isArray(refreshedOrders)) {
-        debugLogger.info(
-          `Recovered ${materialized} admin order(s) into local POS ledger`,
-          undefined,
-          'OrderService',
-        );
-        return this.normalizeOrdersForUi(refreshedOrders as Record<string, unknown>[]);
-      }
-    } catch (error) {
-      debugLogger.warn('Admin order recovery skipped after failure', error, 'OrderService');
-    }
-
-    return localOrders;
-  }
-
   private shouldQueueOrderCreate(error: unknown): boolean {
     if (typeof navigator !== 'undefined' && navigator.onLine === false) {
       return true;
@@ -557,13 +436,12 @@ export class OrderService {
           const orders = result?.data ?? result;
           if (Array.isArray(orders)) {
             const normalized = this.normalizeOrdersForUi(orders as Record<string, unknown>[]);
-            const recovered = await this.recoverAdminOrdersIntoLocalLedger(bridge, normalized);
             debugLogger.info(
-              `Fetched ${recovered.length} orders via bridge (local DB)`,
+              `Fetched ${normalized.length} orders via bridge (local DB)`,
               undefined,
               'OrderService',
             );
-            return recovered;
+            return normalized;
           }
           // Bridge returned non-array
           if (!this.allowAdminApiFallback()) {
