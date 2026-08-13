@@ -22,6 +22,9 @@ pub mod fake_http;
 pub mod fake_keyring;
 pub mod harness;
 
+// Raw-body admin transport (`admin_fetch_raw`) — invoice capture, D11/R17.4.
+mod capture_transport;
+
 // Parity gate tests — one module per gate, named after the gate id.
 // Each test covers the gate's "no pre-reset state survives" / durability
 // / exactly-once invariant described in `pos-tauri/PARITY_GATES.md`.

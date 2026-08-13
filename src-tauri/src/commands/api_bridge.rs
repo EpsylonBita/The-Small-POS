@@ -99,6 +99,23 @@ fn is_caller_id_admin_route(path: &str) -> bool {
     route == "/api/pos/caller-id" || route.starts_with("/api/pos/caller-id/")
 }
 
+/// True when the GET carries an `updated_since` delta cursor
+/// (procurement-loop Task 10.1: `/api/pos/purchase-orders?updated_since=...`).
+/// Delta pulls are point-in-time diffs: serving one from cache is
+/// semantically wrong (the caller advances its cursor from `serverTime`),
+/// and every sync cycle uses a fresh cursor value, so caching them would
+/// also grow `local_settings` by one dead row per cycle forever. The
+/// canonical (cursorless) path stays cacheable for offline fallback.
+fn is_delta_cursor_admin_get(path: &str) -> bool {
+    path.split_once('?')
+        .map(|(_, query)| {
+            query
+                .split('&')
+                .any(|pair| pair.starts_with("updated_since="))
+        })
+        .unwrap_or(false)
+}
+
 fn is_cacheable_admin_get(method: &str, path: &str) -> bool {
     let route = canonical_admin_route(path);
     method.eq_ignore_ascii_case("GET")
@@ -106,6 +123,7 @@ fn is_cacheable_admin_get(method: &str, path: &str) -> bool {
         && !route.contains("/api/pos/auth")
         && !route.contains("/api/pos/updates")
         && !is_caller_id_admin_route(path)
+        && !is_delta_cursor_admin_get(path)
 }
 
 fn admin_api_cache_key(path: &str) -> String {
@@ -609,6 +627,26 @@ mod dto_tests {
         ));
         assert!(!is_cacheable_admin_get("POST", "/api/pos/suppliers"));
         assert!(!is_cacheable_admin_get("GET", "/api/admin/users"));
+    }
+
+    #[test]
+    fn delta_cursor_gets_are_not_offline_cacheable() {
+        // The canonical PO snapshot path stays cacheable for offline
+        // fallback, but point-in-time delta pulls must never be cached:
+        // wrong semantics on replay, and one dead row per cursor forever.
+        assert!(is_cacheable_admin_get("GET", "/api/pos/purchase-orders"));
+        assert!(is_cacheable_admin_get(
+            "GET",
+            "/api/pos/purchase-orders?status=ordered"
+        ));
+        assert!(!is_cacheable_admin_get(
+            "GET",
+            "/api/pos/purchase-orders?updated_since=2026-08-05T10%3A00%3A00.000Z"
+        ));
+        assert!(!is_cacheable_admin_get(
+            "GET",
+            "/api/pos/purchase-orders?status=ordered&updated_since=2026-08-05T10%3A00%3A00.000Z"
+        ));
     }
 
     #[test]

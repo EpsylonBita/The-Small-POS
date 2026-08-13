@@ -5105,6 +5105,156 @@
     }
   },
   "suppliers": {
+    "capture": {
+      "settings": {
+        "title": "Scan-Einstellungen",
+        "subtitle": "Woher diese Kasse gescannte Rechnungen bekommt.",
+        "open": "Scan-Einstellungen",
+        "back": "Zurück",
+        "addScanner": "Scanner hinzufügen",
+        "addFolder": "Scan-Ordner überwachen",
+        "emptyTitle": "Noch kein Scanner eingerichtet",
+        "emptyDescription": "Fügen Sie den Scanner neben dieser Kasse hinzu, oder zeigen Sie uns den Ordner, in den Ihr Gerät die Scans speichert.",
+        "pickScanner": "Wählen Sie das Gerät, von dem Sie scannen möchten.",
+        "looking": "Suche nach Geräten…",
+        "noDevices": "Wir haben hier keinen Scanner gefunden.",
+        "noDevicesHint": "Kein Problem — die meisten Geräte legen Scans direkt in einen Ordner. Zeigen Sie uns stattdessen diesen Ordner.",
+        "testing": "Wir haben eine Testseite angefordert. Hier ist sie:",
+        "testInProgress": "Testseite wird gescannt…",
+        "testImageAlt": "Testseite",
+        "testLooksRight": "Das sieht richtig aus",
+        "testAgain": "Nochmal versuchen",
+        "nameLabel": "Wie sollen wir es nennen?",
+        "useByDefault": "Dieses nehmen, wenn ich auf Rechnung scannen drücke",
+        "makeDefault": "Dieses standardmäßig nehmen",
+        "finish": "Fertig",
+        "finishLater": "Ich teste es später",
+        "folderArrived": "Es hat geklappt — Ihr Scan ist angekommen.",
+        "folderWaiting": "Drücken Sie jetzt an Ihrem Gerät auf Scannen. Wir beobachten diesen Ordner und sagen Bescheid, sobald er ankommt.",
+        "folderPickFailed": "Die Ordnerauswahl ließ sich nicht öffnen. Bitte nochmal versuchen.",
+        "forget": "Entfernen",
+        "forgetConfirm": "Von dieser Kasse entfernen? Bereits gescannte Rechnungen bleiben genau da, wo sie sind.",
+        "forgotten": "Entfernt. Ihre gescannten Rechnungen sind unberührt.",
+        "saved": "Gespeichert. Sie können jetzt von hier scannen."
+      },
+      "pages": {
+        "title": "Ihre Rechnung",
+        "count": "{{count}} Seiten bisher",
+        "count_one": "Eine Seite bisher",
+        "count_other": "{{count}} Seiten bisher",
+        "pageLabel": "Seite {{number}}",
+        "empty": "Noch keine Seiten. Fügen Sie die erste hinzu.",
+        "addAnother": "Weitere Seite hinzufügen",
+        "done": "Fertig",
+        "remove": "Diese Seite entfernen",
+        "rescan": "Diese Seite neu scannen",
+        "rescanned": "Seite ersetzt.",
+        "moveEarlier": "Nach vorne schieben",
+        "moveLater": "Nach hinten schieben",
+        "capReached": "Mehr Seiten passen nicht in eine Rechnung. Schließen Sie diese ab und beginnen Sie für den Rest eine neue.",
+        "finishAndStartAnother": "Diese abschließen und eine neue beginnen",
+        "needAPage": "Fügen Sie mindestens eine Seite hinzu, bevor Sie abschließen."
+      },
+      "queue": {
+        "open": "Gescannte Rechnungen",
+        "title": "Gescannte Rechnungen",
+        "subtitle": "Alles, was hier gescannt und noch nicht abgelegt wurde.",
+        "emptyTitle": "Nichts wartet",
+        "emptyDescription": "Gescannte Rechnungen erscheinen hier, bis sie gespeichert sind.",
+        "check": "Prüfen und speichern",
+        "continue": "Weiter scannen",
+        "retry": "Nochmal versuchen",
+        "manual": "Von Hand eintragen",
+        "discard": "Diesen Scan wegwerfen",
+        "discardConfirm": "Diesen Scan wegwerfen? Die Seiten werden von dieser Kasse gelöscht und lassen sich nicht zurückholen."
+      },
+      "review": {
+        "doubleCheck": "Bitte nachschauen",
+        "fillByHand": "Von Hand eintragen",
+        "scanAgain": "Nochmal scannen",
+        "poTitle": "Diese Lieferung war erwartet — ist sie das?",
+        "poDecline": "Nein, das ist etwas anderes",
+        "poorTitle": "Dieser Scan ist schwer zu lesen",
+        "poorDescription": "Sie können ihn nochmal scannen oder einfach eintippen, was darauf steht.",
+        "queued": "Hier gespeichert. Sobald Sie wieder online sind, geht sie ins Büro.",
+        "saved": "Rechnung gespeichert."
+      },
+      "scan": {
+        "open": "Rechnung scannen",
+        "reading": "Wir lesen Ihre Rechnung… Sie können weiterarbeiten.",
+        "pressScanOnMachine": "Drücken Sie an Ihrem Gerät auf Scannen. Die Rechnung erscheint hier von selbst.",
+        "startFailed": "Das Scannen ließ sich nicht starten. Bitte nochmal versuchen."
+      },
+      "notifications": {
+        "arrived": "Eine neue Rechnung ist angekommen.",
+        "check": "Rechnung prüfen",
+        "ready": "Eine Rechnung ist fertig zum Prüfen."
+      },
+      "reason": {
+        "unknown": "Mit diesem Scan ist etwas schiefgegangen. Nichts ist verloren.",
+        "MODULE_REQUIRED": "Der Lieferantenbereich ist für dieses Geschäft noch nicht freigeschaltet. Der Scan ist sicher und geht durch, sobald er es ist.",
+        "PO_INVOICE_ALREADY_APPLIED": "Diese Lieferung wurde für die Bestellung schon verbucht. Nichts wurde doppelt gezählt.",
+        "PO_STATE_CONFLICT": "Die Bestellung hat sich seit dem Scan verändert. Öffnen Sie sie und schauen Sie, wo sie steht.",
+        "CAPTURE_TOO_LARGE": "Diese Seite ist zu groß zum Senden. Scannen Sie sie kleiner nochmal ein.",
+        "CAPTURE_TOO_MANY_PAGES": "Das sind mehr Seiten, als in eine Rechnung passen. Teilen Sie sie auf und senden Sie sie nacheinander.",
+        "CAPTURE_UNREADABLE": "Auf diesen Seiten war nichts zu lesen. Scannen Sie sie nochmal, oder tragen Sie die Rechnung von Hand ein.",
+        "COMMIT_IN_PROGRESS": "Diese wird gerade schon gespeichert. Einen Moment bitte.",
+        "CAPTURE_ALREADY_COMMITTED": "Diese Rechnung ist bereits gespeichert. Es ist nichts weiter zu tun.",
+        "render_failed": "Wir konnten diese Datei nicht öffnen. Scannen Sie die Rechnung nochmal, oder tragen Sie sie von Hand ein.",
+        "commit_rejected": "Das Büro hat diese Rechnung nicht angenommen. Ihre Änderungen sind noch da — prüfen Sie sie und versuchen Sie es nochmal."
+      },
+      "device": {
+        "device_offline": "Der Scanner ist aus oder nicht angeschlossen. Schalten Sie ihn ein und versuchen Sie es nochmal.",
+        "device_busy": "Der Scanner ist mit einem anderen Auftrag beschäftigt. Versuchen Sie es gleich nochmal.",
+        "device_removed": "Dieser Scanner ist nicht mehr mit der Kasse verbunden. Schließen Sie ihn wieder an, oder wählen Sie einen anderen.",
+        "scan_cancelled": "Der Scan wurde abgebrochen. Es wurde nichts gespeichert.",
+        "device_error": "Der Scanner hat nicht geantwortet. Prüfen Sie, ob er an und angeschlossen ist."
+      },
+      "status": {
+        "capturing": "Wird noch gescannt",
+        "waiting": "Wartet aufs Lesen",
+        "uploading": "Seiten werden gesendet",
+        "reading": "Ihre Rechnung wird gelesen",
+        "ready_review": "Fertig zum Prüfen",
+        "needs_attention": "Braucht einen Blick",
+        "parked": "Auf Halt — der Lieferantenbereich ist nicht aktiv. Nichts ist verloren.",
+        "committing": "Wird gespeichert",
+        "committed": "Gespeichert",
+        "discarded": "Weggeworfen"
+      },
+      "history": {
+        "show": "Letzte Aktivität",
+        "hide": "Letzte Aktivität ausblenden",
+        "empty": "Hier ist noch nichts passiert.",
+        "ingested": "Eine Datei ist angekommen und wurde übernommen.",
+        "skipped_duplicate": "Eine Datei blieb liegen — es ist dieselbe, die wir schon haben.",
+        "skipped_unsupported": "Eine Datei blieb liegen — solche Dateien können wir nicht lesen.",
+        "skipped_oversize": "Eine Datei blieb liegen — sie ist zu groß zum Übernehmen.",
+        "captured": "Ein Scan wurde begonnen.",
+        "page_added": "Eine Seite wurde hinzugefügt.",
+        "page_removed": "Eine Seite wurde entfernt.",
+        "pages_reordered": "Die Seiten wurden neu sortiert.",
+        "pages_rendered": "Die Seiten wurden zum Lesen vorbereitet.",
+        "status_changed": "Dieser Scan ist einen Schritt weiter.",
+        "discarded": "Ein Scan wurde weggeworfen.",
+        "ingest_skipped": "Eine Datei blieb liegen.",
+        "committed": "Eine Rechnung wurde gespeichert.",
+        "local_files_cleaned": "Die Seiten wurden von dieser Kasse geräumt, nachdem die Rechnung gespeichert war.",
+        "generic": "Mit diesem Scan ist etwas passiert."
+      },
+      "sourceKind": {
+        "connected_scanner": "Scanner an dieser Kasse",
+        "watched_folder": "Scan-Ordner",
+        "camera": "Kamera",
+        "usb_scanner": "Scanner am USB-Anschluss",
+        "file_pick": "Ausgewählte Datei"
+      },
+      "sourceStatus": {
+        "ready": "Bereit",
+        "unavailable": "Nicht erreichbar",
+        "watching": "Wird beobachtet"
+      }
+    },
     "title": "Lieferanten",
     "subtitle": "Lieferanten, Rechnungen und importierten Bestand verwalten",
     "total": "Gesamt",
@@ -5332,6 +5482,70 @@
     },
     "summary": {
       "title": "Lieferantenübersicht"
+    }
+  },
+  "procurement": {
+    "tab": "Bestellungen",
+    "empty": "Noch keine Bestellungen für diese Filiale.",
+    "searchPlaceholder": "Bestellungen durchsuchen...",
+    "filterAll": "Alle Status",
+    "supplier": "Lieferant",
+    "expected": "Erwartet",
+    "progress": "{{received}} von {{ordered}} erhalten",
+    "lastSynced": "Zuletzt synchronisiert {{time}}",
+    "neverSynced": "Noch nicht synchronisiert",
+    "status": {
+      "draft": "Entwurf",
+      "ordered": "Bestellt",
+      "partially_received": "Teilweise erhalten",
+      "received_closed": "Erhalten / Abgeschlossen",
+      "cancelled": "Storniert"
+    },
+    "flavor": {
+      "inventory": "Lagerbestand",
+      "retail": "Einzelhandel",
+      "legacy": "Produkt"
+    },
+    "detail": {
+      "items": "Positionen",
+      "orderedQty": "Bestellt",
+      "receivedQty": "Erhalten",
+      "remainingQty": "Verbleibend",
+      "unplanned": "Ungeplant",
+      "notes": "Notizen",
+      "back": "Zurück zur Liste"
+    },
+    "receive": {
+      "action": "Lieferung annehmen",
+      "title": "Wareneingang für {{reference}}",
+      "quantity": "Menge",
+      "unitCost": "Stückkosten",
+      "confirmOverReceipt": "Annahme über der Bestellmenge bestätigen",
+      "notesPlaceholder": "Liefernotizen (optional)",
+      "submit": "Wareneingang erfassen",
+      "submitting": "Wird erfasst...",
+      "queuedOffline": "Wareneingang lokal gespeichert und zur Synchronisierung vorgemerkt.",
+      "recorded": "Wareneingang erfasst.",
+      "replayed": "Wareneingang war bereits erfasst.",
+      "noStaff": "Mit einer Mitarbeiter-PIN anmelden, um Wareneingänge zu erfassen.",
+      "noLines": "Mindestens eine erhaltene Menge eingeben.",
+      "failed": "Wareneingang konnte nicht erfasst werden.",
+      "conflict": "Diese Bestellung wurde auf dem Server geändert ({{status}}). Der Wareneingang wurde nicht angewendet.",
+      "moduleRequired": "Das Lieferanten-Modul ist für dieses Terminal nicht aktiv.",
+      "confirmationRequired": "Markierte Positionen bestätigen und erneut senden."
+    },
+    "pending": {
+      "title": "Synchronisierung ausstehend",
+      "entry": "Erfasst {{time}} — wartet auf Synchronisierung",
+      "parked": "Wartet auf Modulzugriff",
+      "conflictTitle": "Erfordert Aufmerksamkeit",
+      "conflictBody": "Die Bestellung wurde geändert, während das Terminal offline war. Die erfassten Mengen bleiben unten erhalten.",
+      "retry": "Synchronisierung wiederholen",
+      "retryQueued": "Wareneingang zur Wiederholung vorgemerkt.",
+      "quantities": "Erfasste Mengen"
+    },
+    "offline": {
+      "receiveNote": "Offline erfasste Wareneingänge werden auf diesem Terminal gespeichert und nach der Wiederverbindung automatisch synchronisiert."
     }
   },
   "tablesView": {
@@ -5623,6 +5837,7 @@
       "publishBlocked": "Plan wurde eingereiht, ist aber blockiert, bis die ERGANI-Einrichtung abgeschlossen ist.",
       "publishQueued": "Planveröffentlichung für ERGANI wurde eingereiht.",
       "publishFailed": "Veröffentlichung an ERGANI fehlgeschlagen.",
+      "publishNotFiled": "Der Dienstplan wurde nicht bei ERGANI eingereicht.",
       "lastStatus": "ERGANI-Status"
     },
     "errors": {

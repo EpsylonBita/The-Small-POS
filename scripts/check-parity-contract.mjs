@@ -122,15 +122,44 @@ function parseRendererInvokedChannels() {
   return channels;
 }
 
-function parseRustEmittedEvents() {
-  const rustRoot = path.join(rootDir, 'src-tauri', 'src');
-  const files = walk(rustRoot, ['.rs']);
-  const events = new Set();
-  const regex = /\bemit\(\s*"([^"]+)"/g;
+// Event names are commonly held in a `const` so the emit site, the workers that
+// reuse it, and the tests asserting on it cannot drift apart (the capture
+// workers do this). Collect those constants so such an emit resolves to the
+// same name a literal one would.
+function parseRustStrConstants(files) {
+  const constants = new Map();
+  const regex = /\bconst\s+([A-Z_][A-Z0-9_]*)\s*:\s*&(?:'static\s+)?str\s*=\s*"([^"]+)"\s*;/g;
   for (const file of files) {
     const text = fs.readFileSync(file, 'utf8');
     for (const m of text.matchAll(regex)) {
-      events.add(m[1]);
+      constants.set(m[1], m[2]);
+    }
+  }
+  return constants;
+}
+
+function parseRustEmittedEvents() {
+  const rustRoot = path.join(rootDir, 'src-tauri', 'src');
+  const files = walk(rustRoot, ['.rs']);
+  const constants = parseRustStrConstants(files);
+  const events = new Set();
+  // Either a string literal or an identifier resolved through the constant
+  // table above. Declaring a constant is deliberately NOT enough: the name only
+  // counts as emitted when it is passed to an actual `emit(` call, so this
+  // stays as strict as the literal-only form it replaces.
+  const regex = /\bemit\(\s*(?:"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*))/g;
+  for (const file of files) {
+    const text = fs.readFileSync(file, 'utf8');
+    for (const m of text.matchAll(regex)) {
+      if (m[1] !== undefined) {
+        events.add(m[1]);
+        continue;
+      }
+      // `module::EVENT_NAME` resolves on its final path segment.
+      const value = constants.get(m[2].split('::').pop());
+      if (value !== undefined) {
+        events.add(value);
+      }
     }
   }
   return events;

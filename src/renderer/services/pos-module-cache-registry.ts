@@ -87,6 +87,16 @@ export const POS_MODULE_CACHE_ENTRIES: PosModuleCacheEntry[] = [
     syncTables: ['guest_folios', 'folio_charges'],
   },
   {
+    // procurement-loop Task 10.1: keep the raw PO snapshot warm in the
+    // Rust admin-GET cache so offline rendering has a stable fallback
+    // source. Cursor-based delta sync lives in purchase-order-snapshot.ts
+    // (delta paths are deliberately not cacheable Rust-side).
+    moduleId: 'suppliers',
+    warmPaths: ['/api/pos/purchase-orders'],
+    cachePrefixes: ['/api/pos/purchase-orders'],
+    syncTables: [],
+  },
+  {
     moduleId: 'retail_products',
     warmPaths: [
       '/api/pos/products?is_active=true&limit=500&offset=0',

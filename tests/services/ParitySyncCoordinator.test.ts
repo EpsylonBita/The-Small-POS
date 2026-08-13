@@ -275,6 +275,9 @@ test('runParitySyncCycle drives config sync, parity queue sync, and renderer eve
       '/api/pos/rooms',
       '/api/pos/housekeeping?status=all',
       '/api/pos/guest-billing?status=all',
+      // Warm-path fetch: populates the Rust admin-GET cache so the purchase
+      // orders tab renders offline (pos-module-cache-registry 'suppliers').
+      '/api/pos/purchase-orders',
       '/api/pos/products?is_active=true&limit=500&offset=0',
       '/api/pos/product-categories',
       '/api/pos/products/low-stock',
@@ -291,6 +294,10 @@ test('runParitySyncCycle drives config sync, parity queue sync, and renderer eve
       '/api/pos/sync/retail_products?limit=2000',
       '/api/pos/sync/retail_product_variants?limit=2000',
       '/api/pos/sync/retail_product_categories?limit=2000',
+      // Snapshot pull: persists the purchase-order list to localStorage for the
+      // offline PO tab. Distinct consumer from the warm-path fetch above, so the
+      // same URL is legitimately requested twice per cycle.
+      '/api/pos/purchase-orders',
     ]);
     assert.deepEqual(calls.invoke, [
       {
@@ -322,6 +329,9 @@ test('runParitySyncCycle drives config sync, parity queue sync, and renderer eve
             '/api/pos/sync/retail_products',
             '/api/pos/sync/retail_product_variants',
             '/api/pos/sync/retail_product_categories',
+            // Cache prefix for the offline purchase-orders tab
+            // (pos-module-cache-registry 'suppliers').
+            '/api/pos/purchase-orders',
           ],
         },
       },

@@ -5105,6 +5105,156 @@
     }
   },
   "suppliers": {
+    "capture": {
+      "settings": {
+        "title": "Impostazioni di scansione",
+        "subtitle": "Da dove questa cassa riceve le fatture scansionate.",
+        "open": "Impostazioni di scansione",
+        "back": "Indietro",
+        "addScanner": "Aggiungi uno scanner",
+        "addFolder": "Controlla una cartella di scansioni",
+        "emptyTitle": "Nessuno scanner ancora impostato",
+        "emptyDescription": "Aggiungi lo scanner che sta accanto a questa cassa, oppure indicaci la cartella in cui la tua macchina salva le scansioni.",
+        "pickScanner": "Scegli la macchina da cui vuoi scansionare.",
+        "looking": "Ricerca delle macchine…",
+        "noDevices": "Non abbiamo trovato nessuno scanner qui.",
+        "noDevicesHint": "Nessun problema — quasi tutte le macchine salvano le scansioni direttamente in una cartella. Indicaci quella cartella.",
+        "testing": "Le abbiamo chiesto una pagina di prova. Eccola:",
+        "testInProgress": "Scansione di una pagina di prova…",
+        "testImageAlt": "Pagina di prova",
+        "testLooksRight": "Sembra giusta",
+        "testAgain": "Riprova",
+        "nameLabel": "Come la chiamiamo?",
+        "useByDefault": "Usa questa quando premo Scansiona fattura",
+        "makeDefault": "Usa questa come predefinita",
+        "finish": "Fatto",
+        "finishLater": "La proverò più tardi",
+        "folderArrived": "Ha funzionato — la tua scansione è arrivata.",
+        "folderWaiting": "Ora premi Scansiona sulla tua macchina. Stiamo controllando questa cartella e ti diremo appena arriva.",
+        "folderPickFailed": "Non si è aperta la scelta della cartella. Riprova.",
+        "forget": "Rimuovi",
+        "forgetConfirm": "Rimuovere questa dalla cassa? Le fatture già scansionate restano esattamente dove sono.",
+        "forgotten": "Rimossa. Le tue fatture scansionate non sono state toccate.",
+        "saved": "Salvato. Ora puoi scansionare da qui."
+      },
+      "pages": {
+        "title": "La tua fattura",
+        "count": "{{count}} pagine finora",
+        "count_one": "Una pagina finora",
+        "count_other": "{{count}} pagine finora",
+        "pageLabel": "Pagina {{number}}",
+        "empty": "Ancora nessuna pagina. Aggiungi la prima.",
+        "addAnother": "Aggiungi un'altra pagina",
+        "done": "Fatto",
+        "remove": "Togli questa pagina",
+        "rescan": "Scansiona di nuovo questa pagina",
+        "rescanned": "Pagina sostituita.",
+        "moveEarlier": "Sposta prima",
+        "moveLater": "Sposta dopo",
+        "capReached": "Sono tutte le pagine che una fattura può contenere. Chiudi questa e comincia un'altra per il resto.",
+        "finishAndStartAnother": "Chiudi questa e comincia un'altra",
+        "needAPage": "Aggiungi almeno una pagina prima di chiudere."
+      },
+      "queue": {
+        "open": "Fatture scansionate",
+        "title": "Fatture scansionate",
+        "subtitle": "Tutto ciò che è stato scansionato qui e non è ancora archiviato.",
+        "emptyTitle": "Niente in attesa",
+        "emptyDescription": "Le fatture scansionate compaiono qui finché non vengono salvate.",
+        "check": "Controlla e salva",
+        "continue": "Continua a scansionare",
+        "retry": "Riprova",
+        "manual": "Compila a mano",
+        "discard": "Butta via questa scansione",
+        "discardConfirm": "Buttare via questa scansione? Le pagine vengono cancellate da questa cassa e non si possono recuperare."
+      },
+      "review": {
+        "doubleCheck": "Da ricontrollare",
+        "fillByHand": "Compilala a mano",
+        "scanAgain": "Scansionala di nuovo",
+        "poTitle": "Questa consegna era attesa — è questa?",
+        "poDecline": "No, è un'altra cosa",
+        "poorTitle": "Questa scansione si legge male",
+        "poorDescription": "Puoi scansionarla di nuovo, oppure scrivere semplicemente quello che c'è scritto.",
+        "queued": "Salvata qui. Arriverà in ufficio appena torni in linea.",
+        "saved": "Fattura salvata."
+      },
+      "scan": {
+        "open": "Scansiona fattura",
+        "reading": "Stiamo leggendo la tua fattura… puoi continuare a lavorare.",
+        "pressScanOnMachine": "Premi Scansiona sulla tua macchina. La fattura comparirà qui da sola.",
+        "startFailed": "Non è stato possibile avviare la scansione. Riprova."
+      },
+      "notifications": {
+        "arrived": "È arrivata una nuova fattura.",
+        "check": "Controlla la fattura",
+        "ready": "Una fattura è pronta da controllare."
+      },
+      "reason": {
+        "unknown": "Qualcosa è andato storto con questa scansione. Non si è perso niente.",
+        "MODULE_REQUIRED": "L'area fornitori non è ancora attiva per questo negozio. La scansione è al sicuro e passerà appena lo sarà.",
+        "PO_INVOICE_ALREADY_APPLIED": "Questa consegna è già stata registrata su quell'ordine. Niente è stato contato due volte.",
+        "PO_STATE_CONFLICT": "Quell'ordine è cambiato dopo questa scansione. Aprilo e guarda a che punto è.",
+        "CAPTURE_TOO_LARGE": "Questa pagina è troppo pesante da inviare. Scansionala di nuovo più piccola.",
+        "CAPTURE_TOO_MANY_PAGES": "Sono più pagine di quante ne stiano in una fattura. Dividila in due e mandale una dopo l'altra.",
+        "CAPTURE_UNREADABLE": "Non siamo riusciti a leggere niente su queste pagine. Scansionale di nuovo, oppure scrivi la fattura a mano.",
+        "COMMIT_IN_PROGRESS": "Questa si sta già salvando. Dalle un attimo.",
+        "CAPTURE_ALREADY_COMMITTED": "Questa fattura è già salvata. Non c'è altro da fare.",
+        "render_failed": "Non siamo riusciti ad aprire quel file. Scansiona di nuovo la fattura, oppure scrivila a mano.",
+        "commit_rejected": "L'ufficio non ha accettato questa fattura. Le tue modifiche sono ancora qui — controllala e riprova."
+      },
+      "device": {
+        "device_offline": "Lo scanner è spento o staccato. Accendilo e riprova.",
+        "device_busy": "Lo scanner è occupato con un altro lavoro. Riprova tra un attimo.",
+        "device_removed": "Quello scanner non è più collegato a questa cassa. Ricollegalo, oppure scegline un altro.",
+        "scan_cancelled": "La scansione è stata interrotta. Non è stato salvato niente.",
+        "device_error": "Lo scanner non ha risposto. Controlla che sia acceso e collegato."
+      },
+      "status": {
+        "capturing": "Ancora in scansione",
+        "waiting": "In attesa di essere letta",
+        "uploading": "Invio delle pagine",
+        "reading": "Stiamo leggendo la tua fattura",
+        "ready_review": "Pronta da controllare",
+        "needs_attention": "Da guardare",
+        "parked": "In pausa — l'area fornitori non è attiva. Non si è perso niente.",
+        "committing": "Salvataggio",
+        "committed": "Salvata",
+        "discarded": "Buttata via"
+      },
+      "history": {
+        "show": "Attività recente",
+        "hide": "Nascondi attività recente",
+        "empty": "Qui non è ancora successo niente.",
+        "ingested": "È arrivato un file ed è stato preso in carico.",
+        "skipped_duplicate": "Un file è stato lasciato stare — è lo stesso che abbiamo già.",
+        "skipped_unsupported": "Un file è stato lasciato stare — non sappiamo leggere questo tipo di file.",
+        "skipped_oversize": "Un file è stato lasciato stare — è troppo pesante da prendere.",
+        "captured": "È stata avviata una scansione.",
+        "page_added": "È stata aggiunta una pagina.",
+        "page_removed": "È stata tolta una pagina.",
+        "pages_reordered": "Le pagine sono state rimesse in un nuovo ordine.",
+        "pages_rendered": "Le pagine sono state preparate per la lettura.",
+        "status_changed": "Questa scansione è passata al passo successivo.",
+        "discarded": "Una scansione è stata buttata via.",
+        "ingest_skipped": "Un file è stato lasciato stare.",
+        "committed": "Una fattura è stata salvata.",
+        "local_files_cleaned": "Le pagine sono state ripulite da questa cassa dopo il salvataggio della fattura.",
+        "generic": "È successo qualcosa con questa scansione."
+      },
+      "sourceKind": {
+        "connected_scanner": "Scanner di questa cassa",
+        "watched_folder": "Cartella di scansioni",
+        "camera": "Fotocamera",
+        "usb_scanner": "Scanner sulla porta USB",
+        "file_pick": "File scelto"
+      },
+      "sourceStatus": {
+        "ready": "Pronto",
+        "unavailable": "Non raggiungibile",
+        "watching": "In osservazione"
+      }
+    },
     "title": "Fornitori",
     "subtitle": "Gestisci fornitori, fatture e inventario importato",
     "total": "Totale",
@@ -5332,6 +5482,70 @@
     },
     "summary": {
       "title": "Riepilogo fornitore"
+    }
+  },
+  "procurement": {
+    "tab": "Ordini di acquisto",
+    "empty": "Nessun ordine di acquisto per questa filiale al momento.",
+    "searchPlaceholder": "Cerca ordini di acquisto...",
+    "filterAll": "Tutti gli stati",
+    "supplier": "Fornitore",
+    "expected": "Previsto",
+    "progress": "Ricevuti {{received}} su {{ordered}}",
+    "lastSynced": "Ultima sincronizzazione {{time}}",
+    "neverSynced": "Non ancora sincronizzato",
+    "status": {
+      "draft": "Bozza",
+      "ordered": "Ordinato",
+      "partially_received": "Parzialmente ricevuto",
+      "received_closed": "Ricevuto / Chiuso",
+      "cancelled": "Annullato"
+    },
+    "flavor": {
+      "inventory": "Magazzino",
+      "retail": "Vendita al dettaglio",
+      "legacy": "Prodotto"
+    },
+    "detail": {
+      "items": "Articoli",
+      "orderedQty": "Ordinato",
+      "receivedQty": "Ricevuto",
+      "remainingQty": "Rimanente",
+      "unplanned": "Non pianificato",
+      "notes": "Note",
+      "back": "Torna all'elenco"
+    },
+    "receive": {
+      "action": "Ricevi consegna",
+      "title": "Ricezione per {{reference}}",
+      "quantity": "Quantità",
+      "unitCost": "Costo unitario",
+      "confirmOverReceipt": "Conferma la ricezione oltre la quantità ordinata",
+      "notesPlaceholder": "Note di consegna (facoltativo)",
+      "submit": "Registra ricezione",
+      "submitting": "Registrazione...",
+      "queuedOffline": "Ricezione salvata localmente e messa in coda per la sincronizzazione.",
+      "recorded": "Ricezione registrata.",
+      "replayed": "La ricezione era già stata registrata.",
+      "noStaff": "Accedi con un PIN del personale per registrare le ricezioni.",
+      "noLines": "Inserisci almeno una quantità ricevuta.",
+      "failed": "Impossibile registrare la ricezione.",
+      "conflict": "Questo ordine di acquisto è cambiato sul server ({{status}}). La ricezione non è stata applicata.",
+      "moduleRequired": "Il modulo fornitori non è attivo per questo terminale.",
+      "confirmationRequired": "Conferma le righe segnalate e invia di nuovo."
+    },
+    "pending": {
+      "title": "Sincronizzazione in sospeso",
+      "entry": "Registrato {{time}} — in attesa di sincronizzazione",
+      "parked": "In attesa dell'accesso al modulo",
+      "conflictTitle": "Richiede attenzione",
+      "conflictBody": "L'ordine di acquisto è cambiato mentre il terminale era offline. Le quantità registrate sono conservate qui sotto.",
+      "retry": "Riprova sincronizzazione",
+      "retryQueued": "Ricezione messa in coda per un nuovo tentativo.",
+      "quantities": "Quantità registrate"
+    },
+    "offline": {
+      "receiveNote": "Le ricezioni registrate offline vengono salvate su questo terminale e sincronizzate automaticamente alla riconnessione."
     }
   },
   "tablesView": {
@@ -5623,6 +5837,7 @@
       "publishBlocked": "Programma messo in coda ma bloccato finché la configurazione ERGANI non è completa.",
       "publishQueued": "Pubblicazione del programma messa in coda per ERGANI.",
       "publishFailed": "Impossibile pubblicare su ERGANI.",
+      "publishNotFiled": "Il programma non è stato trasmesso a ERGANI.",
       "lastStatus": "Stato ERGANI"
     },
     "errors": {

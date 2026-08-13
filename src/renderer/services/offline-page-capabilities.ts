@@ -28,7 +28,15 @@ export interface OfflineActionState {
 
 interface OfflinePageCapability {
   bannerMessage: string
+  /** Online-only actions: offline they are DISABLED with this message. */
   actions?: Record<string, string>
+  /**
+   * Offline-capable queued actions: they stay ENABLED offline, and this
+   * message is an informational note (returned with `disabled: false`)
+   * that the surface can show near the action (e.g. the receive dialog's
+   * queued-sync note on the purchase-orders tab).
+   */
+  queuedActions?: Record<string, string>
 }
 
 const DEFAULT_READ_ONLY_MESSAGE =
@@ -139,7 +147,11 @@ const PAGE_CAPABILITIES: Record<OfflinePageId, OfflinePageCapability> = {
   },
   suppliers: {
     bannerMessage:
-      'Suppliers remain readable offline from the cached admin snapshot. Supplier changes still require an online connection.',
+      'Suppliers and purchase orders remain readable offline from the cached snapshot. Goods receipts recorded offline save locally and sync after reconnect. Supplier changes still require an online connection.',
+    queuedActions: {
+      receive:
+        'Receipts recorded offline are saved on this terminal and sync automatically after reconnect.',
+    },
   },
 }
 
@@ -202,12 +214,19 @@ export function getOfflineActionState(
   const pageCapability = PAGE_CAPABILITIES[normalizedPageId]
   const message = pageCapability.actions?.[actionId]
 
-  if (!message) {
-    return { disabled: false, message: null }
+  if (message) {
+    return {
+      disabled: true,
+      message,
+    }
   }
 
-  return {
-    disabled: true,
-    message,
+  // Queued actions remain enabled offline; the message is an
+  // informational "saves locally, syncs later" note, not a block.
+  const queuedMessage = pageCapability.queuedActions?.[actionId]
+  if (queuedMessage) {
+    return { disabled: false, message: queuedMessage }
   }
+
+  return { disabled: false, message: null }
 }

@@ -5,6 +5,7 @@ import {
   getPosModuleCachePrefixes,
   getPosModuleWarmPaths,
 } from './pos-module-cache-registry';
+import { syncPurchaseOrderSnapshot } from './purchase-order-snapshot';
 import type {
   QueueStatus,
   SyncResult,
@@ -339,6 +340,16 @@ export async function runParitySyncCycle(options?: {
         await warmAdvisoryPageCaches(config);
       } catch (error) {
         console.warn('[ParitySyncCoordinator] Advisory cache warmup failed:', error);
+      }
+
+      // procurement-loop Task 10.1: purchase_orders snapshot pull set —
+      // full snapshot first, `updated_since` delta afterwards. Runs AFTER
+      // processQueue so queued receipts replay before the snapshot
+      // refresh, clearing their pending overlays into fresh server state.
+      try {
+        await syncPurchaseOrderSnapshot();
+      } catch (error) {
+        console.warn('[ParitySyncCoordinator] Purchase order snapshot sync failed:', error);
       }
 
       let shouldForceLegacySync = requestedLegacySync === true;

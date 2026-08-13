@@ -22,7 +22,9 @@ import {
   RefreshCw,
   Receipt,
   Save,
+  ScanLine,
   Search,
+  Settings,
   Trash2,
   Upload,
   Wallet,
@@ -30,11 +32,45 @@ import {
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { useTheme } from '../contexts/theme-context';
+import { useModules } from '../contexts/module-context';
+import { useShift } from '../contexts/shift-context';
 import { useOnBarcodeScan } from '../contexts/barcode-scanner-context';
 import { formatCurrency, formatDate } from '../utils/format';
-import { posApiGet, posApiPost } from '../utils/api-helpers';
+import { posApiFetch, posApiGet, posApiPost } from '../utils/api-helpers';
 import { extractSupplierImportFile } from '../utils/supplier-import-parser';
 import { renderModalPortal } from '../utils/render-modal-portal';
+import PurchaseOrdersTab from '../components/procurement/PurchaseOrdersTab';
+import CaptureScanSettingsModal from '../components/suppliers/CaptureScanSettingsModal';
+import CapturePagesPanel from '../components/suppliers/CapturePagesPanel';
+import CaptureQueuePanel from '../components/suppliers/CaptureQueuePanel';
+import { CAPTURE_REVIEW_REQUEST_EVENT } from '../components/CaptureNotificationManager';
+import {
+  acquireFromScanner,
+  advanceCapture,
+  confirmCaptureCommit,
+  getCaptureDocument,
+  listCaptureDocuments,
+  loadCaptureSources,
+  loadDefaultCaptureSourceId,
+  resolveDefaultSource,
+  saveCaptureDraft,
+  startCaptureDocument,
+  type CaptureDocumentRow,
+} from '../services/capture-client';
+import { offlineCommitSupplierImport } from '../services/offline-mutations';
+import {
+  loadPurchaseOrderSnapshot,
+  type PosPurchaseOrder,
+} from '../services/purchase-order-snapshot';
+import {
+  badgeCount,
+  deviceKey,
+  doubleCheckCount,
+  mapRecognitionToDraft,
+  needsDoubleCheck,
+  suggestPurchaseOrders,
+} from '../utils/capture-review';
+import type { CaptureSourceConfig, ConfidenceTier } from '../types/supplier-capture';
 
 interface Supplier {
   id: string;
@@ -253,10 +289,37 @@ function getSupplierImportErrorMessage(
   return raw.length > 500 ? `${raw.slice(0, 240).trim()}...` : raw;
 }
 
+/**
+ * Pull the typed outcome code out of a rejected commit's error text.
+ *
+ * The code is what the queue stores and later renders as one plain sentence;
+ * the raw server text never becomes the primary thing a user reads (R12.1).
+ * An unrecognised rejection still gets a code — `commit_rejected` — so the
+ * document is never left with a blank reason.
+ */
+function extractCaptureReason(message: string): string {
+  const codes = [
+    'MODULE_REQUIRED',
+    'PO_INVOICE_ALREADY_APPLIED',
+    'PO_STATE_CONFLICT',
+    'CAPTURE_TOO_LARGE',
+    'CAPTURE_TOO_MANY_PAGES',
+    'CAPTURE_UNREADABLE',
+  ];
+  return codes.find(code => message.includes(code)) || 'commit_rejected';
+}
+
 const SuppliersPage: React.FC = () => {
   const { t, i18n } = useTranslation();
   const { resolvedTheme } = useTheme();
+  const { isModuleEnabled } = useModules();
+  const { staff } = useShift();
   const isDark = resolvedTheme === 'dark';
+  // Belt-and-braces module gate: the suppliers view is already guarded by the
+  // layout, and this keeps every capture entry point off the page if it is
+  // ever composed somewhere that is not. [R14.1]
+  const captureEnabled = isModuleEnabled('suppliers');
+  const captureStaffId = (staff?.databaseStaffId as string | undefined) ?? null;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const cameraInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -266,7 +329,7 @@ const SuppliersPage: React.FC = () => {
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [selectedSupplierId, setSelectedSupplierId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'suppliers' | 'invoices'>('suppliers');
+  const [activeTab, setActiveTab] = useState<'suppliers' | 'invoices' | 'orders'>('suppliers');
   const [searchTerm, setSearchTerm] = useState('');
   const [supplierFilter, setSupplierFilter] = useState<'all' | 'active' | 'inactive'>('all');
   const [invoiceFilter, setInvoiceFilter] = useState<'all' | PaymentStatus>('all');
@@ -291,6 +354,26 @@ const SuppliersPage: React.FC = () => {
   const [paymentReference, setPaymentReference] = useState('');
   const [paymentNotes, setPaymentNotes] = useState('');
 
+  // ---- Invoice capture (spec .claude/specs/invoice-scan-capture, D-UI) ---- //
+  const [captureSources, setCaptureSources] = useState<CaptureSourceConfig[]>([]);
+  const [captureDefaultId, setCaptureDefaultId] = useState<string | null>(null);
+  const [scanSettingsOpen, setScanSettingsOpen] = useState(false);
+  const [captureQueueOpen, setCaptureQueueOpen] = useState(false);
+  const [capturePending, setCapturePending] = useState(0);
+  const [activeCapture, setActiveCapture] = useState<{
+    captureId: string;
+    deviceId: string | null;
+    sourceName: string | null;
+  } | null>(null);
+  const [scanStarting, setScanStarting] = useState(false);
+  /** The document currently open in the import drawer, if the drawer came from a scan. */
+  const [reviewCapture, setReviewCapture] = useState<CaptureDocumentRow | null>(null);
+  const [reviewConfidence, setReviewConfidence] = useState<ConfidenceTier[]>([]);
+  const [reviewQuality, setReviewQuality] = useState<'good' | 'poor'>('good');
+  const [reviewPoOptions, setReviewPoOptions] = useState<PosPurchaseOrder[]>([]);
+  /** null is the default and the decline (R9.2) — linkage is always opt-in. */
+  const [reviewPoId, setReviewPoId] = useState<string | null>(null);
+
   // Ref + stable title id so the portaled import overlay can declare labelled dialog
   // semantics and join the topmost-[role="dialog"] Escape stack used across the POS.
   const importDialogRef = useRef<HTMLDivElement>(null);
@@ -299,6 +382,8 @@ const SuppliersPage: React.FC = () => {
   const summaryTitleId = useId();
   const invoiceDialogRef = useRef<HTMLDivElement>(null);
   const invoiceTitleId = useId();
+  const captureQueueDialogRef = useRef<HTMLDivElement>(null);
+  const captureQueueTitleId = useId();
 
   const panelClass = isDark ? 'bg-zinc-950 border-zinc-800 text-white' : 'bg-white border-gray-200 text-gray-950';
   const subtleClass = isDark ? 'text-zinc-400' : 'text-gray-500';
@@ -316,7 +401,35 @@ const SuppliersPage: React.FC = () => {
   // can never trigger a preview, save, file import, scan, barcode add, or delete.
   const closeImport = useCallback(() => {
     setImportOpen(false);
-  }, []);
+    // Leaving review keeps every edit: the draft is written back to the
+    // capture row, so returning later — or after a restart — resumes exactly
+    // where the user left off. Failing to persist must not trap them in the
+    // drawer, so this is fire-and-forget. [R8.6, R17.3]
+    if (reviewCapture) {
+      void saveCaptureDraft(reviewCapture.captureId, {
+        source: 'review',
+        rows: draftRows,
+        supplier: {
+          name: supplierName,
+          email: supplierEmail,
+          phone: supplierPhone,
+          notes: supplierNotes,
+        },
+        invoice: { invoiceNumber, invoiceDate },
+        poLinkage: reviewPoId ? { purchaseOrderId: reviewPoId } : null,
+      }).catch((error) => console.warn('[capture] could not save review edits:', error));
+    }
+  }, [
+    draftRows,
+    invoiceDate,
+    invoiceNumber,
+    reviewCapture,
+    reviewPoId,
+    supplierEmail,
+    supplierName,
+    supplierNotes,
+    supplierPhone,
+  ]);
 
   // Escape closes the import overlay, mirroring the app-level POS modals. Only the
   // frontmost [role="dialog"] reacts, so a future nested dialog opened above it closes
@@ -391,6 +504,27 @@ const SuppliersPage: React.FC = () => {
     document.addEventListener('keydown', handleEscape);
     return () => document.removeEventListener('keydown', handleEscape);
   }, [selectedInvoiceId, closeInvoiceDetails]);
+
+  // Escape closes the capture queue overlay, same topmost-dialog gate and the
+  // same close-only path — dismissing it never advances or discards a document.
+  useEffect(() => {
+    if (!captureQueueOpen) {
+      return;
+    }
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') {
+        return;
+      }
+      const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'));
+      if (dialogs.length > 0 && dialogs[dialogs.length - 1] !== captureQueueDialogRef.current) {
+        return;
+      }
+      event.preventDefault();
+      setCaptureQueueOpen(false);
+    };
+    document.addEventListener('keydown', handleEscape);
+    return () => document.removeEventListener('keydown', handleEscape);
+  }, [captureQueueOpen]);
 
   const supplierById = useMemo(() => {
     const map = new Map<string, Supplier>();
@@ -682,29 +816,361 @@ const SuppliersPage: React.FC = () => {
     }
   };
 
+  const resetImportForm = useCallback(() => {
+    setImportOpen(false);
+    setSupplierName('');
+    setSupplierEmail('');
+    setSupplierPhone('');
+    setSupplierNotes('');
+    setInvoiceNumber('');
+    setInvoiceDate('');
+    setDraftRows([emptyImportRow()]);
+    setImportDraft(null);
+    setImportError(null);
+    setReviewCapture(null);
+    setReviewConfidence([]);
+    setReviewQuality('good');
+    setReviewPoOptions([]);
+    setReviewPoId(null);
+  }, []);
+
+  // ---- Invoice capture wiring ------------------------------------------ //
+
+  const refreshCaptureSources = useCallback(async () => {
+    const [sources, defaultId] = await Promise.all([
+      loadCaptureSources(),
+      loadDefaultCaptureSourceId(),
+    ]);
+    setCaptureSources(current =>
+      JSON.stringify(current) === JSON.stringify(sources) ? current : sources
+    );
+    setCaptureDefaultId(current => (current === defaultId ? current : defaultId));
+  }, []);
+
+  /**
+   * Recount the waiting/needs-attention badge (R11.5).
+   *
+   * Writes state only on a real change: the worker re-announces statuses it
+   * has already reported, and a header badge that re-renders on every
+   * announcement is a header badge that flickers.
+   */
+  const refreshCaptureQueue = useCallback(async () => {
+    try {
+      const documents = await listCaptureDocuments();
+      const next = badgeCount(documents);
+      setCapturePending(current => (current === next ? current : next));
+    } catch {
+      // The queue is durable in SQLite; failing to *count* it is cosmetic.
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!captureEnabled) return;
+    void refreshCaptureSources();
+    void refreshCaptureQueue();
+  }, [captureEnabled, refreshCaptureQueue, refreshCaptureSources]);
+
+  /**
+   * Open the existing import drawer, prefilled from a captured document.
+   *
+   * Capture deliberately has no review screen of its own: everything a scanned
+   * invoice needs already exists in this drawer, so it is poured in and then
+   * travels the ordinary preview → commit path. Saved review edits win over
+   * the raw recognition, which is what makes leaving and coming back — or the
+   * text-layer fast path — behave the way the user expects. [R8.6, D1]
+   */
+  const openCaptureReview = useCallback(
+    (document: CaptureDocumentRow) => {
+      const prefill = mapRecognitionToDraft(document.recognition);
+      const draft = document.draft;
+      const draftRowsFromDraft = Array.isArray(draft?.rows)
+        ? (draft?.rows as ImportRawRow[])
+        : null;
+
+      const rows = draftRowsFromDraft ?? prefill.rows;
+      const supplier = (draft?.supplier as Record<string, string> | undefined) ?? prefill.supplier;
+      const invoice = (draft?.invoice as Record<string, string> | undefined) ?? prefill.invoice;
+
+      setSupplierName(supplier.name || '');
+      setSupplierEmail(supplier.email || '');
+      setSupplierPhone(supplier.phone || '');
+      setSupplierNotes(supplier.notes || '');
+      setInvoiceNumber(invoice.invoiceNumber || '');
+      setInvoiceDate(invoice.invoiceDate || '');
+      // Every parsed row is kept — the client never drops one. An empty
+      // recognition still opens with one blank row so manual entry works from
+      // the same screen. [R6.4, R7.5]
+      setDraftRows(rows.length > 0 ? rows : [emptyImportRow()]);
+      setImportDraft(null);
+      setImportError(null);
+      setFileNotice(null);
+
+      setReviewCapture(document);
+      setReviewConfidence(prefill.rowConfidence);
+      setReviewQuality(prefill.quality);
+
+      const openOrders = suggestPurchaseOrders(
+        loadPurchaseOrderSnapshot().purchaseOrders,
+        supplier.name || ''
+      );
+      setReviewPoOptions(openOrders);
+      // Declining is the default: the offer is never pre-accepted. [R9.2]
+      setReviewPoId(null);
+
+      setCaptureQueueOpen(false);
+      setImportOpen(true);
+    },
+    []
+  );
+
+  const openCaptureReviewById = useCallback(
+    async (captureId: string) => {
+      const { document } = await getCaptureDocument(captureId);
+      if (document) openCaptureReview(document);
+    },
+    [openCaptureReview]
+  );
+
+  // "Check invoice" on a capture toast lands on that document, not just on
+  // this page. [R3.6, R11.9]
+  useEffect(() => {
+    if (!captureEnabled) return;
+    const handleReviewRequest = (event: Event) => {
+      const captureId = (event as CustomEvent<{ captureId?: string }>).detail?.captureId;
+      if (captureId) void openCaptureReviewById(captureId);
+    };
+    window.addEventListener(CAPTURE_REVIEW_REQUEST_EVENT, handleReviewRequest as EventListener);
+    return () =>
+      window.removeEventListener(CAPTURE_REVIEW_REQUEST_EVENT, handleReviewRequest as EventListener);
+  }, [captureEnabled, openCaptureReviewById]);
+
+  /**
+   * Start a scan from this terminal's default source.
+   *
+   * One click from the suppliers header to a scanner spinning up: no source
+   * picker, no confirmation, no interstitial (R15.1). With nothing configured
+   * the button offers setup instead of raising an error (R1.3).
+   */
+  const startScan = useCallback(async () => {
+    if (captureSources.length === 0) {
+      setScanSettingsOpen(true);
+      return;
+    }
+
+    const source = resolveDefaultSource(captureSources, captureDefaultId);
+    if (!source) {
+      setScanSettingsOpen(true);
+      return;
+    }
+
+    // A watched folder is scanned from the machine, not from here. Saying so
+    // is the whole "zero file browsing" experience: press Scan over there, the
+    // invoice turns up in the queue. [R15.4]
+    if (source.kind === 'watched_folder') {
+      toast.success(
+        t(
+          'suppliers.capture.scan.pressScanOnMachine',
+          'Press Scan on your machine. The invoice will show up here on its own.'
+        )
+      );
+      setCaptureQueueOpen(true);
+      return;
+    }
+
+    setScanStarting(true);
+    try {
+      const captureId = await startCaptureDocument({
+        sourceKind: source.kind,
+        sourceName: source.name,
+        staffId: captureStaffId,
+      });
+      // The panel opens before the scanner answers, so the user sees something
+      // happen well inside a second and watches the pages land. [R17.1]
+      setActiveCapture({
+        captureId,
+        deviceId: source.deviceId ?? null,
+        sourceName: source.name,
+      });
+
+      if (source.deviceId) {
+        const outcome = await acquireFromScanner({ captureId, deviceId: source.deviceId });
+        if (!outcome.ok) {
+          toast.error(
+            t(
+              deviceKey(outcome.code),
+              t(
+                'suppliers.capture.device.device_error',
+                'The scanner did not answer. Check it is on and connected.'
+              )
+            )
+          );
+        }
+      }
+      await refreshCaptureQueue();
+    } catch (scanError) {
+      console.error('[capture] could not start a scan:', scanError);
+      toast.error(
+        t('suppliers.capture.scan.startFailed', 'Could not start scanning. Try again.')
+      );
+    } finally {
+      setScanStarting(false);
+    }
+  }, [captureDefaultId, captureSources, captureStaffId, refreshCaptureQueue, t]);
+
+  /** Finish the in-flight document and hand it to the recognition queue. */
+  const finishCapture = useCallback(
+    async (captureId: string) => {
+      const outcome = await advanceCapture({ captureId, status: 'waiting' });
+      if (!outcome.success && outcome.code === 'no_pages') {
+        toast.error(
+          t('suppliers.capture.pages.needAPage', 'Add at least one page before finishing.')
+        );
+        return false;
+      }
+      setActiveCapture(null);
+      await refreshCaptureQueue();
+      toast.success(
+        t('suppliers.capture.scan.reading', 'Reading your invoice… you can carry on working.')
+      );
+      return true;
+    },
+    [refreshCaptureQueue, t]
+  );
+
+  const finishCaptureAndStartAnother = useCallback(
+    async (captureId: string) => {
+      if (await finishCapture(captureId)) {
+        await startScan();
+      }
+    },
+    [finishCapture, startScan]
+  );
+
+  /**
+   * "Scan again" from a poor result: the current document is thrown away and a
+   * fresh one started for the same invoice. Explicit, confirmed by the button
+   * press itself, and the only thing lost is a scan the user just told us was
+   * no good. [R7.3]
+   */
+  const rescanCurrentInvoice = useCallback(async () => {
+    const document = reviewCapture;
+    resetImportForm();
+    if (document) {
+      await advanceCapture({
+        captureId: document.captureId,
+        status: 'discarded',
+        staffId: captureStaffId,
+      });
+      await refreshCaptureQueue();
+    }
+    await startScan();
+  }, [captureStaffId, refreshCaptureQueue, resetImportForm, reviewCapture, startScan]);
+
   const commitImport = async () => {
     if (!importDraft) return;
     setSaving(true);
     setImportError(null);
+
+    // A scanned invoice carries its provenance and (optionally) its purchase
+    // order alongside the draft. Both blocks are absent for a hand-built
+    // import, which is what keeps this one code path serving both. [R9.1, R13.1]
+    const capture = reviewCapture
+      ? {
+          captureId: reviewCapture.captureId,
+          sourceKind: reviewCapture.sourceKind,
+          sourceName: reviewCapture.sourceName ?? undefined,
+          capturedAt: reviewCapture.capturedAt,
+          capturedByStaffId: reviewCapture.staffId ?? undefined,
+          committedByStaffId: captureStaffId ?? undefined,
+          storageKeys: reviewCapture.storageKeys.filter(
+            (key): key is string => typeof key === 'string' && key.length > 0,
+          ),
+        }
+      : null;
+    const poLinkage = reviewPoId
+      ? { purchaseOrderId: reviewPoId, mode: 'record_delivery' as const }
+      : null;
+
     try {
-      const result = await posApiPost<{ success: boolean; result?: { createdInventoryCount: number; updatedInventoryCount: number }; error?: string }>(
-        'pos/suppliers/import/commit',
-        { draft: importDraft }
-      );
-      if (!result.success || !result.data?.result) {
-        throw new Error(result.error || result.data?.error || 'Commit failed');
+      if (capture) {
+        await advanceCapture({ captureId: capture.captureId, status: 'committing' });
       }
-      toast.success(t('suppliers.import.saved', 'Supplier items saved to inventory'));
-      setImportOpen(false);
-      setSupplierName('');
-      setSupplierEmail('');
-      setSupplierPhone('');
-      setSupplierNotes('');
-      setInvoiceNumber('');
-      setInvoiceDate('');
-      setDraftRows([emptyImportRow()]);
-      setImportDraft(null);
-      setImportError(null);
+
+      const result = await posApiFetch<{
+        success: boolean;
+        result?: { createdInventoryCount: number; updatedInventoryCount: number };
+        error?: string;
+      }>('pos/suppliers/import/commit', {
+        method: 'POST',
+        body: JSON.stringify({
+          draft: importDraft,
+          ...(capture ? { capture } : {}),
+          ...(poLinkage ? { poLinkage } : {}),
+        }),
+      });
+
+      if (!result.success || !result.data?.result) {
+        const message = result.error || result.data?.error || 'Commit failed';
+
+        // No HTTP status means the request never reached the server. The
+        // reviewed invoice is queued with the SAME capture id as its
+        // idempotency key, so if it did land after all the server collapses
+        // the replay onto one invoice. [R9.5, R11.6]
+        if (capture && typeof result.status !== 'number') {
+          await offlineCommitSupplierImport({
+            draft: importDraft as unknown as Record<string, unknown>,
+            capture: {
+              captureId: capture.captureId,
+              sourceKind: capture.sourceKind,
+              capturedAt: capture.capturedAt,
+              sourceName: capture.sourceName,
+              capturedByStaffId: capture.capturedByStaffId,
+              committedByStaffId: capture.committedByStaffId,
+              storageKeys: capture.storageKeys,
+            },
+            ...(poLinkage ? { poLinkage } : {}),
+            staffId: captureStaffId ?? '',
+          });
+          toast.success(
+            t(
+              'suppliers.capture.review.queued',
+              'Saved here. It will reach the office as soon as you are back online.',
+            ),
+          );
+          resetImportForm();
+          await refreshCaptureQueue();
+          return;
+        }
+
+        // The server answered and refused. The document keeps its edits and
+        // becomes actionable with a stated reason. [R9.6, R11.6]
+        if (capture) {
+          await advanceCapture({
+            captureId: capture.captureId,
+            status: 'needs_attention',
+            reason: extractCaptureReason(message),
+            staffId: captureStaffId,
+          });
+          await refreshCaptureQueue();
+        }
+        throw new Error(message);
+      }
+
+      if (capture) {
+        await confirmCaptureCommit({
+          captureId: capture.captureId,
+          result: result.data as unknown as Record<string, unknown>,
+          staffId: captureStaffId,
+        });
+        await refreshCaptureQueue();
+      }
+
+      toast.success(
+        capture
+          ? t('suppliers.capture.review.saved', 'Invoice saved.')
+          : t('suppliers.import.saved', 'Supplier items saved to inventory'),
+      );
+      resetImportForm();
       await fetchData();
     } catch (commitError) {
       const message = getSupplierImportErrorMessage(t, commitError, 'saveFailed');
@@ -823,7 +1289,50 @@ const SuppliersPage: React.FC = () => {
               <h1 className="truncate text-3xl font-bold tracking-tight">{t('suppliers.title', 'Suppliers')}</h1>
               <p className={`mt-1 truncate text-sm ${subtleClass}`}>{t('suppliers.subtitle', 'Manage suppliers, invoices, and imported inventory')}</p>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              {/*
+                Invoice capture entry points. One click from here to a scanner
+                spinning up; the settings button is the secondary, and the
+                badge is the "queued work cannot be forgotten" indicator.
+                [R1.1, R11.5, R15.1]
+              */}
+              {captureEnabled && (
+                <>
+                  <button
+                    data-testid="capture-scan-invoice"
+                    onClick={() => void startScan()}
+                    disabled={scanStarting}
+                    className={`inline-flex items-center gap-2 rounded-xl border bg-transparent px-4 py-3 text-sm font-semibold ${isDark ? 'border-yellow-400/70 text-white active:bg-yellow-400/10' : 'border-yellow-400 text-gray-950 active:bg-yellow-50'}`}
+                  >
+                    {scanStarting ? <Loader2 className="h-4 w-4 animate-spin" /> : <ScanLine className="h-4 w-4" />}
+                    {t('suppliers.capture.scan.open', 'Scan invoice')}
+                  </button>
+                  <button
+                    data-testid="capture-scan-settings"
+                    onClick={() => setScanSettingsOpen(true)}
+                    className={`inline-flex items-center gap-2 rounded-xl border bg-transparent px-4 py-3 text-sm font-semibold ${iconButtonClass}`}
+                  >
+                    <Settings className="h-4 w-4" />
+                    {t('suppliers.capture.settings.open', 'Scan settings')}
+                  </button>
+                  <button
+                    data-testid="capture-queue-open"
+                    onClick={() => setCaptureQueueOpen(true)}
+                    className={`inline-flex items-center gap-2 rounded-xl border bg-transparent px-4 py-3 text-sm font-semibold ${iconButtonClass}`}
+                  >
+                    <Clock className="h-4 w-4" />
+                    {t('suppliers.capture.queue.open', 'Scanned invoices')}
+                    {capturePending > 0 && (
+                      <span
+                        data-testid="capture-pending-badge"
+                        className={`rounded-full border px-2 py-0.5 text-xs font-bold ${isDark ? 'border-amber-400/50 text-amber-200' : 'border-amber-400 text-amber-700'}`}
+                      >
+                        {capturePending}
+                      </span>
+                    )}
+                  </button>
+                </>
+              )}
               <button
                 onClick={() => setImportOpen(true)}
                 className={`inline-flex items-center gap-2 rounded-xl border bg-transparent px-4 py-3 text-sm font-semibold ${isDark ? 'border-yellow-400/70 text-white active:bg-yellow-400/10' : 'border-yellow-400 text-gray-950 active:bg-yellow-50'}`}
@@ -882,23 +1391,28 @@ const SuppliersPage: React.FC = () => {
           </div>
         )}
 
-        <section className="grid min-h-0 flex-1 gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
+        <section className={`grid min-h-0 flex-1 gap-4 ${activeTab === 'orders' ? '' : 'xl:grid-cols-[minmax(0,1fr)_360px]'}`}>
           <div className={`flex min-h-0 flex-col rounded-2xl border ${panelClass}`}>
             <div className="shrink-0 border-b border-inherit p-3 md:p-4">
               <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                 <div className={`flex w-full rounded-xl border p-1 lg:w-auto ${isDark ? 'border-zinc-800 bg-zinc-900' : 'border-gray-200 bg-gray-100'}`}>
-                  {(['suppliers', 'invoices'] as const).map(tab => (
+                  {(['suppliers', 'invoices', 'orders'] as const).map(tab => (
                     <button
                       key={tab}
                       onClick={() => setActiveTab(tab)}
                       className={`inline-flex min-h-10 items-center gap-2 rounded-2xl px-4 text-sm font-semibold transition ${activeTab === tab ? (isDark ? 'bg-white text-black' : 'bg-black text-white') : subtleClass}`}
                     >
-                      {tab === 'suppliers' ? <Building2 className="h-4 w-4" /> : <FileText className="h-4 w-4" />}
-                      {tab === 'suppliers' ? t('suppliers.suppliers', 'Suppliers') : t('suppliers.invoices.title', 'Invoices')}
+                      {tab === 'suppliers' ? <Building2 className="h-4 w-4" /> : tab === 'invoices' ? <FileText className="h-4 w-4" /> : <Package className="h-4 w-4" />}
+                      {tab === 'suppliers'
+                        ? t('suppliers.suppliers', 'Suppliers')
+                        : tab === 'invoices'
+                          ? t('suppliers.invoices.title', 'Invoices')
+                          : t('procurement.tab', 'Purchase orders')}
                     </button>
                   ))}
                 </div>
 
+                {activeTab !== 'orders' && (
                 <div className="flex min-w-0 flex-1 flex-col gap-2 sm:flex-row lg:max-w-2xl">
                   <div className={`relative min-w-0 flex-1 rounded-xl border ${fieldClass}`}>
                     <Search className={`absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 ${subtleClass}`} />
@@ -947,11 +1461,14 @@ const SuppliersPage: React.FC = () => {
                     )}
                   </div>
                 </div>
+                )}
               </div>
             </div>
 
             <div className="min-h-0 flex-1 overflow-y-auto scrollbar-hide p-3 md:p-4">
-              {loading ? (
+              {activeTab === 'orders' ? (
+                <PurchaseOrdersTab />
+              ) : loading ? (
                 <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                   {[1, 2, 3, 4, 5, 6].map(item => (
                     <div key={item} className={`h-40 animate-pulse rounded-xl border ${isDark ? 'border-zinc-800 bg-zinc-900' : 'border-gray-200 bg-gray-100'}`} />
@@ -1109,7 +1626,7 @@ const SuppliersPage: React.FC = () => {
             </div>
           </div>
 
-          <aside className={`hidden min-h-0 flex-col rounded-2xl border xl:flex ${panelClass}`}>
+          <aside className={`${activeTab === 'orders' ? 'hidden' : 'hidden xl:flex'} min-h-0 flex-col rounded-2xl border ${panelClass}`}>
             <div className="border-b border-inherit p-3">
               <p className={`text-xs font-semibold uppercase ${subtleClass}`}>{t('suppliers.detail.title', 'Supplier detail')}</p>
               <h2 className="mt-1 truncate text-xl font-bold">{selectedSupplier?.name || t('suppliers.noSelection', 'No supplier selected')}</h2>
@@ -1627,6 +2144,90 @@ const SuppliersPage: React.FC = () => {
                   </div>
 
                   <div className="min-w-0 space-y-4">
+                    {/*
+                      A hard-to-read scan is a bump, not a dead end: two equally
+                      weighted choices, neither of them the "correct" one, and
+                      the ordinary Save path stays open behind both. [R7.2]
+                    */}
+                    {reviewCapture && reviewQuality === 'poor' && (
+                      <div
+                        data-testid="capture-poor-quality"
+                        className={`rounded-xl border p-4 ${isDark ? 'border-amber-500/30 bg-amber-500/10 text-amber-100' : 'border-amber-200 bg-amber-50 text-amber-800'}`}
+                      >
+                        <p className="font-semibold">
+                          {t('suppliers.capture.review.poorTitle', 'This scan is hard to read')}
+                        </p>
+                        <p className="mt-1 text-sm">
+                          {t('suppliers.capture.review.poorDescription', 'You can scan it again, or just type in what it says.')}
+                        </p>
+                        <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                          <button
+                            data-testid="capture-scan-again"
+                            onClick={() => void rescanCurrentInvoice()}
+                            className={`inline-flex min-h-10 items-center justify-center gap-2 rounded-2xl border px-4 text-sm font-semibold ${iconButtonClass}`}
+                          >
+                            <RefreshCw className="h-4 w-4" />
+                            {t('suppliers.capture.review.scanAgain', 'Scan it again')}
+                          </button>
+                          <button
+                            data-testid="capture-fill-by-hand"
+                            onClick={() => setReviewQuality('good')}
+                            className={`inline-flex min-h-10 items-center justify-center gap-2 rounded-2xl border px-4 text-sm font-semibold ${iconButtonClass}`}
+                          >
+                            <Save className="h-4 w-4" />
+                            {t('suppliers.capture.review.fillByHand', 'Fill it in by hand')}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/*
+                      Purchase-order linkage, in plain language, only when there
+                      is actually an open order for this supplier. Declining is
+                      the default and stays selected unless the user says
+                      otherwise. [R9.2, R15.6]
+                    */}
+                    {reviewCapture && reviewPoOptions.length > 0 && (
+                      <div
+                        data-testid="capture-po-linkage"
+                        className={`rounded-xl border p-4 ${isDark ? 'border-zinc-800 bg-zinc-900/60' : 'border-gray-200 bg-gray-50'}`}
+                      >
+                        <p className="font-semibold">
+                          {t('suppliers.capture.review.poTitle', 'This delivery was expected — is this it?')}
+                        </p>
+                        <div className="mt-3 space-y-2">
+                          {reviewPoOptions.map(order => (
+                            <label
+                              key={order.id}
+                              className="flex min-h-10 items-center gap-3 text-sm"
+                            >
+                              <input
+                                type="radio"
+                                name="capture-po-linkage"
+                                className="h-5 w-5"
+                                checked={reviewPoId === order.id}
+                                onChange={() => setReviewPoId(order.id)}
+                              />
+                              <span className="min-w-0 flex-1 truncate">
+                                {order.orderReference}
+                                {order.expectedDeliveryDate ? ` · ${formatDate(order.expectedDeliveryDate)}` : ''}
+                              </span>
+                            </label>
+                          ))}
+                          <label className="flex min-h-10 items-center gap-3 text-sm">
+                            <input
+                              type="radio"
+                              name="capture-po-linkage"
+                              className="h-5 w-5"
+                              checked={reviewPoId === null}
+                              onChange={() => setReviewPoId(null)}
+                            />
+                            <span>{t('suppliers.capture.review.poDecline', 'No, this is something else')}</span>
+                          </label>
+                        </div>
+                      </div>
+                    )}
+
                     <div className={`rounded-xl border ${isDark ? 'border-zinc-800 bg-zinc-900/60' : 'border-gray-200 bg-white'}`}>
                       <div className="flex items-center justify-between gap-3 border-b border-inherit p-3">
                         <div>
@@ -1679,6 +2280,7 @@ const SuppliersPage: React.FC = () => {
                               subtleClass={subtleClass}
                               iconButtonClass={iconButtonClass}
                               isDark={isDark}
+                              doubleCheck={needsDoubleCheck(reviewConfidence[index])}
                               onChange={updateDraftRow}
                               onRemove={removeDraftRow}
                               t={t}
@@ -1739,6 +2341,83 @@ const SuppliersPage: React.FC = () => {
             </motion.div>
           </motion.div>
       )}
+
+      {captureEnabled && (
+        <CaptureScanSettingsModal
+          isOpen={scanSettingsOpen}
+          onClose={() => setScanSettingsOpen(false)}
+          onSourcesChanged={(sources, defaultSourceId) => {
+            setCaptureSources(sources);
+            setCaptureDefaultId(defaultSourceId);
+          }}
+        />
+      )}
+
+      {captureEnabled && (
+        <CapturePagesPanel
+          isOpen={activeCapture !== null}
+          captureId={activeCapture?.captureId ?? null}
+          deviceId={activeCapture?.deviceId ?? null}
+          sourceName={activeCapture?.sourceName ?? null}
+          onClose={() => {
+            // Closing is not abandoning: the document stays `capturing` and
+            // reappears in the queue with "Carry on scanning". [R11.4]
+            setActiveCapture(null);
+            void refreshCaptureQueue();
+          }}
+          onDone={finishCapture}
+          onFinishAndStartAnother={finishCaptureAndStartAnother}
+        />
+      )}
+
+      {captureEnabled && captureQueueOpen && renderModalPortal(
+        <div
+          className="fixed inset-0 z-[1200] flex items-center justify-center bg-black/55 p-4 backdrop-blur-sm"
+          onClick={() => setCaptureQueueOpen(false)}
+        >
+          <div
+            ref={captureQueueDialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={captureQueueTitleId}
+            onClick={(event) => event.stopPropagation()}
+            className={`flex max-h-[90vh] w-full max-w-3xl flex-col rounded-2xl border shadow-2xl ${panelClass}`}
+          >
+            <div className="flex shrink-0 items-start justify-between gap-4 border-b border-inherit p-4">
+              <div className="min-w-0">
+                <h2 id={captureQueueTitleId} className="truncate text-2xl font-bold">
+                  {t('suppliers.capture.queue.title', 'Scanned invoices')}
+                </h2>
+                <p className={`mt-1 text-sm ${subtleClass}`}>
+                  {t('suppliers.capture.queue.subtitle', 'Everything scanned here that is not filed yet.')}
+                </p>
+              </div>
+              <button
+                onClick={() => setCaptureQueueOpen(false)}
+                aria-label={t('common.close', 'Close')}
+                className={`inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border ${iconButtonClass}`}
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto scrollbar-hide p-4">
+              <CaptureQueuePanel
+                onReview={openCaptureReview}
+                onContinueCapture={(document) => {
+                  setCaptureQueueOpen(false);
+                  setActiveCapture({
+                    captureId: document.captureId,
+                    deviceId: resolveDefaultSource(captureSources, captureDefaultId)?.deviceId ?? null,
+                    sourceName: document.sourceName,
+                  });
+                }}
+                staffId={captureStaffId}
+                onChanged={refreshCaptureQueue}
+              />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -1775,13 +2454,19 @@ interface ImportRowEditorProps {
   subtleClass: string;
   iconButtonClass: string;
   isDark: boolean;
+  /**
+   * True when the reader was not sure about this row and the user should look
+   * at it. Derived from the server's tri-state confidence — the numeric score
+   * behind it never reaches this component, let alone the screen. [R7.1, R7.6]
+   */
+  doubleCheck?: boolean;
   onChange: (index: number, patch: Partial<ImportRawRow>) => void;
   onRemove: (index: number) => void;
   t: TFunction;
 }
 
-const ImportRowEditor: React.FC<ImportRowEditorProps> = ({ row, index, fieldClass, subtleClass, iconButtonClass, isDark, onChange, onRemove, t }) => (
-  <div className={`rounded-xl border p-3 ${isDark ? 'border-zinc-800 bg-black/20' : 'border-gray-200 bg-gray-50'}`}>
+const ImportRowEditor: React.FC<ImportRowEditorProps> = ({ row, index, fieldClass, subtleClass, iconButtonClass, isDark, doubleCheck, onChange, onRemove, t }) => (
+  <div className={`rounded-xl border p-3 ${doubleCheck ? (isDark ? 'border-amber-500/50 bg-amber-500/10' : 'border-amber-300 bg-amber-50') : (isDark ? 'border-zinc-800 bg-black/20' : 'border-gray-200 bg-gray-50')}`}>
     <div className="grid gap-2 md:grid-cols-[minmax(0,1.4fr)_120px_120px_86px_86px_42px]">
       <input
         value={row.name}
@@ -1831,7 +2516,17 @@ const ImportRowEditor: React.FC<ImportRowEditorProps> = ({ row, index, fieldClas
       <input value={row.subcategory || ''} onChange={(event) => onChange(index, { subcategory: event.target.value })} className={`h-10 rounded-2xl border px-3 text-sm outline-none ${fieldClass}`} placeholder={t('suppliers.import.subcategory', 'Subcategory')} />
       <input value={row.notes || ''} onChange={(event) => onChange(index, { notes: event.target.value })} className={`h-10 rounded-2xl border px-3 text-sm outline-none ${fieldClass}`} placeholder={t('suppliers.import.notes', 'Notes')} />
     </div>
-    <p className={`mt-2 text-xs ${subtleClass}`}>{t('suppliers.import.rowNumber', 'Row')} {index + 1}</p>
+    <div className="mt-2 flex flex-wrap items-center gap-2">
+      <p className={`text-xs ${subtleClass}`}>{t('suppliers.import.rowNumber', 'Row')} {index + 1}</p>
+      {doubleCheck && (
+        <span
+          data-testid={`capture-double-check-${index}`}
+          className={`rounded-full border px-2 py-0.5 text-xs font-semibold ${isDark ? 'border-amber-500/50 text-amber-200' : 'border-amber-300 text-amber-800'}`}
+        >
+          {t('suppliers.capture.review.doubleCheck', 'Double-check this')}
+        </span>
+      )}
+    </div>
   </div>
 );
 

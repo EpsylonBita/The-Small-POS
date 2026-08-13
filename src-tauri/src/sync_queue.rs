@@ -4094,6 +4094,10 @@ fn prepare_request(conn: &Connection, item: &SyncQueueItem) -> Result<RequestPre
             prepare_table_session_request(conn, item, &payload, terminal_id.as_str())
         }
         "room_checkins" => prepare_room_checkin_request(item, &payload, terminal_id.as_str()),
+        "po_receipts" => prepare_po_receipt_request(item, &payload, terminal_id.as_str()),
+        "supplier_import_commits" => {
+            prepare_supplier_import_commit_request(item, &payload, terminal_id.as_str())
+        }
         "customer_addresses" => {
             prepare_customer_address_request(conn, item, &payload, terminal_id.as_str())
         }
@@ -5515,6 +5519,285 @@ fn prepare_room_checkin_request(
     }))
 }
 
+/// Build the replay request for an offline goods receipt
+/// (procurement-loop Task 10.3).
+///
+/// Queue rows come from `offline_po_receipt` (entity `po_receipts`,
+/// `record_id` = the capture-time `idempotency_key`, snake_case envelope
+/// with the receipt lines kept in the shared camelCase
+/// `ReceiptCommitRequest` line shape). The server contract is
+/// `POST /api/pos/purchase-orders/{purchaseOrderId}/receipts` with a
+/// camelCase Zod body; the capture-time key is the exactly-once replay
+/// key and is sent BOTH as the mandatory `Idempotency-Key` header (via
+/// `replay_idempotency_header`) and as the body `idempotencyKey`
+/// fallback, so a lost-ack repeat comes back as `200 wasReplay` and
+/// completes the item [R11.4]. A `403 MODULE_REQUIRED` parks the row via
+/// `mark_module_required` (queue retained) [R11.6] and a genuine
+/// `409 PO_STATE_CONFLICT` flows to the manual-strategy conflict-review
+/// machinery so staff resolve it — never a silent drop [R11.7].
+fn prepare_po_receipt_request(
+    item: &SyncQueueItem,
+    payload: &Value,
+    terminal_id: &str,
+) -> Result<RequestPreparation, String> {
+    let Some(purchase_order_id) = string_field(payload, &["purchase_order_id", "purchaseOrderId"])
+    else {
+        return Ok(RequestPreparation::Failed {
+            reason: "PO receipt sync request is missing purchase_order_id".to_string(),
+        });
+    };
+    // The PO id is interpolated into an admin API path; capture stores the
+    // server-issued UUID, so anything else is a corrupted row.
+    if !is_uuid(&purchase_order_id) {
+        return Ok(RequestPreparation::Failed {
+            reason: "PO receipt sync request has a non-UUID purchase_order_id".to_string(),
+        });
+    }
+    let Some(staff_id) = string_field(payload, &["staff_id", "staffId"]) else {
+        return Ok(RequestPreparation::Failed {
+            reason: "PO receipt sync request is missing staff_id".to_string(),
+        });
+    };
+    // Original capture time must survive replay [R11.3]; a row without it
+    // cannot honor the contract and dead-letters with a clear reason.
+    let Some(recorded_at) = string_field(payload, &["recorded_at", "recordedAt"]) else {
+        return Ok(RequestPreparation::Failed {
+            reason: "PO receipt sync request is missing recorded_at".to_string(),
+        });
+    };
+    let lines = payload
+        .get("lines")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if lines.is_empty() {
+        return Ok(RequestPreparation::Failed {
+            reason: "PO receipt sync request has no receipt lines".to_string(),
+        });
+    }
+    // The replay key is persisted inside the queued payload at capture time;
+    // the queue row's record_id mirrors it, so either source replays
+    // exactly-once with the SAME capture-time key (never a fresh one).
+    let idempotency_key = string_field(payload, &["idempotency_key", "idempotencyKey"])
+        .unwrap_or_else(|| item.record_id.trim().to_string());
+    if idempotency_key.is_empty() {
+        return Ok(RequestPreparation::Failed {
+            reason: "PO receipt sync request is missing idempotency_key".to_string(),
+        });
+    }
+
+    let mut body = Map::new();
+    body.insert("idempotencyKey".to_string(), Value::String(idempotency_key));
+    body.insert("staffId".to_string(), Value::String(staff_id));
+    body.insert(
+        "source".to_string(),
+        Value::String(
+            string_field(payload, &["source"]).unwrap_or_else(|| "pos_desktop".to_string()),
+        ),
+    );
+    body.insert("recordedAt".to_string(), Value::String(recorded_at));
+    body.insert(
+        "kind".to_string(),
+        Value::String(string_field(payload, &["kind"]).unwrap_or_else(|| "delivery".to_string())),
+    );
+    if let Some(notes) = string_field(payload, &["notes"]) {
+        body.insert("notes".to_string(), Value::String(notes));
+    }
+    // Lines are stored at capture in the shared camelCase line shape
+    // (purchaseOrderItemId / unplanned / quantityReceived / unitCost /
+    // confirmOverReceipt / confirmUnplanned) — pass through untouched.
+    body.insert("lines".to_string(), Value::Array(lines));
+
+    Ok(RequestPreparation::Ready(RequestSpec {
+        endpoint: format!("/api/pos/purchase-orders/{purchase_order_id}/receipts"),
+        method: Method::POST,
+        body: Some(Value::Object(body).to_string()),
+        terminal_id: terminal_id.to_string(),
+    }))
+}
+
+/// Capture source kinds the commit route's zod enum accepts. A row carrying
+/// anything else was not written by this client and cannot be repaired here.
+const CAPTURE_SOURCE_KINDS: [&str; 5] = [
+    "connected_scanner",
+    "watched_folder",
+    "camera",
+    "usb_scanner",
+    "file_pick",
+];
+
+/// Build the replay request for an offline supplier-invoice import commit
+/// (invoice-scan-capture Task 11.3, design surface D-Rust5).
+///
+/// Queue rows come from `offline_supplier_import_commit` (entity
+/// `supplier_import_commits`, `record_id` = the capture id, which IS the
+/// capture-time idempotency key). The envelope is snake_case, exactly like
+/// `po_receipts`, while the three blocks the server reads (`draft`,
+/// `capture`, `poLinkage`) are stored in their camelCase wire shape and
+/// passed through untouched — the renderer already built them for
+/// `POST /api/pos/suppliers/import/commit`, so re-deriving them here could
+/// only introduce drift.
+///
+/// The capture id travels BOTH as the `Idempotency-Key` header (via
+/// [`replay_idempotency_header`]) and as `capture.captureId`; the route
+/// rejects a request where the two disagree, so this function forces them
+/// equal rather than trusting the stored blocks. A lost-ack repeat therefore
+/// comes back `200 alreadyCommitted` and completes the item, and the server's
+/// commit claim plus the `(organization_id, capture_id)` index guarantee one
+/// invoice and one stock effect [R9.5]. `403 MODULE_REQUIRED` parks the row
+/// via `mark_module_required` (queue retained) [R11.7].
+fn prepare_supplier_import_commit_request(
+    item: &SyncQueueItem,
+    payload: &Value,
+    terminal_id: &str,
+) -> Result<RequestPreparation, String> {
+    // The draft is the invoice itself. Without it there is nothing to commit
+    // and no way to reconstruct one — dead-letter with a reason a person can
+    // act on rather than replaying an empty commit.
+    let Some(draft) = payload
+        .get("draft")
+        .filter(|value| value.is_object())
+        .cloned()
+    else {
+        return Ok(RequestPreparation::Failed {
+            reason: "Supplier import commit sync request is missing draft".to_string(),
+        });
+    };
+
+    let Some(capture) = payload.get("capture").and_then(Value::as_object).cloned() else {
+        return Ok(RequestPreparation::Failed {
+            reason: "Supplier import commit sync request is missing capture".to_string(),
+        });
+    };
+    let mut capture = capture;
+
+    // The replay key is persisted inside the queued payload at capture time;
+    // the queue row's record_id mirrors it, so either source replays
+    // exactly-once with the SAME capture-time key (never a fresh one).
+    let capture_id = string_field(payload, &["capture_id", "captureId"])
+        .or_else(|| string_field(payload, &["idempotency_key", "idempotencyKey"]))
+        .unwrap_or_else(|| item.record_id.trim().to_string());
+    if capture_id.is_empty() {
+        return Ok(RequestPreparation::Failed {
+            reason: "Supplier import commit sync request is missing capture_id".to_string(),
+        });
+    }
+
+    // Original capture time must survive replay [R13.1]; a row without it
+    // cannot honor the provenance contract.
+    let Some(captured_at) = string_field(
+        &Value::Object(capture.clone()),
+        &["capturedAt", "captured_at"],
+    )
+    .or_else(|| string_field(payload, &["recorded_at", "recordedAt"])) else {
+        return Ok(RequestPreparation::Failed {
+            reason: "Supplier import commit sync request is missing captured_at".to_string(),
+        });
+    };
+
+    let source_kind = string_field(
+        &Value::Object(capture.clone()),
+        &["sourceKind", "source_kind"],
+    )
+    .unwrap_or_default();
+    if !CAPTURE_SOURCE_KINDS.contains(&source_kind.as_str()) {
+        return Ok(RequestPreparation::Failed {
+            reason: "Supplier import commit sync request has an unknown source_kind".to_string(),
+        });
+    }
+
+    // Header and body can never disagree about which capture is being
+    // committed — the route 400s on a mismatch, which would dead-letter a
+    // perfectly good invoice.
+    capture.insert("captureId".to_string(), Value::String(capture_id.clone()));
+    capture.insert("capturedAt".to_string(), Value::String(captured_at));
+    capture.insert("sourceKind".to_string(), Value::String(source_kind));
+    if !capture.contains_key("committedByStaffId") {
+        if let Some(staff_id) = string_field(payload, &["staff_id", "staffId"]) {
+            capture.insert("committedByStaffId".to_string(), Value::String(staff_id));
+        }
+    }
+
+    let mut body = Map::new();
+    body.insert("draft".to_string(), draft);
+    body.insert("capture".to_string(), Value::Object(capture));
+
+    if let Some(linkage) = payload
+        .get("po_linkage")
+        .or_else(|| payload.get("poLinkage"))
+        .and_then(Value::as_object)
+    {
+        let purchase_order_id = string_field(
+            &Value::Object(linkage.clone()),
+            &["purchaseOrderId", "purchase_order_id"],
+        )
+        .unwrap_or_default();
+        // The id reaches a `uuid()` zod field and a procurement RPC; anything
+        // else is a corrupted row, not a request worth sending.
+        if !is_uuid(&purchase_order_id) {
+            return Ok(RequestPreparation::Failed {
+                reason: "Supplier import commit sync request has a non-UUID purchase_order_id"
+                    .to_string(),
+            });
+        }
+        let mode = string_field(&Value::Object(linkage.clone()), &["mode"]).unwrap_or_default();
+        if mode != "confirm_existing" && mode != "record_delivery" {
+            return Ok(RequestPreparation::Failed {
+                reason: "Supplier import commit sync request has an unknown poLinkage mode"
+                    .to_string(),
+            });
+        }
+        body.insert("poLinkage".to_string(), Value::Object(linkage.clone()));
+    }
+
+    Ok(RequestPreparation::Ready(RequestSpec {
+        endpoint: "/api/pos/suppliers/import/commit".to_string(),
+        method: Method::POST,
+        body: Some(Value::Object(body).to_string()),
+        terminal_id: terminal_id.to_string(),
+    }))
+}
+
+/// Entity-keyed replay headers (procurement-loop Task 10.3; extended by
+/// invoice-scan-capture Task 11.3).
+///
+/// `POST /api/pos/purchase-orders/:id/receipts` requires the capture-time
+/// idempotency key as the `Idempotency-Key` header (body `idempotencyKey`
+/// is the documented fallback, and the prepared body carries it too).
+/// `POST /api/pos/suppliers/import/commit` takes the same header, where the
+/// key IS the capture id — the route refuses a header that disagrees with
+/// `capture.captureId`, and honours a match as transport-level dedupe.
+/// The key is read from the queued payload with the queue row's
+/// `record_id` as the fallback — the SAME stored key on every retry, so
+/// crash-retry duplicates collapse server-side to one effect [R11.4, R9.5].
+/// Returns `None` for every other entity, leaving their requests
+/// byte-identical to before.
+fn replay_idempotency_header(item: &SyncQueueItem) -> Option<(&'static str, String)> {
+    if !matches!(
+        item.table_name.as_str(),
+        "po_receipts" | "supplier_import_commits"
+    ) {
+        return None;
+    }
+    let payload = serde_json::from_str::<Value>(&item.data).unwrap_or(Value::Null);
+    let key = string_field(
+        &payload,
+        // `capture_id` is the supplier-import commit's spelling of the same
+        // capture-time key; both entities fall back to the record_id mirror.
+        &[
+            "idempotency_key",
+            "idempotencyKey",
+            "capture_id",
+            "captureId",
+        ],
+    )
+    .unwrap_or_else(|| item.record_id.trim().to_string());
+    if key.is_empty() {
+        return None;
+    }
+    Some(("Idempotency-Key", key))
+}
+
 /// Renderer-side prefix for table-session ids that have not been assigned a
 /// remote Supabase UUID yet. The renderer builds these as
 /// `local-table-session:{localOrderId}` (see
@@ -6195,7 +6478,11 @@ fn is_table_session_close_waiting_payment_response(
 /// uniform module-acquisition denial (THE-306 gating sweep):
 /// `403 {"success":false,"error":"MODULE_REQUIRED","missingModules":[...]}`.
 /// `Some("")` means the denial matched but carried no module list.
-fn parse_module_required_response(status: u16, response_body: &str) -> Option<String> {
+///
+/// `pub(crate)` so the invoice-capture worker classifies the very same 403 with
+/// the very same rule instead of growing a second, drift-prone opinion about
+/// what a module denial looks like (invoice-scan-capture D-Rust4, R11.7).
+pub(crate) fn parse_module_required_response(status: u16, response_body: &str) -> Option<String> {
     if status != 403 {
         return None;
     }
@@ -6366,6 +6653,13 @@ pub async fn process_queue(
             .header("x-pos-api-key", api_key)
             .header("x-terminal-id", request_spec.terminal_id.as_str())
             .header("Content-Type", "application/json");
+
+        // Entity-keyed replay headers: po_receipts sends its stored
+        // capture-time key as `Idempotency-Key` so retries are exactly-once
+        // server-side (procurement-loop Task 10.3, R11.4).
+        if let Some((name, value)) = replay_idempotency_header(&item) {
+            request = request.header(name, value);
+        }
 
         if let Some(body) = request_spec.body.as_ref() {
             request = request.body(body.clone());
@@ -6804,6 +7098,17 @@ fn resolve_special_entity_endpoint(item: &SyncQueueItem) -> Option<String> {
                 .unwrap_or_else(|| item.record_id.clone());
             Some(format!("/api/pos/rooms/{room_id}/checkin"))
         }
+        "po_receipts" => {
+            // record_id is the capture-time idempotency key, not the PO —
+            // the target purchase order travels inside the queued payload.
+            let payload = serde_json::from_str::<Value>(&item.data).unwrap_or(Value::Null);
+            let po_id = string_field(&payload, &["purchase_order_id", "purchaseOrderId"])
+                .unwrap_or_else(|| item.record_id.clone());
+            Some(format!("/api/pos/purchase-orders/{po_id}/receipts"))
+        }
+        // record_id is the capture id (also the replay key); the invoice
+        // itself travels inside the queued payload.
+        "supplier_import_commits" => Some("/api/pos/suppliers/import/commit".to_string()),
         "products" => Some(format!("/api/pos/products/{}", item.record_id)),
         _ => None,
     }
@@ -13386,6 +13691,820 @@ mod tests {
             )
             .expect("read conflict audit row");
         assert_eq!(audit_count, 1);
+
+        clear_terminal_identity();
+        server.await.expect("mock server task");
+    }
+
+    // -------------------------------------------------------------------
+    // procurement-loop Task 10.3/10.4: `po_receipts` replay mapping.
+    // Rows are captured offline by `offline_po_receipt` (record_id = the
+    // capture-time idempotency key, snake_case envelope with camelCase
+    // ReceiptCommitRequest lines) and must replay as
+    // `POST /api/pos/purchase-orders/{id}/receipts` carrying the STORED
+    // key as the `Idempotency-Key` header. 2xx (incl. 200 wasReplay)
+    // completes the item, 403 MODULE_REQUIRED parks it retained, and a
+    // 409 PO_STATE_CONFLICT surfaces for staff review — never dropped.
+    // -------------------------------------------------------------------
+
+    const PO_RECEIPT_REPLAY_KEY: &str = "7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+    const PO_RECEIPT_PO_ID: &str = "33333333-3333-4333-8333-333333333333";
+
+    /// The exact queue payload shape `capture_po_receipt` persists.
+    fn po_receipt_capture_payload() -> Value {
+        json!({
+            "purchase_order_id": PO_RECEIPT_PO_ID,
+            "idempotency_key": PO_RECEIPT_REPLAY_KEY,
+            "recorded_at": "2026-08-05T10:15:00+00:00",
+            "staff_id": "44444444-4444-4444-8444-444444444444",
+            "source": "pos_desktop",
+            "kind": "delivery",
+            "notes": "Back-door delivery",
+            "lines": [
+                {
+                    "purchaseOrderItemId": "55555555-5555-4555-8555-555555555555",
+                    "quantityReceived": 6,
+                    "unitCost": 2.4,
+                    "confirmOverReceipt": false,
+                    "confirmUnplanned": false,
+                }
+            ],
+            "organization_id": "org-po-receipt",
+            "branch_id": TEST_BRANCH_ID,
+        })
+    }
+
+    /// Enqueue with the same arguments `offline_mutations::enqueue_parity_item`
+    /// uses in production for this entity (priority 0, module `suppliers`,
+    /// conflict strategy `manual`, version 1).
+    fn enqueue_po_receipt_test_item(conn: &Connection) -> String {
+        enqueue_payload_item(
+            conn,
+            "po_receipts",
+            PO_RECEIPT_REPLAY_KEY,
+            "INSERT",
+            &po_receipt_capture_payload(),
+            Some(0),
+            Some("suppliers"),
+            Some("manual"),
+            Some(1),
+        )
+        .expect("enqueue po receipt item")
+    }
+
+    #[test]
+    fn prepare_po_receipt_request_maps_capture_payload_to_server_contract() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        let mut item = queue_item(
+            "po_receipts",
+            "INSERT",
+            PO_RECEIPT_REPLAY_KEY,
+            po_receipt_capture_payload(),
+        );
+        item.module_type = "suppliers".to_string();
+
+        let prepared = prepare_request(&conn, &item).expect("prepare po receipt request");
+        let RequestPreparation::Ready(spec) = prepared else {
+            panic!("po receipt request should be ready");
+        };
+        assert_eq!(
+            spec.endpoint,
+            format!("/api/pos/purchase-orders/{PO_RECEIPT_PO_ID}/receipts")
+        );
+        assert_eq!(spec.method, Method::POST);
+        assert_eq!(spec.terminal_id, TEST_TERMINAL_ID);
+
+        let body: Value =
+            serde_json::from_str(spec.body.as_deref().expect("body")).expect("json body");
+        // The STORED capture-time key — never a fresh one — keeps replays
+        // exactly-once server-side [R11.4].
+        assert_eq!(body["idempotencyKey"], PO_RECEIPT_REPLAY_KEY);
+        assert_eq!(body["staffId"], "44444444-4444-4444-8444-444444444444");
+        assert_eq!(body["source"], "pos_desktop");
+        // Original capture time preserved on replay [R11.3].
+        assert_eq!(body["recordedAt"], "2026-08-05T10:15:00+00:00");
+        assert_eq!(body["kind"], "delivery");
+        assert_eq!(body["notes"], "Back-door delivery");
+        assert_eq!(
+            body["lines"][0]["purchaseOrderItemId"],
+            "55555555-5555-4555-8555-555555555555"
+        );
+        assert_eq!(body["lines"][0]["quantityReceived"], 6);
+        assert_eq!(body["lines"][0]["unitCost"], 2.4);
+        // Snake_case envelope keys must not leak into the server body.
+        assert!(body.get("purchase_order_id").is_none());
+        assert!(body.get("idempotency_key").is_none());
+        assert!(body.get("staff_id").is_none());
+
+        // The replay header carries the same stored key.
+        let (header_name, header_value) =
+            replay_idempotency_header(&item).expect("po receipt replay header");
+        assert_eq!(header_name, "Idempotency-Key");
+        assert_eq!(header_value, PO_RECEIPT_REPLAY_KEY);
+    }
+
+    #[test]
+    fn prepare_po_receipt_request_dead_letters_corrupted_rows_with_clear_reasons() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        let cases: [(&str, &str); 3] = [
+            ("purchase_order_id", "purchase_order_id"),
+            ("staff_id", "staff_id"),
+            ("recorded_at", "recorded_at"),
+        ];
+        for (field, expected_fragment) in cases {
+            let mut payload = po_receipt_capture_payload();
+            payload
+                .as_object_mut()
+                .expect("payload object")
+                .remove(field);
+            let mut item = queue_item("po_receipts", "INSERT", PO_RECEIPT_REPLAY_KEY, payload);
+            item.module_type = "suppliers".to_string();
+            match prepare_request(&conn, &item).expect("prepare broken po receipt") {
+                RequestPreparation::Failed { reason } => assert!(
+                    reason.contains(expected_fragment),
+                    "failure reason must name the missing field {expected_fragment}: {reason}"
+                ),
+                other => panic!("expected failed preparation for missing {field}, got {other:?}"),
+            }
+        }
+
+        // Empty line sets and non-UUID PO ids also dead-letter locally
+        // instead of producing a malformed or dangerous request.
+        let mut empty_lines = po_receipt_capture_payload();
+        empty_lines["lines"] = json!([]);
+        let mut item = queue_item("po_receipts", "INSERT", PO_RECEIPT_REPLAY_KEY, empty_lines);
+        item.module_type = "suppliers".to_string();
+        match prepare_request(&conn, &item).expect("prepare empty-lines po receipt") {
+            RequestPreparation::Failed { reason } => assert!(
+                reason.contains("lines"),
+                "failure reason must name the empty line set: {reason}"
+            ),
+            other => panic!("expected failed preparation, got {other:?}"),
+        }
+
+        let mut bad_po = po_receipt_capture_payload();
+        bad_po["purchase_order_id"] = json!("../escape");
+        let mut item = queue_item("po_receipts", "INSERT", PO_RECEIPT_REPLAY_KEY, bad_po);
+        item.module_type = "suppliers".to_string();
+        match prepare_request(&conn, &item).expect("prepare bad-po-id po receipt") {
+            RequestPreparation::Failed { reason } => assert!(
+                reason.contains("non-UUID"),
+                "failure reason must flag the malformed PO id: {reason}"
+            ),
+            other => panic!("expected failed preparation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn po_receipt_replay_key_falls_back_to_record_id_for_legacy_rows() {
+        // A row whose payload lost the key copy still replays exactly-once
+        // via the record_id mirror — same rule as room_checkins.
+        let mut payload = po_receipt_capture_payload();
+        payload
+            .as_object_mut()
+            .expect("payload object")
+            .remove("idempotency_key");
+        let mut item = queue_item("po_receipts", "INSERT", PO_RECEIPT_REPLAY_KEY, payload);
+        item.module_type = "suppliers".to_string();
+
+        let (_, header_value) = replay_idempotency_header(&item).expect("fallback replay header");
+        assert_eq!(header_value, PO_RECEIPT_REPLAY_KEY);
+
+        // Other entities get no replay header — their requests stay
+        // byte-identical to before this feature.
+        let other = queue_item("orders", "INSERT", "order-1", json!({}));
+        assert!(replay_idempotency_header(&other).is_none());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn process_queue_sends_po_receipt_with_stored_idempotency_key_header() {
+        clear_terminal_identity();
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        let queue_id = enqueue_po_receipt_test_item(&conn);
+
+        let conn = std::sync::Mutex::new(conn);
+        // 200 wasReplay is what the server answers when this key was
+        // already consumed by an earlier lost-ack attempt — like a fresh
+        // 201, it must complete the queue item [R11.4].
+        let (base_url, mut requests, server) = spawn_mock_http_server(vec![MockResponse::json(
+            200,
+            r#"{"success":true,"receiptId":"receipt-1","wasReplay":true,"purchaseOrderStatus":"partially_received","lineResults":[]}"#,
+        )])
+        .await;
+
+        let result = process_queue(&conn, &base_url, "api-key")
+            .await
+            .expect("process queue");
+
+        assert_eq!(result.processed, 1);
+        assert_eq!(result.failed, 0);
+        assert_eq!(result.conflicts, 0);
+
+        let request = requests.recv().await.expect("captured receipt request");
+        assert_eq!(
+            request.request_line,
+            format!("POST /api/pos/purchase-orders/{PO_RECEIPT_PO_ID}/receipts HTTP/1.1")
+        );
+        // The stored capture-time key travels as the Idempotency-Key
+        // header — the known offline idempotency-key gap is closed for
+        // this mutation type (Task 10.3).
+        assert_eq!(
+            request.headers.get("idempotency-key").map(String::as_str),
+            Some(PO_RECEIPT_REPLAY_KEY)
+        );
+        let body: Value = serde_json::from_str(&request.body).expect("request body json");
+        assert_eq!(body["idempotencyKey"], PO_RECEIPT_REPLAY_KEY);
+        assert_eq!(body["recordedAt"], "2026-08-05T10:15:00+00:00");
+
+        let remaining: i64 = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE id = ?1",
+                params![queue_id],
+                |row| row.get(0),
+            )
+            .expect("read queue state");
+        assert_eq!(
+            remaining, 0,
+            "2xx (incl. 200 wasReplay) must complete and remove the item"
+        );
+
+        clear_terminal_identity();
+        server.await.expect("mock server task");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn process_queue_parks_po_receipt_pending_when_module_is_required() {
+        clear_terminal_identity();
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        let queue_id = enqueue_po_receipt_test_item(&conn);
+
+        let conn = std::sync::Mutex::new(conn);
+        let (base_url, mut requests, server) = spawn_mock_http_server(vec![MockResponse::json(
+            403,
+            r#"{"success":false,"error":"MODULE_REQUIRED","missingModules":["suppliers"]}"#,
+        )])
+        .await;
+
+        let result = process_queue(&conn, &base_url, "api-key")
+            .await
+            .expect("process queue");
+
+        assert_eq!(result.processed, 0);
+        assert_eq!(result.failed, 0);
+        assert_eq!(result.conflicts, 0);
+
+        let request = requests.recv().await.expect("captured receipt request");
+        assert_eq!(
+            request.request_line,
+            format!("POST /api/pos/purchase-orders/{PO_RECEIPT_PO_ID}/receipts HTTP/1.1")
+        );
+
+        let (status, attempts, error_message): (String, i64, String) = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT status, attempts, error_message
+                 FROM parity_sync_queue
+                 WHERE id = ?1",
+                params![queue_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read parked row");
+        assert_eq!(
+            status, "pending",
+            "module denial parks the row — receipt retained until the module returns [R11.6]"
+        );
+        assert_eq!(attempts, 0, "module denial must NOT burn attempts");
+        assert!(
+            error_message.contains("MODULE_REQUIRED"),
+            "park reason must be visible to the procurement UI: {error_message}"
+        );
+        assert!(
+            error_message.contains("suppliers"),
+            "park reason must surface the missing module: {error_message}"
+        );
+
+        clear_terminal_identity();
+        server.await.expect("mock server task");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn process_queue_marks_po_receipt_state_conflict_for_staff_review() {
+        clear_terminal_identity();
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        let queue_id = enqueue_po_receipt_test_item(&conn);
+
+        let conn = std::sync::Mutex::new(conn);
+        // First response: the PO was cancelled while this terminal was
+        // offline — a genuine 409 PO_STATE_CONFLICT, not a replay. Second
+        // response serves the conflict arm's fetch_server_record GET probe
+        // (no GET /api/pos/sync/po_receipts/{id} route exists → 404).
+        let (base_url, mut requests, server) = spawn_mock_http_server(vec![
+            MockResponse::json(
+                409,
+                r#"{"success":false,"error":"PO_STATE_CONFLICT","poStatus":"cancelled"}"#,
+            ),
+            MockResponse::json(404, r#"{"success":false,"error":"Not found"}"#),
+        ])
+        .await;
+
+        let result = process_queue(&conn, &base_url, "api-key")
+            .await
+            .expect("process queue");
+
+        assert_eq!(result.processed, 0);
+        assert_eq!(result.failed, 0);
+        assert_eq!(
+            result.conflicts, 1,
+            "a PO state conflict must surface as a staff-review item [R11.7]"
+        );
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].http_status, Some(409));
+
+        let replay_request = requests.recv().await.expect("captured receipt request");
+        assert_eq!(
+            replay_request.request_line,
+            format!("POST /api/pos/purchase-orders/{PO_RECEIPT_PO_ID}/receipts HTTP/1.1")
+        );
+
+        // Manual conflict strategy: the row leaves the retry pool for
+        // staff review with the recorded quantities preserved in the
+        // queue payload — never silently dropped [R11.7].
+        let (status, data): (String, String) = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT status, data FROM parity_sync_queue WHERE id = ?1",
+                params![queue_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read conflicted row");
+        assert_eq!(status, "conflict");
+        let preserved: Value = serde_json::from_str(&data).expect("preserved payload parses");
+        assert_eq!(preserved["lines"][0]["quantityReceived"], 6);
+
+        let audit_count: i64 = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM conflict_audit_log
+                 WHERE entity_id = ?1 AND entity_type = 'po_receipts'",
+                params![PO_RECEIPT_REPLAY_KEY],
+                |row| row.get(0),
+            )
+            .expect("read conflict audit row");
+        assert_eq!(audit_count, 1);
+
+        clear_terminal_identity();
+        server.await.expect("mock server task");
+    }
+
+    // -------------------------------------------------------------------
+    // invoice-scan-capture Task 11.3/11.4: `supplier_import_commits`
+    // replay mapping. Rows are captured offline by
+    // `offline_supplier_import_commit` (record_id = the capture id, which
+    // IS the capture-time replay key) and must replay as
+    // `POST /api/pos/suppliers/import/commit` carrying that capture id as
+    // the `Idempotency-Key` header. 2xx (incl. `200 alreadyCommitted`)
+    // completes the item, 403 MODULE_REQUIRED parks it retained, and a
+    // corrupted row dead-letters with a reason a person can act on.
+    // -------------------------------------------------------------------
+
+    const CAPTURE_ID: &str = "8b2c1d4e-5f60-4a7b-9c8d-0e1f2a3b4c5d";
+    const CAPTURE_PO_ID: &str = "66666666-6666-4666-8666-666666666666";
+    const CAPTURE_STAFF_ID: &str = "77777777-7777-4777-8777-777777777777";
+
+    /// The exact queue payload shape `capture_supplier_import_commit`
+    /// persists: snake_case envelope, camelCase server blocks.
+    fn supplier_import_commit_payload() -> Value {
+        json!({
+            "capture_id": CAPTURE_ID,
+            "idempotency_key": CAPTURE_ID,
+            "recorded_at": "2026-08-05T18:20:00+00:00",
+            "staff_id": CAPTURE_STAFF_ID,
+            "source": "pos_desktop",
+            "draft": {
+                "supplierName": "Fresh Produce Ltd",
+                "invoiceNumber": "INV-2026-118",
+                "rows": [
+                    { "rowNumber": 1, "name": "Tomatoes", "quantity": 6, "unitCost": 1.25 }
+                ],
+            },
+            "capture": {
+                "captureId": CAPTURE_ID,
+                "sourceKind": "watched_folder",
+                "sourceName": "Back office scans",
+                "capturedAt": "2026-08-05T18:02:00+00:00",
+                "capturedByStaffId": CAPTURE_STAFF_ID,
+                "storageKeys": [
+                    "org-capture/11111111-1111-1111-1111-111111111111/captures/8b2c1d4e-5f60-4a7b-9c8d-0e1f2a3b4c5d/page-000.png"
+                ],
+            },
+            "po_linkage": {
+                "purchaseOrderId": CAPTURE_PO_ID,
+                "mode": "confirm_existing",
+            },
+            "organization_id": "org-capture",
+            "branch_id": TEST_BRANCH_ID,
+        })
+    }
+
+    /// Enqueue with the same arguments `offline_mutations::enqueue_parity_item`
+    /// uses in production for this entity (priority 0, module `suppliers`,
+    /// conflict strategy `manual`, version 1).
+    fn enqueue_supplier_import_commit_test_item(conn: &Connection) -> String {
+        enqueue_payload_item(
+            conn,
+            "supplier_import_commits",
+            CAPTURE_ID,
+            "INSERT",
+            &supplier_import_commit_payload(),
+            Some(0),
+            Some("suppliers"),
+            Some("manual"),
+            Some(1),
+        )
+        .expect("enqueue supplier import commit item")
+    }
+
+    #[test]
+    fn prepare_supplier_import_commit_request_maps_capture_payload_to_server_contract() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        let mut item = queue_item(
+            "supplier_import_commits",
+            "INSERT",
+            CAPTURE_ID,
+            supplier_import_commit_payload(),
+        );
+        item.module_type = "suppliers".to_string();
+
+        let prepared = prepare_request(&conn, &item).expect("prepare supplier import commit");
+        let RequestPreparation::Ready(spec) = prepared else {
+            panic!("supplier import commit request should be ready");
+        };
+        assert_eq!(spec.endpoint, "/api/pos/suppliers/import/commit");
+        assert_eq!(spec.method, Method::POST);
+        assert_eq!(spec.terminal_id, TEST_TERMINAL_ID);
+
+        let body: Value =
+            serde_json::from_str(spec.body.as_deref().expect("body")).expect("json body");
+        // The three blocks the route reads, in their camelCase wire shape.
+        assert_eq!(body["draft"]["invoiceNumber"], "INV-2026-118");
+        assert_eq!(body["draft"]["rows"][0]["name"], "Tomatoes");
+        assert_eq!(body["capture"]["captureId"], CAPTURE_ID);
+        assert_eq!(body["capture"]["sourceKind"], "watched_folder");
+        // Original capture time preserved on replay [R13.1].
+        assert_eq!(body["capture"]["capturedAt"], "2026-08-05T18:02:00+00:00");
+        // The saver is recorded even though the renderer only sent the
+        // scanner [R13.2].
+        assert_eq!(body["capture"]["committedByStaffId"], CAPTURE_STAFF_ID);
+        assert_eq!(body["poLinkage"]["purchaseOrderId"], CAPTURE_PO_ID);
+        assert_eq!(body["poLinkage"]["mode"], "confirm_existing");
+        // Snake_case envelope keys must not leak into the server body.
+        assert!(body.get("capture_id").is_none());
+        assert!(body.get("po_linkage").is_none());
+        assert!(body.get("staff_id").is_none());
+        assert!(body.get("organization_id").is_none());
+
+        // Header and body agree about which capture is being committed —
+        // the route 400s when they do not.
+        let (header_name, header_value) =
+            replay_idempotency_header(&item).expect("supplier import replay header");
+        assert_eq!(header_name, "Idempotency-Key");
+        assert_eq!(header_value, CAPTURE_ID);
+        assert_eq!(body["capture"]["captureId"], header_value.as_str());
+    }
+
+    #[test]
+    fn prepare_supplier_import_commit_request_forces_the_body_key_to_match_the_header() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        // A row whose stored capture block disagrees with its replay key
+        // (hand-edited database, a partially-migrated row) must NOT be sent
+        // as-is: the route rejects the mismatch and a good invoice would
+        // dead-letter for a reason nobody could act on.
+        let mut payload = supplier_import_commit_payload();
+        payload["capture"]["captureId"] = json!("some-other-capture");
+        let mut item = queue_item("supplier_import_commits", "INSERT", CAPTURE_ID, payload);
+        item.module_type = "suppliers".to_string();
+
+        let RequestPreparation::Ready(spec) =
+            prepare_request(&conn, &item).expect("prepare mismatched row")
+        else {
+            panic!("request should be ready");
+        };
+        let body: Value =
+            serde_json::from_str(spec.body.as_deref().expect("body")).expect("json body");
+        let (_, header_value) = replay_idempotency_header(&item).expect("replay header");
+        assert_eq!(body["capture"]["captureId"], CAPTURE_ID);
+        assert_eq!(header_value, CAPTURE_ID);
+    }
+
+    #[test]
+    fn prepare_supplier_import_commit_request_dead_letters_corrupted_rows_with_clear_reasons() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        let prepare = |payload: Value| {
+            let mut item = queue_item("supplier_import_commits", "INSERT", CAPTURE_ID, payload);
+            item.module_type = "suppliers".to_string();
+            prepare_request(&conn, &item).expect("prepare broken commit")
+        };
+        let expect_failure = |prepared: RequestPreparation, fragment: &str| match prepared {
+            RequestPreparation::Failed { reason } => assert!(
+                reason.contains(fragment),
+                "failure reason must name {fragment}: {reason}"
+            ),
+            other => panic!("expected failed preparation, got {other:?}"),
+        };
+
+        // The invoice itself is gone.
+        let mut without_draft = supplier_import_commit_payload();
+        without_draft
+            .as_object_mut()
+            .expect("payload object")
+            .remove("draft");
+        expect_failure(prepare(without_draft), "draft");
+
+        // The provenance block is gone.
+        let mut without_capture = supplier_import_commit_payload();
+        without_capture
+            .as_object_mut()
+            .expect("payload object")
+            .remove("capture");
+        expect_failure(prepare(without_capture), "capture");
+
+        // Capture time is gone from both the block and the envelope.
+        let mut without_captured_at = supplier_import_commit_payload();
+        without_captured_at["capture"]
+            .as_object_mut()
+            .expect("capture object")
+            .remove("capturedAt");
+        without_captured_at
+            .as_object_mut()
+            .expect("payload object")
+            .remove("recorded_at");
+        expect_failure(prepare(without_captured_at), "captured_at");
+
+        // A source kind the route's enum does not accept.
+        let mut bad_source = supplier_import_commit_payload();
+        bad_source["capture"]["sourceKind"] = json!("fax");
+        expect_failure(prepare(bad_source), "source_kind");
+
+        // A PO id that would be interpolated into a procurement RPC.
+        let mut bad_po = supplier_import_commit_payload();
+        bad_po["po_linkage"]["purchaseOrderId"] = json!("../escape");
+        expect_failure(prepare(bad_po), "non-UUID");
+
+        // A linkage mode the route's enum does not accept.
+        let mut bad_mode = supplier_import_commit_payload();
+        bad_mode["po_linkage"]["mode"] = json!("just_link_it");
+        expect_failure(prepare(bad_mode), "mode");
+    }
+
+    #[test]
+    fn supplier_import_commit_replay_key_falls_back_to_record_id_for_legacy_rows() {
+        // A row whose payload lost both key copies still replays
+        // exactly-once via the record_id mirror — same rule as po_receipts.
+        let mut payload = supplier_import_commit_payload();
+        let object = payload.as_object_mut().expect("payload object");
+        object.remove("capture_id");
+        object.remove("idempotency_key");
+        object
+            .get_mut("capture")
+            .and_then(Value::as_object_mut)
+            .expect("capture object")
+            .remove("captureId");
+
+        let mut item = queue_item("supplier_import_commits", "INSERT", CAPTURE_ID, payload);
+        item.module_type = "suppliers".to_string();
+
+        let (_, header_value) = replay_idempotency_header(&item).expect("fallback replay header");
+        assert_eq!(header_value, CAPTURE_ID);
+
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        let RequestPreparation::Ready(spec) =
+            prepare_request(&conn, &item).expect("prepare legacy row")
+        else {
+            panic!("request should be ready");
+        };
+        let body: Value =
+            serde_json::from_str(spec.body.as_deref().expect("body")).expect("json body");
+        assert_eq!(body["capture"]["captureId"], CAPTURE_ID);
+
+        // Other entities get no replay header — their requests stay
+        // byte-identical to before this feature.
+        let other = queue_item("orders", "INSERT", "order-1", json!({}));
+        assert!(replay_idempotency_header(&other).is_none());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn process_queue_sends_supplier_import_commit_with_the_capture_id_as_idempotency_key() {
+        clear_terminal_identity();
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        let queue_id = enqueue_supplier_import_commit_test_item(&conn);
+
+        let conn = std::sync::Mutex::new(conn);
+        // `200 alreadyCommitted` is what the server replays when this
+        // capture id was already committed by an earlier lost-ack attempt —
+        // like a fresh 200, it must complete the queue item [R9.5].
+        let (base_url, mut requests, server) = spawn_mock_http_server(vec![MockResponse::json(
+            200,
+            r#"{"success":true,"alreadyCommitted":true,"result":{"success":true,"supplierInvoiceId":"invoice-1","alreadyCommitted":true}}"#,
+        )])
+        .await;
+
+        let result = process_queue(&conn, &base_url, "api-key")
+            .await
+            .expect("process queue");
+
+        assert_eq!(result.processed, 1);
+        assert_eq!(result.failed, 0);
+        assert_eq!(result.conflicts, 0);
+
+        let request = requests.recv().await.expect("captured commit request");
+        assert_eq!(
+            request.request_line,
+            "POST /api/pos/suppliers/import/commit HTTP/1.1"
+        );
+        assert_eq!(
+            request.headers.get("idempotency-key").map(String::as_str),
+            Some(CAPTURE_ID),
+        );
+        let body: Value = serde_json::from_str(&request.body).expect("request body json");
+        assert_eq!(body["capture"]["captureId"], CAPTURE_ID);
+        assert_eq!(body["draft"]["invoiceNumber"], "INV-2026-118");
+
+        let remaining: i64 = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE id = ?1",
+                params![queue_id],
+                |row| row.get(0),
+            )
+            .expect("read queue state");
+        assert_eq!(
+            remaining, 0,
+            "2xx (incl. 200 alreadyCommitted) must complete and remove the item"
+        );
+
+        clear_terminal_identity();
+        server.await.expect("mock server task");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn process_queue_collapses_supplier_import_crash_retries_to_one_server_effect() {
+        clear_terminal_identity();
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        enqueue_supplier_import_commit_test_item(&conn);
+
+        let conn = std::sync::Mutex::new(conn);
+        // First attempt: the server wrote the invoice but the terminal lost
+        // the acknowledgement (500 on the way back). Second attempt: the
+        // claim replays the stored result verbatim.
+        let (base_url, mut requests, server) = spawn_mock_http_server(vec![
+            MockResponse::json(500, r#"{"success":false,"error":"Upstream timeout"}"#),
+            MockResponse::json(
+                200,
+                r#"{"success":true,"alreadyCommitted":true,"result":{"success":true,"supplierInvoiceId":"invoice-1","alreadyCommitted":true}}"#,
+            ),
+        ])
+        .await;
+
+        process_queue(&conn, &base_url, "api-key")
+            .await
+            .expect("first drain");
+        // Clear the backoff the 500 scheduled so the retry runs in-test.
+        conn.lock()
+            .expect("lock db")
+            .execute(
+                "UPDATE parity_sync_queue SET next_retry_at = NULL, status = 'pending'",
+                [],
+            )
+            .expect("release backoff");
+        let second = process_queue(&conn, &base_url, "api-key")
+            .await
+            .expect("second drain");
+
+        let first_request = requests.recv().await.expect("first commit request");
+        let second_request = requests.recv().await.expect("retry commit request");
+
+        // The SAME capture-time key on both attempts is what makes the
+        // duplicate collapse server-side into one invoice [R9.5].
+        assert_eq!(
+            first_request.headers.get("idempotency-key"),
+            second_request.headers.get("idempotency-key"),
+        );
+        assert_eq!(
+            first_request
+                .headers
+                .get("idempotency-key")
+                .map(String::as_str),
+            Some(CAPTURE_ID),
+        );
+        let first_body: Value = serde_json::from_str(&first_request.body).expect("first body json");
+        let second_body: Value =
+            serde_json::from_str(&second_request.body).expect("second body json");
+        assert_eq!(
+            first_body["capture"]["captureId"], second_body["capture"]["captureId"],
+            "a retry must never mint a fresh capture id",
+        );
+
+        assert_eq!(second.processed, 1);
+        let remaining: i64 = conn
+            .lock()
+            .expect("lock db")
+            .query_row("SELECT COUNT(*) FROM parity_sync_queue", [], |row| {
+                row.get(0)
+            })
+            .expect("read queue state");
+        assert_eq!(remaining, 0, "the replayed result completes the item");
+
+        clear_terminal_identity();
+        server.await.expect("mock server task");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn process_queue_parks_supplier_import_commit_pending_when_module_is_required() {
+        clear_terminal_identity();
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+
+        let queue_id = enqueue_supplier_import_commit_test_item(&conn);
+
+        let conn = std::sync::Mutex::new(conn);
+        let (base_url, mut requests, server) = spawn_mock_http_server(vec![MockResponse::json(
+            403,
+            r#"{"success":false,"error":"MODULE_REQUIRED","missingModules":["suppliers"]}"#,
+        )])
+        .await;
+
+        let result = process_queue(&conn, &base_url, "api-key")
+            .await
+            .expect("process queue");
+
+        assert_eq!(result.processed, 0);
+        assert_eq!(result.failed, 0);
+        assert_eq!(result.conflicts, 0);
+
+        let request = requests.recv().await.expect("captured commit request");
+        assert_eq!(
+            request.request_line,
+            "POST /api/pos/suppliers/import/commit HTTP/1.1"
+        );
+
+        let (status, attempts, error_message, data): (String, i64, String, String) = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT status, attempts, error_message, data
+                 FROM parity_sync_queue
+                 WHERE id = ?1",
+                params![queue_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("read parked row");
+        assert_eq!(
+            status, "pending",
+            "module denial parks the row — the invoice is retained until the module returns [R11.7]"
+        );
+        assert_eq!(attempts, 0, "module denial must NOT burn attempts");
+        assert!(
+            error_message.contains("MODULE_REQUIRED") && error_message.contains("suppliers"),
+            "park reason must name the missing module: {error_message}"
+        );
+        // The reviewed invoice — every edit the user made — is still on the row.
+        let preserved: Value = serde_json::from_str(&data).expect("preserved payload parses");
+        assert_eq!(preserved["draft"]["rows"][0]["name"], "Tomatoes");
+        assert_eq!(preserved["capture"]["captureId"], CAPTURE_ID);
 
         clear_terminal_identity();
         server.await.expect("mock server task");

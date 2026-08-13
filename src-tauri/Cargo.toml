@@ -27,6 +27,19 @@ tauri = { version = "2.11.5", features = [
 ] }
 tauri-plugin-updater = "2.10.1"
 
+# Native folder picker for the invoice-capture watched-folder source
+# (`.claude/specs/invoice-scan-capture/` D-UI, R3.1). The JS half
+# (`@tauri-apps/plugin-dialog`) was already a package.json dependency but the
+# Rust plugin was never registered, so every `open()` call failed at runtime;
+# this declares it and `lib.rs` registers it. Version pinned to the JS
+# package's major/minor so the two halves stay in lockstep.
+#
+# The capability grant in `capabilities/default.json` is deliberately narrow —
+# `dialog:allow-open` only. No save dialog, no message/ask/confirm dialogs: the
+# capture flow picks a folder and nothing else, and the file is an explicit
+# union rather than a wildcard on purpose.
+tauri-plugin-dialog = "2.7.2"
+
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -88,6 +101,14 @@ webbrowser = "1.0"
 # it without depending on reqwest's transitive surface.
 url = "2"
 
+# Filesystem change notifications for the invoice-capture watched-folder source
+# (`capture::watcher`, spec `.claude/specs/invoice-scan-capture/` D-Rust3 / D5).
+# Events are only ever a *wake-up hint*: the watcher also runs an unconditional
+# 10 s poll sweep, because `ReadDirectoryChangesW` notifications are unreliable
+# on the SMB/network shares MFPs scan into — exactly the deployment this source
+# exists for. Default features only; no new platform backends.
+notify = "6"
+
 [target.'cfg(windows)'.dependencies]
 dunce = "1.0.5"
 windows-sys = { version = "0.59", features = [
@@ -96,6 +117,23 @@ windows-sys = { version = "0.59", features = [
   "Win32_System_Threading",
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
+] }
+
+# COM/IDispatch bindings for the WIA Automation layer that drives connected
+# scanners (`capture::wia`, spec `.claude/specs/invoice-scan-capture/` D-Rust2 /
+# D4). `windows-sys` above stays exactly as it is — it exposes raw C bindings
+# with no COM interface support, and `IDispatch` needs the vtable types only the
+# full `windows` crate generates. Already in the lockfile transitively, so this
+# adds no new crate.
+#
+# `Win32_System_Com` brings `IDispatch` + `CoInitializeEx`; `IDispatch::Invoke`
+# is additionally gated behind `Win32_System_Ole` (which also carries
+# `DISPID_PROPERTYPUT`) and `Win32_System_Variant` (`VARIANT`). Three features,
+# no more — every extra one is generated code in every Windows build.
+windows = { version = "0.61", features = [
+  "Win32_System_Com",
+  "Win32_System_Ole",
+  "Win32_System_Variant",
 ] }
 
 [dev-dependencies]

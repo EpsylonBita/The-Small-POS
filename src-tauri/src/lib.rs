@@ -35,6 +35,9 @@ mod api;
 mod auth;
 mod business_day;
 mod callerid;
+/// Invoice capture (scanner/MFP) subsystem — see
+/// `.claude/specs/invoice-scan-capture/design.md`, surface D-Rust1.
+mod capture;
 mod commands;
 mod core_helpers;
 mod customer_display;
@@ -256,14 +259,17 @@ async fn admin_fetch(
         .map_err(|error| error.to_string())
 }
 
-async fn admin_fetch_detailed(
+/// Resolve the terminal's admin endpoint: the normalised dashboard URL and the
+/// keyring-held POS API key, self-healing both from an onboarding connection
+/// string when one is present.
+///
+/// Extracted verbatim from `admin_fetch_detailed` so that every transport —
+/// the JSON [`admin_fetch_detailed`] and the raw-bytes [`admin_fetch_raw`] —
+/// resolves credentials through exactly the same code path rather than a copy
+/// that can drift.
+async fn resolve_admin_endpoint(
     db: Option<&db::DbState>,
-    path: &str,
-    method: &str,
-    body: Option<serde_json::Value>,
-) -> Result<serde_json::Value, api::AdminFetchError> {
-    validate_admin_api_path(path)?;
-
+) -> Result<(String, Zeroizing<String>), api::AdminFetchError> {
     if let Some(db_state) = db {
         hydrate_terminal_credentials_from_local_settings(db_state);
     }
@@ -346,7 +352,67 @@ async fn admin_fetch_detailed(
         ));
     }
 
+    Ok((normalized_admin_url, api_key))
+}
+
+async fn admin_fetch_detailed(
+    db: Option<&db::DbState>,
+    path: &str,
+    method: &str,
+    body: Option<serde_json::Value>,
+) -> Result<serde_json::Value, api::AdminFetchError> {
+    validate_admin_api_path(path)?;
+
+    let (normalized_admin_url, api_key) = resolve_admin_endpoint(db).await?;
+
     api::fetch_from_admin_detailed(&normalized_admin_url, &api_key, path, method, body).await
+}
+
+/// Send a **raw byte body** to the admin dashboard over the terminal's
+/// authenticated channel.
+///
+/// Spec: `.claude/specs/invoice-scan-capture/design.md` — decision **D11**.
+/// Requirement R17.4.
+///
+/// The sibling of [`admin_fetch`] for captured invoice pages, which cannot ride
+/// a JSON body and cannot use multipart (the vendored `reqwest` is compiled
+/// without that feature, and stays that way). It is deliberately the *same*
+/// function as `admin_fetch` in every respect that matters for trust:
+///
+/// - the identical `/api/pos` allowlist via [`validate_admin_api_path`] — a raw
+///   upload can no more reach an arbitrary path than a JSON call can;
+/// - the identical keyring credential resolution via [`resolve_admin_endpoint`];
+/// - the identical base-URL normalisation, terminal-identity header, and typed
+///   error mapping inside [`api::fetch_raw_from_admin_detailed`].
+///
+/// The only difference is that `body` is bytes and the caller names the
+/// `content_type`. `extra_headers` carries per-request metadata that rides
+/// outside the body (for capture pages: `x-capture-content-type` and the
+/// SHA-256 `x-capture-content-hash` the server re-computes and verifies);
+/// headers the transport owns are refused, never silently dropped.
+#[allow(dead_code)] // Consumed by the capture worker's page uploader (next task in the plan).
+async fn admin_fetch_raw(
+    db: Option<&db::DbState>,
+    path: &str,
+    method: &str,
+    content_type: &str,
+    extra_headers: &[(&str, &str)],
+    body: Vec<u8>,
+) -> Result<serde_json::Value, api::AdminFetchError> {
+    validate_admin_api_path(path)?;
+
+    let (normalized_admin_url, api_key) = resolve_admin_endpoint(db).await?;
+
+    api::fetch_raw_from_admin_detailed(
+        &normalized_admin_url,
+        &api_key,
+        path,
+        method,
+        content_type,
+        extra_headers,
+        body,
+    )
+    .await
 }
 
 async fn updater_manifest_is_reachable() -> Result<bool, String> {
@@ -507,6 +573,14 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // Native folder picker for the invoice-capture watched-folder source
+        // (`.claude/specs/invoice-scan-capture/` D-UI, R3.1). The JS half was
+        // already a package.json dependency; without this registration every
+        // `open()` call from the renderer failed at runtime. The capability
+        // grant is narrowed to `dialog:allow-open` in
+        // `capabilities/default.json` — picking a folder is the only thing the
+        // capture flow asks the user's file system for.
+        .plugin(tauri_plugin_dialog::init())
         // Prevent the native window menu at the source instead of racing to
         // remove it after the window is realized.
         //
@@ -780,6 +854,45 @@ pub fn run() {
                 }
             }
 
+            // Start the invoice-capture watched-folder engine (10s poll sweep
+            // plus filesystem change notifications). It sweeps every configured
+            // folder before watching it, so invoices that arrived while the POS
+            // was closed are picked up on startup. A terminal with no watched
+            // folder configured does nothing here.
+            match db::init(&app_data_dir) {
+                Ok(db) => {
+                    capture::watcher::start_watched_folder_worker(
+                        app.handle().clone(),
+                        Arc::new(db),
+                        app_data_dir.clone(),
+                        capture::watcher::POLL_SWEEP_INTERVAL_SECS,
+                        cancel_token.clone(),
+                    );
+                }
+                Err(e) => {
+                    error!("Failed to init capture watcher database: {e} — watched-folder capture disabled");
+                }
+            }
+
+            // Start the invoice-capture recognition worker (15s cadence, plus an
+            // early wake on a new capture or on connectivity returning). It
+            // uploads finished captures page by page, runs recognition, and is
+            // the only thing that deletes a committed capture's local files.
+            match db::init(&app_data_dir) {
+                Ok(db) => {
+                    capture::worker::start_capture_worker(
+                        app.handle().clone(),
+                        Arc::new(db),
+                        app_data_dir.clone(),
+                        capture::worker::WORKER_INTERVAL_SECS,
+                        cancel_token.clone(),
+                    );
+                }
+                Err(e) => {
+                    error!("Failed to init capture worker database: {e} — invoice recognition disabled");
+                }
+            }
+
             // Fetch terminal config (branch_id etc.) from admin on startup
             if storage::is_configured() {
                 let startup_app = app.handle().clone();
@@ -983,6 +1096,8 @@ pub fn run() {
             commands::offline_mutations::offline_drive_thru_update_status,
             commands::offline_mutations::offline_room_update_status,
             commands::offline_mutations::offline_room_checkin,
+            commands::offline_mutations::offline_po_receipt,
+            commands::offline_mutations::offline_supplier_import_commit,
             commands::offline_mutations::offline_housekeeping_update_status,
             commands::offline_mutations::offline_housekeeping_assign_staff,
             commands::offline_mutations::offline_product_update_quantity,
@@ -1124,6 +1239,10 @@ pub fn run() {
             commands::callerid_firewall::callerid_firewall_status,
             commands::callerid_firewall::callerid_firewall_enable,
             commands::callerid_firewall::callerid_firewall_remove,
+            // Invoice capture — connected scanner (WIA)
+            commands::capture_scanner::capture_scanner_list,
+            commands::capture_scanner::capture_scanner_test,
+            commands::capture_scanner::capture_scanner_acquire,
             // Cash drawer
             commands::hardware::drawer_open,
             // Serial ports
@@ -1284,6 +1403,20 @@ pub fn run() {
             commands::api_bridge::api_list_cached_paths,
             commands::api_bridge::sync_test_parent_connection,
             commands::api_bridge::admin_sync_terminal_config,
+            // Invoice capture
+            capture::watcher::capture_attach_rendered_pages,
+            commands::capture_documents::capture_list_documents,
+            commands::capture_documents::capture_get_document,
+            commands::capture_documents::capture_history,
+            commands::capture_documents::capture_page_preview,
+            commands::capture_documents::capture_test_preview,
+            commands::capture_documents::capture_read_original,
+            commands::capture_documents::capture_start_document,
+            commands::capture_documents::capture_advance,
+            commands::capture_documents::capture_save_draft,
+            commands::capture_documents::capture_confirm_commit,
+            commands::capture_documents::capture_remove_page,
+            commands::capture_documents::capture_reorder_pages,
         ])
         .build(tauri::generate_context!())
         .expect("error while building The Small POS")

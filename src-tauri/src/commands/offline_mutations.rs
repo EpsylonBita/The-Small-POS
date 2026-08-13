@@ -1195,6 +1195,255 @@ pub async fn offline_room_checkin(
     Ok(response)
 }
 
+/// Capture an offline goods receipt against a purchase order
+/// (procurement-loop Task 10.3) and enqueue a `po_receipts` parity item
+/// whose `record_id` is the exactly-once replay key (the capture-time
+/// `idempotency_key`).
+///
+/// The idempotency key (UUID) and `recorded_at` are generated AT CAPTURE
+/// when the caller did not supply them and are persisted inside the queued
+/// payload so they survive restarts — replay sends the stored key as the
+/// `Idempotency-Key` header (see `sync_queue::prepare_po_receipt_request`)
+/// so crash-retry duplicates collapse server-side to one effect
+/// [R11.2, R11.3, R11.4].
+///
+/// No local cache is patched here: the pending-sync overlay derives from
+/// the queue row itself (renderer `po-receipt-queue.ts`), so the cached
+/// PO snapshot stays a faithful mirror of the server and the optimistic
+/// adjustment can never double-count after replay.
+fn capture_po_receipt(db: &db::DbState, payload: &Value) -> Result<Value, String> {
+    let purchase_order_id = read_string(payload, &["purchaseOrderId", "purchase_order_id"])
+        .ok_or_else(|| "Missing purchase order id".to_string())?;
+    let staff_id = read_string(payload, &["staffId", "staff_id"])
+        .ok_or_else(|| "Missing staff id".to_string())?;
+    let lines = payload
+        .get("lines")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if lines.is_empty() {
+        return Err("Missing receipt lines".to_string());
+    }
+    for line in &lines {
+        let quantity = read_f64(line, &["quantityReceived", "quantity_received"]);
+        if !matches!(quantity, Some(value) if value != 0.0) {
+            return Err("Receipt lines must carry a non-zero quantityReceived".to_string());
+        }
+        let has_target = read_string(line, &["purchaseOrderItemId", "purchase_order_item_id"])
+            .is_some()
+            || line.get("unplanned").map(Value::is_object).unwrap_or(false);
+        if !has_target {
+            return Err(
+                "Receipt lines must reference a purchase order item or an unplanned catalog item"
+                    .to_string(),
+            );
+        }
+    }
+    let idempotency_key = read_string(payload, &["idempotencyKey", "idempotency_key"])
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let recorded_at =
+        read_string(payload, &["recordedAt", "recorded_at"]).unwrap_or_else(now_rfc3339);
+    let kind = read_string(payload, &["kind"]).unwrap_or_else(|| "delivery".to_string());
+
+    let queue_payload = json!({
+        "purchase_order_id": purchase_order_id,
+        "idempotency_key": idempotency_key.clone(),
+        "recorded_at": recorded_at.clone(),
+        "staff_id": staff_id,
+        "source": "pos_desktop",
+        "kind": kind,
+        "notes": read_string(payload, &["notes"]),
+        // Kept in the shared camelCase ReceiptCommitRequest line shape;
+        // replay passes them through to the server untouched.
+        "lines": lines,
+        "organization_id": organization_id(db, payload),
+        "branch_id": branch_id(db, payload),
+    });
+
+    let queue_id = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        enqueue_parity_item(
+            &conn,
+            "po_receipts",
+            &idempotency_key,
+            "INSERT",
+            &queue_payload,
+            "suppliers",
+            "manual",
+        )?
+    };
+
+    Ok(json!({
+        "success": true,
+        "data": {
+            "idempotencyKey": idempotency_key,
+            "recordedAt": recorded_at,
+            "queueId": queue_id,
+            "queued": true,
+        }
+    }))
+}
+
+#[tauri::command]
+pub async fn offline_po_receipt(
+    arg0: Option<Value>,
+    arg1: Option<Value>,
+    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
+) -> Result<Value, String> {
+    let payload = object_payload(arg0, arg1)?;
+    let response = capture_po_receipt(&db, &payload)?;
+    let _ = app.emit(
+        "po_receipt_queued",
+        json!({
+            "purchaseOrderId": read_string(&payload, &["purchaseOrderId", "purchase_order_id"]),
+            "queueId": response
+                .get("data")
+                .and_then(|data| data.get("queueId"))
+                .cloned(),
+            "queued": true,
+        }),
+    );
+    emit_queue_hint(&app, "suppliers");
+    Ok(response)
+}
+
+/// Queue a reviewed scanned invoice for replay when the connection drops at the
+/// Save moment (invoice-scan-capture Task 11.3, design surface D-Rust5).
+///
+/// Built on the `po_receipt` precedent, with one difference that matters: the
+/// replay key is **not** minted here. It is the capture id — the id the pages
+/// were staged under and the id the server's commit claim is keyed on — so the
+/// same document committed twice (crash, lost ack, impatient retry) converges on
+/// one invoice and one stock effect no matter which path got there first [R9.5].
+///
+/// `recorded_at` and `staff_id` are likewise captured HERE, at Save time, and
+/// persisted inside the queued payload: replay must record who saved the invoice
+/// and when they saved it, not who happened to be signed in when the queue
+/// finally drained [R13.2].
+///
+/// The three blocks the server reads (`draft`, `capture`, `poLinkage`) are stored
+/// in their camelCase wire shape and replayed untouched — the renderer built them
+/// for the online call, and the offline path must not be a second, divergent
+/// serializer of the same invoice.
+fn capture_supplier_import_commit(db: &db::DbState, payload: &Value) -> Result<Value, String> {
+    let draft = payload
+        .get("draft")
+        .filter(|value| value.is_object())
+        .cloned()
+        .ok_or_else(|| "Missing import draft".to_string())?;
+
+    let capture = payload
+        .get("capture")
+        .and_then(Value::as_object)
+        .cloned()
+        .ok_or_else(|| "Missing capture details".to_string())?;
+    let mut capture = capture;
+
+    let capture_value = Value::Object(capture.clone());
+    let capture_id = read_string(&capture_value, &["captureId", "capture_id"])
+        .or_else(|| read_string(payload, &["captureId", "capture_id"]))
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| "Missing capture id".to_string())?;
+    let source_kind = read_string(&capture_value, &["sourceKind", "source_kind"])
+        .ok_or_else(|| "Missing capture source".to_string())?;
+    let captured_at = read_string(&capture_value, &["capturedAt", "captured_at"])
+        .ok_or_else(|| "Missing capture time".to_string())?;
+
+    let staff_id = read_string(payload, &["staffId", "staff_id"])
+        .or_else(|| {
+            read_string(
+                &capture_value,
+                &["committedByStaffId", "committed_by_staff_id"],
+            )
+        })
+        .ok_or_else(|| "Missing staff id".to_string())?;
+    // Save time, not drain time [R13.2].
+    let recorded_at =
+        read_string(payload, &["recordedAt", "recorded_at"]).unwrap_or_else(now_rfc3339);
+
+    capture.insert("captureId".to_string(), Value::String(capture_id.clone()));
+    capture.insert("sourceKind".to_string(), Value::String(source_kind));
+    capture.insert("capturedAt".to_string(), Value::String(captured_at));
+    capture
+        .entry("committedByStaffId".to_string())
+        .or_insert_with(|| Value::String(staff_id.clone()));
+
+    let po_linkage = payload
+        .get("poLinkage")
+        .or_else(|| payload.get("po_linkage"))
+        .and_then(Value::as_object)
+        .cloned();
+    if let Some(linkage) = po_linkage.as_ref() {
+        let linkage_value = Value::Object(linkage.clone());
+        let purchase_order_id =
+            read_string(&linkage_value, &["purchaseOrderId", "purchase_order_id"])
+                .ok_or_else(|| "Missing purchase order id".to_string())?;
+        if Uuid::parse_str(&purchase_order_id).is_err() {
+            return Err("Purchase order id must be a uuid".to_string());
+        }
+        let mode = read_string(&linkage_value, &["mode"]).unwrap_or_default();
+        if mode != "confirm_existing" && mode != "record_delivery" {
+            return Err("Unsupported purchase order linkage mode".to_string());
+        }
+    }
+
+    let queue_payload = json!({
+        // The capture id IS the replay key; both spellings are stored so the
+        // queue's generic header lookup and the request builder read the same
+        // value even if one of them is refactored.
+        "capture_id": capture_id.clone(),
+        "idempotency_key": capture_id.clone(),
+        "recorded_at": recorded_at.clone(),
+        "staff_id": staff_id,
+        "source": "pos_desktop",
+        // Kept in the shared camelCase commit-request shape; replay passes them
+        // to the server untouched.
+        "draft": draft,
+        "capture": Value::Object(capture),
+        "po_linkage": po_linkage.map(Value::Object).unwrap_or(Value::Null),
+        "organization_id": organization_id(db, payload),
+        "branch_id": branch_id(db, payload),
+    });
+
+    let queue_id = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        enqueue_parity_item(
+            &conn,
+            "supplier_import_commits",
+            &capture_id,
+            "INSERT",
+            &queue_payload,
+            "suppliers",
+            "manual",
+        )?
+    };
+
+    Ok(json!({
+        "success": true,
+        "data": {
+            "captureId": capture_id,
+            "idempotencyKey": capture_id,
+            "recordedAt": recorded_at,
+            "queueId": queue_id,
+            "queued": true,
+        }
+    }))
+}
+
+#[tauri::command]
+pub async fn offline_supplier_import_commit(
+    arg0: Option<Value>,
+    arg1: Option<Value>,
+    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
+) -> Result<Value, String> {
+    let payload = object_payload(arg0, arg1)?;
+    let response = capture_supplier_import_commit(&db, &payload)?;
+    emit_queue_hint(&app, "suppliers");
+    Ok(response)
+}
+
 fn patch_housekeeping_cache(
     db: &db::DbState,
     task_id: &str,
@@ -1665,6 +1914,467 @@ mod offline_room_checkin_tests {
                 "expected '{expected_error}' in '{error}'"
             );
         }
+
+        let conn = db.conn.lock().expect("db lock");
+        let queued: i64 = conn
+            .query_row("SELECT COUNT(*) FROM parity_sync_queue", [], |row| {
+                row.get(0)
+            })
+            .expect("count queue rows");
+        assert_eq!(queued, 0, "validation failures must not enqueue");
+    }
+}
+
+#[cfg(test)]
+mod offline_po_receipt_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    /// Real schema via the production migration chain + the parity queue
+    /// DDL (`sync_queue::create_tables`) — never inline fake schemas.
+    fn test_db_state() -> db::DbState {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        db::run_migrations_for_test(&conn);
+        sync_queue::create_tables(&conn).expect("create parity queue tables");
+        db::DbState {
+            conn: Mutex::new(conn),
+            db_path: PathBuf::from(":memory:"),
+        }
+    }
+
+    /// Org + branch included inline so the helpers never fall through to
+    /// the OS keyring (`storage::get_credential`) during tests. Lines use
+    /// the shared camelCase ReceiptCommitRequest shape the renderer sends.
+    fn base_payload() -> Value {
+        json!({
+            "purchaseOrderId": "33333333-3333-4333-8333-333333333333",
+            "staffId": "44444444-4444-4444-8444-444444444444",
+            "lines": [
+                {
+                    "purchaseOrderItemId": "55555555-5555-4555-8555-555555555555",
+                    "quantityReceived": 6,
+                    "unitCost": 2.4,
+                },
+            ],
+            "notes": "Back-door delivery",
+            "organization_id": "org-po-receipt",
+            "branch_id": "branch-po-receipt",
+        })
+    }
+
+    fn read_queue_row(
+        db: &db::DbState,
+    ) -> (String, String, String, String, String, String, String) {
+        let conn = db.conn.lock().expect("db lock");
+        conn.query_row(
+            "SELECT table_name, record_id, operation, data, organization_id,
+                    module_type, conflict_strategy
+             FROM parity_sync_queue",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            },
+        )
+        .expect("exactly one parity queue row")
+    }
+
+    #[test]
+    fn po_receipt_enqueue_row_shape_with_capture_time_key_and_recorded_at() {
+        let db = test_db_state();
+
+        let response = capture_po_receipt(&db, &base_payload()).expect("capture receipt");
+        let data = response.get("data").expect("data envelope");
+        let generated_key = data
+            .get("idempotencyKey")
+            .and_then(Value::as_str)
+            .expect("idempotencyKey in response")
+            .to_string();
+        Uuid::parse_str(&generated_key).expect("generated idempotency_key must be a uuid");
+        let recorded_at = data
+            .get("recordedAt")
+            .and_then(Value::as_str)
+            .expect("recordedAt in response")
+            .to_string();
+        chrono::DateTime::parse_from_rfc3339(&recorded_at)
+            .expect("capture-time recorded_at must be RFC3339");
+        assert_eq!(data.get("queued").and_then(Value::as_bool), Some(true));
+
+        let (table_name, record_id, operation, queued_data, organization_id, module_type, strategy) =
+            read_queue_row(&db);
+        assert_eq!(table_name, "po_receipts");
+        assert_eq!(record_id, generated_key, "record_id mirrors the replay key");
+        assert_eq!(operation, "INSERT");
+        assert_eq!(organization_id, "org-po-receipt");
+        assert_eq!(module_type, "suppliers");
+        assert_eq!(
+            strategy, "manual",
+            "409 PO_STATE_CONFLICT must reach staff review, never auto-resolve"
+        );
+
+        // Durability round-trip: key + recorded_at + lines live ON THE
+        // QUEUE ROW so they survive app restarts [R11.2, R11.3].
+        let queued: Value = serde_json::from_str(&queued_data).expect("queued payload parses");
+        assert_eq!(
+            queued.get("idempotency_key").and_then(Value::as_str),
+            Some(generated_key.as_str())
+        );
+        assert_eq!(
+            queued.get("recorded_at").and_then(Value::as_str),
+            Some(recorded_at.as_str())
+        );
+        assert_eq!(
+            queued.get("purchase_order_id").and_then(Value::as_str),
+            Some("33333333-3333-4333-8333-333333333333")
+        );
+        assert_eq!(
+            queued.get("staff_id").and_then(Value::as_str),
+            Some("44444444-4444-4444-8444-444444444444")
+        );
+        assert_eq!(
+            queued.get("source").and_then(Value::as_str),
+            Some("pos_desktop")
+        );
+        assert_eq!(queued.get("kind").and_then(Value::as_str), Some("delivery"));
+        assert_eq!(
+            queued["lines"][0]["purchaseOrderItemId"],
+            json!("55555555-5555-4555-8555-555555555555")
+        );
+        assert_eq!(queued["lines"][0]["quantityReceived"], json!(6));
+    }
+
+    #[test]
+    fn po_receipt_preserves_caller_supplied_key_and_capture_time() {
+        // The receive dialog generates key + recorded_at at capture and the
+        // online path may have already sent them; re-queuing after a network
+        // failure must reuse them so the server collapses the duplicate.
+        let db = test_db_state();
+
+        let mut payload = base_payload();
+        let object = payload.as_object_mut().expect("payload object");
+        object.insert(
+            "idempotencyKey".to_string(),
+            json!("7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"),
+        );
+        object.insert("recordedAt".to_string(), json!("2026-08-05T10:15:00+00:00"));
+        object.insert("kind".to_string(), json!("correction"));
+
+        let response = capture_po_receipt(&db, &payload).expect("capture receipt");
+        let data = response.get("data").expect("data envelope");
+        assert_eq!(
+            data.get("idempotencyKey").and_then(Value::as_str),
+            Some("7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d")
+        );
+        assert_eq!(
+            data.get("recordedAt").and_then(Value::as_str),
+            Some("2026-08-05T10:15:00+00:00")
+        );
+
+        let (_, record_id, _, queued_data, _, _, _) = read_queue_row(&db);
+        assert_eq!(record_id, "7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d");
+        let queued: Value = serde_json::from_str(&queued_data).expect("queued payload parses");
+        assert_eq!(
+            queued.get("recorded_at").and_then(Value::as_str),
+            Some("2026-08-05T10:15:00+00:00")
+        );
+        assert_eq!(
+            queued.get("kind").and_then(Value::as_str),
+            Some("correction")
+        );
+    }
+
+    #[test]
+    fn po_receipt_validates_required_fields_without_enqueueing() {
+        let db = test_db_state();
+
+        // Missing purchase order / staff.
+        for (field, expected_error) in [
+            ("purchaseOrderId", "Missing purchase order id"),
+            ("staffId", "Missing staff id"),
+            ("lines", "Missing receipt lines"),
+        ] {
+            let mut payload = base_payload();
+            payload
+                .as_object_mut()
+                .expect("payload object")
+                .remove(field);
+            let error =
+                capture_po_receipt(&db, &payload).expect_err("missing required field must fail");
+            assert!(
+                error.contains(expected_error),
+                "expected '{expected_error}' in '{error}'"
+            );
+        }
+
+        // Zero-quantity and targetless lines are refused at capture.
+        let mut zero_quantity = base_payload();
+        zero_quantity["lines"][0]["quantityReceived"] = json!(0);
+        let error = capture_po_receipt(&db, &zero_quantity).expect_err("zero quantity must fail");
+        assert!(error.contains("non-zero"), "unexpected error: {error}");
+
+        let mut targetless = base_payload();
+        targetless["lines"] = json!([{ "quantityReceived": 2 }]);
+        let error = capture_po_receipt(&db, &targetless).expect_err("targetless line must fail");
+        assert!(
+            error.contains("purchase order item"),
+            "unexpected error: {error}"
+        );
+
+        let conn = db.conn.lock().expect("db lock");
+        let queued: i64 = conn
+            .query_row("SELECT COUNT(*) FROM parity_sync_queue", [], |row| {
+                row.get(0)
+            })
+            .expect("count queue rows");
+        assert_eq!(queued, 0, "validation failures must not enqueue");
+    }
+}
+
+#[cfg(test)]
+mod offline_supplier_import_commit_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    const CAPTURE_ID: &str = "8b2c1d4e-5f60-4a7b-9c8d-0e1f2a3b4c5d";
+    const PO_ID: &str = "66666666-6666-4666-8666-666666666666";
+    const STAFF_ID: &str = "77777777-7777-4777-8777-777777777777";
+
+    /// Real schema via the production migration chain + the parity queue
+    /// DDL (`sync_queue::create_tables`) — never inline fake schemas.
+    fn test_db_state() -> db::DbState {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        db::run_migrations_for_test(&conn);
+        sync_queue::create_tables(&conn).expect("create parity queue tables");
+        db::DbState {
+            conn: Mutex::new(conn),
+            db_path: PathBuf::from(":memory:"),
+        }
+    }
+
+    /// Org + branch inline so the helpers never fall through to the OS
+    /// keyring during tests. `draft`, `capture` and `poLinkage` are the exact
+    /// blocks the online commit call sends.
+    fn base_payload() -> Value {
+        json!({
+            "draft": {
+                "supplierName": "Fresh Produce Ltd",
+                "invoiceNumber": "INV-2026-118",
+                "rows": [
+                    { "rowNumber": 1, "name": "Tomatoes", "quantity": 6, "unitCost": 1.25 }
+                ],
+            },
+            "capture": {
+                "captureId": CAPTURE_ID,
+                "sourceKind": "watched_folder",
+                "sourceName": "Back office scans",
+                "capturedAt": "2026-08-05T18:02:00+00:00",
+                "capturedByStaffId": STAFF_ID,
+                "storageKeys": ["org-capture/branch-capture/captures/x/page-000.png"],
+            },
+            "poLinkage": {
+                "purchaseOrderId": PO_ID,
+                "mode": "confirm_existing",
+            },
+            "staffId": STAFF_ID,
+            "organization_id": "org-capture",
+            "branch_id": "branch-capture",
+        })
+    }
+
+    fn read_queue_row(
+        db: &db::DbState,
+    ) -> (String, String, String, String, String, String, String) {
+        let conn = db.conn.lock().expect("db lock");
+        conn.query_row(
+            "SELECT table_name, record_id, operation, data, organization_id,
+                    module_type, conflict_strategy
+             FROM parity_sync_queue",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            },
+        )
+        .expect("exactly one parity queue row")
+    }
+
+    #[test]
+    fn supplier_import_commit_enqueues_under_the_capture_id_as_its_replay_key() {
+        let db = test_db_state();
+
+        let response =
+            capture_supplier_import_commit(&db, &base_payload()).expect("capture commit");
+        let data = response.get("data").expect("data envelope");
+        assert_eq!(
+            data.get("captureId").and_then(Value::as_str),
+            Some(CAPTURE_ID)
+        );
+        // The replay key is NOT minted here — it IS the capture id, which is
+        // what the server commit claim is keyed on [R9.5].
+        assert_eq!(
+            data.get("idempotencyKey").and_then(Value::as_str),
+            Some(CAPTURE_ID),
+        );
+        let recorded_at = data
+            .get("recordedAt")
+            .and_then(Value::as_str)
+            .expect("recordedAt in response");
+        chrono::DateTime::parse_from_rfc3339(recorded_at)
+            .expect("capture-time recorded_at must be RFC3339");
+        assert_eq!(data.get("queued").and_then(Value::as_bool), Some(true));
+
+        let (table_name, record_id, operation, queued_data, organization_id, module_type, strategy) =
+            read_queue_row(&db);
+        assert_eq!(table_name, "supplier_import_commits");
+        assert_eq!(record_id, CAPTURE_ID, "record_id mirrors the replay key");
+        assert_eq!(operation, "INSERT");
+        assert_eq!(organization_id, "org-capture");
+        assert_eq!(module_type, "suppliers");
+        assert_eq!(
+            strategy, "manual",
+            "a rejected invoice must reach staff review, never auto-resolve"
+        );
+
+        // Durability round-trip: the invoice, its provenance and the linkage
+        // live ON THE QUEUE ROW so they survive app restarts [R11.6, R17.3].
+        let queued: Value = serde_json::from_str(&queued_data).expect("queued payload parses");
+        assert_eq!(
+            queued.get("capture_id").and_then(Value::as_str),
+            Some(CAPTURE_ID)
+        );
+        assert_eq!(
+            queued.get("idempotency_key").and_then(Value::as_str),
+            Some(CAPTURE_ID)
+        );
+        assert_eq!(
+            queued.get("recorded_at").and_then(Value::as_str),
+            Some(recorded_at)
+        );
+        assert_eq!(
+            queued.get("staff_id").and_then(Value::as_str),
+            Some(STAFF_ID)
+        );
+        assert_eq!(queued["draft"]["rows"][0]["name"], json!("Tomatoes"));
+        assert_eq!(queued["capture"]["sourceKind"], json!("watched_folder"));
+        assert_eq!(
+            queued["capture"]["capturedAt"],
+            json!("2026-08-05T18:02:00+00:00")
+        );
+        // Who pressed Save is recorded at Save time, not at drain time [R13.2].
+        assert_eq!(queued["capture"]["committedByStaffId"], json!(STAFF_ID));
+        assert_eq!(queued["po_linkage"]["purchaseOrderId"], json!(PO_ID));
+    }
+
+    #[test]
+    fn supplier_import_commit_preserves_a_caller_supplied_save_time_and_saver() {
+        let db = test_db_state();
+
+        let mut payload = base_payload();
+        payload["recordedAt"] = json!("2026-08-05T18:30:00+00:00");
+        payload["capture"]["committedByStaffId"] = json!("99999999-9999-4999-8999-999999999999");
+
+        capture_supplier_import_commit(&db, &payload).expect("capture commit");
+        let (_, _, _, queued_data, _, _, _) = read_queue_row(&db);
+        let queued: Value = serde_json::from_str(&queued_data).expect("queued payload parses");
+        assert_eq!(
+            queued.get("recorded_at").and_then(Value::as_str),
+            Some("2026-08-05T18:30:00+00:00"),
+        );
+        assert_eq!(
+            queued["capture"]["committedByStaffId"],
+            json!("99999999-9999-4999-8999-999999999999"),
+            "an explicitly named saver is never overwritten",
+        );
+    }
+
+    #[test]
+    fn a_commit_without_a_purchase_order_is_queued_unlinked() {
+        let db = test_db_state();
+
+        let mut payload = base_payload();
+        payload
+            .as_object_mut()
+            .expect("payload object")
+            .remove("poLinkage");
+
+        capture_supplier_import_commit(&db, &payload).expect("capture unlinked commit");
+        let (_, _, _, queued_data, _, _, _) = read_queue_row(&db);
+        let queued: Value = serde_json::from_str(&queued_data).expect("queued payload parses");
+        assert_eq!(
+            queued.get("po_linkage"),
+            Some(&Value::Null),
+            "PO linkage is optional — declining it must not block Save",
+        );
+    }
+
+    #[test]
+    fn supplier_import_commit_validation_failures_never_enqueue() {
+        let db = test_db_state();
+
+        for (field, expected_error) in [("draft", "draft"), ("capture", "capture")] {
+            let mut payload = base_payload();
+            payload
+                .as_object_mut()
+                .expect("payload object")
+                .remove(field);
+            let error = capture_supplier_import_commit(&db, &payload)
+                .expect_err("missing required field must fail");
+            assert!(
+                error.contains(expected_error),
+                "expected '{expected_error}' in '{error}'"
+            );
+        }
+
+        // Provenance the server enum would reject, and a PO id that would
+        // reach a procurement RPC, are refused at capture rather than queued
+        // to dead-letter later.
+        let mut without_capture_time = base_payload();
+        without_capture_time["capture"]
+            .as_object_mut()
+            .expect("capture object")
+            .remove("capturedAt");
+        let error = capture_supplier_import_commit(&db, &without_capture_time)
+            .expect_err("missing capture time must fail");
+        assert!(error.contains("capture time"), "unexpected error: {error}");
+
+        let mut without_staff = base_payload();
+        without_staff
+            .as_object_mut()
+            .expect("payload object")
+            .remove("staffId");
+        without_staff["capture"]
+            .as_object_mut()
+            .expect("capture object")
+            .remove("committedByStaffId");
+        let error = capture_supplier_import_commit(&db, &without_staff)
+            .expect_err("missing staff id must fail");
+        assert!(error.contains("staff id"), "unexpected error: {error}");
+
+        let mut bad_po = base_payload();
+        bad_po["poLinkage"]["purchaseOrderId"] = json!("../escape");
+        let error = capture_supplier_import_commit(&db, &bad_po).expect_err("bad PO id must fail");
+        assert!(error.contains("uuid"), "unexpected error: {error}");
+
+        let mut bad_mode = base_payload();
+        bad_mode["poLinkage"]["mode"] = json!("just_link_it");
+        let error = capture_supplier_import_commit(&db, &bad_mode).expect_err("bad mode must fail");
+        assert!(error.contains("linkage mode"), "unexpected error: {error}");
 
         let conn = db.conn.lock().expect("db lock");
         let queued: i64 = conn

@@ -136,6 +136,82 @@ export function offlineAssignHousekeepingStaff(payload: Record<string, unknown>)
   )
 }
 
+/**
+ * Queue a goods receipt against a purchase order for offline replay
+ * (procurement-loop Task 10.3). The Rust capture generates the
+ * idempotency key (UUID) and `recorded_at` when the caller did not
+ * supply them and stores both ON THE QUEUE ROW; replay sends the stored
+ * key as the `Idempotency-Key` header so crash-retry duplicates collapse
+ * server-side to one effect. [R11.2, R11.3, R11.4]
+ */
+export function offlineCommitPoReceipt(payload: {
+  purchaseOrderId: string
+  staffId: string
+  lines: Array<Record<string, unknown>>
+  idempotencyKey?: string
+  recordedAt?: string
+  kind?: 'delivery' | 'correction'
+  notes?: string | null
+}) {
+  return invokeOffline<{
+    idempotencyKey: string
+    recordedAt: string
+    queueId: string
+    queued: boolean
+  }>(
+    'offline:po-receipt',
+    payload,
+    'Failed to queue the goods receipt offline',
+  )
+}
+
+/**
+ * Queue a reviewed scanned invoice for replay when the connection drops at the
+ * Save moment (invoice-scan-capture Task 11.3, design surface D-Rust5).
+ *
+ * The replay key is NOT generated: it is the capture id the pages were staged
+ * under, which is also what the server's commit claim is keyed on. Rust stores
+ * it — together with `recordedAt` and `staffId` captured at Save time — ON THE
+ * QUEUE ROW, and replay sends it as the `Idempotency-Key` header, so the same
+ * document committed twice converges on one invoice and one stock effect.
+ * [R9.5, R11.6, R11.7, R13.2]
+ *
+ * `draft`, `capture` and `poLinkage` are the exact blocks the online
+ * `commitImport` call sends, stored and replayed untouched.
+ */
+export function offlineCommitSupplierImport(payload: {
+  draft: Record<string, unknown>
+  capture: {
+    captureId: string
+    sourceKind: string
+    capturedAt: string
+    sourceName?: string
+    capturedByStaffId?: string
+    committedByStaffId?: string
+    storageKeys?: string[]
+    originalKey?: string
+  }
+  poLinkage?: {
+    purchaseOrderId: string
+    mode: 'confirm_existing' | 'record_delivery'
+    linkedInventoryItemIds?: string[]
+  }
+  staffId: string
+  recordedAt?: string
+}) {
+  return invokeOffline<{
+    captureId: string
+    idempotencyKey: string
+    recordedAt: string
+    queueId: string
+    queued: boolean
+  }>(
+    'offline:supplier-import-commit',
+    payload,
+    'Failed to queue the invoice offline',
+  )
+}
+
 export function offlineUpdateProductQuantity(payload: Record<string, unknown>) {
   return invokeOffline<{ product?: Record<string, unknown>; queueId: string; queued: boolean }>(
     'offline:product-update-quantity',

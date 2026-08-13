@@ -5105,6 +5105,156 @@
     }
   },
   "suppliers": {
+    "capture": {
+      "settings": {
+        "title": "Scan settings",
+        "subtitle": "Where this till gets scanned invoices from.",
+        "open": "Scan settings",
+        "back": "Back",
+        "addScanner": "Add a scanner",
+        "addFolder": "Watch a scan folder",
+        "emptyTitle": "No scanner set up yet",
+        "emptyDescription": "Add the scanner sitting next to this till, or point us at the folder your machine saves scans into.",
+        "pickScanner": "Pick the machine you want to scan from.",
+        "looking": "Looking for machines…",
+        "noDevices": "We could not find a scanner here.",
+        "noDevicesHint": "No problem — most machines can save scans straight into a folder. Point us at that folder instead.",
+        "testing": "We asked it for one test page. Here it is:",
+        "testInProgress": "Scanning a test page…",
+        "testImageAlt": "Test page",
+        "testLooksRight": "That looks right",
+        "testAgain": "Try again",
+        "nameLabel": "What should we call it?",
+        "useByDefault": "Use this one when I press Scan invoice",
+        "makeDefault": "Use this one by default",
+        "finish": "Done",
+        "finishLater": "I will test it later",
+        "folderArrived": "It worked — your scan came through.",
+        "folderWaiting": "Now press Scan on your machine. We are watching this folder and will say when it arrives.",
+        "folderPickFailed": "Could not open the folder picker. Try again.",
+        "forget": "Remove",
+        "forgetConfirm": "Remove this from the till? Invoices you already scanned stay exactly where they are.",
+        "forgotten": "Removed. Your scanned invoices are untouched.",
+        "saved": "Saved. You can scan from here now."
+      },
+      "pages": {
+        "title": "Your invoice",
+        "count": "{{count}} pages so far",
+        "count_one": "One page so far",
+        "count_other": "{{count}} pages so far",
+        "pageLabel": "Page {{number}}",
+        "empty": "No pages yet. Add the first one.",
+        "addAnother": "Add another page",
+        "done": "Done",
+        "remove": "Remove this page",
+        "rescan": "Scan this page again",
+        "rescanned": "Page replaced.",
+        "moveEarlier": "Move earlier",
+        "moveLater": "Move later",
+        "capReached": "That is as many pages as one invoice can hold. Finish this one and start another for the rest.",
+        "finishAndStartAnother": "Finish this one and start another",
+        "needAPage": "Add at least one page before finishing."
+      },
+      "queue": {
+        "open": "Scanned invoices",
+        "title": "Scanned invoices",
+        "subtitle": "Everything scanned here that is not filed yet.",
+        "emptyTitle": "Nothing waiting",
+        "emptyDescription": "Scanned invoices show up here until they are saved.",
+        "check": "Check & Save",
+        "continue": "Carry on scanning",
+        "retry": "Try again",
+        "manual": "Fill in by hand",
+        "discard": "Throw this scan away",
+        "discardConfirm": "Throw this scan away? The pages are deleted from this till and cannot be brought back."
+      },
+      "review": {
+        "doubleCheck": "Double-check this",
+        "fillByHand": "Fill it in by hand",
+        "scanAgain": "Scan it again",
+        "poTitle": "This delivery was expected — is this it?",
+        "poDecline": "No, this is something else",
+        "poorTitle": "This scan is hard to read",
+        "poorDescription": "You can scan it again, or just type in what it says.",
+        "queued": "Saved here. It will reach the office as soon as you are back online.",
+        "saved": "Invoice saved."
+      },
+      "scan": {
+        "open": "Scan invoice",
+        "reading": "Reading your invoice… you can carry on working.",
+        "pressScanOnMachine": "Press Scan on your machine. The invoice will show up here on its own.",
+        "startFailed": "Could not start scanning. Try again."
+      },
+      "notifications": {
+        "arrived": "A new invoice arrived.",
+        "check": "Check invoice",
+        "ready": "An invoice is ready to check."
+      },
+      "reason": {
+        "unknown": "Something went wrong with this scan. Nothing is lost.",
+        "MODULE_REQUIRED": "The suppliers feature is not switched on for this shop yet. The scan is safe and will go through once it is.",
+        "PO_INVOICE_ALREADY_APPLIED": "This delivery has already been booked in against that order. Nothing was counted twice.",
+        "PO_STATE_CONFLICT": "That order has moved on since this was scanned. Open it and check where it stands.",
+        "CAPTURE_TOO_LARGE": "That page is too big to send. Scan it again at a smaller size.",
+        "CAPTURE_TOO_MANY_PAGES": "That is more pages than one invoice can hold. Split it in two and send them one after the other.",
+        "CAPTURE_UNREADABLE": "We could not read anything on these pages. Scan them again, or type the invoice in by hand.",
+        "COMMIT_IN_PROGRESS": "This one is already being saved. Give it a moment.",
+        "CAPTURE_ALREADY_COMMITTED": "This invoice is already saved. There is nothing more to do.",
+        "render_failed": "We could not open that file. Scan the invoice again, or type it in by hand.",
+        "commit_rejected": "The office would not accept this invoice. Your changes are still here — check it and try again."
+      },
+      "device": {
+        "device_offline": "The scanner is switched off or unplugged. Turn it on and try again.",
+        "device_busy": "The scanner is busy with another job. Try again in a moment.",
+        "device_removed": "That scanner is no longer connected to this till. Plug it back in, or pick another one.",
+        "scan_cancelled": "The scan was stopped. Nothing was saved.",
+        "device_error": "The scanner did not answer. Check it is on and connected."
+      },
+      "status": {
+        "capturing": "Still scanning",
+        "waiting": "Waiting to be read",
+        "uploading": "Sending the pages",
+        "reading": "Reading your invoice",
+        "ready_review": "Ready to check",
+        "needs_attention": "Needs a look",
+        "parked": "On hold — the suppliers feature is not active. Nothing is lost.",
+        "committing": "Saving",
+        "committed": "Saved",
+        "discarded": "Thrown away"
+      },
+      "history": {
+        "show": "Recent activity",
+        "hide": "Hide recent activity",
+        "empty": "Nothing has happened here yet.",
+        "ingested": "A file arrived and was picked up.",
+        "skipped_duplicate": "A file was left alone — it is the same one we already have.",
+        "skipped_unsupported": "A file was left alone — we cannot read that kind of file.",
+        "skipped_oversize": "A file was left alone — it is too big to take in.",
+        "captured": "A scan was started.",
+        "page_added": "A page was added.",
+        "page_removed": "A page was removed.",
+        "pages_reordered": "The pages were put in a new order.",
+        "pages_rendered": "The pages were prepared for reading.",
+        "status_changed": "This scan moved on to its next step.",
+        "discarded": "A scan was thrown away.",
+        "ingest_skipped": "A file was left alone.",
+        "committed": "An invoice was saved.",
+        "local_files_cleaned": "The pages were cleared from this till after the invoice was saved.",
+        "generic": "Something happened with this scan."
+      },
+      "sourceKind": {
+        "connected_scanner": "Scanner at this till",
+        "watched_folder": "Scan folder",
+        "camera": "Camera",
+        "usb_scanner": "Scanner on USB",
+        "file_pick": "Picked file"
+      },
+      "sourceStatus": {
+        "ready": "Ready",
+        "unavailable": "Not reachable",
+        "watching": "Watching"
+      }
+    },
     "title": "Suppliers",
     "subtitle": "Manage suppliers, invoices, and imported inventory",
     "total": "Total",
@@ -5332,6 +5482,70 @@
     },
     "summary": {
       "title": "Supplier summary"
+    }
+  },
+  "procurement": {
+    "tab": "Purchase orders",
+    "empty": "No purchase orders for this branch yet.",
+    "searchPlaceholder": "Search purchase orders...",
+    "filterAll": "All statuses",
+    "supplier": "Supplier",
+    "expected": "Expected",
+    "progress": "Received {{received}} of {{ordered}}",
+    "lastSynced": "Last synced {{time}}",
+    "neverSynced": "Not synced yet",
+    "status": {
+      "draft": "Draft",
+      "ordered": "Ordered",
+      "partially_received": "Partially received",
+      "received_closed": "Received / Closed",
+      "cancelled": "Cancelled"
+    },
+    "flavor": {
+      "inventory": "Inventory",
+      "retail": "Retail",
+      "legacy": "Product"
+    },
+    "detail": {
+      "items": "Items",
+      "orderedQty": "Ordered",
+      "receivedQty": "Received",
+      "remainingQty": "Remaining",
+      "unplanned": "Unplanned",
+      "notes": "Notes",
+      "back": "Back to list"
+    },
+    "receive": {
+      "action": "Receive delivery",
+      "title": "Receive against {{reference}}",
+      "quantity": "Quantity",
+      "unitCost": "Unit cost",
+      "confirmOverReceipt": "Confirm receiving more than ordered",
+      "notesPlaceholder": "Delivery notes (optional)",
+      "submit": "Record receipt",
+      "submitting": "Recording...",
+      "queuedOffline": "Receipt saved locally and queued for sync.",
+      "recorded": "Receipt recorded.",
+      "replayed": "Receipt was already recorded.",
+      "noStaff": "Sign in with a staff PIN to record receipts.",
+      "noLines": "Enter at least one received quantity.",
+      "failed": "Failed to record the receipt.",
+      "conflict": "This purchase order changed on the server ({{status}}). The receipt was not applied.",
+      "moduleRequired": "The suppliers module is not active for this terminal.",
+      "confirmationRequired": "Confirm the flagged lines and submit again."
+    },
+    "pending": {
+      "title": "Pending sync",
+      "entry": "Recorded {{time}} — waiting to sync",
+      "parked": "Waiting for module access",
+      "conflictTitle": "Needs attention",
+      "conflictBody": "The purchase order changed while offline. The recorded quantities are preserved below.",
+      "retry": "Retry sync",
+      "retryQueued": "Receipt queued for retry.",
+      "quantities": "Recorded quantities"
+    },
+    "offline": {
+      "receiveNote": "Receipts recorded offline are saved on this terminal and sync automatically after reconnect."
     }
   },
   "tablesView": {
@@ -5623,6 +5837,7 @@
       "publishBlocked": "Schedule queued but blocked until ERGANI setup is complete.",
       "publishQueued": "Schedule publish queued for ERGANI.",
       "publishFailed": "Failed to publish to ERGANI.",
+      "publishNotFiled": "The schedule was not filed with ERGANI.",
       "lastStatus": "ERGANI status"
     },
     "errors": {

@@ -47,7 +47,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-const CURRENT_SCHEMA_VERSION: i32 = 71;
+const CURRENT_SCHEMA_VERSION: i32 = 72;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -457,6 +457,9 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     }
     if current < 71 {
         run_migration_tx(conn, 71, migrate_v71)?;
+    }
+    if current < 72 {
+        run_migration_tx(conn, 72, migrate_v72)?;
     }
 
     Ok(())
@@ -4560,6 +4563,112 @@ fn migrate_v71(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// Migration v72: terminal-local invoice capture store.
+///
+/// Spec: `.claude/specs/invoice-scan-capture/design.md` — design surface
+/// **D-Rust1**. Requirements R8.6, R11.1, R13.4, R17.3.
+///
+/// A scanned invoice becomes durable on this terminal *before* any network
+/// activity and stays durable until the server confirms the committed invoice
+/// with its attachment. These four tables are that durability:
+///
+/// - `capture_documents` — one row per captured document (one document is
+///   exactly one invoice). `status` carries the lifecycle the design's state
+///   machine defines, and its CHECK is deliberately identical to the mobile
+///   client's `invoice_captures.status` and to the shared `CaptureStatus`
+///   type, so statuses, copy, and tests stay in parity across both clients.
+///   `recognition_json` / `draft_json` are what make a restart mid-review
+///   lossless (R8.6, R17.3); `storage_keys_json` is what makes an interrupted
+///   upload resume at the first unuploaded page rather than resending
+///   everything; `next_retry_at` + `attempts` carry the worker's backoff.
+/// - `capture_pages` — the page files on disk, index-addressed. The unique
+///   index on `(capture_id, page_index)` is what lets a re-scan of one page
+///   replace it in place instead of appending a duplicate.
+/// - `capture_ingest_ledger` — content-hash dedupe for the watched-folder
+///   source. Keyed by hash (not path) so the ledger survives restarts and a
+///   file that reappears under a new name is still recognized as already seen
+///   (R3.4); the `skipped_*` outcomes are the visible skip history (R3.5).
+/// - `capture_events` — local audit trail powering the queue history,
+///   including who discarded a document and when (R13.4).
+///
+/// Additive and idempotent: no existing table is touched, so a POS that never
+/// configures a capture source simply carries four empty tables.
+fn migrate_v72(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS capture_documents (
+            id TEXT PRIMARY KEY,
+            status TEXT NOT NULL DEFAULT 'capturing'
+                CHECK (status IN ('capturing', 'waiting', 'uploading', 'reading',
+                                  'ready_review', 'needs_attention', 'parked',
+                                  'committing', 'committed', 'discarded')),
+            source_kind TEXT NOT NULL,
+            source_name TEXT,
+            staff_id TEXT,
+            captured_at TEXT NOT NULL,
+            page_count INTEGER NOT NULL DEFAULT 0,
+            content_hash TEXT,
+            recognition_json TEXT,
+            draft_json TEXT,
+            storage_keys_json TEXT,
+            error_message TEXT,
+            next_retry_at TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
+        );
+
+        -- The capture worker drains FIFO by capture time within a status, and
+        -- the queue badge counts waiting/needs-attention documents.
+        CREATE INDEX IF NOT EXISTS idx_capture_documents_status_captured
+          ON capture_documents (status, captured_at);
+
+        CREATE TABLE IF NOT EXISTS capture_pages (
+            id TEXT PRIMARY KEY,
+            capture_id TEXT NOT NULL,
+            page_index INTEGER NOT NULL,
+            file_path TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            byte_size INTEGER NOT NULL,
+            mime TEXT NOT NULL
+        );
+
+        -- Page order is document order, and a re-scan replaces one page in
+        -- place — both need the index to be the page's identity.
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_capture_pages_capture_index
+          ON capture_pages (capture_id, page_index);
+
+        CREATE TABLE IF NOT EXISTS capture_ingest_ledger (
+            content_hash TEXT PRIMARY KEY,
+            source_path TEXT,
+            capture_id TEXT,
+            outcome TEXT NOT NULL
+                CHECK (outcome IN ('ingested', 'skipped_duplicate',
+                                   'skipped_unsupported', 'skipped_oversize')),
+            seen_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS capture_events (
+            id TEXT PRIMARY KEY,
+            capture_id TEXT,
+            event_type TEXT NOT NULL,
+            staff_id TEXT,
+            details_json TEXT,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_capture_events_capture_created
+          ON capture_events (capture_id, created_at);
+        ",
+    )
+    .map_err(|e| format!("v72 create capture store: {e}"))?;
+
+    conn.execute("INSERT INTO schema_version (version) VALUES (72)", [])
+        .map_err(|e| format!("v72 record schema_version: {e}"))?;
+
+    info!("Applied migration v72 (terminal-local invoice capture store)");
+    Ok(())
+}
+
 /// Read the persisted `idempotency_key` from an entity table.
 ///
 /// Wave 4 architectural contract:
@@ -5759,6 +5868,113 @@ mod tests {
             )
             .expect("read sandbox marker");
         assert_eq!(marker, ("sandbox".to_string(), 1));
+        assert_eq!(max_schema_version(&conn), CURRENT_SCHEMA_VERSION);
+    }
+
+    /// v72 capture store: the four tables exist and their CHECK constraints
+    /// are the real lifecycle/outcome vocabularies, not free text. The
+    /// `status` CHECK is the schema-level half of the cross-client parity
+    /// contract with the shared `CaptureStatus` type — a typo'd status must
+    /// fail at the database, not silently persist and strand a document.
+    #[test]
+    fn test_migrate_v72_creates_the_capture_store() {
+        let conn = test_db();
+        run_migrations(&conn).expect("migrations");
+
+        let tables = table_names(&conn);
+        for table in [
+            "capture_documents",
+            "capture_pages",
+            "capture_ingest_ledger",
+            "capture_events",
+        ] {
+            assert!(
+                tables.contains(&table.to_string()),
+                "missing {table} after v72",
+            );
+        }
+
+        // Every shared `CaptureStatus` variant is accepted.
+        for status in [
+            "capturing",
+            "waiting",
+            "uploading",
+            "reading",
+            "ready_review",
+            "needs_attention",
+            "parked",
+            "committing",
+            "committed",
+            "discarded",
+        ] {
+            conn.execute(
+                "INSERT INTO capture_documents (
+                     id, status, source_kind, captured_at, updated_at
+                 ) VALUES (?1, ?2, 'connected_scanner', datetime('now'), datetime('now'))",
+                params![format!("capture-{status}"), status],
+            )
+            .unwrap_or_else(|e| panic!("status {status} should be accepted by the CHECK: {e}"));
+        }
+
+        // Anything outside the lifecycle is refused.
+        assert!(
+            conn.execute(
+                "INSERT INTO capture_documents (
+                     id, status, source_kind, captured_at, updated_at
+                 ) VALUES ('capture-bogus', 'almost_done', 'camera',
+                           datetime('now'), datetime('now'))",
+                [],
+            )
+            .is_err(),
+            "an unknown status must be refused by the CHECK",
+        );
+
+        // Page identity is (capture_id, page_index) so a re-scan replaces a
+        // page in place rather than appending a duplicate.
+        for index in [0, 1] {
+            conn.execute(
+                "INSERT INTO capture_pages (
+                     id, capture_id, page_index, file_path, content_hash, byte_size, mime
+                 ) VALUES (?1, 'capture-waiting', ?2, ?3, 'hash', 10, 'image/png')",
+                params![format!("page-{index}"), index, format!("page-{index}.png")],
+            )
+            .expect("insert capture page");
+        }
+        assert!(
+            conn.execute(
+                "INSERT INTO capture_pages (
+                     id, capture_id, page_index, file_path, content_hash, byte_size, mime
+                 ) VALUES ('page-dup', 'capture-waiting', 0, 'other.png', 'hash', 10, 'image/png')",
+                [],
+            )
+            .is_err(),
+            "a second row for the same (capture_id, page_index) must be refused",
+        );
+
+        // Ledger outcomes are the documented skip vocabulary.
+        for outcome in [
+            "ingested",
+            "skipped_duplicate",
+            "skipped_unsupported",
+            "skipped_oversize",
+        ] {
+            conn.execute(
+                "INSERT INTO capture_ingest_ledger (content_hash, outcome, seen_at)
+                 VALUES (?1, ?2, datetime('now'))",
+                params![format!("hash-{outcome}"), outcome],
+            )
+            .unwrap_or_else(|e| panic!("outcome {outcome} should be accepted: {e}"));
+        }
+        assert!(
+            conn.execute(
+                "INSERT INTO capture_ingest_ledger (content_hash, outcome, seen_at)
+                 VALUES ('hash-bogus', 'skipped_because', datetime('now'))",
+                [],
+            )
+            .is_err(),
+            "an unknown ingest outcome must be refused by the CHECK",
+        );
+
         assert_eq!(max_schema_version(&conn), CURRENT_SCHEMA_VERSION);
     }
 

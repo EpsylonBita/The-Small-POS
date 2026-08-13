@@ -83,6 +83,11 @@ const entryPoints = [
   path.join(testsRoot, 'renderer', 'staff-schedule-ui.test.ts'),
   path.join(testsRoot, 'renderer', 'module-context-sync.test.ts'),
   path.join(testsRoot, 'renderer', 'suppliers-page-ui.test.ts'),
+  // Invoice scan capture (spec task 12.6): the capture UI must speak only
+  // `suppliers.capture.*`, hardcode no user-facing string, and answer every
+  // runtime-built status/reason/device/history/source variant in all five
+  // locales. Registered here so the guard runs with the rest of the suite.
+  path.join(testsRoot, 'renderer', 'capture-ui-i18n.test.ts'),
   path.join(testsRoot, 'renderer', 'inventory-page-ui.test.ts'),
   path.join(testsRoot, 'renderer', 'coupon-loyalty-scan-ui.test.ts'),
   path.join(testsRoot, 'renderer', 'loyalty-redemption-checkout.test.ts'),

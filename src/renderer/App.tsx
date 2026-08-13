@@ -16,6 +16,7 @@ import OnboardingPage from "./pages/OnboardingPage";
 import { ErrorBoundary } from "./components/error/ErrorBoundary";
 import { ScreenCaptureControlRequestModal } from "./components/ScreenCaptureControlRequestModal";
 import { SyncNotificationManager } from "./components/SyncNotificationManager";
+import { CaptureNotificationManager } from "./components/CaptureNotificationManager";
 import { SyncStatusIndicator } from "./components/SyncStatusIndicator";
 import { CallerIdCustomerSearchModalHost } from "./components/callerid/CallerIdCustomerSearchModalHost";
 import ConnectionSettingsModal from "./components/modals/ConnectionSettingsModal";
@@ -1674,6 +1675,12 @@ function AppContent() {
                 // Handle hardware config updates here
               }}
             />
+
+            {/* Invoice capture notifications + watched-folder PDF rendering.
+                Mounted at the app root, not on the suppliers page, so a scan
+                that arrives while the user is taking an order still becomes a
+                readable capture and still announces itself. [R3.6, R11.9] */}
+            <CaptureNotificationManager />
 
             <PortaledToaster
               position="top-center"

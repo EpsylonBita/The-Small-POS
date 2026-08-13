@@ -422,6 +422,97 @@ pub async fn test_connectivity(admin_url: &str, api_key: &str) -> ConnectivityRe
 // Generic authenticated fetch
 // ---------------------------------------------------------------------------
 
+/// Normalise the admin base URL and refuse non-local plain HTTP.
+///
+/// Shared by [`fetch_from_admin_detailed`] and
+/// [`fetch_raw_from_admin_detailed`] so both transports enforce byte-identical
+/// transport-security rules.
+fn resolve_admin_base(admin_url: &str) -> Result<String, AdminFetchError> {
+    let base = normalize_admin_url(admin_url);
+    if base.starts_with("http://") && !is_local_plain_http_url(&base) {
+        return Err(AdminFetchError::statusless(
+            "Refusing non-local plain HTTP admin URL; use HTTPS or localhost for development"
+                .to_string(),
+        ));
+    }
+    Ok(base)
+}
+
+/// Resolve the `x-terminal-id` header value required by `verifyPosAuth`.
+///
+/// Only trusted local/keyring state or the onboarding connection string may
+/// supply this identity; never accept a renderer/body-provided fallback.
+///
+/// Shared by both transports so a raw upload proves the same terminal identity
+/// as every JSON call.
+fn resolve_terminal_id(api_key: &str) -> Result<String, AdminFetchError> {
+    let mut terminal_id = crate::storage::get_credential("terminal_id").unwrap_or_default();
+    if let Some(decoded_tid) = extract_terminal_id_from_connection_string(api_key) {
+        let existing = terminal_id.trim();
+        if existing.is_empty() || existing != decoded_tid {
+            if !existing.is_empty() && existing != decoded_tid {
+                warn!(
+                    stored_terminal_id = %redact(existing),
+                    decoded_terminal_id = %redact(&decoded_tid),
+                    "terminal_id mismatch detected, preferring decoded terminal id from connection string"
+                );
+            }
+            terminal_id = decoded_tid.clone();
+            let _ = crate::storage::set_credential("terminal_id", &decoded_tid);
+        }
+    }
+    if terminal_id.trim().is_empty() {
+        return Err(AdminFetchError::statusless(
+            "Terminal not configured: missing terminal_id",
+        ));
+    }
+    Ok(terminal_id)
+}
+
+/// Read an error response body, capped at 64 KB.
+///
+/// Preserves validation details for diagnostics and sync queue visibility,
+/// while a hostile or misconfigured server returning a huge error payload
+/// cannot OOM the terminal.
+async fn read_capped_error_body(resp: &mut reqwest::Response) -> String {
+    const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
+    let mut body_bytes: Vec<u8> = Vec::new();
+    loop {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => {
+                let remaining = MAX_ERROR_BODY_BYTES.saturating_sub(body_bytes.len());
+                if chunk.len() >= remaining {
+                    body_bytes.extend_from_slice(&chunk[..remaining]);
+                    break;
+                }
+                body_bytes.extend_from_slice(&chunk);
+            }
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
+    String::from_utf8_lossy(&body_bytes).into_owned()
+}
+
+/// Read a successful response body as JSON, or null for empty 204 responses.
+///
+/// Wave 6: propagate body-read errors rather than swallowing them
+/// with `unwrap_or_default()`. On HEAD a transport error mid-body
+/// returned an empty string which was then parsed as a JSON null,
+/// indistinguishable from a genuine 204. The caller had no way to
+/// tell the two apart.
+async fn read_success_json(resp: reqwest::Response) -> Result<Value, AdminFetchError> {
+    let body_text = resp
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read admin response body: {e}"))?;
+    if body_text.is_empty() {
+        return Ok(Value::Null);
+    }
+    serde_json::from_str(&body_text)
+        .map_err(|e| AdminFetchError::statusless(format!("Invalid JSON from admin dashboard: {e}")))
+}
+
 /// Perform an authenticated HTTP request to the admin dashboard.
 ///
 /// `path` should include the leading slash, e.g. `/api/pos/menu/sync`.
@@ -447,13 +538,7 @@ pub async fn fetch_from_admin_detailed(
     method: &str,
     body: Option<Value>,
 ) -> Result<Value, AdminFetchError> {
-    let base = normalize_admin_url(admin_url);
-    if base.starts_with("http://") && !is_local_plain_http_url(&base) {
-        return Err(AdminFetchError::statusless(
-            "Refusing non-local plain HTTP admin URL; use HTTPS or localhost for development"
-                .to_string(),
-        ));
-    }
+    let base = resolve_admin_base(admin_url)?;
     let resolved_api_key =
         extract_api_key_from_connection_string(api_key).unwrap_or_else(|| api_key.to_string());
     let full_url = format!("{base}{path}");
@@ -468,28 +553,7 @@ pub async fn fetch_from_admin_detailed(
     let client = shared_client()?;
 
     // Include terminal_id header — required by verifyPosAuth on the admin side.
-    // Only trusted local/keyring state or the onboarding connection string may
-    // supply this identity; never accept a renderer/body-provided fallback.
-    let mut terminal_id = crate::storage::get_credential("terminal_id").unwrap_or_default();
-    if let Some(decoded_tid) = extract_terminal_id_from_connection_string(api_key) {
-        let existing = terminal_id.trim();
-        if existing.is_empty() || existing != decoded_tid {
-            if !existing.is_empty() && existing != decoded_tid {
-                warn!(
-                    stored_terminal_id = %redact(existing),
-                    decoded_terminal_id = %redact(&decoded_tid),
-                    "terminal_id mismatch detected, preferring decoded terminal id from connection string"
-                );
-            }
-            terminal_id = decoded_tid.clone();
-            let _ = crate::storage::set_credential("terminal_id", &decoded_tid);
-        }
-    }
-    if terminal_id.trim().is_empty() {
-        return Err(AdminFetchError::statusless(
-            "Terminal not configured: missing terminal_id",
-        ));
-    }
+    let terminal_id = resolve_terminal_id(api_key)?;
 
     let mut req = pos_request(client, http_method, &full_url)
         .timeout(DEFAULT_TIMEOUT)
@@ -516,45 +580,132 @@ pub async fn fetch_from_admin_detailed(
     let status = resp.status();
 
     if !status.is_success() {
-        // Preserve validation details for diagnostics and sync queue visibility,
-        // but cap the response body at 64 KB so a hostile or misconfigured
-        // server returning a huge error payload cannot OOM the terminal.
-        const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
-        let mut body_bytes: Vec<u8> = Vec::new();
-        loop {
-            match resp.chunk().await {
-                Ok(Some(chunk)) => {
-                    let remaining = MAX_ERROR_BODY_BYTES.saturating_sub(body_bytes.len());
-                    if chunk.len() >= remaining {
-                        body_bytes.extend_from_slice(&chunk[..remaining]);
-                        break;
-                    }
-                    body_bytes.extend_from_slice(&chunk);
-                }
-                Ok(None) => break,
-                Err(_) => break,
-            }
-        }
-        let body_text = String::from_utf8_lossy(&body_bytes).into_owned();
+        let body_text = read_capped_error_body(&mut resp).await;
         return Err(admin_http_error_from_body(status, &body_text));
     }
 
-    // Return the JSON body, or null for empty 204 responses.
-    //
-    // Wave 6: propagate body-read errors rather than swallowing them
-    // with `unwrap_or_default()`. On HEAD a transport error mid-body
-    // returned an empty string which was then parsed as a JSON null,
-    // indistinguishable from a genuine 204. The caller had no way to
-    // tell the two apart.
-    let body_text = resp
-        .text()
-        .await
-        .map_err(|e| format!("Failed to read admin response body: {e}"))?;
-    if body_text.is_empty() {
-        return Ok(Value::Null);
+    read_success_json(resp).await
+}
+
+/// Header names [`fetch_raw_from_admin_detailed`] owns outright.
+///
+/// A caller-supplied header must never be able to restate terminal identity,
+/// the API key, or the framing of the request it is riding in — otherwise a
+/// bug (or a value that reached a caller from the renderer) could swap the
+/// authenticated terminal out from under the keyring credentials this module
+/// just resolved.
+#[allow(dead_code)] // Consumed by the capture worker's page uploader (next task in the plan).
+const RESERVED_RAW_HEADERS: &[&str] = &[
+    "x-pos-api-key",
+    "x-terminal-id",
+    "content-type",
+    "content-length",
+    "host",
+    POS_CLIENT_VERSION_HEADER,
+];
+
+/// Perform an authenticated request whose body is **raw bytes** with a
+/// caller-set `Content-Type`.
+///
+/// Spec: `.claude/specs/invoice-scan-capture/design.md` — decision **D11**.
+/// Requirement R17.4.
+///
+/// This is the sibling of [`fetch_from_admin_detailed`] for the one shape that
+/// function cannot carry: a page of a captured invoice. `fetch_from_admin_detailed`
+/// takes a JSON `serde_json::Value` body, and the vendored `reqwest` is compiled
+/// **without** the `multipart` feature (and stays that way — no new cargo
+/// features), so `POST /api/pos/suppliers/import/attachments` is reached with a
+/// single raw `application/octet-stream` page per request instead.
+///
+/// Everything that makes a request trustworthy is *shared code*, not a copy:
+/// the same keyring-resolved API key, the same
+/// [`resolve_terminal_id`] identity rule, the same [`resolve_admin_base`]
+/// URL normalisation and plain-HTTP refusal, the same shared client and
+/// version header, and the same [`admin_http_error_from_body`] /
+/// [`read_capped_error_body`] error mapping. The `/api/pos` path allowlist is
+/// enforced one level up in `lib.rs::admin_fetch_raw`, exactly as it is for
+/// `admin_fetch`. The *only* difference is the body.
+///
+/// `extra_headers` carries the per-page metadata the route reads outside the
+/// body (`x-capture-content-type`, `x-capture-content-hash`); reserved headers
+/// are refused rather than silently ignored.
+#[allow(dead_code)] // Consumed by the capture worker's page uploader (next task in the plan).
+pub async fn fetch_raw_from_admin_detailed(
+    admin_url: &str,
+    api_key: &str,
+    path: &str,
+    method: &str,
+    content_type: &str,
+    extra_headers: &[(&str, &str)],
+    body: Vec<u8>,
+) -> Result<Value, AdminFetchError> {
+    let base = resolve_admin_base(admin_url)?;
+    let resolved_api_key =
+        extract_api_key_from_connection_string(api_key).unwrap_or_else(|| api_key.to_string());
+    let full_url = format!("{base}{path}");
+
+    let http_method: Method = method
+        .to_uppercase()
+        .parse()
+        .map_err(|_| format!("Invalid HTTP method: {method}"))?;
+
+    if content_type.trim().is_empty() {
+        return Err(AdminFetchError::statusless(
+            "A raw admin request requires an explicit Content-Type",
+        ));
     }
-    serde_json::from_str(&body_text)
-        .map_err(|e| AdminFetchError::statusless(format!("Invalid JSON from admin dashboard: {e}")))
+
+    // Validate every caller header before building the request: an invalid
+    // name or a value carrying control characters must surface as a typed
+    // error here, not as an opaque builder failure at send time.
+    for (name, value) in extra_headers {
+        let lower = name.trim().to_ascii_lowercase();
+        if lower.is_empty() {
+            return Err(AdminFetchError::statusless("Empty header name"));
+        }
+        if RESERVED_RAW_HEADERS.contains(&lower.as_str()) {
+            return Err(AdminFetchError::statusless(format!(
+                "Header {name} is set by the transport and cannot be overridden"
+            )));
+        }
+        if reqwest::header::HeaderName::from_bytes(lower.as_bytes()).is_err() {
+            return Err(AdminFetchError::statusless(format!(
+                "Invalid header name: {name}"
+            )));
+        }
+        if reqwest::header::HeaderValue::from_str(value).is_err() {
+            return Err(AdminFetchError::statusless(format!(
+                "Invalid value for header {name}"
+            )));
+        }
+    }
+
+    let client = shared_client()?;
+    let terminal_id = resolve_terminal_id(api_key)?;
+
+    let mut req = pos_request(client, http_method, &full_url)
+        .timeout(DEFAULT_TIMEOUT)
+        .header("X-POS-API-Key", resolved_api_key)
+        .header("x-terminal-id", &terminal_id)
+        .header("Content-Type", content_type);
+
+    for (name, value) in extra_headers {
+        req = req.header(name.trim().to_ascii_lowercase(), *value);
+    }
+
+    let mut resp = req
+        .body(body)
+        .send()
+        .await
+        .map_err(|e| AdminFetchError::statusless(friendly_error(&base, &e)))?;
+    let status = resp.status();
+
+    if !status.is_success() {
+        let body_text = read_capped_error_body(&mut resp).await;
+        return Err(admin_http_error_from_body(status, &body_text));
+    }
+
+    read_success_json(resp).await
 }
 
 #[cfg(test)]

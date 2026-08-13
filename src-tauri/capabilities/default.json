@@ -16,10 +16,16 @@
     "core:tray:default",
     "core:event:deny-emit",
     "core:event:deny-emit-to",
+    "dialog:allow-open",
+    "dialog:deny-save",
+    "dialog:deny-message",
+    "dialog:deny-ask",
+    "dialog:deny-confirm",
     "updater:deny-check",
     "updater:deny-download",
     "updater:deny-install",
     "updater:deny-download-and-install"
   ],
+  "_NOTE_capture_dialog": "invoice-scan-capture (D-UI, R3.1) needs one thing from the user's file system: picking the folder their scanner drops files into. `dialog:allow-open` grants exactly that. The other four dialog capabilities are explicitly denied rather than merely omitted, because this file is a deliberate explicit union — a reader must be able to see that the save dialog and the message/ask/confirm dialogs are off, not infer it from absence.",
   "_NOTE_w1_c16": "Wave 1 C16 replaced the `core:default` wildcard with the explicit union of its sub-defaults. Effective permission surface is unchanged, but the grant is now auditable in this file. Follow-up hardening: review each sub-default and drop unused pieces (e.g. `core:menu:default` if no renderer code uses the menu API), plus add explicit denies for opt-in dangerous permissions like `allow-create-webview-window` once those permission names are verified against the current Tauri version."
 }

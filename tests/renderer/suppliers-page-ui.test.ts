@@ -81,10 +81,15 @@ test('SuppliersPage supplier detail overlays portal above the page container wit
 
   assert.match(source, /\{supplierSummary && renderModalPortal\(\s*<motion\.div/);
   assert.match(source, /\{selectedInvoice && selectedInvoiceStatus && renderModalPortal\(\s*<motion\.div/);
+  // Three centered overlays now share the portal chrome: supplier summary,
+  // invoice detail, and — since invoice-scan-capture task 12.3 — the scanned
+  // invoice queue. Same z-index, same backdrop, so none of them can be trapped
+  // behind the page container.
   assert.equal(
     [...source.matchAll(/className="fixed inset-0 z-\[1200\] flex items-center justify-center bg-black\/55 p-4 backdrop-blur-sm"/g)].length,
-    2,
+    3,
   );
+  assert.match(source, /\{captureEnabled && captureQueueOpen && renderModalPortal\(/);
   assert.doesNotMatch(source, /\{supplierSummary && \(\s*<motion\.div/);
   assert.doesNotMatch(source, /\{selectedInvoice && selectedInvoiceStatus && \(\s*<motion\.div/);
   assert.doesNotMatch(source, /className="fixed inset-0 z-50 flex items-center justify-center/);
@@ -284,13 +289,23 @@ test('SuppliersPage import overlay exposes labelled dialog semantics with a blur
 test('SuppliersPage import overlay Escape closes via the close-only path and triggers no data mutation', () => {
   const source = suppliersPageSource();
 
-  // Close-only callback: only flips importOpen, never a mutation/submit handler.
-  assert.match(source, /const closeImport = useCallback\(\(\) => \{\s*setImportOpen\(false\);\s*\}, \[\]\);/);
+  // Close-only callback: flips importOpen first and never reaches a
+  // mutation/submit handler. Since invoice-scan-capture task 12.4 it also
+  // persists the review draft on the way out (leaving review must lose no
+  // edits), so the contract is asserted against the callback body rather than
+  // against an exact one-statement shape.
+  assert.match(source, /const closeImport = useCallback\(\(\) => \{\s*setImportOpen\(false\);/);
+  const closeImportBody = source.match(
+    /const closeImport = useCallback\(\(\) => \{([\s\S]*?)\}, \[[\s\S]*?\]\);/,
+  );
+  assert.ok(closeImportBody, 'closeImport must remain a useCallback with a dependency array');
   assert.doesNotMatch(
-    source,
-    /const closeImport = useCallback\(\(\) => \{[\s\S]*?(previewImport|commitImport|handleFileImport|scanImageBarcode|appendBarcodeRow|removeDraftRow)[\s\S]*?\}, \[\]\);/,
+    closeImportBody[1],
+    /(previewImport|commitImport|handleFileImport|scanImageBarcode|appendBarcodeRow|removeDraftRow)/,
     'the import close path must not trigger preview/save/file-import/scan/barcode-add/row-delete',
   );
+  // Leaving review persists the draft instead of discarding it. [R8.6]
+  assert.match(closeImportBody[1], /saveCaptureDraft\(/);
 
   // Escape effect: gated on importOpen, topmost-[role="dialog"] gated, routed to close-only.
   assert.match(source, /if \(!importOpen\) \{\s*return;\s*\}/);
@@ -400,7 +415,7 @@ test('SuppliersPage invoice details modal closes on Escape via the same topmost-
   // The import drawer Escape behavior is preserved (its own ref/gate untouched), so the
   // three overlays each handle Escape independently via the shared topmost gate.
   assert.match(source, /dialogs\.length > 0 && dialogs\[dialogs\.length - 1\] !== importDialogRef\.current/);
-  assert.match(source, /const closeImport = useCallback\(\(\) => \{\s*setImportOpen\(false\);\s*\}, \[\]\);/);
+  assert.match(source, /const closeImport = useCallback\(\(\) => \{\s*setImportOpen\(false\);/);
 });
 
 // Round 180 (touch-first, live QA): the SuppliersPage refresh button exposed a native Greek tooltip

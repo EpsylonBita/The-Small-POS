@@ -129,6 +129,21 @@ const EVENT_MAP: Record<string, string> = {
   'ecr_event_transaction_completed': 'ecr:event:transaction-completed',
   'ecr_event_display_message': 'ecr:event:display-message',
   'ecr_event_error': 'ecr:event:error',
+
+  // --- Invoice capture events ---
+  // Emitted by `capture::watcher` and `capture::worker` (spec
+  // `.claude/specs/invoice-scan-capture/`). Identity-mapped, like
+  // `print-worker-alert` above: the backend already emits the hyphenated
+  // channel-style name, so there is no snake_case form to translate.
+  //
+  // Without an entry here `onEvent('capture:...')` silently never fires —
+  // `attachChannelListener` bails when `CHANNEL_TO_TAURI_EVENT` has no
+  // reverse mapping — which for this feature would mean a scanned invoice
+  // arriving with no notification and a queue that never refreshes.
+  'capture:document-arrived': 'capture:document-arrived',
+  'capture:status-changed': 'capture:status-changed',
+  'capture:source-status': 'capture:source-status',
+  'capture:needs-render': 'capture:needs-render',
 };
 
 const CHANNEL_TO_TAURI_EVENT = Object.entries(EVENT_MAP).reduce<Record<string, string>>(
