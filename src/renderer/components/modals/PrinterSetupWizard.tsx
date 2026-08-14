@@ -1,10 +1,19 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import type { TFunction } from 'i18next'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'react-hot-toast'
 import { AlertTriangle, CheckCircle2, ChevronRight, Info, Printer, SlidersHorizontal, Wand2 } from 'lucide-react'
-import { liquidGlassModalButton } from '../../styles/designSystem'
+import { liquidGlassModalButton, liquidGlassModalTone } from '../../styles/designSystem'
 import { getBridge } from '../../../lib'
+import { usePrintQueue } from '../../hooks/usePrintQueue'
+import {
+  canSaveVerifiedPrinter,
+  canStartWizardSample,
+  createVerificationState,
+  parseWizardEnqueueResponse,
+  verificationReducer,
+  type VerificationSample,
+} from './printer-setup-verification'
 
 type PrinterType = 'network' | 'bluetooth' | 'usb' | 'wifi' | 'system'
 type PaperSize = '58mm' | '80mm' | '112mm'
@@ -94,49 +103,32 @@ export interface PrinterCandidate {
   probeHints?: ProbeHints
 }
 
-interface DraftVerificationResult {
-  success?: boolean
-  error?: string
-  sampleKind?: DraftSampleKind | string
-  latencyMs?: number
-  bytesRequested?: number
-  bytesWritten?: number
-  resolvedTransport?: string
-  resolvedAddress?: string
-  transportReachable?: boolean
-  verificationStatus?: VerificationStatus | string
-  emulationMode?: EmulationMode | string
-  renderMode?: ClassicRenderMode | string
-  characterSet?: string
-  escposCodePage?: number | null
-  candidateCapabilities?: PrinterCapabilities
-  candidateConnectionDetails?: ConnectionDetails
-  knownPrinters?: string[]
-}
-
-interface VerificationStageState {
-  attempted: boolean
-  result: DraftVerificationResult | null
-  confirmed: boolean | null
-  attemptCount: number
-}
-
 interface Props {
   existingPrinters: ExistingPrinterProfile[]
   onCancel: () => void
   onSaved: () => Promise<void> | void
   onOpenExpert: () => void
+  logoSettingsLoaded: boolean
+  logoConfigured: boolean
+  onOpenLogoSettings: () => void
+  onBusyChange?: (busy: boolean) => void
 }
 
 const QUICK_READABILITY_KEY = 'printer.quick_readability_default'
 const QUICK_ONBOARDING_KEY = 'printer.onboarding_completed'
 const steps = ['detect', 'verify', 'style', 'save'] as const
 
-const emptyVerificationState = (): Record<DraftSampleKind, VerificationStageState> => ({
-  transport_text: { attempted: false, result: null, confirmed: null, attemptCount: 0 },
-  encoding: { attempted: false, result: null, confirmed: null, attemptCount: 0 },
-  branding: { attempted: false, result: null, confirmed: null, attemptCount: 0 },
-})
+const STAGE_BY_SAMPLE_KIND: Record<DraftSampleKind, VerificationSample> = {
+  transport_text: 'transport',
+  encoding: 'encoding',
+  branding: 'branding',
+}
+
+const createWizardSessionId = (): string => {
+  const generated = globalThis.crypto?.randomUUID?.()
+  if (generated) return `printer-wizard-${generated}`
+  return `printer-wizard-${Date.now().toString(36)}`
+}
 
 const readabilityPreset: Record<ReadabilitySize, { fontType: FontType; layoutDensity: LayoutDensity; headerEmphasis: HeaderEmphasis }> = {
   small: { fontType: 'b', layoutDensity: 'compact', headerEmphasis: 'normal' },
@@ -239,20 +231,61 @@ const normalizeDiscoveredCandidate = (raw: unknown): Omit<PrinterCandidate, 'rec
   }
 }
 
-const connectionIdentityFromCandidate = (candidate: PrinterCandidate): string => {
-  return `${candidate.type}:${candidate.address.toLowerCase()}`
+const positiveIntegerOr = (value: unknown, fallback: number): number => {
+  const parsed = Number(value)
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback
 }
 
-const connectionIdentityFromProfile = (profile: ExistingPrinterProfile): string => {
+const connectionIdentityFromDetails = (
+  details: {
+    type: string
+    ip?: unknown
+    hostname?: unknown
+    port?: unknown
+    address?: unknown
+    channel?: unknown
+    deviceName?: unknown
+    vendorId?: unknown
+    productId?: unknown
+    path?: unknown
+    systemName?: unknown
+    serialPort?: unknown
+  },
+  fallbackType?: PrinterType,
+  fallbackName = '',
+): string | null => {
+  const rawType = typeof details.type === 'string' ? details.type.trim().toLowerCase() : ''
+  const type = normalizePrinterType(rawType || fallbackType)
+  const lower = (value: unknown): string => typeof value === 'string'
+    ? value.trim().toLowerCase()
+    : ''
+
+  if (type === 'network' || type === 'wifi') {
+    const host = lower(details.ip) || lower(details.hostname) || lower(details.address)
+    return host ? `network:${host}:${positiveIntegerOr(details.port, 9100)}` : null
+  }
+  if (type === 'bluetooth') {
+    const address = lower(details.address) || lower(details.deviceName)
+    return address ? `bluetooth:${address}:${positiveIntegerOr(details.channel, 1)}` : null
+  }
+  if (type === 'usb') {
+    const path = lower(details.path) || lower(details.systemName) || lower(details.address)
+    if (path) return `usb:${path}`
+    const vendorId = positiveIntegerOr(details.vendorId, 0)
+    const productId = positiveIntegerOr(details.productId, 0)
+    return vendorId && productId ? `usb:${vendorId}:${productId}` : null
+  }
+  if (rawType === 'serial') {
+    const serialPort = lower(details.serialPort) || lower(details.path) || lower(details.address)
+    return serialPort ? `serial:${serialPort}` : null
+  }
+  const systemName = lower(details.systemName) || lower(details.path) || lower(details.address) || lower(fallbackName)
+  return systemName ? `system:${systemName}` : null
+}
+
+const connectionIdentityFromProfile = (profile: ExistingPrinterProfile): string | null => {
   const details: ConnectionDetails = profile.connectionDetails || { type: profile.type }
-  const rawAddress =
-    details.systemName ||
-    details.ip ||
-    details.address ||
-    details.path ||
-    profile.name ||
-    ''
-  return `${normalizePrinterType(profile.type)}:${rawAddress.toLowerCase()}`
+  return connectionIdentityFromDetails(details, profile.type, profile.name)
 }
 
 const transportLabel = (value: unknown, t: TFunction): string => {
@@ -273,11 +306,9 @@ const verificationLabel = (value: unknown, t: TFunction): string => {
 
 const verificationTone = (value: unknown): string => {
   const status = normalizeVerificationStatus(value)
-  if (status === 'verified') return 'bg-emerald-500/15 border-emerald-400/30 text-emerald-200'
-  if (status === 'degraded') return 'bg-amber-500/15 border-amber-400/30 text-amber-200'
-  // candidate = pending/needs-verification (informational) -> amber, not blue
-  if (status === 'candidate') return 'bg-amber-500/15 border-amber-400/30 text-amber-100'
-  return 'bg-white/5 border-white/10 liquid-glass-modal-text-muted'
+  if (status === 'verified') return liquidGlassModalTone('success')
+  if (status === 'degraded' || status === 'candidate') return liquidGlassModalTone('warning')
+  return liquidGlassModalTone('neutral')
 }
 
 const mergeCapabilities = (...values: Array<PrinterCapabilities | undefined | null>): PrinterCapabilities => {
@@ -328,13 +359,25 @@ const sampleKinds: Array<{
   },
 ]
 
-const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSaved, onOpenExpert }) => {
+const PrinterSetupWizard: React.FC<Props> = ({
+  existingPrinters,
+  onCancel,
+  onSaved,
+  onOpenExpert,
+  logoSettingsLoaded,
+  logoConfigured,
+  onOpenLogoSettings,
+  onBusyChange,
+}) => {
   const { t } = useTranslation()
   const bridge = getBridge()
   const [currentStep, setCurrentStep] = useState<(typeof steps)[number]>('detect')
   const [discovering, setDiscovering] = useState(false)
   const [saving, setSaving] = useState(false)
-  const [verifyingKind, setVerifyingKind] = useState<DraftSampleKind | null>(null)
+  const [submittingKind, setSubmittingKind] = useState<DraftSampleKind | null>(null)
+  const [sampleErrorCode, setSampleErrorCode] = useState<string | null>(null)
+  const [sampleActionBusy, setSampleActionBusy] = useState(false)
+  const [queueObservationEpoch, setQueueObservationEpoch] = useState(0)
   const [candidates, setCandidates] = useState<PrinterCandidate[]>([])
   const [selectedCandidateId, setSelectedCandidateId] = useState<string>('')
   const [paperSize, setPaperSize] = useState<PaperSize>('80mm')
@@ -347,12 +390,45 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
   const [assignKitchen, setAssignKitchen] = useState(false)
   const [assignBar, setAssignBar] = useState(false)
   const [assignLabel, setAssignLabel] = useState(false)
-  const [verification, setVerification] = useState<Record<DraftSampleKind, VerificationStageState>>(emptyVerificationState)
+  const [verification, dispatchVerification] = useReducer(
+    verificationReducer,
+    undefined,
+    createVerificationState,
+  )
+  const wizardSessionIdRef = useRef(createWizardSessionId())
+  const requestGenerationRef = useRef(0)
+  const requestTokenRef = useRef<symbol | null>(null)
+  const saveTokenRef = useRef<symbol | null>(null)
+  const mountedRef = useRef(true)
+  const readabilityButtonRefs = useRef<Record<ReadabilitySize, HTMLButtonElement | null>>({
+    small: null,
+    normal: null,
+    large: null,
+  })
+  const trackedJobId = useMemo(() => {
+    if (verification.activeJobId) return verification.activeJobId
+    for (const sample of ['branding', 'encoding', 'transport'] as const) {
+      const state = verification[sample]
+      if (state.jobId && (state.phase === 'failed' || state.phase === 'cancelled')) {
+        return state.jobId
+      }
+    }
+    return null
+  }, [verification])
+  const trackedQueue = usePrintQueue({ jobIds: trackedJobId ? [trackedJobId] : [] })
+  const effectiveLogoConfigured = logoConfigured
+    || verification.transport.logoConfigured
+    || verification.encoding.logoConfigured
+    || verification.branding.logoConfigured
 
   const selectedCandidate = useMemo(
     () => candidates.find(candidate => candidate.id === selectedCandidateId) || null,
     [candidates, selectedCandidateId],
   )
+  const sampleInteractionLocked = Boolean(
+    saving || submittingKind || verification.activeJobId || sampleActionBusy,
+  )
+  const candidateSelectionLocked = discovering || sampleInteractionLocked
 
   const parseDiscoverResult = (result: unknown): unknown[] => {
     if (Array.isArray(result)) return result
@@ -365,9 +441,24 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
   }
 
   const resetVerification = useCallback(() => {
-    setVerification(emptyVerificationState())
-    setVerifyingKind(null)
+    requestGenerationRef.current += 1
+    requestTokenRef.current = null
+    dispatchVerification({ type: 'reset' })
+    setSubmittingKind(null)
+    setSampleErrorCode(null)
   }, [])
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      requestGenerationRef.current += 1
+      requestTokenRef.current = null
+      saveTokenRef.current = null
+    }
+  }, [])
+
+  useEffect(() => () => onBusyChange?.(false), [onBusyChange])
 
   const discoverCandidates = useCallback(async () => {
     setDiscovering(true)
@@ -478,6 +569,35 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedCandidateId, resetVerification])
 
+  const trackedJob = trackedJobId
+    ? trackedQueue.jobs.find((job) => job.id === trackedJobId) ?? null
+    : null
+  const trackedQueueObservationMissing = Boolean(
+    trackedJobId && !trackedQueue.loading && !trackedJob,
+  )
+  const trackedQueueObservationStale = Boolean(
+    trackedJobId
+      && !trackedQueueObservationMissing
+      && (trackedQueue.stale || trackedQueue.error),
+  )
+
+  useEffect(() => {
+    if (!trackedJob) return
+    dispatchVerification({
+      type: 'job_observed',
+      jobId: trackedJob.id,
+      status: trackedJob.status,
+      transportState: trackedJob.transportState,
+    })
+  }, [
+    queueObservationEpoch,
+    trackedJob?.id,
+    trackedJob?.lastSeenAt,
+    trackedJob?.status,
+    trackedJob?.transportState,
+    trackedJob?.updatedAt,
+  ])
+
   const buildConnectionDetails = useCallback((candidate: PrinterCandidate): ConnectionDetails => {
     const base = candidate.recommended.connectionDetails || { type: candidate.type }
     const details: ConnectionDetails = {
@@ -511,26 +631,26 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
   }, [])
 
   const derivedCapabilities = useMemo(() => {
-    const transport = verification.transport_text
-    if (transport.confirmed !== true || !transport.result?.candidateCapabilities) {
+    const transport = verification.transport
+    if (transport.phase !== 'confirmed' || !transport.candidateCapabilities) {
       return defaultCapabilities()
     }
 
     let capabilities = mergeCapabilities(
-      transport.result.candidateCapabilities,
+      transport.candidateCapabilities,
       {
         status: 'verified',
       },
     )
 
-    if (verification.encoding.confirmed === true) {
-      capabilities = mergeCapabilities(capabilities, verification.encoding.result?.candidateCapabilities, {
+    if (verification.encoding.phase === 'confirmed') {
+      capabilities = mergeCapabilities(capabilities, verification.encoding.candidateCapabilities, {
         status: 'verified',
       })
     }
 
-    if (verification.branding.confirmed === true) {
-      capabilities = mergeCapabilities(capabilities, verification.branding.result?.candidateCapabilities, {
+    if (verification.branding.phase === 'confirmed' && verification.branding.logoIncluded) {
+      capabilities = mergeCapabilities(capabilities, verification.branding.candidateCapabilities, {
         status: 'verified',
         supportsLogo: true,
       })
@@ -542,13 +662,13 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
   const buildProfilePayload = useCallback((candidate: PrinterCandidate, role: PrinterRole, setAsDefault: boolean) => {
     const readabilityConfig = readabilityPreset[readability]
     const connectionDetails = buildConnectionDetails(candidate)
-    const capabilities = verification.transport_text.confirmed === true
+    const capabilities = verification.transport.phase === 'confirmed'
       ? mergeCapabilities(derivedCapabilities, {
           status: 'verified',
           supportsLogo:
-            verification.branding.confirmed === true
+            verification.branding.phase === 'confirmed' && verification.branding.logoIncluded
               ? true
-              : Boolean(derivedCapabilities.supportsLogo),
+              : false,
         })
       : defaultCapabilities()
 
@@ -559,15 +679,15 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
         ...connectionDetails,
         capabilities,
       },
+      confirmedCandidateConnectionDetails: verification.confirmedConnectionDetails,
       paperSize,
       characterSet:
-        verification.encoding.confirmed === true && verification.encoding.result?.characterSet
-          ? verification.encoding.result.characterSet
-          : candidate.recommended.characterSet,
+        candidate.recommended.characterSet,
       greekRenderMode: 'text',
       escposCodePage:
-        verification.encoding.confirmed === true && typeof verification.encoding.result?.escposCodePage === 'number'
-          ? verification.encoding.result.escposCodePage
+        verification.encoding.phase === 'confirmed'
+          && typeof verification.encoding.candidateCapabilities?.escposCodePage === 'number'
+          ? verification.encoding.candidateCapabilities.escposCodePage
           : candidate.recommended.escposCodePage ?? null,
       receiptTemplate: template,
       fontType: readabilityConfig.fontType,
@@ -583,122 +703,195 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
     return buildProfilePayload(candidate, 'receipt', false)
   }, [buildProfilePayload])
 
-  const findExistingProfile = useCallback((role: PrinterRole, candidate: PrinterCandidate): ExistingPrinterProfile | null => {
-    const targetIdentity = connectionIdentityFromCandidate(candidate)
+  const findExistingProfile = useCallback((role: PrinterRole): ExistingPrinterProfile | null => {
+    if (!verification.confirmedConnectionDetails) return null
+    const targetIdentity = connectionIdentityFromDetails(verification.confirmedConnectionDetails)
+    if (!targetIdentity) return null
     return existingPrinters.find(profile => {
       if (profile.role !== role) return false
       return connectionIdentityFromProfile(profile) === targetIdentity
     }) || null
-  }, [existingPrinters])
-
-  const invokeDraftVerification = useCallback(async (
-    draftPayload: Record<string, unknown>,
-    sampleKind: DraftSampleKind,
-    probeAttempt: number,
-  ): Promise<DraftVerificationResult> => {
-    const payload = { profileDraft: draftPayload, sampleKind, probeAttempt }
-    const commandNames = ['printer:test-draft', 'printer_test_draft']
-    let lastError: unknown = null
-
-    for (const commandName of commandNames) {
-      try {
-        const result = await bridge.invoke(commandName, payload)
-        return (result || {}) as DraftVerificationResult
-      } catch (error) {
-        lastError = error
-      }
-    }
-
-    throw lastError
-  }, [bridge])
+  }, [existingPrinters, verification.confirmedConnectionDetails])
 
   const handleRunVerification = useCallback(async (sampleKind: DraftSampleKind) => {
-    if (!selectedCandidate) return
-    setVerifyingKind(sampleKind)
+    if (
+      saving
+      || discovering
+      || sampleActionBusy
+      || !selectedCandidate
+      || requestTokenRef.current
+      || saveTokenRef.current
+    ) return
+    const sample = STAGE_BY_SAMPLE_KIND[sampleKind]
+    if (!canStartWizardSample(
+      verification,
+      sample,
+      logoSettingsLoaded && effectiveLogoConfigured,
+    )) return
+    const token = Symbol(sampleKind)
+    const generation = requestGenerationRef.current
+    const candidateId = selectedCandidate.id
+    requestTokenRef.current = token
+    setSubmittingKind(sampleKind)
+    setSampleErrorCode(null)
     try {
       const draftPayload = buildDraftPayload(selectedCandidate)
-      const probeAttempt = verification[sampleKind].attemptCount
-      const result = await invokeDraftVerification(
-        draftPayload as Record<string, unknown>,
+      const result = await bridge.printer.testDraft({
+        profileDraft: draftPayload,
         sampleKind,
-        probeAttempt,
-      )
-      setVerification(prev => ({
-        ...prev,
-        [sampleKind]: {
-          attempted: true,
-          result,
-          confirmed: result?.success ? null : false,
-          attemptCount: prev[sampleKind].attemptCount + 1,
-        },
-      }))
-
-      if (result?.success) {
-        const dispatchText = sampleKind === 'branding'
-          ? t('settings.printer.quickWizardBrandingDispatched', 'Branding sample dispatched. Confirm the actual paper result before saving.')
-          : t('settings.printer.quickWizardSampleDispatched', 'Sample dispatched. Confirm the actual paper result before saving.')
-        toast.success(dispatchText)
-      } else {
-        toast.error(result?.error || t('settings.printer.testPrintFailed', 'Test print failed'))
+        probeAttempt: verification[sample].attemptCount,
+        wizardSessionId: wizardSessionIdRef.current,
+        ...(verification.confirmedConnectionDetails
+          ? { confirmedCandidateConnectionDetails: verification.confirmedConnectionDetails }
+          : {}),
+      })
+      if (
+        !mountedRef.current
+        || requestGenerationRef.current !== generation
+        || selectedCandidateId !== candidateId
+      ) return
+      const parsed = parseWizardEnqueueResponse(sample, result)
+      if (!parsed.ok) {
+        setSampleErrorCode(parsed.errorCode)
+        return
       }
-    } catch (error) {
-      console.error('[PrinterSetupWizard] draft verification failed', error)
-      const message = error instanceof Error ? error.message : t('settings.printer.testPrintFailed', 'Test print failed')
-      setVerification(prev => ({
-        ...prev,
-        [sampleKind]: {
-          attempted: true,
-          result: { success: false, error: message, sampleKind },
-          confirmed: false,
-          attemptCount: prev[sampleKind].attemptCount + 1,
-        },
-      }))
-      toast.error(message)
+      dispatchVerification({
+        type: 'sample_queued',
+        sample,
+        jobId: parsed.value.jobId,
+        duplicate: parsed.value.duplicate,
+        candidateConnectionDetails: parsed.value.candidateConnectionDetails,
+        candidateCapabilities: parsed.value.candidateCapabilities,
+        logoConfigured: parsed.value.logoConfigured,
+        logoIncluded: parsed.value.logoIncluded,
+      })
+    } catch {
+      if (mountedRef.current && requestGenerationRef.current === generation) {
+        setSampleErrorCode('enqueue_rejected')
+      }
     } finally {
-      setVerifyingKind(null)
+      if (requestTokenRef.current === token) {
+        requestTokenRef.current = null
+        if (mountedRef.current) setSubmittingKind(null)
+      }
     }
-  }, [buildDraftPayload, invokeDraftVerification, selectedCandidate, t, verification])
+  }, [
+    bridge.printer,
+    buildDraftPayload,
+    discovering,
+    effectiveLogoConfigured,
+    saving,
+    logoSettingsLoaded,
+    sampleActionBusy,
+    selectedCandidate,
+    selectedCandidateId,
+    verification,
+  ])
 
   const handleConfirmStage = useCallback((sampleKind: DraftSampleKind, worked: boolean) => {
-    setVerification(prev => {
-      const next = {
-        ...prev,
-        [sampleKind]: {
-          ...prev[sampleKind],
-          confirmed: worked,
-        },
-      }
-
-      if (sampleKind === 'transport_text' && !worked) {
-        next.encoding = { attempted: false, result: null, confirmed: null, attemptCount: 0 }
-        next.branding = { attempted: false, result: null, confirmed: null, attemptCount: 0 }
-      }
-
-      if (sampleKind === 'encoding' && !worked) {
-        next.branding = { attempted: false, result: null, confirmed: null, attemptCount: 0 }
-      }
-
-      return next
+    if (saveTokenRef.current) return
+    dispatchVerification({
+      type: 'paper_confirmed',
+      sample: STAGE_BY_SAMPLE_KIND[sampleKind],
+      worked,
     })
   }, [])
 
-  const handleSave = useCallback(async () => {
-    if (!selectedCandidate) return
-    setSaving(true)
+  const handleTrackedCancel = useCallback(async (sampleKind: DraftSampleKind) => {
+    const sample = STAGE_BY_SAMPLE_KIND[sampleKind]
+    const jobId = verification[sample].jobId
+    if (
+      !jobId
+      || requestTokenRef.current
+      || saveTokenRef.current
+      || sampleActionBusy
+      || !trackedJob?.cancellable
+    ) return
+    const token = Symbol('cancel-sample')
+    requestTokenRef.current = token
+    setSampleActionBusy(true)
+    setSampleErrorCode(null)
     try {
-      const defaultAllowed = verification.transport_text.confirmed === true
-      const receiptPayload = buildProfilePayload(selectedCandidate, 'receipt', defaultAllowed ? setDefaultReceipt : false)
-      const existingReceipt = findExistingProfile('receipt', selectedCandidate)
+      const result = await trackedQueue.cancelJob(jobId)
+      if (mountedRef.current && (!result.success || result.affected < 1)) {
+        setSampleErrorCode('cancel_failed')
+      }
+    } catch {
+      if (mountedRef.current) setSampleErrorCode('cancel_failed')
+    } finally {
+      if (requestTokenRef.current === token) {
+        requestTokenRef.current = null
+        if (mountedRef.current) setSampleActionBusy(false)
+      }
+    }
+  }, [sampleActionBusy, trackedJob?.cancellable, trackedQueue, verification])
+
+  const handleTrackedRetry = useCallback(async (sampleKind: DraftSampleKind) => {
+    const sample = STAGE_BY_SAMPLE_KIND[sampleKind]
+    const jobId = verification[sample].jobId
+    if (
+      !jobId
+      || requestTokenRef.current
+      || saveTokenRef.current
+      || sampleActionBusy
+      || !trackedJob?.retryable
+    ) return
+    const token = Symbol('retry-sample')
+    requestTokenRef.current = token
+    setSampleActionBusy(true)
+    setSampleErrorCode(null)
+    try {
+      const result = await trackedQueue.retryJob(jobId)
+      if (mountedRef.current && (!result.success || result.affected < 1)) {
+        setSampleErrorCode('retry_failed')
+      } else if (mountedRef.current) {
+        dispatchVerification({
+          type: 'job_observed',
+          jobId,
+          status: 'pending',
+          transportState: 'created',
+        })
+        setQueueObservationEpoch(epoch => epoch + 1)
+      }
+    } catch {
+      if (mountedRef.current) setSampleErrorCode('retry_failed')
+    } finally {
+      if (requestTokenRef.current === token) {
+        requestTokenRef.current = null
+        if (mountedRef.current) setSampleActionBusy(false)
+      }
+    }
+  }, [sampleActionBusy, trackedJob?.retryable, trackedQueue, verification])
+
+  const handleSave = useCallback(async () => {
+    const verifiedForSave = logoSettingsLoaded
+      && !discovering
+      && !submittingKind
+      && !sampleActionBusy
+      && canSaveVerifiedPrinter(verification, effectiveLogoConfigured)
+    if (!selectedCandidate || !verifiedForSave || requestTokenRef.current || saveTokenRef.current) return
+    const saveToken = Symbol('save')
+    saveTokenRef.current = saveToken
+    onBusyChange?.(true)
+    setSaving(true)
+    let receiptSaved = false
+    try {
+      const receiptPayload = buildProfilePayload(selectedCandidate, 'receipt', setDefaultReceipt)
+      const existingReceipt = findExistingProfile('receipt')
       let receiptResult: any
       if (existingReceipt) {
         receiptResult = await bridge.printer.update(existingReceipt.id, receiptPayload)
       } else {
         receiptResult = await bridge.printer.add(receiptPayload)
       }
-      if (receiptResult?.success === false) {
-        toast.error(receiptResult?.error || t('errors.operationFailed', 'Operation failed'))
+      if (receiptResult?.success !== true) {
+        toast.error(t(
+          'settings.printer.quickWizardSaveFailedSafe',
+          'The printer could not be saved. Refresh the printer list and try again.',
+        ))
         return
       }
+      receiptSaved = true
 
       const optionalRoles: PrinterRole[] = []
       if (assignKitchen) optionalRoles.push('kitchen')
@@ -707,11 +900,20 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
 
       for (const role of optionalRoles) {
         const payload = buildProfilePayload(selectedCandidate, role, false)
-        const existing = findExistingProfile(role, selectedCandidate)
+        const existing = findExistingProfile(role)
+        let roleResult: any
         if (existing) {
-          await bridge.printer.update(existing.id, payload)
+          roleResult = await bridge.printer.update(existing.id, payload)
         } else {
-          await bridge.printer.add(payload)
+          roleResult = await bridge.printer.add(payload)
+        }
+        if (roleResult?.success !== true) {
+          toast.error(t(
+            'settings.printer.quickWizardPartialSaveFailedSafe',
+            'Some printer assignments could not be saved. The printer list was refreshed so you can retry safely.',
+          ))
+          await onSaved()
+          return
         }
       }
 
@@ -729,22 +931,28 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
         console.warn('[PrinterSetupWizard] failed to persist onboarding flags in settings store', settingsError)
       }
 
-      if (!defaultAllowed) {
-        toast(t(
-          'settings.printer.quickWizardSavedUnverified',
-          'Saved as discovered only. Run verification before using it as a default printer.',
-        ), {
-          icon: <AlertTriangle className="w-4 h-4 text-amber-300" />,
-        })
-      } else {
-        toast.success(t('settings.printer.saved', 'Saved'))
-      }
+      toast.success(t('settings.printer.saved', 'Saved'))
       await onSaved()
     } catch (error) {
       console.error('[PrinterSetupWizard] save failed', error)
-      toast.error(t('errors.operationFailed', 'Operation failed'))
+      if (receiptSaved) {
+        toast.error(t(
+          'settings.printer.quickWizardPartialSaveFailedSafe',
+          'Some printer assignments could not be saved. The printer list was refreshed so you can retry safely.',
+        ))
+        await onSaved()
+      } else {
+        toast.error(t(
+          'settings.printer.quickWizardSaveFailedSafe',
+          'The printer could not be saved. Refresh the printer list and try again.',
+        ))
+      }
     } finally {
-      setSaving(false)
+      if (saveTokenRef.current === saveToken) {
+        saveTokenRef.current = null
+        onBusyChange?.(false)
+      }
+      if (mountedRef.current) setSaving(false)
     }
   }, [
     assignBar,
@@ -755,31 +963,64 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
     buildProfilePayload,
     findExistingProfile,
     onSaved,
+    onBusyChange,
     readability,
     selectedCandidate,
     setDefaultReceipt,
     t,
-    verification.transport_text.confirmed,
+    logoSettingsLoaded,
+    discovering,
+    submittingKind,
+    sampleActionBusy,
+    effectiveLogoConfigured,
+    verification,
   ])
 
+  const saveAllowed = logoSettingsLoaded
+    && !discovering
+    && !submittingKind
+    && !sampleActionBusy
+    && !saving
+    && !requestTokenRef.current
+    && canSaveVerifiedPrinter(verification, effectiveLogoConfigured)
   const canContinue = Boolean(selectedCandidate)
-    && (currentStep !== 'verify' || verification.transport_text.confirmed === true)
+    && (currentStep !== 'verify' || saveAllowed)
   const stepIndex = steps.indexOf(currentStep)
-  const verificationStatus = verification.transport_text.confirmed === true ? 'verified' : 'unverified'
+  const verificationStatus = saveAllowed ? 'verified' : 'unverified'
   const resolvedTransport = derivedCapabilities.resolvedTransport
   const resolvedAddress = derivedCapabilities.resolvedAddress
-  const defaultReceiptAllowed = verification.transport_text.confirmed === true
-  const transportFailureMessage = verification.transport_text.attempted && verification.transport_text.result?.success === false
-    ? verification.transport_text.result?.error
-    : ''
+  const defaultReceiptAllowed = saveAllowed
+
+  const handleReadabilityKeyDown = (
+    event: React.KeyboardEvent<HTMLButtonElement>,
+    current: ReadabilitySize,
+  ) => {
+    const sizes: ReadabilitySize[] = ['small', 'normal', 'large']
+    const currentIndex = sizes.indexOf(current)
+    let nextIndex: number | null = null
+    if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+      nextIndex = (currentIndex + 1) % sizes.length
+    } else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+      nextIndex = (currentIndex - 1 + sizes.length) % sizes.length
+    } else if (event.key === 'Home') {
+      nextIndex = 0
+    } else if (event.key === 'End') {
+      nextIndex = sizes.length - 1
+    }
+    if (nextIndex === null) return
+    event.preventDefault()
+    const next = sizes[nextIndex]
+    setReadability(next)
+    readabilityButtonRefs.current[next]?.focus()
+  }
 
   const gotoNext = () => {
-    if (stepIndex >= steps.length - 1) return
+    if (saveTokenRef.current || stepIndex >= steps.length - 1) return
     setCurrentStep(steps[stepIndex + 1])
   }
 
   const gotoPrevious = () => {
-    if (stepIndex <= 0) return
+    if (saveTokenRef.current || stepIndex <= 0) return
     setCurrentStep(steps[stepIndex - 1])
   }
 
@@ -795,15 +1036,19 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
           </p>
         </div>
         <button
-          onClick={() => void discoverCandidates()}
+          type="button"
+          onClick={() => {
+            if (requestTokenRef.current || saveTokenRef.current || sampleInteractionLocked) return
+            void discoverCandidates()
+          }}
           className={liquidGlassModalButton('secondary', 'sm')}
-          disabled={discovering}
+          disabled={discovering || sampleInteractionLocked}
         >
           {discovering ? t('settings.printer.scanning', 'Scanning...') : t('settings.printer.refresh', 'Refresh')}
         </button>
       </div>
 
-      <div className="p-3 rounded-2xl border border-amber-500/20 bg-amber-500/10 text-xs text-amber-100">
+      <div className={`p-3 rounded-2xl border text-xs ${liquidGlassModalTone('warning')}`}>
         {t(
           'settings.printer.quickWizardDraftOnlyHint',
           'Compatibility-first setup: the wizard tests transport and encoding using an unsaved draft profile. No temporary printer profiles are created.',
@@ -811,7 +1056,7 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
       </div>
 
       {candidates.length === 0 ? (
-        <div className="p-4 rounded-2xl border border-white/10 bg-white/5 text-sm liquid-glass-modal-text-muted">
+        <div className={`p-4 rounded-2xl border text-sm ${liquidGlassModalTone('neutral')}`}>
           {discovering ? t('settings.printer.scanning', 'Scanning...') : t('settings.printer.noDevicesFound', 'No printers found')}
         </div>
       ) : (
@@ -822,16 +1067,19 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
               <button
                 key={candidate.id}
                 type="button"
+                aria-pressed={selected}
+                disabled={candidateSelectionLocked}
                 onClick={() => {
+                  if (candidateSelectionLocked || requestTokenRef.current || saveTokenRef.current) return
                   setSelectedCandidateId(candidate.id)
                   setPaperSize(candidate.recommended.paperSize)
                   setTemplate('classic')
                   setReadability(guessReadabilityFromRecommended(candidate.recommended))
                 }}
-                className={`w-full text-left p-3 rounded-lg border transition-all active:scale-[0.99] ${
+                className={`min-h-[44px] w-full text-left p-3 rounded-lg border transition-all active:scale-[0.99] ${
                   selected
-                    ? 'bg-amber-500/15 border-amber-400/50'
-                    : 'bg-white/5 border-white/10'
+                    ? 'bg-amber-50 border-amber-400 text-amber-950 dark:bg-amber-500/15 dark:border-amber-400/50 dark:text-amber-100'
+                    : 'bg-slate-50 border-slate-200 text-slate-800 dark:bg-slate-900/60 dark:border-white/10 dark:text-slate-100'
                 }`}
               >
                 <div className="flex items-center justify-between gap-3">
@@ -851,8 +1099,8 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
                   <div className="text-right">
                     <div className={`text-xs px-2 py-0.5 rounded ${
                       candidate.confidence >= 80
-                        ? 'bg-green-500/20 text-green-300'
-                        : 'bg-yellow-500/20 text-yellow-300'
+                        ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-500/20 dark:text-emerald-100'
+                        : 'bg-amber-100 text-amber-900 dark:bg-amber-500/20 dark:text-amber-100'
                     }`}>
                       {candidate.confidence >= 80
                         ? t('settings.printer.quickWizardHighConfidence', 'High confidence')
@@ -884,18 +1132,34 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
     },
     disabled: boolean,
   ) => {
-    const state = verification[stage.kind]
-    const result = state.result
-    const awaitingConfirmation = Boolean(result?.success) && state.confirmed === null
+    const sample = STAGE_BY_SAMPLE_KIND[stage.kind]
+    const state = verification[sample]
+    const isTrackedRow = Boolean(state.jobId && trackedJob?.id === state.jobId)
+    const canStart = canStartWizardSample(
+      verification,
+      sample,
+      logoSettingsLoaded && effectiveLogoConfigured,
+    )
+    const awaitingConfirmation = state.phase === 'awaiting_confirmation'
+    const sampleLabel = sample === 'transport'
+      ? t('settings.printer.quickWizardSampleLabel.transport', 'transport')
+      : sample === 'encoding'
+        ? t('settings.printer.quickWizardSampleLabel.encoding', 'encoding')
+        : t('settings.printer.quickWizardSampleLabel.branding', 'branding')
+    const sendLabel = sample === 'transport'
+      ? t('settings.printer.quickWizardSendTransportSample', 'Send transport sample')
+      : sample === 'encoding'
+        ? t('settings.printer.quickWizardSendEncodingSample', 'Send encoding sample')
+        : t('settings.printer.quickWizardSendBrandingSample', 'Send branding sample')
 
     return (
-      <div key={stage.kind} className="rounded-2xl border border-white/10 bg-white/5 p-3 space-y-3">
+      <div key={stage.kind} className={`rounded-2xl border p-3 space-y-3 ${liquidGlassModalTone('neutral')}`}>
         <div className="flex items-start justify-between gap-3">
           <div>
             <div className="font-medium liquid-glass-modal-text">
               {t(stage.titleKey, stage.defaultTitle)}
               {stage.optional && (
-                <span className="ml-2 text-[11px] px-1.5 py-0.5 rounded bg-white/10 liquid-glass-modal-text-muted">
+                <span className="ml-2 rounded bg-slate-200 px-1.5 py-0.5 text-[11px] text-slate-700 dark:bg-white/10 dark:text-slate-200">
                   {t('settings.printer.optional', 'Optional')}
                 </span>
               )}
@@ -906,11 +1170,12 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
           </div>
           <button
             type="button"
-            disabled={disabled || verifyingKind === stage.kind}
+            aria-label={sendLabel}
+            disabled={disabled || !canStart || saving || discovering || Boolean(submittingKind) || sampleActionBusy}
             onClick={() => void handleRunVerification(stage.kind)}
-            className={liquidGlassModalButton('secondary', 'sm')}
+            className={`${liquidGlassModalButton('secondary', 'sm')} min-h-[44px] min-w-[44px]`}
           >
-            {verifyingKind === stage.kind
+            {submittingKind === stage.kind
               ? t('settings.printer.testing', 'Testing...')
               : t('settings.printer.quickWizardSendSample', 'Send sample')}
           </button>
@@ -922,82 +1187,154 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
           </div>
         )}
 
-        {result && (
-          <div className={`rounded-2xl border p-3 text-xs ${
-            result.success
-              ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-100'
-              : 'bg-amber-500/10 border-amber-500/20 text-amber-100'
-          }`}>
-            <div className="font-medium">
-              {result.success
-                ? t('settings.printer.quickWizardSampleSent', 'Sample dispatched')
-                : t('settings.printer.quickWizardSampleFailed', 'Sample failed')}
-            </div>
-            {result.error && (
-              <div className="mt-1">{result.error}</div>
+        {(state.phase === 'queued' || state.phase === 'printing' || state.phase === 'cancelled') && (
+          <div
+            role="status"
+            aria-live="polite"
+            className={`rounded-2xl border p-3 text-xs ${liquidGlassModalTone(
+              state.phase === 'cancelled' ? 'warning' : 'neutral',
+            )}`}
+          >
+            {state.phase === 'queued'
+              ? t('settings.printer.quickWizardQueueQueued', 'Sample queued')
+              : state.phase === 'printing'
+                ? t('settings.printer.quickWizardQueuePrinting', 'Printing in progress')
+                : t('settings.printer.quickWizardQueueCancelled', 'Sample cancelled')}
+          </div>
+        )}
+
+        {state.phase === 'failed' && (
+          <div role="alert" className={`rounded-2xl border p-3 text-xs ${liquidGlassModalTone('danger')}`}>
+            {t('settings.printer.quickWizardQueueFailed', 'The tracked sample failed. Check the printer and try again.')}
+          </div>
+        )}
+
+        {isTrackedRow && (trackedJob?.cancellable || trackedJob?.retryable) && (
+          <div className="flex flex-wrap gap-2">
+            {trackedJob.cancellable && (
+              <button
+                type="button"
+                aria-label={t(
+                  'settings.printer.quickWizardCancelSampleAria',
+                  `Cancel ${sampleLabel} sample`,
+                  { sample: sampleLabel },
+                )}
+                disabled={sampleActionBusy}
+                onClick={() => void handleTrackedCancel(stage.kind)}
+                className={`${liquidGlassModalButton('secondary', 'sm')} min-h-[44px] min-w-[44px]`}
+              >
+                {t('settings.printer.quickWizardCancelSample', 'Cancel sample')}
+              </button>
             )}
-            {(result.resolvedTransport || result.resolvedAddress) && (
-              <div className="mt-1">
-                {t('settings.printer.quickWizardResolvedPath', 'Resolved path')}:{' '}
-                {transportLabel(result.resolvedTransport, t)}
-                {result.resolvedAddress ? ` • ${result.resolvedAddress}` : ''}
-              </div>
-            )}
-            {typeof result.transportReachable === 'boolean' && (
-              <div className="mt-1">
-                {result.transportReachable
-                  ? t('settings.printer.quickWizardTransportReachable', 'Transport reachable')
-                  : t('settings.printer.quickWizardTransportNotReachable', 'Transport not reachable')}
-              </div>
-            )}
-            {result.knownPrinters && result.knownPrinters.length > 0 && !result.success && (
-              <div className="mt-1">
-                {t('settings.printer.quickWizardKnownQueues', 'Detected Windows queues')}: {result.knownPrinters.join(', ')}
-              </div>
+            {trackedJob.retryable && (
+              <button
+                type="button"
+                aria-label={t(
+                  'settings.printer.quickWizardRetrySampleAria',
+                  `Retry ${sampleLabel} sample`,
+                  { sample: sampleLabel },
+                )}
+                disabled={sampleActionBusy}
+                onClick={() => void handleTrackedRetry(stage.kind)}
+                className={`${liquidGlassModalButton('secondary', 'sm')} min-h-[44px] min-w-[44px]`}
+              >
+                {t('settings.printer.quickWizardRetrySample', 'Retry sample')}
+              </button>
             )}
           </div>
         )}
 
         {awaitingConfirmation && (
-          <div className="rounded-2xl border border-amber-500/20 bg-amber-500/10 p-3 text-xs text-amber-100">
-            <div className="font-medium mb-2">
+          <fieldset className={`rounded-2xl border p-3 text-xs ${liquidGlassModalTone('warning')}`}>
+            <legend className="px-1 font-medium">
               {t('settings.printer.quickWizardConfirmPaperResult', 'Did the paper output print correctly?')}
+            </legend>
+            <div role="status" aria-live="polite" className="mb-2">
+              {t('settings.printer.quickWizardAwaitingPaper', 'Paper output is ready for confirmation.')}
             </div>
             <div className="flex flex-wrap gap-2">
               <button
                 type="button"
                 onClick={() => handleConfirmStage(stage.kind, true)}
-                className={liquidGlassModalButton('primary', 'sm')}
+                className={`${liquidGlassModalButton('primary', 'sm')} min-h-[44px] min-w-[44px]`}
               >
                 {t('common.actions.yes', 'Yes')}
               </button>
               <button
                 type="button"
                 onClick={() => handleConfirmStage(stage.kind, false)}
-                className={liquidGlassModalButton('secondary', 'sm')}
+                className={`${liquidGlassModalButton('secondary', 'sm')} min-h-[44px] min-w-[44px]`}
               >
                 {t('common.actions.no', 'No')}
               </button>
             </div>
-          </div>
+          </fieldset>
         )}
 
-        {state.confirmed === true && (
-          <div className="flex items-center gap-2 text-xs text-emerald-200">
+        {state.phase === 'confirmed' && (
+          <div role="status" className={`flex items-center gap-2 rounded-xl border p-2 text-xs ${liquidGlassModalTone('success')}`}>
             <CheckCircle2 className="w-4 h-4" />
             <span>{t('settings.printer.quickWizardStageVerified', 'Confirmed working')}</span>
           </div>
         )}
 
-        {state.confirmed === false && state.attempted && (
-          <div className="flex items-center gap-2 text-xs text-amber-200">
+        {state.phase === 'rejected' && (
+          <div role="alert" className={`flex items-center gap-2 rounded-xl border p-2 text-xs ${liquidGlassModalTone('warning')}`}>
             <AlertTriangle className="w-4 h-4" />
-            <span>{t('settings.printer.quickWizardStageRejected', 'This stage is not trusted yet. Adjust settings or keep the profile unverified.')}</span>
+            <span>{sample === 'branding' && !state.logoIncluded
+              ? t('settings.printer.quickWizardLogoNotIncluded', 'The sample did not include logo raster data, so logo support was not confirmed.')
+              : t('settings.printer.quickWizardStageRejected', 'This stage is not trusted yet. Adjust settings and retry.')}</span>
+          </div>
+        )}
+
+        {stage.kind === 'branding' && logoSettingsLoaded && !effectiveLogoConfigured && (
+          <div className={`rounded-xl border p-3 text-xs ${liquidGlassModalTone('warning')}`}>
+            <div className="font-medium">
+              {t('settings.printer.quickWizardLogoUnavailableTitle', 'Logo sample unavailable')}
+            </div>
+            <p className="mt-1">
+              {t('settings.printer.quickWizardLogoUnavailableBody', 'Enable and save a receipt logo before testing Branding.')}
+            </p>
+            <button
+              type="button"
+              disabled={saving}
+              onClick={() => {
+                if (!saveTokenRef.current) onOpenLogoSettings()
+              }}
+              className={`${liquidGlassModalButton('secondary', 'sm')} mt-2 min-h-[44px] min-w-[44px]`}
+            >
+              {t('settings.printer.quickWizardOpenLogoSettings', 'Open logo settings')}
+            </button>
           </div>
         )}
       </div>
     )
   }
+
+  const renderLogoSettingsRecovery = () => !logoSettingsLoaded && (
+    <div
+      role="status"
+      aria-live="polite"
+      className={`rounded-2xl border p-3 text-xs ${liquidGlassModalTone('warning')}`}
+    >
+      <div>
+        {t(
+          'settings.printer.quickWizardLogoSettingsUnavailable',
+          'Logo settings are unavailable. Open logo settings to reload them before saving.',
+        )}
+      </div>
+      <button
+        type="button"
+        disabled={saving}
+        onClick={() => {
+          if (!saveTokenRef.current) onOpenLogoSettings()
+        }}
+        className={`${liquidGlassModalButton('secondary', 'sm')} mt-2 min-h-[44px] min-w-[44px]`}
+      >
+        {t('settings.printer.quickWizardOpenLogoSettings', 'Open logo settings')}
+      </button>
+    </div>
+  )
 
   const renderVerifyStep = () => (
     <div className="space-y-4">
@@ -1006,7 +1343,7 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
       </h3>
       {selectedCandidate ? (
         <div className="space-y-3">
-          <div className="p-3 rounded-2xl border border-white/10 bg-white/5">
+          <div className={`p-3 rounded-2xl border ${liquidGlassModalTone('neutral')}`}>
             <div className="flex items-center gap-2 text-sm liquid-glass-modal-text">
               <Printer className="w-4 h-4" />
               <span className="font-medium">{selectedCandidate.name}</span>
@@ -1020,10 +1357,11 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
           </div>
 
           <div>
-            <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
+            <label htmlFor="quick-wizard-paper-size" className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
               {t('settings.printer.paperSize', 'Paper Size')}
             </label>
             <select
+              id="quick-wizard-paper-size"
               value={paperSize}
               onChange={e => setPaperSize(normalizePaperSize(e.target.value))}
               className="liquid-glass-modal-input"
@@ -1034,7 +1372,78 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
             </select>
           </div>
 
-          {sampleKinds.map(stage => renderVerificationCard(stage, stage.kind !== 'transport_text' && verification.transport_text.confirmed !== true))}
+          {sampleErrorCode && (
+            <div role="alert" className={`rounded-2xl border p-3 text-xs ${liquidGlassModalTone('danger')}`}>
+              {sampleErrorCode === 'sample_kind_mismatch'
+                ? t(
+                    'settings.printer.quickWizardSampleMismatch',
+                    'The queued sample did not match this verification step.',
+                  )
+                : sampleErrorCode === 'cancel_failed'
+                  ? t('settings.printer.quickWizardCancelFailed', 'The tracked sample could not be cancelled.')
+                  : sampleErrorCode === 'retry_failed'
+                    ? t('settings.printer.quickWizardRetryFailed', 'The tracked sample could not be retried.')
+                    : sampleErrorCode === 'invalid_enqueue_response'
+                      ? t('settings.printer.quickWizardInvalidResponse', 'The printer returned an invalid sample response. Try again.')
+                      : t('settings.printer.quickWizardEnqueueFailed', 'The sample could not be queued. Check the printer and try again.')}
+            </div>
+          )}
+
+          {trackedQueueObservationMissing && (
+            <div
+              role="alert"
+              className={`rounded-2xl border p-3 text-xs ${liquidGlassModalTone('danger')}`}
+            >
+              {t(
+                'settings.printer.quickWizardTrackedJobUnavailable',
+                'The tracked sample status is unavailable. Refresh the queue or retry the sample.',
+              )}
+            </div>
+          )}
+
+          {trackedQueueObservationStale && (
+            <div
+              role="status"
+              aria-live="polite"
+              className={`rounded-2xl border p-3 text-xs ${liquidGlassModalTone('warning')}`}
+            >
+              {t(
+                'settings.printer.quickWizardQueueStale',
+                'Print status may be out of date. The last known sample state remains visible.',
+              )}
+            </div>
+          )}
+
+          {sampleKinds.map(stage => {
+            const disabled = stage.kind === 'encoding'
+              ? verification.transport.phase !== 'confirmed'
+              : stage.kind === 'branding'
+                ? verification.encoding.phase !== 'confirmed'
+                  || !logoSettingsLoaded
+                  || !effectiveLogoConfigured
+                : false
+            return renderVerificationCard(stage, disabled)
+          })}
+
+          {renderLogoSettingsRecovery()}
+
+          {logoSettingsLoaded
+            && effectiveLogoConfigured
+            && verification.encoding.phase === 'confirmed'
+            && verification.branding.phase !== 'confirmed' && (
+              <label className={`flex min-h-[44px] items-center gap-2 rounded-2xl border p-3 text-sm ${liquidGlassModalTone('warning')}`}>
+                <input
+                  type="checkbox"
+                  checked={verification.continueWithoutLogo}
+                  onChange={(event) => dispatchVerification({
+                    type: 'continue_without_logo',
+                    value: event.target.checked,
+                  })}
+                  className="h-5 w-5 rounded"
+                />
+                {t('settings.printer.quickWizardContinueWithoutLogo', 'Continue without verified logo output')}
+              </label>
+            )}
 
           <div className={`rounded-2xl border p-3 ${verificationTone(verificationStatus)}`}>
             <div className="flex items-center justify-between gap-3">
@@ -1053,35 +1462,18 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
             </div>
           </div>
 
-          {transportFailureMessage && (
-            <div className="rounded-2xl border border-amber-500/20 bg-amber-500/10 p-3 text-xs text-amber-100">
-              <div className="font-medium">
-                {t('settings.printer.quickWizardDiscoveredNotPrintableTitle', 'Discovered, not yet printable')}
-              </div>
-              <div className="mt-1">
-                {transportFailureMessage}
-              </div>
-              <div className="mt-2">
-                {t(
-                  'settings.printer.quickWizardDiscoveredNotPrintableBody',
-                  'The device was detected, but the app could not confirm a working queue, raw TCP path, or serial/RFCOMM transport yet.',
-                )}
-              </div>
-            </div>
-          )}
-
           {selectedCandidate.reasons.length > 0 && (
-            <div className="p-3 rounded-2xl bg-amber-500/10 border border-amber-500/20">
-              <div className="text-xs font-medium text-amber-300 mb-1">
+            <div className={`p-3 rounded-2xl border ${liquidGlassModalTone('warning')}`}>
+              <div className="mb-1 text-xs font-medium">
                 {t('settings.printer.quickWizardWhyTitle', 'Why this recommendation')}
               </div>
-              <ul className="text-xs text-amber-100/80 space-y-1">
+              <ul className="space-y-1 text-xs">
                 {selectedCandidate.reasons.slice(0, 3).map(reason => (
                   <li key={reason}>• {reason}</li>
                 ))}
               </ul>
               {selectedCandidate.probeHints?.preferredEmulationOrder?.length ? (
-                <div className="mt-2 text-[11px] text-amber-100/70">
+                <div className="mt-2 text-[11px] opacity-80">
                   {t('settings.printer.quickWizardProbeOrder', 'Probe order')}:{' '}
                   {selectedCandidate.probeHints.preferredEmulationOrder.join(' → ')}
                 </div>
@@ -1103,7 +1495,7 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
         {t('settings.printer.quickWizardStyleTitle', 'Step 3: Defaults & Readability')}
       </h3>
 
-      <div className="rounded-2xl border border-white/10 bg-white/5 p-3 text-xs liquid-glass-modal-text-muted">
+      <div className={`rounded-2xl border p-3 text-xs ${liquidGlassModalTone('neutral')}`}>
         {t(
           'settings.printer.quickWizardCompatibilityDefaults',
           'Safe defaults for new profiles: Classic template, text render mode, and automatic protocol selection. Optional logo / raster support is only trusted after confirmation.',
@@ -1111,10 +1503,11 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
       </div>
 
       <div>
-        <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
+        <label htmlFor="quick-wizard-receipt-template" className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
           {t('settings.printer.receiptTemplate', 'Receipt Template')}
         </label>
         <select
+          id="quick-wizard-receipt-template"
           value={template}
           onChange={e => setTemplate((e.target.value === 'modern' ? 'modern' : 'classic'))}
           className="liquid-glass-modal-input"
@@ -1125,19 +1518,26 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
       </div>
 
       <div>
-        <label className="block text-xs font-medium mb-2 liquid-glass-modal-text-muted">
+        <div id="quick-wizard-readability-label" className="block text-xs font-medium mb-2 liquid-glass-modal-text-muted">
           {t('settings.printer.quickWizardReadability.label', 'Readability')}
-        </label>
-        <div className="grid grid-cols-3 gap-2">
+        </div>
+        <div role="radiogroup" aria-labelledby="quick-wizard-readability-label" className="grid grid-cols-3 gap-2">
           {(['small', 'normal', 'large'] as ReadabilitySize[]).map(size => (
             <button
               key={size}
+              ref={(element) => {
+                readabilityButtonRefs.current[size] = element
+              }}
               type="button"
+              role="radio"
+              aria-checked={readability === size}
+              tabIndex={readability === size ? 0 : -1}
               onClick={() => setReadability(size)}
-              className={`px-3 py-2 rounded-lg border text-sm ${
+              onKeyDown={event => handleReadabilityKeyDown(event, size)}
+              className={`min-h-[44px] min-w-[44px] rounded-lg border px-3 py-2 text-sm ${
                 readability === size
-                  ? 'bg-amber-500/15 border-amber-400/50 text-amber-100'
-                  : 'bg-white/5 border-white/10 liquid-glass-modal-text'
+                  ? liquidGlassModalTone('warning')
+                  : liquidGlassModalTone('neutral')
               }`}
             >
               {t(`settings.printer.quickWizardReadability.${size}`, size.charAt(0).toUpperCase() + size.slice(1))}
@@ -1146,7 +1546,7 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
         </div>
       </div>
 
-      <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
+      <div className={`rounded-2xl border p-3 ${liquidGlassModalTone('neutral')}`}>
         <div className="text-xs liquid-glass-modal-text-muted mb-2">
           {t('settings.printer.quickWizardLivePreview', 'Live style preview')}
         </div>
@@ -1178,18 +1578,20 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
         {t('settings.printer.quickWizardSaveTitle', 'Step 4: Save & Assign')}
       </h3>
 
+      {renderLogoSettingsRecovery()}
+
       <div className={`rounded-2xl border p-3 ${verificationTone(verificationStatus)}`}>
         <div className="flex items-start justify-between gap-3">
           <div>
             <div className="font-medium">
-              {verification.transport_text.confirmed === true
+              {saveAllowed
                 ? t('settings.printer.quickWizardReadyVerifiedTitle', 'Ready to save as verified')
-                : t('settings.printer.quickWizardReadyUnverifiedTitle', 'Ready to save as discovered only')}
+                : t('settings.printer.quickWizardVerificationRequired', 'Verification is incomplete')}
             </div>
             <div className="text-xs mt-1">
-              {verification.transport_text.confirmed === true
-                ? t('settings.printer.quickWizardReadyVerifiedBody', 'This printer now has a confirmed transport path and can be used as a working receipt printer.')
-                : t('settings.printer.quickWizardReadyUnverifiedBody', 'You can still save the profile, but it will remain unverified and should not be relied on as the default printer yet.')}
+              {saveAllowed
+                ? t('settings.printer.quickWizardReadyVerifiedBody', 'Transport and encoding are confirmed for this printer.')
+                : t('settings.printer.quickWizardEncodingRequired', 'Confirm both Transport and Encoding before saving this printer.')}
             </div>
           </div>
           <div className="text-right text-xs">
@@ -1199,7 +1601,7 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
         </div>
       </div>
 
-      <label className={`flex items-center gap-2 text-sm cursor-pointer ${defaultReceiptAllowed ? 'liquid-glass-modal-text' : 'liquid-glass-modal-text-muted'}`}>
+      <label className={`flex min-h-[44px] items-center gap-2 text-sm cursor-pointer ${defaultReceiptAllowed ? 'liquid-glass-modal-text' : 'liquid-glass-modal-text-muted'}`}>
         <input
           type="checkbox"
           checked={defaultReceiptAllowed ? setDefaultReceipt : false}
@@ -1216,21 +1618,21 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
         <div className="text-xs liquid-glass-modal-text-muted">
           {t('settings.printer.quickWizardAssignOtherRoles', 'Assign this printer to other roles (optional)')}
         </div>
-        <label className="flex items-center gap-2 text-sm liquid-glass-modal-text cursor-pointer">
+        <label className="flex min-h-[44px] items-center gap-2 text-sm liquid-glass-modal-text cursor-pointer">
           <input type="checkbox" checked={assignKitchen} onChange={e => setAssignKitchen(e.target.checked)} className="rounded" />
           {t('settings.printer.roleKitchen', 'Kitchen')}
         </label>
-        <label className="flex items-center gap-2 text-sm liquid-glass-modal-text cursor-pointer">
+        <label className="flex min-h-[44px] items-center gap-2 text-sm liquid-glass-modal-text cursor-pointer">
           <input type="checkbox" checked={assignBar} onChange={e => setAssignBar(e.target.checked)} className="rounded" />
           {t('settings.printer.roleBar', 'Bar')}
         </label>
-        <label className="flex items-center gap-2 text-sm liquid-glass-modal-text cursor-pointer">
+        <label className="flex min-h-[44px] items-center gap-2 text-sm liquid-glass-modal-text cursor-pointer">
           <input type="checkbox" checked={assignLabel} onChange={e => setAssignLabel(e.target.checked)} className="rounded" />
           {t('settings.printer.roleLabel', 'Label')}
         </label>
       </div>
 
-      <div className="rounded-2xl border border-white/10 bg-white/5 p-3 text-xs liquid-glass-modal-text-muted">
+      <div className={`rounded-2xl border p-3 text-xs ${liquidGlassModalTone('neutral')}`}>
         <div>{t('settings.printer.quickWizardSavedTemplate', 'Template')}: {template}</div>
         <div>{t('settings.printer.quickWizardSavedRenderMode', 'Render mode')}: {derivedCapabilities.renderMode || 'text'}</div>
         <div>{t('settings.printer.quickWizardSavedEmulation', 'Emulation')}: {derivedCapabilities.emulation || 'auto'}</div>
@@ -1242,29 +1644,36 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="inline-flex rounded-lg bg-white/5 border border-white/10 p-1">
+        <ol className={`inline-flex rounded-lg border p-1 ${liquidGlassModalTone('neutral')}`}>
           {steps.map(step => {
             const active = step === currentStep
             const passed = steps.indexOf(step) < stepIndex
             return (
-              <button
-                key={step}
-                type="button"
-                onClick={() => setCurrentStep(step)}
-                className={`px-2.5 py-1.5 text-xs rounded-md transition active:scale-95 ${
-                  active
-                    ? 'bg-amber-500/20 text-amber-100'
-                    : passed
-                    ? 'text-emerald-200'
-                    : 'liquid-glass-modal-text-muted'
-                }`}
-              >
-                {t(`settings.printer.quickWizardStep.${step}`, step)}
-              </button>
+              <li key={step}>
+                <button
+                  type="button"
+                  aria-current={active ? 'step' : undefined}
+                  disabled={saving}
+                  onClick={() => {
+                    if (!saving && !saveTokenRef.current) setCurrentStep(step)
+                  }}
+                  className={`min-h-[44px] min-w-[44px] px-2.5 py-1.5 text-xs rounded-md transition active:scale-95 ${
+                    active
+                      ? 'bg-amber-100 text-amber-900 dark:bg-amber-500/20 dark:text-amber-100'
+                      : passed
+                        ? 'text-emerald-700 dark:text-emerald-200'
+                        : 'liquid-glass-modal-text-muted'
+                  }`}
+                >
+                  {t(`settings.printer.quickWizardStep.${step}`, step)}
+                </button>
+              </li>
             )
           })}
-        </div>
-        <button onClick={onOpenExpert} className={liquidGlassModalButton('secondary', 'sm')} type="button">
+        </ol>
+        <button disabled={saving} onClick={() => {
+          if (!saveTokenRef.current) onOpenExpert()
+        }} className={`${liquidGlassModalButton('secondary', 'sm')} min-h-[44px] min-w-[44px]`} type="button">
           <span className="inline-flex items-center justify-center gap-1">
             <SlidersHorizontal className="w-4 h-4 shrink-0" />
             {t('settings.printer.quickWizardAdvanced', 'Expert Settings')}
@@ -1277,21 +1686,23 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
       {currentStep === 'style' && renderStyleStep()}
       {currentStep === 'save' && renderSaveStep()}
 
-      <div className="flex items-center justify-between pt-2 border-t border-white/10">
-        <button onClick={onCancel} className={liquidGlassModalButton('secondary', 'md')} type="button">
+      <div className="flex items-center justify-between border-t border-slate-200 pt-2 dark:border-white/10">
+        <button disabled={saving} onClick={() => {
+          if (!saveTokenRef.current) onCancel()
+        }} className={`${liquidGlassModalButton('secondary', 'md')} min-h-[44px] min-w-[44px]`} type="button">
           {t('common.actions.cancel', 'Cancel')}
         </button>
         <div className="flex items-center gap-2">
           {stepIndex > 0 && (
-            <button onClick={gotoPrevious} className={liquidGlassModalButton('secondary', 'md')} type="button">
+            <button disabled={saving} onClick={gotoPrevious} className={`${liquidGlassModalButton('secondary', 'md')} min-h-[44px] min-w-[44px]`} type="button">
               {t('common.actions.back', 'Back')}
             </button>
           )}
           {stepIndex < steps.length - 1 ? (
             <button
               onClick={gotoNext}
-              disabled={!canContinue}
-              className={liquidGlassModalButton('primary', 'md')}
+              disabled={saving || !canContinue}
+              className={`${liquidGlassModalButton('primary', 'md')} min-h-[44px] min-w-[44px]`}
               type="button"
             >
               <span className="inline-flex items-center justify-center gap-1">
@@ -1303,8 +1714,8 @@ const PrinterSetupWizard: React.FC<Props> = ({ existingPrinters, onCancel, onSav
           ) : (
             <button
               onClick={() => void handleSave()}
-              disabled={saving || !canContinue}
-              className={liquidGlassModalButton('primary', 'md')}
+              disabled={saving || !saveAllowed}
+              className={`${liquidGlassModalButton('primary', 'md')} min-h-[44px] min-w-[44px]`}
               type="button"
             >
               {saving ? t('common.actions.saving', 'Saving...') : t('common.actions.save', 'Save')}

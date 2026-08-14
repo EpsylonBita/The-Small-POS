@@ -1204,7 +1204,11 @@ fn require_active_cashier_for_order_create(
 }
 
 /// Create an order locally: insert into `orders` table and enqueue for sync.
-pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
+pub fn create_order(
+    db: &DbState,
+    payload: &Value,
+    invalidator: &dyn print::PrintQueueInvalidator,
+) -> Result<Value, String> {
     // Validate menu items BEFORE acquiring the connection lock to avoid
     // deadlock: menu::read_cache() also calls db.conn.lock() and
     // std::sync::Mutex is not reentrant.
@@ -1889,7 +1893,9 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
     );
     if !skip_auto_print {
         for entity_type in print::auto_print_entity_types_for_order_type(&order_type) {
-            if let Err(error) = print::enqueue_print_job(db, entity_type, &order_id, None) {
+            if let Err(error) =
+                print::enqueue_print_job(db, entity_type, &order_id, None, invalidator)
+            {
                 warn!(
                     order_id = %order_id,
                     entity_type = %entity_type,
@@ -10012,9 +10018,13 @@ async fn reconcile_remote_orders(
                     && matches!(new_status.as_str(), "completed" | "delivered")
                     && crate::print::is_print_action_enabled(db, "on_complete")
                 {
-                    if let Err(e) =
-                        print::enqueue_print_job(db, "order_completed_receipt", &local_id, None)
-                    {
+                    if let Err(e) = print::enqueue_print_job(
+                        db,
+                        "order_completed_receipt",
+                        &local_id,
+                        None,
+                        app,
+                    ) {
                         warn!(
                             order_id = %local_id,
                             error = %e,
@@ -10052,6 +10062,7 @@ async fn reconcile_remote_orders(
                         &local_id,
                         None,
                         Some(&payload),
+                        app,
                     ) {
                         warn!(
                             order_id = %local_id,
@@ -10099,7 +10110,9 @@ async fn reconcile_remote_orders(
                 && crate::print::is_print_action_enabled(db, "after_order")
             {
                 for entity_type in auto_print_types {
-                    if let Err(error) = print::enqueue_print_job(db, entity_type, &local_id, None) {
+                    if let Err(error) =
+                        print::enqueue_print_job(db, entity_type, &local_id, None, app)
+                    {
                         warn!(
                             order_id = %local_id,
                             entity_type = %entity_type,
@@ -18577,6 +18590,21 @@ mod tests {
     use crate::db;
     use rusqlite::{params, Connection};
 
+    #[derive(Default)]
+    struct CountingPrintQueueInvalidator(std::sync::atomic::AtomicUsize);
+
+    impl crate::print::PrintQueueInvalidator for CountingPrintQueueInvalidator {
+        fn invalidate_print_queue(&self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
+    }
+
+    impl CountingPrintQueueInvalidator {
+        fn count(&self) -> usize {
+            self.0.load(std::sync::atomic::Ordering::Acquire)
+        }
+    }
+
     fn test_db() -> DbState {
         let conn = Connection::open_in_memory().expect("open in-memory db");
         conn.execute_batch(
@@ -19332,7 +19360,9 @@ mod tests {
     fn test_create_order_enqueues_order_receipt_print_job() {
         let db = test_db();
         seed_active_cashier(&db, "branch-create-print", "terminal-create-print");
+        let invalidator = CountingPrintQueueInvalidator::default();
         let payload = serde_json::json!({
+            "clientRequestId": "create-print-request",
             "branchId": "branch-create-print",
             "terminalId": "terminal-create-print",
             "items": [{ "name": "Coffee", "quantity": 1, "price": 2.5 }],
@@ -19342,11 +19372,20 @@ mod tests {
             "orderType": "pickup"
         });
 
-        let created = create_order(&db, &payload).expect("create order");
+        let created = create_order(&db, &payload, &invalidator).expect("create order");
         let order_id = created
             .get("orderId")
             .and_then(Value::as_str)
             .expect("order id");
+        assert_eq!(invalidator.count(), 1);
+
+        let duplicate = create_order(&db, &payload, &invalidator).expect("deduplicate order");
+        assert_eq!(duplicate["orderId"], order_id);
+        assert_eq!(
+            invalidator.count(),
+            1,
+            "idempotent create must not invalidate without a new print INSERT"
+        );
 
         let conn = db.conn.lock().unwrap();
         let queued_count: i64 = conn
@@ -19377,7 +19416,8 @@ mod tests {
             "orderType": "dine-in"
         });
 
-        let created = create_order(&db, &payload).expect("create order");
+        let created = create_order(&db, &payload, &crate::print::NoopPrintQueueInvalidator)
+            .expect("create order");
         let order_id = created
             .get("orderId")
             .and_then(Value::as_str)
@@ -19413,7 +19453,8 @@ mod tests {
             "orderType": "dine-in"
         });
 
-        let created = create_order(&db, &payload).expect("create order");
+        let created = create_order(&db, &payload, &crate::print::NoopPrintQueueInvalidator)
+            .expect("create order");
         let order_id = created
             .get("orderId")
             .and_then(Value::as_str)
@@ -19460,7 +19501,8 @@ mod tests {
             "orderType": "dine-in"
         });
 
-        let created = create_order(&db, &payload).expect("create order");
+        let created = create_order(&db, &payload, &crate::print::NoopPrintQueueInvalidator)
+            .expect("create order");
         let order_id = created
             .get("orderId")
             .and_then(Value::as_str)
@@ -19532,7 +19574,8 @@ mod tests {
             "orderType": "dine-in"
         });
 
-        let created = create_order(&db, &payload).expect("create order");
+        let created = create_order(&db, &payload, &crate::print::NoopPrintQueueInvalidator)
+            .expect("create order");
         let order_id = created
             .get("orderId")
             .and_then(Value::as_str)
@@ -19598,7 +19641,8 @@ mod tests {
             "orderType": "dine-in"
         });
 
-        let created = create_order(&db, &payload).expect("create order");
+        let created = create_order(&db, &payload, &crate::print::NoopPrintQueueInvalidator)
+            .expect("create order");
         let order_id = created
             .get("orderId")
             .and_then(Value::as_str)
@@ -19637,7 +19681,8 @@ mod tests {
             "orderType": "dine-in"
         });
 
-        let created = create_order(&db, &payload).expect("create order");
+        let created = create_order(&db, &payload, &crate::print::NoopPrintQueueInvalidator)
+            .expect("create order");
         let order_id = created
             .get("orderId")
             .and_then(Value::as_str)
@@ -19754,7 +19799,8 @@ mod tests {
             "staffId": "driver-create"
         });
 
-        let created = create_order(&db, &payload).expect("create order");
+        let created = create_order(&db, &payload, &crate::print::NoopPrintQueueInvalidator)
+            .expect("create order");
         let order_id = created
             .get("orderId")
             .and_then(Value::as_str)
@@ -19822,7 +19868,8 @@ mod tests {
             "orderType": "pickup"
         });
 
-        let error = create_order(&db, &payload).expect_err("cashier gate should reject");
+        let error = create_order(&db, &payload, &crate::print::NoopPrintQueueInvalidator)
+            .expect_err("cashier gate should reject");
 
         assert_eq!(error, NO_ACTIVE_CASHIER_ORDER_CREATE_ERROR);
         let conn = db.conn.lock().unwrap();
@@ -27705,8 +27752,14 @@ mod tests {
         if matches!(new_status.as_str(), "completed" | "delivered")
             && crate::print::is_print_action_enabled(&db, "on_complete")
         {
-            print::enqueue_print_job(&db, "order_completed_receipt", "ord-complete", None)
-                .expect("enqueue order_completed_receipt");
+            print::enqueue_print_job(
+                &db,
+                "order_completed_receipt",
+                "ord-complete",
+                None,
+                &crate::print::NoopPrintQueueInvalidator,
+            )
+            .expect("enqueue order_completed_receipt");
         }
 
         // Verify a print job was created
@@ -27751,6 +27804,7 @@ mod tests {
                 "ord-cancel",
                 None,
                 Some(&payload),
+                &crate::print::NoopPrintQueueInvalidator,
             )
             .expect("enqueue order_canceled_receipt");
         }
@@ -27811,6 +27865,7 @@ mod tests {
                 "ord-cancel2",
                 None,
                 Some(&payload),
+                &crate::print::NoopPrintQueueInvalidator,
             )
             .expect("enqueue order_canceled_receipt");
         }

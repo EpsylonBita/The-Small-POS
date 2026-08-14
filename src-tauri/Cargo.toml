@@ -1,6 +1,6 @@
 [package]
 name = "the-small-pos"
-version = "1.4.63"
+version = "1.4.64"
 description = "The Small POS - Desktop point-of-sale (Tauri v2)"
 authors = ["The Small Team <dev@thesmall.app>"]
 edition = "2021"
@@ -74,6 +74,8 @@ md5 = "0.7"
 
 # Compression for sync payloads
 zstd = "0.13"
+flate2 = "1"
+sha2 = "0.10"
 
 # Logging
 tracing = "0.1"
@@ -113,6 +115,7 @@ notify = "6"
 dunce = "1.0.5"
 windows-sys = { version = "0.59", features = [
   "Win32_Foundation",
+  "Win32_Graphics_Printing",
   "Win32_System_Registry",
   "Win32_System_Threading",
   "Win32_UI_Shell",

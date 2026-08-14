@@ -4,7 +4,7 @@
 //! configuration. Provides schema migrations, settings helpers, and managed
 //! state for use across Tauri commands.
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -47,7 +47,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-const CURRENT_SCHEMA_VERSION: i32 = 72;
+const CURRENT_SCHEMA_VERSION: i32 = 74;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -460,6 +460,12 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     }
     if current < 72 {
         run_migration_tx(conn, 72, migrate_v72)?;
+    }
+    if current < 73 {
+        run_migration_tx(conn, 73, migrate_v73)?;
+    }
+    if current < 74 {
+        run_migration_tx(conn, 74, migrate_v74)?;
     }
 
     Ok(())
@@ -4669,6 +4675,486 @@ fn migrate_v72(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// Migration v73: persist immutable print snapshots and managed transport attempts.
+///
+/// This migration is deliberately additive so that print jobs created by the
+/// older spooler stay readable while future dispatch code can retain an
+/// immutable document snapshot and an attempt ledger.
+fn migrate_v73(conn: &Connection) -> Result<(), String> {
+    let has_print_jobs = conn
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'print_jobs'
+             )",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|e| format!("v73 inspect print_jobs table: {e}"))?;
+
+    // Repair-oriented fixtures can carry a later schema marker while lacking
+    // the local spooler entirely. Do not make the generic migration-repair
+    // path unrecoverable for that intentionally partial shape; production POS
+    // databases always contain print_jobs and take the full branch below.
+    if !has_print_jobs {
+        conn.execute("INSERT INTO schema_version (version) VALUES (73)", [])
+            .map_err(|e| format!("v73 record partial schema_version: {e}"))?;
+        info!("Applied migration v73 (print spooler absent in partial schema)");
+        return Ok(());
+    }
+
+    for (column, definition) in [
+        ("document_snapshot_version", "INTEGER"),
+        ("document_snapshot_zlib", "BLOB"),
+        ("document_snapshot_sha256", "TEXT"),
+        ("render_profile_snapshot_json", "TEXT"),
+        ("reprint_of_job_id", "TEXT REFERENCES print_jobs(id)"),
+        ("completed_at", "TEXT"),
+        ("history_expires_at", "TEXT"),
+    ] {
+        if !column_exists(conn, "print_jobs", column)? {
+            conn.execute_batch(&format!(
+                "ALTER TABLE print_jobs ADD COLUMN {column} {definition};"
+            ))
+            .map_err(|e| format!("v73 add print_jobs.{column}: {e}"))?;
+        }
+    }
+
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS print_job_attempts (
+            id TEXT PRIMARY KEY,
+            print_job_id TEXT NOT NULL REFERENCES print_jobs(id) ON DELETE CASCADE,
+            attempt_number INTEGER NOT NULL,
+            transport TEXT NOT NULL CHECK (transport IN ('windows', 'raw_tcp', 'serial')),
+            resolved_target TEXT NOT NULL,
+            document_name TEXT NOT NULL,
+            spool_job_id INTEGER,
+            state TEXT NOT NULL CHECK (state IN (
+              'created', 'submitting', 'windows_queued', 'windows_printing',
+              'paused', 'sent', 'spool_completed', 'cancel_requested',
+              'cancelled', 'transport_error', 'spool_error', 'cancel_failed', 'unknown'
+            )),
+            native_status_bits INTEGER,
+            native_status_text TEXT,
+            bytes_requested INTEGER NOT NULL DEFAULT 0,
+            bytes_written INTEGER NOT NULL DEFAULT 0,
+            started_at TEXT NOT NULL,
+            last_seen_at TEXT,
+            completed_at TEXT,
+            cancel_requested_at TEXT,
+            cancel_confirmed_at TEXT,
+            last_error TEXT,
+            UNIQUE(print_job_id, attempt_number)
+        );
+        CREATE INDEX IF NOT EXISTS idx_print_attempts_job
+          ON print_job_attempts(print_job_id, attempt_number DESC);
+        CREATE INDEX IF NOT EXISTS idx_print_attempts_spool
+          ON print_job_attempts(resolved_target, spool_job_id)
+          WHERE spool_job_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_print_attempts_active_target
+          ON print_job_attempts(resolved_target, state)
+          WHERE state IN ('created','submitting','windows_queued','windows_printing','paused','cancel_requested','unknown');
+        CREATE INDEX IF NOT EXISTS idx_print_jobs_history_expiry_status
+          ON print_jobs(status, julianday(history_expires_at), id)
+          WHERE history_expires_at IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_print_jobs_reprint_parent
+          ON print_jobs(reprint_of_job_id)
+          WHERE reprint_of_job_id IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS print_target_state (
+            target_key TEXT PRIMARY KEY,
+            transport TEXT NOT NULL,
+            circuit_state TEXT NOT NULL,
+            blocked_reason TEXT,
+            blocked_at TEXT,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TRIGGER IF NOT EXISTS trg_print_jobs_snapshot_immutable
+        BEFORE UPDATE OF
+            document_snapshot_version,
+            document_snapshot_zlib,
+            document_snapshot_sha256,
+            render_profile_snapshot_json
+        ON print_jobs
+        FOR EACH ROW
+        WHEN
+            (OLD.document_snapshot_version IS NOT NULL
+                AND NEW.document_snapshot_version IS NOT OLD.document_snapshot_version)
+            OR (OLD.document_snapshot_zlib IS NOT NULL
+                AND NEW.document_snapshot_zlib IS NOT OLD.document_snapshot_zlib)
+            OR (OLD.document_snapshot_sha256 IS NOT NULL
+                AND NEW.document_snapshot_sha256 IS NOT OLD.document_snapshot_sha256)
+            OR (OLD.render_profile_snapshot_json IS NOT NULL
+                AND NEW.render_profile_snapshot_json IS NOT OLD.render_profile_snapshot_json)
+        BEGIN
+            SELECT RAISE(ABORT, 'print job document snapshot is immutable');
+        END;
+
+        UPDATE print_jobs
+        SET completed_at = COALESCE(completed_at, updated_at),
+            history_expires_at = COALESCE(history_expires_at, datetime(updated_at, '+30 days'))
+        WHERE status IN ('printed', 'dispatched', 'failed', 'cancelled');
+        ",
+    )
+    .map_err(|e| format!("v73 create managed print schema: {e}"))?;
+
+    conn.execute("INSERT INTO schema_version (version) VALUES (73)", [])
+        .map_err(|e| format!("v73 record schema_version: {e}"))?;
+    info!("Applied migration v73 (managed print attempt schema)");
+    Ok(())
+}
+
+/// Migration v74: durable local interlock for outstanding payment collection.
+///
+/// A fiscal/EFT request necessarily releases the process' SQLite mutex while
+/// waiting on hardware. The already-durable `ecr_transactions` attempt row is
+/// therefore also the per-order reservation: these triggers prevent any other
+/// SQLite connection/process from changing the financial ledger or fiscal
+/// order inputs until that attempt is either definitely failed or represented
+/// by the exact completed payment row.
+fn migrate_v74(conn: &Connection) -> Result<(), String> {
+    let required_tables_present = [
+        "orders",
+        "order_payments",
+        "payment_adjustments",
+        "ecr_transactions",
+    ]
+    .into_iter()
+    .try_fold(true, |all_present, table| {
+        conn.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM sqlite_master
+                 WHERE type = 'table' AND name = ?1
+             )",
+            [table],
+            |row| row.get::<_, bool>(0),
+        )
+        .map(|present| all_present && present)
+        .map_err(|error| format!("v74 inspect {table} table: {error}"))
+    })?;
+
+    // Repair fixtures can intentionally contain only a subset of the full POS
+    // schema. Preserve the existing additive migration behavior there; a real
+    // POS database always has all four tables and installs the guard set.
+    if required_tables_present {
+        conn.execute_batch(
+            r#"
+            CREATE TRIGGER IF NOT EXISTS trg_outstanding_collection_payment_insert
+            BEFORE INSERT ON order_payments
+            FOR EACH ROW
+            WHEN NEW.status = 'completed'
+             AND EXISTS (
+                SELECT 1
+                FROM ecr_transactions et
+                WHERE et.transaction_type = 'fiscal_receipt'
+                  AND et.status IN ('processing', 'timeout', 'approved', 'approved_persisting')
+                  AND substr(et.order_id, 1, length(NEW.order_id || ':collect-outstanding:'))
+                        = NEW.order_id || ':collect-outstanding:'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM order_payments represented
+                    WHERE represented.order_id = NEW.order_id
+                      AND represented.status = 'completed'
+                      AND represented.transaction_ref = et.id
+                      AND represented.idempotency_key = et.id
+                  )
+                  AND NOT (
+                    et.status = 'approved_persisting'
+                    AND NEW.transaction_ref = et.id
+                    AND NEW.idempotency_key = et.id
+                  )
+             )
+            BEGIN
+              SELECT RAISE(ABORT, 'outstanding payment collection is active');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_outstanding_collection_payment_update
+            BEFORE UPDATE OF order_id, status, method, amount, amount_cents,
+                             transaction_ref, idempotency_key, payment_origin
+            ON order_payments
+            FOR EACH ROW
+            WHEN (OLD.status = 'completed' OR NEW.status = 'completed')
+             AND EXISTS (
+                SELECT 1 FROM ecr_transactions et
+                WHERE et.transaction_type = 'fiscal_receipt'
+                  AND et.status IN ('processing', 'timeout', 'approved', 'approved_persisting')
+                  AND (
+                    substr(et.order_id, 1, length(OLD.order_id || ':collect-outstanding:'))
+                        = OLD.order_id || ':collect-outstanding:'
+                    OR substr(et.order_id, 1, length(NEW.order_id || ':collect-outstanding:'))
+                        = NEW.order_id || ':collect-outstanding:'
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1 FROM order_payments represented
+                    WHERE represented.order_id = OLD.order_id
+                      AND represented.status = 'completed'
+                      AND represented.transaction_ref = et.id
+                      AND represented.idempotency_key = et.id
+                  )
+             )
+            BEGIN
+              SELECT RAISE(ABORT, 'outstanding payment collection is active');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_outstanding_collection_payment_delete
+            BEFORE DELETE ON order_payments
+            FOR EACH ROW
+            WHEN OLD.status = 'completed'
+             AND EXISTS (
+                SELECT 1 FROM ecr_transactions et
+                WHERE et.transaction_type = 'fiscal_receipt'
+                  AND et.status IN ('processing', 'timeout', 'approved', 'approved_persisting')
+                  AND substr(et.order_id, 1, length(OLD.order_id || ':collect-outstanding:'))
+                        = OLD.order_id || ':collect-outstanding:'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM order_payments represented
+                    WHERE represented.order_id = OLD.order_id
+                      AND represented.status = 'completed'
+                      AND represented.transaction_ref = et.id
+                      AND represented.idempotency_key = et.id
+                  )
+             )
+            BEGIN
+              SELECT RAISE(ABORT, 'outstanding payment collection is active');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_outstanding_collection_refund_insert
+            BEFORE INSERT ON payment_adjustments
+            FOR EACH ROW
+            WHEN NEW.adjustment_type = 'refund'
+             AND EXISTS (
+                SELECT 1 FROM ecr_transactions et
+                WHERE et.transaction_type = 'fiscal_receipt'
+                  AND et.status IN ('processing', 'timeout', 'approved', 'approved_persisting')
+                  AND substr(et.order_id, 1, length(NEW.order_id || ':collect-outstanding:'))
+                        = NEW.order_id || ':collect-outstanding:'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM order_payments represented
+                    WHERE represented.order_id = NEW.order_id
+                      AND represented.status = 'completed'
+                      AND represented.transaction_ref = et.id
+                      AND represented.idempotency_key = et.id
+                  )
+             )
+            BEGIN
+              SELECT RAISE(ABORT, 'outstanding payment collection is active');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_outstanding_collection_refund_update
+            BEFORE UPDATE OF payment_id, order_id, adjustment_type, amount, amount_cents
+            ON payment_adjustments
+            FOR EACH ROW
+            WHEN (OLD.adjustment_type = 'refund' OR NEW.adjustment_type = 'refund')
+             AND EXISTS (
+                SELECT 1 FROM ecr_transactions et
+                WHERE et.transaction_type = 'fiscal_receipt'
+                  AND et.status IN ('processing', 'timeout', 'approved', 'approved_persisting')
+                  AND (
+                    substr(et.order_id, 1, length(OLD.order_id || ':collect-outstanding:'))
+                        = OLD.order_id || ':collect-outstanding:'
+                    OR substr(et.order_id, 1, length(NEW.order_id || ':collect-outstanding:'))
+                        = NEW.order_id || ':collect-outstanding:'
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1 FROM order_payments represented
+                    WHERE represented.order_id IN (OLD.order_id, NEW.order_id)
+                      AND represented.status = 'completed'
+                      AND represented.transaction_ref = et.id
+                      AND represented.idempotency_key = et.id
+                  )
+             )
+            BEGIN
+              SELECT RAISE(ABORT, 'outstanding payment collection is active');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_outstanding_collection_refund_delete
+            BEFORE DELETE ON payment_adjustments
+            FOR EACH ROW
+            WHEN OLD.adjustment_type = 'refund'
+             AND EXISTS (
+                SELECT 1 FROM ecr_transactions et
+                WHERE et.transaction_type = 'fiscal_receipt'
+                  AND et.status IN ('processing', 'timeout', 'approved', 'approved_persisting')
+                  AND substr(et.order_id, 1, length(OLD.order_id || ':collect-outstanding:'))
+                        = OLD.order_id || ':collect-outstanding:'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM order_payments represented
+                    WHERE represented.order_id = OLD.order_id
+                      AND represented.status = 'completed'
+                      AND represented.transaction_ref = et.id
+                      AND represented.idempotency_key = et.id
+                  )
+             )
+            BEGIN
+              SELECT RAISE(ABORT, 'outstanding payment collection is active');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_outstanding_collection_order_update
+            BEFORE UPDATE OF items, total_amount, total_amount_cents, tax_amount,
+                             tax_amount_cents, subtotal, subtotal_cents,
+                             discount_percentage, discount_amount, discount_amount_cents,
+                             tip_amount, tip_amount_cents, order_type, status
+            ON orders
+            FOR EACH ROW
+            WHEN EXISTS (
+                SELECT 1 FROM ecr_transactions et
+                WHERE et.transaction_type = 'fiscal_receipt'
+                  AND et.status IN ('processing', 'timeout', 'approved', 'approved_persisting')
+                  AND substr(et.order_id, 1, length(OLD.id || ':collect-outstanding:'))
+                        = OLD.id || ':collect-outstanding:'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM order_payments represented
+                    WHERE represented.order_id = OLD.id
+                      AND represented.status = 'completed'
+                      AND represented.transaction_ref = et.id
+                      AND represented.idempotency_key = et.id
+                  )
+             )
+            BEGIN
+              SELECT RAISE(ABORT, 'outstanding payment collection is active');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_outstanding_collection_order_delete
+            BEFORE DELETE ON orders
+            FOR EACH ROW
+            WHEN EXISTS (
+                SELECT 1 FROM ecr_transactions et
+                WHERE et.transaction_type = 'fiscal_receipt'
+                  AND et.status IN ('processing', 'timeout', 'approved', 'approved_persisting')
+                  AND substr(et.order_id, 1, length(OLD.id || ':collect-outstanding:'))
+                        = OLD.id || ':collect-outstanding:'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM order_payments represented
+                    WHERE represented.order_id = OLD.id
+                      AND represented.status = 'completed'
+                      AND represented.transaction_ref = et.id
+                      AND represented.idempotency_key = et.id
+                  )
+             )
+            BEGIN
+              SELECT RAISE(ABORT, 'outstanding payment collection is active');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_outstanding_collection_device_delete
+            BEFORE DELETE ON ecr_devices
+            FOR EACH ROW
+            WHEN EXISTS (
+                SELECT 1 FROM ecr_transactions et
+                WHERE et.device_id = OLD.id
+                  AND et.transaction_type = 'fiscal_receipt'
+                  AND et.status IN ('processing', 'timeout', 'approved', 'approved_persisting')
+                  AND instr(et.order_id, ':collect-outstanding:') > 0
+                  AND NOT EXISTS (
+                    SELECT 1 FROM order_payments represented
+                    WHERE represented.order_id = substr(
+                            et.order_id,
+                            1,
+                            instr(et.order_id, ':collect-outstanding:') - 1
+                          )
+                      AND represented.status = 'completed'
+                      AND represented.transaction_ref = et.id
+                      AND represented.idempotency_key = et.id
+                  )
+             )
+            BEGIN
+              SELECT RAISE(ABORT, 'outstanding payment collection is active');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_outstanding_collection_attempt_delete
+            BEFORE DELETE ON ecr_transactions
+            FOR EACH ROW
+            WHEN OLD.transaction_type = 'fiscal_receipt'
+             AND OLD.status IN ('processing', 'timeout', 'approved', 'approved_persisting')
+             AND instr(OLD.order_id, ':collect-outstanding:') > 0
+             AND NOT EXISTS (
+                SELECT 1 FROM order_payments represented
+                WHERE represented.order_id = substr(
+                        OLD.order_id,
+                        1,
+                        instr(OLD.order_id, ':collect-outstanding:') - 1
+                      )
+                  AND represented.status = 'completed'
+                  AND represented.transaction_ref = OLD.id
+                  AND represented.idempotency_key = OLD.id
+             )
+            BEGIN
+              SELECT RAISE(ABORT, 'outstanding payment collection is active');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_outstanding_collection_attempt_identity_update
+            BEFORE UPDATE OF id, device_id, order_id, transaction_type, amount, currency, started_at
+            ON ecr_transactions
+            FOR EACH ROW
+            WHEN OLD.transaction_type = 'fiscal_receipt'
+             AND OLD.status IN ('processing', 'timeout', 'approved', 'approved_persisting')
+             AND instr(OLD.order_id, ':collect-outstanding:') > 0
+             AND NOT EXISTS (
+                SELECT 1 FROM order_payments represented
+                WHERE represented.order_id = substr(
+                        OLD.order_id,
+                        1,
+                        instr(OLD.order_id, ':collect-outstanding:') - 1
+                      )
+                  AND represented.status = 'completed'
+                  AND represented.transaction_ref = OLD.id
+                  AND represented.idempotency_key = OLD.id
+             )
+            BEGIN
+              SELECT RAISE(ABORT, 'outstanding payment collection is active');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_outstanding_collection_attempt_status_update
+            BEFORE UPDATE OF status ON ecr_transactions
+            FOR EACH ROW
+            WHEN OLD.transaction_type = 'fiscal_receipt'
+             AND instr(OLD.order_id, ':collect-outstanding:') > 0
+             AND OLD.status IN ('processing', 'timeout', 'approved', 'approved_persisting')
+             AND NOT EXISTS (
+                SELECT 1 FROM order_payments represented
+                WHERE represented.order_id = substr(
+                        OLD.order_id,
+                        1,
+                        instr(OLD.order_id, ':collect-outstanding:') - 1
+                      )
+                  AND represented.status = 'completed'
+                  AND represented.transaction_ref = OLD.id
+                  AND represented.idempotency_key = OLD.id
+             )
+             AND NOT (
+                  NEW.status = OLD.status
+               OR (OLD.status = 'processing'
+                   AND NEW.status IN ('approved', 'timeout', 'declined', 'error', 'cancelled'))
+               OR (OLD.status = 'approved' AND NEW.status = 'approved_persisting')
+               OR (OLD.status = 'approved_persisting'
+                   AND NEW.status = 'approved'
+                   AND EXISTS (
+                     SELECT 1 FROM order_payments represented
+                     WHERE represented.order_id = substr(
+                             OLD.order_id,
+                             1,
+                             instr(OLD.order_id, ':collect-outstanding:') - 1
+                           )
+                       AND represented.status = 'completed'
+                       AND represented.transaction_ref = OLD.id
+                       AND represented.idempotency_key = OLD.id
+                   ))
+             )
+            BEGIN
+              SELECT RAISE(ABORT, 'outstanding payment collection state is protected');
+            END;
+            "#,
+        )
+        .map_err(|error| format!("v74 install outstanding collection interlock: {error}"))?;
+    }
+
+    conn.execute("INSERT INTO schema_version (version) VALUES (74)", [])
+        .map_err(|error| format!("v74 record schema_version: {error}"))?;
+    info!("Applied migration v74 (durable outstanding payment interlock)");
+    Ok(())
+}
+
 /// Read the persisted `idempotency_key` from an entity table.
 ///
 /// Wave 4 architectural contract:
@@ -4945,6 +5431,170 @@ pub fn ecr_insert_transaction(conn: &Connection, tx: &serde_json::Value) -> Resu
         ],
     )
     .map_err(|e| format!("ecr_insert_transaction: {e}"))?;
+    Ok(())
+}
+
+/// Update the durable pre-dispatch ECR attempt with the device outcome.
+///
+/// Outstanding collections insert the row before hardware I/O. Updating that
+/// exact primary key preserves one stable attempt identity across processing,
+/// timeout, approval, and definite-failure outcomes.
+pub(crate) fn ecr_update_transaction_outcome(
+    conn: &Connection,
+    tx: &serde_json::Value,
+) -> Result<(), String> {
+    let id = tx
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or("ecr_update_transaction_outcome: missing id")?;
+    let status = tx
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or("ecr_update_transaction_outcome: missing status")?;
+    let current = conn
+        .query_row(
+            "SELECT status, transaction_type, order_id
+             FROM ecr_transactions WHERE id = ?1",
+            [id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| format!("ecr_update_transaction_outcome: {error}"))?
+        .ok_or_else(|| {
+            format!("ecr_update_transaction_outcome: durable attempt {id} was not found")
+        })?;
+    let is_outstanding = current.1 == "fiscal_receipt"
+        && current
+            .2
+            .as_deref()
+            .is_some_and(|order_id| order_id.contains(":collect-outstanding:"));
+    let allowed_outstanding_outcome = current.0 == "processing"
+        && matches!(
+            status,
+            "approved" | "timeout" | "declined" | "error" | "cancelled"
+        );
+    if !is_outstanding || !allowed_outstanding_outcome {
+        return Err(format!(
+            "ecr_update_transaction_outcome: invalid transition from {} to {status}",
+            current.0
+        ));
+    }
+    let receipt_data = tx.get("receiptData").map(serde_json::Value::to_string);
+    let raw_response = tx.get("rawResponse").map(serde_json::Value::to_string);
+    let updated = conn
+        .execute(
+            "UPDATE ecr_transactions
+             SET status = ?2,
+                 authorization_code = COALESCE(?3, authorization_code),
+                 terminal_reference = COALESCE(?4, terminal_reference),
+                 fiscal_receipt_number = COALESCE(?5, fiscal_receipt_number),
+                 card_type = COALESCE(?6, card_type),
+                 card_last_four = COALESCE(?7, card_last_four),
+                 entry_method = COALESCE(?8, entry_method),
+                 receipt_data = COALESCE(?9, receipt_data),
+                 error_message = ?10,
+                 raw_response = COALESCE(?11, raw_response),
+                 completed_at = COALESCE(?12, completed_at)
+             WHERE id = ?1",
+            params![
+                id,
+                status,
+                tx.get("authorizationCode")
+                    .and_then(serde_json::Value::as_str),
+                tx.get("terminalReference")
+                    .and_then(serde_json::Value::as_str),
+                tx.get("fiscalReceiptNumber")
+                    .and_then(serde_json::Value::as_str),
+                tx.get("cardType").and_then(serde_json::Value::as_str),
+                tx.get("cardLastFour").and_then(serde_json::Value::as_str),
+                tx.get("entryMethod").and_then(serde_json::Value::as_str),
+                receipt_data,
+                tx.get("errorMessage").and_then(serde_json::Value::as_str),
+                raw_response,
+                tx.get("completedAt").and_then(serde_json::Value::as_str),
+            ],
+        )
+        .map_err(|error| format!("ecr_update_transaction_outcome: {error}"))?;
+    if updated != 1 {
+        return Err(format!(
+            "ecr_update_transaction_outcome: durable attempt {id} was not found"
+        ));
+    }
+    Ok(())
+}
+
+/// Enter the only state in which v74 permits the exact owning payment INSERT.
+/// Must be called inside the same `BEGIN IMMEDIATE` transaction as that INSERT.
+pub(crate) fn ecr_begin_outstanding_payment_persist(
+    conn: &Connection,
+    attempt_id: &str,
+    order_id: &str,
+) -> Result<(), String> {
+    let reference_prefix = format!("{order_id}:collect-outstanding:");
+    let updated = conn
+        .execute(
+            "UPDATE ecr_transactions
+             SET status = 'approved_persisting'
+             WHERE id = ?1
+               AND order_id IS NOT NULL
+               AND substr(order_id, 1, length(?2)) = ?2
+               AND transaction_type = 'fiscal_receipt'
+               AND status = 'approved'
+               AND NOT EXISTS (
+                 SELECT 1 FROM order_payments represented
+                 WHERE represented.order_id = ?3
+                   AND represented.status = 'completed'
+                   AND represented.transaction_ref = ecr_transactions.id
+                   AND represented.idempotency_key = ecr_transactions.id
+               )",
+            params![attempt_id, reference_prefix, order_id],
+        )
+        .map_err(|error| format!("authorize outstanding payment persistence: {error}"))?;
+    if updated != 1 {
+        return Err(
+            "The fiscal approval is not available for exact local payment persistence".to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// Return the attempt to `approved` only after its exact payment representation
+/// exists. Must share the owner's transaction so rollback restores both the
+/// unrepresented approval and its durable reconciliation block.
+pub(crate) fn ecr_finish_outstanding_payment_persist(
+    conn: &Connection,
+    attempt_id: &str,
+    order_id: &str,
+) -> Result<(), String> {
+    let updated = conn
+        .execute(
+            "UPDATE ecr_transactions
+             SET status = 'approved'
+             WHERE id = ?1
+               AND status = 'approved_persisting'
+               AND EXISTS (
+                 SELECT 1 FROM order_payments represented
+                 WHERE represented.order_id = ?2
+                   AND represented.status = 'completed'
+                   AND represented.transaction_ref = ecr_transactions.id
+                   AND represented.idempotency_key = ecr_transactions.id
+               )",
+            params![attempt_id, order_id],
+        )
+        .map_err(|error| format!("finalize outstanding payment persistence: {error}"))?;
+    if updated != 1 {
+        return Err(
+            "The fiscal approval was not represented by the exact completed payment".to_string(),
+        );
+    }
     Ok(())
 }
 
@@ -5498,6 +6148,647 @@ mod tests {
         );
     }
 
+    fn seed_outstanding_collection_reservation(
+        conn: &Connection,
+        order_id: &str,
+        transaction_id: &str,
+    ) {
+        conn.execute(
+            "INSERT OR IGNORE INTO orders (id) VALUES (?1)",
+            params![order_id],
+        )
+        .expect("seed reservation order");
+        conn.execute(
+            "INSERT OR IGNORE INTO ecr_devices (
+                id, name, device_type, brand, protocol, connection_type,
+                connection_details
+             ) VALUES (
+                'reservation-device', 'Reservation device', 'cash_register',
+                'RBS', 'cap_driver', 'network', '{}'
+             )",
+            [],
+        )
+        .expect("seed reservation ECR device");
+        conn.execute(
+            "INSERT INTO ecr_transactions (
+                id, device_id, order_id, transaction_type, amount, currency,
+                status, receipt_data, started_at
+             ) VALUES (
+                ?1, 'reservation-device', ?2 || ':collect-outstanding:attempt',
+                'fiscal_receipt', 4200, 'EUR', 'processing',
+                '{\"intendedMethod\":\"card\"}', '2026-08-13T12:00:00Z'
+             )",
+            params![transaction_id, order_id],
+        )
+        .expect("seed durable processing collection");
+    }
+
+    #[test]
+    fn outstanding_processing_attempt_blocks_other_payment_and_refund_ledger_mutations() {
+        let conn = test_db();
+        run_migrations(&conn).expect("migrations");
+        conn.execute(
+            "INSERT INTO orders (id) VALUES ('reserved-ledger-order')",
+            [],
+        )
+        .expect("seed order");
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, amount_cents, status,
+                sync_status, created_at, updated_at
+             ) VALUES (
+                'existing-ledger-payment', 'reserved-ledger-order', 'cash',
+                10.00, 1000, 'completed', 'pending', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed existing completed payment");
+        conn.execute(
+            "INSERT INTO ecr_devices (
+                id, name, device_type, brand, protocol, connection_type,
+                connection_details
+             ) VALUES (
+                'reservation-device', 'Reservation device', 'cash_register',
+                'RBS', 'cap_driver', 'network', '{}'
+             )",
+            [],
+        )
+        .expect("seed reservation ECR device");
+        conn.execute(
+            "INSERT INTO ecr_transactions (
+                id, device_id, order_id, transaction_type, amount, currency,
+                status, receipt_data, started_at
+             ) VALUES (
+                'owning-fiscal-attempt', 'reservation-device',
+                'reserved-ledger-order:collect-outstanding:attempt',
+                'fiscal_receipt', 3200, 'EUR', 'processing',
+                '{\"intendedMethod\":\"card\"}', '2026-08-13T12:00:00Z'
+             )",
+            [],
+        )
+        .expect("seed durable processing collection");
+
+        let payment_error = conn
+            .execute(
+                "INSERT INTO order_payments (
+                    id, order_id, method, amount, amount_cents, status,
+                    sync_status, created_at, updated_at
+                 ) VALUES (
+                    'racing-payment', 'reserved-ledger-order', 'cash', 5.00, 500,
+                    'completed', 'pending', datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .expect_err("another completed payment must not change the reserved ledger");
+        assert!(payment_error.to_string().contains("collection is active"));
+
+        let refund_error = conn
+            .execute(
+                "INSERT INTO payment_adjustments (
+                    id, payment_id, order_id, adjustment_type, amount, amount_cents,
+                    reason, sync_state, created_at, updated_at
+                 ) VALUES (
+                    'racing-refund', 'existing-ledger-payment', 'reserved-ledger-order',
+                    'refund', 1.00, 100, 'racing refund', 'pending',
+                    datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .expect_err("a refund must not change the reserved ledger");
+        assert!(refund_error.to_string().contains("collection is active"));
+
+        let void_error = conn
+            .execute(
+                "UPDATE order_payments SET status = 'voided'
+                 WHERE id = 'existing-ledger-payment'",
+                [],
+            )
+            .expect_err("voiding a completed payment must not change the reserved ledger");
+        assert!(void_error.to_string().contains("collection is active"));
+    }
+
+    #[test]
+    fn outstanding_reservation_blocks_financial_updates_and_cascade_deletes() {
+        let conn = test_db();
+        run_migrations(&conn).expect("migrations");
+        conn.execute(
+            "INSERT INTO orders (id, total_amount, total_amount_cents)
+             VALUES ('reserved-delete-order', 50.00, 5000)",
+            [],
+        )
+        .expect("seed guarded order");
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, amount_cents, status,
+                sync_status, created_at, updated_at
+             ) VALUES (
+                'reserved-delete-payment', 'reserved-delete-order', 'cash',
+                10.00, 1000, 'completed', 'pending', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed guarded payment");
+        conn.execute(
+            "INSERT INTO payment_adjustments (
+                id, payment_id, order_id, adjustment_type, amount, amount_cents,
+                reason, sync_state, created_at, updated_at
+             ) VALUES (
+                'reserved-delete-refund', 'reserved-delete-payment',
+                'reserved-delete-order', 'refund', 1.00, 100,
+                'seed refund', 'pending', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed guarded refund");
+        seed_outstanding_collection_reservation(
+            &conn,
+            "reserved-delete-order",
+            "reserved-delete-attempt",
+        );
+
+        for (sql, message) in [
+            (
+                "DELETE FROM order_payments WHERE id = 'reserved-delete-payment'",
+                "completed payment delete",
+            ),
+            (
+                "UPDATE payment_adjustments SET amount_cents = 200, amount = 2.00
+                 WHERE id = 'reserved-delete-refund'",
+                "refund amount update",
+            ),
+            (
+                "DELETE FROM payment_adjustments WHERE id = 'reserved-delete-refund'",
+                "refund delete",
+            ),
+            (
+                "UPDATE orders SET total_amount_cents = 5100, total_amount = 51.00
+                 WHERE id = 'reserved-delete-order'",
+                "order total update",
+            ),
+            (
+                "DELETE FROM orders WHERE id = 'reserved-delete-order'",
+                "order cascade delete",
+            ),
+        ] {
+            let error = conn.execute(sql, []).expect_err(message);
+            assert!(
+                error.to_string().contains("collection is active"),
+                "unexpected {message} error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_outstanding_attempt_can_persist_then_releases_the_ledger() {
+        let conn = test_db();
+        run_migrations(&conn).expect("migrations");
+        seed_outstanding_collection_reservation(
+            &conn,
+            "exact-collector-order",
+            "exact-fiscal-attempt",
+        );
+
+        conn.execute(
+            "UPDATE ecr_transactions SET status = 'approved'
+             WHERE id = 'exact-fiscal-attempt'",
+            [],
+        )
+        .expect("record device approval before local payment persistence");
+
+        let unowned_error = conn
+            .execute(
+                "INSERT INTO order_payments (
+                    id, order_id, method, amount, amount_cents, status, transaction_ref,
+                    sync_status, created_at, updated_at
+                 ) VALUES (
+                    'unowned-payment', 'exact-collector-order', 'card', 42.00,
+                    4200, 'completed', 'exact-fiscal-attempt', 'pending',
+                    datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .expect_err("matching transaction reference alone must not bypass the reservation");
+        assert!(unowned_error.to_string().contains("collection is active"));
+
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .expect("begin exact collector transaction");
+        ecr_begin_outstanding_payment_persist(
+            &conn,
+            "exact-fiscal-attempt",
+            "exact-collector-order",
+        )
+        .expect("enter the narrowly scoped exact-owner persistence state");
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, amount_cents, status, transaction_ref,
+                idempotency_key,
+                sync_status, created_at, updated_at
+             ) VALUES (
+                'exact-collector-payment', 'exact-collector-order', 'card', 42.00,
+                4200, 'completed', 'exact-fiscal-attempt', 'exact-fiscal-attempt', 'pending',
+                datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("the exact owning fiscal attempt may persist its payment");
+        ecr_finish_outstanding_payment_persist(
+            &conn,
+            "exact-fiscal-attempt",
+            "exact-collector-order",
+        )
+        .expect("finalize the represented fiscal attempt");
+        conn.execute_batch("COMMIT")
+            .expect("commit exact collector transaction");
+
+        conn.execute(
+            "INSERT INTO payment_adjustments (
+                id, payment_id, order_id, adjustment_type, amount, amount_cents,
+                reason, sync_state, created_at, updated_at
+             ) VALUES (
+                'post-reconcile-refund', 'exact-collector-payment', 'exact-collector-order',
+                'refund', 1.00, 100, 'after reconciliation', 'pending',
+                datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("a represented attempt must not leave the ledger permanently locked");
+    }
+
+    #[test]
+    fn outstanding_reservation_is_enforced_by_a_second_sqlite_connection() {
+        let unique = format!(
+            "pos-outstanding-reservation-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        );
+        let db_path = std::env::temp_dir().join(unique);
+        let first = open_and_configure(&db_path).expect("open first sqlite connection");
+        run_migrations(&first).expect("migrations");
+        first
+            .execute(
+                "INSERT INTO orders (id) VALUES ('cross-connection-order')",
+                [],
+            )
+            .expect("seed cross-connection order");
+        first
+            .execute(
+                "INSERT INTO order_payments (
+                    id, order_id, method, amount, amount_cents, status,
+                    sync_status, created_at, updated_at
+                 ) VALUES (
+                    'cross-existing-payment', 'cross-connection-order', 'cash',
+                    10.00, 1000, 'completed', 'pending', datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .expect("seed cross-connection completed payment");
+        seed_outstanding_collection_reservation(
+            &first,
+            "cross-connection-order",
+            "cross-connection-fiscal",
+        );
+        let second = open_and_configure(&db_path).expect("open second sqlite connection");
+
+        let error = second
+            .execute(
+                "INSERT INTO order_payments (
+                    id, order_id, method, amount, amount_cents, status,
+                    sync_status, created_at, updated_at
+                 ) VALUES (
+                    'cross-connection-payment', 'cross-connection-order', 'cash',
+                    5.00, 500, 'completed', 'pending', datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .expect_err("the durable reservation must block another SQLite writer");
+        assert!(error.to_string().contains("collection is active"));
+
+        let refund_error = second
+            .execute(
+                "INSERT INTO payment_adjustments (
+                    id, payment_id, order_id, adjustment_type, amount, amount_cents,
+                    reason, sync_state, created_at, updated_at
+                 ) VALUES (
+                    'cross-connection-refund', 'cross-existing-payment',
+                    'cross-connection-order', 'refund', 1.00, 100,
+                    'racing refund', 'pending', datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .expect_err("the durable reservation must block another SQLite refund writer");
+        assert!(refund_error.to_string().contains("collection is active"));
+
+        let void_error = second
+            .execute(
+                "UPDATE order_payments SET status = 'voided'
+                 WHERE id = 'cross-existing-payment'",
+                [],
+            )
+            .expect_err("the durable reservation must block another SQLite void writer");
+        assert!(void_error.to_string().contains("collection is active"));
+
+        drop(second);
+        drop(first);
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn exact_owner_rollback_restores_the_reconciliation_blocker() {
+        let conn = test_db();
+        run_migrations(&conn).expect("migrations");
+        seed_outstanding_collection_reservation(
+            &conn,
+            "rollback-collector-order",
+            "rollback-fiscal-attempt",
+        );
+        conn.execute(
+            "UPDATE ecr_transactions SET status = 'approved'
+             WHERE id = 'rollback-fiscal-attempt'",
+            [],
+        )
+        .expect("record device approval");
+
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .expect("begin exact-owner transaction");
+        ecr_begin_outstanding_payment_persist(
+            &conn,
+            "rollback-fiscal-attempt",
+            "rollback-collector-order",
+        )
+        .expect("enter owner persistence state");
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, amount_cents, status, transaction_ref,
+                idempotency_key,
+                sync_status, created_at, updated_at
+             ) VALUES (
+                'rolled-back-payment', 'rollback-collector-order', 'card', 42.00,
+                4200, 'completed', 'rollback-fiscal-attempt', 'rollback-fiscal-attempt', 'pending',
+                datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("exact owner insert inside transaction");
+        ecr_finish_outstanding_payment_persist(
+            &conn,
+            "rollback-fiscal-attempt",
+            "rollback-collector-order",
+        )
+        .expect("finalize inside transaction");
+        conn.execute_batch("ROLLBACK")
+            .expect("simulate crash rollback");
+
+        let state: String = conn
+            .query_row(
+                "SELECT status FROM ecr_transactions WHERE id = 'rollback-fiscal-attempt'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read restored attempt state");
+        assert_eq!(state, "approved");
+        let payment_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM order_payments WHERE id = 'rolled-back-payment'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count rolled-back payment");
+        assert_eq!(payment_count, 0);
+
+        let blocked = conn
+            .execute(
+                "INSERT INTO order_payments (
+                    id, order_id, method, amount, amount_cents, status,
+                    sync_status, created_at, updated_at
+                 ) VALUES (
+                    'post-rollback-racer', 'rollback-collector-order', 'cash', 1.00,
+                    100, 'completed', 'pending', datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .expect_err("rollback must leave the order reconciliation-blocked");
+        assert!(blocked.to_string().contains("collection is active"));
+    }
+
+    #[test]
+    fn outstanding_attempt_outcome_updates_the_existing_row() {
+        let conn = test_db();
+        run_migrations(&conn).expect("migrations");
+        seed_outstanding_collection_reservation(
+            &conn,
+            "outcome-update-order",
+            "outcome-update-attempt",
+        );
+
+        ecr_update_transaction_outcome(
+            &conn,
+            &serde_json::json!({
+                "id": "outcome-update-attempt",
+                "status": "approved",
+                "authorizationCode": "AUTH-1",
+                "terminalReference": "TERM-1",
+                "fiscalReceiptNumber": "RECEIPT-1",
+                "receiptData": { "intendedMethod": "card" },
+                "completedAt": "2026-08-13T12:00:05Z",
+            }),
+        )
+        .expect("update the pre-hardware attempt row");
+
+        let (count, status, authorization): (i64, String, Option<String>) = conn
+            .query_row(
+                "SELECT COUNT(*), MAX(status), MAX(authorization_code)
+                 FROM ecr_transactions WHERE id = 'outcome-update-attempt'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read updated attempt");
+        assert_eq!(count, 1, "hardware outcome must not create a second row");
+        assert_eq!(status, "approved");
+        assert_eq!(authorization.as_deref(), Some("AUTH-1"));
+    }
+
+    #[test]
+    fn approved_attempt_only_unlocks_after_exact_payment_representation() {
+        let conn = test_db();
+        run_migrations(&conn).expect("migrations");
+        seed_outstanding_collection_reservation(
+            &conn,
+            "approved-guard-order",
+            "approved-guard-attempt",
+        );
+        conn.execute(
+            "UPDATE ecr_transactions SET status = 'approved'
+             WHERE id = 'approved-guard-attempt'",
+            [],
+        )
+        .expect("persist approved outcome");
+
+        let unrepresented_error = conn
+            .execute(
+                "INSERT INTO order_payments (
+                    id, order_id, method, amount, amount_cents, status,
+                    sync_status, created_at, updated_at
+                 ) VALUES (
+                    'approved-unrepresented-racer', 'approved-guard-order', 'cash',
+                    1.00, 100, 'completed', 'pending', datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .expect_err("approved without a payment row must keep blocking");
+        assert!(unrepresented_error
+            .to_string()
+            .contains("collection is active"));
+
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .expect("begin exact representation transaction");
+        ecr_begin_outstanding_payment_persist(
+            &conn,
+            "approved-guard-attempt",
+            "approved-guard-order",
+        )
+        .expect("authorize exact owner");
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, amount_cents, status, transaction_ref,
+                idempotency_key, sync_status, created_at, updated_at
+             ) VALUES (
+                'approved-representation', 'approved-guard-order', 'card', 42.00,
+                4200, 'completed', 'approved-guard-attempt', 'approved-guard-attempt',
+                'pending', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("persist exact payment representation");
+        ecr_finish_outstanding_payment_persist(
+            &conn,
+            "approved-guard-attempt",
+            "approved-guard-order",
+        )
+        .expect("finish exact representation");
+        conn.execute_batch("COMMIT")
+            .expect("commit represented attempt");
+
+        conn.execute(
+            "INSERT INTO payment_adjustments (
+                id, payment_id, order_id, adjustment_type, amount, amount_cents,
+                reason, sync_state, created_at, updated_at
+             ) VALUES (
+                'approved-post-representation-refund', 'approved-representation',
+                'approved-guard-order', 'refund', 1.00, 100,
+                'after exact representation', 'pending', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("represented approval unlocks future ledger mutations");
+    }
+
+    #[test]
+    fn active_outstanding_attempt_cannot_be_erased_or_tampered_with() {
+        let conn = test_db();
+        run_migrations(&conn).expect("migrations");
+        seed_outstanding_collection_reservation(
+            &conn,
+            "attempt-integrity-order",
+            "attempt-integrity-id",
+        );
+
+        let device_delete_error = ecr_delete_device(&conn, "reservation-device")
+            .expect_err("deleting the owning device must not cascade away an active attempt");
+        assert!(device_delete_error.contains("collection is active"));
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM ecr_transactions WHERE id = 'attempt-integrity-id'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count attempt after rejected device delete"),
+            1
+        );
+
+        for (sql, message) in [
+            (
+                "DELETE FROM ecr_transactions WHERE id = 'attempt-integrity-id'",
+                "direct active-attempt delete must be blocked",
+            ),
+            (
+                "UPDATE ecr_transactions SET order_id = 'different-order:collect-outstanding:x'
+                 WHERE id = 'attempt-integrity-id'",
+                "active-attempt identity tamper must be blocked",
+            ),
+        ] {
+            let error = conn.execute(sql, []).expect_err(message);
+            assert!(error.to_string().contains("collection is active"));
+        }
+
+        ecr_update_transaction_outcome(
+            &conn,
+            &serde_json::json!({
+                "id": "attempt-integrity-id",
+                "status": "timeout",
+                "errorMessage": "unknown result",
+                "completedAt": "2026-08-13T12:00:05Z",
+            }),
+        )
+        .expect("processing may become a durable ambiguous timeout");
+        let status_tamper_error = conn
+            .execute(
+                "UPDATE ecr_transactions SET status = 'error'
+                 WHERE id = 'attempt-integrity-id'",
+                [],
+            )
+            .expect_err("an ambiguous timeout must not be relabeled as definite failure");
+        assert!(status_tamper_error
+            .to_string()
+            .contains("collection state is protected"));
+
+        let invalid_helper_transition = ecr_update_transaction_outcome(
+            &conn,
+            &serde_json::json!({
+                "id": "attempt-integrity-id",
+                "status": "declined",
+                "completedAt": "2026-08-13T12:00:06Z",
+            }),
+        )
+        .expect_err("the outcome helper must not release an ambiguous timeout");
+        assert!(invalid_helper_transition.contains("invalid transition"));
+    }
+
+    #[test]
+    fn migration_v74_is_retryable_and_keeps_one_trigger_set() {
+        let conn = test_db();
+        run_migrations(&conn).expect("migrations");
+
+        conn.execute("DELETE FROM schema_version WHERE version = 74", [])
+            .expect("rewind v74 marker");
+        run_migration_tx(&conn, 74, migrate_v74).expect("retry v74 migration");
+
+        let marker_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_version WHERE version = 74",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count v74 marker");
+        let trigger_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'trigger' AND name LIKE 'trg_outstanding_collection_%'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count v74 triggers");
+        assert_eq!(marker_count, 1);
+        assert_eq!(
+            trigger_count, 12,
+            "migration must install one canonical trigger set"
+        );
+    }
+
     // --- receipt_number fiscal-entitlement migration scoping (v67/v68) --------
 
     /// Build a minimal pre-v67 schema: an `orders` row with NO receipt_number
@@ -5976,6 +7267,195 @@ mod tests {
         );
 
         assert_eq!(max_schema_version(&conn), CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migration_v73_adds_managed_print_columns_and_attempt_tables() {
+        let conn = test_db();
+        run_migrations(&conn).expect("migrations");
+
+        let required = [
+            "document_snapshot_version",
+            "document_snapshot_zlib",
+            "document_snapshot_sha256",
+            "render_profile_snapshot_json",
+            "reprint_of_job_id",
+            "completed_at",
+            "history_expires_at",
+        ];
+        for column in required {
+            assert!(
+                column_exists(&conn, "print_jobs", column).unwrap(),
+                "missing {column}"
+            );
+        }
+
+        let tables = table_names(&conn);
+        assert!(
+            tables.contains(&"print_job_attempts".to_string()),
+            "missing print_job_attempts"
+        );
+        assert!(
+            tables.contains(&"print_target_state".to_string()),
+            "missing print_target_state"
+        );
+
+        for index in [
+            "idx_print_attempts_job",
+            "idx_print_attempts_spool",
+            "idx_print_attempts_active_target",
+            "idx_print_jobs_history_expiry_status",
+            "idx_print_jobs_reprint_parent",
+        ] {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1)",
+                    [index],
+                    |row| row.get(0),
+                )
+                .expect("read attempt index");
+            assert!(exists, "missing {index}");
+        }
+
+        let history_index_sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type = 'index' AND name = 'idx_print_jobs_history_expiry_status'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read print history expiry index SQL");
+        assert!(history_index_sql.contains("status"));
+        assert!(history_index_sql.contains("julianday(history_expires_at)"));
+
+        let parent_index_sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type = 'index' AND name = 'idx_print_jobs_reprint_parent'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read Reprint parent index SQL");
+        assert!(parent_index_sql.contains("reprint_of_job_id"));
+
+        assert_eq!(max_schema_version(&conn), CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migration_v73_preserves_existing_print_jobs() {
+        let conn = test_db();
+        conn.execute_batch(
+            "
+            CREATE TABLE schema_version (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT DEFAULT (datetime('now'))
+            );
+            INSERT INTO schema_version (version) VALUES (72);
+            CREATE TABLE print_jobs (
+                id TEXT PRIMARY KEY,
+                entity_type TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            ",
+        )
+        .expect("create v72 print-job schema");
+        for (index, status) in ["printed", "dispatched", "failed", "cancelled"]
+            .into_iter()
+            .enumerate()
+        {
+            conn.execute(
+                "INSERT INTO print_jobs (
+                     id, entity_type, entity_id, status, created_at, updated_at
+                 ) VALUES (
+                     ?1, 'order_receipt', ?2, ?3,
+                     '2026-08-01 10:00:00', ?4
+                 )",
+                params![
+                    format!("v72-print-job-{status}"),
+                    format!("order-v72-{status}"),
+                    status,
+                    format!("2026-08-01 10:0{}:00", index + 1),
+                ],
+            )
+            .expect("seed v72 terminal print job");
+        }
+
+        run_migration_tx(&conn, 73, migrate_v73).expect("migrations through v73");
+
+        for (index, status) in ["printed", "dispatched", "failed", "cancelled"]
+            .into_iter()
+            .enumerate()
+        {
+            let expected_updated = format!("2026-08-01 10:0{}:00", index + 1);
+            let expected_expires = format!("2026-08-31 10:0{}:00", index + 1);
+            let job: (String, String, String, Option<String>, Option<String>) = conn
+                .query_row(
+                    "SELECT entity_id, status, updated_at,
+                            completed_at, history_expires_at
+                     FROM print_jobs WHERE id = ?1",
+                    [format!("v72-print-job-{status}")],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    },
+                )
+                .expect("existing terminal print job survives v73");
+            assert_eq!(
+                job,
+                (
+                    format!("order-v72-{status}"),
+                    status.to_string(),
+                    expected_updated.clone(),
+                    Some(expected_updated),
+                    Some(expected_expires),
+                ),
+                "v73 must backfill both terminal timestamps for {status}",
+            );
+        }
+        assert_eq!(max_schema_version(&conn), 73);
+    }
+
+    #[test]
+    fn migration_v73_makes_snapshot_immutable() {
+        let conn = test_db();
+        run_migrations(&conn).expect("migrations");
+        conn.execute(
+            "INSERT INTO print_jobs (id, entity_type, entity_id, status, created_at, updated_at)
+             VALUES ('immutable-snapshot-job', 'order_receipt', 'order-immutable', 'pending',
+                     datetime('now'), datetime('now'))",
+            [],
+        )
+        .expect("insert print job");
+
+        conn.execute(
+            "UPDATE print_jobs
+             SET document_snapshot_version = 1,
+                 document_snapshot_zlib = X'789C',
+                 document_snapshot_sha256 = 'original-hash',
+                 render_profile_snapshot_json = '{\"template\":\"classic\"}'
+             WHERE id = 'immutable-snapshot-job'",
+            [],
+        )
+        .expect("first snapshot write succeeds");
+
+        let update = conn.execute(
+            "UPDATE print_jobs
+             SET document_snapshot_version = 2
+             WHERE id = 'immutable-snapshot-job'",
+            [],
+        );
+        assert!(
+            update.is_err(),
+            "a non-null document snapshot version must be immutable"
+        );
     }
 
     #[test]

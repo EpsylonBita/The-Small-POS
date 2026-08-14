@@ -76,6 +76,7 @@ const entryPoints = [
   path.join(testsRoot, 'renderer', 'split-payment-terminal-card-integrity.test.ts'),
   path.join(testsRoot, 'renderer', 'split-payment-currency.test.ts'),
   path.join(testsRoot, 'renderer', 'checkout-failure-contract.test.ts'),
+  path.join(testsRoot, 'renderer', 'split-checkout-dismissal.test.ts'),
   // THE-324: retail checkout money/order-item seam — fee-exclusive total
   // contract with OrderFlow and offer-reward lines mapped to real UUIDs.
   path.join(testsRoot, 'renderer', 'retail-checkout-money-contract.test.ts'),
@@ -94,6 +95,7 @@ const entryPoints = [
   path.join(testsRoot, 'renderer', 'users-page-ui.test.ts'),
   path.join(testsRoot, 'renderer', 'user-directory-filters.test.ts'),
   path.join(testsRoot, 'renderer', 'custom-titlebar-ui.test.ts'),
+  path.join(testsRoot, 'renderer', 'sync-status-health-modal-theme-ui.test.ts'),
   path.join(testsRoot, 'renderer', 'automatic-update-check.test.ts'),
   path.join(testsRoot, 'renderer', 'release-1-4-33-i18n.test.ts'),
   path.join(testsRoot, 'renderer', 'featured-weekly-ranking.test.ts'),
@@ -105,6 +107,7 @@ const entryPoints = [
   path.join(testsRoot, 'renderer', 'remaining-page-headers-ui.test.ts'),
   path.join(testsRoot, 'renderer', 'payment-terminals-ui.test.ts'),
   path.join(testsRoot, 'renderer', 'settings-modal-ui.test.ts'),
+  path.join(testsRoot, 'renderer', 'printer-queue-wizard-i18n.test.ts'),
   // Settings > Data > Local Recovery: guards that the selected recovery detail never renders raw snapshot/
   // terminal/branch identifiers or filesystem paths (cashier-facing). Registered here so the guard actually
   // runs in the parity suite -- it previously existed but was never executed by this runner.

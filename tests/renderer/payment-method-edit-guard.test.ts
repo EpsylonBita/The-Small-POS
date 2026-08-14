@@ -12,12 +12,16 @@ const paymentsSource = readFileSync(
   path.join(projectRoot, 'src-tauri', 'src', 'payments.rs'),
   'utf8',
 );
+const paymentRoutingSource = readFileSync(
+  path.join(projectRoot, 'src', 'renderer', 'utils', 'paymentEditRouting.ts'),
+  'utf8',
+);
 
 test('payment-method edit exposes every completed payment row instead of blocking split orders', () => {
   assert.match(dashboardSource, /const handleEditPayment = async \(\) =>/);
   assert.match(
     dashboardSource,
-    /await bridge\.payments\.getOrderPayments\(\s*editablePaymentOrder\.id,\s*\)/,
+    /await loadPaymentEditRoute\(bridge, editablePaymentOrder\)/,
   );
   assert.doesNotMatch(
     dashboardSource,
@@ -26,7 +30,21 @@ test('payment-method edit exposes every completed payment row instead of blockin
   );
   assert.match(
     dashboardSource,
-    /payments:\s*completedPayments\.map\(/,
+    /payments:\s*route\.payments/,
+  );
+  assert.match(
+    paymentRoutingSource,
+    /await bridge\.payments\.getOrderPayments\(orderId\)/,
+  );
+  assert.match(
+    dashboardSource,
+    /route\.kind === "collect-missing"[\s\S]*?await loadPersistedSplitDismissal\([\s\S]*?setMissingPaymentRepairTarget/,
+    'zero-row pending orders must collect a real payment instead of opening method edit',
+  );
+  assert.match(
+    dashboardSource,
+    /setMissingPaymentRepairTarget\(\{[\s\S]*?amount:\s*settlement\.outstandingAmount/,
+    'the collection modal must display the authoritative remaining balance',
   );
   assert.match(
     dashboardSource,
@@ -61,6 +79,38 @@ test('native payment edit remains ambiguity-safe while supporting an explicit pa
     dashboardSource,
     /toast\.error\(extractOrderDashboardErrorMessage\(error\)/,
   );
+});
+
+test('missing-payment repair reports one truthful payment outcome and treats refresh as best-effort', () => {
+  const handlerStart = dashboardSource.indexOf('const handleMissingPaymentRepair');
+  const handlerEnd = dashboardSource.indexOf('// Used when the operator changes order type', handlerStart);
+  assert.ok(handlerStart >= 0 && handlerEnd > handlerStart, 'missing-payment repair handler must exist');
+  const handler = dashboardSource.slice(handlerStart, handlerEnd);
+
+  assert.match(handler, /recordPayment:\s*\(\) => repairMissingPayment\(bridge\.payments/);
+  assert.match(handler, /reconcileOutstandingPaymentAttempt\(\{/);
+  assert.match(handler, /settlement\.kind === ["']settled["']/);
+  assert.match(handler, /settlement\.kind === ["']partial["']/);
+  assert.match(handler, /settlement\.kind === ["']unpaid["']/);
+  assert.doesNotMatch(handler, /toast\.error\([^)]*error/i, 'raw backend errors must not be rendered');
+  assert.match(handler, /amount:\s*selection\.amount/);
+  assert.match(handler, /cashReceived:\s*selection\.cashReceived/);
+  assert.match(handler, /changeGiven:\s*selection\.change/);
+  assert.match(handler, /transactionRef:\s*selection\.transactionId/);
+  assert.match(handler, /idempotencyKey:\s*selection\.transactionId/);
+  assert.doesNotMatch(handler, /idempotencyKey:\s*target\.orderId/);
+  assert.match(handler, /snapshotOnly:\s*selection\.reconciliationOnly/);
+  assert.match(
+    handler,
+    /paymentAttempt\.kind === ["']unknown["'][\s\S]*?return ["']reconciliation-pending["']/,
+  );
+  assert.match(
+    handler,
+    /paymentAttempt\.kind === ["']unknown["'][\s\S]*?if \(!selection\.reconciliationOnly\) \{[\s\S]*?toast\.error/,
+  );
+  assert.match(handler, /await loadOrders\(\)\.catch\(/);
+  assert.doesNotMatch(handler, /toast\.success\(/, 'PaymentModal owns the single success toast');
+  assert.match(handler, /return true/);
 });
 
 test('per-payment edit instructions exist in every POS locale', () => {

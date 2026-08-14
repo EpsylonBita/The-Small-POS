@@ -1,5 +1,6 @@
 use rusqlite::OptionalExtension;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::collections::{hash_map::DefaultHasher, HashSet};
 use std::hash::{Hash, Hasher};
 use std::time::Duration;
@@ -2241,7 +2242,8 @@ fn find_approved_fiscal_transaction(
     let persisted = conn
         .query_row(
             "SELECT id, device_id, authorization_code, terminal_reference,
-                fiscal_receipt_number, card_type, card_last_four, entry_method
+                fiscal_receipt_number, card_type, card_last_four, entry_method,
+                receipt_data
          FROM ecr_transactions
          WHERE order_id = ?1
            AND transaction_type = 'fiscal_receipt'
@@ -2250,6 +2252,9 @@ fn find_approved_fiscal_transaction(
          LIMIT 1",
             rusqlite::params![order_reference],
             |row| {
+                let receipt_data = row
+                    .get::<_, Option<String>>(8)?
+                    .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok());
                 Ok(serde_json::json!({
                     "transactionId": row.get::<_, String>(0)?,
                     "deviceId": row.get::<_, String>(1)?,
@@ -2259,6 +2264,11 @@ fn find_approved_fiscal_transaction(
                     "cardType": row.get::<_, Option<String>>(5)?,
                     "cardLastFour": row.get::<_, Option<String>>(6)?,
                     "entryMethod": row.get::<_, Option<String>>(7)?,
+                    "intendedMethod": receipt_data
+                        .as_ref()
+                        .and_then(|value| value.get("intendedMethod"))
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
                 }))
             },
         )
@@ -2285,6 +2295,11 @@ fn find_approved_fiscal_transaction(
                 "cardType": value.get("cardType").cloned().unwrap_or(serde_json::Value::Null),
                 "cardLastFour": value.get("cardLastFour").cloned().unwrap_or(serde_json::Value::Null),
                 "entryMethod": value.get("entryMethod").cloned().unwrap_or(serde_json::Value::Null),
+                "intendedMethod": value
+                    .get("receiptData")
+                    .and_then(|data| data.get("intendedMethod"))
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
                 "orphanedLocally": true,
             })
         });
@@ -2320,6 +2335,568 @@ fn find_ambiguous_fiscal_transaction(
     .map_err(|error| format!("find ambiguous fiscal transaction: {error}"))
 }
 
+fn find_definite_failed_fiscal_transaction(
+    conn: &rusqlite::Connection,
+    order_reference: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    conn.query_row(
+        "SELECT id, device_id, status, error_message, receipt_data
+         FROM ecr_transactions
+         WHERE order_id = ?1
+           AND transaction_type = 'fiscal_receipt'
+           AND status IN ('declined', 'error', 'cancelled')
+         ORDER BY created_at DESC
+         LIMIT 1",
+        rusqlite::params![order_reference],
+        |row| {
+            let receipt_data = row
+                .get::<_, Option<String>>(4)?
+                .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok());
+            Ok(serde_json::json!({
+                "transactionId": row.get::<_, String>(0)?,
+                "deviceId": row.get::<_, String>(1)?,
+                "status": row.get::<_, String>(2)?,
+                "errorMessage": row.get::<_, Option<String>>(3)?,
+                "intendedMethod": receipt_data
+                    .as_ref()
+                    .and_then(|value| value.get("intendedMethod"))
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            }))
+        },
+    )
+    .optional()
+    .map_err(|error| format!("find definite failed fiscal transaction: {error}"))
+}
+
+fn outstanding_definite_failure_retry_response(
+    transaction: serde_json::Value,
+) -> serde_json::Value {
+    let error = transaction
+        .get("errorMessage")
+        .cloned()
+        .filter(|value| !value.is_null())
+        .unwrap_or_else(|| serde_json::json!("The prior fiscal attempt was not approved"));
+    serde_json::json!({
+        "success": false,
+        "approved": false,
+        "deduplicated": true,
+        "requiresReconciliation": false,
+        "error": error,
+        "transaction": transaction,
+    })
+}
+
+fn validate_existing_outstanding_approval(
+    existing: &serde_json::Value,
+    intended_method: &str,
+    prior_completed_payments: &[serde_json::Value],
+) -> Result<(), String> {
+    let approved_method = existing
+        .get("intendedMethod")
+        .and_then(|value| value.as_str());
+    let method_matches = approved_method == Some(intended_method);
+    let ledger_already_contains_approval = existing
+        .get("transactionId")
+        .and_then(|value| value.as_str())
+        .is_some_and(|transaction_id| {
+            prior_completed_payments.iter().any(|payment| {
+                payment.get("status").and_then(|value| value.as_str()) == Some("completed")
+                    && payment
+                        .get("transactionRef")
+                        .and_then(|value| value.as_str())
+                        == Some(transaction_id)
+            })
+        });
+    if method_matches && !ledger_already_contains_approval {
+        Ok(())
+    } else {
+        Err(
+            "A prior outstanding fiscal approval does not match this collection. Reconcile it before retrying."
+                .to_string(),
+        )
+    }
+}
+
+fn outstanding_approval_retry_response(
+    existing: &serde_json::Value,
+    intended_method: &str,
+    prior_completed_payments: &[serde_json::Value],
+) -> serde_json::Value {
+    match validate_existing_outstanding_approval(
+        existing,
+        intended_method,
+        prior_completed_payments,
+    ) {
+        Ok(()) => serde_json::json!({
+            "success": true,
+            "approved": true,
+            "deduplicated": true,
+            "orphanedLocally": existing
+                .get("orphanedLocally")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!(false)),
+            "transaction": existing,
+        }),
+        Err(error) => serde_json::json!({
+            "success": false,
+            "approved": false,
+            "requiresReconciliation": true,
+            "error": error,
+            "transaction": existing,
+        }),
+    }
+}
+
+fn outstanding_fiscal_build_failure(error: String) -> serde_json::Value {
+    serde_json::json!({
+        "success": false,
+        "approved": false,
+        "requiresReconciliation": true,
+        "error": error,
+    })
+}
+
+fn find_unreconciled_outstanding_fiscal_attempt(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+    completed_payments: &[serde_json::Value],
+    current_reference: Option<&str>,
+) -> Result<Option<serde_json::Value>, String> {
+    let reference_prefix = format!("{order_id}:collect-outstanding:");
+    let completed_refs: std::collections::HashSet<&str> = completed_payments
+        .iter()
+        .filter(|payment| {
+            payment.get("status").and_then(|value| value.as_str()) == Some("completed")
+        })
+        .filter_map(|payment| {
+            payment
+                .get("transactionRef")
+                .and_then(|value| value.as_str())
+        })
+        .collect();
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, order_id, status, error_message, raw_response, receipt_data
+             FROM ecr_transactions
+             WHERE substr(order_id, 1, length(?1)) = ?1
+               AND transaction_type = 'fiscal_receipt'
+               AND status IN ('approved', 'pending', 'processing', 'timeout')
+             ORDER BY created_at DESC",
+        )
+        .map_err(|error| format!("prepare outstanding fiscal reconciliation guard: {error}"))?;
+    let candidates = stmt
+        .query_map(rusqlite::params![reference_prefix], |row| {
+            let raw_response = row
+                .get::<_, Option<String>>(4)?
+                .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok());
+            let receipt_data = row
+                .get::<_, Option<String>>(5)?
+                .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok());
+            Ok(serde_json::json!({
+                "transactionId": row.get::<_, String>(0)?,
+                "orderReference": row.get::<_, String>(1)?,
+                "status": row.get::<_, String>(2)?,
+                "errorMessage": row.get::<_, Option<String>>(3)?,
+                "rawResponse": raw_response,
+                "intendedMethod": receipt_data
+                    .as_ref()
+                    .and_then(|value| value.get("intendedMethod"))
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            }))
+        })
+        .map_err(|error| format!("query outstanding fiscal reconciliation guard: {error}"))?;
+    let mut exact_retry_candidate: Option<serde_json::Value> = None;
+    for candidate in candidates {
+        let candidate = candidate
+            .map_err(|error| format!("read outstanding fiscal reconciliation guard: {error}"))?;
+        let transaction_id = candidate
+            .get("transactionId")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        if completed_refs.contains(transaction_id) {
+            continue;
+        }
+        let is_exact_retry = current_reference.is_some_and(|reference| {
+            candidate
+                .get("orderReference")
+                .and_then(|value| value.as_str())
+                == Some(reference)
+        });
+        if is_exact_retry {
+            if let Some(existing) = exact_retry_candidate.as_ref() {
+                let existing_id = existing
+                    .get("transactionId")
+                    .and_then(|value| value.as_str());
+                let candidate_id = candidate
+                    .get("transactionId")
+                    .and_then(|value| value.as_str());
+                if existing_id != candidate_id {
+                    let mut conflict = candidate;
+                    conflict["multipleUnreconciledAttempts"] = serde_json::json!(true);
+                    return Ok(Some(conflict));
+                }
+            } else {
+                exact_retry_candidate = Some(candidate);
+            }
+        } else {
+            // Any other unreconciled generation/attempt wins over an exact
+            // retry candidate. Otherwise a newer exact row could hide an
+            // older approved receipt and allow a second hardware charge.
+            return Ok(Some(candidate));
+        }
+    }
+
+    let mut orphan_stmt = conn
+        .prepare(
+            "SELECT setting_key, setting_value
+             FROM local_settings
+             WHERE setting_category = 'ecr_orphaned_receipts'
+               AND substr(setting_key, 1, length(?1)) = ?1
+             ORDER BY updated_at DESC",
+        )
+        .map_err(|error| format!("prepare outstanding orphan reconciliation guard: {error}"))?;
+    let orphans = orphan_stmt
+        .query_map(rusqlite::params![reference_prefix], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|error| format!("query outstanding orphan reconciliation guard: {error}"))?;
+    for orphan in orphans {
+        let (reference, raw) =
+            orphan.map_err(|error| format!("read outstanding orphan guard: {error}"))?;
+        let value = serde_json::from_str::<serde_json::Value>(&raw).unwrap_or_default();
+        let transaction_id = value
+            .get("id")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        if completed_refs.contains(transaction_id) {
+            continue;
+        }
+        let candidate = serde_json::json!({
+            "transactionId": transaction_id,
+            "orderReference": reference,
+            "status": value.get("status").cloned().unwrap_or_else(|| serde_json::json!("approved")),
+            "intendedMethod": value
+                .get("receiptData")
+                .and_then(|data| data.get("intendedMethod"))
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            "orphanedLocally": true,
+        });
+        if current_reference == Some(reference.as_str()) {
+            if let Some(existing) = exact_retry_candidate.as_ref() {
+                let existing_id = existing
+                    .get("transactionId")
+                    .and_then(|value| value.as_str());
+                let candidate_id = candidate
+                    .get("transactionId")
+                    .and_then(|value| value.as_str());
+                if existing_id != candidate_id {
+                    let mut conflict = candidate;
+                    conflict["multipleUnreconciledAttempts"] = serde_json::json!(true);
+                    return Ok(Some(conflict));
+                }
+            } else {
+                exact_retry_candidate = Some(candidate);
+            }
+        } else {
+            return Ok(Some(candidate));
+        }
+    }
+    Ok(exact_retry_candidate)
+}
+
+fn outstanding_fiscal_transaction_id(order_reference: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"the-small/outstanding-fiscal-attempt/v1\0");
+    digest.update(order_reference.as_bytes());
+    let bytes: [u8; 32] = digest.finalize().into();
+    format!(
+        "fiscal-outstanding-{}",
+        crate::payments::settlement_generation_token(&bytes)
+    )
+}
+
+fn outstanding_fiscal_payload_fingerprint(order: &serde_json::Value) -> Result<[u8; 32], String> {
+    let items = order
+        .get("items")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("Order has no fiscal items array")?;
+    let total = order
+        .get("total_amount")
+        .or_else(|| order.get("totalAmount"))
+        .or_else(|| order.get("total"))
+        .and_then(serde_json::Value::as_f64)
+        .filter(|value| value.is_finite())
+        .ok_or("Order has no finite fiscal total")?;
+    let mut canonical_items = Vec::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        let name = ["name", "name_en", "product_name", "title"]
+            .into_iter()
+            .find_map(|key| item.get(key).and_then(serde_json::Value::as_str))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| format!("Fiscal item {index} has no name"))?;
+        let quantity = ["quantity", "qty"]
+            .into_iter()
+            .find_map(|key| item.get(key).and_then(serde_json::Value::as_f64))
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .ok_or_else(|| format!("Fiscal item {index} has no valid quantity"))?;
+        let price = ["price", "unitPrice", "unit_price"]
+            .into_iter()
+            .find_map(|key| item.get(key).and_then(serde_json::Value::as_f64))
+            .or_else(|| {
+                ["totalPrice", "total_price"]
+                    .into_iter()
+                    .find_map(|key| item.get(key).and_then(serde_json::Value::as_f64))
+                    .map(|value| value / quantity)
+            })
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .ok_or_else(|| format!("Fiscal item {index} has no valid price"))?;
+        let tax_rate = item
+            .get("taxRate")
+            .and_then(serde_json::Value::as_f64)
+            .filter(|value| value.is_finite());
+        let discount = ["discount", "discountAmount"]
+            .into_iter()
+            .find_map(|key| item.get(key).and_then(serde_json::Value::as_f64))
+            .filter(|value| value.is_finite() && *value >= 0.0);
+        canonical_items.push(serde_json::json!({
+            "name": name,
+            "quantity": quantity,
+            "priceCents": crate::money::Cents::round_half_even(price).as_i64(),
+            "taxRate": tax_rate,
+            "discountCents": discount
+                .map(|value| crate::money::Cents::round_half_even(value).as_i64()),
+        }));
+    }
+    let encoded = serde_json::to_vec(&serde_json::json!({
+        "items": canonical_items,
+        "totalCents": crate::money::Cents::round_half_even(total).as_i64(),
+    }))
+    .map_err(|error| format!("encode outstanding fiscal order inputs: {error}"))?;
+    let mut digest = Sha256::new();
+    digest.update(b"the-small/outstanding-fiscal-order/v1\0");
+    digest.update(encoded);
+    Ok(digest.finalize().into())
+}
+
+fn fiscal_receipt_data_fingerprint(
+    data: &ecr::protocol::FiscalReceiptData,
+) -> Result<[u8; 32], String> {
+    let encoded = serde_json::to_vec(data)
+        .map_err(|error| format!("encode outstanding fiscal payload: {error}"))?;
+    let mut digest = Sha256::new();
+    digest.update(b"the-small/outstanding-fiscal-receipt/v1\0");
+    digest.update(encoded);
+    Ok(digest.finalize().into())
+}
+
+fn completed_payment_fingerprint(
+    completed_payments: &[serde_json::Value],
+) -> Result<[u8; 32], String> {
+    let normalized: Vec<serde_json::Value> = completed_payments
+        .iter()
+        .filter(|payment| {
+            payment.get("status").and_then(serde_json::Value::as_str) == Some("completed")
+        })
+        .map(|payment| {
+            serde_json::json!({
+                "id": payment.get("id"),
+                "method": payment.get("method"),
+                "amount": payment.get("amount"),
+                "transactionRef": payment.get("transactionRef"),
+                "paymentOrigin": payment.get("paymentOrigin"),
+                "refundedAmount": payment.get("refundedAmount"),
+                "remainingRefundable": payment.get("remainingRefundable"),
+            })
+        })
+        .collect();
+    let encoded = serde_json::to_vec(&normalized)
+        .map_err(|error| format!("encode outstanding payment generation: {error}"))?;
+    let mut digest = Sha256::new();
+    digest.update(b"the-small/outstanding-payment-generation/v1\0");
+    digest.update(encoded);
+    Ok(digest.finalize().into())
+}
+
+fn load_authoritative_outstanding_fiscal_order(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+) -> Result<serde_json::Value, String> {
+    conn.query_row(
+        "SELECT items,
+                COALESCE(total_amount_cents, CAST(ROUND(total_amount * 100) AS INTEGER), 0)
+         FROM orders WHERE id = ?1",
+        rusqlite::params![order_id],
+        |row| {
+            let items_raw: String = row.get(0)?;
+            let items = serde_json::from_str::<serde_json::Value>(&items_raw)
+                .unwrap_or_else(|_| serde_json::json!([]));
+            let total_cents: i64 = row.get(1)?;
+            Ok(serde_json::json!({
+                "items": items,
+                "totalAmount": crate::money::Cents::new(total_cents).to_f64_dp2(),
+            }))
+        },
+    )
+    .map_err(|error| format!("load authoritative outstanding fiscal order: {error}"))
+}
+
+fn verify_authoritative_outstanding_fiscal_payload(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+    expected_order_fingerprint: &[u8; 32],
+    expected_fiscal: &ecr::protocol::FiscalReceiptData,
+    expected_completed_payments: &[serde_json::Value],
+    intended_payment: &serde_json::Value,
+    tax_rates: &[ecr::protocol::TaxRateConfig],
+    operator_id: Option<&str>,
+) -> Result<(), String> {
+    let current_order = load_authoritative_outstanding_fiscal_order(conn, order_id)?;
+    if &outstanding_fiscal_payload_fingerprint(&current_order)? != expected_order_fingerprint {
+        return Err(
+            "Outstanding fiscal payload changed before reservation; refresh and retry".to_string(),
+        );
+    }
+    let current_settlement = crate::payments::load_order_settlement_snapshot(conn, order_id)?;
+    if completed_payment_fingerprint(&current_settlement.completed_payments)?
+        != completed_payment_fingerprint(expected_completed_payments)?
+    {
+        return Err(
+            "Outstanding payment ledger changed before fiscal reservation; refresh and retry"
+                .to_string(),
+        );
+    }
+    let current_fiscal = ecr::fiscal::build_fiscal_data_for_outstanding_checkout(
+        &current_order,
+        &current_settlement.completed_payments,
+        intended_payment,
+        tax_rates,
+        operator_id,
+    )
+    .map_err(|error| format!("Outstanding fiscal payload changed: {error}"))?;
+    if fiscal_receipt_data_fingerprint(&current_fiscal)?
+        != fiscal_receipt_data_fingerprint(expected_fiscal)?
+    {
+        return Err(
+            "Outstanding fiscal payload changed before reservation; refresh and retry".to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn reject_existing_unresolved_outstanding_attempt(
+    conn: &rusqlite::Connection,
+    attempt: &serde_json::Value,
+) -> Result<(), String> {
+    let attempt_id = attempt
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or("Outstanding fiscal attempt has no durable identity")?;
+    let order_reference = attempt
+        .get("orderId")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or("Outstanding fiscal attempt has no order reference")?;
+    let (order_id, generation) = order_reference
+        .split_once(":collect-outstanding:")
+        .ok_or("Outstanding fiscal attempt has an invalid order reference")?;
+    if order_id.is_empty() || generation.is_empty() {
+        return Err("Outstanding fiscal attempt has an invalid order reference".to_string());
+    }
+    let reference_prefix = format!("{order_id}:collect-outstanding:");
+    let existing_attempt_id = conn
+        .query_row(
+            "SELECT et.id
+             FROM ecr_transactions et
+             WHERE et.transaction_type = 'fiscal_receipt'
+               AND et.status IN ('processing', 'timeout', 'approved', 'approved_persisting')
+               AND substr(et.order_id, 1, length(?1)) = ?1
+               AND NOT EXISTS (
+                 SELECT 1 FROM order_payments represented
+                 WHERE represented.order_id = ?2
+                   AND represented.status = 'completed'
+                   AND represented.transaction_ref = et.id
+                   AND represented.idempotency_key = et.id
+               )
+             ORDER BY et.created_at ASC, et.id ASC
+             LIMIT 1",
+            rusqlite::params![reference_prefix, order_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| format!("inspect unresolved outstanding fiscal attempt: {error}"))?;
+
+    if existing_attempt_id.is_some() {
+        let same_attempt = existing_attempt_id.as_deref() == Some(attempt_id);
+        return Err(if same_attempt {
+            "An unresolved outstanding fiscal attempt already exists for this request; reconciliation is required before retrying"
+                .to_string()
+        } else {
+            "An unresolved outstanding fiscal attempt already exists for this order; reconciliation is required before another device request"
+                .to_string()
+        });
+    }
+    Ok(())
+}
+
+async fn dispatch_after_durable_outstanding_attempt<T, Verify, Dispatch, DispatchFuture>(
+    db: &db::DbState,
+    attempt: &serde_json::Value,
+    verify: Verify,
+    dispatch: Dispatch,
+) -> Result<T, String>
+where
+    Verify: FnOnce(&rusqlite::Connection) -> Result<(), String>,
+    Dispatch: FnOnce() -> DispatchFuture,
+    DispatchFuture: std::future::Future<Output = T>,
+{
+    {
+        let conn = db.conn.lock().map_err(|error| error.to_string())?;
+        db::with_full_sync(&conn, |conn| {
+            conn.execute_batch("BEGIN IMMEDIATE")
+                .map_err(|error| format!("begin durable outstanding attempt: {error}"))?;
+            let result = reject_existing_unresolved_outstanding_attempt(conn, attempt)
+                .and_then(|()| verify(conn))
+                .and_then(|()| db::ecr_insert_transaction(conn, attempt));
+            match result {
+                Ok(()) => conn
+                    .execute_batch("COMMIT")
+                    .map_err(|error| format!("commit durable outstanding attempt: {error}")),
+                Err(error) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    Err(error)
+                }
+            }
+        })
+        .map_err(|error| format!("persist outstanding fiscal attempt: {error}"))?;
+    }
+    Ok(dispatch().await)
+}
+
+fn persist_outstanding_attempt_outcome(
+    db: &db::DbState,
+    transaction: &serde_json::Value,
+) -> Result<(), String> {
+    let conn = db.conn.lock().map_err(|error| error.to_string())?;
+    db::with_full_sync(&conn, |conn| {
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .map_err(|error| format!("begin outstanding outcome: {error}"))?;
+        match db::ecr_update_transaction_outcome(conn, transaction) {
+            Ok(()) => conn
+                .execute_batch("COMMIT")
+                .map_err(|error| format!("commit outstanding outcome: {error}")),
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    })
+}
+
 /// Execute the fiscal cashier transaction before a payment is persisted.
 ///
 /// A card payment is therefore only recorded after the cashier's protocol
@@ -2333,16 +2910,82 @@ pub(crate) async fn fiscal_checkout_for_order_payload(
     order_reference: &str,
     order: &serde_json::Value,
     intended_payment: &serde_json::Value,
+    prior_completed_payments: Option<&[serde_json::Value]>,
 ) -> Result<serde_json::Value, String> {
-    let (device, existing_approval, existing_ambiguous) = {
+    let intended_method = intended_payment
+        .get("method")
+        .or_else(|| intended_payment.get("paymentMethod"))
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if let Some(prior) = prior_completed_payments {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let order_id = order_reference
+            .split_once(":collect-outstanding:")
+            .map(|(order_id, _)| order_id)
+            .unwrap_or(order_reference);
+        if let Some(transaction) = find_unreconciled_outstanding_fiscal_attempt(
+            &conn,
+            order_id,
+            prior,
+            Some(order_reference),
+        )? {
+            let is_exact_retry = transaction
+                .get("orderReference")
+                .and_then(|value| value.as_str())
+                == Some(order_reference);
+            let has_multiple_unreconciled_attempts = transaction
+                .get("multipleUnreconciledAttempts")
+                .and_then(|value| value.as_bool())
+                == Some(true);
+            if !is_exact_retry || has_multiple_unreconciled_attempts {
+                return Ok(serde_json::json!({
+                    "success": false,
+                    "approved": false,
+                    "requiresReconciliation": true,
+                    "error": "A previous outstanding fiscal collection is not reconciled. Reconcile it before starting another payment.",
+                    "transaction": transaction,
+                }));
+            }
+            if transaction
+                .get("orphanedLocally")
+                .and_then(|value| value.as_bool())
+                == Some(true)
+            {
+                // The cashier already approved this exact attempt, but its
+                // ECR audit-row insert failed. Reuse the durable orphan marker
+                // as the approval result; contacting hardware again could
+                // issue a second receipt/charge.
+                return Ok(outstanding_approval_retry_response(
+                    &transaction,
+                    intended_method.as_str(),
+                    prior,
+                ));
+            }
+        }
+    }
+    let (device, existing_approval, existing_ambiguous, existing_definite_failure) = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         let device = db::ecr_get_default_device(&conn, Some("cash_register"));
         let existing = find_approved_fiscal_transaction(&conn, order_reference)?;
         let ambiguous = find_ambiguous_fiscal_transaction(&conn, order_reference)?;
-        (device, existing, ambiguous)
+        let definite_failure = if prior_completed_payments.is_some() {
+            find_definite_failed_fiscal_transaction(&conn, order_reference)?
+        } else {
+            None
+        };
+        (device, existing, ambiguous, definite_failure)
     };
 
     if let Some(existing) = existing_approval {
+        if let Some(prior) = prior_completed_payments {
+            return Ok(outstanding_approval_retry_response(
+                &existing,
+                intended_method.as_str(),
+                prior,
+            ));
+        }
         return Ok(serde_json::json!({
             "success": true,
             "approved": true,
@@ -2359,6 +3002,10 @@ pub(crate) async fn fiscal_checkout_for_order_payload(
             "error": "A previous fiscal attempt has an unknown result. Check the cashier/CAP Driver log before retrying.",
             "transaction": existing,
         }));
+    }
+
+    if let Some(existing) = existing_definite_failure {
+        return Ok(outstanding_definite_failure_retry_response(existing));
     }
 
     let Some(device) = device else {
@@ -2402,19 +3049,37 @@ pub(crate) async fn fiscal_checkout_for_order_payload(
     )
     .unwrap_or_default();
     let operator_id = device.get("operatorId").and_then(|value| value.as_str());
-    let fiscal_data = ecr::fiscal::build_fiscal_data_for_checkout(
-        order,
-        intended_payment,
-        &tax_rates,
-        operator_id,
-    )?;
+    let fiscal_data = match prior_completed_payments {
+        Some(completed) => match ecr::fiscal::build_fiscal_data_for_outstanding_checkout(
+            order,
+            completed,
+            intended_payment,
+            &tax_rates,
+            operator_id,
+        ) {
+            Ok(data) => data,
+            Err(error) => return Ok(outstanding_fiscal_build_failure(error)),
+        },
+        None => ecr::fiscal::build_fiscal_data_for_checkout(
+            order,
+            intended_payment,
+            &tax_rates,
+            operator_id,
+        )?,
+    };
     let amount = fiscal_data
         .payments
         .iter()
         .map(|payment| payment.amount)
         .sum();
-    let tx_id = format!("fiscal-{}", uuid::Uuid::new_v4());
+    let outstanding_collection = prior_completed_payments.is_some();
+    let tx_id = if outstanding_collection {
+        outstanding_fiscal_transaction_id(order_reference)
+    } else {
+        format!("fiscal-{}", uuid::Uuid::new_v4())
+    };
     let started = chrono::Utc::now().to_rfc3339();
+    let expected_fiscal_data = fiscal_data.clone();
     let request = ecr::protocol::TransactionRequest {
         transaction_id: tx_id.clone(),
         transaction_type: ecr::protocol::TransactionType::FiscalReceipt,
@@ -2426,9 +3091,105 @@ pub(crate) async fn fiscal_checkout_for_order_payload(
         fiscal_data: Some(fiscal_data),
     };
 
-    let response = match mgr.process_transaction_offloaded(&device_id, request).await {
-        Ok(response) => response,
+    let device_result = if let Some(expected_completed_payments) = prior_completed_payments {
+        let order_id = order_reference
+            .split_once(":collect-outstanding:")
+            .map(|(order_id, _)| order_id)
+            .unwrap_or(order_reference);
+        let fiscal_fingerprint = fiscal_receipt_data_fingerprint(&expected_fiscal_data)?;
+        let order_fingerprint = outstanding_fiscal_payload_fingerprint(order)?;
+        let processing_attempt = serde_json::json!({
+            "id": tx_id.clone(),
+            "deviceId": device_id.clone(),
+            "orderId": order_reference,
+            "transactionType": "fiscal_receipt",
+            "amount": amount,
+            "currency": "EUR",
+            "status": "processing",
+            "receiptData": {
+                "intendedMethod": intended_method.clone(),
+                "fiscalPayloadFingerprint": crate::payments::settlement_generation_token(
+                    &fiscal_fingerprint,
+                ),
+            },
+            "startedAt": started.clone(),
+        });
+        dispatch_after_durable_outstanding_attempt(
+            db,
+            &processing_attempt,
+            |conn| {
+                verify_authoritative_outstanding_fiscal_payload(
+                    conn,
+                    order_id,
+                    &order_fingerprint,
+                    &expected_fiscal_data,
+                    expected_completed_payments,
+                    intended_payment,
+                    &tax_rates,
+                    operator_id,
+                )
+            },
+            || mgr.process_transaction_offloaded(&device_id, request),
+        )
+        .await
+    } else {
+        Ok(mgr.process_transaction_offloaded(&device_id, request).await)
+    };
+
+    let response = match device_result {
         Err(error) => {
+            let changed = error.to_ascii_lowercase().contains("changed");
+            tracing::warn!(
+                target: "ecr.outstanding_reservation",
+                order_reference = %order_reference,
+                error = %error,
+                "Outstanding fiscal collection was not dispatched"
+            );
+            return Ok(serde_json::json!({
+                "success": false,
+                "approved": false,
+                "errorCode": if changed { "FISCAL_PAYLOAD_CHANGED" } else { "FISCAL_ATTEMPT_NOT_DURABLE" },
+                "requiresReconciliation": !changed,
+                "error": if changed {
+                    "The order changed before fiscal collection was reserved. Refresh the payment details before retrying.".to_string()
+                } else {
+                    "The fiscal collection could not be durably reserved, so no device request was sent. Reconcile any existing attempt before retrying.".to_string()
+                },
+            }));
+        }
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) if outstanding_collection => {
+            let error_text = error.to_string();
+            let timeout_outcome = serde_json::json!({
+                "id": tx_id.clone(),
+                "status": "timeout",
+                "receiptData": { "intendedMethod": intended_method.clone() },
+                "errorMessage": error_text.clone(),
+                "rawResponse": { "requiresReconciliation": true },
+                "completedAt": chrono::Utc::now().to_rfc3339(),
+            });
+            let persistence_error = persist_outstanding_attempt_outcome(db, &timeout_outcome).err();
+            if let Some(persistence_error) = persistence_error.as_deref() {
+                tracing::error!(
+                    target: "ecr.outstanding_reconciliation",
+                    order_reference = %order_reference,
+                    transaction_id = %timeout_outcome["id"],
+                    error = %persistence_error,
+                    "Failed to persist the ambiguous fiscal outcome; durable processing row remains blocking"
+                );
+            }
+            return Ok(serde_json::json!({
+                "success": false,
+                "approved": false,
+                "requiresReconciliation": true,
+                "error": "The fiscal device result is unknown. Check the cashier/CAP Driver log before retrying.",
+                "transaction": {
+                    "transactionId": timeout_outcome["id"],
+                    "status": "timeout",
+                },
+            }));
+        }
+        Ok(Err(error)) => {
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
             let _ = db::ecr_insert_transaction(
                 &conn,
@@ -2453,10 +3214,40 @@ pub(crate) async fn fiscal_checkout_for_order_payload(
         }
     };
 
+    if outstanding_collection && response.transaction_id != tx_id {
+        let mismatch_outcome = serde_json::json!({
+            "id": tx_id.clone(),
+            "status": "timeout",
+            "receiptData": { "intendedMethod": intended_method.clone() },
+            "errorMessage": "Fiscal device returned a different transaction identity",
+            "rawResponse": {
+                "requiresReconciliation": true,
+                "deviceTransactionId": response.transaction_id,
+            },
+            "completedAt": chrono::Utc::now().to_rfc3339(),
+        });
+        let _ = persist_outstanding_attempt_outcome(db, &mismatch_outcome);
+        return Ok(serde_json::json!({
+            "success": false,
+            "approved": false,
+            "requiresReconciliation": true,
+            "error": "The fiscal device returned an unexpected transaction identity. Reconcile it before retrying.",
+            "transaction": {
+                "transactionId": mismatch_outcome["id"],
+                "status": "timeout",
+            },
+        }));
+    }
+
     let approved = response.status == ecr::protocol::TransactionStatus::Approved;
     let status = format!("{:?}", response.status).to_lowercase();
+    let persisted_transaction_id = if outstanding_collection {
+        tx_id.clone()
+    } else {
+        response.transaction_id.clone()
+    };
     let transaction = serde_json::json!({
-        "id": response.transaction_id,
+        "id": persisted_transaction_id,
         "deviceId": device_id,
         "orderId": order_reference,
         "transactionType": "fiscal_receipt",
@@ -2469,12 +3260,17 @@ pub(crate) async fn fiscal_checkout_for_order_payload(
         "cardType": response.card_type,
         "cardLastFour": response.card_last_four,
         "entryMethod": response.entry_method,
+        "receiptData": {
+            "intendedMethod": intended_method.clone(),
+        },
         "errorMessage": response.error_message,
         "rawResponse": response.raw_response,
         "startedAt": response.started_at,
         "completedAt": response.completed_at,
     });
-    let persist_error = {
+    let persist_error = if outstanding_collection {
+        persist_outstanding_attempt_outcome(db, &transaction).err()
+    } else {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         match db::ecr_insert_transaction(&conn, &transaction) {
             Ok(()) => {
@@ -2517,6 +3313,8 @@ pub(crate) async fn fiscal_checkout_for_order_payload(
         return Ok(serde_json::json!({
             "success": false,
             "approved": false,
+            "requiresReconciliation": persist_error.is_some()
+                || transaction.get("status").and_then(serde_json::Value::as_str) == Some("timeout"),
             "error": transaction.get("errorMessage").cloned().unwrap_or_else(|| serde_json::json!("Payment was not approved")),
             "transaction": transaction,
         }));
@@ -2542,6 +3340,7 @@ pub(crate) async fn fiscal_checkout_for_order_payload(
         "success": true,
         "approved": true,
         "orphanedLocally": persist_error.is_some(),
+        "requiresReconciliation": persist_error.is_some(),
         "transaction": {
             "transactionId": transaction["id"],
             "deviceId": transaction["deviceId"],
@@ -3061,6 +3860,465 @@ mod discovery_tests {
 mod dto_tests {
     use super::*;
 
+    struct TempOutstandingDb(std::path::PathBuf);
+
+    impl Drop for TempOutstandingDb {
+        fn drop(&mut self) {
+            for path in [
+                self.0.clone(),
+                self.0.with_extension("db-wal"),
+                self.0.with_extension("db-shm"),
+            ] {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+
+    fn file_backed_outstanding_attempt_test_dbs(
+        order_id: &str,
+    ) -> (TempOutstandingDb, db::DbState, db::DbState) {
+        let path = std::env::temp_dir().join(format!(
+            "pos-outstanding-attempt-race-{}-{}.db",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let first = rusqlite::Connection::open(&path).expect("open first attempt database");
+        first
+            .execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 PRAGMA foreign_keys = ON;
+                 PRAGMA busy_timeout = 5000;
+                 PRAGMA synchronous = NORMAL;",
+            )
+            .expect("configure first attempt database");
+        crate::db::run_migrations_for_test(&first);
+        first
+            .execute(
+                "INSERT INTO orders (id, items, total_amount, total_amount_cents)
+                 VALUES (?1, '[]', 42.00, 4200)",
+                rusqlite::params![order_id],
+            )
+            .expect("seed outstanding race order");
+        first
+            .execute(
+                "INSERT INTO ecr_devices (
+                    id, name, device_type, brand, protocol, connection_type,
+                    connection_details
+                 ) VALUES (
+                    'race-attempt-device', 'CAP Cashier', 'cash_register', 'RBS',
+                    'cap_driver', 'network', '{}'
+                 )",
+                [],
+            )
+            .expect("seed outstanding race device");
+
+        let second = rusqlite::Connection::open(&path).expect("open second attempt database");
+        second
+            .execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 PRAGMA busy_timeout = 5000;
+                 PRAGMA synchronous = NORMAL;",
+            )
+            .expect("configure second attempt database");
+
+        let first_state = db::DbState {
+            conn: std::sync::Mutex::new(first),
+            db_path: path.clone(),
+        };
+        let second_state = db::DbState {
+            conn: std::sync::Mutex::new(second),
+            db_path: path.clone(),
+        };
+        (TempOutstandingDb(path), first_state, second_state)
+    }
+
+    fn outstanding_processing_attempt(id: &str, order_reference: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "deviceId": "race-attempt-device",
+            "orderId": order_reference,
+            "transactionType": "fiscal_receipt",
+            "amount": 4200,
+            "currency": "EUR",
+            "status": "processing",
+            "receiptData": { "intendedMethod": "card" },
+            "startedAt": "2026-08-13T12:00:00Z",
+        })
+    }
+
+    fn outstanding_attempt_test_db() -> db::DbState {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        crate::db::run_migrations_for_test(&conn);
+        conn.execute(
+            "INSERT INTO ecr_devices (
+                id, name, device_type, brand, protocol, connection_type,
+                connection_details
+             ) VALUES (
+                'durable-attempt-device', 'CAP Cashier', 'cash_register', 'RBS',
+                'cap_driver', 'network', '{}'
+             )",
+            [],
+        )
+        .expect("seed durable-attempt fiscal device");
+        db::DbState {
+            conn: std::sync::Mutex::new(conn),
+            db_path: std::path::PathBuf::from(":memory:"),
+        }
+    }
+
+    #[tokio::test]
+    async fn second_connection_cannot_reserve_a_different_key_for_the_same_order() {
+        let (_cleanup, first, second) =
+            file_backed_outstanding_attempt_test_dbs("order-cross-process-race");
+        let first_attempt = outstanding_processing_attempt(
+            "race-attempt-first",
+            "order-cross-process-race:collect-outstanding:first-key",
+        );
+        let second_attempt = outstanding_processing_attempt(
+            "race-attempt-second",
+            "order-cross-process-race:collect-outstanding:second-key",
+        );
+        let hardware_calls = std::sync::atomic::AtomicUsize::new(0);
+
+        dispatch_after_durable_outstanding_attempt(
+            &first,
+            &first_attempt,
+            |_| Ok(()),
+            || async {
+                hardware_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            },
+        )
+        .await
+        .expect("first process reserves and dispatches");
+
+        let error = dispatch_after_durable_outstanding_attempt(
+            &second,
+            &second_attempt,
+            |_| Ok(()),
+            || async {
+                hardware_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            },
+        )
+        .await
+        .expect_err("second key must lose the atomic per-order reservation");
+
+        assert!(error.contains("unresolved outstanding fiscal attempt"));
+        assert!(
+            !error.contains("UNIQUE"),
+            "must not expose raw SQLite errors"
+        );
+        assert_eq!(
+            hardware_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "only the first process may contact hardware",
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_processing_attempt_is_reconciled_without_redispatch_or_unique_error() {
+        let (_cleanup, first, second) =
+            file_backed_outstanding_attempt_test_dbs("order-exact-process-race");
+        let attempt = outstanding_processing_attempt(
+            "race-attempt-exact",
+            "order-exact-process-race:collect-outstanding:stable-key",
+        );
+        let hardware_calls = std::sync::atomic::AtomicUsize::new(0);
+
+        dispatch_after_durable_outstanding_attempt(
+            &first,
+            &attempt,
+            |_| Ok(()),
+            || async {
+                hardware_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            },
+        )
+        .await
+        .expect("first process reserves and dispatches");
+
+        let error = dispatch_after_durable_outstanding_attempt(
+            &second,
+            &attempt,
+            |_| Ok(()),
+            || async {
+                hardware_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            },
+        )
+        .await
+        .expect_err("same processing attempt requires reconciliation");
+
+        assert!(error.contains("unresolved outstanding fiscal attempt"));
+        assert!(
+            !error.contains("UNIQUE"),
+            "must not expose raw SQLite errors"
+        );
+        assert_eq!(
+            hardware_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "an exact processing retry must never redispatch hardware",
+        );
+    }
+
+    #[test]
+    fn outstanding_attempt_identity_is_stable_and_reference_bound() {
+        let first =
+            outstanding_fiscal_transaction_id("order-1:collect-outstanding:stable-generation");
+        let retry =
+            outstanding_fiscal_transaction_id("order-1:collect-outstanding:stable-generation");
+        let changed =
+            outstanding_fiscal_transaction_id("order-1:collect-outstanding:changed-generation");
+
+        assert_eq!(
+            first, retry,
+            "a retry must reuse the same hardware identity"
+        );
+        assert_ne!(
+            first, changed,
+            "a changed ledger generation needs a new identity"
+        );
+        assert!(first.starts_with("fiscal-outstanding-"));
+        assert_eq!(first.len(), "fiscal-outstanding-".len() + 64);
+    }
+
+    #[test]
+    fn definite_failure_is_deduplicated_for_the_same_attempt_but_not_a_fresh_one() {
+        let state = outstanding_attempt_test_db();
+        let conn = state.conn.lock().expect("lock definite failure database");
+        conn.execute(
+            "INSERT INTO ecr_transactions (
+                id, device_id, order_id, transaction_type, amount, currency,
+                status, receipt_data, error_message, started_at, completed_at
+             ) VALUES (
+                'declined-attempt-id', 'durable-attempt-device',
+                'order-declined:collect-outstanding:same-key', 'fiscal_receipt',
+                4200, 'EUR', 'declined', '{\"intendedMethod\":\"card\"}',
+                'Declined', '2026-08-13T12:00:00Z', '2026-08-13T12:00:02Z'
+             )",
+            [],
+        )
+        .expect("seed definite declined attempt");
+
+        let retry = find_definite_failed_fiscal_transaction(
+            &conn,
+            "order-declined:collect-outstanding:same-key",
+        )
+        .expect("query same-key failure")
+        .expect("same-key failure must deduplicate");
+        assert_eq!(retry["transactionId"], "declined-attempt-id");
+        assert_eq!(retry["status"], "declined");
+        assert!(find_definite_failed_fiscal_transaction(
+            &conn,
+            "order-declined:collect-outstanding:fresh-key",
+        )
+        .expect("query fresh-key reference")
+        .is_none());
+        assert!(
+            reject_existing_unresolved_outstanding_attempt(
+                &conn,
+                &outstanding_processing_attempt(
+                    "fresh-attempt-after-decline",
+                    "order-declined:collect-outstanding:fresh-key",
+                ),
+            )
+            .is_ok(),
+            "a definite decline must release the per-order reservation"
+        );
+
+        let response = outstanding_definite_failure_retry_response(retry);
+        assert_eq!(response["success"], false);
+        assert_eq!(response["approved"], false);
+        assert_eq!(response["deduplicated"], true);
+        assert_eq!(response["requiresReconciliation"], false);
+    }
+
+    #[test]
+    fn outstanding_fiscal_payload_fingerprint_detects_equal_total_item_edits() {
+        let original = serde_json::json!({
+            "items": [
+                {"name": "Coffee", "quantity": 1, "price": 5.00, "taxRate": 24.0},
+                {"name": "Cake", "quantity": 1, "price": 5.00, "taxRate": 13.0}
+            ],
+            "totalAmount": 10.00,
+            "taxAmount": 1.72,
+            "subtotal": 8.28,
+            "discountAmount": 0.0,
+            "tipAmount": 0.0,
+            "orderType": "takeaway"
+        });
+        let equal_total_edit = serde_json::json!({
+            "items": [
+                {"name": "Tea", "quantity": 1, "price": 5.00, "taxRate": 24.0},
+                {"name": "Cake", "quantity": 1, "price": 5.00, "taxRate": 13.0}
+            ],
+            "totalAmount": 10.00,
+            "taxAmount": 1.72,
+            "subtotal": 8.28,
+            "discountAmount": 0.0,
+            "tipAmount": 0.0,
+            "orderType": "takeaway"
+        });
+
+        assert_ne!(
+            outstanding_fiscal_payload_fingerprint(&original)
+                .expect("fingerprint original fiscal payload"),
+            outstanding_fiscal_payload_fingerprint(&equal_total_edit)
+                .expect("fingerprint edited fiscal payload"),
+            "equal-total item edits must invalidate a pending fiscal collection",
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_attempt_is_visible_before_dispatch_and_insert_failure_skips_hardware() {
+        let state = outstanding_attempt_test_db();
+        let attempt_id = outstanding_fiscal_transaction_id(
+            "order-durable:collect-outstanding:stable-generation",
+        );
+        let attempt = serde_json::json!({
+            "id": attempt_id.clone(),
+            "deviceId": "durable-attempt-device",
+            "orderId": "order-durable:collect-outstanding:stable-generation",
+            "transactionType": "fiscal_receipt",
+            "amount": 4200,
+            "currency": "EUR",
+            "status": "processing",
+            "receiptData": { "intendedMethod": "card" },
+            "startedAt": "2026-08-13T12:00:00Z",
+        });
+
+        let visible_status = dispatch_after_durable_outstanding_attempt(
+            &state,
+            &attempt,
+            |_| Ok(()),
+            || async {
+                let conn = state
+                    .conn
+                    .lock()
+                    .expect("lock attempt database during dispatch");
+                conn.query_row(
+                    "SELECT status FROM ecr_transactions WHERE id = ?1",
+                    rusqlite::params![attempt_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .expect("attempt must be committed before hardware dispatch")
+            },
+        )
+        .await
+        .expect("persist then dispatch");
+        assert_eq!(visible_status, "processing");
+
+        let hardware_calls = std::sync::atomic::AtomicUsize::new(0);
+        let error = dispatch_after_durable_outstanding_attempt(
+            &state,
+            &attempt,
+            |_| Ok(()),
+            || async {
+                hardware_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            },
+        )
+        .await
+        .expect_err("duplicate durable identity must fail before hardware");
+        assert!(error.contains("persist outstanding fiscal attempt"));
+        assert_eq!(
+            hardware_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "persistence failure must never reach hardware",
+        );
+    }
+
+    #[tokio::test]
+    async fn equal_total_edit_before_reservation_fails_before_hardware_dispatch() {
+        let state = outstanding_attempt_test_db();
+        let original = serde_json::json!({
+            "items": [{"name": "Coffee", "quantity": 1, "price": 10.00}],
+            "totalAmount": 10.00,
+        });
+        let edited_items = serde_json::json!([
+            {"name": "Tea", "quantity": 1, "price": 10.00}
+        ]);
+        let intended = serde_json::json!({"method": "cash", "amount": 10.00});
+        let tax_rates = Vec::<ecr::protocol::TaxRateConfig>::new();
+        let expected_order_fingerprint = outstanding_fiscal_payload_fingerprint(&original)
+            .expect("fingerprint original fiscal order");
+        let expected_fiscal = ecr::fiscal::build_fiscal_data_for_outstanding_checkout(
+            &original,
+            &[],
+            &intended,
+            &tax_rates,
+            None,
+        )
+        .expect("build expected fiscal payload");
+        {
+            let conn = state.conn.lock().expect("lock edit test database");
+            conn.execute(
+                "INSERT INTO orders (id, items, total_amount, total_amount_cents)
+                 VALUES ('edited-before-reserve-order', ?1, 10.00, 1000)",
+                rusqlite::params![original["items"].to_string()],
+            )
+            .expect("seed original order");
+            conn.execute(
+                "UPDATE orders SET items = ?1 WHERE id = 'edited-before-reserve-order'",
+                rusqlite::params![edited_items.to_string()],
+            )
+            .expect("simulate equal-total edit before reservation");
+        }
+        let reference = "edited-before-reserve-order:collect-outstanding:generation";
+        let attempt = serde_json::json!({
+            "id": outstanding_fiscal_transaction_id(reference),
+            "deviceId": "durable-attempt-device",
+            "orderId": reference,
+            "transactionType": "fiscal_receipt",
+            "amount": 1000,
+            "currency": "EUR",
+            "status": "processing",
+            "receiptData": { "intendedMethod": "cash" },
+            "startedAt": "2026-08-13T12:00:00Z",
+        });
+        let hardware_calls = std::sync::atomic::AtomicUsize::new(0);
+        let error = dispatch_after_durable_outstanding_attempt(
+            &state,
+            &attempt,
+            |conn| {
+                verify_authoritative_outstanding_fiscal_payload(
+                    conn,
+                    "edited-before-reserve-order",
+                    &expected_order_fingerprint,
+                    &expected_fiscal,
+                    &[],
+                    &intended,
+                    &tax_rates,
+                    None,
+                )
+            },
+            || async {
+                hardware_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            },
+        )
+        .await
+        .expect_err("stale fiscal payload must fail reservation");
+
+        assert!(error
+            .to_ascii_lowercase()
+            .contains("fiscal payload changed"));
+        assert_eq!(
+            hardware_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "stale order data must not reach hardware",
+        );
+        let attempt_count: i64 = state
+            .conn
+            .lock()
+            .expect("lock after rejected reservation")
+            .query_row(
+                "SELECT COUNT(*) FROM ecr_transactions WHERE order_id = ?1",
+                rusqlite::params![reference],
+                |row| row.get(0),
+            )
+            .expect("count rejected attempts");
+        assert_eq!(
+            attempt_count, 0,
+            "failed validation must roll back reservation"
+        );
+    }
+
     #[test]
     fn parse_required_device_id_supports_string_and_object() {
         let from_string = parse_required_device_id(Some(serde_json::json!("device-1")))
@@ -3223,6 +4481,280 @@ mod dto_tests {
         assert!(find_ambiguous_fiscal_transaction(&conn, "another-order")
             .expect("query other order")
             .is_none());
+    }
+
+    #[test]
+    fn outstanding_approval_retry_requires_the_same_method_and_an_unpersisted_reference() {
+        let existing = serde_json::json!({
+            "transactionId": "fiscal-approved-1",
+            "intendedMethod": "card",
+        });
+
+        assert!(validate_existing_outstanding_approval(&existing, "card", &[]).is_ok());
+        assert!(
+            validate_existing_outstanding_approval(&existing, "cash", &[])
+                .expect_err("changed tender must require reconciliation")
+                .contains("Reconcile")
+        );
+        assert!(validate_existing_outstanding_approval(
+            &existing,
+            "card",
+            &[serde_json::json!({
+                "status": "completed",
+                "transactionRef": "fiscal-approved-1",
+            })],
+        )
+        .expect_err("already persisted approval must not be reused")
+        .contains("Reconcile"));
+        assert!(validate_existing_outstanding_approval(
+            &serde_json::json!({
+                "transactionId": "legacy-approved-without-method",
+            }),
+            "card",
+            &[],
+        )
+        .expect_err("unbound legacy approval must fail closed")
+        .contains("Reconcile"));
+    }
+
+    #[test]
+    fn approved_fiscal_lookup_restores_the_bound_intended_method() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        crate::db::run_migrations_for_test(&conn);
+        conn.execute(
+            "INSERT INTO ecr_devices (
+                id, name, device_type, brand, protocol, connection_type,
+                connection_details
+             ) VALUES (
+                'device-bound', 'CAP Cashier', 'cash_register', 'RBS',
+                'cap_driver', 'network', '{}'
+             )",
+            [],
+        )
+        .expect("seed fiscal device");
+        conn.execute(
+            "INSERT INTO ecr_transactions (
+                id, device_id, order_id, transaction_type, amount, currency,
+                status, receipt_data, started_at, completed_at
+             ) VALUES (
+                'tx-bound-card', 'device-bound', 'collection-reference',
+                'fiscal_receipt', 5000, 'EUR', 'approved',
+                '{\"intendedMethod\":\"card\"}',
+                '2026-08-13T12:00:00Z', '2026-08-13T12:00:01Z'
+             )",
+            [],
+        )
+        .expect("seed bound approval");
+
+        let found = find_approved_fiscal_transaction(&conn, "collection-reference")
+            .expect("query approved transaction")
+            .expect("approved transaction");
+        assert_eq!(found["transactionId"], "tx-bound-card");
+        assert_eq!(found["intendedMethod"], "card");
+    }
+
+    #[test]
+    fn cross_generation_outstanding_approval_blocks_new_hardware_until_reconciled() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        crate::db::run_migrations_for_test(&conn);
+        conn.execute(
+            "INSERT INTO ecr_devices (
+                id, name, device_type, brand, protocol, connection_type,
+                connection_details
+             ) VALUES (
+                'device-cross-generation', 'CAP Cashier', 'cash_register', 'RBS',
+                'cap_driver', 'network', '{}'
+             )",
+            [],
+        )
+        .expect("seed fiscal device");
+        conn.execute(
+            "INSERT INTO ecr_transactions (
+                id, device_id, order_id, transaction_type, amount, currency,
+                status, receipt_data, started_at, completed_at
+             ) VALUES (
+                'tx-old-generation', 'device-cross-generation',
+                'order-cross:collect-outstanding:5000:0:5000:attempt-old',
+                'fiscal_receipt', 5000, 'EUR', 'approved',
+                '{\"intendedMethod\":\"card\"}',
+                '2026-08-13T12:00:00Z', '2026-08-13T12:00:01Z'
+             )",
+            [],
+        )
+        .expect("seed unreconciled approval");
+
+        let found = find_unreconciled_outstanding_fiscal_attempt(&conn, "order-cross", &[], None)
+            .expect("scan outstanding attempts")
+            .expect("old approval must block a new generation");
+        assert_eq!(found["transactionId"], "tx-old-generation");
+        assert_eq!(found["intendedMethod"], "card");
+
+        let represented = find_unreconciled_outstanding_fiscal_attempt(
+            &conn,
+            "order-cross",
+            &[serde_json::json!({
+                "status": "completed",
+                "transactionRef": "tx-old-generation",
+            })],
+            None,
+        )
+        .expect("scan reconciled attempts");
+        assert!(represented.is_none());
+    }
+
+    #[test]
+    fn cross_generation_orphan_marker_blocks_new_hardware_until_reconciled() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        crate::db::run_migrations_for_test(&conn);
+        crate::db::set_setting(
+            &conn,
+            "ecr_orphaned_receipts",
+            "order-orphan:collect-outstanding:4200:0:4200:attempt-old",
+            &serde_json::json!({
+                "id": "tx-orphan-old",
+                "status": "approved",
+                "receiptData": { "intendedMethod": "card" },
+            })
+            .to_string(),
+        )
+        .expect("seed orphan approval marker");
+
+        let found = find_unreconciled_outstanding_fiscal_attempt(&conn, "order-orphan", &[], None)
+            .expect("scan orphaned outstanding attempts")
+            .expect("orphan approval must block another charge");
+        assert_eq!(found["transactionId"], "tx-orphan-old");
+        assert_eq!(found["orphanedLocally"], true);
+        assert_eq!(found["intendedMethod"], "card");
+    }
+
+    #[test]
+    fn older_unreconciled_attempt_wins_over_the_exact_retry_candidate() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        crate::db::run_migrations_for_test(&conn);
+        conn.execute(
+            "INSERT INTO ecr_devices (
+                id, name, device_type, brand, protocol, connection_type,
+                connection_details
+             ) VALUES (
+                'device-multiple-attempts', 'CAP Cashier', 'cash_register', 'RBS',
+                'cap_driver', 'network', '{}'
+             )",
+            [],
+        )
+        .expect("seed fiscal device");
+        for (id, reference, started_at) in [
+            (
+                "tx-old-unreconciled",
+                "order-multiple:collect-outstanding:5000:0:5000:attempt-old",
+                "2026-08-13T12:00:00Z",
+            ),
+            (
+                "tx-exact-retry",
+                "order-multiple:collect-outstanding:4500:500:4000:attempt-current",
+                "2026-08-13T12:01:00Z",
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO ecr_transactions (
+                    id, device_id, order_id, transaction_type, amount, currency,
+                    status, receipt_data, started_at, completed_at
+                 ) VALUES (?1, 'device-multiple-attempts', ?2, 'fiscal_receipt',
+                    4000, 'EUR', 'approved', '{\"intendedMethod\":\"card\"}',
+                    ?3, ?3)",
+                rusqlite::params![id, reference, started_at],
+            )
+            .expect("seed outstanding approval");
+        }
+
+        let found = find_unreconciled_outstanding_fiscal_attempt(
+            &conn,
+            "order-multiple",
+            &[],
+            Some("order-multiple:collect-outstanding:4500:500:4000:attempt-current"),
+        )
+        .expect("scan all outstanding attempts")
+        .expect("older approval must block the exact retry");
+
+        assert_eq!(found["transactionId"], "tx-old-unreconciled");
+    }
+
+    #[test]
+    fn outstanding_receipt_build_failure_is_a_reconciliation_result() {
+        let result = outstanding_fiscal_build_failure(
+            "Outstanding fiscal checkout cannot replay a previously approved card tender"
+                .to_string(),
+        );
+
+        assert_eq!(result["success"], false);
+        assert_eq!(result["approved"], false);
+        assert_eq!(result["requiresReconciliation"], true);
+        assert!(result["error"]
+            .as_str()
+            .expect("error message")
+            .contains("previously approved card"));
+    }
+
+    #[test]
+    fn exact_orphaned_approval_retry_is_deduplicated_without_new_hardware() {
+        let orphan = serde_json::json!({
+            "transactionId": "tx-orphan-exact",
+            "orderReference": "order-orphan:collect-outstanding:4200:0:4200:attempt-1",
+            "status": "approved",
+            "intendedMethod": "card",
+            "orphanedLocally": true,
+        });
+
+        let response = outstanding_approval_retry_response(&orphan, "card", &[]);
+
+        assert_eq!(response["success"], true);
+        assert_eq!(response["approved"], true);
+        assert_eq!(response["deduplicated"], true);
+        assert_eq!(response["orphanedLocally"], true);
+        assert_eq!(response["transaction"]["transactionId"], "tx-orphan-exact");
+    }
+
+    #[test]
+    fn multiple_exact_approvals_fail_closed_instead_of_choosing_one() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        crate::db::run_migrations_for_test(&conn);
+        conn.execute(
+            "INSERT INTO ecr_devices (
+                id, name, device_type, brand, protocol, connection_type,
+                connection_details
+             ) VALUES (
+                'device-duplicate-exact', 'CAP Cashier', 'cash_register', 'RBS',
+                'cap_driver', 'network', '{}'
+             )",
+            [],
+        )
+        .expect("seed fiscal device");
+        let reference = "order-duplicate:collect-outstanding:4200:0:4200:ledger:attempt";
+        for (id, started_at) in [
+            ("tx-exact-one", "2026-08-13T12:00:00Z"),
+            ("tx-exact-two", "2026-08-13T12:01:00Z"),
+        ] {
+            conn.execute(
+                "INSERT INTO ecr_transactions (
+                    id, device_id, order_id, transaction_type, amount, currency,
+                    status, receipt_data, started_at, completed_at
+                 ) VALUES (?1, 'device-duplicate-exact', ?2, 'fiscal_receipt',
+                    4200, 'EUR', 'approved', '{\"intendedMethod\":\"card\"}',
+                    ?3, ?3)",
+                rusqlite::params![id, reference, started_at],
+            )
+            .expect("seed exact approval");
+        }
+
+        let found = find_unreconciled_outstanding_fiscal_attempt(
+            &conn,
+            "order-duplicate",
+            &[],
+            Some(reference),
+        )
+        .expect("scan duplicate exact approvals")
+        .expect("duplicates require reconciliation");
+
+        assert_eq!(found["multipleUnreconciledAttempts"], true);
     }
 
     #[test]

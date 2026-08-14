@@ -535,31 +535,6 @@ fn force_order_sync_retry_inner(
     })
 }
 
-fn enqueue_or_refresh_driver_earning_sync_row(
-    conn: &rusqlite::Connection,
-    earning_id: &str,
-    payload: &Value,
-    now: &str,
-) -> Result<(), String> {
-    crate::sync_queue::clear_unsynced_items(conn, "driver_earnings", earning_id)?;
-    crate::sync_queue::enqueue_payload_item(
-        conn,
-        "driver_earnings",
-        earning_id,
-        "INSERT",
-        payload,
-        Some(1),
-        Some("financial"),
-        Some("manual"),
-        Some(1),
-    )
-    .map_err(|e| format!("enqueue driver earning parity row: {e}"))?;
-
-    let _ = now;
-
-    Ok(())
-}
-
 fn enqueue_order_sync_payload(
     conn: &rusqlite::Connection,
     order_id: &str,
@@ -3069,7 +3044,7 @@ pub async fn orders_apply_edit_settlement(
         // full payment breakdown — including an edit-settlement delta
         // recorded in this same transaction with a different method than
         // the original (e.g. cash order, card-settled edit delta).
-        print::enqueue_after_edit_auto_print(&db, &actual_order_id, &order_type, is_ghost);
+        print::enqueue_after_edit_auto_print(&db, &actual_order_id, &order_type, is_ghost, &app);
     }
 
     Ok(response)
@@ -3573,7 +3548,7 @@ pub async fn order_save_from_remote(
         suppress_auto_print || is_ghost || payment_method.as_deref() == Some("pending");
     if !skip_auto_print && crate::print::is_print_action_enabled(&db, "after_order") {
         for entity_type in print::auto_print_entity_types_for_order_type(&order_type) {
-            if let Err(error) = print::enqueue_print_job(&db, entity_type, &local_id, None) {
+            if let Err(error) = print::enqueue_print_job(&db, entity_type, &local_id, None, &app) {
                 tracing::warn!(
                     order_id = %local_id,
                     entity_type = %entity_type,
@@ -3756,11 +3731,11 @@ pub async fn order_fetch_items_from_supabase(
 pub async fn order_create(
     arg0: Option<serde_json::Value>,
     db: tauri::State<'_, db::DbState>,
-    _app: tauri::AppHandle,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let payload = arg0.ok_or("Missing order payload")?;
     let normalized = payload.get("orderData").cloned().unwrap_or(payload);
-    let mut resp = sync::create_order(&db, &normalized)?;
+    let mut resp = sync::create_order(&db, &normalized, &app)?;
     let order_id = resp
         .get("orderId")
         .and_then(|v| v.as_str())
@@ -3810,7 +3785,7 @@ pub async fn order_create_with_initial_payment(
     arg0: Option<serde_json::Value>,
     db: tauri::State<'_, db::DbState>,
     mgr: tauri::State<'_, crate::ecr::DeviceManager>,
-    _app: tauri::AppHandle,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let payload = arg0.ok_or("Missing order payload")?;
     let mut normalized = payload.get("orderData").cloned().unwrap_or(payload);
@@ -3856,6 +3831,7 @@ pub async fn order_create_with_initial_payment(
             &client_request_id,
             &normalized,
             &initial_payment,
+            None,
         )
         .await
         {
@@ -3938,7 +3914,7 @@ pub async fn order_create_with_initial_payment(
         }
     }
 
-    let mut resp = sync::create_order(&db, &normalized)?;
+    let mut resp = sync::create_order(&db, &normalized, &app)?;
     let order_id = resp
         .get("orderId")
         .and_then(|v| v.as_str())
@@ -4220,36 +4196,12 @@ pub async fn order_assign_driver(
         rusqlite::params![notes, now, order_id],
     );
 
-    // W4d-iv additive emission: driver-earning sync payload now ships
-    // every monetary float key alongside its `_cents` integer sibling.
-    let total_earning = assignment.delivery_fee + assignment.tip_amount;
-    let driver_earning_sync_payload = serde_json::json!({
-        "id": earning_id,
-        "driver_id": driver_id,
-        "staff_shift_id": shift_id,
-        "order_id": order_id,
-        "branch_id": assignment.branch_id,
-        "delivery_fee": assignment.delivery_fee,
-        "delivery_fee_cents": Cents::round_half_even(assignment.delivery_fee).as_i64(),
-        "tip_amount": assignment.tip_amount,
-        "tip_amount_cents": Cents::round_half_even(assignment.tip_amount).as_i64(),
-        "total_earning": total_earning,
-        "total_earning_cents": Cents::round_half_even(total_earning).as_i64(),
-        "payment_method": assignment.payment_method,
-        "cash_collected": assignment.cash_collected,
-        "cash_collected_cents": Cents::round_half_even(assignment.cash_collected).as_i64(),
-        "card_amount": assignment.card_amount,
-        "card_amount_cents": Cents::round_half_even(assignment.card_amount).as_i64(),
-        "cash_to_return": assignment.cash_collected,
-        "cash_to_return_cents": Cents::round_half_even(assignment.cash_collected).as_i64(),
-        "createdAt": now,
-        "updatedAt": now,
-    });
-    enqueue_or_refresh_driver_earning_sync_row(
+    let driver_earning_sync_payload =
+        order_ownership::build_driver_earning_sync_payload(&conn, &earning_id)?;
+    order_ownership::enqueue_or_refresh_driver_earning_sync_row(
         &conn,
         &earning_id,
         &driver_earning_sync_payload,
-        &now,
     )?;
 
     let order_sync_payload = serde_json::json!({
@@ -4281,6 +4233,7 @@ pub async fn order_assign_driver(
             &order_id,
             None,
             Some(&assign_slip_payload),
+            &app,
         ) {
             tracing::warn!(
                 order_id = %order_id,
@@ -4795,7 +4748,7 @@ pub async fn order_save_for_retry(
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let payload = arg0.ok_or("Missing order payload")?;
-    let mut resp = sync::create_order(&db, &payload)?;
+    let mut resp = sync::create_order(&db, &payload, &app)?;
     let order_id = resp
         .get("orderId")
         .and_then(|value| value.as_str())
@@ -5941,75 +5894,81 @@ mod transition_tests {
 
     #[test]
     fn enqueue_or_refresh_driver_earning_sync_row_replaces_stale_unsynced_rows() {
-        let db = test_db();
-        let conn = db.conn.lock().unwrap();
+        for stale_status in ["pending", "failed", "conflict"] {
+            let db = test_db();
+            let conn = db.conn.lock().unwrap();
 
-        crate::sync_queue::enqueue_payload_item(
-            &conn,
-            "driver_earnings",
-            "earning-1",
-            "INSERT",
-            &serde_json::json!({ "order_id": "order-old" }),
-            Some(1),
-            Some("financial"),
-            Some("manual"),
-            Some(1),
-        )
-        .unwrap();
-        conn.execute(
-            "UPDATE parity_sync_queue
-             SET status = 'failed',
-                 attempts = 3,
-                 error_message = 'Parent shift not yet synced'
-             WHERE table_name = 'driver_earnings'
-               AND record_id = 'earning-1'",
-            [],
-        )
-        .unwrap();
-
-        let payload = serde_json::json!({
-            "id": "earning-1",
-            "driver_id": "driver-1",
-            "staff_shift_id": "shift-new",
-            "order_id": "order-new"
-        });
-
-        enqueue_or_refresh_driver_earning_sync_row(
-            &conn,
-            "earning-1",
-            &payload,
-            "2026-03-20T18:00:00Z",
-        )
-        .expect("refresh driver earning queue row");
-
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM parity_sync_queue
+            crate::sync_queue::enqueue_payload_item(
+                &conn,
+                "driver_earnings",
+                "earning-1",
+                "INSERT",
+                &serde_json::json!({ "order_id": "order-old" }),
+                Some(1),
+                Some("financial"),
+                Some("manual"),
+                Some(1),
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE parity_sync_queue
+                 SET status = ?1,
+                     attempts = 3,
+                     error_message = 'Parent shift not yet synced'
                  WHERE table_name = 'driver_earnings'
                    AND record_id = 'earning-1'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(count, 1);
-
-        let (status, retry_count, last_error, payload_text): (String, i64, Option<String>, String) =
-            conn.query_row(
-                "SELECT status, attempts, error_message, data
-                 FROM parity_sync_queue
-                 WHERE table_name = 'driver_earnings'
-                   AND record_id = 'earning-1'
-                 LIMIT 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                rusqlite::params![stale_status],
             )
             .unwrap();
 
-        assert_eq!(status, "pending");
-        assert_eq!(retry_count, 0);
-        assert_eq!(last_error, None);
-        assert!(payload_text.contains("\"order_id\":\"order-new\""));
-        assert!(payload_text.contains("\"staff_shift_id\":\"shift-new\""));
+            let payload = serde_json::json!({
+                "id": "earning-1",
+                "driver_id": "driver-1",
+                "staff_shift_id": "shift-new",
+                "order_id": "order-new"
+            });
+
+            order_ownership::enqueue_or_refresh_driver_earning_sync_row(
+                &conn,
+                "earning-1",
+                &payload,
+            )
+            .expect("refresh driver earning queue row");
+
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM parity_sync_queue
+                     WHERE table_name = 'driver_earnings'
+                       AND record_id = 'earning-1'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1);
+
+            let (status, retry_count, last_error, payload_text): (
+                String,
+                i64,
+                Option<String>,
+                String,
+            ) = conn
+                .query_row(
+                    "SELECT status, attempts, error_message, data
+                     FROM parity_sync_queue
+                     WHERE table_name = 'driver_earnings'
+                       AND record_id = 'earning-1'
+                     LIMIT 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .unwrap();
+
+            assert_eq!(status, "pending");
+            assert_eq!(retry_count, 0);
+            assert_eq!(last_error, None);
+            assert!(payload_text.contains("\"order_id\":\"order-new\""));
+            assert!(payload_text.contains("\"staff_shift_id\":\"shift-new\""));
+        }
     }
 
     #[test]

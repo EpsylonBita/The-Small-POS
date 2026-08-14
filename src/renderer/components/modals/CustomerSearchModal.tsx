@@ -113,7 +113,7 @@ type CustomerSearchModalProps = CustomerSearchModalBaseProps & (
       onCustomerSelected?: (customer: Customer) => void;
       onAddNewCustomer?: (phone: string) => void;
       onContinueWithoutCustomer?: (phone: string) => void;
-      onAddNewAddress?: never;
+      onAddNewAddress?: (customer: Customer) => void;
       onEditCustomer?: never;
     }
   | {
@@ -215,6 +215,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
   const searchInputId = useId();
   const searchDisposedRef = useRef(false);
   const searchRequestSeqRef = useRef(0);
+  const suppressAutomaticLookupRef = useRef(Boolean(initialCustomer));
   const displayedRequestRef = useRef<string | null>(null);
   const [selectedAddressId, setSelectedAddressId] = useState<string | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -246,15 +247,19 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
     setIsSearching(false);
 
     if (initialCustomer) {
-      setCustomer(withMaterializedCustomerAddresses({
+      suppressAutomaticLookupRef.current = true;
+      const materializedCustomer = withMaterializedCustomerAddresses({
         ...initialCustomer,
         addresses: normalizeCustomerAddresses(initialCustomer.addresses),
-      }) as Customer);
+      }) as Customer;
+      setCustomer(materializedCustomer);
+      setSelectedAddressId(resolveSelectedCustomerAddress(materializedCustomer)?.id ?? null);
       setSearchQuery(initialCustomer.phone || '');
       setLookupQuery(initialCustomer.phone || '');
       return;
     }
 
+    suppressAutomaticLookupRef.current = false;
     setCustomer(null);
     setSearchQuery(initialSearchTerm?.trim() ?? '');
     setLookupQuery(initialLookupTerm?.trim() || initialSearchTerm?.trim() || '');
@@ -424,6 +429,8 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
 
   // Real-time search effect
   useEffect(() => {
+    if (suppressAutomaticLookupRef.current) return;
+
     // Clear any existing timeout
     if (searchTimeout) {
       clearTimeout(searchTimeout);
@@ -446,6 +453,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
 
   // Manual search function (keeping for backward compatibility)
   const handleManualSearch = () => {
+    suppressAutomaticLookupRef.current = false;
     if (searchTimeout) {
       clearTimeout(searchTimeout);
     }
@@ -545,6 +553,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
   };
 
   const handleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    suppressAutomaticLookupRef.current = false;
     const value = e.target.value;
     setSearchQuery(value);
     setLookupQuery(value);
@@ -1099,6 +1108,19 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                   </div>
                 </>
               )}
+            </>
+          )}
+          {callerIdWorkspace && lookupOnly && onAddNewAddress && (
+            <>
+              {/* Caller ID add-address action */}
+              <button
+                type="button"
+                onClick={handleAddNewAddress}
+                className="mt-4 flex min-h-[44px] w-full items-center justify-center gap-2 rounded-xl border border-amber-600 bg-white px-4 py-3 font-semibold text-slate-900 transition-transform active:scale-[0.98] dark:border-amber-400/50 dark:bg-slate-900 dark:text-white"
+              >
+                <MapPin className="h-5 w-5 text-amber-600 dark:text-amber-300" />
+                {t('modals.customerSearch.addNewAddress', 'Add address')}
+              </button>
             </>
           )}
         </div>

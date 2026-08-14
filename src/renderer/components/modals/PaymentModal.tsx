@@ -77,6 +77,7 @@ interface PaymentModalProps {
   /** When provided, a "Split" button is rendered alongside Cash/Card in the payment selection step. */
   onSplitPayment?: (tipSelection: TipSelection | null) => void;
   roomChargeContext?: RoomChargeContext | null;
+  allowTips?: boolean;
 }
 
 type ModalStep = 'minimum_warning' | 'payment_selection' | 'cash_input';
@@ -194,6 +195,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   onPaymentComplete,
   onSplitPayment,
   roomChargeContext = null,
+  allowTips = true,
 }) => {
   const { t } = useTranslation();
   const { isFeatureEnabled, isMobileWaiter, loading: isFeatureLoading } = useFeatures();
@@ -516,6 +518,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       className="!max-w-lg"
       closeOnBackdrop={false}
       closeOnEscape={!isProcessingPayment}
+      closeDisabled={isProcessingPayment}
       initialFocusRef={currentStep === 'cash_input' ? cashInputRef : undefined}
       onEnterKey={handleModalEnter}
       enterKeyEnabled={!isProcessingPayment && !isFeatureLoading && canSubmitWithEnter}
@@ -609,7 +612,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
 
         {currentStep === 'payment_selection' && (
           <div className="relative">
-            <button
+            {allowTips && <button
               type="button"
               onClick={() => setShowTipModal(true)}
               disabled={isProcessingPayment}
@@ -637,7 +640,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
               <span className="text-lg font-bold text-emerald-400">
                 {tipAmount > 0 ? formatCurrency(tipAmount) : '+'}
               </span>
-            </button>
+            </button>}
             {isFeatureLoading ? (
               <div className="flex items-center gap-3 p-4 rounded-2xl bg-white/5 border border-white/10 w-full">
                 <div className="w-5 h-5 rounded-full border-2 border-white/20 border-t-white/70 animate-spin flex-shrink-0" />
@@ -913,7 +916,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       </div>
     </LiquidGlassModal>
     <TipModal
-      isOpen={isOpen && showTipModal}
+      isOpen={allowTips && isOpen && showTipModal}
       onClose={() => setShowTipModal(false)}
       baseAmount={tipBaseAmount}
       orderType={orderType}

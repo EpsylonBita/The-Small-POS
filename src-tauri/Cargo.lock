@@ -4636,13 +4636,14 @@ dependencies = [
 
 [[package]]
 name = "the-small-pos"
-version = "1.4.63"
+version = "1.4.64"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
  "bcrypt",
  "chrono",
  "dunce",
+ "flate2",
  "font8x8",
  "image",
  "keyring",
@@ -4657,6 +4658,7 @@ dependencies = [
  "serde_json",
  "serial_test",
  "serialport",
+ "sha2",
  "syn 2.0.115",
  "tauri",
  "tauri-build",

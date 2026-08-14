@@ -111,6 +111,15 @@ const extractErrorMessage = (error: unknown, fallback: string): string => {
   return fallback;
 };
 
+const ADD_ADDRESS_SAVE_TIMEOUT_MS = 35_000;
+
+class AddAddressSaveTimeoutError extends Error {
+  constructor() {
+    super('Add address save timed out');
+    this.name = 'AddAddressSaveTimeoutError';
+  }
+}
+
 const getStoredCoordinates = (source: any): { lat: number; lng: number } | null => {
   const directCoordinates = source?.coordinates;
   if (
@@ -578,6 +587,9 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
   }, [isOpen, initialPhone, initialCustomer, isAddAddressMode, isEditAddressMode, hasDeliveryPro]);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const submissionLockRef = useRef(false);
+  const submissionGenerationRef = useRef(0);
+  const isSubmissionLocked = () => submissionLockRef.current;
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [deliveryValidationResult, setDeliveryValidationResult] = useState<DeliveryValidationResult | null>(null);
   const [deliveryValidationStatus, setDeliveryValidationStatus] = useState<ValidationStatus | 'idle'>('idle');
@@ -853,35 +865,39 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    console.log('[AddCustomerModal.handleSubmit] BUILD v2026.01.05.2 - Called with mode:', mode, 'initialCustomer:', initialCustomer?.id, initialCustomer?.name);
-    console.log('[AddCustomerModal.handleSubmit] formData:', JSON.stringify(formData, null, 2));
+    if (isSubmissionLocked()) return;
 
-    if (!validateForm()) {
-      console.log('[AddCustomerModal.handleSubmit] Validation failed');
-      return;
-    }
-
-    let validationForSubmit: DeliveryValidationResult | null = null;
-    if (hasDeliveryPro) {
-      validationForSubmit = await ensureAddressValidationForSubmit();
-      const validationDecisionError = evaluateValidationDecision(validationForSubmit);
-      if (validationDecisionError) {
-        const nextErrors: Record<string, string> = {};
-        const status = validationForSubmit?.validation_status;
-        if ((status === 'out_of_zone' || status === 'unverified_offline') && overrideApplied) {
-          nextErrors.overrideReason = validationDecisionError;
-        } else {
-          nextErrors.address = validationDecisionError;
-        }
-        setErrors((prev) => ({ ...prev, ...nextErrors }));
-        return;
-      }
-    }
-
+    submissionLockRef.current = true;
+    const submissionGeneration = ++submissionGenerationRef.current;
     setIsSubmitting(true);
-    console.log('[AddCustomerModal.handleSubmit] Starting submission...');
 
     try {
+      console.log('[AddCustomerModal.handleSubmit] BUILD v2026.01.05.2 - Called with mode:', mode, 'initialCustomer:', initialCustomer?.id, initialCustomer?.name);
+      console.log('[AddCustomerModal.handleSubmit] formData:', JSON.stringify(formData, null, 2));
+
+      if (!validateForm()) {
+        console.log('[AddCustomerModal.handleSubmit] Validation failed');
+        return;
+      }
+
+      let validationForSubmit: DeliveryValidationResult | null = null;
+      if (hasDeliveryPro) {
+        validationForSubmit = await ensureAddressValidationForSubmit();
+        const validationDecisionError = evaluateValidationDecision(validationForSubmit);
+        if (validationDecisionError) {
+          const nextErrors: Record<string, string> = {};
+          const status = validationForSubmit?.validation_status;
+          if ((status === 'out_of_zone' || status === 'unverified_offline') && overrideApplied) {
+            nextErrors.overrideReason = validationDecisionError;
+          } else {
+            nextErrors.address = validationDecisionError;
+          }
+          setErrors((prev) => ({ ...prev, ...nextErrors }));
+          return;
+        }
+      }
+
+      console.log('[AddCustomerModal.handleSubmit] Starting submission...');
       const refreshed = await getResolvedTerminalCredentials().catch(() => ({
         branchId: terminalBranchId || undefined,
       } as any));
@@ -926,6 +942,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             postal_code: formData.postalCode ? formData.postalCode.trim() : null,
             floor_number: formData.floorNumber ? formData.floorNumber.trim() : null,
             notes: formData.notes ? formData.notes.trim() : null,
+            name_on_ringer: formData.nameOnRinger.trim() || null,
             address_type: 'delivery',
             is_default: false,
             coordinates: hasDeliveryPro ? persistedCoords : null,
@@ -935,7 +952,18 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
           };
 
           // Result from IPC is { success: boolean, data?: any, error?: string }
-          const result = await customerService.addCustomerAddress(initialCustomer.id, addressData) as any;
+          let timeoutId: ReturnType<typeof setTimeout> | undefined;
+          const result = await Promise.race([
+            customerService.addCustomerAddress(initialCustomer.id, addressData),
+            new Promise<never>((_resolve, reject) => {
+              timeoutId = setTimeout(
+                () => reject(new AddAddressSaveTimeoutError()),
+                ADD_ADDRESS_SAVE_TIMEOUT_MS,
+              );
+            }),
+          ]).finally(() => {
+            if (timeoutId) clearTimeout(timeoutId);
+          }) as any;
 
           if (result && result.success) {
             const newAddress = result.data;
@@ -968,7 +996,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             throw new Error(result?.error || 'Failed to add address');
           }
         } catch (err: any) {
-          throw new Error(extractErrorMessage(err, 'Failed to add address'));
+          throw err;
         }
         return;
       }
@@ -1229,11 +1257,32 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
     } catch (error) {
       console.error('[AddCustomerModal.handleSubmit] Error:', error);
       console.error('[AddCustomerModal.handleSubmit] Mode was:', mode, 'initialCustomer:', initialCustomer?.id);
-      setErrors({ submit: error instanceof Error ? error.message : t('modals.addCustomer.failed') });
+      setErrors({
+        submit: isAddAddressMode
+          ? error instanceof AddAddressSaveTimeoutError
+            ? t('modals.addCustomer.addressSaveTimedOut')
+            : t('modals.addCustomer.addressSaveFailed')
+          : error instanceof Error
+            ? error.message
+            : t('modals.addCustomer.failed'),
+      });
     } finally {
-      console.log('[AddCustomerModal.handleSubmit] Finally block - isSubmitting set to false');
-      setIsSubmitting(false);
+      if (submissionGenerationRef.current === submissionGeneration) {
+        console.log('[AddCustomerModal.handleSubmit] Finally block - isSubmitting set to false');
+        submissionLockRef.current = false;
+        setIsSubmitting(false);
+      }
     }
+  };
+
+  const handleSafeClose = () => {
+    if (isSubmissionLocked()) return;
+    submissionGenerationRef.current += 1;
+    onClose();
+  };
+  const handleSafeMinimize = () => {
+    if (isSubmissionLocked()) return;
+    callerIdWorkspace?.onMinimize();
   };
 
   // Cleanup validation timeout on unmount
@@ -1242,6 +1291,8 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       if (validationTimeoutRef.current) {
         clearTimeout(validationTimeoutRef.current);
       }
+      submissionGenerationRef.current += 1;
+      submissionLockRef.current = false;
     };
   }, []);
 
@@ -1264,7 +1315,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
   return (
     <LiquidGlassModal
       isOpen={isOpen}
-      onClose={onClose}
+      onClose={handleSafeClose}
       title={callerIdWorkspace ? undefined : getModalTitle()}
       header={callerIdWorkspace ? (
         <div className="liquid-glass-modal-header">
@@ -1272,7 +1323,8 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
           <div className="ml-4 flex items-center gap-2">
             <button
               type="button"
-              onClick={callerIdWorkspace.onMinimize}
+              onClick={handleSafeMinimize}
+              disabled={isSubmitting}
               className="liquid-glass-modal-close"
               aria-label={t('app.window.minimize', 'Minimize')}
             >
@@ -1280,7 +1332,8 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             </button>
             <button
               type="button"
-              onClick={onClose}
+              onClick={handleSafeClose}
+              disabled={isSubmitting}
               className="liquid-glass-modal-close"
               aria-label={t('common.actions.close', 'Close')}
             >
@@ -1292,8 +1345,8 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       ariaLabel={callerIdWorkspace ? getModalTitle() : undefined}
       size={callerIdWorkspace ? 'lg' : 'sm'}
       className={callerIdWorkspace ? '!max-w-4xl' : '!max-w-lg'}
-      closeOnBackdrop={true}
-      closeOnEscape={true}
+      closeOnBackdrop={!isSubmitting}
+      closeOnEscape={!isSubmitting}
     >
       {/* Form Content */}
       <form onSubmit={handleSubmit} className="space-y-4">
@@ -1404,7 +1457,9 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
                       <div className={`flex items-center gap-2 ${deliveryValidationStatus === 'unverified_offline' ? 'text-yellow-500' : 'text-red-600'}`}>
                         <AlertTriangle className="w-4 h-4" />
                         <span className="text-sm">
-                          {deliveryValidationResult.message
+                          {isAddAddressMode
+                            ? t('modals.addCustomer.validationError')
+                            : deliveryValidationResult.message
                             || (deliveryValidationStatus === 'requires_selection'
                               ? t('modals.addCustomer.selectAddressForValidation', 'Select a real address from suggestions to validate delivery.')
                               : t('modals.addCustomer.addressOutsideArea'))}
@@ -1623,7 +1678,8 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         <div className="flex gap-3 pt-4">
           <button
             type="button"
-            onClick={onClose}
+            onClick={handleSafeClose}
+            disabled={isSubmitting}
             className="liquid-glass-modal-button liquid-glass-modal-error flex-1 rounded-2xl"
           >
             {t('modals.addCustomer.cancel')}

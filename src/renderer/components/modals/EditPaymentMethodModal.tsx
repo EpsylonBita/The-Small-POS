@@ -74,6 +74,7 @@ export const EditPaymentMethodModal: React.FC<EditPaymentMethodModalProps> = ({
       className="!max-w-lg"
       closeOnBackdrop={!isSaving}
       closeOnEscape={!isSaving}
+      closeDisabled={isSaving}
     >
       <p className="liquid-glass-modal-text-muted mb-6">
         {t('modals.editPaymentMethod.message')}

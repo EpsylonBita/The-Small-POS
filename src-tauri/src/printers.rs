@@ -307,6 +307,71 @@ pub struct RawPrintResult {
     pub bytes_requested: usize,
     pub bytes_written: usize,
     pub doc_name: String,
+    pub spool_job_id: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RawTransportFailureKind {
+    DefinitelyNotSent,
+    AmbiguousAfterWrite,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RawTransportFailure {
+    pub kind: RawTransportFailureKind,
+    pub bytes_requested: usize,
+    pub bytes_written: usize,
+    pub message: String,
+}
+
+impl RawTransportFailure {
+    fn definitely_not_sent(bytes_requested: usize, message: String) -> Self {
+        Self {
+            kind: RawTransportFailureKind::DefinitelyNotSent,
+            bytes_requested,
+            bytes_written: 0,
+            message,
+        }
+    }
+
+    fn ambiguous(bytes_requested: usize, bytes_written: usize, message: String) -> Self {
+        Self {
+            kind: RawTransportFailureKind::AmbiguousAfterWrite,
+            bytes_requested,
+            bytes_written: bytes_written.min(bytes_requested),
+            message,
+        }
+    }
+}
+
+fn raw_transport_result(
+    bytes_requested: usize,
+    bytes_written: usize,
+    doc_name: &str,
+) -> RawPrintResult {
+    RawPrintResult {
+        bytes_requested,
+        bytes_written,
+        doc_name: doc_name.to_owned(),
+        spool_job_id: None,
+    }
+}
+
+fn windows_spool_result(
+    bytes_requested: usize,
+    doc_name: &str,
+    submission: crate::windows_spooler::SpoolSubmission,
+) -> RawPrintResult {
+    RawPrintResult {
+        bytes_requested,
+        bytes_written: bytes_requested,
+        doc_name: doc_name.to_owned(),
+        spool_job_id: Some(submission.started.job_id),
+    }
+}
+
+fn windows_spool_error(error: crate::windows_spooler::SpoolerError) -> String {
+    error.to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -468,38 +533,78 @@ fn capability_reset_required(
         .any(|field| previous.get(*field) != next.get(*field))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CapabilityEvidenceTrust {
+    Untrusted,
+    Validated,
+}
+
 fn normalize_capabilities_for_connection(
     previous_connection: Option<&Map<String, Value>>,
     next_connection: &mut Map<String, Value>,
+    evidence_trust: CapabilityEvidenceTrust,
 ) {
     let should_reset = capability_reset_required(previous_connection, next_connection);
     let previous_capabilities = capabilities_object(previous_connection).cloned();
+    let incoming_capabilities = capabilities_object(Some(next_connection)).cloned();
     let capabilities = ensure_capabilities_object(next_connection);
 
+    if evidence_trust == CapabilityEvidenceTrust::Untrusted {
+        let incoming_matches_previous = incoming_capabilities
+            .as_ref()
+            .zip(previous_capabilities.as_ref())
+            .map(|(incoming, previous)| incoming == previous)
+            .unwrap_or(false);
+        let incoming_is_empty = incoming_capabilities
+            .as_ref()
+            .map(Map::is_empty)
+            .unwrap_or(true);
+
+        if should_reset || (!incoming_is_empty && !incoming_matches_previous) {
+            *capabilities = default_capabilities_value()
+                .as_object()
+                .cloned()
+                .unwrap_or_default();
+            return;
+        }
+    }
+
     if should_reset {
-        // Preserve wizard-confirmed fields before resetting derived capabilities.
+        // A strictly verified/degraded wizard candidate owns its exact resolved
+        // target and protocol evidence. Preserve that allowlisted snapshot;
+        // unverified/stale capabilities still reset completely.
         let incoming_status = capabilities
             .get("status")
             .and_then(Value::as_str)
             .filter(|s| *s == "verified" || *s == "degraded")
             .map(|s| s.to_string());
-        let incoming_logo = capabilities.get("supportsLogo").cloned();
-        let incoming_last_verified = capabilities.get("lastVerifiedAt").cloned();
+        let confirmed_fields = incoming_status.as_ref().map(|_| {
+            [
+                "resolvedTransport",
+                "resolvedAddress",
+                "emulation",
+                "renderMode",
+                "baudRate",
+                "escposCodePage",
+                "supportsCut",
+                "supportsLogo",
+                "lastVerifiedAt",
+            ]
+            .into_iter()
+            .filter_map(|key| capabilities.get(key).cloned().map(|value| (key, value)))
+            .collect::<Vec<_>>()
+        });
 
         *capabilities = default_capabilities_value()
             .as_object()
             .cloned()
             .unwrap_or_default();
 
-        // Restore wizard-confirmed fields (status, logo support, verification timestamp).
         if let Some(status) = incoming_status {
             capabilities.insert("status".to_string(), Value::String(status));
-        }
-        if let Some(logo) = incoming_logo {
-            capabilities.insert("supportsLogo".to_string(), logo);
-        }
-        if let Some(ts) = incoming_last_verified {
-            capabilities.insert("lastVerifiedAt".to_string(), ts);
+            for (key, value) in confirmed_fields.unwrap_or_default() {
+                capabilities.insert(key.to_string(), value);
+            }
         }
         return;
     }
@@ -765,10 +870,11 @@ fn role_uses_classic_receipt_defaults(role: &str) -> bool {
     )
 }
 
-pub(crate) fn normalize_connection_json_for_role(
+fn normalize_connection_json_for_role_with_trust(
     role: &str,
     raw_connection_json: Option<&str>,
     current_connection_json: Option<&str>,
+    evidence_trust: CapabilityEvidenceTrust,
 ) -> Result<Option<String>, String> {
     let uses_receipt_defaults = role_uses_classic_receipt_defaults(role);
     let Some(raw_connection_json) = raw_connection_json
@@ -804,9 +910,22 @@ pub(crate) fn normalize_connection_json_for_role(
     object
         .entry("emulation".to_string())
         .or_insert_with(|| Value::String("auto".to_string()));
-    normalize_capabilities_for_connection(current_connection.as_ref(), object);
+    normalize_capabilities_for_connection(current_connection.as_ref(), object, evidence_trust);
 
     Ok(Some(parsed.to_string()))
+}
+
+pub(crate) fn normalize_connection_json_for_role(
+    role: &str,
+    raw_connection_json: Option<&str>,
+    current_connection_json: Option<&str>,
+) -> Result<Option<String>, String> {
+    normalize_connection_json_for_role_with_trust(
+        role,
+        raw_connection_json,
+        current_connection_json,
+        CapabilityEvidenceTrust::Untrusted,
+    )
 }
 
 fn normalized_printer_type(value: Option<&str>) -> &'static str {
@@ -1187,10 +1306,8 @@ pub fn list_system_printers() -> Vec<String> {
 
 /// Send raw binary data (ESC/POS) to a Windows printer via the winspool API.
 ///
-/// Uses `OpenPrinterW` → `StartDocPrinterA(RAW)` → `StartPagePrinter` →
-/// `WritePrinter` → cleanup to push bytes directly to the printer spooler
-/// without any rendering.  This is the correct method for thermal receipt
-/// printers which expect ESC/POS binary.
+/// Delegates to the single Winspool RAW adapter. Success means Windows
+/// accepted and finalized the spool document, not that paper was printed.
 #[cfg(target_os = "windows")]
 pub fn print_raw_to_windows_cancellable(
     printer_name: &str,
@@ -1198,170 +1315,28 @@ pub fn print_raw_to_windows_cancellable(
     doc_name: &str,
     cancel: &AtomicBool,
 ) -> Result<RawPrintResult, String> {
-    use std::ffi::CString;
-    use std::ptr;
+    use crate::windows_spooler::{SystemWindowsSpooler, WindowsRawRequest, WindowsSpooler};
 
-    #[allow(clippy::upper_case_acronyms)]
-    type HANDLE = *mut std::ffi::c_void;
-
-    #[repr(C)]
-    #[allow(non_snake_case, non_camel_case_types)]
-    struct DOC_INFO_1A {
-        pDocName: *const i8,
-        pOutputFile: *const i8,
-        pDatatype: *const i8,
-    }
-
-    #[link(name = "winspool")]
-    extern "system" {
-        fn OpenPrinterW(
-            pPrinterName: *const u16,
-            phPrinter: *mut HANDLE,
-            pDefault: *const u8,
-        ) -> i32;
-        fn ClosePrinter(hPrinter: HANDLE) -> i32;
-        fn AbortPrinter(hPrinter: HANDLE) -> i32;
-        fn StartDocPrinterA(hPrinter: HANDLE, Level: u32, pDocInfo: *const DOC_INFO_1A) -> u32;
-        fn EndDocPrinter(hPrinter: HANDLE) -> i32;
-        fn StartPagePrinter(hPrinter: HANDLE) -> i32;
-        fn EndPagePrinter(hPrinter: HANDLE) -> i32;
-        fn WritePrinter(hPrinter: HANDLE, pBuf: *const u8, cbBuf: u32, pcWritten: *mut u32) -> i32;
-    }
-
-    // Convert printer name to null-terminated UTF-16
-    let wide_name: Vec<u16> = printer_name
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-
-    let mut h_printer: HANDLE = ptr::null_mut();
-
-    // Open printer (no defaults — pass null for PRINTER_DEFAULTS)
-    let ok = unsafe { OpenPrinterW(wide_name.as_ptr(), &mut h_printer, ptr::null()) };
-    if ok == 0 || h_printer.is_null() {
-        return Err(format!("OpenPrinter failed for \"{printer_name}\""));
-    }
-
-    // Prepare DOC_INFO_1A with RAW data type
-    // SAFETY: the inner/final `expect` calls are on static ASCII literals that
-    // contain no interior null bytes, so `CString::new` cannot fail. Documented
-    // as `.expect(...)` rather than `.unwrap()` so the intent is explicit.
-    let c_doc_name = CString::new(doc_name).unwrap_or_else(|_| {
-        CString::new("POS Print").expect("static literal \"POS Print\" has no null bytes")
-    });
-    let c_datatype = CString::new("RAW").expect("static literal \"RAW\" has no null bytes");
-
-    let doc_info = DOC_INFO_1A {
-        pDocName: c_doc_name.as_ptr(),
-        pOutputFile: ptr::null(),
-        pDatatype: c_datatype.as_ptr(),
-    };
-
-    let doc_id = unsafe { StartDocPrinterA(h_printer, 1, &doc_info) };
-    if doc_id == 0 {
-        unsafe {
-            ClosePrinter(h_printer);
-        }
-        return Err(format!("StartDocPrinter failed for \"{printer_name}\""));
-    }
-
-    let page_ok = unsafe { StartPagePrinter(h_printer) };
-    if page_ok == 0 {
-        unsafe {
-            AbortPrinter(h_printer);
-            ClosePrinter(h_printer);
-        }
-        return Err(format!("StartPagePrinter failed for \"{printer_name}\""));
-    }
-
-    // Use bounded chunks so an operator Pause/Cancel request can be observed
-    // between spool writes. A single unbounded WritePrinter call made the UI
-    // controls powerless until the driver returned.
-    const WINDOWS_RAW_CHUNK_SIZE: usize = 4096;
-    let mut written_total = 0usize;
-    for chunk in data.chunks(WINDOWS_RAW_CHUNK_SIZE) {
-        if cancel.load(Ordering::Acquire) {
-            unsafe {
-                AbortPrinter(h_printer);
-                ClosePrinter(h_printer);
-            }
-            return Err(format!(
-                "Print dispatch to \"{printer_name}\" was stopped by the operator after writing {written_total}/{} bytes; raw print state is unknown. Automatic retry stopped.",
-                data.len()
-            ));
-        }
-
-        let mut written: u32 = 0;
-        let write_ok =
-            unsafe { WritePrinter(h_printer, chunk.as_ptr(), chunk.len() as u32, &mut written) };
-        written_total = written_total.saturating_add(written as usize);
-
-        if write_ok == 0 {
-            unsafe {
-                AbortPrinter(h_printer);
-                ClosePrinter(h_printer);
-            }
-            return Err(format!(
-                "WritePrinter failed for \"{printer_name}\": wrote {written_total}/{} bytes; raw print state is unknown. Automatic retry stopped to prevent repeated or gibberish output.",
-                data.len()
-            ));
-        }
-
-        if written as usize != chunk.len() {
-            unsafe {
-                AbortPrinter(h_printer);
-                ClosePrinter(h_printer);
-            }
-            return Err(format!(
-                "Partial spool write for \"{printer_name}\": wrote {written_total}/{} bytes; raw print state is unknown. Automatic retry stopped to prevent repeated or gibberish output.",
-                data.len()
-            ));
-        }
-    }
-
-    if cancel.load(Ordering::Acquire) {
-        unsafe {
-            AbortPrinter(h_printer);
-            ClosePrinter(h_printer);
-        }
-        return Err(format!(
-            "Print dispatch to \"{printer_name}\" was stopped by the operator after writing {written_total}/{} bytes; raw print state is unknown. Automatic retry stopped.",
-            data.len()
-        ));
-    }
-
-    let end_page_ok = unsafe { EndPagePrinter(h_printer) };
-    if end_page_ok == 0 {
-        unsafe {
-            AbortPrinter(h_printer);
-            ClosePrinter(h_printer);
-        }
-        return Err(format!(
-            "EndPagePrinter failed for \"{printer_name}\"; raw print state is unknown. Automatic retry stopped to prevent repeated or gibberish output."
-        ));
-    }
-
-    let end_doc_ok = unsafe { EndDocPrinter(h_printer) };
-    unsafe {
-        ClosePrinter(h_printer);
-    }
-    if end_doc_ok == 0 {
-        return Err(format!(
-            "EndDocPrinter failed for \"{printer_name}\"; raw print state is unknown. Automatic retry stopped to prevent repeated or gibberish output."
-        ));
-    }
+    let submission = SystemWindowsSpooler
+        .submit_raw(
+            WindowsRawRequest {
+                printer_name: printer_name.to_owned(),
+                document_name: doc_name.to_owned(),
+                bytes: std::sync::Arc::from(data),
+            },
+            cancel,
+            &mut |_| Ok(()),
+        )
+        .map_err(windows_spool_error)?;
 
     info!(
         printer = %printer_name,
         bytes = data.len(),
         doc = %doc_name,
-        "Sent raw data to Windows print spooler"
+        spool_job_id = submission.started.job_id,
+        "Windows print spooler accepted and finalized the raw document"
     );
-    Ok(RawPrintResult {
-        bytes_requested: data.len(),
-        bytes_written: written_total,
-        doc_name: doc_name.to_string(),
-    })
+    Ok(windows_spool_result(data.len(), doc_name, submission))
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -1417,34 +1392,122 @@ fn write_raw_payload_in_chunks<W: std::io::Write>(
     cancel: &AtomicBool,
     target_label: &str,
 ) -> Result<usize, String> {
+    write_raw_payload_in_chunks_with_evidence(
+        writer,
+        data,
+        chunk_size,
+        chunk_delay,
+        deadline,
+        cancel,
+        target_label,
+    )
+    .map_err(|failure| failure.message)
+}
+
+fn write_raw_payload_in_chunks_with_evidence<W: std::io::Write>(
+    writer: &mut W,
+    data: &[u8],
+    chunk_size: usize,
+    chunk_delay: Duration,
+    deadline: Instant,
+    cancel: &AtomicBool,
+    target_label: &str,
+) -> Result<usize, RawTransportFailure> {
+    write_raw_payload_in_chunks_with_evidence_and_clock(
+        writer,
+        data,
+        chunk_size,
+        chunk_delay,
+        deadline,
+        cancel,
+        target_label,
+        Instant::now,
+    )
+}
+
+fn write_raw_payload_in_chunks_with_evidence_and_clock<W: std::io::Write, F: FnMut() -> Instant>(
+    writer: &mut W,
+    data: &[u8],
+    chunk_size: usize,
+    chunk_delay: Duration,
+    deadline: Instant,
+    cancel: &AtomicBool,
+    target_label: &str,
+    mut now: F,
+) -> Result<usize, RawTransportFailure> {
     let chunk_size = chunk_size.max(1);
     let mut written_total = 0usize;
-
-    for chunk in data.chunks(chunk_size) {
-        if cancel.load(Ordering::Acquire) {
-            return Err(format!(
+    let guard = |written_total: usize, observed_now: Instant| {
+        let message = if cancel.load(Ordering::Acquire) {
+            Some(format!(
                 "Print dispatch to {target_label} was stopped by the operator after writing {written_total}/{} bytes; raw print state is unknown. Automatic retry stopped.",
                 data.len()
-            ));
-        }
-        if Instant::now() >= deadline {
-            return Err(format!(
+            ))
+        } else if observed_now >= deadline {
+            Some(format!(
                 "{target_label} did not accept the receipt within the write deadline after writing {written_total}/{} bytes; raw print state is unknown. Automatic retry stopped.",
                 data.len()
-            ));
+            ))
+        } else {
+            None
+        };
+        match message {
+            Some(message) if written_total == 0 => Err(RawTransportFailure::definitely_not_sent(
+                data.len(),
+                message,
+            )),
+            Some(message) => Err(RawTransportFailure::ambiguous(
+                data.len(),
+                written_total,
+                message,
+            )),
+            None => Ok(()),
         }
+    };
 
-        writer.write_all(chunk).map_err(|error| {
-            format!(
-                "Raw write to {target_label} failed after it wrote {written_total}/{} bytes ({error}); raw print state is unknown. Automatic retry stopped.",
-                data.len()
-            )
-        })?;
-        written_total += chunk.len();
+    for chunk in data.chunks(chunk_size) {
+        guard(written_total, now())?;
+
+        let mut chunk_offset = 0usize;
+        while chunk_offset < chunk.len() {
+            guard(written_total, now())?;
+            match writer.write(&chunk[chunk_offset..]) {
+                Ok(0) => {
+                    return Err(RawTransportFailure::ambiguous(
+                        data.len(),
+                        written_total,
+                        format!(
+                            "Raw write to {target_label} made no progress after it wrote {written_total}/{} bytes; raw print state is unknown. Automatic retry stopped.",
+                            data.len()
+                        ),
+                    ));
+                }
+                Ok(written) => {
+                    let bounded = written.min(chunk.len() - chunk_offset);
+                    chunk_offset += bounded;
+                    written_total = written_total.saturating_add(bounded).min(data.len());
+                }
+                Err(error) => {
+                    return Err(RawTransportFailure::ambiguous(
+                        data.len(),
+                        written_total,
+                        format!(
+                            "Raw write to {target_label} failed after it wrote {written_total}/{} bytes ({error}); raw print state is unknown. Automatic retry stopped.",
+                            data.len()
+                        ),
+                    ));
+                }
+            }
+        }
+        guard(written_total, now())?;
         writer.flush().map_err(|error| {
-            format!(
+            RawTransportFailure::ambiguous(
+                data.len(),
+                written_total,
+                format!(
                 "Raw flush to {target_label} failed after it wrote {written_total}/{} bytes ({error}); raw print state is unknown. Automatic retry stopped.",
                 data.len()
+                ),
             )
         })?;
 
@@ -1452,6 +1515,8 @@ fn write_raw_payload_in_chunks<W: std::io::Write>(
             std::thread::sleep(chunk_delay);
         }
     }
+
+    guard(written_total, now())?;
 
     Ok(written_total)
 }
@@ -1463,6 +1528,17 @@ pub fn print_raw_to_tcp_cancellable(
     doc_name: &str,
     cancel: &AtomicBool,
 ) -> Result<RawPrintResult, String> {
+    print_raw_to_tcp_cancellable_with_evidence(host, port, data, doc_name, cancel)
+        .map_err(|failure| failure.message)
+}
+
+pub(crate) fn print_raw_to_tcp_cancellable_with_evidence(
+    host: &str,
+    port: u16,
+    data: &[u8],
+    doc_name: &str,
+    cancel: &AtomicBool,
+) -> Result<RawPrintResult, RawTransportFailure> {
     info!(
         host = %host,
         port,
@@ -1471,10 +1547,16 @@ pub fn print_raw_to_tcp_cancellable(
         "Sending raw data to network thermal printer"
     );
 
-    let mut stream = connect_tcp_socket(host, port, RAW_TCP_CONNECT_TIMEOUT_MS)?;
+    let mut stream = connect_tcp_socket(host, port, RAW_TCP_CONNECT_TIMEOUT_MS)
+        .map_err(|message| RawTransportFailure::definitely_not_sent(data.len(), message))?;
     stream
         .set_write_timeout(Some(Duration::from_millis(RAW_TCP_WRITE_TIMEOUT_MS)))
-        .map_err(|e| format!("Set network printer write timeout for {host}:{port}: {e}"))?;
+        .map_err(|error| {
+            RawTransportFailure::definitely_not_sent(
+                data.len(),
+                format!("Set network printer write timeout for {host}:{port}: {error}"),
+            )
+        })?;
     let _ = stream.set_nodelay(true);
 
     // Chunk large payloads to avoid overwhelming the printer's receive buffer.
@@ -1503,7 +1585,7 @@ pub fn print_raw_to_tcp_cancellable(
         Duration::ZERO
     };
     let target_label = format!("network printer {host}:{port}");
-    let written = write_raw_payload_in_chunks(
+    let written = write_raw_payload_in_chunks_with_evidence(
         &mut stream,
         data,
         TCP_CHUNK_SIZE,
@@ -1521,11 +1603,7 @@ pub fn print_raw_to_tcp_cancellable(
         "Sent raw data to network thermal printer"
     );
 
-    Ok(RawPrintResult {
-        bytes_requested: data.len(),
-        bytes_written: written,
-        doc_name: doc_name.to_string(),
-    })
+    Ok(raw_transport_result(data.len(), written, doc_name))
 }
 
 pub fn probe_printer_tcp(host: &str, port: u16) -> Result<(), String> {
@@ -1541,13 +1619,29 @@ pub fn print_raw_to_serial_cancellable(
     doc_name: &str,
     cancel: &AtomicBool,
 ) -> Result<RawPrintResult, String> {
+    print_raw_to_serial_cancellable_with_evidence(port_name, baud_rate, data, doc_name, cancel)
+        .map_err(|failure| failure.message)
+}
+
+pub(crate) fn print_raw_to_serial_cancellable_with_evidence(
+    port_name: &str,
+    baud_rate: u32,
+    data: &[u8],
+    doc_name: &str,
+    cancel: &AtomicBool,
+) -> Result<RawPrintResult, RawTransportFailure> {
     let mut port = serialport::new(port_name, baud_rate)
         .timeout(Duration::from_millis(RAW_SERIAL_TIMEOUT_MS))
         .open()
-        .map_err(|e| format!("Open serial printer {port_name} @ {baud_rate}: {e}"))?;
+        .map_err(|error| {
+            RawTransportFailure::definitely_not_sent(
+                data.len(),
+                format!("Open serial printer {port_name} @ {baud_rate}: {error}"),
+            )
+        })?;
 
     let target_label = format!("serial printer {port_name} @ {baud_rate}");
-    let written = write_raw_payload_in_chunks(
+    let written = write_raw_payload_in_chunks_with_evidence(
         &mut port,
         data,
         4096,
@@ -1565,11 +1659,7 @@ pub fn print_raw_to_serial_cancellable(
         "Sent raw data to serial thermal printer"
     );
 
-    Ok(RawPrintResult {
-        bytes_requested: data.len(),
-        bytes_written: written,
-        doc_name: doc_name.to_string(),
-    })
+    Ok(raw_transport_result(data.len(), written, doc_name))
 }
 
 pub fn probe_printer_serial(port_name: &str, baud_rate: u32) -> Result<(), String> {
@@ -1631,6 +1721,31 @@ pub fn print_raw_for_target_cancellable(
             port_name,
             baud_rate,
         } => print_raw_to_serial_cancellable(port_name, *baud_rate, data, doc_name, cancel),
+    }
+}
+
+pub(crate) fn print_raw_for_target_cancellable_with_evidence(
+    target: &ResolvedPrinterTarget,
+    data: &[u8],
+    doc_name: &str,
+    cancel: &AtomicBool,
+) -> Result<RawPrintResult, RawTransportFailure> {
+    match target {
+        ResolvedPrinterTarget::RawTcp { host, port } => {
+            print_raw_to_tcp_cancellable_with_evidence(host, *port, data, doc_name, cancel)
+        }
+        ResolvedPrinterTarget::SerialPort {
+            port_name,
+            baud_rate,
+        } => print_raw_to_serial_cancellable_with_evidence(
+            port_name, *baud_rate, data, doc_name, cancel,
+        ),
+        ResolvedPrinterTarget::WindowsQueue { .. } => {
+            Err(RawTransportFailure::definitely_not_sent(
+                data.len(),
+                "Managed Windows printing must use the WindowsSpooler adapter".into(),
+            ))
+        }
     }
 }
 
@@ -1775,6 +1890,21 @@ fn get_default_profile_id_from_column(conn: &rusqlite::Connection) -> Option<Str
 
 /// Create a new printer profile. Returns `{ success, profileId }`.
 pub fn create_printer_profile(db: &DbState, profile: &Value) -> Result<Value, String> {
+    create_printer_profile_with_capability_trust(db, profile, CapabilityEvidenceTrust::Untrusted)
+}
+
+pub(crate) fn create_printer_profile_with_validated_capabilities(
+    db: &DbState,
+    profile: &Value,
+) -> Result<Value, String> {
+    create_printer_profile_with_capability_trust(db, profile, CapabilityEvidenceTrust::Validated)
+}
+
+fn create_printer_profile_with_capability_trust(
+    db: &DbState,
+    profile: &Value,
+    evidence_trust: CapabilityEvidenceTrust,
+) -> Result<Value, String> {
     let name = non_empty_str(profile.get("name").and_then(|v| v.as_str()))
         .ok_or("Missing profile name")?;
     let printer_name = non_empty_str(
@@ -1887,8 +2017,12 @@ pub fn create_printer_profile(db: &DbState, profile: &Value) -> Result<Value, St
         .or_else(|| profile.get("fallback_printer_id"))
         .and_then(|v| v.as_str());
     let connection_json_input = profile_connection_json_string(profile);
-    let connection_json =
-        normalize_connection_json_for_role(&role, connection_json_input.as_deref(), None)?;
+    let connection_json = normalize_connection_json_for_role_with_trust(
+        &role,
+        connection_json_input.as_deref(),
+        None,
+        evidence_trust,
+    )?;
     let escpos_code_page: Option<i32> = profile
         .get("escposCodePage")
         .or_else(|| profile.get("escpos_code_page"))
@@ -2008,6 +2142,21 @@ pub fn create_printer_profile(db: &DbState, profile: &Value) -> Result<Value, St
 
 /// Update an existing printer profile. Returns `{ success }`.
 pub fn update_printer_profile(db: &DbState, profile: &Value) -> Result<Value, String> {
+    update_printer_profile_with_capability_trust(db, profile, CapabilityEvidenceTrust::Untrusted)
+}
+
+pub(crate) fn update_printer_profile_with_validated_capabilities(
+    db: &DbState,
+    profile: &Value,
+) -> Result<Value, String> {
+    update_printer_profile_with_capability_trust(db, profile, CapabilityEvidenceTrust::Validated)
+}
+
+fn update_printer_profile_with_capability_trust(
+    db: &DbState,
+    profile: &Value,
+    evidence_trust: CapabilityEvidenceTrust,
+) -> Result<Value, String> {
     let id = profile
         .get("id")
         .or_else(|| profile.get("profileId"))
@@ -2227,12 +2376,13 @@ pub fn update_printer_profile(db: &DbState, profile: &Value) -> Result<Value, St
     let connection_json_input = profile_connection_json_string(profile);
     if connection_json_input.is_some() || requested_role.is_some() {
         let effective_role = requested_role.as_deref().unwrap_or(current_role.as_str());
-        let normalized_connection_json = normalize_connection_json_for_role(
+        let normalized_connection_json = normalize_connection_json_for_role_with_trust(
             effective_role,
             connection_json_input
                 .as_deref()
                 .or(current_connection_json.as_deref()),
             current_connection_json.as_deref(),
+            evidence_trust,
         )?;
         if let Some(connection_json) = normalized_connection_json {
             sets.push("connection_json = ?");
@@ -2631,38 +2781,6 @@ pub fn resolve_printer_profile_for_role(
     resolve_any_enabled_profile(db)
 }
 
-/// Reprint a failed print job by resetting its status and retry counters.
-pub fn reprint_job(db: &DbState, job_id: &str) -> Result<Value, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let now = Utc::now().to_rfc3339();
-
-    let affected = conn
-        .execute(
-            "UPDATE print_jobs SET
-                status = 'pending',
-                retry_count = 0,
-                next_retry_at = NULL,
-                last_error = NULL,
-                updated_at = ?1
-             WHERE id = ?2 AND status = 'failed'",
-            params![now, job_id],
-        )
-        .map_err(|e| format!("reprint job: {e}"))?;
-
-    if affected == 0 {
-        return Err(format!(
-            "Print job {job_id} not found or not in failed state"
-        ));
-    }
-
-    info!(job_id = %job_id, "Print job reset for reprint");
-    Ok(serde_json::json!({
-        "success": true,
-        "jobId": job_id,
-        "message": "Print job queued for reprint",
-    }))
-}
-
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -2694,6 +2812,97 @@ mod tests {
                     "simulated disconnect",
                 ))
             }
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct PartialThenFail {
+        wrote: bool,
+    }
+
+    impl Write for PartialThenFail {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.wrote {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "simulated post-write failure",
+                ))
+            } else {
+                self.wrote = true;
+                Ok(buf.len().min(2))
+            }
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct CancelAfterFirstPartial<'a> {
+        cancel: &'a AtomicBool,
+        writes: usize,
+    }
+
+    #[derive(Default)]
+    struct OneByteWriter {
+        writes: usize,
+    }
+
+    impl Write for OneByteWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.writes += 1;
+            Ok(buf.len().min(1))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct CancelBeforeFlushWriter<'a> {
+        cancel: &'a AtomicBool,
+        flushes: usize,
+    }
+
+    impl Write for CancelBeforeFlushWriter<'_> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.cancel.store(true, Ordering::Release);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.flushes += 1;
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct FlushCountingWriter {
+        flushes: usize,
+    }
+
+    impl Write for FlushCountingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.flushes += 1;
+            Ok(())
+        }
+    }
+
+    impl Write for CancelAfterFirstPartial<'_> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.writes += 1;
+            let written = buf.len().min(1);
+            if self.writes == 1 {
+                self.cancel.store(true, Ordering::Release);
+            }
+            Ok(written)
         }
 
         fn flush(&mut self) -> std::io::Result<()> {
@@ -2738,6 +2947,208 @@ mod tests {
         assert!(
             error.contains("raw print state is unknown"),
             "partial streams must be fail-closed: {error}"
+        );
+    }
+
+    #[test]
+    fn structured_raw_transport_evidence_distinguishes_prewrite_from_ambiguous_failure() {
+        let cancel = AtomicBool::new(true);
+        let mut untouched = Vec::<u8>::new();
+        let prewrite = write_raw_payload_in_chunks_with_evidence(
+            &mut untouched,
+            &[1, 2, 3, 4],
+            4,
+            Duration::ZERO,
+            Instant::now() + Duration::from_secs(1),
+            &cancel,
+            "fake target",
+        )
+        .unwrap_err();
+        assert_eq!(prewrite.kind, RawTransportFailureKind::DefinitelyNotSent);
+        assert_eq!((prewrite.bytes_written, prewrite.bytes_requested), (0, 4));
+
+        let cancel = AtomicBool::new(false);
+        let mut writer = PartialThenFail { wrote: false };
+        let ambiguous = write_raw_payload_in_chunks_with_evidence(
+            &mut writer,
+            &[1, 2, 3, 4],
+            4,
+            Duration::ZERO,
+            Instant::now() + Duration::from_secs(1),
+            &cancel,
+            "fake target",
+        )
+        .unwrap_err();
+        assert_eq!(ambiguous.kind, RawTransportFailureKind::AmbiguousAfterWrite);
+        assert_eq!((ambiguous.bytes_written, ambiguous.bytes_requested), (2, 4));
+    }
+
+    #[test]
+    fn structured_raw_transport_rechecks_cancel_between_partial_writes() {
+        let cancel = AtomicBool::new(false);
+        let mut writer = CancelAfterFirstPartial {
+            cancel: &cancel,
+            writes: 0,
+        };
+
+        let failure = write_raw_payload_in_chunks_with_evidence(
+            &mut writer,
+            &[1, 2, 3, 4],
+            4,
+            Duration::ZERO,
+            Instant::now() + Duration::from_secs(1),
+            &cancel,
+            "fake target",
+        )
+        .unwrap_err();
+
+        assert_eq!(failure.kind, RawTransportFailureKind::AmbiguousAfterWrite);
+        assert_eq!((failure.bytes_written, failure.bytes_requested), (1, 4));
+        assert_eq!(writer.writes, 1);
+    }
+
+    #[test]
+    fn structured_raw_transport_rechecks_injected_deadline_between_partial_writes() {
+        let cancel = AtomicBool::new(false);
+        let mut writer = OneByteWriter::default();
+        let before = Instant::now();
+        let deadline = before + Duration::from_secs(1);
+        let mut checks = 0usize;
+
+        let failure = write_raw_payload_in_chunks_with_evidence_and_clock(
+            &mut writer,
+            &[1, 2, 3, 4],
+            4,
+            Duration::ZERO,
+            deadline,
+            &cancel,
+            "fake target",
+            || {
+                checks += 1;
+                if checks >= 3 {
+                    deadline
+                } else {
+                    before
+                }
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(failure.kind, RawTransportFailureKind::AmbiguousAfterWrite);
+        assert_eq!((failure.bytes_written, failure.bytes_requested), (1, 4));
+        assert_eq!(writer.writes, 1);
+    }
+
+    #[test]
+    fn structured_raw_transport_rechecks_cancel_before_flush() {
+        let cancel = AtomicBool::new(false);
+        let mut writer = CancelBeforeFlushWriter {
+            cancel: &cancel,
+            flushes: 0,
+        };
+
+        let failure = write_raw_payload_in_chunks_with_evidence(
+            &mut writer,
+            &[1, 2, 3, 4],
+            4,
+            Duration::ZERO,
+            Instant::now() + Duration::from_secs(1),
+            &cancel,
+            "fake target",
+        )
+        .unwrap_err();
+
+        assert_eq!(failure.kind, RawTransportFailureKind::AmbiguousAfterWrite);
+        assert_eq!(failure.bytes_written, 4);
+        assert_eq!(writer.flushes, 0);
+    }
+
+    #[test]
+    fn structured_raw_transport_rechecks_injected_deadline_before_success() {
+        let cancel = AtomicBool::new(false);
+        let mut writer = FlushCountingWriter::default();
+        let before = Instant::now();
+        let deadline = before + Duration::from_secs(1);
+        let mut checks = 0usize;
+
+        let failure = write_raw_payload_in_chunks_with_evidence_and_clock(
+            &mut writer,
+            &[1, 2, 3, 4],
+            4,
+            Duration::ZERO,
+            deadline,
+            &cancel,
+            "fake target",
+            || {
+                checks += 1;
+                if checks >= 4 {
+                    deadline
+                } else {
+                    before
+                }
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(failure.kind, RawTransportFailureKind::AmbiguousAfterWrite);
+        assert_eq!(failure.bytes_written, 4);
+        assert_eq!(writer.flushes, 1);
+    }
+
+    #[test]
+    fn non_windows_spooler_transport_results_never_claim_a_spool_job_id() {
+        let result = raw_transport_result(8, 8, "Receipt");
+
+        assert_eq!(result.bytes_requested, 8);
+        assert_eq!(result.bytes_written, 8);
+        assert_eq!(result.doc_name, "Receipt");
+        assert_eq!(result.spool_job_id, None);
+    }
+
+    #[test]
+    fn windows_spool_submission_result_carries_the_native_job_id() {
+        use crate::windows_spooler::{SpoolStarted, SpoolSubmission};
+
+        let result = windows_spool_result(
+            8,
+            "Receipt",
+            SpoolSubmission {
+                started: SpoolStarted {
+                    job_id: 73,
+                    printer_name: "Kitchen".to_owned(),
+                    document_name: "Receipt".to_owned(),
+                    submitted_at: Utc::now(),
+                },
+            },
+        );
+
+        assert_eq!(result.bytes_requested, 8);
+        assert_eq!(result.bytes_written, 8);
+        assert_eq!(result.doc_name, "Receipt");
+        assert_eq!(result.spool_job_id, Some(73));
+    }
+
+    #[test]
+    fn windows_compatibility_error_preserves_input_field_and_partial_counts() {
+        use crate::windows_spooler::{
+            SpoolerError, SpoolerInputField, SpoolerOperation, SpoolerPrimitive,
+        };
+
+        let invalid = windows_spool_error(SpoolerError::InvalidInput {
+            operation: SpoolerOperation::SubmitRaw,
+            field: SpoolerInputField::DocumentName,
+        });
+        assert!(invalid.contains("DocumentName"));
+
+        let partial = windows_spool_error(SpoolerError::PartialWrite {
+            operation: SpoolerOperation::SubmitRaw,
+            primitive: SpoolerPrimitive::WritePrinter,
+            expected: 4096,
+            written: 1024,
+        });
+        assert_eq!(
+            partial,
+            "spooler SubmitRaw WritePrinter wrote 1024 of 4096 bytes"
         );
     }
 
@@ -3116,6 +3527,246 @@ mod tests {
     }
 
     #[test]
+    fn profile_capability_trust_untrusted_create_cannot_redirect_verified_target() {
+        let db = test_db();
+
+        for status in ["verified", "degraded"] {
+            let created = create_printer_profile(
+                &db,
+                &serde_json::json!({
+                    "name": format!("Untrusted create {status}"),
+                    "printerName": "192.0.2.10",
+                    "printerType": "network",
+                    "connectionJson": {
+                        "type": "network",
+                        "ip": "192.0.2.10",
+                        "port": 9100,
+                        "capabilities": {
+                            "status": status,
+                            "resolvedTransport": "raw_tcp",
+                            "resolvedAddress": "198.51.100.77:9200",
+                            "emulation": "escpos",
+                            "renderMode": "text",
+                            "baudRate": null,
+                            "supportsCut": true,
+                            "supportsLogo": false,
+                            "lastVerifiedAt": "2026-08-12T12:00:00Z"
+                        }
+                    }
+                }),
+            )
+            .expect("generic profile create should remain usable after fail-closed normalization");
+            let profile = get_printer_profile(
+                &db,
+                created["profileId"].as_str().expect("created profile id"),
+            )
+            .expect("load created profile");
+            let capabilities = read_capability_snapshot(&profile);
+
+            assert_eq!(capabilities.status, "unverified");
+            assert_eq!(capabilities.resolved_transport, None);
+            assert_eq!(capabilities.resolved_address, None);
+            assert_eq!(
+                resolve_printer_target(&profile),
+                Ok(ResolvedPrinterTarget::RawTcp {
+                    host: "192.0.2.10".to_string(),
+                    port: 9100,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn profile_capability_trust_untrusted_update_cannot_redirect_verified_target() {
+        let db = test_db();
+
+        for status in ["verified", "degraded"] {
+            let created = create_printer_profile(
+                &db,
+                &serde_json::json!({
+                    "name": format!("Untrusted update {status}"),
+                    "printerName": "192.0.2.20",
+                    "printerType": "network",
+                    "connectionJson": {
+                        "type": "network",
+                        "ip": "192.0.2.20",
+                        "port": 9100
+                    }
+                }),
+            )
+            .expect("create profile to update");
+            let profile_id = created["profileId"].as_str().expect("created profile id");
+
+            update_printer_profile(
+                &db,
+                &serde_json::json!({
+                    "id": profile_id,
+                    "connectionJson": {
+                        "type": "network",
+                        "ip": "192.0.2.20",
+                        "port": 9100,
+                        "capabilities": {
+                            "status": status,
+                            "resolvedTransport": "raw_tcp",
+                            "resolvedAddress": "203.0.113.91:9300",
+                            "emulation": "star_line",
+                            "renderMode": "raster_exact",
+                            "baudRate": null,
+                            "supportsCut": false,
+                            "supportsLogo": true,
+                            "lastVerifiedAt": "2026-08-12T12:30:00Z"
+                        }
+                    }
+                }),
+            )
+            .expect("generic profile update should remain usable after fail-closed normalization");
+            let profile = get_printer_profile(&db, profile_id).expect("load updated profile");
+            let capabilities = read_capability_snapshot(&profile);
+
+            assert_eq!(capabilities.status, "unverified");
+            assert_eq!(capabilities.resolved_transport, None);
+            assert_eq!(capabilities.resolved_address, None);
+            assert_eq!(
+                resolve_printer_target(&profile),
+                Ok(ResolvedPrinterTarget::RawTcp {
+                    host: "192.0.2.20".to_string(),
+                    port: 9100,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn profile_capability_trust_validated_create_preserves_exact_evidence() {
+        let db = test_db();
+        let created = create_printer_profile_with_validated_capabilities(
+            &db,
+            &serde_json::json!({
+                "name": "Validated create",
+                "printerName": "192.0.2.30",
+                "printerType": "network",
+                "connectionJson": {
+                    "type": "network",
+                    "ip": "192.0.2.30",
+                    "port": 9100,
+                    "emulation": "star_line",
+                    "render_mode": "raster_exact",
+                    "capabilities": {
+                        "status": "verified",
+                        "resolvedTransport": "raw_tcp",
+                        "resolvedAddress": "192.0.2.30:9100",
+                        "emulation": "star_line",
+                        "renderMode": "raster_exact",
+                        "baudRate": null,
+                        "escposCodePage": 15,
+                        "supportsCut": false,
+                        "supportsLogo": true,
+                        "lastVerifiedAt": "2026-08-12T13:00:00Z"
+                    }
+                }
+            }),
+        )
+        .expect("validated create should preserve the exact confirmed evidence");
+        let profile = get_printer_profile(
+            &db,
+            created["profileId"].as_str().expect("created profile id"),
+        )
+        .expect("load validated profile");
+        let capabilities = read_capability_snapshot(&profile);
+
+        assert_eq!(capabilities.status, "verified");
+        assert_eq!(capabilities.resolved_transport.as_deref(), Some("raw_tcp"));
+        assert_eq!(
+            capabilities.resolved_address.as_deref(),
+            Some("192.0.2.30:9100")
+        );
+        assert_eq!(capabilities.emulation.as_deref(), Some("star_line"));
+        assert_eq!(capabilities.render_mode.as_deref(), Some("raster_exact"));
+        assert_eq!(capabilities.supports_cut, false);
+        assert_eq!(capabilities.supports_logo, true);
+        assert_eq!(
+            capabilities.last_verified_at.as_deref(),
+            Some("2026-08-12T13:00:00Z")
+        );
+        assert_eq!(
+            resolve_printer_target(&profile),
+            Ok(ResolvedPrinterTarget::RawTcp {
+                host: "192.0.2.30".to_string(),
+                port: 9100,
+            })
+        );
+    }
+
+    #[test]
+    fn profile_capability_trust_validated_update_preserves_exact_evidence() {
+        let db = test_db();
+        let created = create_printer_profile(
+            &db,
+            &serde_json::json!({
+                "name": "Validated update",
+                "printerName": "COM31",
+                "printerType": "usb",
+                "connectionJson": {
+                    "type": "usb",
+                    "serialPort": "COM31",
+                    "baudRate": 38400
+                }
+            }),
+        )
+        .expect("create profile to update through validated path");
+        let profile_id = created["profileId"].as_str().expect("created profile id");
+
+        update_printer_profile_with_validated_capabilities(
+            &db,
+            &serde_json::json!({
+                "id": profile_id,
+                "connectionJson": {
+                    "type": "usb",
+                    "serialPort": "COM31",
+                    "baudRate": 38400,
+                    "emulation": "escpos",
+                    "render_mode": "text",
+                    "capabilities": {
+                        "status": "degraded",
+                        "resolvedTransport": "serial",
+                        "resolvedAddress": "COM31",
+                        "emulation": "escpos",
+                        "renderMode": "text",
+                        "baudRate": 38400,
+                        "escposCodePage": 14,
+                        "supportsCut": true,
+                        "supportsLogo": false,
+                        "lastVerifiedAt": "2026-08-12T13:30:00Z"
+                    }
+                }
+            }),
+        )
+        .expect("validated update should preserve the exact confirmed evidence");
+        let profile = get_printer_profile(&db, profile_id).expect("load validated update");
+        let capabilities = read_capability_snapshot(&profile);
+
+        assert_eq!(capabilities.status, "degraded");
+        assert_eq!(capabilities.resolved_transport.as_deref(), Some("serial"));
+        assert_eq!(capabilities.resolved_address.as_deref(), Some("COM31"));
+        assert_eq!(capabilities.emulation.as_deref(), Some("escpos"));
+        assert_eq!(capabilities.render_mode.as_deref(), Some("text"));
+        assert_eq!(capabilities.baud_rate, Some(38400));
+        assert_eq!(capabilities.supports_cut, true);
+        assert_eq!(capabilities.supports_logo, false);
+        assert_eq!(
+            capabilities.last_verified_at.as_deref(),
+            Some("2026-08-12T13:30:00Z")
+        );
+        assert_eq!(
+            resolve_printer_target(&profile),
+            Ok(ResolvedPrinterTarget::SerialPort {
+                port_name: "COM31".to_string(),
+                baud_rate: 38400,
+            })
+        );
+    }
+
+    #[test]
     fn test_delete_profile_clears_default() {
         let db = test_db();
 
@@ -3211,66 +3862,6 @@ mod tests {
 
         // Resolve with invalid ID -> error
         let err = resolve_printer_profile(&db, Some("nonexistent"));
-        assert!(err.is_err());
-    }
-
-    #[test]
-    fn test_reprint_job() {
-        let db = test_db();
-
-        // Insert a failed print job directly
-        {
-            let conn = db.conn.lock().unwrap();
-            conn.execute(
-                "INSERT INTO print_jobs (id, entity_type, entity_id, status, retry_count, max_retries, last_error, created_at, updated_at)
-                 VALUES ('pj-fail', 'order_receipt', 'ord-1', 'failed', 3, 3, 'printer offline', datetime('now'), datetime('now'))",
-                [],
-            )
-            .unwrap();
-        }
-
-        // Reprint
-        let result = reprint_job(&db, "pj-fail").unwrap();
-        assert_eq!(result["success"], true);
-
-        // Verify job is back to pending
-        let conn = db.conn.lock().unwrap();
-        let status: String = conn
-            .query_row(
-                "SELECT status FROM print_jobs WHERE id = 'pj-fail'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(status, "pending");
-
-        let retry: i32 = conn
-            .query_row(
-                "SELECT retry_count FROM print_jobs WHERE id = 'pj-fail'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(retry, 0);
-    }
-
-    #[test]
-    fn test_reprint_non_failed_job_errors() {
-        let db = test_db();
-
-        // Insert a pending print job
-        {
-            let conn = db.conn.lock().unwrap();
-            conn.execute(
-                "INSERT INTO print_jobs (id, entity_type, entity_id, status, created_at, updated_at)
-                 VALUES ('pj-pend', 'order_receipt', 'ord-2', 'pending', datetime('now'), datetime('now'))",
-                [],
-            )
-            .unwrap();
-        }
-
-        // Reprint should fail — job is not in 'failed' state
-        let err = reprint_job(&db, "pj-pend");
         assert!(err.is_err());
     }
 

@@ -137,3 +137,17 @@ test('CustomerSearchModal deletes saved addresses through the local-first custom
     /posApiFetch<any>\(`pos\/customers\/\$\{customer\.id\}\/addresses\/\$\{addr\.id\}`/,
   );
 });
+
+test('CustomerSearchModal renders a translated, touch-sized Caller ID add-address action without management controls', () => {
+  const callerIdActionsStart = source.indexOf('{/* Caller ID add-address action */}');
+  const callerIdActionsEnd = source.indexOf('{/* Add New Customer Option', callerIdActionsStart);
+  assert.notEqual(callerIdActionsStart, -1);
+  assert.notEqual(callerIdActionsEnd, -1);
+  const callerIdActions = source.slice(callerIdActionsStart, callerIdActionsEnd);
+
+  assert.match(callerIdActions, /type="button"/);
+  assert.match(callerIdActions, /min-h-\[44px\]/);
+  assert.match(callerIdActions, /dark:border-amber-400\/50[\s\S]*dark:text-white/);
+  assert.match(callerIdActions, /t\('modals\.customerSearch\.addNewAddress', 'Add address'\)/);
+  assert.doesNotMatch(callerIdActions, /editCustomer|deleteCustomer|Trash2|<Edit/);
+});

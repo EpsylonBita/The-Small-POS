@@ -1,4 +1,4 @@
-import { memo, useState, useCallback, useEffect } from 'react';
+import { memo, useState, useCallback, useEffect, useRef } from 'react';
 import { LiquidGlassModal } from './ui/pos-glass-components';
 import { MenuModal } from './modals/MenuModal';
 import { ProductCatalogModal } from './modals/ProductCatalogModal';
@@ -6,6 +6,10 @@ import { CustomerSearchModal } from './modals/CustomerSearchModal';
 import { AddCustomerModal } from './modals/AddCustomerModal';
 import { SplitPaymentModal } from './modals/SplitPaymentModal';
 import type { SplitPaymentResult } from './modals/SplitPaymentModal';
+import {
+  OutstandingPaymentMethodModal,
+  type OutstandingPaymentSelection,
+} from './modals/OutstandingPaymentMethodModal';
 import { ZoneValidationAlert } from './delivery/ZoneValidationAlert';
 import { FloatingActionButton } from './ui/FloatingActionButton';
 import { TableSelector, TableActionModal, ReservationForm } from './tables';
@@ -45,6 +49,10 @@ import { buildSplitPaymentItems } from '../utils/splitPaymentItems';
 import type { SplitPaymentItem } from '../utils/splitPaymentItems';
 import { resolvePersistedCustomerId } from '../utils/persisted-customer-id';
 import { resolveOrderCompletionOutcome } from '../utils/orderCompletionOutcome';
+import {
+  loadPersistedSplitDismissal,
+  reconcileOutstandingPaymentAttempt,
+} from '../utils/splitCheckoutRecovery';
 import { resolveActiveCashierShift } from '../utils/active-cashier';
 import { parseSpecialAddressInput } from '../utils/specialAddress';
 import {
@@ -177,7 +185,36 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     orderTotal: number;
     items: SplitPaymentItem[];
     isGhostOrder: boolean;
+    orderNumber?: string;
+    orderType: 'pickup' | 'delivery';
+    existingPayments?: any[];
+    tipAmount?: number;
+    tipRecipientRole?: 'waiter' | 'cashier' | 'driver';
+    tipRecipientStaffId?: string;
+    tipRecipientStaffShiftId?: string;
+    recoverySession?: number;
+    settlementGeneration?: string;
   } | null>(null);
+  const [outstandingPaymentData, setOutstandingPaymentData] = useState<{
+    orderId: string;
+    orderTotal: number;
+    outstandingAmount: number;
+    items: SplitPaymentItem[];
+    isGhostOrder: boolean;
+    orderNumber?: string;
+    orderType: 'pickup' | 'delivery';
+    existingPayments: any[];
+    tipAmount?: number;
+    tipRecipientRole?: 'waiter' | 'cashier' | 'driver';
+    tipRecipientStaffId?: string;
+    tipRecipientStaffShiftId?: string;
+    recoverySession?: number;
+    settlementGeneration: string;
+  } | null>(null);
+  const [isProcessingOutstandingPayment, setIsProcessingOutstandingPayment] = useState(false);
+  const [isReconcilingSplitClose, setIsReconcilingSplitClose] = useState(false);
+  const splitPaymentCompletedRef = useRef<SplitPaymentResult | null>(null);
+  const splitCloseRecoveryRef = useRef(false);
 
   // Customer modal mode: 'new' | 'edit' | 'addAddress' | 'editAddress'
   const [customerModalMode, setCustomerModalMode] = useState<'new' | 'edit' | 'addAddress' | 'editAddress'>('new');
@@ -298,6 +335,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     setIsAddCustomerModalOpen(false);
     setIsMenuModalOpen(false);
     setSplitPaymentData(null);
+    setOutstandingPaymentData(null);
     setSelectedOrderType(null);
     setSelectedCustomer(null);
     setSelectedAddress(null);
@@ -547,17 +585,187 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     }
   }, [askForPaymentPrint, bridge]);
 
-  const handleSplitClose = useCallback(() => {
-    setSplitPaymentData(null);
-    resetFlow();
-    void silentRefresh().catch(() => {});
-  }, [resetFlow, silentRefresh]);
+  const handleSplitClose = useCallback(async () => {
+    const closingSplitPayment = splitPaymentData;
+    splitPaymentCompletedRef.current = null;
+    if (!closingSplitPayment) return;
+    if (splitCloseRecoveryRef.current) return;
 
-  const handleSplitComplete = useCallback(async (_result: SplitPaymentResult) => {
-    setSplitPaymentData(null);
-    resetFlow();
+    splitCloseRecoveryRef.current = true;
+    setIsReconcilingSplitClose(true);
+
+    try {
+      const resolution = await loadPersistedSplitDismissal(
+        bridge,
+        closingSplitPayment.orderId,
+        closingSplitPayment.orderTotal,
+      );
+      await silentRefresh().catch(() => {});
+
+      if (resolution.kind === 'settled') {
+        setSplitPaymentData(null);
+        resetFlow();
+        return;
+      }
+
+      if (resolution.kind === 'partial') {
+        setSplitPaymentData({
+          ...closingSplitPayment,
+          orderTotal: resolution.orderTotal,
+          existingPayments: resolution.completedPayments,
+          recoverySession: (closingSplitPayment.recoverySession ?? 0) + 1,
+          settlementGeneration: resolution.settlementGeneration,
+        });
+        return;
+      }
+
+      setOutstandingPaymentData({
+        ...closingSplitPayment,
+        orderTotal: resolution.orderTotal,
+        outstandingAmount: resolution.outstandingAmount,
+        existingPayments: resolution.completedPayments,
+        settlementGeneration: resolution.settlementGeneration!,
+      });
+      setSplitPaymentData(null);
+    } catch (error) {
+      console.error('[OrderFlow] Failed to reconcile dismissed split payment:', error);
+      setSplitPaymentData(closingSplitPayment);
+      toast.error(t('orderDashboard.collectPaymentFailed', {
+        defaultValue: 'Failed to load the outstanding payment. Try again.',
+      }));
+    } finally {
+      splitCloseRecoveryRef.current = false;
+      setIsReconcilingSplitClose(false);
+    }
+  }, [bridge, resetFlow, silentRefresh, splitPaymentData, t]);
+
+  const handleOutstandingPaymentSelect = useCallback(async (
+    selection: OutstandingPaymentSelection,
+  ): Promise<boolean | 'reconciliation-pending'> => {
+    const pendingPayment = outstandingPaymentData;
+    if (!pendingPayment) return false;
+
+    if (selection.method === 'split') {
+      setOutstandingPaymentData(null);
+      setSplitPaymentData({
+        orderId: pendingPayment.orderId,
+        orderTotal: pendingPayment.orderTotal,
+        items: pendingPayment.items,
+        isGhostOrder: pendingPayment.isGhostOrder,
+        orderNumber: pendingPayment.orderNumber,
+        orderType: pendingPayment.orderType,
+        existingPayments: pendingPayment.existingPayments,
+        tipAmount: pendingPayment.tipAmount,
+        tipRecipientRole: pendingPayment.tipRecipientRole,
+        tipRecipientStaffId: pendingPayment.tipRecipientStaffId,
+        tipRecipientStaffShiftId: pendingPayment.tipRecipientStaffShiftId,
+        recoverySession: (pendingPayment.recoverySession ?? 0) + 1,
+        settlementGeneration: pendingPayment.settlementGeneration,
+      });
+      return true;
+    }
+    const paymentMethod = selection.method;
+
+    setIsProcessingOutstandingPayment(true);
+    try {
+      const askBeforePrint = await shouldAskPaymentPrint();
+      const paymentAttempt = await reconcileOutstandingPaymentAttempt({
+        recordPayment: () => bridge.payments.recordPayment({
+          orderId: pendingPayment.orderId,
+          method: paymentMethod,
+          amount: pendingPayment.outstandingAmount,
+          cashReceived: paymentMethod === 'cash' ? selection.cashReceived : undefined,
+          changeGiven: paymentMethod === 'cash' ? selection.change : undefined,
+          transactionRef: selection.transactionId,
+          idempotencyKey: selection.transactionId,
+          collectOutstandingBalance: true,
+          expectedSettlementGeneration: pendingPayment.settlementGeneration,
+          staffId: pendingPayment.orderType === 'delivery' ? undefined : staff?.staffId,
+          staffShiftId: pendingPayment.orderType === 'delivery' ? undefined : activeShift?.id,
+          tipAmount: pendingPayment.tipAmount,
+          tipRecipientRole: pendingPayment.tipRecipientRole,
+          tipRecipientStaffId: pendingPayment.tipRecipientStaffId,
+          tipRecipientStaffShiftId: pendingPayment.tipRecipientStaffShiftId,
+        }),
+        snapshotOnly: selection.reconciliationOnly,
+        bridge,
+        orderId: pendingPayment.orderId,
+        fallbackOrderTotal: pendingPayment.orderTotal,
+      });
+      if (paymentAttempt.kind === 'unknown') {
+        if (!selection.reconciliationOnly) {
+          toast.error(t('orderDashboard.collectPaymentFailed', {
+            defaultValue: 'Failed to collect payment',
+          }));
+        }
+        return 'reconciliation-pending';
+      }
+      const latestResolution = paymentAttempt.settlement;
+      await silentRefresh().catch(() => {});
+
+      if (latestResolution.kind === 'partial') {
+        setOutstandingPaymentData(null);
+        setSplitPaymentData({
+          orderId: pendingPayment.orderId,
+          orderTotal: latestResolution.orderTotal,
+          items: pendingPayment.items,
+          isGhostOrder: pendingPayment.isGhostOrder,
+          orderNumber: pendingPayment.orderNumber,
+          orderType: pendingPayment.orderType,
+          existingPayments: latestResolution.completedPayments,
+          tipAmount: pendingPayment.tipAmount,
+          tipRecipientRole: pendingPayment.tipRecipientRole,
+          tipRecipientStaffId: pendingPayment.tipRecipientStaffId,
+          tipRecipientStaffShiftId: pendingPayment.tipRecipientStaffShiftId,
+          recoverySession: (pendingPayment.recoverySession ?? 0) + 1,
+          settlementGeneration: latestResolution.settlementGeneration,
+        });
+        toast.error(t('orderDashboard.collectPaymentFailed', {
+          defaultValue: 'Failed to collect payment',
+        }));
+        return false;
+      }
+
+      if (latestResolution.kind !== 'settled') {
+        setOutstandingPaymentData({
+          ...pendingPayment,
+          orderTotal: latestResolution.orderTotal,
+          outstandingAmount: latestResolution.outstandingAmount,
+          existingPayments: latestResolution.completedPayments,
+          settlementGeneration: latestResolution.settlementGeneration!,
+        });
+        toast.error(t('orderDashboard.collectPaymentFailed', {
+          defaultValue: 'Failed to collect payment',
+        }));
+        return false;
+      }
+
+      setOutstandingPaymentData(null);
+      void finalizeCreatedOrderPayment(pendingPayment.orderId, pendingPayment.isGhostOrder, {
+        askBeforePrint,
+        autoPrintSuppressed: askBeforePrint,
+        amount: pendingPayment.outstandingAmount,
+        orderNumber: pendingPayment.orderNumber || null,
+      }).catch((error) => {
+        console.warn('[OrderFlow] Recovered payment print failed:', error);
+      });
+      resetFlow();
+      return true;
+    } catch {
+      console.error('[OrderFlow] Failed to collect recovered payment');
+      toast.error(t('orderDashboard.collectPaymentFailed', {
+        defaultValue: 'Failed to collect payment',
+      }));
+      return false;
+    } finally {
+      setIsProcessingOutstandingPayment(false);
+    }
+  }, [activeShift?.id, bridge, finalizeCreatedOrderPayment, outstandingPaymentData, resetFlow, shouldAskPaymentPrint, silentRefresh, staff?.staffId, t]);
+
+  const handleSplitComplete = useCallback(async (result: SplitPaymentResult) => {
+    splitPaymentCompletedRef.current = result;
     await silentRefresh().catch(() => {});
-  }, [resetFlow, silentRefresh]);
+  }, [silentRefresh]);
 
   // Zone validation alert handlers
   const handleOverrideApproved = useCallback(() => {
@@ -1194,6 +1402,12 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
               adjustmentLabel: t('splitPayment.adjustment', { defaultValue: 'Adjustment' }),
             }),
             isGhostOrder,
+            orderNumber: result.orderNumber,
+            orderType: selectedOrderType || 'pickup',
+            tipAmount,
+            tipRecipientRole,
+            tipRecipientStaffId,
+            tipRecipientStaffShiftId,
           });
           setIsMenuModalOpen(false);
           await silentRefresh().catch(() => {});
@@ -1511,12 +1725,42 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         <SplitPaymentModal
           isOpen={true}
           onClose={handleSplitClose}
+          key={`${splitPaymentData.orderId}:${splitPaymentData.recoverySession ?? 0}`}
           orderId={splitPaymentData.orderId}
           orderTotal={splitPaymentData.orderTotal}
           items={splitPaymentData.items}
+          existingPayments={splitPaymentData.existingPayments}
           initialMode="by-items"
           isGhostOrder={splitPaymentData.isGhostOrder}
+          isReconciliationPending={isReconcilingSplitClose}
           onSplitComplete={handleSplitComplete}
+        />
+      )}
+      {outstandingPaymentData && (
+        <OutstandingPaymentMethodModal
+          isOpen={true}
+          onClose={() => {
+            const pendingPayment = outstandingPaymentData;
+            setOutstandingPaymentData(null);
+            setSplitPaymentData({
+              orderId: pendingPayment.orderId,
+              orderTotal: pendingPayment.orderTotal,
+              items: pendingPayment.items,
+              isGhostOrder: pendingPayment.isGhostOrder,
+              orderNumber: pendingPayment.orderNumber,
+              orderType: pendingPayment.orderType,
+              existingPayments: pendingPayment.existingPayments,
+              tipAmount: pendingPayment.tipAmount,
+              tipRecipientRole: pendingPayment.tipRecipientRole,
+              tipRecipientStaffId: pendingPayment.tipRecipientStaffId,
+              tipRecipientStaffShiftId: pendingPayment.tipRecipientStaffShiftId,
+              recoverySession: (pendingPayment.recoverySession ?? 0) + 1,
+            });
+          }}
+          amount={outstandingPaymentData.outstandingAmount}
+          orderType={outstandingPaymentData.orderType}
+          isProcessing={isProcessingOutstandingPayment}
+          onSelect={handleOutstandingPaymentSelect}
         />
       )}
       {paymentPrintPromptModal}

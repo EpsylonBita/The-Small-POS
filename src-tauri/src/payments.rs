@@ -7,6 +7,7 @@
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -387,6 +388,7 @@ pub(crate) struct PaymentRecordInput {
     pub cash_received: Option<f64>,
     pub change_given: Option<f64>,
     pub transaction_ref: Option<String>,
+    pub idempotency_key: Option<String>,
     pub discount_amount: f64,
     pub payment_origin: String,
     pub terminal_device_id: Option<String>,
@@ -460,6 +462,17 @@ pub(crate) struct OrderPaymentBalanceSnapshot {
     pub order_total: f64,
     pub net_paid: f64,
     pub outstanding_amount: f64,
+    pub completed_payment_count: i64,
+    pub ledger_generation: [u8; 32],
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct OrderSettlementSnapshot {
+    pub order_total: f64,
+    pub net_paid: f64,
+    pub outstanding_amount: f64,
+    pub completed_payments: Vec<Value>,
+    pub ledger_generation: [u8; 32],
 }
 
 fn parse_payment_items(payload: &Value) -> Vec<PaymentItemInput> {
@@ -555,6 +568,71 @@ pub(crate) fn normalize_external_payment_method(method: &str) -> Option<String> 
     }
 }
 
+pub(crate) fn payload_collects_outstanding_balance(payload: &Value) -> bool {
+    payload
+        .get("collectOutstandingBalance")
+        .or_else(|| payload.get("collect_outstanding_balance"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Replace renderer-supplied money with the current native balance before a
+/// missing-payment collection enters fiscal checkout or local persistence.
+/// Cash tender is still operator supplied, but its change is recalculated from
+/// integer cents so stale renderer totals cannot leak into the ledger.
+pub(crate) fn prepare_outstanding_collection_payload(
+    payload: &mut Value,
+    snapshot: OrderPaymentBalanceSnapshot,
+) -> Result<(), String> {
+    let method = str_field(payload, "method")
+        .map(|value| value.trim().to_ascii_lowercase())
+        .ok_or("Missing method")?;
+    if !matches!(method.as_str(), "cash" | "card") {
+        return Err("Outstanding balance collection requires cash or card".to_string());
+    }
+
+    let outstanding_cents = Cents::round_half_even(snapshot.outstanding_amount).as_i64();
+    if outstanding_cents <= 0 {
+        return Err("Order has no outstanding balance to collect".to_string());
+    }
+    let outstanding_amount = Cents::new(outstanding_cents).to_f64_dp2();
+    let payment = payload.as_object_mut().ok_or("Invalid payment payload")?;
+    payment.insert("amount".to_string(), serde_json::json!(outstanding_amount));
+
+    if method == "cash" {
+        let cash_received = payment
+            .get("cashReceived")
+            .or_else(|| payment.get("cash_received"))
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite())
+            .ok_or("Missing cashReceived for outstanding cash collection")?;
+        let cash_received_cents = Cents::round_half_even(cash_received).as_i64();
+        if cash_received_cents < outstanding_cents {
+            return Err(format!(
+                "Cash received {:.2} is below outstanding balance {:.2}",
+                Cents::new(cash_received_cents).to_f64_dp2(),
+                outstanding_amount,
+            ));
+        }
+        payment.insert(
+            "cashReceived".to_string(),
+            serde_json::json!(Cents::new(cash_received_cents).to_f64_dp2()),
+        );
+        payment.insert(
+            "changeGiven".to_string(),
+            serde_json::json!(Cents::new(cash_received_cents - outstanding_cents).to_f64_dp2()),
+        );
+    } else {
+        payment.remove("cashReceived");
+        payment.remove("cash_received");
+        payment.remove("changeGiven");
+        payment.remove("change_given");
+        payment.remove("change");
+    }
+
+    Ok(())
+}
+
 pub(crate) fn build_payment_record_input(payload: &Value) -> Result<PaymentRecordInput, String> {
     let order_id = str_field(payload, "orderId")
         .or_else(|| str_field(payload, "order_id"))
@@ -600,6 +678,10 @@ pub(crate) fn build_payment_record_input(payload: &Value) -> Result<PaymentRecor
         .or_else(|| str_field(payload, "transaction_ref"))
         .or_else(|| str_field(payload, "transactionId"))
         .or_else(|| str_field(payload, "transaction_id"));
+    let idempotency_key = str_field(payload, "idempotencyKey")
+        .or_else(|| str_field(payload, "idempotency_key"))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     let discount_amount = num_field(payload, "discountAmount")
         .or_else(|| num_field(payload, "discount_amount"))
         .unwrap_or(0.0)
@@ -643,6 +725,7 @@ pub(crate) fn build_payment_record_input(payload: &Value) -> Result<PaymentRecor
         cash_received,
         change_given,
         transaction_ref,
+        idempotency_key,
         discount_amount,
         payment_origin,
         terminal_device_id,
@@ -717,10 +800,97 @@ pub(crate) fn load_order_payment_balance_snapshot(
         )
         .map_err(|e| format!("load order total for payment balance snapshot {order_id}: {e}"))?;
     let net_paid = load_net_paid_for_order(conn, order_id)?;
+    let completed_payment_count = conn
+        .query_row(
+            "SELECT COUNT(*) FROM order_payments WHERE order_id = ?1 AND status = 'completed'",
+            params![order_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| format!("load completed payment count for order {order_id}: {error}"))?;
+    let order_total_cents = Cents::round_half_even(order_total).as_i64();
+    let ledger_generation =
+        load_completed_payment_ledger_generation(conn, order_id, order_total_cents)?;
     Ok(OrderPaymentBalanceSnapshot {
         order_total,
         net_paid,
         outstanding_amount: (order_total - net_paid).max(0.0),
+        completed_payment_count,
+        ledger_generation,
+    })
+}
+
+fn load_completed_payment_ledger_generation(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+    order_total_cents: i64,
+) -> Result<[u8; 32], String> {
+    let mut statement = conn
+        .prepare(
+            "SELECT op.id, op.method,
+                    COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0),
+                    op.transaction_ref, COALESCE(op.payment_origin, 'manual'),
+                    COALESCE((
+                        SELECT SUM(COALESCE(pa.amount_cents, CAST(ROUND(pa.amount * 100) AS INTEGER)))
+                        FROM payment_adjustments pa
+                        WHERE pa.payment_id = op.id
+                          AND pa.adjustment_type = 'refund'
+                    ), 0)
+             FROM order_payments op
+             WHERE op.order_id = ?1
+               AND op.status = 'completed'
+             ORDER BY op.id ASC",
+        )
+        .map_err(|error| format!("prepare payment-ledger generation for {order_id}: {error}"))?;
+    let rows = statement
+        .query_map(params![order_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })
+        .map_err(|error| format!("query payment-ledger generation for {order_id}: {error}"))?;
+
+    let mut digest = Sha256::new();
+    digest.update(b"order-settlement-v1\0");
+    digest.update((order_id.len() as u64).to_le_bytes());
+    digest.update(order_id.as_bytes());
+    digest.update(order_total_cents.to_le_bytes());
+    for row in rows {
+        let row = row.map_err(|error| {
+            format!("read completed payment for ledger generation {order_id}: {error}")
+        })?;
+        let encoded = serde_json::to_vec(&row)
+            .map_err(|error| format!("encode payment-ledger generation: {error}"))?;
+        digest.update((encoded.len() as u64).to_le_bytes());
+        digest.update(encoded);
+    }
+    let finalized = digest.finalize();
+    let mut generation = [0_u8; 32];
+    generation.copy_from_slice(&finalized);
+    Ok(generation)
+}
+
+pub(crate) fn settlement_generation_token(generation: &[u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut token = String::with_capacity(64);
+    for byte in generation {
+        token.push(HEX[(byte >> 4) as usize] as char);
+        token.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    token
+}
+
+fn settlement_snapshot_json(snapshot: OrderSettlementSnapshot) -> Value {
+    serde_json::json!({
+        "orderTotal": snapshot.order_total,
+        "netPaid": snapshot.net_paid,
+        "outstandingAmount": snapshot.outstanding_amount,
+        "completedPayments": snapshot.completed_payments,
+        "generation": settlement_generation_token(&snapshot.ledger_generation),
     })
 }
 
@@ -1212,12 +1382,12 @@ pub(crate) fn record_payment_in_connection(
             tip_amount, tip_amount_cents, tip_recipient_role,
             tip_recipient_staff_id, tip_recipient_staff_shift_id,
             payment_origin, terminal_device_id,
-            remote_payment_id, staff_id, staff_shift_id, sync_status,
+            remote_payment_id, idempotency_key, staff_id, staff_shift_id, sync_status,
             sync_state, created_at, updated_at
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, 'completed', ?7, ?8, ?9, ?10,
             ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21,
-            ?22, ?23, ?24, ?25, ?26, ?27
+            ?22, ?23, ?24, ?25, ?26, ?27, ?28
         )",
         params![
             payment_id,
@@ -1241,6 +1411,7 @@ pub(crate) fn record_payment_in_connection(
             input.payment_origin,
             input.terminal_device_id,
             options.remote_payment_id,
+            input.idempotency_key,
             resolved_staff_id,
             resolved_shift_id,
             options.sync_status,
@@ -1445,7 +1616,21 @@ pub(crate) fn record_payment_in_connection(
 /// and `payment_method`, and enqueues a sync entry.
 #[allow(clippy::type_complexity)]
 pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
-    let mut input = build_payment_record_input(payload)?;
+    record_payment_with_expected_balance(db, payload, None)
+}
+
+/// Persist a payment and return a settlement snapshot captured before the same
+/// write transaction commits. `expected_balance` is supplied by the
+/// command layer after fiscal checkout; if another mutation changed the
+/// balance while hardware was processing, persistence fails closed instead of
+/// attaching the approval reference to a different amount.
+pub(crate) fn record_payment_with_expected_balance(
+    db: &DbState,
+    payload: &Value,
+    expected_balance: Option<OrderPaymentBalanceSnapshot>,
+) -> Result<Value, String> {
+    let mut prepared_payload = payload.clone();
+    let mut input = build_payment_record_input(&prepared_payload)?;
     if input.method != "cash" && input.method != "card" && input.method != "room_charge" {
         return Err(
             "Only cash, card, and room_charge payments can be recorded locally".to_string(),
@@ -1458,19 +1643,107 @@ pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     input.order_id = resolve_order_id(&conn, &input.order_id)
         .ok_or_else(|| format!("Order not found: {}", input.order_id))?;
-    conn.execute_batch("BEGIN IMMEDIATE")
-        .map_err(|e| format!("begin transaction: {e}"))?;
+    let collect_outstanding = payload_collects_outstanding_balance(&prepared_payload);
+    let mut persist_transaction =
+        || -> Result<(RecordedPayment, OrderSettlementSnapshot), String> {
+            conn.execute_batch("BEGIN IMMEDIATE")
+                .map_err(|e| format!("begin transaction: {e}"))?;
+            let outcome = (|| -> Result<(RecordedPayment, OrderSettlementSnapshot), String> {
+                if collect_outstanding {
+                    let current = load_order_payment_balance_snapshot(&conn, &input.order_id)?;
+                    if let Some(expected) = expected_balance {
+                        let expected_generation = (
+                            Cents::round_half_even(expected.order_total).as_i64(),
+                            Cents::round_half_even(expected.net_paid).as_i64(),
+                            Cents::round_half_even(expected.outstanding_amount).as_i64(),
+                            expected.completed_payment_count,
+                            expected.ledger_generation,
+                        );
+                        let current_generation = (
+                            Cents::round_half_even(current.order_total).as_i64(),
+                            Cents::round_half_even(current.net_paid).as_i64(),
+                            Cents::round_half_even(current.outstanding_amount).as_i64(),
+                            current.completed_payment_count,
+                            current.ledger_generation,
+                        );
+                        if expected_generation != current_generation {
+                            return Err(format!(
+                        "Outstanding balance changed during payment collection (expected {:.2}, current {:.2})",
+                        expected.outstanding_amount,
+                        current.outstanding_amount,
+                    ));
+                        }
+                    }
+                    prepare_outstanding_collection_payload(&mut prepared_payload, current)?;
+                    input = build_payment_record_input(&prepared_payload)?;
+                    input.order_id = resolve_order_id(&conn, &input.order_id)
+                        .ok_or_else(|| "Order not found".to_string())?;
+                }
 
-    let recorded = match record_payment_in_connection(&conn, &input, &options) {
-        Ok(recorded) => {
-            conn.execute_batch("COMMIT")
-                .map_err(|e| format!("commit: {e}"))?;
-            recorded
-        }
-        Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            return Err(e);
-        }
+                let outstanding_attempt_id = if collect_outstanding {
+                    match (
+                        input.transaction_ref.as_deref(),
+                        input.idempotency_key.as_deref(),
+                    ) {
+                        (Some(transaction_ref), Some(idempotency_key))
+                            if transaction_ref.starts_with("fiscal-outstanding-")
+                                && transaction_ref == idempotency_key =>
+                        {
+                            Some(transaction_ref.to_string())
+                        }
+                        (Some(transaction_ref), _)
+                            if transaction_ref.starts_with("fiscal-outstanding-") =>
+                        {
+                            return Err(
+                        "Outstanding fiscal payment identity does not match its durable attempt"
+                            .to_string(),
+                    );
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                if let Some(attempt_id) = outstanding_attempt_id.as_deref() {
+                    crate::db::ecr_begin_outstanding_payment_persist(
+                        &conn,
+                        attempt_id,
+                        &input.order_id,
+                    )?;
+                }
+                let recorded = record_payment_in_connection(&conn, &input, &options)?;
+                if let Some(attempt_id) = outstanding_attempt_id.as_deref() {
+                    crate::db::ecr_finish_outstanding_payment_persist(
+                        &conn,
+                        attempt_id,
+                        &input.order_id,
+                    )?;
+                }
+                let settlement = load_order_settlement_snapshot(&conn, &input.order_id)?;
+                Ok((recorded, settlement))
+            })();
+
+            match outcome {
+                Ok(outcome) => match conn.execute_batch("COMMIT") {
+                    Ok(()) => Ok(outcome),
+                    Err(error) => {
+                        let _ = conn.execute_batch("ROLLBACK");
+                        Err(format!("commit: {error}"))
+                    }
+                },
+                Err(error) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    Err(error)
+                }
+            }
+        };
+    let (recorded, settlement) = if collect_outstanding {
+        // Both the exact payment representation and the attempt finalization
+        // must survive power loss together. The rest of the POS stays on the
+        // normal WAL policy; only this high-value commit opts into FULL sync.
+        crate::db::with_full_sync(&conn, |_| persist_transaction())?
+    } else {
+        persist_transaction()?
     };
     info!(
         payment_id = %recorded.payment_id,
@@ -1479,10 +1752,15 @@ pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
         amount = %input.amount,
         "Payment recorded"
     );
+    let settlement_json = settlement_snapshot_json(settlement);
 
     Ok(serde_json::json!({
         "success": true,
+        "orderId": input.order_id,
         "paymentId": recorded.payment_id,
+        "method": input.method,
+        "amount": input.amount,
+        "settlement": settlement_json,
         "paymentOrigin": recorded.payment_origin,
         "syncStatus": recorded.sync_status,
         "syncState": recorded.sync_state,
@@ -1929,6 +2207,81 @@ fn enqueue_order_payment_snapshot_sync(
     Ok(())
 }
 
+fn refresh_driver_earning_for_payment_method_edit(
+    conn: &Connection,
+    order_id: &str,
+    now: &str,
+) -> Result<(), String> {
+    let Some(earning_id) =
+        crate::order_ownership::refresh_existing_driver_earning_payment_snapshot(
+            conn, order_id, now,
+        )?
+    else {
+        return Ok(());
+    };
+    let payload = crate::order_ownership::build_driver_earning_sync_payload(conn, &earning_id)?;
+    crate::order_ownership::enqueue_or_refresh_driver_earning_sync_row(conn, &earning_id, &payload)
+}
+
+fn order_has_adjustment_or_finalized_payment(
+    conn: &Connection,
+    order_id: &str,
+) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT CASE WHEN
+            EXISTS(
+                SELECT 1 FROM payment_adjustments
+                WHERE order_id = ?1
+            ) OR EXISTS(
+                SELECT 1 FROM order_payments
+                WHERE order_id = ?1
+                  AND LOWER(TRIM(COALESCE(status, ''))) IN ('refunded', 'voided')
+            )
+            THEN 1 ELSE 0 END",
+        params![order_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|value| value != 0)
+    .map_err(|e| format!("check payment adjustments before method edit: {e}"))
+}
+
+fn order_has_driver_earning(conn: &Connection, order_id: &str) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM driver_earnings WHERE order_id = ?1)",
+        params![order_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|value| value != 0)
+    .map_err(|e| format!("check courier earning before payment snapshot fallback: {e}"))
+}
+
+fn ensure_driver_earning_sync_is_not_processing(
+    conn: &Connection,
+    order_id: &str,
+) -> Result<(), String> {
+    let is_processing = conn
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM driver_earnings de
+                JOIN parity_sync_queue q
+                  ON q.table_name = 'driver_earnings'
+                 AND q.record_id = de.id
+                WHERE de.order_id = ?1
+                  AND LOWER(TRIM(q.status)) = 'processing'
+            )",
+            params![order_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|e| format!("check courier earning sync barrier: {e}"))?
+        != 0;
+
+    if is_processing {
+        return Err("DRIVER_EARNING_SYNC_IN_PROGRESS".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 pub fn update_payment_method(
     db: &DbState,
@@ -1968,12 +2321,14 @@ pub fn update_payment_method_for_payment(
     }
     let normalized_payment_status = current_payment_status.trim().to_ascii_lowercase();
 
+    ensure_driver_earning_sync_is_not_processing(&conn, &order_id)?;
+
     type CompletedPaymentRow = (String, String, i64);
     let completed_payments = {
         let mut stmt = conn
             .prepare(
                 "SELECT op.id,
-                        op.method,
+                        LOWER(TRIM(op.method)),
                         COALESCE((
                             SELECT COUNT(*)
                             FROM payment_items pi
@@ -1981,7 +2336,7 @@ pub fn update_payment_method_for_payment(
                         ), 0) AS item_assignment_count
                  FROM order_payments op
                  WHERE op.order_id = ?1
-                   AND op.status = 'completed'
+                   AND LOWER(TRIM(op.status)) = 'completed'
                  ORDER BY op.created_at ASC",
             )
             .map_err(|e| format!("prepare payment edit lookup: {e}"))?;
@@ -2002,6 +2357,10 @@ pub fn update_payment_method_for_payment(
         .map(str::trim)
         .filter(|payment_id| !payment_id.is_empty());
 
+    if order_has_adjustment_or_finalized_payment(&conn, &order_id)? {
+        return Err("PAYMENT_METHOD_EDIT_ADJUSTED_ORDER_NOT_EDITABLE".into());
+    }
+
     if completed_payments.is_empty() {
         if target_payment_id.is_some() {
             return Err("PAYMENT_METHOD_EDIT_TARGET_NOT_FOUND".into());
@@ -2011,6 +2370,9 @@ pub fn update_payment_method_for_payment(
                 "Payment method can only be edited for fully paid orders when no local payment record exists"
                     .into(),
             );
+        }
+        if order_has_driver_earning(&conn, &order_id)? {
+            return Err("DRIVER_REQUIRES_LOCAL_PAYMENT".into());
         }
 
         // W6: the stored `orders.payment_method` column was dropped in
@@ -2066,40 +2428,28 @@ pub fn update_payment_method_for_payment(
             }
             completed_payments[0].clone()
         };
+
     if current_method == next_method {
-        if payment_sync_queue_needs_retry(&conn, &payment_id)? {
-            let tx = conn
-                .transaction()
-                .map_err(|e| format!("begin payment sync retry transaction: {e}"))?;
+        let now = Utc::now().to_rfc3339();
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("begin same-method payment edit transaction: {e}"))?;
+        refresh_driver_earning_for_payment_method_edit(&tx, &order_id, &now)?;
+        let retried_sync = if payment_sync_queue_needs_retry(&tx, &payment_id)? {
             refresh_payment_sync_queue_entry(&tx, &payment_id)?;
-            let payment_status: String = tx
-                .query_row(
-                    "SELECT COALESCE(payment_status, 'pending') FROM orders WHERE id = ?1",
-                    params![order_id],
-                    |row| row.get(0),
-                )
-                .map_err(|e| format!("reload payment status after sync retry: {e}"))?;
-            tx.commit()
-                .map_err(|e| format!("commit payment sync retry: {e}"))?;
-
-            info!(
-                order_id = %order_id,
-                payment_id = %payment_id,
-                method = %current_method,
-                "Payment sync requeued without changing payment method"
-            );
-
-            return Ok(serde_json::json!({
-                "success": true,
-                "data": {
-                    "orderId": order_id,
-                    "paymentId": payment_id,
-                    "paymentMethod": current_method,
-                    "paymentStatus": payment_status,
-                    "retriedSync": true,
-                }
-            }));
-        }
+            true
+        } else {
+            false
+        };
+        let payment_status: String = tx
+            .query_row(
+                "SELECT COALESCE(payment_status, 'pending') FROM orders WHERE id = ?1",
+                params![order_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("reload payment status after same-method edit: {e}"))?;
+        tx.commit()
+            .map_err(|e| format!("commit same-method payment edit: {e}"))?;
 
         return Ok(serde_json::json!({
             "success": true,
@@ -2107,8 +2457,8 @@ pub fn update_payment_method_for_payment(
                 "orderId": order_id,
                 "paymentId": payment_id,
                 "paymentMethod": current_method,
-                "paymentStatus": current_payment_status,
-                "retriedSync": false,
+                "paymentStatus": payment_status,
+                "retriedSync": retried_sync,
             }
         }));
     }
@@ -2120,12 +2470,25 @@ pub fn update_payment_method_for_payment(
     tx.execute(
         "UPDATE order_payments
          SET method = ?1,
+             cash_received = CASE
+                WHEN ?1 = 'cash' THEN CAST(
+                    COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER)) AS REAL
+                ) / 100.0
+                ELSE NULL
+             END,
+             cash_received_cents = CASE
+                WHEN ?1 = 'cash' THEN COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER))
+                ELSE NULL
+             END,
+             change_given = CASE WHEN ?1 = 'cash' THEN 0 ELSE NULL END,
+             change_given_cents = CASE WHEN ?1 = 'cash' THEN 0 ELSE NULL END,
              updated_at = ?2
          WHERE id = ?3",
         params![next_method, now, payment_id],
     )
     .map_err(|e| format!("update local payment method: {e}"))?;
     recompute_order_payment_state(&tx, &order_id, &now, &payment_id)?;
+    refresh_driver_earning_for_payment_method_edit(&tx, &order_id, &now)?;
     refresh_payment_sync_queue_entry(&tx, &payment_id)?;
     let payment_status: String = tx
         .query_row(
@@ -2185,34 +2548,31 @@ pub fn void_payment(
 // Query payments
 // ---------------------------------------------------------------------------
 
-/// Get all payments for an order.
-pub fn get_order_payments(db: &DbState, order_id: &str) -> Result<Value, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+type PaymentRow = (
+    String,
+    String,
+    String,
+    f64,
+    String,
+    String,
+    Option<f64>,
+    Option<f64>,
+    Option<String>,
+    f64,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    String,
+    String,
+    String,
+    f64,
+);
 
-    type PaymentRow = (
-        String,
-        String,
-        String,
-        f64,
-        String,
-        String,
-        Option<f64>,
-        Option<f64>,
-        Option<String>,
-        f64,
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        String,
-        String,
-        String,
-        f64,
-    );
-
+fn load_order_payment_rows(conn: &Connection, order_id: &str) -> Result<Vec<Value>, String> {
     let mut stmt = conn
         .prepare(
             // W4b: cols 3 (amount), 6 (cash_received), 7 (change_given),
@@ -2239,7 +2599,7 @@ pub fn get_order_payments(db: &DbState, order_id: &str) -> Result<Value, String>
              WHERE op.order_id = ?1
              ORDER BY op.created_at DESC",
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| error.to_string())?;
 
     let rows: Vec<PaymentRow> = stmt
         .query_map(params![order_id], |row| {
@@ -2269,50 +2629,109 @@ pub fn get_order_payments(db: &DbState, order_id: &str) -> Result<Value, String>
                 Cents::new(row.get::<_, i64>(20)?).to_f64_dp2(),
             ))
         })
-        .map_err(|e| e.to_string())?
+        .map_err(|error| error.to_string())?
         .filter_map(|row| match row {
             Ok(payment) => Some(payment),
-            Err(e) => {
-                warn!("skipping malformed payment row: {e}");
+            Err(error) => {
+                warn!("skipping malformed payment row: {error}");
                 None
             }
         })
         .collect();
     drop(stmt);
 
-    let mut payments = Vec::new();
-    for row in rows {
-        let items = load_payment_items_for_payment(&conn, &row.0)?;
-        let remaining_refundable = ((row.3 - row.20).max(0.0) * 100.0).round() / 100.0;
-        payments.push(serde_json::json!({
-            "id": row.0,
-            "orderId": row.1,
-            "method": row.2,
-            "amount": row.3,
-            "currency": row.4,
-            "status": row.5,
-            "cashReceived": row.6,
-            "changeGiven": row.7,
-            "transactionRef": row.8,
-            "discountAmount": row.9,
-            "paymentOrigin": row.10,
-            "terminalApproved": row.10 == "terminal",
-            "terminalDeviceId": row.11,
-            "staffId": row.12,
-            "staffShiftId": row.13,
-            "voidedAt": row.14,
-            "voidedBy": row.15,
-            "voidReason": row.16,
-            "syncStatus": row.17,
-            "createdAt": row.18,
-            "updatedAt": row.19,
-            "refundedAmount": row.20,
-            "remainingRefundable": remaining_refundable,
-            "items": items,
-        }));
-    }
+    rows.into_iter()
+        .map(|row| {
+            let items = load_payment_items_for_payment(conn, &row.0)?;
+            let remaining_refundable = ((row.3 - row.20).max(0.0) * 100.0).round() / 100.0;
+            Ok(serde_json::json!({
+                "id": row.0,
+                "orderId": row.1,
+                "method": row.2,
+                "amount": row.3,
+                "currency": row.4,
+                "status": row.5,
+                "cashReceived": row.6,
+                "changeGiven": row.7,
+                "transactionRef": row.8,
+                "discountAmount": row.9,
+                "paymentOrigin": row.10,
+                "terminalApproved": row.10 == "terminal",
+                "terminalDeviceId": row.11,
+                "staffId": row.12,
+                "staffShiftId": row.13,
+                "voidedAt": row.14,
+                "voidedBy": row.15,
+                "voidReason": row.16,
+                "syncStatus": row.17,
+                "createdAt": row.18,
+                "updatedAt": row.19,
+                "refundedAmount": row.20,
+                "remainingRefundable": remaining_refundable,
+                "items": items,
+            }))
+        })
+        .collect()
+}
 
-    Ok(serde_json::json!(payments))
+pub(crate) fn load_order_settlement_snapshot(
+    conn: &Connection,
+    order_id: &str,
+) -> Result<OrderSettlementSnapshot, String> {
+    let balance = load_order_payment_balance_snapshot(conn, order_id)?;
+    let completed_payments = load_order_payment_rows(conn, order_id)?
+        .into_iter()
+        .filter(|payment| payment.get("status").and_then(Value::as_str) == Some("completed"))
+        .collect();
+    Ok(OrderSettlementSnapshot {
+        order_total: balance.order_total,
+        net_paid: balance.net_paid,
+        outstanding_amount: balance.outstanding_amount,
+        completed_payments,
+        ledger_generation: balance.ledger_generation,
+    })
+}
+
+/// Return one read-transaction view of the order total, completed payment rows,
+/// refunds, and remaining balance. The distinct API avoids changing the legacy
+/// `get_order_payments` array contract used by existing renderer screens.
+pub fn get_order_settlement_snapshot(db: &DbState, order_id: &str) -> Result<Value, String> {
+    let conn = db.conn.lock().map_err(|error| error.to_string())?;
+    conn.execute_batch("BEGIN DEFERRED")
+        .map_err(|error| format!("begin settlement snapshot transaction: {error}"))?;
+    let result = (|| -> Result<(String, OrderSettlementSnapshot), String> {
+        let actual_order_id =
+            resolve_order_id(&conn, order_id).ok_or_else(|| "Order not found".to_string())?;
+        let snapshot = load_order_settlement_snapshot(&conn, &actual_order_id)?;
+        Ok((actual_order_id, snapshot))
+    })();
+
+    match result {
+        Ok((actual_order_id, snapshot)) => {
+            conn.execute_batch("COMMIT")
+                .map_err(|error| format!("commit settlement snapshot transaction: {error}"))?;
+            let values = settlement_snapshot_json(snapshot);
+            Ok(serde_json::json!({
+                "success": true,
+                "orderId": actual_order_id,
+                "orderTotal": values["orderTotal"],
+                "netPaid": values["netPaid"],
+                "outstandingAmount": values["outstandingAmount"],
+                "completedPayments": values["completedPayments"],
+                "generation": values["generation"],
+            }))
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
+/// Get all payments for an order.
+pub fn get_order_payments(db: &DbState, order_id: &str) -> Result<Value, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    Ok(serde_json::json!(load_order_payment_rows(&conn, order_id)?))
 }
 
 /// Get items already paid for in an order (used by split-by-items UI).
@@ -2441,6 +2860,1233 @@ mod tests {
             conn: std::sync::Mutex::new(conn),
             db_path: std::path::PathBuf::from(":memory:"),
         }
+    }
+
+    fn seed_driver_delivery_with_completed_payments(
+        db: &DbState,
+        order_id: &str,
+        payments: &[(&str, i64)],
+        shift_status: &str,
+        settled: i64,
+        is_transferred: i64,
+    ) -> Vec<String> {
+        let total_cents: i64 = payments.iter().map(|(_, cents)| cents).sum();
+        let total_amount = Cents::new(total_cents).to_f64_dp2();
+        let shift_id = format!("shift-{order_id}");
+        let now = "2026-08-12T00:00:00Z";
+        let conn = db.conn.lock().expect("lock delivery seed database");
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                 id, staff_id, branch_id, terminal_id, role_type, check_in_time,
+                 status, sync_status, created_at, updated_at
+             ) VALUES (?1, 'driver-1', 'branch-1', 'terminal-1', 'driver', ?2, ?3, 'pending', ?2, ?2)",
+            params![shift_id, now, shift_status],
+        )
+        .expect("insert driver shift");
+        conn.execute(
+            "INSERT INTO orders (
+                 id, items, total_amount, total_amount_cents, status, order_type,
+                 driver_id, staff_shift_id, branch_id, terminal_id, payment_status,
+                 sync_status, supabase_id, delivery_fee, delivery_fee_cents,
+                 tip_amount, tip_amount_cents, created_at, updated_at
+             ) VALUES (
+                 ?1, '[]', ?2, ?3, 'completed', 'delivery',
+                 'driver-1', ?4, 'branch-1', 'terminal-1', 'paid',
+                 'synced', ?5, 2.0, 200, 0.0, 0, ?6, ?6
+             )",
+            params![
+                order_id,
+                total_amount,
+                total_cents,
+                shift_id,
+                format!("remote-{order_id}"),
+                now,
+            ],
+        )
+        .expect("insert completed delivery order");
+
+        let payment_ids: Vec<String> = payments
+            .iter()
+            .enumerate()
+            .map(|(index, (method, cents))| {
+                let payment_id = format!("payment-{order_id}-{index}");
+                conn.execute(
+                    "INSERT INTO order_payments (
+                         id, order_id, method, amount, amount_cents, currency, status,
+                         payment_origin, sync_status, sync_state, created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, 'EUR', 'completed',
+                               'manual', 'synced', 'applied', ?6, ?6)",
+                    params![
+                        payment_id,
+                        order_id,
+                        method,
+                        Cents::new(*cents).to_f64_dp2(),
+                        cents,
+                        now,
+                    ],
+                )
+                .expect("insert completed delivery payment");
+                payment_id
+            })
+            .collect();
+
+        let cash_cents: i64 = payments
+            .iter()
+            .filter(|(method, _)| *method == "cash")
+            .map(|(_, cents)| cents)
+            .sum();
+        let card_cents: i64 = payments
+            .iter()
+            .filter(|(method, _)| *method == "card")
+            .map(|(_, cents)| cents)
+            .sum();
+        let method = if cash_cents > 0 && card_cents > 0 {
+            "mixed"
+        } else if card_cents > 0 {
+            "card"
+        } else {
+            "cash"
+        };
+        conn.execute(
+            "INSERT INTO driver_earnings (
+                 id, driver_id, staff_shift_id, order_id, branch_id,
+                 delivery_fee, delivery_fee_cents, tip_amount, tip_amount_cents,
+                 total_earning, total_earning_cents, payment_method,
+                 cash_collected, cash_collected_cents, card_amount, card_amount_cents,
+                 cash_to_return, cash_to_return_cents, settled, is_transferred,
+                 created_at, updated_at
+             ) VALUES (
+                 ?1, 'driver-1', ?2, ?3, 'branch-1',
+                 2.0, 200, 0.0, 0, 2.0, 200, ?4,
+                 ?5, ?6, ?7, ?8, ?5, ?6, ?9, ?10,
+                 '2026-08-11T00:00:00Z', ?11
+             )",
+            params![
+                format!("earning-{order_id}"),
+                shift_id,
+                order_id,
+                method,
+                Cents::new(cash_cents).to_f64_dp2(),
+                cash_cents,
+                Cents::new(card_cents).to_f64_dp2(),
+                card_cents,
+                settled,
+                is_transferred,
+                now,
+            ],
+        )
+        .expect("insert courier settlement projection");
+
+        payment_ids
+    }
+
+    fn driver_earning_payment_snapshot(
+        db: &DbState,
+        order_id: &str,
+    ) -> (String, f64, i64, f64, i64, f64, i64, String, String) {
+        let conn = db.conn.lock().expect("lock snapshot database");
+        conn.query_row(
+            "SELECT payment_method,
+                    cash_collected, cash_collected_cents,
+                    card_amount, card_amount_cents,
+                    cash_to_return, cash_to_return_cents,
+                    created_at, updated_at
+             FROM driver_earnings WHERE order_id = ?1",
+            params![order_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                ))
+            },
+        )
+        .expect("read courier settlement snapshot")
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct DeliveryEarningEditState {
+        id: String,
+        driver_id: String,
+        staff_shift_id: Option<String>,
+        branch_id: String,
+        settled: i64,
+        is_transferred: i64,
+        payment_method: String,
+        cash_collected: f64,
+        cash_collected_cents: i64,
+        card_amount: f64,
+        card_amount_cents: i64,
+        cash_to_return: f64,
+        cash_to_return_cents: i64,
+        updated_at: String,
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct DeliveryPaymentEditState {
+        payment: (
+            String,
+            f64,
+            Option<i64>,
+            Option<f64>,
+            Option<i64>,
+            Option<f64>,
+            Option<i64>,
+            String,
+            String,
+            String,
+        ),
+        order: (String, String, String, Option<String>, Option<String>),
+        earning: DeliveryEarningEditState,
+        outboxes: Vec<(
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            i64,
+            Option<String>,
+            Option<String>,
+        )>,
+    }
+
+    fn delivery_payment_edit_state(
+        db: &DbState,
+        order_id: &str,
+        payment_id: &str,
+    ) -> DeliveryPaymentEditState {
+        let conn = db.conn.lock().expect("lock payment edit snapshot database");
+        let payment = conn
+            .query_row(
+                "SELECT method, amount, amount_cents,
+                        cash_received, cash_received_cents,
+                        change_given, change_given_cents,
+                        sync_status, sync_state, updated_at
+                 FROM order_payments WHERE id = ?1",
+                params![payment_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                    ))
+                },
+            )
+            .expect("read payment edit snapshot");
+        let order = conn
+            .query_row(
+                "SELECT status, payment_status, sync_status, driver_id, staff_shift_id
+                 FROM orders WHERE id = ?1",
+                params![order_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("read order edit snapshot");
+        let earning = conn
+            .query_row(
+                "SELECT id, driver_id, staff_shift_id, branch_id,
+                        settled, is_transferred, payment_method,
+                        cash_collected, cash_collected_cents,
+                        card_amount, card_amount_cents,
+                        cash_to_return, cash_to_return_cents, updated_at
+                 FROM driver_earnings WHERE order_id = ?1",
+                params![order_id],
+                |row| {
+                    Ok(DeliveryEarningEditState {
+                        id: row.get(0)?,
+                        driver_id: row.get(1)?,
+                        staff_shift_id: row.get(2)?,
+                        branch_id: row.get(3)?,
+                        settled: row.get(4)?,
+                        is_transferred: row.get(5)?,
+                        payment_method: row.get(6)?,
+                        cash_collected: row.get(7)?,
+                        cash_collected_cents: row.get(8)?,
+                        card_amount: row.get(9)?,
+                        card_amount_cents: row.get(10)?,
+                        cash_to_return: row.get(11)?,
+                        cash_to_return_cents: row.get(12)?,
+                        updated_at: row.get(13)?,
+                    })
+                },
+            )
+            .expect("read courier earning edit snapshot");
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, table_name, record_id, operation, status, data,
+                        attempts, next_retry_at, error_message
+                 FROM parity_sync_queue
+                 WHERE table_name IN ('orders', 'payments', 'driver_earnings')
+                 ORDER BY id",
+            )
+            .expect("prepare outbox edit snapshot");
+        let outboxes = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                ))
+            })
+            .expect("query outbox edit snapshot")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("read outbox edit snapshot");
+
+        DeliveryPaymentEditState {
+            payment,
+            order,
+            earning,
+            outboxes,
+        }
+    }
+
+    #[test]
+    fn payment_method_edit_rebuilds_active_delivery_courier_cash_snapshot_and_checkout() {
+        let db = test_db();
+        let payment_id = seed_driver_delivery_with_completed_payments(
+            &db,
+            "delivery-cash-to-card",
+            &[("cash", 2400)],
+            "active",
+            0,
+            0,
+        )[0]
+        .clone();
+
+        update_payment_method_for_payment(
+            &db,
+            "delivery-cash-to-card",
+            Some(payment_id.as_str()),
+            "card",
+        )
+        .expect("change completed delivery payment from cash to card");
+
+        let earning = driver_earning_payment_snapshot(&db, "delivery-cash-to-card");
+        assert_eq!(earning.0, "card");
+        assert_eq!(
+            (earning.1, earning.2, earning.3, earning.4, earning.5, earning.6),
+            (0.0, 0, 24.0, 2400, 0.0, 0),
+            "all real/cents driver settlement fields must match the complete payment snapshot"
+        );
+        assert_eq!(earning.7, "2026-08-11T00:00:00Z");
+        assert_ne!(
+            earning.8, earning.7,
+            "payment refresh must update the earning timestamp"
+        );
+
+        let checkout = crate::shifts::get_shift_summary(&db, "shift-delivery-cash-to-card")
+            .expect("build courier checkout from materialized earnings");
+        assert_eq!(checkout["amountToReturn"], 0.0);
+
+        let conn = db.conn.lock().expect("lock outbox database");
+        let (queue_count, queue_status, operation, payload): (i64, String, String, String) = conn
+            .query_row(
+                "SELECT COUNT(*), MAX(status), MAX(operation), MAX(data)
+                 FROM parity_sync_queue
+                 WHERE table_name = 'driver_earnings'
+                   AND record_id = 'earning-delivery-cash-to-card'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("load refreshed courier earning outbox row");
+        assert_eq!(queue_count, 1);
+        assert_eq!(queue_status, "pending");
+        assert_eq!(operation, "INSERT");
+        let payload: Value = serde_json::from_str(&payload).expect("parse earning outbox payload");
+        assert_eq!(payload["payment_method"], "card");
+        assert_eq!(payload["cash_collected_cents"], 0);
+        assert_eq!(payload["card_amount_cents"], 2400);
+        assert_eq!(payload["cash_to_return_cents"], 0);
+        assert_eq!(payload["createdAt"], "2026-08-11T00:00:00Z");
+        assert_eq!(payload["updatedAt"], earning.8);
+    }
+
+    #[test]
+    fn payment_method_edit_rebuilds_full_split_snapshot_and_same_method_repair_is_idempotent() {
+        let db = test_db();
+        let payment_ids = seed_driver_delivery_with_completed_payments(
+            &db,
+            "delivery-split-repair",
+            &[("card", 400), ("cash", 600)],
+            "active",
+            0,
+            0,
+        );
+        {
+            let conn = db.conn.lock().expect("lock stale projection database");
+            conn.execute(
+                "UPDATE driver_earnings
+                 SET payment_method = 'cash', cash_collected = 99.0,
+                     cash_collected_cents = 9900, card_amount = 0.0,
+                     card_amount_cents = 0, cash_to_return = 99.0,
+                     cash_to_return_cents = 9900
+                 WHERE order_id = 'delivery-split-repair'",
+                [],
+            )
+            .expect("make courier projection stale");
+        }
+
+        update_payment_method_for_payment(
+            &db,
+            "delivery-split-repair",
+            Some(payment_ids[0].as_str()),
+            "card",
+        )
+        .expect("same-method edit repairs stale courier projection");
+        let repaired = driver_earning_payment_snapshot(&db, "delivery-split-repair");
+        assert_eq!(repaired.0, "mixed");
+        assert_eq!(
+            (repaired.1, repaired.2, repaired.3, repaired.4, repaired.5, repaired.6),
+            (6.0, 600, 4.0, 400, 6.0, 600)
+        );
+
+        update_payment_method_for_payment(
+            &db,
+            "delivery-split-repair",
+            Some(payment_ids[0].as_str()),
+            "card",
+        )
+        .expect("repeating same-method repair remains idempotent");
+        let repeated = driver_earning_payment_snapshot(&db, "delivery-split-repair");
+        assert_eq!(
+            (repeated.1, repeated.2, repeated.3, repeated.4, repeated.5, repeated.6),
+            (6.0, 600, 4.0, 400, 6.0, 600)
+        );
+
+        let conn = db.conn.lock().expect("lock split outbox database");
+        let outbox_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue
+                 WHERE table_name = 'driver_earnings'
+                   AND record_id = 'earning-delivery-split-repair'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count idempotent courier earning outbox rows");
+        assert_eq!(
+            outbox_count, 1,
+            "same-method replay must replace, not duplicate, the courier earning outbox row"
+        );
+    }
+
+    #[test]
+    fn payment_method_edit_rebuilds_active_delivery_card_to_cash_snapshot_exactly_once() {
+        let db = test_db();
+        let payment_id = seed_driver_delivery_with_completed_payments(
+            &db,
+            "delivery-card-to-cash",
+            &[("card", 2400)],
+            "active",
+            0,
+            0,
+        )[0]
+        .clone();
+
+        update_payment_method_for_payment(
+            &db,
+            "delivery-card-to-cash",
+            Some(payment_id.as_str()),
+            "cash",
+        )
+        .expect("change completed delivery payment from card to cash");
+        let earning = driver_earning_payment_snapshot(&db, "delivery-card-to-cash");
+        assert_eq!(earning.0, "cash");
+        assert_eq!(
+            (earning.1, earning.2, earning.3, earning.4, earning.5, earning.6),
+            (24.0, 2400, 0.0, 0, 24.0, 2400)
+        );
+        let checkout = crate::shifts::get_shift_summary(&db, "shift-delivery-card-to-cash")
+            .expect("build courier checkout after card to cash edit");
+        assert_eq!(checkout["amountToReturn"], 24.0);
+        let conn = db.conn.lock().expect("lock card to cash outbox database");
+        let outbox_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue
+                 WHERE table_name = 'driver_earnings'
+                   AND record_id = 'earning-delivery-card-to-cash'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count card to cash courier outboxes");
+        assert_eq!(outbox_count, 1);
+    }
+
+    #[test]
+    fn targeted_split_payment_edit_rebuilds_complete_delivery_snapshot_as_mixed() {
+        let db = test_db();
+        let payment_ids = seed_driver_delivery_with_completed_payments(
+            &db,
+            "delivery-targeted-split",
+            &[("cash", 400), ("cash", 600)],
+            "active",
+            0,
+            0,
+        );
+
+        update_payment_method_for_payment(
+            &db,
+            "delivery-targeted-split",
+            Some(payment_ids[0].as_str()),
+            "card",
+        )
+        .expect("retarget one split payment to card");
+        let earning = driver_earning_payment_snapshot(&db, "delivery-targeted-split");
+        assert_eq!(earning.0, "mixed");
+        assert_eq!(
+            (earning.1, earning.2, earning.3, earning.4, earning.5, earning.6),
+            (6.0, 600, 4.0, 400, 6.0, 600)
+        );
+    }
+
+    #[test]
+    fn same_method_edit_repairs_stale_delivery_projection_and_retries_existing_payment_sync() {
+        let db = test_db();
+        let payment_id = seed_driver_delivery_with_completed_payments(
+            &db,
+            "delivery-same-method-retry",
+            &[("card", 2400)],
+            "active",
+            0,
+            0,
+        )[0]
+        .clone();
+        {
+            let conn = db.conn.lock().expect("lock same-method retry database");
+            conn.execute(
+                "UPDATE driver_earnings
+                 SET payment_method = 'cash', cash_collected = 24.0,
+                     cash_collected_cents = 2400, card_amount = 0.0,
+                     card_amount_cents = 0, cash_to_return = 24.0,
+                     cash_to_return_cents = 2400
+                 WHERE order_id = 'delivery-same-method-retry'",
+                [],
+            )
+            .expect("make card earning projection stale");
+            crate::sync_queue::enqueue_payload_item(
+                &conn,
+                "payments",
+                payment_id.as_str(),
+                "INSERT",
+                &serde_json::json!({ "id": payment_id, "orderId": "delivery-same-method-retry" }),
+                Some(1),
+                Some("payment"),
+                Some("manual"),
+                Some(1),
+            )
+            .expect("seed failed payment outbox");
+            conn.execute(
+                "UPDATE parity_sync_queue
+                 SET status = 'failed', attempts = 2, error_message = 'temporary failure'
+                 WHERE table_name = 'payments' AND record_id = ?1",
+                params![payment_id],
+            )
+            .expect("mark payment outbox failed");
+        }
+
+        let result = update_payment_method_for_payment(
+            &db,
+            "delivery-same-method-retry",
+            Some(payment_id.as_str()),
+            "card",
+        )
+        .expect("same method retries payment sync and repairs courier projection");
+        assert_eq!(result["data"]["retriedSync"], true);
+        let earning = driver_earning_payment_snapshot(&db, "delivery-same-method-retry");
+        assert_eq!(earning.0, "card");
+        assert_eq!(
+            (earning.1, earning.2, earning.3, earning.4, earning.5, earning.6),
+            (0.0, 0, 24.0, 2400, 0.0, 0)
+        );
+        let conn = db
+            .conn
+            .lock()
+            .expect("lock payment retry assertions database");
+        let payment_queue_status: String = conn
+            .query_row(
+                "SELECT status FROM parity_sync_queue
+                 WHERE table_name = 'payments' AND record_id = ?1",
+                params![payment_id],
+                |row| row.get(0),
+            )
+            .expect("read retried payment outbox status");
+        assert_eq!(payment_queue_status, "pending");
+    }
+
+    #[test]
+    fn same_method_edit_rejects_closed_settled_and_transferred_courier_settlements() {
+        for (suffix, shift_status, settled, is_transferred) in [
+            ("closed", "closed", 0, 0),
+            ("settled", "active", 1, 0),
+            ("transferred", "active", 0, 1),
+        ] {
+            let db = test_db();
+            let order_id = format!("delivery-same-method-{suffix}");
+            let payment_id = seed_driver_delivery_with_completed_payments(
+                &db,
+                order_id.as_str(),
+                &[("cash", 2400)],
+                shift_status,
+                settled,
+                is_transferred,
+            )[0]
+            .clone();
+            let before = delivery_payment_edit_state(&db, &order_id, &payment_id);
+
+            let error = update_payment_method_for_payment(
+                &db,
+                order_id.as_str(),
+                Some(payment_id.as_str()),
+                "cash",
+            )
+            .expect_err("same method must not bypass finalized courier settlement boundary");
+            assert_eq!(error, "DRIVER_SETTLEMENT_NOT_EDITABLE");
+            assert_eq!(
+                delivery_payment_edit_state(&db, &order_id, &payment_id),
+                before,
+                "same-method rejection must leave every local financial and outbox field unchanged"
+            );
+        }
+    }
+
+    #[test]
+    fn payment_method_edit_rejects_adjusted_delivery_without_resurrecting_refunded_cash() {
+        let db = test_db();
+        let payment_id = seed_driver_delivery_with_completed_payments(
+            &db,
+            "delivery-adjusted-payment",
+            &[("cash", 2400)],
+            "active",
+            0,
+            0,
+        )[0]
+        .clone();
+        {
+            let conn = db.conn.lock().expect("lock adjusted delivery database");
+            conn.execute(
+                "INSERT INTO payment_adjustments (
+                     id, payment_id, order_id, adjustment_type, amount, amount_cents,
+                     reason, refund_method, cash_handler, adjustment_context,
+                     sync_state, created_at, updated_at
+                 ) VALUES (
+                     'adjustment-delivery-refund', ?1, 'delivery-adjusted-payment',
+                     'refund', 5.0, 500, 'partial cash refund', 'cash', 'driver_shift',
+                     'manual', 'pending', '2026-08-12T00:00:00Z', '2026-08-12T00:00:00Z'
+                 )",
+                params![payment_id],
+            )
+            .expect("seed driver-handled partial refund");
+            conn.execute(
+                "UPDATE driver_earnings
+                 SET cash_collected = 19.0, cash_collected_cents = 1900,
+                     cash_to_return = 19.0, cash_to_return_cents = 1900
+                 WHERE order_id = 'delivery-adjusted-payment'",
+                [],
+            )
+            .expect("mirror settled partial refund onto courier projection");
+        }
+
+        let error = update_payment_method_for_payment(
+            &db,
+            "delivery-adjusted-payment",
+            Some(payment_id.as_str()),
+            "card",
+        )
+        .expect_err(
+            "adjusted delivery payment edit must fail closed until tender accounting is explicit",
+        );
+        assert_eq!(error, "PAYMENT_METHOD_EDIT_ADJUSTED_ORDER_NOT_EDITABLE");
+        let earning = driver_earning_payment_snapshot(&db, "delivery-adjusted-payment");
+        assert_eq!(
+            (earning.0, earning.2, earning.4, earning.6),
+            ("cash".to_string(), 1900, 0, 1900)
+        );
+    }
+
+    #[test]
+    fn payment_method_edit_rejects_refunded_and_voided_status_only_siblings() {
+        for sibling_status in ["refunded", "voided"] {
+            let db = test_db();
+            let order_id = format!("delivery-status-only-{sibling_status}");
+            let payment_id = seed_driver_delivery_with_completed_payments(
+                &db,
+                order_id.as_str(),
+                &[("cash", 2400)],
+                "active",
+                0,
+                0,
+            )[0]
+            .clone();
+            {
+                let conn = db
+                    .conn
+                    .lock()
+                    .expect("lock status-only adjustment database");
+                conn.execute(
+                    "INSERT INTO order_payments (
+                         id, order_id, method, amount, amount_cents, currency, status,
+                         payment_origin, sync_status, sync_state, created_at, updated_at
+                     ) VALUES (?1, ?2, 'cash', 1.0, 100, 'EUR', ?3, 'manual', 'synced',
+                               'applied', '2026-08-12T00:00:00Z', '2026-08-12T00:00:00Z')",
+                    params![
+                        format!("payment-status-only-{sibling_status}"),
+                        order_id,
+                        sibling_status,
+                    ],
+                )
+                .expect("insert status-only finalized sibling");
+            }
+            let before = delivery_payment_edit_state(&db, &order_id, &payment_id);
+
+            let error = update_payment_method_for_payment(
+                &db,
+                order_id.as_str(),
+                Some(payment_id.as_str()),
+                "cash",
+            )
+            .expect_err("same-method edit must reject finalized sibling before returning");
+            assert_eq!(error, "PAYMENT_METHOD_EDIT_ADJUSTED_ORDER_NOT_EDITABLE");
+            assert_eq!(
+                delivery_payment_edit_state(&db, &order_id, &payment_id),
+                before,
+                "status-only rejection must preserve order, payment, earning, and outboxes"
+            );
+        }
+    }
+
+    #[test]
+    fn payment_method_snapshot_fallback_rejects_delivery_earning_without_local_payment() {
+        let db = test_db();
+        seed_driver_delivery_with_completed_payments(
+            &db,
+            "delivery-fallback-earning",
+            &[("cash", 2400)],
+            "active",
+            0,
+            0,
+        );
+        {
+            let conn = db.conn.lock().expect("lock fallback earning database");
+            conn.execute(
+                "DELETE FROM order_payments WHERE order_id = 'delivery-fallback-earning'",
+                [],
+            )
+            .expect("remove local completed payment to emulate remote-only snapshot");
+        }
+
+        let error =
+            update_payment_method_for_payment(&db, "delivery-fallback-earning", None, "card")
+                .expect_err(
+                    "fallback must not diverge a driver earning from a missing local payment",
+                );
+        assert_eq!(error, "DRIVER_REQUIRES_LOCAL_PAYMENT");
+        let conn = db.conn.lock().expect("lock fallback assertions database");
+        let (sync_status, outbox_count): (String, i64) = conn
+            .query_row(
+                "SELECT o.sync_status,
+                        (SELECT COUNT(*) FROM parity_sync_queue
+                         WHERE table_name IN ('orders', 'payments', 'driver_earnings'))
+                 FROM orders o WHERE o.id = 'delivery-fallback-earning'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read unchanged fallback state");
+        assert_eq!(sync_status, "synced");
+        assert_eq!(outbox_count, 0);
+    }
+
+    #[test]
+    fn payment_method_edit_propagates_courier_lookup_error_and_rolls_back_payment() {
+        let db = test_db();
+        let payment_id = seed_driver_delivery_with_completed_payments(
+            &db,
+            "delivery-lookup-error",
+            &[("cash", 2400)],
+            "active",
+            0,
+            0,
+        )[0]
+        .clone();
+        {
+            let conn = db.conn.lock().expect("lock lookup-error database");
+            conn.execute_batch("PRAGMA foreign_keys = OFF; DROP TABLE staff_shifts;")
+                .expect("remove courier shift table to inject lookup error");
+        }
+
+        let error = update_payment_method_for_payment(
+            &db,
+            "delivery-lookup-error",
+            Some(payment_id.as_str()),
+            "card",
+        )
+        .expect_err("lookup failure must not be treated as a missing courier earning");
+        assert!(error.contains("load courier settlement context"));
+        let conn = db
+            .conn
+            .lock()
+            .expect("lock lookup-error assertions database");
+        let (method, outbox_count): (String, i64) = conn
+            .query_row(
+                "SELECT op.method,
+                        (SELECT COUNT(*) FROM parity_sync_queue
+                         WHERE table_name IN ('payments', 'driver_earnings'))
+                 FROM order_payments op WHERE op.id = ?1",
+                params![payment_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read rolled-back lookup-error payment");
+        assert_eq!(method, "cash");
+        assert_eq!(outbox_count, 0);
+    }
+
+    #[test]
+    fn payment_method_edit_rejects_mismatched_courier_settlement_identity() {
+        for (suffix, sql) in [
+            (
+                "shift-role",
+                "UPDATE staff_shifts SET role_type = 'cashier' WHERE id = 'shift-delivery-mismatch-shift-role'",
+            ),
+            (
+                "shift-staff",
+                "UPDATE staff_shifts SET staff_id = 'another-driver' WHERE id = 'shift-delivery-mismatch-shift-staff'",
+            ),
+            (
+                "earning-branch",
+                "UPDATE driver_earnings SET branch_id = 'another-branch' WHERE order_id = 'delivery-mismatch-earning-branch'",
+            ),
+            (
+                "order-branch",
+                "UPDATE orders SET branch_id = 'another-branch' WHERE id = 'delivery-mismatch-order-branch'",
+            ),
+            (
+                "order-driver",
+                "UPDATE orders SET driver_id = 'another-driver' WHERE id = 'delivery-mismatch-order-driver'",
+            ),
+            (
+                "order-shift",
+                "UPDATE orders SET staff_shift_id = 'another-shift' WHERE id = 'delivery-mismatch-order-shift'",
+            ),
+            (
+                "order-unassigned",
+                "UPDATE orders SET driver_id = NULL, staff_shift_id = NULL WHERE id = 'delivery-mismatch-order-unassigned'",
+            ),
+        ] {
+            let db = test_db();
+            let order_id = format!("delivery-mismatch-{suffix}");
+            let payment_id = seed_driver_delivery_with_completed_payments(
+                &db,
+                order_id.as_str(),
+                &[("cash", 2400)],
+                "active",
+                0,
+                0,
+            )[0]
+            .clone();
+            {
+                let conn = db.conn.lock().expect("lock mismatch seed database");
+                conn.execute(sql, [])
+                    .expect("inject courier settlement identity mismatch");
+            }
+            let before = delivery_payment_edit_state(&db, &order_id, &payment_id);
+
+            let error = update_payment_method_for_payment(
+                &db,
+                order_id.as_str(),
+                Some(payment_id.as_str()),
+                "card",
+            )
+            .expect_err("courier settlement identity mismatch must reject payment edit");
+            assert_eq!(error, "DRIVER_SETTLEMENT_NOT_EDITABLE");
+            assert_eq!(
+                delivery_payment_edit_state(&db, &order_id, &payment_id),
+                before,
+                "identity mismatch must roll back order, tender, earning, and every outbox"
+            );
+        }
+    }
+
+    #[test]
+    fn payment_method_edit_reclassifies_cash_tender_metadata_without_losing_transaction_reference()
+    {
+        let db = test_db();
+        let cash_payment_id = seed_driver_delivery_with_completed_payments(
+            &db,
+            "delivery-tender-cash-to-card",
+            &[("cash", 2400)],
+            "active",
+            0,
+            0,
+        )[0]
+        .clone();
+        let card_db = test_db();
+        let card_payment_id = seed_driver_delivery_with_completed_payments(
+            &card_db,
+            "delivery-tender-card-to-cash",
+            &[("card", 2400)],
+            "active",
+            0,
+            0,
+        )[0]
+        .clone();
+        {
+            let conn = db.conn.lock().expect("lock tender metadata database");
+            conn.execute(
+                "UPDATE order_payments
+                 SET cash_received = 30.0, cash_received_cents = 3000,
+                     change_given = 6.0, change_given_cents = 600,
+                     transaction_ref = 'ORIGINAL-CASH-REF'
+                 WHERE id = ?1",
+                params![cash_payment_id],
+            )
+            .expect("seed cash tender metadata");
+        }
+        {
+            let conn = card_db
+                .conn
+                .lock()
+                .expect("lock card tender metadata database");
+            conn.execute(
+                "UPDATE order_payments
+                 SET amount = 99.99, amount_cents = 2400,
+                     transaction_ref = 'ORIGINAL-CARD-REF'
+                 WHERE id = ?1",
+                params![card_payment_id],
+            )
+            .expect("seed divergent legacy REAL amount and card transaction reference");
+        }
+
+        update_payment_method_for_payment(
+            &db,
+            "delivery-tender-cash-to-card",
+            Some(cash_payment_id.as_str()),
+            "card",
+        )
+        .expect("reclassify cash payment as card");
+        update_payment_method_for_payment(
+            &card_db,
+            "delivery-tender-card-to-cash",
+            Some(card_payment_id.as_str()),
+            "cash",
+        )
+        .expect("reclassify card payment as exact cash tender");
+
+        let conn = db
+            .conn
+            .lock()
+            .expect("lock card reclassification result database");
+        let cash_to_card: (Option<i64>, Option<i64>, String) = conn
+            .query_row(
+                "SELECT cash_received_cents, change_given_cents, transaction_ref
+                 FROM order_payments WHERE id = ?1",
+                params![cash_payment_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read card reclassification metadata");
+        drop(conn);
+        let conn = card_db
+            .conn
+            .lock()
+            .expect("lock cash reclassification result database");
+        let card_to_cash: (Option<f64>, Option<i64>, Option<f64>, Option<i64>, String) = conn
+            .query_row(
+                "SELECT cash_received, cash_received_cents,
+                        change_given, change_given_cents, transaction_ref
+                 FROM order_payments WHERE id = ?1",
+                params![card_payment_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("read cash reclassification metadata");
+        assert_eq!(cash_to_card, (None, None, "ORIGINAL-CASH-REF".to_string()));
+        assert_eq!(
+            card_to_cash,
+            (
+                Some(24.0),
+                Some(2400),
+                Some(0.0),
+                Some(0),
+                "ORIGINAL-CARD-REF".to_string()
+            ),
+            "authoritative cents must drive both REAL and cents cash tender fields"
+        );
+    }
+
+    #[test]
+    fn payment_method_edit_waits_for_processing_driver_earning_sync_then_retries_safely() {
+        for (suffix, next_method) in [("different", "card"), ("same", "cash")] {
+            let db = test_db();
+            let order_id = format!("delivery-processing-{suffix}");
+            let payment_id = seed_driver_delivery_with_completed_payments(
+                &db,
+                order_id.as_str(),
+                &[("cash", 2400)],
+                "active",
+                0,
+                0,
+            )[0]
+            .clone();
+            let earning_id = format!("earning-{order_id}");
+            {
+                let conn = db
+                    .conn
+                    .lock()
+                    .expect("lock processing outbox seed database");
+                let payload =
+                    crate::order_ownership::build_driver_earning_sync_payload(&conn, &earning_id)
+                        .expect("build processing courier earning payload");
+                crate::sync_queue::enqueue_payload_item(
+                    &conn,
+                    "driver_earnings",
+                    &earning_id,
+                    "INSERT",
+                    &payload,
+                    Some(1),
+                    Some("financial"),
+                    Some("manual"),
+                    Some(1),
+                )
+                .expect("seed courier earning outbox");
+                conn.execute(
+                    "UPDATE parity_sync_queue
+                     SET status = 'processing'
+                     WHERE table_name = 'driver_earnings' AND record_id = ?1",
+                    params![earning_id],
+                )
+                .expect("mark courier earning outbox processing");
+            }
+            let before = delivery_payment_edit_state(&db, &order_id, &payment_id);
+
+            let error = update_payment_method_for_payment(
+                &db,
+                order_id.as_str(),
+                Some(payment_id.as_str()),
+                next_method,
+            )
+            .expect_err("payment edit must wait while the courier earning payload is in flight");
+            assert_eq!(error, "DRIVER_EARNING_SYNC_IN_PROGRESS");
+            assert_eq!(
+                delivery_payment_edit_state(&db, &order_id, &payment_id),
+                before,
+                "processing barrier must preserve payment, tender, order, earning, and exact outbox"
+            );
+
+            {
+                let conn = db.conn.lock().expect("lock completed outbox database");
+                conn.execute(
+                    "DELETE FROM parity_sync_queue
+                     WHERE table_name = 'driver_earnings'
+                       AND record_id = ?1
+                       AND status = 'processing'",
+                    params![earning_id],
+                )
+                .expect("simulate completed courier earning sync removal");
+            }
+            update_payment_method_for_payment(
+                &db,
+                order_id.as_str(),
+                Some(payment_id.as_str()),
+                next_method,
+            )
+            .expect("edit retries once no courier earning payload is processing");
+        }
+    }
+
+    #[test]
+    fn payment_method_edit_rejects_finalized_courier_settlements_without_partial_writes() {
+        for (suffix, shift_status, settled, is_transferred) in [
+            ("closed", "closed", 0, 0),
+            ("settled", "active", 1, 0),
+            ("transferred", "active", 0, 1),
+        ] {
+            let db = test_db();
+            let order_id = format!("delivery-final-{suffix}");
+            let payment_id = seed_driver_delivery_with_completed_payments(
+                &db,
+                order_id.as_str(),
+                &[("cash", 2400)],
+                shift_status,
+                settled,
+                is_transferred,
+            )[0]
+            .clone();
+
+            let error = update_payment_method_for_payment(
+                &db,
+                order_id.as_str(),
+                Some(payment_id.as_str()),
+                "card",
+            )
+            .expect_err("finalized courier settlement must reject payment method edit");
+            assert_eq!(error, "DRIVER_SETTLEMENT_NOT_EDITABLE");
+
+            let conn = db.conn.lock().expect("lock finalized settlement database");
+            let payment_method: String = conn
+                .query_row(
+                    "SELECT method FROM order_payments WHERE id = ?1",
+                    params![payment_id],
+                    |row| row.get(0),
+                )
+                .expect("read unchanged payment method");
+            let outbox_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM parity_sync_queue
+                     WHERE table_name IN ('payments', 'driver_earnings')",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("count rolled back outbox rows");
+            assert_eq!(payment_method, "cash");
+            assert_eq!(
+                outbox_count, 0,
+                "rejected finalized settlement must roll back every outbox mutation"
+            );
+        }
+    }
+
+    #[test]
+    fn payment_method_edit_leaves_non_delivery_without_courier_earning_and_rolls_back_outbox_failure(
+    ) {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().expect("lock non-delivery database");
+            conn.execute(
+                "INSERT INTO orders (
+                     id, items, total_amount, total_amount_cents, status, order_type,
+                     payment_status, sync_status, supabase_id, created_at, updated_at
+                 ) VALUES ('non-delivery-payment-edit', '[]', 12.0, 1200, 'completed', 'takeaway',
+                           'paid', 'synced', 'remote-non-delivery', ?1, ?1)",
+                params!["2026-08-12T00:00:00Z"],
+            )
+            .expect("insert non-delivery order");
+            conn.execute(
+                "INSERT INTO order_payments (
+                     id, order_id, method, amount, amount_cents, currency, status,
+                     payment_origin, sync_status, sync_state, created_at, updated_at
+                 ) VALUES ('payment-non-delivery', 'non-delivery-payment-edit', 'cash', 12.0, 1200,
+                           'EUR', 'completed', 'manual', 'synced', 'applied', ?1, ?1)",
+                params!["2026-08-12T00:00:00Z"],
+            )
+            .expect("insert non-delivery payment");
+        }
+        update_payment_method_for_payment(
+            &db,
+            "non-delivery-payment-edit",
+            Some("payment-non-delivery"),
+            "card",
+        )
+        .expect("non-delivery payment edit remains supported");
+        {
+            let conn = db.conn.lock().expect("lock non-delivery result database");
+            let driver_earning_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM driver_earnings WHERE order_id = 'non-delivery-payment-edit'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("count non-delivery courier earnings");
+            assert_eq!(
+                driver_earning_count, 0,
+                "payment edit must not invent courier earnings"
+            );
+        }
+
+        let rollback_db = test_db();
+        let payment_id = seed_driver_delivery_with_completed_payments(
+            &rollback_db,
+            "delivery-outbox-rollback",
+            &[("cash", 2400)],
+            "active",
+            0,
+            0,
+        )[0]
+        .clone();
+        {
+            let conn = rollback_db
+                .conn
+                .lock()
+                .expect("lock rollback trigger database");
+            conn.execute_batch(
+                "CREATE TRIGGER abort_driver_earning_outbox
+                 BEFORE INSERT ON parity_sync_queue
+                 WHEN NEW.table_name = 'driver_earnings'
+                 BEGIN
+                    SELECT RAISE(ABORT, 'forced driver earning outbox failure');
+                 END;",
+            )
+            .expect("install outbox rollback trigger");
+        }
+        let error = update_payment_method_for_payment(
+            &rollback_db,
+            "delivery-outbox-rollback",
+            Some(payment_id.as_str()),
+            "card",
+        )
+        .expect_err("driver earning outbox failure must abort the complete payment edit");
+        assert!(error.contains("forced driver earning outbox failure"));
+        let conn = rollback_db
+            .conn
+            .lock()
+            .expect("lock rollback assertions database");
+        let (payment_method, cash_cents, card_cents): (String, i64, i64) = conn
+            .query_row(
+                "SELECT op.method, de.cash_collected_cents, de.card_amount_cents
+                 FROM order_payments op
+                 JOIN driver_earnings de ON de.order_id = op.order_id
+                 WHERE op.id = ?1",
+                params![payment_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read rolled back payment and courier state");
+        let outbox_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue
+                 WHERE table_name IN ('payments', 'driver_earnings')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count rolled back payment and courier outboxes");
+        assert_eq!(
+            (payment_method, cash_cents, card_cents),
+            ("cash".to_string(), 2400, 0)
+        );
+        assert_eq!(
+            outbox_count, 0,
+            "failed courier enqueue must roll back payment and all canonical outboxes"
+        );
     }
 
     #[test]
@@ -4925,5 +6571,323 @@ mod tests {
         );
         let result = derive_payment_method(&conn, "ord-dpm-double-cash").unwrap();
         assert_eq!(result.as_deref(), Some("cash"));
+    }
+
+    #[test]
+    fn collect_outstanding_cash_uses_authoritative_balance_and_returns_post_insert_snapshot() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (
+                    id, items, total_amount, total_amount_cents, status, sync_status,
+                    payment_status, created_at, updated_at
+                 ) VALUES (
+                    'ord-collect-outstanding', '[]', 42.50, 4250, 'pending', 'pending',
+                    'pending', datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .expect("seed unpaid order");
+        }
+
+        let result = record_payment(
+            &db,
+            &serde_json::json!({
+                "orderId": "ord-collect-outstanding",
+                "method": "cash",
+                "amount": 1.00,
+                "cashReceived": 50.00,
+                "changeGiven": 49.00,
+                "collectOutstandingBalance": true,
+            }),
+        )
+        .expect("collect the current outstanding balance");
+
+        assert_eq!(result["success"], true);
+        assert_eq!(result["orderId"], "ord-collect-outstanding");
+        assert_eq!(result["method"], "cash");
+        assert_eq!(result["amount"], 42.50);
+        assert_eq!(result["settlement"]["orderTotal"], 42.50);
+        assert_eq!(result["settlement"]["netPaid"], 42.50);
+        assert_eq!(result["settlement"]["outstandingAmount"], 0.0);
+        assert_eq!(
+            result["settlement"]["completedPayments"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+
+        let conn = db.conn.lock().unwrap();
+        let (amount, cash_received, change_given): (f64, f64, f64) = conn
+            .query_row(
+                "SELECT amount, cash_received, change_given
+                 FROM order_payments
+                 WHERE order_id = 'ord-collect-outstanding'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("load recorded tender values");
+        assert_eq!((amount, cash_received, change_given), (42.50, 50.00, 7.50));
+    }
+
+    #[test]
+    fn collect_outstanding_cash_rejects_tender_below_authoritative_balance() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (
+                    id, items, total_amount, total_amount_cents, status, sync_status,
+                    payment_status, created_at, updated_at
+                 ) VALUES (
+                    'ord-collect-insufficient', '[]', 42.50, 4250, 'pending', 'pending',
+                    'pending', datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .expect("seed unpaid order");
+        }
+
+        let error = record_payment(
+            &db,
+            &serde_json::json!({
+                "orderId": "ord-collect-insufficient",
+                "method": "cash",
+                "amount": 1.00,
+                "cashReceived": 40.00,
+                "collectOutstandingBalance": true,
+            }),
+        )
+        .expect_err("cash tender below the live balance must fail");
+
+        assert_eq!(
+            error,
+            "Cash received 40.00 is below outstanding balance 42.50"
+        );
+        let conn = db.conn.lock().unwrap();
+        let payment_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM order_payments WHERE order_id = 'ord-collect-insufficient'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(payment_count, 0);
+    }
+
+    #[test]
+    fn collect_outstanding_card_uses_the_authoritative_remaining_partial_balance() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            seed_order_with_payments(
+                &conn,
+                "ord-collect-partial-card",
+                &[("existing-partial", "cash", 4.00, "completed")],
+            );
+        }
+
+        let result = record_payment(
+            &db,
+            &serde_json::json!({
+                "orderId": "ord-collect-partial-card",
+                "method": "card",
+                "amount": 6.00,
+                "collectOutstandingBalance": true,
+            }),
+        )
+        .expect("collect the remaining partial balance");
+
+        assert_eq!(result["success"], true);
+        assert_eq!(result["amount"], 6.00);
+        assert_eq!(result["method"], "card");
+        assert_eq!(result["settlement"]["netPaid"], 10.00);
+        assert_eq!(result["settlement"]["outstandingAmount"], 0.00);
+        assert_eq!(
+            result["settlement"]["completedPayments"]
+                .as_array()
+                .map(Vec::len),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn authoritative_collection_rolls_back_when_ledger_generation_changed() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (
+                    id, items, total_amount, total_amount_cents, status, sync_status,
+                    payment_status, created_at, updated_at
+                 ) VALUES (
+                    'ord-collect-generation-change', '[]', 42.50, 4250, 'pending', 'pending',
+                    'pending', datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .expect("seed changed-generation order");
+        }
+
+        let error = record_payment_with_expected_balance(
+            &db,
+            &serde_json::json!({
+                "orderId": "ord-collect-generation-change",
+                "method": "cash",
+                "amount": 40.00,
+                "cashReceived": 50.00,
+                "collectOutstandingBalance": true,
+            }),
+            Some(OrderPaymentBalanceSnapshot {
+                order_total: 40.00,
+                net_paid: 0.00,
+                outstanding_amount: 40.00,
+                completed_payment_count: 0,
+                ledger_generation: [0; 32],
+            }),
+        )
+        .expect_err("changed native ledger generation must fail closed");
+
+        assert!(error.contains("Outstanding balance changed during payment collection"));
+        let conn = db.conn.lock().unwrap();
+        let payment_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM order_payments WHERE order_id = 'ord-collect-generation-change'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(payment_count, 0);
+    }
+
+    #[test]
+    fn balance_snapshot_generation_changes_for_equal_value_ledger_replacement() {
+        let db = test_db();
+        let first = {
+            let conn = db.conn.lock().unwrap();
+            seed_order_with_payments(
+                &conn,
+                "ord-ledger-fingerprint",
+                &[("payment-original", "cash", 4.00, "completed")],
+            );
+            load_order_payment_balance_snapshot(&conn, "ord-ledger-fingerprint")
+                .expect("load first ledger generation")
+        };
+        let second = {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE order_payments
+                 SET id = 'payment-replacement', updated_at = '2026-08-13T12:00:00Z'
+                 WHERE id = 'payment-original'",
+                [],
+            )
+            .expect("replace payment identity without changing balance");
+            load_order_payment_balance_snapshot(&conn, "ord-ledger-fingerprint")
+                .expect("load replacement ledger generation")
+        };
+
+        assert_eq!(first.order_total, second.order_total);
+        assert_eq!(first.net_paid, second.net_paid);
+        assert_eq!(first.outstanding_amount, second.outstanding_amount);
+        assert_eq!(
+            first.completed_payment_count,
+            second.completed_payment_count
+        );
+        assert_ne!(first.ledger_generation, second.ledger_generation);
+    }
+
+    #[test]
+    fn settlement_generation_ignores_sync_only_timestamp_updates() {
+        let db = test_db();
+        let first = {
+            let conn = db.conn.lock().unwrap();
+            seed_order_with_payments(
+                &conn,
+                "ord-ledger-sync-only",
+                &[("payment-sync-only", "cash", 4.00, "completed")],
+            );
+            load_order_payment_balance_snapshot(&conn, "ord-ledger-sync-only")
+                .expect("load initial settlement generation")
+        };
+        let second = {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE order_payments
+                 SET sync_status = 'synced', updated_at = '2026-08-13T12:00:00Z'
+                 WHERE id = 'payment-sync-only'",
+                [],
+            )
+            .expect("apply sync-only metadata update");
+            load_order_payment_balance_snapshot(&conn, "ord-ledger-sync-only")
+                .expect("load generation after sync-only update")
+        };
+
+        assert_eq!(first.ledger_generation, second.ledger_generation);
+    }
+
+    #[test]
+    fn settlement_snapshot_reports_completed_rows_and_net_refunds_together() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (
+                    id, items, total_amount, total_amount_cents, status, sync_status,
+                    payment_status, created_at, updated_at
+                 ) VALUES (
+                    'ord-settlement-snapshot', '[]', 20.00, 2000, 'pending', 'pending',
+                    'partially_paid', datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .expect("seed snapshot order");
+            conn.execute(
+                "INSERT INTO order_payments (
+                    id, order_id, method, amount, amount_cents, status, sync_status,
+                    created_at, updated_at
+                 ) VALUES (
+                    'pay-settlement-snapshot', 'ord-settlement-snapshot', 'cash',
+                    12.00, 1200, 'completed', 'pending', datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .expect("seed completed payment");
+            conn.execute(
+                "INSERT INTO payment_adjustments (
+                    id, payment_id, order_id, adjustment_type, amount, amount_cents,
+                    reason, created_at, updated_at
+                 ) VALUES (
+                    'refund-settlement-snapshot', 'pay-settlement-snapshot',
+                    'ord-settlement-snapshot', 'refund', 2.00, 200,
+                    'test refund', datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .expect("seed refund adjustment");
+        }
+
+        let snapshot = get_order_settlement_snapshot(&db, "ord-settlement-snapshot")
+            .expect("load atomic settlement snapshot");
+
+        assert_eq!(snapshot["success"], true);
+        assert_eq!(snapshot["orderId"], "ord-settlement-snapshot");
+        assert_eq!(snapshot["orderTotal"], 20.00);
+        assert_eq!(snapshot["netPaid"], 10.00);
+        assert_eq!(snapshot["outstandingAmount"], 10.00);
+        assert_eq!(
+            snapshot["generation"].as_str().map(str::len),
+            Some(64),
+            "settlement generation is an opaque full SHA-256 token"
+        );
+        let completed = snapshot["completedPayments"]
+            .as_array()
+            .expect("completed payment rows");
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0]["id"], "pay-settlement-snapshot");
+        assert_eq!(completed[0]["method"], "cash");
+        assert_eq!(completed[0]["amount"], 12.00);
+        assert_eq!(completed[0]["refundedAmount"], 2.00);
+        assert_eq!(completed[0]["remainingRefundable"], 10.00);
     }
 }

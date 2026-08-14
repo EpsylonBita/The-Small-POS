@@ -35,6 +35,10 @@ import {
 } from "./modals/EditSettlementDeltaModal";
 import { SplitPaymentModal } from "./modals/SplitPaymentModal";
 import {
+  OutstandingPaymentMethodModal,
+  type OutstandingPaymentSelection,
+} from "./modals/OutstandingPaymentMethodModal";
+import {
   SinglePaymentCollectionModal,
   type SinglePaymentCollectionResult,
 } from "./modals/SinglePaymentCollectionModal";
@@ -144,6 +148,12 @@ import type {
 } from "../../lib/ipc-adapter";
 import { buildSplitPaymentItems } from "../utils/splitPaymentItems";
 import { resolveOrderCompletionOutcome } from "../utils/orderCompletionOutcome";
+import {
+  loadPersistedSplitDismissal,
+  reconcileOutstandingPaymentAttempt,
+} from "../utils/splitCheckoutRecovery";
+import { loadPaymentEditRoute } from "../utils/paymentEditRouting";
+import { repairMissingPayment } from "../utils/repairMissingPayment";
 import { deriveEditSettlementFinancials } from "../utils/editSettlementFinancials";
 import {
   calculatePickupToDeliveryTotal,
@@ -960,6 +970,16 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       paymentStatus: string;
       payments: EditablePaymentRow[];
     } | null>(null);
+    const [missingPaymentRepairTarget, setMissingPaymentRepairTarget] = useState<{
+      orderId: string;
+      orderNumber?: string;
+      amount: number;
+      settlementGeneration: string;
+      orderType: "pickup" | "delivery" | "dine-in";
+    } | null>(null);
+    const [isRepairingMissingPayment, setIsRepairingMissingPayment] =
+      useState(false);
+    const missingPaymentRepairRef = useRef(false);
     const [pendingEditOrders, setPendingEditOrders] = useState<string[]>([]);
     const [editingSingleOrder, setEditingSingleOrder] = useState<string | null>(
       null,
@@ -1037,7 +1057,41 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       initialMode?: "by-amount" | "by-items";
       collectionMode?: SplitPaymentCollectionMode;
       statusAfterCollection?: StatusTransitionTarget;
+      orderNumber?: string;
+      orderType?: "pickup" | "delivery" | "dine-in";
+      tipAmount?: number;
+      tipRecipientRole?: "waiter" | "cashier" | "driver";
+      tipRecipientStaffId?: string;
+      tipRecipientStaffShiftId?: string;
+      recoverySession?: number;
+      settlementGeneration?: string;
     } | null>(null);
+    const [outstandingPaymentData, setOutstandingPaymentData] = useState<{
+      orderId: string;
+      orderTotal: number;
+      outstandingAmount: number;
+      existingPayments: any[];
+      items: Array<{
+        name: string;
+        quantity: number;
+        price: number;
+        totalPrice: number;
+        itemIndex: number;
+      }>;
+      isGhostOrder: boolean;
+      orderNumber?: string;
+      orderType: "pickup" | "delivery" | "dine-in";
+      tipAmount?: number;
+      tipRecipientRole?: "waiter" | "cashier" | "driver";
+      tipRecipientStaffId?: string;
+      tipRecipientStaffShiftId?: string;
+      recoverySession?: number;
+      settlementGeneration: string;
+    } | null>(null);
+    const [isProcessingOutstandingPayment, setIsProcessingOutstandingPayment] =
+      useState(false);
+    const [isReconcilingSplitClose, setIsReconcilingSplitClose] =
+      useState(false);
     const [singlePaymentCollectionData, setSinglePaymentCollectionData] =
       useState<PendingStatusPaymentCollection | null>(null);
     const [pendingEditRefundSettlement, setPendingEditRefundSettlement] =
@@ -1106,7 +1160,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     const alertingOrderIdRef = useRef<string | null>(null);
     const activeAlertAudioRef = useRef<HTMLAudioElement | null>(null);
     const shiftRefreshArmedRef = useRef(false);
-    const splitPaymentCompletedRef = useRef(false);
+    const splitPaymentCompletedRef = useRef<SplitPaymentResult | null>(null);
+    const splitCloseRecoveryRef = useRef(false);
     const callerIdOrderIntentRef = useRef<CallerIdOrderIntent | null>(null);
 
     useEffect(() => subscribeToCallerIdOrderIntents((intent) => {
@@ -3977,6 +4032,12 @@ export const OrderDashboard = memo<OrderDashboardProps>(
               }),
               isGhostOrder,
               initialMode: "by-items",
+              orderNumber: result.orderNumber,
+              orderType: selectedOrderType || "pickup",
+              tipAmount,
+              tipRecipientRole,
+              tipRecipientStaffId,
+              tipRecipientStaffShiftId,
             });
           }
 
@@ -4679,12 +4740,243 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       setEditSettlementDeltaPrompt(null);
     }, []);
 
-    const handleSplitComplete = async (_result: SplitPaymentResult) => {
-      splitPaymentCompletedRef.current = true;
+    const handleSplitPaymentClose = useCallback(async () => {
       const closingSplitPayment = splitPaymentData;
-      setSplitPaymentData(null);
+      const completionResult = splitPaymentCompletedRef.current;
+      splitPaymentCompletedRef.current = null;
+
+      if (!closingSplitPayment) return;
+
+      if (closingSplitPayment.kind !== "new-order") {
+        setSplitPaymentData(null);
+        if (!completionResult && closingSplitPayment.kind === "edit-settlement") {
+          toast(
+            t("orderDashboard.orderEditPartialPaymentSaved", {
+              defaultValue:
+                "Order changes were saved. The remaining balance is still pending payment.",
+            }),
+          );
+        }
+        void silentRefresh().catch(() => {});
+        return;
+      }
+
+      if (splitCloseRecoveryRef.current) return;
+      splitCloseRecoveryRef.current = true;
+      setIsReconcilingSplitClose(true);
+
+      try {
+        const resolution = await loadPersistedSplitDismissal(
+          bridge,
+          closingSplitPayment.orderId,
+          closingSplitPayment.orderTotal,
+        );
+        await silentRefresh().catch(() => {});
+
+        if (resolution.kind === "settled") {
+          setSplitPaymentData(null);
+          return;
+        }
+
+        if (resolution.kind === "partial") {
+          setSplitPaymentData({
+            ...closingSplitPayment,
+            orderTotal: resolution.orderTotal,
+            existingPayments: resolution.completedPayments,
+            recoverySession: (closingSplitPayment.recoverySession ?? 0) + 1,
+            settlementGeneration: resolution.settlementGeneration,
+          });
+          return;
+        }
+
+        setOutstandingPaymentData({
+          orderId: closingSplitPayment.orderId,
+          orderTotal: resolution.orderTotal,
+          outstandingAmount: resolution.outstandingAmount,
+          existingPayments: resolution.completedPayments,
+          items: closingSplitPayment.items,
+          isGhostOrder: closingSplitPayment.isGhostOrder,
+          orderNumber: closingSplitPayment.orderNumber,
+          orderType: closingSplitPayment.orderType || "pickup",
+          tipAmount: closingSplitPayment.tipAmount,
+          tipRecipientRole: closingSplitPayment.tipRecipientRole,
+          tipRecipientStaffId: closingSplitPayment.tipRecipientStaffId,
+          tipRecipientStaffShiftId: closingSplitPayment.tipRecipientStaffShiftId,
+          recoverySession: closingSplitPayment.recoverySession,
+          settlementGeneration: resolution.settlementGeneration!,
+        });
+        setSplitPaymentData(null);
+      } catch (error) {
+        console.error(
+          "[OrderDashboard] Failed to reconcile dismissed split payment:",
+          error,
+        );
+        setSplitPaymentData(closingSplitPayment);
+        toast.error(
+          t("orderDashboard.collectPaymentFailed", {
+            defaultValue: "Failed to load the outstanding payment. Try again.",
+          }),
+        );
+      } finally {
+        splitCloseRecoveryRef.current = false;
+        setIsReconcilingSplitClose(false);
+      }
+    }, [bridge, silentRefresh, splitPaymentData, t]);
+
+    const handleOutstandingPaymentSelect = useCallback(async (
+      selection: OutstandingPaymentSelection,
+    ): Promise<boolean | "reconciliation-pending"> => {
+      const pendingPayment = outstandingPaymentData;
+      if (!pendingPayment) return false;
+
+      if (selection.method === "split") {
+        setOutstandingPaymentData(null);
+        setSplitPaymentData({
+          kind: "new-order",
+          orderId: pendingPayment.orderId,
+          orderTotal: pendingPayment.orderTotal,
+          existingPayments: pendingPayment.existingPayments,
+          items: pendingPayment.items,
+          isGhostOrder: pendingPayment.isGhostOrder,
+          initialMode: "by-items",
+          orderNumber: pendingPayment.orderNumber,
+          orderType: pendingPayment.orderType,
+          tipAmount: pendingPayment.tipAmount,
+          tipRecipientRole: pendingPayment.tipRecipientRole,
+          tipRecipientStaffId: pendingPayment.tipRecipientStaffId,
+          tipRecipientStaffShiftId: pendingPayment.tipRecipientStaffShiftId,
+          recoverySession: (pendingPayment.recoverySession ?? 0) + 1,
+          settlementGeneration: pendingPayment.settlementGeneration,
+        });
+        return true;
+      }
+      const paymentMethod = selection.method;
+
+      setIsProcessingOutstandingPayment(true);
+      try {
+        const askBeforePrint = await shouldAskPaymentPrint();
+        const paymentAttempt = await reconcileOutstandingPaymentAttempt({
+          recordPayment: () => bridge.payments.recordPayment({
+            orderId: pendingPayment.orderId,
+            method: paymentMethod,
+            amount: pendingPayment.outstandingAmount,
+            cashReceived:
+              paymentMethod === "cash" ? selection.cashReceived : undefined,
+            changeGiven:
+              paymentMethod === "cash" ? selection.change : undefined,
+            transactionRef: selection.transactionId,
+            idempotencyKey: selection.transactionId,
+            collectOutstandingBalance: true,
+            expectedSettlementGeneration: pendingPayment.settlementGeneration,
+            tipAmount: pendingPayment.tipAmount,
+            tipRecipientRole: pendingPayment.tipRecipientRole,
+            tipRecipientStaffId: pendingPayment.tipRecipientStaffId,
+            tipRecipientStaffShiftId: pendingPayment.tipRecipientStaffShiftId,
+          }),
+          snapshotOnly: selection.reconciliationOnly,
+          bridge,
+          orderId: pendingPayment.orderId,
+          fallbackOrderTotal: pendingPayment.orderTotal,
+        });
+        if (paymentAttempt.kind === "unknown") {
+          if (!selection.reconciliationOnly) {
+            toast.error(
+              t("orderDashboard.collectPaymentFailed", {
+                defaultValue: "Failed to collect payment",
+              }),
+            );
+          }
+          return "reconciliation-pending";
+        }
+        const latestResolution = paymentAttempt.settlement;
+        await silentRefresh().catch(() => {});
+
+        if (latestResolution.kind === "partial") {
+          setOutstandingPaymentData(null);
+          setSplitPaymentData({
+            kind: "new-order",
+            orderId: pendingPayment.orderId,
+            orderTotal: latestResolution.orderTotal,
+            existingPayments: latestResolution.completedPayments,
+            items: pendingPayment.items,
+            isGhostOrder: pendingPayment.isGhostOrder,
+            initialMode: "by-items",
+            orderNumber: pendingPayment.orderNumber,
+            orderType: pendingPayment.orderType,
+            tipAmount: pendingPayment.tipAmount,
+            tipRecipientRole: pendingPayment.tipRecipientRole,
+            tipRecipientStaffId: pendingPayment.tipRecipientStaffId,
+            tipRecipientStaffShiftId: pendingPayment.tipRecipientStaffShiftId,
+            recoverySession: (pendingPayment.recoverySession ?? 0) + 1,
+            settlementGeneration: latestResolution.settlementGeneration,
+          });
+          toast.error(
+            t("orderDashboard.collectPaymentFailed", {
+              defaultValue: "Failed to collect payment",
+            }),
+          );
+          return false;
+        }
+
+        if (latestResolution.kind !== "settled") {
+          setOutstandingPaymentData({
+            ...pendingPayment,
+            orderTotal: latestResolution.orderTotal,
+            outstandingAmount: latestResolution.outstandingAmount,
+            existingPayments: latestResolution.completedPayments,
+            settlementGeneration: latestResolution.settlementGeneration!,
+          });
+          toast.error(
+            t("orderDashboard.collectPaymentFailed", {
+              defaultValue: "Failed to collect payment",
+            }),
+          );
+          return false;
+        }
+
+        setOutstandingPaymentData(null);
+        void finalizeCreatedOrderPayment(
+          pendingPayment.orderId,
+          pendingPayment.isGhostOrder,
+          {
+            askBeforePrint,
+            autoPrintSuppressed: askBeforePrint,
+            amount: pendingPayment.outstandingAmount,
+            orderNumber: pendingPayment.orderNumber || null,
+          },
+        ).catch((error) => {
+          console.warn(
+            "[OrderDashboard] Recovered payment print failed:",
+            error,
+          );
+        });
+        return true;
+      } catch {
+        console.error("[OrderDashboard] Failed to collect recovered payment");
+        toast.error(
+          t("orderDashboard.collectPaymentFailed", {
+            defaultValue: "Failed to collect payment",
+          }),
+        );
+        return false;
+      } finally {
+        setIsProcessingOutstandingPayment(false);
+      }
+    }, [
+      bridge,
+      finalizeCreatedOrderPayment,
+      outstandingPaymentData,
+      shouldAskPaymentPrint,
+      silentRefresh,
+      t,
+    ]);
+
+    const handleSplitComplete = async (result: SplitPaymentResult) => {
+      splitPaymentCompletedRef.current = result;
+      const closingSplitPayment = splitPaymentData;
       await silentRefresh().catch(() => {});
       if (
+        result.paymentStatus === "paid" &&
         closingSplitPayment?.kind === "status-blocker" &&
         closingSplitPayment.statusAfterCollection
       ) {
@@ -4695,22 +4987,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       }
     };
 
-    const handleSplitPaymentClose = useCallback(() => {
-      const closingSplitPayment = splitPaymentData;
-      const wasSuccessful = splitPaymentCompletedRef.current;
-      splitPaymentCompletedRef.current = false;
-      setSplitPaymentData(null);
-      if (!wasSuccessful && closingSplitPayment?.kind === "edit-settlement") {
-        toast(
-          t("orderDashboard.orderEditPartialPaymentSaved", {
-            defaultValue:
-              "Order changes were saved. The remaining balance is still pending payment.",
-          }),
-        );
-      }
-      void silentRefresh().catch(() => {});
-    }, [silentRefresh, splitPaymentData, t]);
-
+    /*
+     * Split collection data for status changes remains separate from the
+     * new-order recovery state above.
+     */
     const buildStatusBlockerSplitPaymentData = useCallback(
       (
         order: Order,
@@ -5367,18 +5647,6 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       return orders.find((order) => order.id === pendingEditOrders[0]) || null;
     }, [pendingEditOrders, orders]);
 
-    const editablePaymentMethod = React.useMemo<"cash" | "card" | null>(() => {
-      if (!editablePaymentOrder) return null;
-      const method = String(
-        editablePaymentOrder.payment_method ||
-          editablePaymentOrder.paymentMethod ||
-          "",
-      )
-        .trim()
-        .toLowerCase();
-      return method === "cash" || method === "card" ? method : null;
-    }, [editablePaymentOrder]);
-
     const paymentEditIneligibilityReason = React.useMemo(() => {
       if (pendingEditOrders.length !== 1) {
         return t("orderDashboard.paymentMethodEditUnavailable");
@@ -5437,57 +5705,54 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       paymentMethodEditRequestRef.current = true;
       setIsCheckingPaymentMethodEdit(true);
       try {
-        const orderPayments = await bridge.payments.getOrderPayments(
-          editablePaymentOrder.id,
-        );
-        const paymentRows = Array.isArray(orderPayments)
-          ? (orderPayments as Array<{
-              id?: unknown;
-              method?: unknown;
-              status?: unknown;
-              amount?: unknown;
-              transactionRef?: unknown;
-            }>)
-          : [];
-        const completedPayments = paymentRows
-          .filter(
-            (payment) =>
-              String(payment?.status || "").trim().toLowerCase() ===
-              "completed",
-          )
-          .filter((payment) => {
-            const method = String(payment?.method || "")
-              .trim()
-              .toLowerCase();
-            return (
-              String(payment?.id || "").trim().length > 0 &&
-              (method === "cash" || method === "card")
+        const route = await loadPaymentEditRoute(bridge, editablePaymentOrder);
+        if (route.kind === "blocked") {
+          showPaymentMethodEditError(
+            t("orderDashboard.paymentMethodEditUnavailable"),
+          );
+          return;
+        }
+
+        if (route.kind === "collect-missing") {
+          const settlement = await loadPersistedSplitDismissal(
+            bridge,
+            editablePaymentOrder.id,
+            Number(
+              editablePaymentOrder.total_amount ||
+                editablePaymentOrder.totalAmount ||
+                0,
+            ),
+          );
+          if (settlement.kind === "settled" || settlement.outstandingAmount <= 0) {
+            showPaymentMethodEditError(
+              t("orderDashboard.paymentMethodEditUnavailable"),
             );
+            return;
+          }
+          const rawOrderType = String(
+            editablePaymentOrder.order_type ||
+              editablePaymentOrder.orderType ||
+              "pickup",
+          ).trim().toLowerCase();
+          const orderType =
+            rawOrderType === "delivery"
+              ? "delivery"
+              : rawOrderType === "dine-in" || rawOrderType === "dine_in"
+                ? "dine-in"
+                : "pickup";
+          setMissingPaymentRepairTarget({
+            orderId: editablePaymentOrder.id,
+            orderNumber:
+              editablePaymentOrder.order_number ||
+              editablePaymentOrder.orderNumber,
+            amount: settlement.outstandingAmount,
+            settlementGeneration: settlement.settlementGeneration!,
+            orderType,
           });
-
-        if (paymentRows.length > 0 && completedPayments.length === 0) {
-          showPaymentMethodEditError(
-            t("orderDashboard.paymentMethodEditUnavailable"),
-          );
+          setShowEditOptionsModal(false);
           return;
         }
 
-        const completedPaymentMethod =
-          completedPayments.length > 0
-            ? String(completedPayments[0]?.method || "")
-                .trim()
-                .toLowerCase()
-            : "";
-        const currentMethod =
-          completedPaymentMethod === "cash" || completedPaymentMethod === "card"
-            ? completedPaymentMethod
-            : editablePaymentMethod;
-        if (!currentMethod) {
-          showPaymentMethodEditError(
-            t("orderDashboard.paymentMethodEditUnavailable"),
-          );
-          return;
-        }
         const paymentStatus =
           String(
             editablePaymentOrder.payment_status ||
@@ -5502,19 +5767,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           orderNumber:
             editablePaymentOrder.order_number ||
             editablePaymentOrder.orderNumber,
-          currentMethod,
+          currentMethod: route.currentMethod,
           paymentStatus,
-          payments: completedPayments.map((payment) => ({
-            id: String(payment.id),
-            method: String(payment.method).trim().toLowerCase() as
-              | "cash"
-              | "card",
-            amount: Number(payment.amount || 0),
-            transactionRef:
-              typeof payment.transactionRef === "string"
-                ? payment.transactionRef
-                : null,
-          })),
+          payments: route.payments,
         });
         setShowEditOptionsModal(false);
         setShowEditPaymentModal(true);
@@ -5526,6 +5781,100 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         setIsCheckingPaymentMethodEdit(false);
       }
     };
+
+    const handleMissingPaymentRepair = useCallback(
+      async (selection: OutstandingPaymentSelection): Promise<boolean | "reconciliation-pending"> => {
+        const target = missingPaymentRepairTarget;
+        if (
+          !target ||
+          selection.method === "split" ||
+          missingPaymentRepairRef.current
+        ) {
+          return false;
+        }
+        const paymentMethod = selection.method;
+
+        missingPaymentRepairRef.current = true;
+        setIsRepairingMissingPayment(true);
+        try {
+          const paymentAttempt = await reconcileOutstandingPaymentAttempt({
+            recordPayment: () => repairMissingPayment(bridge.payments, {
+              orderId: target.orderId,
+              method: paymentMethod,
+              amount: selection.amount,
+              cashReceived: selection.cashReceived,
+              changeGiven: selection.change,
+              transactionRef: selection.transactionId,
+              idempotencyKey: selection.transactionId,
+              expectedSettlementGeneration: target.settlementGeneration,
+            }),
+            snapshotOnly: selection.reconciliationOnly,
+            bridge,
+            orderId: target.orderId,
+            fallbackOrderTotal: target.amount,
+          });
+          if (paymentAttempt.kind === "unknown") {
+            if (!selection.reconciliationOnly) {
+              toast.error(
+                t("orderDashboard.collectPaymentFailed", {
+                  defaultValue: "Failed to collect payment",
+                }),
+              );
+            }
+            return "reconciliation-pending";
+          }
+
+          const settlement = paymentAttempt.settlement;
+          if (settlement.kind === "settled") {
+            setMissingPaymentRepairTarget(null);
+            setPendingEditOrders([]);
+            setEditingSingleOrder(null);
+            clearBulkSelection();
+            await loadOrders().catch(() => {
+              console.warn("Missing payment was recorded but order refresh failed");
+            });
+            return true;
+          }
+
+          if (settlement.kind === "partial") {
+            setMissingPaymentRepairTarget({
+              ...target,
+              amount: settlement.outstandingAmount,
+              settlementGeneration: settlement.settlementGeneration!,
+            });
+          } else if (settlement.kind === "unpaid") {
+            setMissingPaymentRepairTarget({
+              ...target,
+              amount: settlement.outstandingAmount,
+              settlementGeneration: settlement.settlementGeneration!,
+            });
+          }
+          toast.error(
+            t("orderDashboard.collectPaymentFailed", {
+              defaultValue: "Failed to collect payment",
+            }),
+          );
+          return false;
+        } catch {
+          console.error("Failed to reconcile missing order payment");
+          toast.error(
+            t("orderDashboard.collectPaymentFailed", {
+              defaultValue: "Failed to collect payment",
+            }),
+          );
+          return false;
+        } finally {
+          missingPaymentRepairRef.current = false;
+          setIsRepairingMissingPayment(false);
+        }
+      }, [
+        bridge,
+        clearBulkSelection,
+        loadOrders,
+        missingPaymentRepairTarget,
+        t,
+      ],
+    );
 
     // Used when the operator changes order type FROM delivery TO pickup or
     // dine-in via the Change-Order-Type card. Per product decision: customer
@@ -7320,6 +7669,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           survives MenuModal closing after order creation */}
         {splitPaymentData && (
           <SplitPaymentModal
+            key={`${splitPaymentData.orderId}:${splitPaymentData.recoverySession ?? 0}`}
             isOpen={true}
             onClose={handleSplitPaymentClose}
             orderId={splitPaymentData.orderId}
@@ -7328,9 +7678,40 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             items={splitPaymentData.items}
             initialMode={splitPaymentData.initialMode || "by-items"}
             isGhostOrder={splitPaymentData.isGhostOrder}
+            isReconciliationPending={isReconcilingSplitClose}
             collectionMode={splitPaymentData.collectionMode}
             allowDiscounts={splitPaymentData.kind !== "edit-settlement"}
             onSplitComplete={handleSplitComplete}
+          />
+        )}
+
+        {outstandingPaymentData && (
+          <OutstandingPaymentMethodModal
+            isOpen={true}
+            onClose={() => {
+              const pendingPayment = outstandingPaymentData;
+              setOutstandingPaymentData(null);
+              setSplitPaymentData({
+                kind: "new-order",
+                orderId: pendingPayment.orderId,
+                orderTotal: pendingPayment.orderTotal,
+                existingPayments: pendingPayment.existingPayments,
+                items: pendingPayment.items,
+                isGhostOrder: pendingPayment.isGhostOrder,
+                initialMode: "by-items",
+                orderNumber: pendingPayment.orderNumber,
+                orderType: pendingPayment.orderType,
+                tipAmount: pendingPayment.tipAmount,
+                tipRecipientRole: pendingPayment.tipRecipientRole,
+                tipRecipientStaffId: pendingPayment.tipRecipientStaffId,
+                tipRecipientStaffShiftId: pendingPayment.tipRecipientStaffShiftId,
+                recoverySession: (pendingPayment.recoverySession ?? 0) + 1,
+              });
+            }}
+            amount={outstandingPaymentData.outstandingAmount}
+            orderType={outstandingPaymentData.orderType}
+            isProcessing={isProcessingOutstandingPayment}
+            onSelect={handleOutstandingPaymentSelect}
           />
         )}
 
@@ -7515,6 +7896,23 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           onSave={handlePaymentMethodSave}
           onClose={handleEditPaymentClose}
         />
+
+        {missingPaymentRepairTarget && (
+          <OutstandingPaymentMethodModal
+            isOpen={true}
+            amount={missingPaymentRepairTarget.amount}
+            orderType={missingPaymentRepairTarget.orderType}
+            allowSplit={false}
+            isProcessing={isRepairingMissingPayment}
+            onSelect={handleMissingPaymentRepair}
+            onClose={() => {
+              if (isRepairingMissingPayment) return;
+              setMissingPaymentRepairTarget(null);
+              setPendingEditOrders([]);
+              setEditingSingleOrder(null);
+            }}
+          />
+        )}
 
         <EditCustomerInfoModal
           isOpen={showEditCustomerModal}

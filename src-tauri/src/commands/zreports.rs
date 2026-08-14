@@ -189,11 +189,12 @@ pub async fn zreport_list(
 pub async fn zreport_print(
     arg0: Option<serde_json::Value>,
     db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let payload = serde_json::json!({
         "zReportId": parse_zreport_id_payload(arg0)?
     });
-    zreport::print_z_report(&db, &payload)
+    zreport::print_z_report(&db, &payload, &app)
 }
 
 #[cfg(test)]

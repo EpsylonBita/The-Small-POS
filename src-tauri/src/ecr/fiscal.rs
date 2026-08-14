@@ -177,6 +177,119 @@ pub fn build_fiscal_data_for_checkout(
     )
 }
 
+fn normalize_fiscal_payment_method(raw: &str) -> Result<&'static str, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "cash" => Ok("cash"),
+        "card" | "credit" | "debit" => Ok("card"),
+        other => Err(format!(
+            "Unsupported fiscal payment method for outstanding checkout: {other}"
+        )),
+    }
+}
+
+/// Build the final fiscal receipt when one or more earlier split tenders are
+/// already stored. Prior rows contribute their refund-net tender amounts, and
+/// the new intended payment remains explicit so only that outstanding card
+/// amount is sent through paired EFT processing.
+pub fn build_fiscal_data_for_outstanding_checkout(
+    order: &serde_json::Value,
+    completed_payments: &[serde_json::Value],
+    intended_payment: &serde_json::Value,
+    tax_rates: &[TaxRateConfig],
+    operator_id: Option<&str>,
+) -> Result<FiscalReceiptData, String> {
+    let mut prior_cash_cents = 0_i64;
+    let mut prior_card_cents = 0_i64;
+    for (index, payment) in completed_payments.iter().enumerate() {
+        if payment.get("status").and_then(|value| value.as_str()) != Some("completed") {
+            continue;
+        }
+        let raw_method = str_field(payment, &["method", "paymentMethod", "payment_method"])
+            .ok_or_else(|| format!("Fiscal payment {index} is missing a method"))?;
+        let method = normalize_fiscal_payment_method(raw_method)?;
+        let amount = f64_field(payment, &["remainingRefundable", "remaining_refundable"])
+            .or_else(|| {
+                let gross = f64_field(payment, &["amount", "amountPaid", "amount_paid"])?;
+                let refunded =
+                    f64_field(payment, &["refundedAmount", "refunded_amount"]).unwrap_or(0.0);
+                Some((gross - refunded).max(0.0))
+            })
+            .ok_or_else(|| format!("Fiscal payment {index} is missing amount"))?;
+        if !amount.is_finite() || amount < 0.0 {
+            return Err(format!("Fiscal payment {index} has an invalid net amount"));
+        }
+        let amount_cents = (amount * 100.0).round() as i64;
+        match method {
+            "cash" => prior_cash_cents += amount_cents,
+            "card" => prior_card_cents += amount_cents,
+            _ => unreachable!("normalized fiscal method"),
+        }
+    }
+
+    // CAP Driver uses every card tender in the fiscal receipt to initiate its
+    // paired EFT sale. A previously approved card must therefore never be
+    // replayed through this final outstanding collection.
+    if prior_card_cents > 0 {
+        return Err(
+            "Outstanding fiscal checkout cannot replay a previously approved card tender"
+                .to_string(),
+        );
+    }
+
+    let intended_method = str_field(
+        intended_payment,
+        &["method", "paymentMethod", "payment_method"],
+    )
+    .ok_or("Intended outstanding payment is missing a method")?;
+    let intended_amount = f64_field(
+        intended_payment,
+        &["amount", "amountPaid", "amount_paid", "total"],
+    )
+    .ok_or("Intended outstanding payment is missing amount")?;
+    let intended_method = normalize_fiscal_payment_method(intended_method)?;
+    let intended_amount_cents = positive_cents(intended_amount, "intended outstanding payment")?;
+    let mut cash_cents = prior_cash_cents;
+    let mut card_cents = 0_i64;
+    match intended_method {
+        "cash" => cash_cents += intended_amount_cents,
+        "card" => card_cents = intended_amount_cents,
+        _ => unreachable!("normalized fiscal method"),
+    }
+
+    let mut tenders = Vec::with_capacity(2);
+    if cash_cents > 0 {
+        tenders.push(serde_json::json!({
+            "method": "cash",
+            "amount": cash_cents as f64 / 100.0,
+        }));
+    }
+    if card_cents > 0 {
+        tenders.push(serde_json::json!({
+            "method": "card",
+            "amount": card_cents as f64 / 100.0,
+        }));
+    }
+
+    let order_total = f64_field(order, &["total_amount", "totalAmount", "total"])
+        .ok_or("Order total is required for outstanding fiscal checkout")?;
+    let order_total_cents = positive_cents(order_total, "order total")?;
+    let tender_total_cents = tenders.iter().try_fold(0_i64, |sum, tender| {
+        let amount = f64_field(tender, &["amount"]).ok_or("Fiscal tender is missing amount")?;
+        positive_cents(amount, "outstanding tender").map(|cents| sum + cents)
+    })?;
+    if tender_total_cents != order_total_cents {
+        return Err(format!(
+            "Outstanding fiscal tenders {}.{:02} do not match order total {}.{:02}",
+            tender_total_cents / 100,
+            tender_total_cents.unsigned_abs() % 100,
+            order_total_cents / 100,
+            order_total_cents.unsigned_abs() % 100,
+        ));
+    }
+
+    build_fiscal_data(order, &tenders, tax_rates, operator_id)
+}
+
 /// Format fiscal receipt data as ESC/POS binary for direct printing.
 ///
 /// Used when `print_mode` is `"pos_sends_receipt"` — the POS builds and sends
@@ -357,6 +470,123 @@ mod tests {
         assert_eq!(data.payments.len(), 1);
         assert_eq!(data.payments[0].method, "card");
         assert_eq!(data.payments[0].amount, 500);
+    }
+
+    #[test]
+    fn outstanding_checkout_builder_combines_prior_net_tenders_with_the_new_card() {
+        let order = json!({
+            "items": [{"name": "Item", "quantity": 1, "price": 50.00}],
+            "total_amount": 50.00
+        });
+        let prior_payments = vec![json!({
+            "method": "cash",
+            "amount": 20.00,
+            "refundedAmount": 0.00,
+            "status": "completed"
+        })];
+        let intended_payment = json!({"method": "card", "amount": 30.00});
+
+        let data = build_fiscal_data_for_outstanding_checkout(
+            &order,
+            &prior_payments,
+            &intended_payment,
+            &sample_tax_rates(),
+            None,
+        )
+        .expect("build final split tender fiscal data");
+
+        assert_eq!(data.payments.len(), 2);
+        assert_eq!(data.payments[0].method, "cash");
+        assert_eq!(data.payments[0].amount, 2000);
+        assert_eq!(data.payments[1].method, "card");
+        assert_eq!(data.payments[1].amount, 3000);
+    }
+
+    #[test]
+    fn outstanding_checkout_builder_uses_refund_net_and_rejects_tender_mismatch() {
+        let order = json!({
+            "items": [{"name": "Item", "quantity": 1, "price": 50.00}],
+            "total_amount": 50.00
+        });
+        let prior_payments = vec![json!({
+            "method": "cash",
+            "amount": 25.00,
+            "refundedAmount": 5.00,
+            "remainingRefundable": 20.00,
+            "status": "completed"
+        })];
+
+        let data = build_fiscal_data_for_outstanding_checkout(
+            &order,
+            &prior_payments,
+            &json!({"method": "card", "amount": 30.00}),
+            &sample_tax_rates(),
+            None,
+        )
+        .expect("net prior tender plus new tender matches total");
+        assert_eq!(data.payments[0].amount, 2000);
+        assert_eq!(data.payments[1].amount, 3000);
+
+        let error = build_fiscal_data_for_outstanding_checkout(
+            &order,
+            &prior_payments,
+            &json!({"method": "card", "amount": 29.00}),
+            &sample_tax_rates(),
+            None,
+        )
+        .expect_err("combined tenders must equal the order total exactly");
+        assert_eq!(
+            error,
+            "Outstanding fiscal tenders 49.00 do not match order total 50.00"
+        );
+    }
+
+    #[test]
+    fn outstanding_checkout_builder_aggregates_repeated_prior_tender_methods() {
+        let order = json!({
+            "items": [{"name": "Item", "quantity": 1, "price": 50.00}],
+            "total_amount": 50.00
+        });
+        let prior_payments = vec![
+            json!({"method": "cash", "amount": 10.00, "status": "completed"}),
+            json!({"method": "cash", "amount": 10.00, "status": "completed"}),
+        ];
+
+        let data = build_fiscal_data_for_outstanding_checkout(
+            &order,
+            &prior_payments,
+            &json!({"method": "card", "amount": 30.00}),
+            &sample_tax_rates(),
+            None,
+        )
+        .expect("repeated prior cash rows must collapse into one fiscal tender");
+
+        assert_eq!(data.payments.len(), 2);
+        assert_eq!(data.payments[0].method, "cash");
+        assert_eq!(data.payments[0].amount, 2000);
+        assert_eq!(data.payments[1].method, "card");
+        assert_eq!(data.payments[1].amount, 3000);
+    }
+
+    #[test]
+    fn outstanding_checkout_rejects_prior_card_that_the_cashier_would_charge_again() {
+        let order = json!({
+            "items": [{"name": "Item", "quantity": 1, "price": 50.00}],
+            "total_amount": 50.00
+        });
+        let error = build_fiscal_data_for_outstanding_checkout(
+            &order,
+            &[json!({"method": "card", "amount": 20.00, "status": "completed"})],
+            &json!({"method": "cash", "amount": 30.00}),
+            &sample_tax_rates(),
+            None,
+        )
+        .expect_err("a prior approved card must never be sent to paired EFT again");
+
+        assert_eq!(
+            error,
+            "Outstanding fiscal checkout cannot replay a previously approved card tender"
+        );
     }
 
     #[test]

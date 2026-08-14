@@ -650,6 +650,24 @@ interface LiquidGlassModalProps {
   closeOnEscape?: boolean;
 
   /**
+   * Controls who owns the close lifecycle.
+   * `internal` runs the shared modal's exit animation before notifying `onClose`.
+   * `request` notifies `onClose` immediately and leaves the dialog mounted until
+   * the parent changes `isOpen`, which is useful when closing requires reconciliation.
+   * @optional
+   * @default 'internal'
+   */
+  closeMode?: 'internal' | 'request';
+
+  /**
+   * Prevents every user-driven close path while keeping the dialog mounted.
+   * The header close control remains visible but is disabled for accessibility.
+   * @optional
+   * @default false
+   */
+  closeDisabled?: boolean;
+
+  /**
    * Optional element ref that should receive focus when the modal opens.
    * Falls back to the first focusable element when not provided.
    */
@@ -699,6 +717,8 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
   size = 'md',
   closeOnBackdrop = true,
   closeOnEscape = true,
+  closeMode = 'internal',
+  closeDisabled = false,
   initialFocusRef,
   ariaLabel,
   onEnterKey,
@@ -759,11 +779,17 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
 
   // Handle close with animation
   const handleClose = React.useCallback(() => {
-    if (isClosing) return
+    if (isClosing || closeDisabled) return
+
+    if (closeMode === 'request') {
+      onClose()
+      return
+    }
+
     closeFinalizedRef.current = false
     externalClosingRef.current = false
     setIsClosing(true)
-  }, [isClosing])
+  }, [closeDisabled, closeMode, isClosing, onClose])
 
   // Handle animation end
   const handleAnimationEnd = React.useCallback((event: React.AnimationEvent<HTMLDivElement>) => {
@@ -1007,7 +1033,9 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
             </h2>
             <button
               onClick={handleClose}
-              className="liquid-glass-modal-close"
+              disabled={closeDisabled}
+              aria-disabled={closeDisabled}
+              className="liquid-glass-modal-close disabled:cursor-not-allowed disabled:opacity-50"
               aria-label={t('common.actions.close')}
             >
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">

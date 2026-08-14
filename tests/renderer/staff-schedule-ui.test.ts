@@ -193,6 +193,25 @@ test('StaffScheduleView staffSchedule translation keys exist in every POS locale
   }
 });
 
+test('StaffScheduleView localizes the known ERGANI not-filed status instead of rendering server English', () => {
+  const source = readScheduleSource();
+  const notFiledBranch = source.slice(
+    source.indexOf("if (status === 'not_filed')"),
+    source.indexOf("} else if (status === 'blocked')"),
+  );
+
+  assert.match(
+    notFiledBranch,
+    /toast\(\s*t\(\s*'staffSchedule\.ergani\.publishNotFiled'/,
+    'known not_filed state must select localized operator copy',
+  );
+  assert.doesNotMatch(
+    notFiledBranch,
+    /response\.data\?\.message/,
+    'server diagnostics must not override localized legal-status copy',
+  );
+});
+
 // Round 188 (touch-first, live QA): StaffScheduleView interactive controls (prev/next week, refresh,
 // per-day add-shift, unscheduled-staff buttons) exposed native DOM `title` tooltips as accessibility
 // "Description" text. Touchscreen-first POS -> no native title tooltips and no hover utilities;

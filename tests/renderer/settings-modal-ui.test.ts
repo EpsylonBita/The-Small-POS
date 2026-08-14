@@ -25,6 +25,14 @@ const paymentTerminalsSectionSource = readFileSync(
   ),
   'utf8',
 );
+const printerSettingsModalSource = readFileSync(
+  path.join(projectRoot, 'src', 'renderer', 'components', 'modals', 'PrinterSettingsModal.tsx'),
+  'utf8',
+);
+const printerSetupWizardSource = readFileSync(
+  path.join(projectRoot, 'src', 'renderer', 'components', 'modals', 'PrinterSetupWizard.tsx'),
+  'utf8',
+);
 
 // Scope assertions to a single <button> by slicing from a marker inside its opening tag (or onClick
 // body) to its closing </button>. Lets us assert a native `title=` attribute on a control is gone
@@ -143,6 +151,55 @@ test('ConnectionSettingsModal keeps critical hardware and admin integrations wir
   assert.match(source, /CallerIdSection/);
   assert.match(source, /handleManualPolicySync/);
   assert.match(source, /handleSaveConnection/);
+});
+
+test('printer quick setup receives only persisted logo availability and opens the parent expert view', () => {
+  assert.match(printerSettingsModalSource, /const \[persistedLogoConfigured, setPersistedLogoConfigured\] = useState\(false\)/);
+  assert.match(printerSettingsModalSource, /logoConfigured=\{logoLoaded && persistedLogoConfigured\}/);
+
+  const openLogoStart = printerSettingsModalSource.indexOf('onOpenLogoSettings={() => {');
+  assert.notEqual(openLogoStart, -1, 'wizard must expose its logo-settings handoff');
+  const openLogoEnd = printerSettingsModalSource.indexOf('onCancel=', openLogoStart);
+  assert.notEqual(openLogoEnd, -1, 'logo-settings handoff must stay inside the wizard props');
+  const openLogoHandler = printerSettingsModalSource.slice(openLogoStart, openLogoEnd);
+  assert.match(openLogoHandler, /setSetupMode\('expert'\)/);
+  assert.match(openLogoHandler, /logo: true/);
+  assert.match(openLogoHandler, /setViewMode\('add'\)/);
+  assert.doesNotMatch(openLogoHandler, /resetForm\(/, 'opening logo settings must preserve the expert draft');
+
+  assert.doesNotMatch(printerSetupWizardSource, /<LiquidGlassModal\b|role=["']dialog["']/);
+});
+
+test('printer logo evidence fails closed during every load and after a failed reopen', () => {
+  const loadStart = printerSettingsModalSource.indexOf('const loadReceiptLogoSettings = useCallback(async () => {');
+  assert.notEqual(loadStart, -1, 'receipt logo loader must exist');
+  const loadEnd = printerSettingsModalSource.indexOf('const loadReceiptActionSettings', loadStart);
+  assert.notEqual(loadEnd, -1, 'receipt action loader must follow the logo loader');
+  const loader = printerSettingsModalSource.slice(loadStart, loadEnd);
+
+  const tryIndex = loader.indexOf('try {');
+  const firstAwait = loader.indexOf('await Promise.all');
+  assert.ok(tryIndex > 0 && firstAwait > tryIndex, 'logo loader must reset before awaiting persisted settings');
+  const beforeTry = loader.slice(0, tryIndex);
+  assert.match(beforeTry, /setLogoLoaded\(false\)/);
+  assert.match(beforeTry, /setPersistedLogoConfigured\(false\)/);
+
+  const coreLoad = loader.slice(tryIndex, loader.indexOf('setLogoEnabled', tryIndex));
+  assert.match(coreLoad, /await Promise\.all\(\[/);
+  assert.match(coreLoad, /key: 'show_logo'/);
+  assert.match(coreLoad, /key: 'logo_source'/);
+  assert.match(coreLoad, /key: 'logo_url'/);
+  assert.doesNotMatch(coreLoad, /key: 'text_scale'|key: 'logo_scale'|key: 'layout_density_scale'/,
+    'non-critical scale reads must not make core logo evidence unknown');
+  assert.match(loader, /Promise\.allSettled\(\[/,
+    'non-critical scale reads must settle independently after core logo evidence');
+
+  const catchIndex = loader.indexOf('catch (e)');
+  assert.notEqual(catchIndex, -1, 'logo loader must handle a failed reopen');
+  const catchBlock = loader.slice(catchIndex);
+  assert.match(catchBlock, /setLogoLoaded\(false\)/);
+  assert.match(catchBlock, /setPersistedLogoConfigured\(false\)/);
+  assert.doesNotMatch(catchBlock, /setLogoLoaded\(true\)/, 'failed loads must never unlock Branding');
 });
 
 const localesDir = path.join(projectRoot, 'src', 'locales');
@@ -1443,20 +1500,63 @@ test('Round 301: PrinterSettingsModal receipt-action rows use the shared POSGlas
   // through POSGlassSwitch.onChange and does NOT also bubble to the row onClick (no double toggle).
   assert.match(row, /<span onClick=\{\(event\) => event\.stopPropagation\(\)\}>\s*<POSGlassSwitch/);
 
-  // Enabled state reads as semantic green (the ON accent on row/icon/state moved to emerald).
-  assert.match(row, /border-emerald-400\/40 bg-emerald-500/);
-  assert.match(row, /text-emerald-300/);
+  // Enabled state reads as semantic green in BOTH themes: a pale, dark-text surface in light mode and
+  // the existing translucent emerald treatment in dark mode.
+  assert.match(
+    row,
+    /border-emerald-300 bg-emerald-50 text-emerald-900 dark:border-emerald-400\/30 dark:bg-emerald-500\/10 dark:text-emerald-100/,
+  );
+  assert.match(row, /text-emerald-600 dark:text-emerald-300/);
 
   // Touch-first: no hover utilities, no native title tooltip in the row.
   assert.doesNotMatch(row, /hover:/);
   assert.doesNotMatch(row, /\btitle=/);
 });
 
-// Round 305: Settings > Printer embeds PrintQueuePanel, so it must obey the same touch-first / glass
-// palette rules as the rest of Settings -- no pointer-hover affordances, no off-theme sky/blue, centered
-// >=44px touch targets on the top actions, hidden native scrollbars on the queue list, and a
-// destructive=rose / retry=emerald colour contract. Queue behaviour, bridge calls, job filtering, toasts,
-// loading/busy states, and translations are untouched (this is a presentation-only round).
+test('Round 306: PrinterSettingsModal receipt actions keep cards, labels and dividers readable in light and dark themes', () => {
+  const rowStart = printerModalSource.indexOf('const renderReceiptActionSwitchRow');
+  assert.notEqual(rowStart, -1, 'renderReceiptActionSwitchRow must exist');
+  const rowEnd = printerModalSource.indexOf('const renderReceiptActionGrid', rowStart);
+  assert.ok(rowEnd > rowStart, 'renderReceiptActionGrid must follow the row renderer');
+  const row = printerModalSource.slice(rowStart, rowEnd);
+
+  // Enabled and disabled cards each own a real light surface/text palette plus an explicit dark variant.
+  // Mutating either branch back to white-on-translucent-white must break this regression guard.
+  assert.match(
+    row,
+    /border-emerald-300 bg-emerald-50 text-emerald-900 dark:border-emerald-400\/30 dark:bg-emerald-500\/10 dark:text-emerald-100/,
+  );
+  assert.match(
+    row,
+    /border-slate-200 bg-slate-50\/80 text-slate-800 dark:border-white\/10 dark:bg-slate-900\/60 dark:text-slate-100/,
+  );
+  assert.match(row, /text-emerald-950 dark:text-emerald-100/);
+  assert.match(row, /text-slate-900 dark:text-slate-100/);
+  assert.match(row, /text-emerald-700 dark:text-emerald-300/);
+  assert.match(row, /text-slate-600 dark:text-slate-400/);
+  assert.match(row, /focus-within:ring-2 focus-within:ring-emerald-500\/60 dark:focus-within:ring-emerald-300\/60/);
+  assert.doesNotMatch(row, /(?<!dark:)text-white(?:\/\d+)?/);
+  assert.doesNotMatch(row, /(?<!dark:)border-white(?:\/\d+)?/);
+
+  // The shared section header and the "new triggers" separator were also white-only in the screenshot.
+  const headerStart = printerModalSource.indexOf('const renderSectionHeader');
+  const headerEnd = printerModalSource.indexOf('const renderReceiptActionSwitchRow', headerStart);
+  const header = printerModalSource.slice(headerStart, headerEnd);
+  assert.match(header, /bg-slate-100\/80[^"']*dark:bg-white\/5/);
+  assert.match(header, /text-slate-900 dark:text-white\/90/);
+  assert.match(header, /text-slate-500 dark:text-white\/50/);
+  assert.match(header, /focus-visible:ring-2/);
+
+  const actionsStart = printerModalSource.indexOf('{/* Automatic Receipt Actions');
+  const actionsEnd = printerModalSource.indexOf('// Render discovery view', actionsStart);
+  assert.ok(actionsEnd > actionsStart, 'receipt action list section must precede discovery view');
+  const actions = printerModalSource.slice(actionsStart, actionsEnd);
+  assert.match(actions, /border-slate-300 dark:border-white\/10/);
+  assert.match(actions, /text-slate-600 dark:text-slate-400/);
+});
+
+// Round 305, updated for the managed queue: the hook-driven Settings surface
+// keeps the established touch-first palette while adding semantic live controls.
 test('Round 305: PrintQueuePanel is touch-first and on-palette (no hover, no sky/blue, 44px actions, hidden rail)', () => {
   const panel = readFileSync(
     path.join(projectRoot, 'src', 'renderer', 'components', 'printing', 'PrintQueuePanel.tsx'),
@@ -1471,11 +1571,11 @@ test('Round 305: PrintQueuePanel is touch-first and on-palette (no hover, no sky
 
   // (2) No off-theme sky/blue/indigo/violet/cyan/purple tokens. The printer/queue accent is POS yellow.
   assert.doesNotMatch(panel, /\b(?:bg|text|border|from|to|ring)-(?:sky|blue|indigo|violet|cyan|purple)-/);
-  assert.match(panel, /<Printer className="h-4 w-4 text-yellow-600 dark:text-yellow-300" \/>/);
+  assert.match(panel, /text-yellow-600 dark:text-yellow-300/);
   assert.doesNotMatch(panel, /(?:amber|orange)-\d+/);
 
   // Light theme owns explicit readable text/surfaces; dark variants are additive rather than white-only.
-  assert.match(panel, /bg-slate-100[^"']*text-slate-600/);
+  assert.match(panel, /bg-white\/80[^"']*text-slate-800/);
   assert.match(panel, /text-slate-700[^"']*dark:text-slate-100/);
   assert.doesNotMatch(panel, /text-white\/(?:35|45|55|60|80|90)/);
 
@@ -1484,18 +1584,17 @@ test('Round 305: PrintQueuePanel is touch-first and on-palette (no hover, no sky
   // fixed-width column on desktop (md:w-48); there is no flex-wrap chip row that could go ragged in Greek.
   assert.match(
     panel,
-    /grid w-full shrink-0 grid-cols-1 gap-2 md:w-48/,
+    /grid w-full shrink-0 grid-cols-1 gap-2 md:w-56/,
     'the top action cluster must be an equal-width grid (full-width on mobile, fixed column on desktop)',
   );
-  assert.doesNotMatch(panel, /flex-wrap/, 'the action cluster must not be a content-sized flex-wrap chip row');
 
   // The three top action buttons fill their grid cell (w-full -> identical width in every language), are
   // centered >=44px touch targets with the Settings rounded-2xl family, and keep active: pressed feedback
   // + their disabled states.
   for (const marker of [
-    'onClick={() => void loadQueue()}',
-    'onClick={() => void togglePause()}',
-    'onClick={() => void cancelAllPending()}',
+    'onClick={() => void queue.refresh()}',
+    'onClick={handleQueuePauseToggle}',
+    "onClick={() => setConfirmation({ kind: 'bulk' })}",
   ]) {
     const btn = sliceButton(panel, marker);
     assert.match(btn, /\bw-full\b/, `${marker} must be w-full so the grid track sets an equal width`);
@@ -1510,30 +1609,29 @@ test('Round 305: PrintQueuePanel is touch-first and on-palette (no hover, no sky
   }
 
   // (4) The queue list overflow region keeps its max-height + scrolling but hides the native rail.
-  assert.match(panel, /max-h-72 overflow-y-auto scrollbar-hide divide-y divide-slate-200 dark:divide-white\/5/);
+  assert.match(panel, /max-h-96[^"']*overflow-y-auto[^"']*scrollbar-hide/);
 
   // (5) Semantic colour contract: destructive cancel stays red, retry stays emerald, both with active
   // feedback and readable light/dark variants.
   for (const marker of [
-    'onClick={() => void cancelAllPending()}',
-    'onClick={() => void handleCancelJob(job.id)}',
+    "onClick={() => setConfirmation({ kind: 'bulk' })}",
+    'onClick={() => handleCancelJob(job.id)}',
   ]) {
     const destructive = sliceButton(panel, marker);
-    assert.match(destructive, /border-red-300/, `${marker} must expose a readable light red border`);
-    assert.match(destructive, /bg-red-50/, `${marker} must expose a readable light red fill`);
-    assert.match(destructive, /text-red-700/, `${marker} must expose readable light red text`);
-    assert.match(destructive, /dark:active:bg-red-500\/20/, `${marker} must give dark red active feedback`);
+    assert.match(destructive, /border-rose-300/, `${marker} must expose a readable light rose border`);
+    assert.match(destructive, /bg-rose-50/, `${marker} must expose a readable light rose fill`);
+    assert.match(destructive, /text-rose-700/, `${marker} must expose readable light rose text`);
+    assert.match(destructive, /dark:active:bg-rose-500\/20/, `${marker} must give dark rose active feedback`);
   }
-  const retryRow = sliceButton(panel, 'onClick={() => void handleRetryJob(job.id)}');
+  const retryRow = sliceButton(panel, 'onClick={() => handleRetryJob(job.id)}');
   assert.match(retryRow, /border-emerald-300/);
   assert.match(retryRow, /bg-emerald-50/);
   assert.match(retryRow, /text-emerald-700/);
   assert.match(retryRow, /dark:active:bg-emerald-500\/20/);
 
-  // Behaviour preserved (UI-only round): every bridge.printer method + the empty state stay wired.
-  for (const fn of ['listJobs', 'pauseQueue', 'resumeQueue', 'cancelAllJobs', 'cancelJob', 'retryJob']) {
-    assert.match(panel, new RegExp(`bridge\\.printer\\.${fn}\\(`), `bridge.printer.${fn} must stay wired`);
-  }
+  // The component delegates all loading and mutations to the typed queue hook.
+  assert.match(panel, /usePrintQueue\(\{ limit, offset: 0 \}\)/);
+  assert.doesNotMatch(panel, /getBridge\(|setInterval\(|clearInterval\(/);
   assert.match(panel, /settings\.printQueue\.empty/);
 });
 
@@ -1543,32 +1641,72 @@ test('Round 357: PrintQueuePanel hides technical job and printer identifiers fro
     'utf8',
   );
 
-  assert.match(panel, /TECHNICAL_IDENTIFIER_PATTERN/);
-  assert.match(panel, /TECHNICAL_IDENTIFIER_IN_TEXT_PATTERN/);
-  assert.match(panel, /normalizeEntityTypeKey/);
-  assert.match(panel, /getJobReferenceLabel\(job\)/);
-  assert.match(panel, /getJobIssueLabel\(job\)/);
-  assert.match(panel, /settings\.printQueue\.localJob/);
-  assert.match(panel, /settings\.printQueue\.configuredPrinter/);
-  assert.match(panel, /settings\.printQueue\.issue\.hardwareProfileMissing/);
-  assert.match(panel, /settings\.printQueue\.issue\.needsAttention/);
-  assert.match(panel, /settings\.printQueue\.entityType\.\$\{normalizeEntityTypeKey\(entityType\)\}/);
+  assert.match(panel, /UUID_IN_TEXT/);
+  assert.match(panel, /OWNERSHIP_MARKER_IN_TEXT/);
+  assert.match(panel, /LONG_TECHNICAL_TOKEN_IN_TEXT/);
+  assert.match(panel, /operatorSafeDetail/);
+  assert.match(panel, /settings\.printQueue\.issue\.genericAttention/);
+  assert.doesNotMatch(panel, /settings\.printQueue\.issue\.needsAttention/);
+  assert.match(panel, /settings\.printQueue\.entityType\.\$\{normalizeKey\(job\.entityType\)\}/);
 
   // The normal row no longer renders raw entityId or printerProfileId text. Those values may still be
   // used as bridge/API inputs, but they are not visible metadata in the queue table.
   assert.doesNotMatch(panel, /\{job\.entityId\}/);
-  assert.doesNotMatch(panel, /\{job\.printerProfileId \|\|/);
+  assert.doesNotMatch(panel, />\s*\{job\.printerProfileId\}\s*</);
   assert.doesNotMatch(panel, /\{job\.lastError\}/);
   assert.doesNotMatch(panel, /pausedPrinterProfileIds\.join\(', '\)/);
+  assert.doesNotMatch(panel, /spoolJobId|ownershipMarker|nativeStatusBits|documentEnvelope|payload/);
+});
 
-  for (const language of ['en', 'el', 'de', 'fr', 'it']) {
-    const locale = JSON.parse(readFileSync(path.join(projectRoot, 'src', 'locales', `${language}.json`), 'utf8'));
-    const queue = locale.settings?.printQueue;
-    assert.equal(typeof queue?.localJob, 'string', `${language} missing settings.printQueue.localJob`);
-    assert.equal(typeof queue?.configuredPrinter, 'string', `${language} missing settings.printQueue.configuredPrinter`);
-    assert.equal(typeof queue?.reference, 'string', `${language} missing settings.printQueue.reference`);
-    assert.equal(typeof queue?.issue?.hardwareProfileMissing, 'string', `${language} missing hardware issue copy`);
-    assert.equal(typeof queue?.issue?.needsAttention, 'string', `${language} missing generic issue copy`);
-    assert.equal(typeof queue?.entityType?.order_receipt, 'string', `${language} missing order_receipt label`);
+test('Greek settings test print reports only a validated managed-queue enqueue', () => {
+  const start = printerModalSource.indexOf('const handleGreekTestPrint = async (printerId: string) => {');
+  assert.notEqual(start, -1, 'Greek test-print handler must exist');
+  const end = printerModalSource.indexOf('// Get diagnostics', start);
+  assert.ok(end > start, 'diagnostics handler must follow the Greek test-print handler');
+  const handler = printerModalSource.slice(start, end);
+
+  // The old command name stays behind the typed bridge, but success is now
+  // accepted only through the exact managed WizardPrintResponse contract.
+  assert.match(handler, /api\?\.printerTestGreekDirect\?\.\(printerId\)/);
+  assert.match(handler, /parseWizardEnqueueResponse\('encoding', result\)/);
+  assert.match(handler, /if \(parsed\.ok\)/);
+  assert.match(
+    handler,
+    /settings\.printer\.greekTestPrintQueued[\s\S]*?Greek test print queued/,
+    'the operator must be told only that the managed sample was queued',
+  );
+
+  // Queue acceptance is not paper success or transport completion. Legacy
+  // direct-dispatch evidence must never appear in this staff-facing message.
+  assert.doesNotMatch(
+    handler,
+    /latencyMs|bytesRequested|bytesWritten|escposCodePage|resolvedTransport|greekTestPrintDispatched|greekTestPrintSuccess|paper/i,
+  );
+
+  // Malformed, rejected, and success-without-queued responses fail closed.
+  // Backend details remain diagnostic-only and never become toast copy.
+  assert.match(handler, /settings\.printer\.testPrintFailed/);
+  assert.doesNotMatch(handler, /result\?\.error|result\.error|e\.message/);
+
+  // Preserve the existing busy-state lifecycle around the IPC request.
+  assert.match(handler, /setLoading\(true\)/);
+  assert.match(handler, /finally \{\s*setLoading\(false\)\s*\}/);
+});
+
+test('Greek managed test-print queued copy is complete and translated in every POS locale', () => {
+  const key = 'settings.printer.greekTestPrintQueued';
+  const locales = ['en', 'el', 'de', 'fr', 'it'] as const;
+  const values = Object.fromEntries(locales.map((locale) => [locale, getKey(loadLocale(locale), key)]));
+
+  for (const locale of locales) {
+    const value = values[locale];
+    assert.equal(typeof value, 'string', `${locale} missing ${key}`);
+    assert.ok((value as string).trim().length > 0, `${locale} has blank ${key}`);
+    assert.doesNotMatch(value as string, /\[NEEDS TRANSLATION\]/, `${locale} has placeholder ${key}`);
   }
+
+  for (const locale of ['el', 'de', 'fr', 'it'] as const) {
+    assert.notEqual(values[locale], values.en, `${locale} ${key} must not leak English copy`);
+  }
+  assert.match(values.el as string, /[\u0370-\u03FF]/, `el ${key} must contain real Greek`);
 });

@@ -1,4 +1,5 @@
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
+use serde_json::Value;
 use uuid::Uuid;
 
 use crate::business_day;
@@ -458,6 +459,285 @@ pub fn get_order_payment_totals(
     };
 
     Ok((payment_method, cash_collected, card_amount, total_paid))
+}
+
+/// Refresh the payment-dependent fields of an existing courier earning from
+/// the complete local completed-payment snapshot for its order.
+///
+/// Courier checkout reads `driver_earnings`, rather than `order_payments`
+/// directly. Once a courier shift has been closed, settled, or transferred,
+/// that materialization is financial history and must not be rewritten.
+pub fn refresh_existing_driver_earning_payment_snapshot(
+    conn: &Connection,
+    order_id: &str,
+    now: &str,
+) -> Result<Option<String>, String> {
+    let earning: Option<(
+        String,
+        String,
+        Option<String>,
+        String,
+        i64,
+        i64,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> = conn
+        .query_row(
+            "SELECT de.id,
+                    de.driver_id,
+                    de.staff_shift_id,
+                    de.branch_id,
+                    COALESCE(de.settled, 0),
+                    COALESCE(de.is_transferred, 0),
+                    ss.status,
+                    ss.role_type,
+                    ss.staff_id,
+                    ss.branch_id,
+                    o.branch_id,
+                    o.driver_id,
+                    o.staff_shift_id
+             FROM driver_earnings de
+             JOIN orders o ON o.id = de.order_id
+             LEFT JOIN staff_shifts ss ON ss.id = de.staff_shift_id
+             WHERE de.order_id = ?1
+             LIMIT 1",
+            params![order_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
+                    row.get(11)?,
+                    row.get(12)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| format!("load courier settlement context: {e}"))?;
+
+    let Some((
+        earning_id,
+        driver_id,
+        staff_shift_id,
+        earning_branch_id,
+        settled,
+        is_transferred,
+        shift_status,
+        shift_role_type,
+        shift_staff_id,
+        shift_branch_id,
+        order_branch_id,
+        order_driver_id,
+        order_staff_shift_id,
+    )) = earning
+    else {
+        return Ok(None);
+    };
+
+    let has_active_shift = shift_status
+        .as_deref()
+        .map(|status| status.trim().eq_ignore_ascii_case("active"))
+        .unwrap_or(false);
+    let has_valid_driver_identity = shift_role_type
+        .as_deref()
+        .map(|role_type| role_type.trim().eq_ignore_ascii_case("driver"))
+        .unwrap_or(false)
+        && shift_staff_id.as_deref() == Some(driver_id.as_str())
+        && shift_branch_id.as_deref() == Some(earning_branch_id.as_str())
+        && order_branch_id.as_deref() == Some(earning_branch_id.as_str())
+        && order_driver_id.as_deref() == Some(driver_id.as_str())
+        && order_staff_shift_id.as_deref() == staff_shift_id.as_deref();
+    if staff_shift_id.is_none()
+        || !has_active_shift
+        || settled != 0
+        || is_transferred != 0
+        || !has_valid_driver_identity
+    {
+        return Err("DRIVER_SETTLEMENT_NOT_EDITABLE".into());
+    }
+
+    let (cash_cents, card_cents): (i64, i64) = conn
+        .query_row(
+            "SELECT
+                COALESCE(SUM(CASE
+                    WHEN LOWER(TRIM(status)) = 'completed' AND LOWER(TRIM(method)) = 'cash'
+                    THEN COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER))
+                    ELSE 0
+                END), 0),
+                COALESCE(SUM(CASE
+                    WHEN LOWER(TRIM(status)) = 'completed' AND LOWER(TRIM(method)) = 'card'
+                    THEN COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER))
+                    ELSE 0
+                END), 0)
+             FROM order_payments
+             WHERE order_id = ?1",
+            params![order_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|e| format!("load courier payment snapshot: {e}"))?;
+    let payment_method = if cash_cents > 0 && card_cents > 0 {
+        "mixed"
+    } else if card_cents > 0 {
+        "card"
+    } else {
+        "cash"
+    };
+
+    conn.execute(
+        "UPDATE driver_earnings
+         SET payment_method = ?1,
+             cash_collected = ?2,
+             cash_collected_cents = ?3,
+             card_amount = ?4,
+             card_amount_cents = ?5,
+             cash_to_return = ?2,
+             cash_to_return_cents = ?3,
+             updated_at = ?6
+         WHERE id = ?7",
+        params![
+            payment_method,
+            Cents::new(cash_cents).to_f64_dp2(),
+            cash_cents,
+            Cents::new(card_cents).to_f64_dp2(),
+            card_cents,
+            now,
+            earning_id,
+        ],
+    )
+    .map_err(|e| format!("refresh courier payment snapshot: {e}"))?;
+
+    Ok(Some(earning_id))
+}
+
+/// Build the canonical parity payload from the persisted earning row so every
+/// producer shares the exact financial representation and timestamps.
+pub fn build_driver_earning_sync_payload(
+    conn: &Connection,
+    earning_id: &str,
+) -> Result<Value, String> {
+    let (
+        id,
+        driver_id,
+        staff_shift_id,
+        order_id,
+        branch_id,
+        delivery_fee_cents,
+        tip_amount_cents,
+        total_earning_cents,
+        payment_method,
+        cash_collected_cents,
+        card_amount_cents,
+        cash_to_return_cents,
+        created_at,
+        updated_at,
+    ): (
+        String,
+        String,
+        Option<String>,
+        String,
+        String,
+        i64,
+        i64,
+        i64,
+        String,
+        i64,
+        i64,
+        i64,
+        String,
+        String,
+    ) = conn
+        .query_row(
+            "SELECT id, driver_id, staff_shift_id, order_id, branch_id,
+                    COALESCE(delivery_fee_cents, CAST(ROUND(delivery_fee * 100) AS INTEGER), 0),
+                    COALESCE(tip_amount_cents, CAST(ROUND(tip_amount * 100) AS INTEGER), 0),
+                    COALESCE(total_earning_cents, CAST(ROUND(total_earning * 100) AS INTEGER), 0),
+                    payment_method,
+                    COALESCE(cash_collected_cents, CAST(ROUND(cash_collected * 100) AS INTEGER), 0),
+                    COALESCE(card_amount_cents, CAST(ROUND(card_amount * 100) AS INTEGER), 0),
+                    COALESCE(cash_to_return_cents, CAST(ROUND(cash_to_return * 100) AS INTEGER), 0),
+                    created_at, updated_at
+             FROM driver_earnings
+             WHERE id = ?1",
+            params![earning_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
+                    row.get(11)?,
+                    row.get(12)?,
+                    row.get(13)?,
+                ))
+            },
+        )
+        .map_err(|e| format!("load courier earning sync payload: {e}"))?;
+
+    Ok(serde_json::json!({
+        "id": id,
+        "driver_id": driver_id,
+        "staff_shift_id": staff_shift_id,
+        "order_id": order_id,
+        "branch_id": branch_id,
+        "delivery_fee": Cents::new(delivery_fee_cents).to_f64_dp2(),
+        "delivery_fee_cents": delivery_fee_cents,
+        "tip_amount": Cents::new(tip_amount_cents).to_f64_dp2(),
+        "tip_amount_cents": tip_amount_cents,
+        "total_earning": Cents::new(total_earning_cents).to_f64_dp2(),
+        "total_earning_cents": total_earning_cents,
+        "payment_method": payment_method,
+        "cash_collected": Cents::new(cash_collected_cents).to_f64_dp2(),
+        "cash_collected_cents": cash_collected_cents,
+        "card_amount": Cents::new(card_amount_cents).to_f64_dp2(),
+        "card_amount_cents": card_amount_cents,
+        "cash_to_return": Cents::new(cash_to_return_cents).to_f64_dp2(),
+        "cash_to_return_cents": cash_to_return_cents,
+        "createdAt": created_at,
+        "updatedAt": updated_at,
+    }))
+}
+
+/// Replace the outstanding canonical financial sync row for an earning.
+pub fn enqueue_or_refresh_driver_earning_sync_row(
+    conn: &Connection,
+    earning_id: &str,
+    payload: &Value,
+) -> Result<(), String> {
+    crate::sync_queue::clear_unsynced_items(conn, "driver_earnings", earning_id)?;
+    crate::sync_queue::enqueue_payload_item(
+        conn,
+        "driver_earnings",
+        earning_id,
+        "INSERT",
+        payload,
+        Some(1),
+        Some("financial"),
+        Some("manual"),
+        Some(1),
+    )
+    .map_err(|e| format!("enqueue driver earning parity row: {e}"))?;
+
+    Ok(())
 }
 
 pub fn is_final_order_status(status: &str) -> bool {
@@ -1456,5 +1736,51 @@ mod tests {
         assert_eq!(removed.id, "earning-1");
         assert_eq!(removed.supabase_id.as_deref(), Some("remote-earning-1"));
         assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn refresh_driver_earning_outbox_replaces_pending_without_clearing_processing_history() {
+        let conn = test_conn();
+        crate::sync_queue::enqueue_payload_item(
+            &conn,
+            "driver_earnings",
+            "earning-processing",
+            "INSERT",
+            &serde_json::json!({ "id": "earning-processing", "payment_method": "cash" }),
+            Some(1),
+            Some("financial"),
+            Some("manual"),
+            Some(1),
+        )
+        .expect("seed processing courier earning row");
+        conn.execute(
+            "UPDATE parity_sync_queue
+             SET status = 'processing'
+             WHERE table_name = 'driver_earnings'
+               AND record_id = 'earning-processing'",
+            [],
+        )
+        .expect("mark courier earning row processing");
+
+        enqueue_or_refresh_driver_earning_sync_row(
+            &conn,
+            "earning-processing",
+            &serde_json::json!({ "id": "earning-processing", "payment_method": "card" }),
+        )
+        .expect("refresh courier earning outbox");
+
+        let (processing, pending): (i64, i64) = conn
+            .query_row(
+                "SELECT
+                    SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END)
+                 FROM parity_sync_queue
+                 WHERE table_name = 'driver_earnings'
+                   AND record_id = 'earning-processing'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("count preserved processing and refreshed pending rows");
+        assert_eq!((processing, pending), (1, 1));
     }
 }

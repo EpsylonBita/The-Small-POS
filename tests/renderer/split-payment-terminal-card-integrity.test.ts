@@ -189,11 +189,14 @@ test('round 2 P0 (behavioral): a confirm settlement and a terminal charge are mu
 test('round 2 P1: modal close (X and Escape) is locked while a terminal charge is in flight', () => {
   assert.match(
     modalSource,
-    /onClose=\{\s*processingPortionId\s*\|\|\s*isProcessing\s*\|\|\s*isTerminalChargeInFlight\s*\?\s*\(\)\s*=>\s*undefined\s*:\s*onClose\s*\}/,
+    /const isCloseLocked = isReconciliationPending \|\| Boolean\(processingPortionId\) \|\| isProcessing \|\| isTerminalChargeInFlight;/,
   );
+  assert.match(modalSource, /onClose=\{onClose\}/);
+  assert.match(modalSource, /closeMode=["']request["']/);
+  assert.match(modalSource, /closeDisabled=\{isCloseLocked\}/);
   assert.match(
     modalSource,
-    /closeOnEscape=\{\s*!processingPortionId\s*&&\s*!isProcessing\s*&&\s*!isTerminalChargeInFlight\s*\}/,
+    /closeOnEscape=\{!isCloseLocked\}/,
   );
 });
 
@@ -207,9 +210,9 @@ test('round 2 P1: the in-flight flag is armed with the guard and cleared in fina
 
 test('round 2 P3: amount edits, method toggles, and add-person are locked during the guarded window (stale-amount charge)', () => {
   assert.match(modalSource, /disabled=\{portion\.status !== 'draft' \|\| isProcessing \|\| isTerminalChargeInFlight\}/);
-  assert.match(modalSource, /const locked = portion\.status !== 'draft' \|\| isProcessing \|\| isTerminalChargeInFlight;/);
+  assert.match(modalSource, /const locked = portion\.status !== 'draft' \|\| isProcessing \|\| isTerminalChargeInFlight \|\| isReconciliationPending;/);
   assert.match(modalSource, /disabled=\{Boolean\(processingPortionId\) \|\| isProcessing \|\| isTerminalChargeInFlight\}/);
-  assert.match(modalSource, /&& !isTerminalChargeInFlight, \[anyItemsAssigned/);
+  assert.match(modalSource, /&& !isTerminalChargeInFlight && !isReconciliationPending, \[anyItemsAssigned/);
 });
 
 test('P0-02: settlement and recording use the normalized card portion, never the stale draft capture', () => {

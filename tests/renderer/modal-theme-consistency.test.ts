@@ -15,6 +15,7 @@ const zReportModal = readRendererFile('components', 'modals', 'ZReportModal.tsx'
 const updateDialog = readRendererFile('components', 'UpdateDialog.tsx');
 const confirmDialog = readRendererFile('components', 'ui', 'ConfirmDialog.tsx');
 const callerIdSection = readRendererFile('components', 'peripherals', 'CallerIdSection.tsx');
+const printerSettingsModal = readRendererFile('components', 'modals', 'PrinterSettingsModal.tsx');
 
 test('light theme clears a stale dark class from html and body portal roots', () => {
   const applyThemeToDocument = (
@@ -141,6 +142,62 @@ test('Caller ID settings use the shared light and dark modal theme contract', ()
   assert.match(callerIdSection, /liquid-glass-modal-button/);
 
   assert.doesNotMatch(callerIdSection, /(?:text|bg|border|placeholder)-zinc-(?:[1-9]00|950)/);
+});
+
+test('printer list verification, role, row and transport surfaces use shared semantic tones', () => {
+  assert.match(
+    printerSettingsModal,
+    /const verificationTone[\s\S]*?liquidGlassModalTone\('success'\)[\s\S]*?liquidGlassModalTone\('warning'\)[\s\S]*?liquidGlassModalTone\('neutral'\)/,
+  );
+  assert.match(
+    printerSettingsModal,
+    /rolePrinters\.length > 0[\s\S]*?liquidGlassModalTone\('success'\)[\s\S]*?liquidGlassModalTone\('warning'\)[\s\S]*?liquidGlassModalTone\('neutral'\)/,
+  );
+  assert.match(printerSettingsModal, /p-3 rounded-lg[^`]*\$\{liquidGlassModalTone\('neutral'\)\}/);
+  assert.match(printerSettingsModal, /liquidGlassModalTone\('warning'\)[\s\S]{0,300}settings\.printer\.default/);
+  assert.match(printerSettingsModal, /liquidGlassModalTone\('neutral'\)[\s\S]{0,300}transportLabel\(resolvedTransport, t\)/);
+  assert.match(printerSettingsModal, /liquidGlassModalTone\('warning'\)[\s\S]{0,300}transportUnreachable/);
+
+  const listStart = printerSettingsModal.indexOf('// Render printer list view');
+  const listEnd = printerSettingsModal.indexOf('// Render discovery view', listStart);
+  const printerList = printerSettingsModal.slice(listStart, listEnd);
+  assert.doesNotMatch(printerList, /className="p-3 rounded-lg bg-white\/5 border border-white\/10 flex items-center justify-between"/);
+  assert.doesNotMatch(printerList, /className="px-2 py-0\.5 rounded border border-white\/10 liquid-glass-modal-text-muted"/);
+  assert.doesNotMatch(printerList, /className="px-2 py-0\.5 rounded border border-amber-500\/30 text-amber-200"/);
+});
+
+test('printer setup selector and onboarding surfaces use shared light and dark tones', () => {
+  const selectorStart = printerSettingsModal.indexOf('const renderListView', printerSettingsModal.indexOf('// Render printer list view'));
+  const selectorEnd = printerSettingsModal.indexOf('<PrinterSupportEntryPoint', selectorStart);
+  const selectorAndHint = printerSettingsModal.slice(selectorStart, selectorEnd);
+  assert.match(selectorAndHint, /liquidGlassModalTone\('neutral'\)/);
+  assert.match(selectorAndHint, /liquidGlassModalTone\('warning'\)/);
+  assert.doesNotMatch(selectorAndHint, /bg-white\/5|border-white\/10|text-amber-100/);
+
+  const discoveryStart = printerSettingsModal.indexOf('const renderDiscoverView');
+  const discoveryEnd = printerSettingsModal.indexOf('const renderFormView', discoveryStart);
+  const discoveryOnboarding = printerSettingsModal.slice(discoveryStart, discoveryEnd);
+  assert.match(discoveryOnboarding, /liquidGlassModalTone\('warning'\)[\s\S]*?settings\.printer\.discoveredOnlyHint/);
+  assert.match(discoveryOnboarding, /discoveredPrinters\.map[\s\S]*?liquidGlassModalTone\('neutral'\)/);
+  assert.doesNotMatch(discoveryOnboarding, /bg-white\/5|border-white\/10|text-amber-100/);
+
+  const expertStart = printerSettingsModal.indexOf("t('settings.printer.quickSetupFirstTitle");
+  const expertCardStart = printerSettingsModal.lastIndexOf('<div className={`rounded-2xl', expertStart);
+  const expertCardEnd = printerSettingsModal.indexOf('</div>', printerSettingsModal.indexOf('</button>', expertStart)) + '</div>'.length;
+  const expertOnboarding = printerSettingsModal.slice(expertCardStart, expertCardEnd);
+  assert.match(expertOnboarding, /liquidGlassModalTone\('warning'\)/);
+  assert.doesNotMatch(expertOnboarding, /text-amber-100|bg-amber-500\/10/);
+});
+
+test('printer wizard save busy state gates every modal-owned dismissal path', () => {
+  assert.match(printerSettingsModal, /const \[wizardBusy, setWizardBusy\] = useState\(false\)/);
+  assert.match(printerSettingsModal, /const wizardBusyRef = useRef\(false\)/);
+  assert.match(printerSettingsModal, /const handleWizardBusyChange = useCallback\(\(busy: boolean\) => \{[\s\S]*?wizardBusyRef\.current = busy[\s\S]*?setWizardBusy\(busy\)[\s\S]*?\}, \[\]\)/);
+  assert.match(printerSettingsModal, /onBusyChange=\{handleWizardBusyChange\}/);
+  assert.match(printerSettingsModal, /if \(!wizardBusyRef\.current\) onClose\(\)/);
+  assert.match(printerSettingsModal, /onClose=\{handleModalClose\}/);
+  assert.match(printerSettingsModal, /closeOnBackdrop=\{!wizardBusy\}/);
+  assert.match(printerSettingsModal, /closeOnEscape=\{!wizardBusy\}/);
 });
 
 test('modal inventory has no unthemed dark-only content outside the intentional order-type palette', () => {

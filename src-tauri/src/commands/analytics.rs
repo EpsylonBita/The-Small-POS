@@ -907,6 +907,36 @@ fn normalize_report_generate_payload(arg0: Option<serde_json::Value>) -> serde_j
     }
 }
 
+fn driver_record_earning_inner(
+    conn: &mut rusqlite::Connection,
+    driver_id: &str,
+    shift_id: Option<&str>,
+    order_id: &str,
+    now: &str,
+) -> Result<(String, order_ownership::DriverOwnershipAssignment), String> {
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("begin driver earning transaction: {e}"))?;
+    let resolved_shift_id = order_ownership::resolve_driver_shift_id(&tx, driver_id, shift_id)?
+        .ok_or("No active driver shift found")?;
+    let assignment = order_ownership::assign_order_to_driver_shift(
+        &tx,
+        order_id,
+        driver_id,
+        None,
+        &resolved_shift_id,
+        now,
+    )?;
+    let earning_id =
+        order_ownership::upsert_driver_earning(&tx, order_id, driver_id, &assignment, now)?;
+    let sync_payload = order_ownership::build_driver_earning_sync_payload(&tx, &earning_id)?;
+    order_ownership::enqueue_or_refresh_driver_earning_sync_row(&tx, &earning_id, &sync_payload)?;
+    tx.commit()
+        .map_err(|e| format!("commit driver earning transaction: {e}"))?;
+
+    Ok((earning_id, assignment))
+}
+
 #[tauri::command]
 pub async fn driver_record_earning(
     arg0: Option<serde_json::Value>,
@@ -922,23 +952,10 @@ pub async fn driver_record_earning(
     let order_id = crate::value_str(&payload, &["orderId", "order_id"]).ok_or("Missing orderId")?;
     let now = Utc::now().to_rfc3339();
 
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-
-    let resolved_shift_id =
-        order_ownership::resolve_driver_shift_id(&conn, &driver_id, shift_id.as_deref())?
-            .ok_or("No active driver shift found")?;
-
-    let assignment = order_ownership::assign_order_to_driver_shift(
-        &conn,
-        &order_id,
-        &driver_id,
-        None,
-        &resolved_shift_id,
-        &now,
-    )?;
-
-    let earning_id =
-        order_ownership::upsert_driver_earning(&conn, &order_id, &driver_id, &assignment, &now)?;
+    let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let (earning_id, assignment) =
+        driver_record_earning_inner(&mut conn, &driver_id, shift_id.as_deref(), &order_id, &now)?;
+    let resolved_shift_id = assignment.driver_shift_id.clone();
 
     info!("Recorded driver earning {earning_id} for order {order_id}");
 
@@ -1584,10 +1601,15 @@ pub async fn report_get_order_type_breakdown(
 pub async fn report_print_z_report(
     arg0: Option<serde_json::Value>,
     db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let payload = arg0.unwrap_or(serde_json::json!({}));
     if let Some(z_report_id) = extract_z_report_id_from_payload(&payload) {
-        return zreport::print_z_report(&db, &serde_json::json!({ "zReportId": z_report_id }));
+        return zreport::print_z_report(
+            &db,
+            &serde_json::json!({ "zReportId": z_report_id }),
+            &app,
+        );
     }
 
     let Some(mut snapshot) = snapshot_or_payload(&payload) else {
@@ -1620,7 +1642,14 @@ pub async fn report_print_z_report(
     if !crate::print::is_print_action_enabled(&db, "z_report") {
         return Ok(serde_json::json!({ "success": true, "skipped": true }));
     }
-    print::enqueue_print_job_with_payload(&db, "z_report", &synthetic_id, None, Some(&snapshot))
+    print::enqueue_print_job_with_payload(
+        &db,
+        "z_report",
+        &synthetic_id,
+        None,
+        Some(&snapshot),
+        &app,
+    )
 }
 
 #[tauri::command]
@@ -1779,7 +1808,7 @@ pub async fn report_submit_z_report(
 
     if let Some(z_report_id) = z_report_id {
         if crate::print::is_print_action_enabled(&db, "z_report") {
-            match print::enqueue_print_job(&db, "z_report", &z_report_id, None) {
+            match print::enqueue_print_job(&db, "z_report", &z_report_id, None, &app) {
                 Ok(job) => {
                     if let Some(obj) = result.as_object_mut() {
                         obj.insert("autoPrintJob".to_string(), job);
@@ -1834,6 +1863,200 @@ pub async fn products_get_catalog_count() -> Result<serde_json::Value, String> {
 #[cfg(test)]
 mod dto_tests {
     use super::*;
+
+    fn driver_earning_test_conn() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory database");
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             PRAGMA busy_timeout = 5000;
+             PRAGMA synchronous = NORMAL;",
+        )
+        .expect("configure driver earning test database");
+        crate::db::run_migrations_for_test(&conn);
+        conn
+    }
+
+    #[test]
+    fn registered_driver_record_earning_producer_enqueues_canonical_financial_outbox_atomically() {
+        let mut conn = driver_earning_test_conn();
+        let now = "2026-08-12T10:00:00Z";
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                 id, staff_id, branch_id, terminal_id, role_type, check_in_time,
+                 status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'shift-analytics-driver', 'driver-analytics', 'branch-analytics',
+                 'terminal-analytics', 'driver', ?1, 'active', 'pending', ?1, ?1
+             )",
+            rusqlite::params![now],
+        )
+        .expect("seed active analytics driver shift");
+        conn.execute(
+            "INSERT INTO orders (
+                 id, items, total_amount, total_amount_cents, status, order_type,
+                 branch_id, terminal_id, payment_status, sync_status,
+                 delivery_fee, delivery_fee_cents, tip_amount, tip_amount_cents,
+                 created_at, updated_at
+             ) VALUES (
+                 'order-analytics-driver', '[]', 24.0, 2400, 'ready', 'delivery',
+                 'branch-analytics', 'terminal-analytics', 'paid', 'synced',
+                 2.0, 200, 1.0, 100, ?1, ?1
+             )",
+            rusqlite::params![now],
+        )
+        .expect("seed analytics delivery order");
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, amount_cents, currency, status,
+                 payment_origin, sync_status, sync_state, created_at, updated_at
+             ) VALUES (
+                 'payment-analytics-driver', 'order-analytics-driver', 'cash',
+                 24.0, 2400, 'EUR', 'completed', 'manual', 'synced', 'applied', ?1, ?1
+             )",
+            rusqlite::params![now],
+        )
+        .expect("seed analytics delivery payment");
+
+        let (earning_id, assignment) = driver_record_earning_inner(
+            &mut conn,
+            "driver-analytics",
+            Some("shift-analytics-driver"),
+            "order-analytics-driver",
+            now,
+        )
+        .expect("registered analytics producer records courier earning");
+        assert_eq!(assignment.driver_shift_id, "shift-analytics-driver");
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue
+                 WHERE table_name = 'driver_earnings' AND record_id = ?1",
+                rusqlite::params![earning_id],
+                |row| row.get(0),
+            )
+            .expect("count analytics courier earning outbox");
+        assert_eq!(
+            count, 1,
+            "producer must emit exactly one canonical outbox row"
+        );
+        let (operation, status, data): (String, String, String) = conn
+            .query_row(
+                "SELECT operation, status, data FROM parity_sync_queue
+                 WHERE table_name = 'driver_earnings' AND record_id = ?1",
+                rusqlite::params![earning_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("load analytics courier earning outbox");
+        assert_eq!(operation, "INSERT");
+        assert_eq!(status, "pending");
+        let payload: serde_json::Value =
+            serde_json::from_str(&data).expect("parse canonical courier earning payload");
+        assert_eq!(payload["id"], earning_id);
+        assert_eq!(payload["driver_id"], "driver-analytics");
+        assert_eq!(payload["staff_shift_id"], "shift-analytics-driver");
+        assert_eq!(payload["cash_collected_cents"], 2400);
+        assert_eq!(payload["card_amount_cents"], 0);
+        assert_eq!(payload["cash_to_return_cents"], 2400);
+        assert_eq!(payload["createdAt"], now);
+        assert_eq!(payload["updatedAt"], now);
+    }
+
+    #[test]
+    fn registered_driver_record_earning_producer_rolls_back_assignment_and_earning_on_enqueue_error(
+    ) {
+        let mut conn = driver_earning_test_conn();
+        let now = "2026-08-12T10:30:00Z";
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                 id, staff_id, branch_id, terminal_id, role_type, check_in_time,
+                 status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'shift-analytics-rollback', 'driver-analytics-rollback', 'branch-analytics',
+                 'terminal-analytics', 'driver', ?1, 'active', 'pending', ?1, ?1
+             )",
+            rusqlite::params![now],
+        )
+        .expect("seed rollback driver shift");
+        conn.execute(
+            "INSERT INTO orders (
+                 id, items, total_amount, total_amount_cents, status, order_type,
+                 branch_id, terminal_id, payment_status, sync_status,
+                 created_at, updated_at
+             ) VALUES (
+                 'order-analytics-rollback', '[]', 12.0, 1200, 'ready', 'delivery',
+                 'branch-analytics', 'terminal-analytics', 'paid', 'synced', ?1, ?1
+             )",
+            rusqlite::params![now],
+        )
+        .expect("seed rollback delivery order");
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, amount_cents, currency, status,
+                 created_at, updated_at
+             ) VALUES (
+                 'payment-analytics-rollback', 'order-analytics-rollback', 'cash',
+                 12.0, 1200, 'EUR', 'completed', ?1, ?1
+             )",
+            rusqlite::params![now],
+        )
+        .expect("seed rollback payment");
+        conn.execute_batch(
+            "CREATE TRIGGER abort_analytics_driver_earning_outbox
+             BEFORE INSERT ON parity_sync_queue
+             WHEN NEW.table_name = 'driver_earnings'
+             BEGIN
+                SELECT RAISE(ABORT, 'forced analytics earning enqueue failure');
+             END;",
+        )
+        .expect("install analytics enqueue failure trigger");
+
+        let result = driver_record_earning_inner(
+            &mut conn,
+            "driver-analytics-rollback",
+            Some("shift-analytics-rollback"),
+            "order-analytics-rollback",
+            now,
+        );
+        let error = match result {
+            Ok(_) => panic!("outbox failure must roll back assignment and earning"),
+            Err(error) => error,
+        };
+        assert!(error.contains("forced analytics earning enqueue failure"));
+        let (status, driver_id, shift_id, sync_status, earning_count, queue_count): (
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            i64,
+            i64,
+        ) = conn
+            .query_row(
+                "SELECT status, driver_id, staff_shift_id, sync_status,
+                        (SELECT COUNT(*) FROM driver_earnings
+                         WHERE order_id = 'order-analytics-rollback'),
+                        (SELECT COUNT(*) FROM parity_sync_queue
+                         WHERE table_name = 'driver_earnings')
+                 FROM orders WHERE id = 'order-analytics-rollback'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .expect("read rolled-back analytics producer state");
+        assert_eq!(status, "ready");
+        assert_eq!(driver_id, None);
+        assert_eq!(shift_id, None);
+        assert_eq!(sync_status, "synced");
+        assert_eq!(earning_count, 0);
+        assert_eq!(queue_count, 0);
+    }
 
     #[test]
     fn parse_driver_shift_payload_supports_string_and_object() {

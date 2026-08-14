@@ -1,5 +1,5 @@
-use chrono::Utc;
-use serde::Deserialize;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use std::collections::{hash_map::DefaultHasher, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -7,8 +7,8 @@ use tauri::{Emitter, Manager};
 use tracing::{info, warn};
 
 use crate::{
-    auth, db, drawer, escpos, payload_arg0_as_string, print, printers, read_local_json_array,
-    receipt_renderer, resolve_order_id, value_str, write_local_json,
+    auth, db, drawer, escpos, payload_arg0_as_string, print, print_history, printers,
+    read_local_json_array, receipt_renderer, resolve_order_id, value_str, write_local_json,
 };
 
 // -- Print -------------------------------------------------------------------
@@ -63,7 +63,164 @@ struct VerificationCandidate {
     target: printers::ResolvedPrinterTarget,
     emulation: String,
     render_mode: String,
+    supports_cut: bool,
     supports_logo: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WizardSampleKind {
+    TransportText,
+    Encoding,
+    Branding,
+}
+
+impl WizardSampleKind {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::TransportText => "transport_text",
+            Self::Encoding => "encoding",
+            Self::Branding => "branding",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PrinterTestDraftPayload {
+    profile_draft: serde_json::Value,
+    sample_kind: WizardSampleKind,
+    #[serde(default)]
+    probe_attempt: usize,
+    wizard_session_id: String,
+    #[serde(default)]
+    confirmed_candidate_connection_details: Option<serde_json::Value>,
+}
+
+#[derive(Debug)]
+struct WizardSampleBuild {
+    bytes: Vec<u8>,
+    logo_configured: bool,
+    logo_included: bool,
+}
+
+#[derive(Debug)]
+struct WizardSampleBuildError {
+    code: &'static str,
+    message: String,
+    logo_configured: bool,
+    logo_included: bool,
+}
+
+impl WizardSampleBuildError {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            logo_configured: false,
+            logo_included: false,
+        }
+    }
+
+    fn with_logo_state(mut self, logo_configured: bool, logo_included: bool) -> Self {
+        self.logo_configured = logo_configured;
+        self.logo_included = logo_included;
+        self
+    }
+
+    fn code(&self) -> &'static str {
+        self.code
+    }
+
+    fn logo_configured(&self) -> bool {
+        self.logo_configured
+    }
+
+    fn logo_included(&self) -> bool {
+        self.logo_included
+    }
+}
+
+impl std::fmt::Display for WizardSampleBuildError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum WizardPrintResponse {
+    Queued(WizardPrintQueuedResponse),
+    Rejected(WizardPrintRejectedResponse),
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WizardPrintQueuedResponse {
+    success: bool,
+    queued: bool,
+    duplicate: bool,
+    job_id: String,
+    queue_state: String,
+    sample_kind: String,
+    candidate_connection_details: serde_json::Value,
+    candidate_capabilities: serde_json::Value,
+    logo_configured: bool,
+    logo_included: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WizardPrintRejectedResponse {
+    success: bool,
+    queued: bool,
+    printer_name: String,
+    sample_kind: String,
+    error_code: String,
+    error: String,
+    resolved_transport: String,
+    resolved_address: String,
+    verification_status: String,
+    logo_configured: bool,
+    logo_included: bool,
+}
+
+impl WizardPrintResponse {
+    fn queued(outcome: print::PreRenderedTestPrintOutcome) -> Self {
+        Self::Queued(WizardPrintQueuedResponse {
+            success: true,
+            queued: true,
+            duplicate: outcome.duplicate,
+            job_id: outcome.job_id,
+            queue_state: outcome.queue_state,
+            sample_kind: outcome.sample_kind,
+            candidate_connection_details: outcome.candidate_connection_details,
+            candidate_capabilities: outcome.candidate_capabilities,
+            logo_configured: outcome.logo_configured,
+            logo_included: outcome.logo_included,
+        })
+    }
+
+    fn rejected(
+        printer_name: String,
+        sample_kind: WizardSampleKind,
+        target: &printers::ResolvedPrinterTarget,
+        error: WizardSampleBuildError,
+    ) -> Self {
+        Self::Rejected(WizardPrintRejectedResponse {
+            success: false,
+            queued: false,
+            printer_name,
+            sample_kind: sample_kind.as_str().to_string(),
+            error_code: error.code().to_string(),
+            error: error.to_string(),
+            resolved_transport: resolved_transport_name(target).to_string(),
+            resolved_address: target.label(),
+            verification_status: "unverified".to_string(),
+            logo_configured: error.logo_configured(),
+            logo_included: error.logo_included(),
+        })
+    }
 }
 
 fn parse_order_id_payload(arg0: Option<serde_json::Value>) -> Result<String, String> {
@@ -167,10 +324,15 @@ struct PrintListJobsPayload {
     state: Option<String>,
     #[serde(default, alias = "printer_profile_id")]
     printer_profile_id: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    offset: Option<usize>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 struct PrintQueueControlPayload {
     #[serde(default, alias = "printer_profile_id")]
     printer_profile_id: Option<String>,
@@ -180,7 +342,7 @@ struct PrintQueueControlPayload {
 
 fn parse_print_list_jobs_payload(
     arg0: Option<serde_json::Value>,
-) -> (Option<String>, Option<String>) {
+) -> (Option<String>, Option<String>, usize, usize) {
     match arg0 {
         Some(serde_json::Value::Object(obj)) => {
             let payload = serde_json::Value::Object(obj.clone());
@@ -191,22 +353,58 @@ fn parse_print_list_jobs_payload(
                     .printer_profile_id
                     .map(|value| value.trim().to_string())
                     .filter(|value| !value.is_empty()),
+                parsed.limit.unwrap_or(50),
+                parsed.offset.unwrap_or(0),
             )
         }
-        other => (parse_print_list_jobs_status(other), None),
+        other => (parse_print_list_jobs_status(other), None, 50, 0),
     }
 }
 
-fn parse_print_queue_control_payload(arg0: Option<serde_json::Value>) -> PrintQueueControlPayload {
+fn parse_print_queue_control_payload(
+    arg0: Option<serde_json::Value>,
+) -> Result<PrintQueueControlPayload, String> {
     match arg0 {
         Some(serde_json::Value::Object(obj)) => {
-            serde_json::from_value(serde_json::Value::Object(obj)).unwrap_or_default()
+            let profile_was_explicit =
+                obj.contains_key("printerProfileId") || obj.contains_key("printer_profile_id");
+            let mut parsed: PrintQueueControlPayload =
+                serde_json::from_value(serde_json::Value::Object(obj))
+                    .map_err(|error| format!("Invalid print queue control payload: {error}"))?;
+            parsed.printer_profile_id = match parsed.printer_profile_id {
+                Some(value) => {
+                    let value = value.trim();
+                    if value.is_empty() {
+                        return Err("Printer profile scope cannot be empty".into());
+                    }
+                    Some(value.to_string())
+                }
+                None if profile_was_explicit => {
+                    return Err("Printer profile scope must be a non-empty string".into());
+                }
+                None => None,
+            };
+            for status in &mut parsed.statuses {
+                let normalized = status.trim().to_ascii_lowercase();
+                if !matches!(normalized.as_str(), "pending" | "printing" | "dispatched") {
+                    return Err(format!("Unsupported print queue status: {status}"));
+                }
+                *status = normalized;
+            }
+            Ok(parsed)
         }
-        Some(value) => PrintQueueControlPayload {
-            printer_profile_id: value_to_string(value),
-            statuses: Vec::new(),
-        },
-        None => PrintQueueControlPayload::default(),
+        Some(serde_json::Value::String(value)) => {
+            let value = value.trim();
+            if value.is_empty() {
+                return Err("Printer profile scope cannot be empty".into());
+            }
+            Ok(PrintQueueControlPayload {
+                printer_profile_id: Some(value.to_string()),
+                statuses: Vec::new(),
+            })
+        }
+        Some(_) => Err("Print queue control payload must be an object or profile ID".into()),
+        None => Ok(PrintQueueControlPayload::default()),
     }
 }
 
@@ -629,8 +827,13 @@ pub async fn payment_print_receipt(
         return Ok(serde_json::json!({ "success": true, "skipped": true }));
     }
 
-    let enqueue_result =
-        print::enqueue_print_job(&db, entity_type, &order_id, printer_profile_id.as_deref())?;
+    let enqueue_result = print::enqueue_print_job(
+        &db,
+        entity_type,
+        &order_id,
+        printer_profile_id.as_deref(),
+        &app,
+    )?;
 
     // Process the job immediately instead of waiting for the background worker.
     // Wave 11 Item 8 deferred follow-up: offload to `spawn_blocking` so the
@@ -665,6 +868,7 @@ pub async fn kitchen_print_ticket(
         "kitchen_ticket",
         &order_id,
         printer_profile_id.as_deref(),
+        &app,
     )?;
 
     // Process the job immediately instead of waiting for the background worker.
@@ -684,21 +888,58 @@ pub async fn kitchen_print_ticket(
     Ok(enqueue_result)
 }
 
+async fn run_print_list_jobs_blocking<F>(work: F) -> Result<serde_json::Value, String>
+where
+    F: FnOnce() -> Result<serde_json::Value, String> + Send + 'static,
+{
+    match tokio::task::spawn_blocking(work).await {
+        Ok(result) => result,
+        Err(error) if error.is_panic() => Err("Print queue snapshot worker panicked".to_string()),
+        Err(_) => Err("Print queue snapshot worker was cancelled".to_string()),
+    }
+}
+
+async fn run_printer_ipc_blocking<T, F>(work: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    match tokio::task::spawn_blocking(work).await {
+        Ok(result) => result,
+        Err(error) if error.is_panic() => Err("Printer command worker panicked".to_string()),
+        Err(_) => Err("Printer command worker was cancelled".to_string()),
+    }
+}
+
+async fn run_guarded_printer_ipc_blocking<F>(
+    work: F,
+) -> Result<serde_json::Value, auth::GuardedCommandError>
+where
+    F: FnOnce() -> Result<serde_json::Value, String> + Send + 'static,
+{
+    run_printer_ipc_blocking(work)
+        .await
+        .map_err(auth::GuardedCommandError::from)
+}
+
 #[tauri::command]
 pub async fn print_list_jobs(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let (status, printer_profile_id) = parse_print_list_jobs_payload(arg0);
-    let jobs =
-        print::list_print_jobs_with_filters(&db, status.as_deref(), printer_profile_id.as_deref())?;
-    let queue_status = print::print_queue_status(&db)?;
-    Ok(serde_json::json!({
-        "success": true,
-        "jobs": jobs,
-        "queuePaused": queue_status.get("queuePaused").cloned().unwrap_or(serde_json::Value::Bool(false)),
-        "pausedPrinterProfileIds": queue_status.get("pausedPrinterProfileIds").cloned().unwrap_or_else(|| serde_json::json!([])),
-    }))
+    let (status, printer_profile_id, limit, offset) = parse_print_list_jobs_payload(arg0);
+    run_print_list_jobs_blocking(move || {
+        let db = app.state::<db::DbState>();
+        serde_json::to_value(print::print_queue_snapshot(
+            &db,
+            status.as_deref(),
+            printer_profile_id.as_deref(),
+            limit,
+            offset,
+        )?)
+        .map_err(|error| error.to_string())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -724,11 +965,8 @@ pub async fn print_get_receipt_file(
 
 #[tauri::command]
 pub async fn printer_list_system_printers() -> Result<serde_json::Value, String> {
-    let names = printers::list_system_printers();
-    Ok(serde_json::json!({
-        "success": true,
-        "printers": names,
-    }))
+    run_printer_ipc_blocking(|| Ok(system_printers_response(printers::list_system_printers())))
+        .await
 }
 
 #[tauri::command]
@@ -737,7 +975,17 @@ pub async fn printer_create_profile(
     db: tauri::State<'_, db::DbState>,
 ) -> Result<serde_json::Value, String> {
     let payload = arg0.ok_or("Missing printer profile payload")?;
-    printers::create_printer_profile(&db, &payload)
+    let has_confirmed_candidate = payload_has_confirmed_candidate(&payload);
+    let payload = if has_confirmed_candidate {
+        profile_payload_with_confirmed_candidate(payload)?
+    } else {
+        payload
+    };
+    if has_confirmed_candidate {
+        printers::create_printer_profile_with_validated_capabilities(&db, &payload)
+    } else {
+        printers::create_printer_profile(&db, &payload)
+    }
 }
 
 #[tauri::command]
@@ -746,7 +994,17 @@ pub async fn printer_update_profile(
     db: tauri::State<'_, db::DbState>,
 ) -> Result<serde_json::Value, String> {
     let payload = arg0.ok_or("Missing printer profile payload")?;
-    printers::update_printer_profile(&db, &payload)
+    let has_confirmed_candidate = payload_has_confirmed_candidate(&payload);
+    let payload = if has_confirmed_candidate {
+        profile_payload_with_confirmed_candidate(payload)?
+    } else {
+        payload
+    };
+    if has_confirmed_candidate {
+        printers::update_printer_profile_with_validated_capabilities(&db, &payload)
+    } else {
+        printers::update_printer_profile(&db, &payload)
+    }
 }
 
 #[tauri::command]
@@ -793,10 +1051,15 @@ pub async fn printer_get_default_profile(
 #[tauri::command]
 pub async fn print_reprint_job(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let job_id = parse_job_id_payload(arg0)?;
-    printers::reprint_job(&db, &job_id)
+    run_print_queue_mutation_with_kick(
+        app,
+        move |db| execute_print_reprint_job(db, &job_id, Utc::now()),
+        reprint_kick_job_id,
+    )
+    .await
 }
 
 /// Transform a flat Rust printer profile (from DB) into Electron-compatible format.
@@ -989,6 +1252,79 @@ fn electron_to_profile_input(id: Option<String>, payload: serde_json::Value) -> 
     serde_json::Value::Object(out)
 }
 
+fn profile_payload_with_confirmed_candidate(
+    payload: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let confirmed = payload
+        .get("confirmedCandidateConnectionDetails")
+        .or_else(|| payload.get("confirmed_candidate_connection_details"))
+        .cloned();
+    let is_frontend_payload = payload.get("connectionDetails").is_some()
+        || payload.get("paperSize").is_some()
+        || payload.get("type").is_some();
+    let mut mapped = if is_frontend_payload {
+        electron_to_profile_input(None, payload)
+    } else {
+        let mut flat = payload;
+        if let Some(object) = flat.as_object_mut() {
+            object.remove("confirmedCandidateConnectionDetails");
+            object.remove("confirmed_candidate_connection_details");
+        }
+        flat
+    };
+    let Some(confirmed) = confirmed else {
+        return Ok(mapped);
+    };
+    let confirmed = safe_confirmed_candidate_connection(&confirmed)?;
+    let selected_target = printers::resolve_printer_target(&mapped)
+        .map_err(|error| format!("Resolve selected printer candidate: {error}"))?;
+    let confirmed_profile = profile_with_exact_connection(&mapped, &confirmed);
+    let confirmed_target = printers::resolve_printer_target(&confirmed_profile)
+        .map_err(|error| format!("Resolve confirmed printer candidate: {error}"))?;
+    if !same_physical_candidate_target(&selected_target, &confirmed_target) {
+        return Err(
+            "confirmedCandidateConnectionDetails does not match the selected physical printer"
+                .into(),
+        );
+    }
+    if let Some(object) = mapped.as_object_mut() {
+        object.insert(
+            "connectionJson".to_string(),
+            serde_json::json!(confirmed.to_string()),
+        );
+        if let Some(cut_paper) = confirmed
+            .get("cutPaper")
+            .and_then(serde_json::Value::as_bool)
+        {
+            object.insert("cutPaper".to_string(), serde_json::json!(cut_paper));
+        }
+        if let Some(code_page) = confirmed
+            .get("escposCodePage")
+            .and_then(serde_json::Value::as_u64)
+        {
+            object.insert("escposCodePage".to_string(), serde_json::json!(code_page));
+        }
+        if let Some(name) = confirmed
+            .get("systemName")
+            .or_else(|| confirmed.get("hostname"))
+            .or_else(|| confirmed.get("ip"))
+            .or_else(|| confirmed.get("address"))
+            .or_else(|| confirmed.get("serialPort"))
+            .and_then(serde_json::Value::as_str)
+        {
+            object.insert("printerName".to_string(), serde_json::json!(name));
+        }
+    }
+    Ok(mapped)
+}
+
+fn payload_has_confirmed_candidate(payload: &serde_json::Value) -> bool {
+    payload.get("confirmedCandidateConnectionDetails").is_some()
+        || payload
+            .get("confirmed_candidate_connection_details")
+            .is_some()
+}
+
 fn normalize_draft_profile_payload(
     payload: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
@@ -1041,6 +1377,7 @@ fn render_mode_key(mode: receipt_renderer::ClassicCustomerRenderMode) -> &'stati
 fn capability_candidate_json(
     target: &printers::ResolvedPrinterTarget,
     layout: &receipt_renderer::LayoutConfig,
+    supports_cut: bool,
     supports_logo: bool,
 ) -> serde_json::Value {
     let (resolved_transport, resolved_address, baud_rate) = match target {
@@ -1058,17 +1395,21 @@ fn capability_candidate_json(
         } => ("serial", port_name.clone(), serde_json::json!(baud_rate)),
     };
 
-    serde_json::json!({
+    let mut candidate = serde_json::json!({
         "status": "verified",
         "resolvedTransport": resolved_transport,
         "resolvedAddress": resolved_address,
         "emulation": emulation_mode_key(layout.emulation_mode),
         "renderMode": render_mode_key(layout.classic_customer_render_mode),
         "baudRate": baud_rate,
-        "supportsCut": true,
+        "supportsCut": supports_cut,
         "supportsLogo": supports_logo,
         "lastVerifiedAt": chrono::Utc::now().to_rfc3339()
-    })
+    });
+    if let (Some(object), Some(code_page)) = (candidate.as_object_mut(), layout.escpos_code_page) {
+        object.insert("escposCodePage".to_string(), serde_json::json!(code_page));
+    }
+    candidate
 }
 
 fn merge_candidate_capabilities_into_connection(
@@ -1083,10 +1424,472 @@ fn merge_candidate_capabilities_into_connection(
         .unwrap_or_else(|| serde_json::json!({}));
 
     if let Some(connection_object) = connection_details.as_object_mut() {
+        if let Some(emulation) = candidate_capabilities.get("emulation").cloned() {
+            connection_object.insert("emulation".to_string(), emulation);
+        }
+        if let Some(render_mode) = candidate_capabilities.get("renderMode").cloned() {
+            connection_object.insert("render_mode".to_string(), render_mode);
+        }
+        if let Some(baud_rate) = candidate_capabilities.get("baudRate").cloned() {
+            if !baud_rate.is_null() {
+                connection_object.insert("baudRate".to_string(), baud_rate);
+            }
+        }
+        if let Some(code_page) = candidate_capabilities
+            .get("escposCodePage")
+            .filter(|value| !value.is_null())
+            .cloned()
+        {
+            connection_object.insert("escposCodePage".to_string(), code_page);
+        }
+        if let Some(supports_cut) = candidate_capabilities.get("supportsCut").cloned() {
+            connection_object.insert("cutPaper".to_string(), supports_cut);
+        }
+        match candidate_capabilities
+            .get("resolvedTransport")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("windows_queue") => {
+                connection_object.insert("type".to_string(), serde_json::json!("system"));
+                if let Some(address) = candidate_capabilities.get("resolvedAddress").cloned() {
+                    connection_object.insert("systemName".to_string(), address);
+                }
+            }
+            Some("raw_tcp") => {
+                connection_object.insert("type".to_string(), serde_json::json!("network"));
+                if let Some(address) = candidate_capabilities
+                    .get("resolvedAddress")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    if let Some((host, port)) = address.rsplit_once(':') {
+                        connection_object.insert("ip".to_string(), serde_json::json!(host));
+                        if let Ok(port) = port.parse::<u16>() {
+                            connection_object.insert("port".to_string(), serde_json::json!(port));
+                        }
+                    }
+                }
+            }
+            Some("serial") => {
+                if let Some(address) = candidate_capabilities.get("resolvedAddress").cloned() {
+                    connection_object.insert("serialPort".to_string(), address.clone());
+                    connection_object.insert("path".to_string(), address);
+                }
+            }
+            _ => {}
+        }
         connection_object.insert("capabilities".to_string(), candidate_capabilities);
     }
 
     connection_details
+}
+
+fn validate_candidate_string(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    max_len: usize,
+    required: bool,
+) -> Result<Option<String>, String> {
+    let Some(value) = object.get(key) else {
+        return if required {
+            Err(format!("confirmed candidate is missing {key}"))
+        } else {
+            Ok(None)
+        };
+    };
+    let text = value
+        .as_str()
+        .ok_or_else(|| format!("confirmed candidate {key} must be a string"))?
+        .trim();
+    if text.is_empty() || text.len() > max_len {
+        return Err(format!(
+            "confirmed candidate {key} must contain 1 to {max_len} bytes"
+        ));
+    }
+    Ok(Some(text.to_string()))
+}
+
+fn validate_candidate_enum(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    allowed: &[&str],
+    required: bool,
+) -> Result<Option<String>, String> {
+    let value = validate_candidate_string(object, key, 64, required)?;
+    if let Some(value) = value.as_deref() {
+        if !allowed.contains(&value) {
+            return Err(format!("confirmed candidate {key} is unsupported"));
+        }
+    }
+    Ok(value)
+}
+
+fn candidate_bounded_integer(
+    value: &serde_json::Value,
+    key: &str,
+    minimum: u64,
+    maximum: u64,
+) -> Result<u64, String> {
+    let parsed = value.as_u64().or_else(|| {
+        value
+            .as_str()
+            .and_then(|text| text.trim().parse::<u64>().ok())
+    });
+    let parsed = parsed.ok_or_else(|| {
+        format!("confirmed candidate {key} must be an integer between {minimum} and {maximum}")
+    })?;
+    if !(minimum..=maximum).contains(&parsed) {
+        return Err(format!(
+            "confirmed candidate {key} must be between {minimum} and {maximum}"
+        ));
+    }
+    Ok(parsed)
+}
+
+fn candidate_optional_bounded_integer(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    minimum: u64,
+    maximum: u64,
+) -> Result<Option<u64>, String> {
+    object
+        .get(key)
+        .map(|value| candidate_bounded_integer(value, key, minimum, maximum))
+        .transpose()
+}
+
+fn candidate_target_component_matches(left: &str, right: &str) -> bool {
+    left.trim().to_lowercase() == right.trim().to_lowercase()
+}
+
+fn validate_candidate_target_evidence(
+    connection: &serde_json::Map<String, serde_json::Value>,
+    capabilities: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    let transport = capabilities
+        .get("resolvedTransport")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("confirmed candidate is missing resolvedTransport")?;
+    let resolved_address = capabilities
+        .get("resolvedAddress")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("confirmed candidate is missing resolvedAddress")?
+        .trim();
+    let connection_string = |keys: &[&str]| {
+        keys.iter().find_map(|key| {
+            connection
+                .get(*key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+    };
+    let connection_type = connection
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("confirmed candidate is missing type")?;
+    match transport {
+        "windows_queue" => {
+            if !matches!(connection_type, "system" | "usb" | "bluetooth" | "bt") {
+                return Err("confirmed Windows candidate has an incompatible type".into());
+            }
+            let configured = connection_string(&["systemName"])
+                .ok_or("confirmed Windows candidate is missing systemName")?;
+            if !candidate_target_component_matches(configured, resolved_address) {
+                return Err("confirmed Windows candidate target evidence does not match".into());
+            }
+            if !capabilities
+                .get("baudRate")
+                .is_some_and(serde_json::Value::is_null)
+            {
+                return Err("confirmed Windows candidate baudRate must be null".into());
+            }
+        }
+        "raw_tcp" => {
+            if !matches!(connection_type, "network" | "lan" | "wifi") {
+                return Err("confirmed raw TCP candidate has an incompatible type".into());
+            }
+            let configured_host = connection_string(&["ip", "hostname", "host", "address"])
+                .ok_or("confirmed network candidate is missing host/IP")?;
+            let configured_port = connection
+                .get("port")
+                .ok_or_else(|| "confirmed network candidate is missing port".to_string())
+                .and_then(|value| candidate_bounded_integer(value, "port", 1, 65_535))?;
+            let (resolved_host, resolved_port) = resolved_address
+                .rsplit_once(':')
+                .ok_or("confirmed raw TCP address must include a port")?;
+            let resolved_port = resolved_port
+                .parse::<u64>()
+                .map_err(|_| "confirmed raw TCP address has an invalid port")?;
+            if !candidate_target_component_matches(configured_host, resolved_host)
+                || configured_port != resolved_port
+            {
+                return Err("confirmed raw TCP candidate target evidence does not match".into());
+            }
+            if !capabilities
+                .get("baudRate")
+                .is_some_and(serde_json::Value::is_null)
+            {
+                return Err("confirmed raw TCP candidate baudRate must be null".into());
+            }
+        }
+        "serial" => {
+            if !matches!(connection_type, "usb" | "bluetooth" | "bt") {
+                return Err("confirmed serial candidate has an incompatible type".into());
+            }
+            let configured =
+                connection_string(&["serialPort", "path", "portName", "comPort", "address"])
+                    .ok_or("confirmed serial candidate is missing a port")?;
+            if !candidate_target_component_matches(configured, resolved_address) {
+                return Err("confirmed serial candidate target evidence does not match".into());
+            }
+            let connection_baud = connection
+                .get("baudRate")
+                .ok_or_else(|| "confirmed serial candidate is missing baudRate".to_string())
+                .and_then(|value| candidate_bounded_integer(value, "baudRate", 300, 4_000_000))?;
+            let capability_baud = capabilities
+                .get("baudRate")
+                .filter(|value| !value.is_null())
+                .ok_or_else(|| {
+                    "confirmed serial candidate capabilities.baudRate must be non-null".to_string()
+                })
+                .and_then(|value| {
+                    candidate_bounded_integer(value, "capabilities.baudRate", 300, 4_000_000)
+                })?;
+            if connection_baud != capability_baud {
+                return Err("confirmed serial candidate baud evidence does not match".into());
+            }
+        }
+        _ => return Err("confirmed candidate resolvedTransport is unsupported".into()),
+    }
+    Ok(())
+}
+
+fn validate_candidate_cross_field_evidence(
+    connection: &serde_json::Map<String, serde_json::Value>,
+    capabilities: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    for (connection_key, capability_key) in
+        [("emulation", "emulation"), ("render_mode", "renderMode")]
+    {
+        let connection_value = connection
+            .get(connection_key)
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| format!("confirmed candidate is missing {connection_key}"))?;
+        let capability_value = capabilities
+            .get(capability_key)
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                format!("confirmed candidate is missing capabilities.{capability_key}")
+            })?;
+        if connection_value != capability_value {
+            return Err(format!(
+                "confirmed candidate {connection_key} contradicts capabilities.{capability_key}"
+            ));
+        }
+    }
+
+    let cut_paper = connection
+        .get("cutPaper")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or("confirmed candidate is missing cutPaper")?;
+    let supports_cut = capabilities
+        .get("supportsCut")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or("confirmed candidate is missing capabilities.supportsCut")?;
+    if cut_paper != supports_cut {
+        return Err("confirmed candidate cutPaper contradicts capabilities.supportsCut".into());
+    }
+
+    let connection_code_page =
+        candidate_optional_bounded_integer(connection, "escposCodePage", 0, 255)?;
+    let capability_code_page =
+        candidate_optional_bounded_integer(capabilities, "escposCodePage", 0, 255)?;
+    if connection_code_page != capability_code_page {
+        return Err(
+            "confirmed candidate escposCodePage contradicts capabilities.escposCodePage".into(),
+        );
+    }
+    Ok(())
+}
+
+fn safe_confirmed_candidate_connection(
+    value: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let object = value
+        .as_object()
+        .ok_or("confirmedCandidateConnectionDetails must be an object")?;
+    validate_candidate_enum(
+        object,
+        "type",
+        &["system", "network", "lan", "wifi", "bluetooth", "bt", "usb"],
+        true,
+    )?;
+    for key in [
+        "systemName",
+        "ip",
+        "hostname",
+        "host",
+        "address",
+        "path",
+        "serialPort",
+        "portName",
+        "comPort",
+    ] {
+        validate_candidate_string(object, key, 1_024, false)?;
+    }
+    for key in ["vendorId", "productId"] {
+        if let Some(value) = object.get(key) {
+            match value {
+                serde_json::Value::String(text) if !text.trim().is_empty() && text.len() <= 64 => {}
+                serde_json::Value::Number(_) => {
+                    candidate_bounded_integer(value, key, 0, 65_535)?;
+                }
+                _ => return Err(format!("confirmed candidate {key} is invalid")),
+            }
+        }
+    }
+    if let Some(value) = object.get("port") {
+        candidate_bounded_integer(value, "port", 1, 65_535)?;
+    }
+    if let Some(value) = object.get("baudRate") {
+        candidate_bounded_integer(value, "baudRate", 300, 4_000_000)?;
+    }
+    if let Some(value) = object.get("escposCodePage") {
+        candidate_bounded_integer(value, "escposCodePage", 0, 255)?;
+    }
+    validate_candidate_enum(object, "emulation", &["auto", "escpos", "star_line"], true)?;
+    validate_candidate_enum(object, "render_mode", &["text", "raster_exact"], true)?;
+    if !object
+        .get("cutPaper")
+        .is_some_and(serde_json::Value::is_boolean)
+    {
+        return Err("confirmed candidate cutPaper must be a boolean".into());
+    }
+
+    let capabilities = object
+        .get("capabilities")
+        .and_then(serde_json::Value::as_object)
+        .ok_or("confirmed candidate requires verified capabilities")?;
+    validate_candidate_enum(capabilities, "status", &["verified", "degraded"], true)?;
+    validate_candidate_enum(
+        capabilities,
+        "resolvedTransport",
+        &["windows_queue", "raw_tcp", "serial"],
+        true,
+    )?;
+    validate_candidate_string(capabilities, "resolvedAddress", 1_024, true)?;
+    validate_candidate_enum(
+        capabilities,
+        "emulation",
+        &["auto", "escpos", "star_line"],
+        true,
+    )?;
+    validate_candidate_enum(capabilities, "renderMode", &["text", "raster_exact"], true)?;
+    match capabilities.get("baudRate") {
+        Some(value) if value.is_null() => {}
+        Some(value) => {
+            candidate_bounded_integer(value, "capabilities.baudRate", 300, 4_000_000)?;
+        }
+        None => return Err("confirmed candidate is missing capabilities.baudRate".into()),
+    }
+    if let Some(value) = capabilities.get("escposCodePage") {
+        candidate_bounded_integer(value, "capabilities.escposCodePage", 0, 255)?;
+    }
+    for key in ["supportsCut", "supportsLogo"] {
+        if !capabilities
+            .get(key)
+            .is_some_and(serde_json::Value::is_boolean)
+        {
+            return Err(format!(
+                "confirmed candidate capabilities.{key} must be a boolean"
+            ));
+        }
+    }
+    let verified_at = validate_candidate_string(capabilities, "lastVerifiedAt", 64, true)?
+        .expect("required timestamp was validated");
+    DateTime::parse_from_rfc3339(&verified_at)
+        .map_err(|_| "confirmed candidate lastVerifiedAt must be RFC 3339")?;
+    validate_candidate_target_evidence(object, capabilities)?;
+    validate_candidate_cross_field_evidence(object, capabilities)?;
+
+    let mut safe = serde_json::Map::new();
+    for key in [
+        "type",
+        "systemName",
+        "ip",
+        "hostname",
+        "host",
+        "port",
+        "address",
+        "path",
+        "serialPort",
+        "portName",
+        "comPort",
+        "vendorId",
+        "productId",
+        "render_mode",
+        "emulation",
+        "baudRate",
+        "cutPaper",
+        "escposCodePage",
+    ] {
+        if let Some(field) = object.get(key) {
+            safe.insert(key.to_string(), field.clone());
+        }
+    }
+    let mut safe_capabilities = serde_json::Map::new();
+    for key in [
+        "status",
+        "resolvedTransport",
+        "resolvedAddress",
+        "emulation",
+        "renderMode",
+        "baudRate",
+        "escposCodePage",
+        "supportsCut",
+        "supportsLogo",
+        "lastVerifiedAt",
+    ] {
+        if let Some(field) = capabilities.get(key) {
+            safe_capabilities.insert(key.to_string(), field.clone());
+        }
+    }
+    safe.insert(
+        "capabilities".to_string(),
+        serde_json::Value::Object(safe_capabilities),
+    );
+    Ok(serde_json::Value::Object(safe))
+}
+
+fn profile_with_exact_connection(
+    profile: &serde_json::Value,
+    connection: &serde_json::Value,
+) -> serde_json::Value {
+    let mut updated = profile.clone();
+    if let Some(object) = updated.as_object_mut() {
+        object.insert(
+            "connectionJson".to_string(),
+            serde_json::json!(connection.to_string()),
+        );
+        if let Some(name) = connection
+            .get("systemName")
+            .or_else(|| connection.get("hostname"))
+            .or_else(|| connection.get("ip"))
+            .or_else(|| connection.get("address"))
+            .or_else(|| connection.get("serialPort"))
+            .and_then(serde_json::Value::as_str)
+        {
+            object.insert("printerName".to_string(), serde_json::json!(name));
+        }
+    }
+    updated
+}
+
+fn same_physical_candidate_target(
+    selected: &printers::ResolvedPrinterTarget,
+    confirmed: &printers::ResolvedPrinterTarget,
+) -> bool {
+    print::wizard_physical_target_key(selected) == print::wizard_physical_target_key(confirmed)
 }
 
 fn target_capability_fields(
@@ -1113,6 +1916,7 @@ fn profile_with_candidate_capabilities(
     target: &printers::ResolvedPrinterTarget,
     emulation: &str,
     render_mode: &str,
+    supports_cut: bool,
     supports_logo: bool,
 ) -> serde_json::Value {
     let (resolved_transport, resolved_address, baud_rate) = target_capability_fields(target);
@@ -1123,7 +1927,7 @@ fn profile_with_candidate_capabilities(
         "emulation": emulation,
         "renderMode": render_mode,
         "baudRate": baud_rate,
-        "supportsCut": true,
+        "supportsCut": supports_cut,
         "supportsLogo": supports_logo,
         "lastVerifiedAt": chrono::Utc::now().to_rfc3339()
     });
@@ -1147,6 +1951,26 @@ fn profile_connection_details(profile: &serde_json::Value) -> serde_json::Value 
         .and_then(|value| value.as_str())
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
         .unwrap_or_else(|| serde_json::json!({}))
+}
+
+fn profile_supports_cut(profile: &serde_json::Value) -> bool {
+    let connection = profile_connection_details(profile);
+    profile
+        .get("cutPaper")
+        .or_else(|| profile.get("cut_paper"))
+        .and_then(serde_json::Value::as_bool)
+        .or_else(|| {
+            connection
+                .get("cutPaper")
+                .and_then(serde_json::Value::as_bool)
+        })
+        .or_else(|| {
+            connection
+                .get("capabilities")
+                .and_then(|value| value.get("supportsCut"))
+                .and_then(serde_json::Value::as_bool)
+        })
+        .unwrap_or(true)
 }
 
 fn verification_emulation_candidates(profile: &serde_json::Value) -> Vec<String> {
@@ -1224,6 +2048,7 @@ fn verification_candidates_for_profile(
     let target_candidates = verification_target_candidates(profile, target);
     let emulations = verification_emulation_candidates(profile);
     let render_modes = verification_render_mode_candidates(profile, sample_kind);
+    let supports_cut = profile_supports_cut(profile);
 
     let mut out = Vec::new();
     for target_candidate in target_candidates {
@@ -1233,6 +2058,7 @@ fn verification_candidates_for_profile(
                     target: target_candidate.clone(),
                     emulation: emulation.clone(),
                     render_mode: render_mode.clone(),
+                    supports_cut,
                     supports_logo: sample_kind == "branding",
                 });
             }
@@ -1242,21 +2068,43 @@ fn verification_candidates_for_profile(
 }
 
 fn build_sample_bytes(
-    sample_kind: &str,
+    sample_kind: &WizardSampleKind,
     printer_label: &str,
     layout: &receipt_renderer::LayoutConfig,
-) -> Result<(Vec<u8>, bool, &'static str), String> {
-    match sample_kind {
-        "encoding" => Ok((build_encoding_sample(layout), false, "POS Encoding Test")),
-        "branding" => {
-            let (bytes, supports_logo) = build_branding_sample(printer_label, layout)?;
-            Ok((bytes, supports_logo, "POS Branding Test"))
-        }
-        _ => Ok((
-            build_transport_text_sample(printer_label, layout),
-            false,
-            "POS Draft Test",
-        )),
+    cut_paper: bool,
+) -> Result<WizardSampleBuild, WizardSampleBuildError> {
+    let logo_configured = layout.show_logo
+        && layout
+            .logo_url
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|source| !source.is_empty());
+    let mut sample = match sample_kind {
+        WizardSampleKind::Encoding => Ok(WizardSampleBuild {
+            bytes: build_encoding_sample(layout),
+            logo_configured,
+            logo_included: false,
+        }),
+        WizardSampleKind::Branding => build_branding_sample(printer_label, layout),
+        WizardSampleKind::TransportText => Ok(WizardSampleBuild {
+            bytes: build_transport_text_sample(printer_label, layout),
+            logo_configured,
+            logo_included: false,
+        }),
+    }?;
+    if !cut_paper {
+        remove_terminal_sample_cut(&mut sample.bytes);
+    }
+    Ok(sample)
+}
+
+fn remove_terminal_sample_cut(bytes: &mut Vec<u8>) {
+    const ESCPOS_CUT: [u8; 4] = [0x1d, 0x56, 0x41, 0x10];
+    const STAR_CUT: [u8; 3] = [0x1b, 0x64, 0x01];
+    if bytes.ends_with(&ESCPOS_CUT) {
+        bytes.truncate(bytes.len() - ESCPOS_CUT.len());
+    } else if bytes.ends_with(&STAR_CUT) {
+        bytes.truncate(bytes.len() - STAR_CUT.len());
     }
 }
 
@@ -1264,6 +2112,14 @@ fn build_sample_bytes(
 struct ConfiguredPrinterLookup {
     names: HashSet<String>,
     addresses: HashSet<String>,
+}
+
+struct BlockingDiscoverySnapshot {
+    configured: ConfiguredPrinterLookup,
+    system_printer_names: Vec<String>,
+    usb_serial: Vec<serde_json::Value>,
+    bluetooth: Vec<serde_json::Value>,
+    local_ips: Vec<std::net::Ipv4Addr>,
 }
 
 fn normalize_lookup_token(value: &str) -> Option<String> {
@@ -1465,12 +2321,16 @@ fn resolved_transport_name(target: &printers::ResolvedPrinterTarget) -> &'static
     target.transport_name()
 }
 
-fn resolve_profile_connection_state(
+fn resolve_profile_connection_state_with_probe<P>(
     profile: &serde_json::Value,
-) -> (Option<printers::ResolvedPrinterTarget>, bool, &'static str) {
+    probe: &P,
+) -> (Option<printers::ResolvedPrinterTarget>, bool, &'static str)
+where
+    P: Fn(&printers::ResolvedPrinterTarget) -> Result<(), String>,
+{
     match printers::resolve_printer_target(profile) {
         Ok(target) => {
-            let connected = printers::probe_printer_target(&target).is_ok();
+            let connected = probe(&target).is_ok();
             let verification_status = printers::capability_verification_status(profile);
             let state = if connected {
                 match verification_status {
@@ -1488,6 +2348,13 @@ fn resolve_profile_connection_state(
             (None, false, "unresolved")
         }
     }
+}
+
+#[cfg(test)]
+fn resolve_profile_connection_state(
+    profile: &serde_json::Value,
+) -> (Option<printers::ResolvedPrinterTarget>, bool, &'static str) {
+    resolve_profile_connection_state_with_probe(profile, &printers::probe_printer_target)
 }
 
 fn is_configured_discovery_entry(
@@ -1681,6 +2548,11 @@ $rows | ConvertTo-Json -Compress
     out
 }
 
+#[cfg(not(target_os = "windows"))]
+fn detect_local_ipv4s() -> Vec<std::net::Ipv4Addr> {
+    vec![]
+}
+
 #[cfg(target_os = "windows")]
 fn lan_subnet_hosts(primary_ip: std::net::Ipv4Addr) -> Vec<std::net::Ipv4Addr> {
     let [a, b, c, host] = primary_ip.octets();
@@ -1711,10 +2583,10 @@ async fn probe_lan_printer_host(ip: std::net::Ipv4Addr) -> Option<u16> {
 }
 
 #[cfg(target_os = "windows")]
-async fn discover_lan_printers_native(
+async fn discover_lan_printers_from_local_ips(
     configured: &ConfiguredPrinterLookup,
+    local_ips: Vec<std::net::Ipv4Addr>,
 ) -> Vec<serde_json::Value> {
-    let local_ips = detect_local_ipv4s();
     if local_ips.is_empty() {
         warn!("LAN printer discovery skipped: unable to detect any local private IPv4 address");
         return vec![];
@@ -1771,8 +2643,9 @@ async fn discover_lan_printers_native(
 }
 
 #[cfg(not(target_os = "windows"))]
-async fn discover_lan_printers_native(
+async fn discover_lan_printers_from_local_ips(
     _configured: &ConfiguredPrinterLookup,
+    _local_ips: Vec<std::net::Ipv4Addr>,
 ) -> Vec<serde_json::Value> {
     vec![]
 }
@@ -1932,9 +2805,13 @@ $devices.Values | ConvertTo-Json -Depth 6 -Compress
     run_hidden_powershell_json_rows(script, "bluetooth-ble")
 }
 
-fn collect_printer_status_map(
+fn collect_printer_status_map_with_probe<P>(
     db: &db::DbState,
-) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    probe: P,
+) -> Result<serde_json::Map<String, serde_json::Value>, String>
+where
+    P: Fn(&printers::ResolvedPrinterTarget) -> Result<(), String>,
+{
     let profiles = printers::list_printer_profiles(db)?;
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
@@ -1942,7 +2819,8 @@ fn collect_printer_status_map(
     if let Some(arr) = profiles.as_array() {
         for profile in arr {
             let printer_id = value_str(profile, &["id"]).unwrap_or_default();
-            let (target, connected, state) = resolve_profile_connection_state(profile);
+            let (target, connected, state) =
+                resolve_profile_connection_state_with_probe(profile, &probe);
             let capabilities = printers::read_capability_snapshot(profile);
 
             let queue_len: i64 = conn
@@ -1976,6 +2854,12 @@ fn collect_printer_status_map(
     Ok(status_map)
 }
 
+fn collect_printer_status_map(
+    db: &db::DbState,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    collect_printer_status_map_with_probe(db, printers::probe_printer_target)
+}
+
 fn hash_status_map(status_map: &serde_json::Map<String, serde_json::Value>) -> u64 {
     let mut hasher = DefaultHasher::new();
     // JSON object key order is deterministic for Map insertion sequence,
@@ -1983,6 +2867,17 @@ fn hash_status_map(status_map: &serde_json::Map<String, serde_json::Value>) -> u
     let serialized = serde_json::to_string(status_map).unwrap_or_default();
     serialized.hash(&mut hasher);
     hasher.finish()
+}
+
+fn printer_status_snapshot_event(
+    statuses: serde_json::Map<String, serde_json::Value>,
+    updated_at: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "status": "snapshot",
+        "statuses": statuses,
+        "updatedAt": updated_at
+    })
 }
 
 pub fn start_printer_status_monitor(
@@ -1995,18 +2890,22 @@ pub fn start_printer_status_monitor(
     tauri::async_runtime::spawn(async move {
         let mut last_hash: Option<u64> = None;
         loop {
-            match collect_printer_status_map(db.as_ref()) {
+            let db_for_snapshot = Arc::clone(&db);
+            match run_printer_ipc_blocking(move || {
+                collect_printer_status_map(db_for_snapshot.as_ref())
+            })
+            .await
+            {
                 Ok(statuses) => {
                     let current_hash = hash_status_map(&statuses);
                     if last_hash != Some(current_hash) {
                         last_hash = Some(current_hash);
                         let _ = app.emit(
                             "printer_status_changed",
-                            serde_json::json!({
-                                "status": "snapshot",
-                                "statuses": statuses,
-                                "updatedAt": chrono::Utc::now().to_rfc3339()
-                            }),
+                            printer_status_snapshot_event(
+                                statuses,
+                                &chrono::Utc::now().to_rfc3339(),
+                            ),
                         );
                     }
                 }
@@ -2101,6 +3000,163 @@ fn discover_bluetooth_printers_native(
     _configured: &ConfiguredPrinterLookup,
 ) -> Result<Vec<serde_json::Value>, String> {
     Ok(vec![])
+}
+
+fn collect_discovery_blocking_with_sources<S, U, B, R, L>(
+    db: &db::DbState,
+    wants_system_like: bool,
+    wants_bluetooth: bool,
+    list_system: S,
+    list_usb_serial: U,
+    discover_bluetooth: B,
+    list_bluetooth_serial: R,
+    detect_local_ips: L,
+) -> Result<BlockingDiscoverySnapshot, String>
+where
+    S: FnOnce() -> Vec<String>,
+    U: FnOnce(&ConfiguredPrinterLookup) -> Vec<serde_json::Value>,
+    B: FnOnce(&ConfiguredPrinterLookup) -> Result<Vec<serde_json::Value>, String>,
+    R: FnOnce(&ConfiguredPrinterLookup) -> Vec<serde_json::Value>,
+    L: FnOnce() -> Vec<std::net::Ipv4Addr>,
+{
+    let configured = configured_printer_lookup(db);
+    let (system_printer_names, usb_serial, local_ips) = if wants_system_like {
+        (
+            list_system(),
+            list_usb_serial(&configured),
+            detect_local_ips(),
+        )
+    } else {
+        (vec![], vec![], vec![])
+    };
+    let bluetooth = if wants_bluetooth {
+        let mut discovered = discover_bluetooth(&configured)?;
+        discovered.extend(list_bluetooth_serial(&configured));
+        dedupe_discovered_printers(discovered)
+    } else {
+        vec![]
+    };
+
+    Ok(BlockingDiscoverySnapshot {
+        configured,
+        system_printer_names,
+        usb_serial,
+        bluetooth,
+        local_ips,
+    })
+}
+
+fn collect_discovery_blocking(
+    db: &db::DbState,
+    wants_system_like: bool,
+    wants_bluetooth: bool,
+) -> Result<BlockingDiscoverySnapshot, String> {
+    collect_discovery_blocking_with_sources(
+        db,
+        wants_system_like,
+        wants_bluetooth,
+        printers::list_system_printers,
+        |configured| discover_serial_printers_native(configured, true, false),
+        discover_bluetooth_printers_native,
+        |configured| discover_serial_printers_native(configured, false, true),
+        detect_local_ipv4s,
+    )
+}
+
+fn system_printers_response(names: Vec<String>) -> serde_json::Value {
+    serde_json::json!({
+        "success": true,
+        "printers": names,
+    })
+}
+
+fn system_discovery_entries(
+    names: Vec<String>,
+    configured: &ConfiguredPrinterLookup,
+    include_port: bool,
+) -> Vec<serde_json::Value> {
+    names
+        .into_iter()
+        .map(|name| {
+            let address = name.clone();
+            let mut row = serde_json::json!({
+                "name": name,
+                "type": "system",
+                "address": address,
+                "model": serde_json::Value::Null,
+                "manufacturer": "system",
+                "isConfigured": is_configured_discovery_entry(configured, &name, &address)
+            });
+            if include_port {
+                row.as_object_mut()
+                    .expect("system discovery row must be an object")
+                    .insert("port".into(), serde_json::Value::Null);
+            }
+            row
+        })
+        .collect()
+}
+
+fn network_scan_response(
+    snapshot: BlockingDiscoverySnapshot,
+    lan_printers: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    let mut discovered =
+        system_discovery_entries(snapshot.system_printer_names, &snapshot.configured, false);
+    discovered.extend(snapshot.usb_serial);
+    discovered.extend(lan_printers);
+    serde_json::json!({
+        "success": true,
+        "printers": dedupe_discovered_printers(discovered),
+        "type": "network"
+    })
+}
+
+fn bluetooth_scan_response(snapshot: BlockingDiscoverySnapshot) -> serde_json::Value {
+    let printers = dedupe_discovered_printers(snapshot.bluetooth);
+    let message = if cfg!(target_os = "windows") {
+        if printers.is_empty() {
+            "No paired Bluetooth devices found".to_string()
+        } else {
+            format!("Discovered {} Bluetooth device(s)", printers.len())
+        }
+    } else {
+        "Bluetooth native scan is currently supported on Windows only".to_string()
+    };
+    serde_json::json!({
+        "success": true,
+        "printers": printers,
+        "type": "bluetooth",
+        "message": message
+    })
+}
+
+fn printer_discover_response(
+    snapshot: BlockingDiscoverySnapshot,
+    lan_printers: Vec<serde_json::Value>,
+    wants_system_like: bool,
+    wants_bluetooth: bool,
+) -> serde_json::Value {
+    let mut out = Vec::new();
+    if wants_system_like {
+        out.extend(system_discovery_entries(
+            snapshot.system_printer_names,
+            &snapshot.configured,
+            true,
+        ));
+        out.extend(snapshot.usb_serial);
+        out.extend(lan_printers);
+    }
+    if wants_bluetooth {
+        info!(
+            bluetooth_candidates = snapshot.bluetooth.len(),
+            "printer_discover native bluetooth scan result"
+        );
+        out.extend(snapshot.bluetooth);
+    }
+    let deduped = dedupe_discovered_printers(out);
+    info!(result_count = deduped.len(), "printer_discover completed");
+    serde_json::json!({ "success": true, "printers": deduped })
 }
 
 #[cfg(test)]
@@ -2201,63 +3257,39 @@ mod bluetooth_discovery_tests {
 
 #[tauri::command]
 pub async fn printer_scan_network(
-    db: tauri::State<'_, db::DbState>,
+    _db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let configured = configured_printer_lookup(&db);
-    let printers = printers::list_system_printers();
-    let mut discovered: Vec<serde_json::Value> = printers
-        .into_iter()
-        .map(|name| {
-            let address = name.clone();
-            serde_json::json!({
-                "name": name,
-                "type": "system",
-                "address": address,
-                "model": serde_json::Value::Null,
-                "manufacturer": "system",
-                "isConfigured": is_configured_discovery_entry(&configured, &name, &address)
-            })
-        })
-        .collect();
-    discovered.extend(discover_serial_printers_native(&configured, true, false));
-    discovered.extend(discover_lan_printers_native(&configured).await);
-    let deduped = dedupe_discovered_printers(discovered);
-    Ok(serde_json::json!({
-        "success": true,
-        "printers": deduped,
-        "type": "network"
-    }))
+    let worker_app = app.clone();
+    let mut snapshot = run_printer_ipc_blocking(move || {
+        let db = worker_app.state::<db::DbState>();
+        collect_discovery_blocking(&db, true, false)
+    })
+    .await?;
+    let local_ips = std::mem::take(&mut snapshot.local_ips);
+    let lan_printers = discover_lan_printers_from_local_ips(&snapshot.configured, local_ips).await;
+    Ok(network_scan_response(snapshot, lan_printers))
 }
 
 #[tauri::command]
 pub async fn printer_scan_bluetooth(
-    db: tauri::State<'_, db::DbState>,
+    _db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let configured = configured_printer_lookup(&db);
-    let mut printers = discover_bluetooth_printers_native(&configured)?;
-    printers.extend(discover_serial_printers_native(&configured, false, true));
-    let printers = dedupe_discovered_printers(printers);
-    let message = if cfg!(target_os = "windows") {
-        if printers.is_empty() {
-            "No paired Bluetooth devices found".to_string()
-        } else {
-            format!("Discovered {} Bluetooth device(s)", printers.len())
-        }
-    } else {
-        "Bluetooth native scan is currently supported on Windows only".to_string()
-    };
-    Ok(serde_json::json!({
-        "success": true,
-        "printers": printers,
-        "type": "bluetooth",
-        "message": message
-    }))
+    let worker_app = app.clone();
+    let snapshot = run_printer_ipc_blocking(move || {
+        let db = worker_app.state::<db::DbState>();
+        collect_discovery_blocking(&db, false, true)
+    })
+    .await?;
+    Ok(bluetooth_scan_response(snapshot))
 }
 
 #[tauri::command]
 pub async fn printer_discover(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    _db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let requested = parse_printer_discover_types(arg0);
     info!(
@@ -2267,41 +3299,24 @@ pub async fn printer_discover(
     let wants_system_like = should_discover_system_like(&requested);
     let wants_bluetooth = should_discover_bluetooth(&requested);
 
-    let configured = configured_printer_lookup(&db);
-    let mut out: Vec<serde_json::Value> = Vec::new();
-
-    if wants_system_like {
-        for printer_name in printers::list_system_printers() {
-            let address = printer_name.clone();
-            out.push(serde_json::json!({
-                "name": printer_name,
-                "type": "system",
-                "address": address,
-                "port": serde_json::Value::Null,
-                "model": serde_json::Value::Null,
-                "manufacturer": "system",
-                "isConfigured": is_configured_discovery_entry(&configured, &printer_name, &address)
-            }));
-        }
-        out.extend(discover_serial_printers_native(&configured, true, false));
-        out.extend(discover_lan_printers_native(&configured).await);
-    }
-
-    if wants_bluetooth {
-        let mut bluetooth = discover_bluetooth_printers_native(&configured)?;
-        bluetooth.extend(discover_serial_printers_native(&configured, false, true));
-        let bluetooth = dedupe_discovered_printers(bluetooth);
-        info!(
-            bluetooth_candidates = bluetooth.len(),
-            "printer_discover native bluetooth scan result"
-        );
-        out.extend(bluetooth);
-    }
-
-    let deduped = dedupe_discovered_printers(out);
-    info!(result_count = deduped.len(), "printer_discover completed");
-
-    Ok(serde_json::json!({ "success": true, "printers": deduped }))
+    let worker_app = app.clone();
+    let mut snapshot = run_printer_ipc_blocking(move || {
+        let db = worker_app.state::<db::DbState>();
+        collect_discovery_blocking(&db, wants_system_like, wants_bluetooth)
+    })
+    .await?;
+    let lan_printers = if wants_system_like {
+        let local_ips = std::mem::take(&mut snapshot.local_ips);
+        discover_lan_printers_from_local_ips(&snapshot.configured, local_ips).await
+    } else {
+        vec![]
+    };
+    Ok(printer_discover_response(
+        snapshot,
+        lan_printers,
+        wants_system_like,
+        wants_bluetooth,
+    ))
 }
 
 #[tauri::command]
@@ -2310,8 +3325,14 @@ pub async fn printer_add(
     db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = electron_to_profile_input(None, arg0.unwrap_or(serde_json::json!({})));
-    let created = printers::create_printer_profile(&db, &payload)?;
+    let payload = arg0.unwrap_or(serde_json::json!({}));
+    let has_confirmed_candidate = payload_has_confirmed_candidate(&payload);
+    let payload = profile_payload_with_confirmed_candidate(payload)?;
+    let created = if has_confirmed_candidate {
+        printers::create_printer_profile_with_validated_capabilities(&db, &payload)?
+    } else {
+        printers::create_printer_profile(&db, &payload)?
+    };
     let profile_id = value_str(&created, &["profileId"]).unwrap_or_default();
     let profile = if profile_id.is_empty() {
         serde_json::Value::Null
@@ -2339,8 +3360,20 @@ pub async fn printer_update(
 ) -> Result<serde_json::Value, String> {
     let parsed = parse_printer_update_payload(arg0, arg1)?;
     let printer_id = parsed.printer_id;
-    let payload = electron_to_profile_input(Some(printer_id.clone()), parsed.updates);
-    let _ = printers::update_printer_profile(&db, &payload)?;
+    let has_confirmed_candidate = payload_has_confirmed_candidate(&parsed.updates);
+    let mut payload = if has_confirmed_candidate {
+        profile_payload_with_confirmed_candidate(parsed.updates)?
+    } else {
+        electron_to_profile_input(Some(printer_id.clone()), parsed.updates)
+    };
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("id".to_string(), serde_json::json!(printer_id.clone()));
+    }
+    if has_confirmed_candidate {
+        let _ = printers::update_printer_profile_with_validated_capabilities(&db, &payload)?;
+    } else {
+        let _ = printers::update_printer_profile(&db, &payload)?;
+    }
     let raw = printers::get_printer_profile(&db, &printer_id)?;
     let profile = profile_to_electron_format(&raw);
     let _ = app.emit(
@@ -2396,15 +3429,17 @@ pub async fn printer_get(
     Ok(serde_json::json!({ "success": true, "printer": profile }))
 }
 
-#[tauri::command]
-pub async fn printer_get_status(
-    arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
-) -> Result<serde_json::Value, String> {
-    let printer_id = parse_printer_id_payload(arg0)?;
-    let profile = printers::get_printer_profile(&db, &printer_id)?;
+fn execute_printer_get_status_with_probe<P>(
+    db: &db::DbState,
+    printer_id: &str,
+    probe: P,
+) -> Result<serde_json::Value, String>
+where
+    P: Fn(&printers::ResolvedPrinterTarget) -> Result<(), String>,
+{
+    let profile = printers::get_printer_profile(db, printer_id)?;
     let printer_name = value_str(&profile, &["printerName", "printer_name"]).unwrap_or_default();
-    let (target, connected, state) = resolve_profile_connection_state(&profile);
+    let (target, connected, state) = resolve_profile_connection_state_with_probe(&profile, &probe);
     let capabilities = printers::read_capability_snapshot(&profile);
 
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -2434,18 +3469,47 @@ pub async fn printer_get_status(
     }))
 }
 
+fn execute_printer_get_status(
+    db: &db::DbState,
+    printer_id: &str,
+) -> Result<serde_json::Value, String> {
+    execute_printer_get_status_with_probe(db, printer_id, printers::probe_printer_target)
+}
+
+#[tauri::command]
+pub async fn printer_get_status(
+    arg0: Option<serde_json::Value>,
+    _db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    let printer_id = parse_printer_id_payload(arg0)?;
+    let worker_app = app.clone();
+    run_printer_ipc_blocking(move || {
+        let db = worker_app.state::<db::DbState>();
+        execute_printer_get_status(&db, &printer_id)
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn printer_get_all_statuses(
-    db: tauri::State<'_, db::DbState>,
+    _db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let status_map = collect_printer_status_map(&db)?;
-    Ok(serde_json::json!({ "success": true, "statuses": status_map }))
+    let worker_app = app.clone();
+    run_printer_ipc_blocking(move || {
+        let db = worker_app.state::<db::DbState>();
+        let status_map = collect_printer_status_map(&db)?;
+        Ok(serde_json::json!({ "success": true, "statuses": status_map }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn printer_submit_job(
     arg0: Option<serde_json::Value>,
     db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let payload = arg0.unwrap_or(serde_json::json!({}));
     let entity_type = value_str(&payload, &["entityType", "entity_type"])
@@ -2464,6 +3528,7 @@ pub async fn printer_submit_job(
             &entity_type,
             &entity_id,
             printer_profile_id.as_deref(),
+            &app,
         );
     }
 
@@ -2483,76 +3548,197 @@ pub async fn printer_submit_job(
     Ok(serde_json::json!({ "success": true, "jobId": job_id }))
 }
 
+fn take_print_queue_durable_changed(result: &mut serde_json::Value) -> bool {
+    result
+        .as_object_mut()
+        .and_then(|object| object.remove("durableChanged"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+}
+
+fn serialize_print_history_mutation(
+    result: Result<print_history::PrintHistoryMutationResult, String>,
+) -> Result<serde_json::Value, String> {
+    let result = result?;
+    let mut value = serde_json::to_value(result)
+        .map_err(|error| format!("Serialize print history mutation result: {error}"))?;
+    let _ = value
+        .as_object_mut()
+        .ok_or_else(|| "Print history mutation result did not serialize as an object".to_string())?
+        .insert("success".into(), serde_json::Value::Bool(true));
+    Ok(value)
+}
+
+fn execute_print_reprint_job(
+    db: &db::DbState,
+    job_id: &str,
+    now: DateTime<Utc>,
+) -> Result<serde_json::Value, String> {
+    serialize_print_history_mutation(print_history::clone_reprint_job(db, job_id, now))
+}
+
+fn execute_printer_retry_job(
+    db: &db::DbState,
+    job_id: &str,
+    now: DateTime<Utc>,
+) -> Result<serde_json::Value, String> {
+    serialize_print_history_mutation(print_history::retry_failed_print_job(db, job_id, now))
+}
+
+fn retry_kick_job_id(result: &serde_json::Value) -> Option<String> {
+    result
+        .get("jobId")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
+
+fn reprint_kick_job_id(result: &serde_json::Value) -> Option<String> {
+    result
+        .get("newJobId")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
+
+fn finish_print_queue_mutation<S, I, K>(
+    mutation_result: Result<serde_json::Value, String>,
+    select_kick_job: S,
+    invalidate: I,
+    kick: K,
+) -> Result<serde_json::Value, String>
+where
+    S: FnOnce(&serde_json::Value) -> Option<String>,
+    I: FnOnce(),
+    K: FnOnce(&str),
+{
+    let mut result = mutation_result?;
+    let affected = result.get("affected").and_then(serde_json::Value::as_u64) == Some(1);
+    let kick_job_id = select_kick_job(&result);
+    let durable_changed = take_print_queue_durable_changed(&mut result);
+    if durable_changed {
+        invalidate();
+    }
+    if durable_changed && affected {
+        if let Some(job_id) = kick_job_id.as_deref() {
+            kick(job_id);
+        }
+    }
+    Ok(result)
+}
+
+fn spawn_print_history_job_processing(app: &tauri::AppHandle, job_id: &str) {
+    match app.path().app_data_dir() {
+        Ok(data_dir) => print::spawn_pending_job_processing(
+            app.clone(),
+            data_dir,
+            format!("print history job {job_id}"),
+        ),
+        Err(error) => warn!(
+            job_id = %job_id,
+            error = %error,
+            "Unable to kick managed processing for print history job"
+        ),
+    }
+}
+
+async fn run_print_queue_mutation_with_kick<F, S>(
+    app: tauri::AppHandle,
+    mutation: F,
+    select_kick_job: S,
+) -> Result<serde_json::Value, String>
+where
+    F: FnOnce(&db::DbState) -> Result<serde_json::Value, String> + Send + 'static,
+    S: FnOnce(&serde_json::Value) -> Option<String> + Send + 'static,
+{
+    let worker_app = app.clone();
+    let mutation_result = tokio::task::spawn_blocking(move || {
+        let db = worker_app.state::<db::DbState>();
+        mutation(&db)
+    })
+    .await
+    .map_err(|error| format!("Print queue mutation worker failed: {error}"))?;
+
+    finish_print_queue_mutation(
+        mutation_result,
+        select_kick_job,
+        || {
+            // Invalidation only: consumers must reload the typed SQLite snapshot.
+            print::notify_print_queue_changed(&app);
+        },
+        |job_id| spawn_print_history_job_processing(&app, job_id),
+    )
+}
+
+async fn run_print_queue_mutation<F>(
+    app: tauri::AppHandle,
+    mutation: F,
+) -> Result<serde_json::Value, String>
+where
+    F: FnOnce(&db::DbState) -> Result<serde_json::Value, String> + Send + 'static,
+{
+    run_print_queue_mutation_with_kick(app, mutation, |_| None).await
+}
+
 #[tauri::command]
 pub async fn printer_cancel_job(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let job_id = parse_job_id_payload(arg0)?;
-    print::cancel_print_job(&db, &job_id)
+    run_print_queue_mutation(app, move |db| print::cancel_print_job(db, &job_id)).await
 }
 
 #[tauri::command]
 pub async fn printer_pause_queue(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = parse_print_queue_control_payload(arg0);
-    print::set_print_queue_paused(&db, payload.printer_profile_id.as_deref(), true)
+    let payload = parse_print_queue_control_payload(arg0)?;
+    run_print_queue_mutation(app, move |db| {
+        print::set_print_queue_paused(db, payload.printer_profile_id.as_deref(), true)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn printer_resume_queue(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = parse_print_queue_control_payload(arg0);
-    print::set_print_queue_paused(&db, payload.printer_profile_id.as_deref(), false)
+    let payload = parse_print_queue_control_payload(arg0)?;
+    run_print_queue_mutation(app, move |db| {
+        print::set_print_queue_paused(db, payload.printer_profile_id.as_deref(), false)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn printer_cancel_all_jobs(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = parse_print_queue_control_payload(arg0);
-    print::cancel_print_jobs(
-        &db,
-        payload.printer_profile_id.as_deref(),
-        Some(payload.statuses.as_slice()),
-    )
+    let payload = parse_print_queue_control_payload(arg0)?;
+    run_print_queue_mutation(app, move |db| {
+        print::pause_and_cancel_pos_jobs(
+            db,
+            payload.printer_profile_id.as_deref(),
+            Some(payload.statuses.as_slice()),
+        )
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn printer_retry_job(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let job_id = parse_job_id_payload(arg0)?;
-    printers::reprint_job(&db, &job_id)
-}
-
-fn ensure_target_ready(
-    target: &printers::ResolvedPrinterTarget,
-) -> Result<Option<Vec<String>>, String> {
-    if let printers::ResolvedPrinterTarget::WindowsQueue {
-        printer_name: windows_printer_name,
-    } = target
-    {
-        let known_printers = printers::list_system_printers();
-        let printer_known = known_printers
-            .iter()
-            .any(|name| name == windows_printer_name);
-        if !printer_known {
-            return Err(format!(
-                "Printer \"{}\" is not installed in Windows Printers",
-                windows_printer_name
-            ));
-        }
-        return Ok(Some(known_printers));
-    }
-
-    Ok(None)
+    run_print_queue_mutation_with_kick(
+        app,
+        move |db| execute_printer_retry_job(db, &job_id, Utc::now()),
+        retry_kick_job_id,
+    )
+    .await
 }
 
 fn build_transport_text_sample(
@@ -2657,529 +3843,425 @@ fn build_encoding_sample(layout: &receipt_renderer::LayoutConfig) -> Vec<u8> {
 fn build_branding_sample(
     printer_label: &str,
     layout: &receipt_renderer::LayoutConfig,
-) -> Result<(Vec<u8>, bool), String> {
-    let mut bytes = build_transport_text_sample(printer_label, layout);
-    let mut supports_logo = false;
-    if let Some(prefix) = crate::print::build_logo_prefix_for_layout(layout)? {
-        let mut combined = Vec::with_capacity(prefix.len() + bytes.len() + 1);
-        combined.extend_from_slice(&prefix);
-        combined.push(0x0A);
-        combined.extend_from_slice(&bytes);
-        bytes = combined;
-        supports_logo = true;
+) -> Result<WizardSampleBuild, WizardSampleBuildError> {
+    if !layout.show_logo
+        || !layout
+            .logo_url
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|source| !source.is_empty())
+    {
+        return Err(WizardSampleBuildError::new(
+            "logo_not_configured",
+            "A configured and enabled logo is required for the branding sample",
+        ));
     }
-    Ok((bytes, supports_logo))
+    let prefix = crate::print::build_logo_prefix_for_layout(layout)
+        .map_err(|error| {
+            WizardSampleBuildError::new("logo_render_failed", error).with_logo_state(true, false)
+        })?
+        .filter(|prefix| !prefix.is_empty())
+        .ok_or_else(|| {
+            WizardSampleBuildError::new(
+                "logo_render_failed",
+                "Logo rendering returned no raster bytes",
+            )
+            .with_logo_state(true, false)
+        })?;
+    let body = build_transport_text_sample(printer_label, layout);
+    let mut bytes = Vec::with_capacity(prefix.len() + body.len() + 1);
+    bytes.extend_from_slice(&prefix);
+    bytes.push(0x0A);
+    bytes.extend_from_slice(&body);
+    Ok(WizardSampleBuild {
+        bytes,
+        logo_configured: true,
+        logo_included: true,
+    })
 }
 
-fn run_verification_dispatch(
+struct PreparedWizardSample {
+    target: printers::ResolvedPrinterTarget,
+    layout: receipt_renderer::LayoutConfig,
+    sample: WizardSampleBuild,
+    candidate_capabilities: serde_json::Value,
+    candidate_connection_details: serde_json::Value,
+}
+
+fn prepare_wizard_sample(
     db: &db::DbState,
     base_profile: &serde_json::Value,
     base_target: &printers::ResolvedPrinterTarget,
     printer_label: &str,
-    sample_kind: &str,
+    sample_kind: &WizardSampleKind,
     probe_attempt: usize,
-) -> Result<
-    (
-        VerificationCandidate,
-        receipt_renderer::LayoutConfig,
-        printers::RawPrintResult,
-        bool,
-    ),
-    String,
-> {
-    let candidates = verification_candidates_for_profile(base_profile, base_target, sample_kind);
-    if candidates.is_empty() {
-        return Err("No verification candidates available for this printer".to_string());
-    }
-    if probe_attempt >= candidates.len() {
-        return Err("No additional protocol candidates remain. Open Expert Settings to adjust transport or emulation manually.".to_string());
-    }
-
-    let candidate = candidates[probe_attempt].clone();
-    let candidate_profile = profile_with_candidate_capabilities(
+    confirmed_connection: Option<&serde_json::Value>,
+) -> Result<PreparedWizardSample, WizardSampleBuildError> {
+    let candidate = if let Some(confirmed_connection) = confirmed_connection {
+        let confirmed_connection = safe_confirmed_candidate_connection(confirmed_connection)
+            .map_err(|error| WizardSampleBuildError::new("candidate_invalid", error))?;
+        let confirmed_profile = profile_with_exact_connection(base_profile, &confirmed_connection);
+        let confirmed_target = printers::resolve_printer_target(&confirmed_profile)
+            .map_err(|error| WizardSampleBuildError::new("candidate_invalid", error))?;
+        if !same_physical_candidate_target(base_target, &confirmed_target) {
+            return Err(WizardSampleBuildError::new(
+                "candidate_mismatch",
+                "The confirmed candidate does not match the selected physical printer",
+            ));
+        }
+        VerificationCandidate {
+            target: confirmed_target,
+            emulation: value_str(&confirmed_connection, &["emulation"])
+                .unwrap_or_else(|| "auto".to_string()),
+            render_mode: value_str(&confirmed_connection, &["render_mode", "renderMode"])
+                .unwrap_or_else(|| "text".to_string()),
+            supports_cut: confirmed_connection
+                .get("capabilities")
+                .and_then(|value| value.get("supportsCut"))
+                .and_then(serde_json::Value::as_bool)
+                .or_else(|| {
+                    confirmed_connection
+                        .get("cutPaper")
+                        .and_then(serde_json::Value::as_bool)
+                })
+                .unwrap_or_else(|| profile_supports_cut(base_profile)),
+            supports_logo: confirmed_connection
+                .get("capabilities")
+                .and_then(|value| value.get("supportsLogo"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+        }
+    } else {
+        let candidates =
+            verification_candidates_for_profile(base_profile, base_target, sample_kind.as_str());
+        if candidates.is_empty() {
+            return Err(WizardSampleBuildError::new(
+                "candidate_unavailable",
+                "No verification candidates available for this printer",
+            ));
+        }
+        candidates.get(probe_attempt).cloned().ok_or_else(|| {
+            WizardSampleBuildError::new(
+                "candidate_exhausted",
+                "No additional protocol candidates remain. Open Expert Settings to adjust transport or emulation manually.",
+            )
+        })?
+    };
+    let mut candidate_profile = profile_with_candidate_capabilities(
         base_profile,
         &candidate.target,
         &candidate.emulation,
         &candidate.render_mode,
+        candidate.supports_cut,
         candidate.supports_logo,
     );
-    let layout = print::resolve_layout_config(db, &candidate_profile, "order_receipt")?;
-    let (test_data, supports_logo, doc_name) =
-        build_sample_bytes(sample_kind, printer_label, &layout)?;
-    let dispatch = printers::print_raw_for_target(&candidate.target, &test_data, doc_name)?;
+    let mut layout = print::resolve_layout_config(db, &candidate_profile, "order_receipt")
+        .map_err(|error| WizardSampleBuildError::new("sample_prepare_failed", error))?;
+    if matches!(sample_kind, WizardSampleKind::Encoding)
+        && layout.character_set.eq_ignore_ascii_case("PC737_GREEK")
+    {
+        let code_page =
+            if receipt_renderer::uses_star_commands(layout.detected_brand, layout.emulation_mode) {
+                15
+            } else {
+                14
+            };
+        if let Some(profile) = candidate_profile.as_object_mut() {
+            profile.insert("escposCodePage".to_string(), serde_json::json!(code_page));
+        }
+        layout = print::resolve_layout_config(db, &candidate_profile, "order_receipt")
+            .map_err(|error| WizardSampleBuildError::new("sample_prepare_failed", error))?;
+    }
+    let sample = build_sample_bytes(sample_kind, printer_label, &layout, candidate.supports_cut)?;
+    let candidate_capabilities = capability_candidate_json(
+        &candidate.target,
+        &layout,
+        candidate.supports_cut,
+        sample.logo_included,
+    );
+    let candidate_connection_details =
+        safe_confirmed_candidate_connection(&merge_candidate_capabilities_into_connection(
+            &candidate_profile,
+            candidate_capabilities.clone(),
+        ))
+        .map_err(|error| WizardSampleBuildError::new("candidate_invalid", error))?;
+    Ok(PreparedWizardSample {
+        target: candidate.target,
+        layout,
+        sample,
+        candidate_capabilities,
+        candidate_connection_details,
+    })
+}
 
-    Ok((candidate, layout, dispatch, supports_logo))
+fn managed_test_print_request(
+    profile: &serde_json::Value,
+    prepared: PreparedWizardSample,
+    sample_kind: &WizardSampleKind,
+    wizard_session_id: &str,
+    saved_profile_id: Option<&str>,
+) -> print::PreRenderedTestPrint {
+    let profile_name = value_str(profile, &["name", "printerName", "printer_name"])
+        .unwrap_or_else(|| prepared.target.label());
+    let effective_profile_id = saved_profile_id
+        .map(ToString::to_string)
+        .unwrap_or_else(|| format!("wizard-draft-{wizard_session_id}"));
+    let driver_type = value_str(profile, &["driverType", "driver_type"]).unwrap_or_else(|| {
+        if matches!(
+            prepared.target,
+            printers::ResolvedPrinterTarget::WindowsQueue { .. }
+        ) {
+            "windows".to_string()
+        } else {
+            "escpos".to_string()
+        }
+    });
+    let cut_paper = prepared
+        .candidate_capabilities
+        .get("supportsCut")
+        .and_then(serde_json::Value::as_bool)
+        .or_else(|| {
+            prepared
+                .candidate_connection_details
+                .get("cutPaper")
+                .and_then(serde_json::Value::as_bool)
+        })
+        .or_else(|| {
+            profile
+                .get("cutPaper")
+                .or_else(|| profile.get("cut_paper"))
+                .and_then(serde_json::Value::as_bool)
+        })
+        .unwrap_or(true);
+    print::PreRenderedTestPrint {
+        wizard_session_id: wizard_session_id.to_string(),
+        sample_kind: sample_kind.as_str().to_string(),
+        effective_profile_id,
+        effective_profile_name: profile_name,
+        saved_profile_id: saved_profile_id.map(ToString::to_string),
+        target: prepared.target,
+        bytes: prepared.sample.bytes,
+        layout: prepared.layout,
+        candidate_connection_details: prepared.candidate_connection_details,
+        candidate_capabilities: prepared.candidate_capabilities,
+        driver_type,
+        cut_paper,
+        logo_configured: prepared.sample.logo_configured,
+        logo_included: prepared.sample.logo_included,
+    }
+}
+
+fn finish_wizard_print_enqueue<N, K>(
+    result: Result<print::PreRenderedTestPrintOutcome, String>,
+    notify: N,
+    kick: K,
+) -> Result<WizardPrintResponse, String>
+where
+    N: FnOnce(),
+    K: FnOnce(&str),
+{
+    let outcome = result?;
+    if !outcome.duplicate {
+        notify();
+        kick(&outcome.job_id);
+    }
+    Ok(WizardPrintResponse::queued(outcome))
+}
+
+fn execute_saved_profile_test_enqueue(
+    db: &db::DbState,
+    printer_id: &str,
+    sample_kind: WizardSampleKind,
+    wizard_session_id: &str,
+) -> Result<print::PreRenderedTestPrintOutcome, String> {
+    let profile = printers::get_printer_profile(db, printer_id)?;
+    let target = printers::resolve_printer_target(&profile)?;
+    let printer_label =
+        value_str(&profile, &["printerName", "printer_name"]).unwrap_or_else(|| target.label());
+    let prepared =
+        prepare_wizard_sample(db, &profile, &target, &printer_label, &sample_kind, 0, None)
+            .map_err(|error| format!("{}: {error}", error.code()))?;
+    print::enqueue_pre_rendered_test_print(
+        db,
+        managed_test_print_request(
+            &profile,
+            prepared,
+            &sample_kind,
+            wizard_session_id,
+            Some(printer_id),
+        ),
+    )
+}
+
+fn execute_greek_compatibility_enqueue(
+    db: &db::DbState,
+    printer_id: &str,
+    wizard_session_id: &str,
+) -> Result<print::PreRenderedTestPrintOutcome, String> {
+    execute_saved_profile_test_enqueue(
+        db,
+        printer_id,
+        WizardSampleKind::Encoding,
+        wizard_session_id,
+    )
+}
+
+enum DraftWizardEnqueue {
+    Queued(print::PreRenderedTestPrintOutcome),
+    Rejected(WizardPrintResponse),
+}
+
+fn execute_draft_profile_test_enqueue(
+    db: &db::DbState,
+    payload: PrinterTestDraftPayload,
+) -> Result<DraftWizardEnqueue, String> {
+    let profile = normalize_draft_profile_payload(payload.profile_draft)?;
+    let printer_name = value_str(&profile, &["printerName", "printer_name"]).unwrap_or_default();
+    let target = printers::resolve_printer_target(&profile)?;
+    let printer_label = if printer_name.is_empty() {
+        target.label()
+    } else {
+        printer_name
+    };
+    let prepared = match prepare_wizard_sample(
+        db,
+        &profile,
+        &target,
+        &printer_label,
+        &payload.sample_kind,
+        payload.probe_attempt,
+        payload.confirmed_candidate_connection_details.as_ref(),
+    ) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return Ok(DraftWizardEnqueue::Rejected(WizardPrintResponse::rejected(
+                printer_label,
+                payload.sample_kind,
+                &target,
+                error,
+            )));
+        }
+    };
+    let request = managed_test_print_request(
+        &profile,
+        prepared,
+        &payload.sample_kind,
+        payload.wizard_session_id.trim(),
+        None,
+    );
+    print::enqueue_pre_rendered_test_print(db, request).map(DraftWizardEnqueue::Queued)
 }
 
 #[tauri::command]
 pub async fn printer_test_draft(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
-) -> Result<serde_json::Value, String> {
-    let payload = arg0.unwrap_or_else(|| serde_json::json!({}));
-    let sample_kind = value_str(&payload, &["sampleKind", "sample_kind"])
-        .unwrap_or_else(|| "transport_text".to_string())
-        .to_ascii_lowercase();
-    let probe_attempt = payload
-        .get("probeAttempt")
-        .or_else(|| payload.get("probe_attempt"))
-        .and_then(|value| {
-            value.as_u64().or_else(|| {
-                value
-                    .as_str()
-                    .and_then(|raw| raw.trim().parse::<u64>().ok())
-            })
-        })
-        .unwrap_or(0) as usize;
-    let draft_payload = payload
-        .get("profileDraft")
-        .cloned()
-        .or_else(|| payload.get("draft").cloned())
-        .or_else(|| payload.get("printer").cloned())
-        .unwrap_or_else(|| payload.clone());
-
-    let profile = normalize_draft_profile_payload(draft_payload)?;
-    let printer_name = value_str(&profile, &["printerName", "printer_name"]).unwrap_or_default();
-    let target = match printers::resolve_printer_target(&profile) {
-        Ok(target) => target,
-        Err(error) => {
-            return Ok(serde_json::json!({
-                "success": false,
-                "printerName": printer_name,
-                "sampleKind": sample_kind,
-                "verificationStatus": "unverified",
-                "transportReachable": false,
-                "error": error,
-            }));
-        }
-    };
-    let printer_label = if printer_name.is_empty() {
-        target.label()
-    } else {
-        printer_name.clone()
-    };
-
-    let known_printers = match ensure_target_ready(&target) {
-        Ok(value) => value,
-        Err(error) => {
-            return Ok(serde_json::json!({
-                "success": false,
-                "printerName": printer_label,
-                "sampleKind": sample_kind,
-                "verificationStatus": "unverified",
-                "transportReachable": false,
-                "resolvedTransport": resolved_transport_name(&target),
-                "resolvedAddress": target.label(),
-                "error": error,
-            }));
-        }
-    };
-
-    let start = std::time::Instant::now();
-    match run_verification_dispatch(
-        &db,
-        &profile,
-        &target,
-        &printer_label,
-        &sample_kind,
-        probe_attempt,
-    ) {
-        Ok((candidate, layout, dispatch, supports_logo)) => {
-            let latency_ms = start.elapsed().as_millis() as u64;
-            let candidate_capabilities =
-                capability_candidate_json(&candidate.target, &layout, supports_logo);
-            let candidate_connection = merge_candidate_capabilities_into_connection(
-                &profile,
-                candidate_capabilities.clone(),
-            );
-            Ok(serde_json::json!({
-                "success": true,
-                "printerName": printer_label,
-                "sampleKind": sample_kind,
-                "message": "Draft test print dispatched",
-                "latencyMs": latency_ms,
-                "bytesRequested": dispatch.bytes_requested,
-                "bytesWritten": dispatch.bytes_written,
-                "resolvedTransport": resolved_transport_name(&candidate.target),
-                "resolvedAddress": candidate.target.label(),
-                "transportReachable": true,
-                "verificationStatus": "candidate",
-                "emulationMode": emulation_mode_key(layout.emulation_mode),
-                "renderMode": render_mode_key(layout.classic_customer_render_mode),
-                "characterSet": layout.character_set,
-                "escposCodePage": layout.escpos_code_page,
-                "probeAttempt": probe_attempt,
-                "candidateCapabilities": candidate_capabilities,
-                "candidateConnectionDetails": candidate_connection,
-                "knownPrinters": known_printers
-            }))
-        }
-        Err(error) => {
-            warn!(printer = %printer_label, error = %error, sample_kind = %sample_kind, probe_attempt, "Draft print test failed");
-            Ok(serde_json::json!({
-                "success": false,
-                "printerName": printer_label,
-                "sampleKind": sample_kind,
-                "error": error,
-                "latencyMs": start.elapsed().as_millis() as u64,
-                "probeAttempt": probe_attempt,
-                "bytesWritten": 0,
-                "resolvedTransport": resolved_transport_name(&target),
-                "resolvedAddress": target.label(),
-                "transportReachable": false,
-                "verificationStatus": "unverified",
-                "knownPrinters": known_printers
-            }))
-        }
+    _db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
+) -> Result<WizardPrintResponse, String> {
+    let payload: PrinterTestDraftPayload =
+        serde_json::from_value(arg0.ok_or("Missing printer wizard sample payload")?)
+            .map_err(|error| format!("Invalid printer wizard sample payload: {error}"))?;
+    if payload.wizard_session_id.trim().is_empty() || payload.wizard_session_id.len() > 128 {
+        return Err("wizardSessionId must contain 1 to 128 bytes".into());
     }
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("app data dir: {error}"))?;
+    let worker_app = app.clone();
+    let result = run_printer_ipc_blocking(move || {
+        let db = worker_app.state::<db::DbState>();
+        execute_draft_profile_test_enqueue(&db, payload)
+    })
+    .await?;
+    let result = match result {
+        DraftWizardEnqueue::Queued(result) => result,
+        DraftWizardEnqueue::Rejected(response) => return Ok(response),
+    };
+    let app_for_notify = app.clone();
+    let app_for_kick = app.clone();
+    finish_wizard_print_enqueue(
+        Ok(result),
+        move || print::notify_print_queue_changed(&app_for_notify),
+        move |job_id| {
+            print::spawn_pending_job_processing(
+                app_for_kick,
+                data_dir,
+                format!("printer wizard sample {job_id}"),
+            )
+        },
+    )
 }
 
 #[tauri::command]
 pub async fn printer_test(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
-) -> Result<serde_json::Value, String> {
+    _db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
+) -> Result<WizardPrintResponse, String> {
     let printer_id = parse_printer_id_payload(arg0)?;
-    let profile = printers::get_printer_profile(&db, &printer_id)?;
-    let printer_name = value_str(&profile, &["printerName", "printer_name"]).unwrap_or_default();
-    let target = match printers::resolve_printer_target(&profile) {
-        Ok(target) => target,
-        Err(error) => {
-            return Ok(serde_json::json!({
-                "success": false,
-                "printerId": printer_id,
-                "printerName": printer_name,
-                "error": error,
-            }));
-        }
-    };
-    let printer_label = if printer_name.is_empty() {
-        target.label()
-    } else {
-        printer_name.clone()
-    };
-    let known_printers = match ensure_target_ready(&target) {
-        Ok(value) => value,
-        Err(error) => {
-            return Ok(serde_json::json!({
-                "success": false,
-                "printerId": printer_id,
-                "printerName": printer_label,
-                "resolvedTransport": resolved_transport_name(&target),
-                "resolvedAddress": target.label(),
-                "error": error,
-            }));
-        }
-    };
-
-    let start = std::time::Instant::now();
-    let verification_status = printers::capability_verification_status(&profile);
-    let dispatch_result = if verification_status == "unverified" {
-        run_verification_dispatch(&db, &profile, &target, &printer_label, "transport_text", 0).map(
-            |(candidate, layout, dispatch, supports_logo)| {
-                let dispatch_target = candidate.target.clone();
-                let candidate_capabilities =
-                    capability_candidate_json(&dispatch_target, &layout, supports_logo);
-                (
-                    dispatch_target,
-                    layout,
-                    dispatch,
-                    supports_logo,
-                    Some(candidate_capabilities),
-                )
-            },
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("app data dir: {error}"))?;
+    let wizard_session_id = format!("saved-profile-{}", uuid::Uuid::new_v4());
+    let worker_app = app.clone();
+    let result = run_printer_ipc_blocking(move || {
+        let db = worker_app.state::<db::DbState>();
+        execute_saved_profile_test_enqueue(
+            &db,
+            &printer_id,
+            WizardSampleKind::TransportText,
+            &wizard_session_id,
         )
-    } else {
-        let layout = print::resolve_layout_config(&db, &profile, "order_receipt")?;
-        let test_data = build_transport_text_sample(&printer_label, &layout);
-        let dispatch = printers::print_raw_for_target(&target, &test_data, "POS Test Print")?;
-        Ok((target.clone(), layout, dispatch, false, None))
-    };
-
-    match dispatch_result {
-        Ok((dispatch_target, layout, dispatch, supports_logo, candidate_capabilities)) => {
-            if matches!(
-                dispatch_target,
-                printers::ResolvedPrinterTarget::WindowsQueue { .. }
-            ) {
-                if let Err(probe_error) = printers::probe_printer_target(&dispatch_target) {
-                    warn!(
-                        printer = %printer_label,
-                        error = %probe_error,
-                        "Printer spool probe failed after test print dispatch"
-                    );
-                    return Ok(serde_json::json!({
-                        "success": false,
-                        "printerId": printer_id,
-                        "printerName": printer_label,
-                        "error": format!("Print data was sent but spool status probe failed: {probe_error}"),
-                        "bytesRequested": dispatch.bytes_requested,
-                        "bytesWritten": dispatch.bytes_written,
-                        "docName": dispatch.doc_name,
-                        "latencyMs": start.elapsed().as_millis() as u64,
-                        "resolvedTransport": resolved_transport_name(&dispatch_target),
-                        "resolvedAddress": dispatch_target.label(),
-                        "emulationMode": emulation_mode_key(layout.emulation_mode),
-                        "renderMode": render_mode_key(layout.classic_customer_render_mode),
-                        "characterSet": layout.character_set,
-                        "escposCodePage": layout.escpos_code_page,
-                        "candidateCapabilities": candidate_capabilities,
-                        "knownPrinters": known_printers
-                    }));
-                }
-            }
-
-            let latency_ms = start.elapsed().as_millis() as u64;
-            info!(
-                printer = %printer_label,
-                latency_ms = latency_ms,
-                bytes = dispatch.bytes_requested,
-                emulation_mode = ?layout.emulation_mode,
-                render_mode = ?layout.classic_customer_render_mode,
-                verification_status = %verification_status,
-                "Test print dispatched"
-            );
-
-            // Record test print in print_jobs for diagnostics tracking
-            {
-                let job_id = uuid::Uuid::new_v4().to_string();
-                let now = chrono::Utc::now().to_rfc3339();
-                if let Ok(conn) = db.conn.lock() {
-                    let _ = conn.execute(
-                        "INSERT INTO print_jobs (id, entity_type, entity_id, printer_profile_id,
-                                                 status, created_at, updated_at, printed_at)
-                         VALUES (?1, 'test_print', ?2, ?3, 'printed', ?4, ?4, ?4)",
-                        rusqlite::params![job_id, job_id, printer_id, now],
-                    );
-                }
-            }
-
-            Ok(serde_json::json!({
-                "success": true,
-                "printerId": printer_id,
-                "printerName": printer_label,
-                "latencyMs": latency_ms,
-                "message": "Test print dispatched",
-                "bytesRequested": dispatch.bytes_requested,
-                "bytesWritten": dispatch.bytes_written,
-                "docName": dispatch.doc_name,
-                "resolvedTransport": resolved_transport_name(&dispatch_target),
-                "resolvedAddress": dispatch_target.label(),
-                "verificationStatus": verification_status,
-                "emulationMode": emulation_mode_key(layout.emulation_mode),
-                "renderMode": render_mode_key(layout.classic_customer_render_mode),
-                "characterSet": layout.character_set,
-                "escposCodePage": layout.escpos_code_page,
-                "candidateCapabilities": candidate_capabilities,
-                "candidateConnectionDetails": candidate_capabilities
-                    .clone()
-                    .map(|value| merge_candidate_capabilities_into_connection(&profile, value)),
-                "supportsLogo": supports_logo,
-                "knownPrinters": known_printers
-            }))
-        }
-        Err(e) => {
-            warn!(printer = %printer_label, error = %e, "Test print failed");
-
-            // Record failed test print in print_jobs for diagnostics tracking
-            {
-                let job_id = uuid::Uuid::new_v4().to_string();
-                let now = chrono::Utc::now().to_rfc3339();
-                if let Ok(conn) = db.conn.lock() {
-                    let _ = conn.execute(
-                        "INSERT INTO print_jobs (id, entity_type, entity_id, printer_profile_id,
-                                                 status, created_at, updated_at)
-                         VALUES (?1, 'test_print', ?2, ?3, 'failed', ?4, ?4)",
-                        rusqlite::params![job_id, job_id, printer_id, now],
-                    );
-                }
-            }
-
-            Ok(serde_json::json!({
-                "success": false,
-                "printerId": printer_id,
-                "printerName": printer_label,
-                "error": e,
-                "latencyMs": start.elapsed().as_millis() as u64,
-                "bytesWritten": 0,
-                "docName": "POS Test Print",
-                "resolvedTransport": resolved_transport_name(&target),
-                "resolvedAddress": target.label(),
-                "knownPrinters": known_printers
-            }))
-        }
-    }
+    })
+    .await;
+    let app_for_notify = app.clone();
+    let app_for_kick = app.clone();
+    finish_wizard_print_enqueue(
+        result,
+        move || print::notify_print_queue_changed(&app_for_notify),
+        move |job_id| {
+            print::spawn_pending_job_processing(
+                app_for_kick,
+                data_dir,
+                format!("saved printer test {job_id}"),
+            )
+        },
+    )
 }
 
 #[tauri::command]
 pub async fn printer_test_greek_direct(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
-) -> Result<serde_json::Value, String> {
+    _db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
+) -> Result<WizardPrintResponse, String> {
     let printer_id = parse_printer_id_payload(arg0)?;
-    let profile = printers::get_printer_profile(&db, &printer_id)?;
-    let printer_name = value_str(&profile, &["printerName", "printer_name"]).unwrap_or_default();
-    let target = match printers::resolve_printer_target(&profile) {
-        Ok(target) => target,
-        Err(error) => {
-            return Ok(serde_json::json!({
-                "success": false,
-                "printerId": printer_id,
-                "printerName": printer_name,
-                "error": error,
-            }));
-        }
-    };
-    let printer_label = if printer_name.is_empty() {
-        target.label()
-    } else {
-        printer_name.clone()
-    };
-    let known_printers = ensure_target_ready(&target).ok().flatten();
-    let verification_status = printers::capability_verification_status(&profile);
-    let (dispatch_target, layout) = if verification_status == "unverified" {
-        let candidates = verification_candidates_for_profile(&profile, &target, "encoding");
-        let Some(candidate) = candidates.into_iter().next() else {
-            return Ok(serde_json::json!({
-                "success": false,
-                "printerId": printer_id,
-                "printerName": printer_label,
-                "error": "No verification candidates available for this printer",
-                "resolvedTransport": resolved_transport_name(&target),
-                "resolvedAddress": target.label(),
-                "knownPrinters": known_printers
-            }));
-        };
-        let candidate_profile = profile_with_candidate_capabilities(
-            &profile,
-            &candidate.target,
-            &candidate.emulation,
-            &candidate.render_mode,
-            candidate.supports_logo,
-        );
-        (
-            candidate.target,
-            print::resolve_layout_config(&db, &candidate_profile, "order_receipt")?,
-        )
-    } else {
-        (
-            target.clone(),
-            print::resolve_layout_config(&db, &profile, "order_receipt")?,
-        )
-    };
-    let use_star_line_mode =
-        receipt_renderer::uses_star_commands(layout.detected_brand, layout.emulation_mode);
-
-    let start = std::time::Instant::now();
-
-    let mut builder = if use_star_line_mode {
-        escpos::EscPosBuilder::new()
-            .with_paper(layout.paper_width)
-            .with_star_line_mode()
-    } else {
-        escpos::EscPosBuilder::new().with_paper(layout.paper_width)
-    };
-    builder.init();
-
-    // Apply character set using the same logic as receipts
-    let _warnings = receipt_renderer::apply_character_set_for_test(
-        &mut builder,
-        &layout.character_set,
-        layout.greek_render_mode.as_deref(),
-        layout.escpos_code_page,
-        layout.detected_brand,
-        layout.emulation_mode,
-    );
-
-    builder
-        .center()
-        .bold(true)
-        .text("GREEK TEST PRINT\n")
-        .bold(false)
-        .separator()
-        .left()
-        .text(&format!("Character Set: {}\n", layout.character_set))
-        .text(&format!(
-            "Code Page Override: {}\n",
-            layout
-                .escpos_code_page
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "Auto".to_string())
-        ))
-        .separator()
-        .bold(true)
-        .text("Greek Uppercase:\n")
-        .bold(false)
-        .text("\u{0391}\u{0392}\u{0393}\u{0394}\u{0395}\u{0396}\u{0397}\u{0398}\u{0399}\u{039A}\u{039B}\u{039C}\u{039D}\u{039E}\u{039F}\u{03A0}\u{03A1}\u{03A3}\u{03A4}\u{03A5}\u{03A6}\u{03A7}\u{03A8}\u{03A9}\n")
-        .bold(true)
-        .text("Greek Lowercase:\n")
-        .bold(false)
-        .text("\u{03B1}\u{03B2}\u{03B3}\u{03B4}\u{03B5}\u{03B6}\u{03B7}\u{03B8}\u{03B9}\u{03BA}\u{03BB}\u{03BC}\u{03BD}\u{03BE}\u{03BF}\u{03C0}\u{03C1}\u{03C3}\u{03C2}\u{03C4}\u{03C5}\u{03C6}\u{03C7}\u{03C8}\u{03C9}\n")
-        .separator()
-        .bold(true)
-        .text("Sample Receipt Line:\n")
-        .bold(false);
-    builder
-        .line_pair("\u{039A}\u{03B1}\u{03C6}\u{03AD}\u{03C2} \u{0395}\u{03BB}\u{03BB}\u{03B7}\u{03BD}\u{03B9}\u{03BA}\u{03CC}\u{03C2}", "3.50")
-        .line_pair("\u{03A3}\u{03BF}\u{03C5}\u{03B2}\u{03BB}\u{03AC}\u{03BA}\u{03B9}", "6.00")
-        .line_pair("\u{03A3}\u{03CD}\u{03BD}\u{03BF}\u{03BB}\u{03BF}", "9.50");
-    builder.separator().center();
-    builder
-        .text("\u{0395}\u{03C5}\u{03C7}\u{03B1}\u{03C1}\u{03B9}\u{03C3}\u{03C4}\u{03BF}\u{03CD}\u{03BC}\u{03B5}!\n");
-    if use_star_line_mode {
-        builder.feed(3).star_cut();
-    } else {
-        builder.feed(4).cut();
-    }
-
-    let test_data = builder.build();
-    let byte_count = test_data.len();
-
-    info!(
-        printer = %printer_label,
-        character_set = %layout.character_set,
-        code_page_override = ?layout.escpos_code_page,
-        emulation_mode = ?layout.emulation_mode,
-        bytes = byte_count,
-        "Greek test print dispatching"
-    );
-
-    match printers::print_raw_for_target(&dispatch_target, &test_data, "POS Greek Test") {
-        Ok(dispatch) => {
-            let latency_ms = start.elapsed().as_millis() as u64;
-            Ok(serde_json::json!({
-                "success": true,
-                "printerId": printer_id,
-                "printerName": printer_label,
-                "characterSet": layout.character_set,
-                "escposCodePage": layout.escpos_code_page,
-                "latencyMs": latency_ms,
-                "bytesRequested": dispatch.bytes_requested,
-                "bytesWritten": dispatch.bytes_written,
-                "message": "Greek test print dispatched",
-                "resolvedTransport": resolved_transport_name(&dispatch_target),
-                "resolvedAddress": dispatch_target.label(),
-                "verificationStatus": verification_status,
-                "emulationMode": emulation_mode_key(layout.emulation_mode),
-                "renderMode": render_mode_key(layout.classic_customer_render_mode),
-                "knownPrinters": known_printers
-            }))
-        }
-        Err(e) => {
-            warn!(printer = %printer_label, error = %e, "Greek test print failed");
-            Ok(serde_json::json!({
-                "success": false,
-                "printerId": printer_id,
-                "printerName": printer_label,
-                "error": e,
-                "resolvedTransport": resolved_transport_name(&dispatch_target),
-                "resolvedAddress": dispatch_target.label(),
-                "emulationMode": emulation_mode_key(layout.emulation_mode),
-                "renderMode": render_mode_key(layout.classic_customer_render_mode),
-                "knownPrinters": known_printers
-            }))
-        }
-    }
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("app data dir: {error}"))?;
+    let wizard_session_id = format!("greek-direct-{}", uuid::Uuid::new_v4());
+    let worker_app = app.clone();
+    let result = run_printer_ipc_blocking(move || {
+        let db = worker_app.state::<db::DbState>();
+        execute_greek_compatibility_enqueue(&db, &printer_id, &wizard_session_id)
+    })
+    .await;
+    let app_for_notify = app.clone();
+    let app_for_kick = app.clone();
+    finish_wizard_print_enqueue(
+        result,
+        move || print::notify_print_queue_changed(&app_for_notify),
+        move |job_id| {
+            print::spawn_pending_job_processing(
+                app_for_kick,
+                data_dir,
+                format!("Greek printer compatibility sample {job_id}"),
+            )
+        },
+    )
 }
 
 /// Returns auto-detected printer configuration based on the printer name and
@@ -3252,13 +4334,15 @@ pub async fn printer_recommend_profile(
     }))
 }
 
-#[tauri::command]
-pub async fn printer_diagnostics(
-    arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
-) -> Result<serde_json::Value, String> {
-    let printer_id = parse_printer_id_payload(arg0)?;
-    let profile = printers::get_printer_profile(&db, &printer_id)?;
+fn execute_printer_diagnostics_with_probe<P>(
+    db: &db::DbState,
+    printer_id: &str,
+    probe: P,
+) -> Result<serde_json::Value, String>
+where
+    P: Fn(&printers::ResolvedPrinterTarget) -> Result<(), String>,
+{
+    let profile = printers::get_printer_profile(db, printer_id)?;
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
     let total_jobs: i64 = conn
@@ -3280,7 +4364,7 @@ pub async fn printer_diagnostics(
     let printer_type = value_str(&profile, &["printerType", "printer_type"])
         .unwrap_or_else(|| "system".to_string());
     let printer_name = value_str(&profile, &["printerName", "printer_name"]).unwrap_or_default();
-    let (target, connected, state) = resolve_profile_connection_state(&profile);
+    let (target, connected, state) = resolve_profile_connection_state_with_probe(&profile, &probe);
     let capabilities = printers::read_capability_snapshot(&profile);
 
     Ok(serde_json::json!({
@@ -3304,6 +4388,28 @@ pub async fn printer_diagnostics(
             }
         }
     }))
+}
+
+fn execute_printer_diagnostics(
+    db: &db::DbState,
+    printer_id: &str,
+) -> Result<serde_json::Value, String> {
+    execute_printer_diagnostics_with_probe(db, printer_id, printers::probe_printer_target)
+}
+
+#[tauri::command]
+pub async fn printer_diagnostics(
+    arg0: Option<serde_json::Value>,
+    _db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    let printer_id = parse_printer_id_payload(arg0)?;
+    let worker_app = app.clone();
+    run_printer_ipc_blocking(move || {
+        let db = worker_app.state::<db::DbState>();
+        execute_printer_diagnostics(&db, &printer_id)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -3332,7 +4438,13 @@ pub async fn printer_open_cash_drawer(
         &auth_state,
     )?;
     let printer_id = parse_optional_printer_id_payload(arg0);
-    let result = drawer::open_cash_drawer(&db, printer_id.as_deref())?;
+    let worker_app = app.clone();
+    let worker_printer_id = printer_id.clone();
+    let result = run_guarded_printer_ipc_blocking(move || {
+        let db = worker_app.state::<db::DbState>();
+        drawer::open_cash_drawer(&db, worker_printer_id.as_deref())
+    })
+    .await?;
     let _ = app.emit(
         "printer_status_changed",
         serde_json::json!({
@@ -3709,9 +4821,13 @@ fn build_receipt_sample_preview_response(
 #[cfg(test)]
 mod dto_tests {
     use super::*;
+    use base64::Engine as _;
+    use chrono::Duration as ChronoDuration;
     use rusqlite::Connection;
+    use std::cell::{Cell, RefCell};
     use std::net::TcpListener;
-    use std::sync::Mutex;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Barrier, Mutex};
     use std::thread;
 
     fn test_db() -> db::DbState {
@@ -3723,8 +4839,1756 @@ mod dto_tests {
         }
     }
 
+    fn wizard_print_request(
+        session: &str,
+        sample_kind: WizardSampleKind,
+        target: printers::ResolvedPrinterTarget,
+        bytes: Vec<u8>,
+    ) -> print::PreRenderedTestPrint {
+        let mut layout = receipt_renderer::LayoutConfig::default();
+        layout.organization_name = "Wizard test".to_string();
+        layout.character_set = "PC737_GREEK".to_string();
+        layout.escpos_code_page = Some(14);
+        let (candidate_connection_details, candidate_capabilities, driver_type) = match &target {
+            printers::ResolvedPrinterTarget::WindowsQueue { printer_name } => (
+                serde_json::json!({
+                    "type": "system",
+                    "systemName": printer_name,
+                    "emulation": "escpos",
+                    "render_mode": "text",
+                    "escposCodePage": 14,
+                    "capabilities": {
+                        "status": "verified",
+                        "resolvedTransport": "windows_queue",
+                        "resolvedAddress": printer_name,
+                        "emulation": "escpos",
+                        "renderMode": "text",
+                        "baudRate": null,
+                        "escposCodePage": 14,
+                        "supportsCut": true,
+                        "supportsLogo": false,
+                        "lastVerifiedAt": "2026-08-12T00:00:00Z"
+                    }
+                }),
+                serde_json::json!({
+                    "status": "verified",
+                    "resolvedTransport": "windows_queue",
+                    "resolvedAddress": printer_name,
+                    "emulation": "escpos",
+                    "renderMode": "text",
+                    "baudRate": null,
+                    "escposCodePage": 14,
+                    "supportsCut": true,
+                    "supportsLogo": false,
+                    "lastVerifiedAt": "2026-08-12T00:00:00Z"
+                }),
+                "windows".to_string(),
+            ),
+            printers::ResolvedPrinterTarget::RawTcp { host, port } => (
+                serde_json::json!({
+                    "type": "network",
+                    "ip": host,
+                    "port": port,
+                    "emulation": "escpos",
+                    "render_mode": "text",
+                    "escposCodePage": 14,
+                    "capabilities": {
+                        "status": "verified",
+                        "resolvedTransport": "raw_tcp",
+                        "resolvedAddress": format!("{host}:{port}"),
+                        "emulation": "escpos",
+                        "renderMode": "text",
+                        "baudRate": null,
+                        "escposCodePage": 14,
+                        "supportsCut": true,
+                        "supportsLogo": false,
+                        "lastVerifiedAt": "2026-08-12T00:00:00Z"
+                    }
+                }),
+                serde_json::json!({
+                    "status": "verified",
+                    "resolvedTransport": "raw_tcp",
+                    "resolvedAddress": format!("{host}:{port}"),
+                    "emulation": "escpos",
+                    "renderMode": "text",
+                    "baudRate": null,
+                    "escposCodePage": 14,
+                    "supportsCut": true,
+                    "supportsLogo": false,
+                    "lastVerifiedAt": "2026-08-12T00:00:00Z"
+                }),
+                "escpos".to_string(),
+            ),
+            printers::ResolvedPrinterTarget::SerialPort {
+                port_name,
+                baud_rate,
+            } => (
+                serde_json::json!({
+                    "type": "bluetooth",
+                    "serialPort": port_name,
+                    "baudRate": baud_rate,
+                    "emulation": "escpos",
+                    "render_mode": "text",
+                    "escposCodePage": 14,
+                    "capabilities": {
+                        "status": "verified",
+                        "resolvedTransport": "serial",
+                        "resolvedAddress": port_name,
+                        "emulation": "escpos",
+                        "renderMode": "text",
+                        "baudRate": baud_rate,
+                        "escposCodePage": 14,
+                        "supportsCut": true,
+                        "supportsLogo": false,
+                        "lastVerifiedAt": "2026-08-12T00:00:00Z"
+                    }
+                }),
+                serde_json::json!({
+                    "status": "verified",
+                    "resolvedTransport": "serial",
+                    "resolvedAddress": port_name,
+                    "emulation": "escpos",
+                    "renderMode": "text",
+                    "baudRate": baud_rate,
+                    "escposCodePage": 14,
+                    "supportsCut": true,
+                    "supportsLogo": false,
+                    "lastVerifiedAt": "2026-08-12T00:00:00Z"
+                }),
+                "escpos".to_string(),
+            ),
+        };
+        print::PreRenderedTestPrint {
+            wizard_session_id: session.to_string(),
+            sample_kind: sample_kind.as_str().to_string(),
+            effective_profile_id: format!("wizard-draft-{session}"),
+            effective_profile_name: "Wizard test".to_string(),
+            saved_profile_id: None,
+            target,
+            bytes,
+            layout,
+            candidate_connection_details,
+            candidate_capabilities,
+            driver_type,
+            cut_paper: true,
+            logo_configured: false,
+            logo_included: false,
+        }
+    }
+
+    #[test]
+    fn wizard_print_all_sample_kinds_are_durable_before_invalidation_and_kick() {
+        let db = test_db();
+        for (index, kind) in [
+            WizardSampleKind::TransportText,
+            WizardSampleKind::Encoding,
+            WizardSampleKind::Branding,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let target = printers::ResolvedPrinterTarget::RawTcp {
+                host: format!("192.0.2.{}", index + 10),
+                port: 9100,
+            };
+            let request = wizard_print_request(
+                &format!("session-{index}"),
+                kind.clone(),
+                target,
+                vec![0x1b, 0x40, index as u8, 0x0a],
+            );
+            let outcome = print::enqueue_pre_rendered_test_print(&db, request)
+                .expect("wizard sample enqueues");
+            assert!(!outcome.duplicate);
+            let observed = RefCell::new(Vec::<String>::new());
+            finish_wizard_print_enqueue(
+                Ok(outcome.clone()),
+                || {
+                    let conn = db.conn.lock().unwrap();
+                    let row: (String, i64, i64, i64, i64) = conn
+                        .query_row(
+                            "SELECT status,
+                                    document_snapshot_version IS NOT NULL,
+                                    document_snapshot_zlib IS NOT NULL,
+                                    document_snapshot_sha256 IS NOT NULL,
+                                    render_profile_snapshot_json IS NOT NULL
+                             FROM print_jobs WHERE id = ?1",
+                            [&outcome.job_id],
+                            |row| {
+                                Ok((
+                                    row.get(0)?,
+                                    row.get(1)?,
+                                    row.get(2)?,
+                                    row.get(3)?,
+                                    row.get(4)?,
+                                ))
+                            },
+                        )
+                        .unwrap();
+                    assert_eq!(row, ("pending".into(), 1, 1, 1, 1));
+                    observed.borrow_mut().push("invalidate".into());
+                },
+                |job_id| observed.borrow_mut().push(format!("kick:{job_id}")),
+            )
+            .expect("finish wizard enqueue");
+            assert_eq!(
+                observed.borrow().as_slice(),
+                ["invalidate", &format!("kick:{}", outcome.job_id)]
+            );
+        }
+    }
+
+    #[test]
+    fn wizard_print_frozen_bytes_target_and_safe_evidence_survive_profile_changes() {
+        let db = test_db();
+        let bytes = vec![0x1b, 0x40, 0x1b, 0x74, 14, 0x80, 0x0a];
+        let target = printers::ResolvedPrinterTarget::RawTcp {
+            host: "192.0.2.10".into(),
+            port: 9100,
+        };
+        let outcome = print::enqueue_pre_rendered_test_print(
+            &db,
+            wizard_print_request(
+                "frozen-session",
+                WizardSampleKind::Encoding,
+                target.clone(),
+                bytes.clone(),
+            ),
+        )
+        .expect("enqueue frozen sample");
+
+        let conn = db.conn.lock().unwrap();
+        let stored = crate::print_snapshot::load_snapshot(&conn, &outcome.job_id)
+            .expect("load snapshot")
+            .expect("snapshot present");
+        let (envelope, evidence): (serde_json::Value, serde_json::Value) = conn
+            .query_row(
+                "SELECT render_profile_snapshot_json, entity_payload_json
+                 FROM print_jobs WHERE id = ?1",
+                [&outcome.job_id],
+                |row| {
+                    let envelope: String = row.get(0)?;
+                    let evidence: String = row.get(1)?;
+                    Ok((
+                        serde_json::from_str(&envelope).unwrap(),
+                        serde_json::from_str(&evidence).unwrap(),
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(stored, bytes);
+        assert_eq!(envelope["transport"]["kind"], "raw_tcp");
+        assert_eq!(envelope["transport"]["host"], "192.0.2.10");
+        assert_eq!(envelope["transport"]["port"], 9100);
+        assert_eq!(evidence["candidateConnectionDetails"]["ip"], "192.0.2.10");
+        assert!(evidence.to_string().len() < 4096);
+        assert!(!evidence
+            .to_string()
+            .to_ascii_lowercase()
+            .contains("password"));
+        drop(conn);
+
+        // No mutable draft/profile is consulted after enqueue: the immutable
+        // payload and target remain the values above.
+        assert_eq!(outcome.sample_kind, "encoding");
+        assert_eq!(outcome.queue_state, "pending");
+    }
+
+    #[test]
+    fn wizard_print_draft_queue_snapshot_uses_frozen_effective_profile_display_name() {
+        let db_path = std::env::temp_dir().join(format!(
+            "wizard-display-name-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let conn = Connection::open(&db_path).unwrap();
+        db::run_migrations_for_test(&conn);
+        let db = db::DbState {
+            conn: Mutex::new(conn),
+            db_path: db_path.clone(),
+        };
+        let mut request = wizard_print_request(
+            "display-name-session",
+            WizardSampleKind::TransportText,
+            printers::ResolvedPrinterTarget::RawTcp {
+                host: "192.0.2.93".into(),
+                port: 9100,
+            },
+            b"display-name".to_vec(),
+        );
+        request.effective_profile_name = "Draft Receipt Printer".to_string();
+        let outcome = print::enqueue_pre_rendered_test_print(&db, request).unwrap();
+
+        let snapshot =
+            serde_json::to_value(print::print_queue_snapshot(&db, None, None, 20, 0).unwrap())
+                .unwrap();
+        let job = snapshot["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|job| job["id"] == outcome.job_id)
+            .unwrap();
+        assert_eq!(job["printerProfileId"], serde_json::Value::Null);
+        assert_eq!(job["printerProfileName"], serde_json::Value::Null);
+        assert_eq!(job["printerDisplayName"], "Draft Receipt Printer");
+        assert!(!job.to_string().contains("renderProfileSnapshot"));
+        drop(snapshot);
+        drop(db);
+        std::fs::remove_file(db_path).unwrap();
+    }
+
+    #[test]
+    fn wizard_print_same_target_coalesces_globally_but_terminal_history_does_not_block() {
+        let db = test_db();
+        let target = printers::ResolvedPrinterTarget::RawTcp {
+            host: "192.0.2.30".into(),
+            port: 9100,
+        };
+        let first = print::enqueue_pre_rendered_test_print(
+            &db,
+            wizard_print_request(
+                "session-a",
+                WizardSampleKind::TransportText,
+                target.clone(),
+                b"first".to_vec(),
+            ),
+        )
+        .unwrap();
+        let same_session = print::enqueue_pre_rendered_test_print(
+            &db,
+            wizard_print_request(
+                "session-a",
+                WizardSampleKind::TransportText,
+                target.clone(),
+                b"second".to_vec(),
+            ),
+        )
+        .unwrap();
+        let other_session = print::enqueue_pre_rendered_test_print(
+            &db,
+            wizard_print_request(
+                "session-b",
+                WizardSampleKind::Encoding,
+                target.clone(),
+                b"third".to_vec(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(same_session.job_id, first.job_id);
+        assert_eq!(other_session.job_id, first.job_id);
+        assert!(same_session.duplicate && other_session.duplicate);
+
+        let invalidations = Cell::new(0usize);
+        let kicks = Cell::new(0usize);
+        let duplicate_response = finish_wizard_print_enqueue(
+            Ok(other_session),
+            || invalidations.set(invalidations.get() + 1),
+            |_| kicks.set(kicks.get() + 1),
+        )
+        .unwrap();
+        assert_eq!(invalidations.get(), 0);
+        assert_eq!(kicks.get(), 0);
+        let duplicate_response = serde_json::to_value(duplicate_response).unwrap();
+        assert_eq!(
+            duplicate_response["candidateConnectionDetails"]["ip"], "192.0.2.30",
+            "duplicate response must use the first persisted evidence"
+        );
+
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE print_jobs
+                 SET status = 'failed', completed_at = datetime('now'),
+                     history_expires_at = datetime('now', '+30 days')
+                 WHERE id = ?1",
+                [&first.job_id],
+            )
+            .unwrap();
+        }
+        let later = print::enqueue_pre_rendered_test_print(
+            &db,
+            wizard_print_request(
+                "session-c",
+                WizardSampleKind::Encoding,
+                target,
+                b"later".to_vec(),
+            ),
+        )
+        .unwrap();
+        assert_ne!(later.job_id, first.job_id);
+        assert!(!later.duplicate);
+
+        let independent = print::enqueue_pre_rendered_test_print(
+            &db,
+            wizard_print_request(
+                "session-c",
+                WizardSampleKind::Encoding,
+                printers::ResolvedPrinterTarget::RawTcp {
+                    host: "192.0.2.31".into(),
+                    port: 9100,
+                },
+                b"independent".to_vec(),
+            ),
+        )
+        .unwrap();
+        assert_ne!(independent.job_id, later.job_id);
+    }
+
+    #[test]
+    fn wizard_print_serial_samples_coalesce_by_physical_port_not_baud() {
+        let db = test_db();
+        let first = print::enqueue_pre_rendered_test_print(
+            &db,
+            wizard_print_request(
+                "serial-9600",
+                WizardSampleKind::TransportText,
+                printers::ResolvedPrinterTarget::SerialPort {
+                    port_name: "COM17".into(),
+                    baud_rate: 9_600,
+                },
+                b"serial-first".to_vec(),
+            ),
+        )
+        .unwrap();
+        let second = print::enqueue_pre_rendered_test_print(
+            &db,
+            wizard_print_request(
+                "serial-38400",
+                WizardSampleKind::Encoding,
+                printers::ResolvedPrinterTarget::SerialPort {
+                    port_name: "com17".into(),
+                    baud_rate: 38_400,
+                },
+                b"serial-second".to_vec(),
+            ),
+        )
+        .unwrap();
+
+        assert!(
+            second.duplicate,
+            "one serial port is one physical sample lane"
+        );
+        assert_eq!(second.job_id, first.job_id);
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM print_jobs WHERE entity_type = 'test_print'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn wizard_print_unicode_case_equivalent_queue_callers_share_one_lane() {
+        let path = std::env::temp_dir().join(format!(
+            "wizard-unicode-lane-{}-{}.sqlite",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let bootstrap = Connection::open(&path).unwrap();
+        bootstrap
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        db::run_migrations_for_test(&bootstrap);
+        drop(bootstrap);
+        let states = (0..2)
+            .map(|_| {
+                let conn = Connection::open(&path).unwrap();
+                conn.busy_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+                Arc::new(db::DbState {
+                    conn: Mutex::new(conn),
+                    db_path: path.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let barrier = Arc::new(Barrier::new(2));
+        let queue_names = ["FRONT Α", "front α"];
+        let handles = states
+            .into_iter()
+            .zip(queue_names)
+            .enumerate()
+            .map(|(index, (state, queue_name))| {
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    print::enqueue_pre_rendered_test_print(
+                        &state,
+                        wizard_print_request(
+                            &format!("unicode-{index}"),
+                            WizardSampleKind::TransportText,
+                            printers::ResolvedPrinterTarget::WindowsQueue {
+                                printer_name: queue_name.into(),
+                            },
+                            vec![index as u8 + 1],
+                        ),
+                    )
+                    .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        let outcomes = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(outcomes[0].job_id, outcomes[1].job_id);
+        assert_eq!(
+            outcomes.iter().filter(|outcome| !outcome.duplicate).count(),
+            1
+        );
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM print_jobs WHERE entity_type = 'test_print'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1
+        );
+        drop(conn);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn wizard_print_malformed_legacy_payload_is_ignored_during_coalescing() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO print_jobs (
+                    id, entity_type, entity_id, entity_payload_json, status,
+                    created_at, updated_at
+                 ) VALUES (
+                    ?1, 'test_print', 'legacy-bad-json', '{not-json', 'failed',
+                    datetime('now'), datetime('now')
+                 )",
+                [uuid::Uuid::new_v4().to_string()],
+            )
+            .unwrap();
+        }
+        let outcome = print::enqueue_pre_rendered_test_print(
+            &db,
+            wizard_print_request(
+                "after-malformed",
+                WizardSampleKind::TransportText,
+                printers::ResolvedPrinterTarget::RawTcp {
+                    host: "192.0.2.32".into(),
+                    port: 9100,
+                },
+                b"safe enqueue".to_vec(),
+            ),
+        )
+        .expect("malformed unrelated legacy evidence must not break enqueue");
+        assert!(!outcome.duplicate);
+    }
+
+    #[test]
+    fn wizard_print_dispatched_parent_with_active_native_attempt_blocks_overlap() {
+        let db = test_db();
+        let target = printers::ResolvedPrinterTarget::WindowsQueue {
+            printer_name: "Wizard Queue".into(),
+        };
+        let mut request = wizard_print_request(
+            "native-a",
+            WizardSampleKind::TransportText,
+            target.clone(),
+            b"native-first".to_vec(),
+        );
+        request.candidate_connection_details = serde_json::json!({
+            "type": "system",
+            "systemName": "Wizard Queue",
+            "emulation": "escpos",
+            "render_mode": "text"
+        });
+        request.candidate_capabilities = serde_json::json!({
+            "status": "verified",
+            "resolvedTransport": "windows_queue",
+            "resolvedAddress": "Wizard Queue",
+            "emulation": "escpos",
+            "renderMode": "text",
+            "baudRate": null,
+            "supportsCut": true,
+            "supportsLogo": false,
+            "lastVerifiedAt": "2026-08-12T00:00:00Z"
+        });
+        let first = print::enqueue_pre_rendered_test_print(&db, request).unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE print_jobs SET status = 'dispatched' WHERE id = ?1",
+                [&first.job_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO print_job_attempts (
+                    id, print_job_id, attempt_number, transport, resolved_target,
+                    document_name, spool_job_id, state, bytes_requested, bytes_written,
+                    started_at, last_seen_at
+                 ) VALUES (
+                    ?1, ?2, 1, 'windows', 'windows:Wizard Queue',
+                    'TheSmallPOS/test', 77, 'windows_queued', 12, 12,
+                    datetime('now'), datetime('now')
+                 )",
+                rusqlite::params![uuid::Uuid::new_v4().to_string(), &first.job_id],
+            )
+            .unwrap();
+        }
+        let duplicate = print::enqueue_pre_rendered_test_print(
+            &db,
+            wizard_print_request(
+                "native-b",
+                WizardSampleKind::Encoding,
+                target,
+                b"must-not-overlap".to_vec(),
+            ),
+        )
+        .unwrap();
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.job_id, first.job_id);
+        assert_eq!(duplicate.queue_state, "dispatched");
+    }
+
+    #[test]
+    fn wizard_print_cancel_failed_and_identity_valid_spool_error_block_overlap() {
+        for (index, state) in ["cancel_failed", "spool_error"].into_iter().enumerate() {
+            let db = test_db();
+            let target = printers::ResolvedPrinterTarget::WindowsQueue {
+                printer_name: format!("Blocked Queue {index}"),
+            };
+            let first = print::enqueue_pre_rendered_test_print(
+                &db,
+                wizard_print_request(
+                    &format!("blocker-a-{index}"),
+                    WizardSampleKind::TransportText,
+                    target.clone(),
+                    b"first".to_vec(),
+                ),
+            )
+            .unwrap();
+            {
+                let conn = db.conn.lock().unwrap();
+                conn.execute(
+                    "UPDATE print_jobs SET status = 'dispatched' WHERE id = ?1",
+                    [&first.job_id],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO print_job_attempts (
+                        id, print_job_id, attempt_number, transport, resolved_target,
+                        document_name, spool_job_id, state, bytes_requested, bytes_written,
+                        started_at, last_seen_at
+                     ) VALUES (?1, ?2, 1, 'windows', ?3,
+                        'TheSmallPOS/test', 88, ?4, 5, 5, datetime('now'), datetime('now'))",
+                    rusqlite::params![
+                        uuid::Uuid::new_v4().to_string(),
+                        &first.job_id,
+                        format!("windows:Blocked Queue {index}"),
+                        state
+                    ],
+                )
+                .unwrap();
+            }
+            let duplicate = print::enqueue_pre_rendered_test_print(
+                &db,
+                wizard_print_request(
+                    &format!("blocker-b-{index}"),
+                    WizardSampleKind::Encoding,
+                    target,
+                    b"second".to_vec(),
+                ),
+            )
+            .unwrap();
+            assert!(duplicate.duplicate, "{state} must block overlap");
+            assert_eq!(duplicate.job_id, first.job_id);
+        }
+    }
+
+    #[test]
+    fn wizard_print_concurrent_file_db_enqueues_at_most_one_active_target() {
+        let path = std::env::temp_dir().join(format!(
+            "wizard-print-concurrency-{}-{}.sqlite",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let bootstrap = Connection::open(&path).unwrap();
+        bootstrap
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        db::run_migrations_for_test(&bootstrap);
+        drop(bootstrap);
+
+        let states = (0..2)
+            .map(|_| {
+                let conn = Connection::open(&path).unwrap();
+                conn.busy_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+                Arc::new(db::DbState {
+                    conn: Mutex::new(conn),
+                    db_path: path.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let barrier = Arc::new(Barrier::new(2));
+        let handles = states
+            .into_iter()
+            .enumerate()
+            .map(|(index, state)| {
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    print::enqueue_pre_rendered_test_print(
+                        &state,
+                        wizard_print_request(
+                            &format!("concurrent-{index}"),
+                            WizardSampleKind::TransportText,
+                            printers::ResolvedPrinterTarget::RawTcp {
+                                host: "192.0.2.60".into(),
+                                port: 9100,
+                            },
+                            vec![index as u8 + 1],
+                        ),
+                    )
+                    .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        let outcomes = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(outcomes[0].job_id, outcomes[1].job_id);
+        assert_eq!(
+            outcomes.iter().filter(|outcome| !outcome.duplicate).count(),
+            1
+        );
+        let conn = Connection::open(&path).unwrap();
+        let active: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM print_jobs
+                 WHERE entity_type = 'test_print' AND status IN ('pending', 'printing')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(active, 1);
+        drop(conn);
+        let _ = std::fs::remove_file(path);
+    }
+
+    struct CapturingWizardTransport {
+        calls: Mutex<Vec<(printers::ResolvedPrinterTarget, Vec<u8>)>>,
+    }
+
+    impl print::ManagedRawTransport for CapturingWizardTransport {
+        fn send(
+            &self,
+            _db: &db::DbState,
+            target: &printers::ResolvedPrinterTarget,
+            bytes: &[u8],
+            document_name: &str,
+            _cancel: &AtomicBool,
+        ) -> Result<printers::RawPrintResult, printers::RawTransportFailure> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((target.clone(), bytes.to_vec()));
+            Ok(printers::RawPrintResult {
+                bytes_requested: bytes.len(),
+                bytes_written: bytes.len(),
+                doc_name: document_name.to_string(),
+                spool_job_id: None,
+            })
+        }
+    }
+
+    #[test]
+    fn wizard_print_worker_replays_frozen_bytes_and_target_without_profile_lookup() {
+        let db = test_db();
+        let target = printers::ResolvedPrinterTarget::RawTcp {
+            host: "192.0.2.70".into(),
+            port: 19100,
+        };
+        let bytes = b"frozen-wizard-sample".to_vec();
+        let outcome = print::enqueue_pre_rendered_test_print(
+            &db,
+            wizard_print_request(
+                "worker-replay",
+                WizardSampleKind::Encoding,
+                target.clone(),
+                bytes.clone(),
+            ),
+        )
+        .unwrap();
+        let transport = CapturingWizardTransport {
+            calls: Mutex::new(Vec::new()),
+        };
+        let output_dir =
+            std::env::temp_dir().join(format!("wizard-worker-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&output_dir).unwrap();
+        print::process_pre_rendered_test_print_with_transport(&db, &output_dir, &transport)
+            .expect("process frozen wizard job");
+        let calls = transport.calls.lock().unwrap();
+        assert_eq!(calls.as_slice(), [(target, bytes)]);
+        drop(calls);
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT status FROM print_jobs WHERE id = ?1",
+                [&outcome.job_id],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "dispatched"
+        );
+        drop(conn);
+        let _ = std::fs::remove_dir_all(output_dir);
+    }
+
+    #[test]
+    fn wizard_print_saved_command_enqueues_a_managed_sample() {
+        let db = test_db();
+        let profile = printers::create_printer_profile(
+            &db,
+            &serde_json::json!({
+                "name": "Saved wizard printer",
+                "printerName": "192.0.2.80",
+                "driverType": "escpos",
+                "printerType": "network",
+                "role": "receipt",
+                "characterSet": "PC737_GREEK",
+                "connectionJson": serde_json::json!({
+                    "type": "network",
+                    "ip": "192.0.2.80",
+                    "port": 9100,
+                    "emulation": "escpos",
+                    "render_mode": "text"
+                }).to_string()
+            }),
+        )
+        .unwrap();
+        let profile_id = profile["profileId"].as_str().unwrap();
+        let saved = execute_saved_profile_test_enqueue(
+            &db,
+            profile_id,
+            WizardSampleKind::TransportText,
+            "saved-command",
+        )
+        .unwrap();
+        assert!(!saved.duplicate);
+        let conn = db.conn.lock().unwrap();
+        let rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM print_jobs
+                 WHERE entity_type = 'test_print'
+                   AND status = 'pending'
+                   AND document_snapshot_zlib IS NOT NULL
+                   AND render_profile_snapshot_json IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 1);
+        assert_eq!(saved.sample_kind, "transport_text");
+    }
+
+    #[test]
+    fn wizard_print_confirmed_candidate_save_round_trip_preserves_exact_fields() {
+        let db = test_db();
+        let confirmed = serde_json::json!({
+            "type": "bluetooth",
+            "systemName": "Star MCP31 - Ethernet:TCP;",
+            "address": "Star MCP31 - Ethernet:TCP;",
+            "serialPort": "COM17",
+            "baudRate": 38400,
+            "emulation": "star_line",
+            "render_mode": "raster_exact",
+            "cutPaper": false,
+            "escposCodePage": 15,
+            "customerName": "must not persist",
+            "privateReceiptPayload": { "phone": "6900000000" },
+            "capabilities": {
+                "status": "verified",
+                "resolvedTransport": "serial",
+                "resolvedAddress": "COM17",
+                "emulation": "star_line",
+                "renderMode": "raster_exact",
+                "baudRate": 38400,
+                "escposCodePage": 15,
+                "supportsCut": false,
+                "supportsLogo": true,
+                "lastVerifiedAt": "2026-08-12T10:00:00Z"
+            }
+        });
+        let mapped = profile_payload_with_confirmed_candidate(serde_json::json!({
+            "name": "Exact candidate",
+            "type": "bluetooth",
+            "connectionDetails": {
+                "type": "bluetooth",
+                "systemName": "Star MCP31 - Ethernet:TCP;",
+                "serialPort": "COM17",
+                "baudRate": 38400
+            },
+            "confirmedCandidateConnectionDetails": confirmed,
+            "paperSize": "80mm",
+            "role": "receipt",
+            "enabled": true
+        }))
+        .unwrap();
+        let created =
+            printers::create_printer_profile_with_validated_capabilities(&db, &mapped).unwrap();
+        let stored =
+            printers::get_printer_profile(&db, created["profileId"].as_str().unwrap()).unwrap();
+        let connection: serde_json::Value = serde_json::from_str(
+            stored["connectionJson"]
+                .as_str()
+                .expect("stored connection JSON"),
+        )
+        .unwrap();
+        assert_eq!(connection["type"], "bluetooth");
+        assert_eq!(connection["systemName"], "Star MCP31 - Ethernet:TCP;");
+        assert_eq!(connection["serialPort"], "COM17");
+        assert_eq!(connection["baudRate"], 38400);
+        assert_eq!(connection["emulation"], "star_line");
+        assert_eq!(connection["render_mode"], "raster_exact");
+        assert_eq!(connection["cutPaper"], false);
+        assert_eq!(connection["escposCodePage"], 15);
+        assert!(connection.get("customerName").is_none());
+        assert!(connection.get("privateReceiptPayload").is_none());
+        assert_eq!(connection["capabilities"]["resolvedTransport"], "serial");
+        assert_eq!(connection["capabilities"]["resolvedAddress"], "COM17");
+        assert_eq!(connection["capabilities"]["supportsCut"], false);
+        assert_eq!(stored["cutPaper"], false);
+        assert_eq!(stored["escposCodePage"], 15);
+    }
+
+    #[test]
+    fn wizard_print_candidate_evidence_is_allowlisted_before_persistence() {
+        let db = test_db();
+        let base = serde_json::json!({
+            "paperWidthMm": 80,
+            "printerName": "192.0.2.91",
+            "printerType": "network",
+            "characterSet": "PC737_GREEK",
+            "connectionJson": serde_json::json!({
+                "type": "network",
+                "ip": "192.0.2.91",
+                "port": 9100,
+                "emulation": "escpos",
+                "render_mode": "text",
+                "customerName": "Private Customer",
+                "receiptPayload": { "phone": "6900000000" }
+            }).to_string()
+        });
+        let target = printers::resolve_printer_target(&base).unwrap();
+        let prepared = prepare_wizard_sample(
+            &db,
+            &base,
+            &target,
+            "Private evidence printer",
+            &WizardSampleKind::Encoding,
+            0,
+            None,
+        )
+        .unwrap();
+        assert!(prepared
+            .candidate_connection_details
+            .get("customerName")
+            .is_none());
+        assert!(prepared
+            .candidate_connection_details
+            .get("receiptPayload")
+            .is_none());
+        let outcome = print::enqueue_pre_rendered_test_print(
+            &db,
+            managed_test_print_request(
+                &base,
+                prepared,
+                &WizardSampleKind::Encoding,
+                "allowlisted-evidence",
+                None,
+            ),
+        )
+        .unwrap();
+        let conn = db.conn.lock().unwrap();
+        let evidence: String = conn
+            .query_row(
+                "SELECT entity_payload_json FROM print_jobs WHERE id = ?1",
+                [&outcome.job_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!evidence.contains("Private Customer"));
+        assert!(!evidence.contains("6900000000"));
+    }
+
+    #[test]
+    fn wizard_print_candidate_validator_rejects_invalid_enums_and_bounds() {
+        let valid = serde_json::json!({
+            "type": "network",
+            "ip": "192.0.2.92",
+            "port": 9100,
+            "emulation": "escpos",
+            "render_mode": "text",
+            "cutPaper": true,
+            "escposCodePage": 14,
+            "capabilities": {
+                "status": "verified",
+                "resolvedTransport": "raw_tcp",
+                "resolvedAddress": "192.0.2.92:9100",
+                "emulation": "escpos",
+                "renderMode": "text",
+                "baudRate": null,
+                "escposCodePage": 14,
+                "supportsCut": true,
+                "supportsLogo": false,
+                "lastVerifiedAt": "2026-08-12T10:00:00Z"
+            }
+        });
+        assert!(safe_confirmed_candidate_connection(&valid).is_ok());
+        for (path, invalid) in [
+            ("status", serde_json::json!("unverified")),
+            ("transport", serde_json::json!("cloud")),
+            ("emulation", serde_json::json!("vendor_magic")),
+            ("render", serde_json::json!("html")),
+            ("port", serde_json::json!(70000)),
+            ("baud", serde_json::json!(99)),
+            ("code_page", serde_json::json!(300)),
+        ] {
+            let mut candidate = valid.clone();
+            match path {
+                "status" => candidate["capabilities"]["status"] = invalid,
+                "transport" => candidate["capabilities"]["resolvedTransport"] = invalid,
+                "emulation" => candidate["capabilities"]["emulation"] = invalid,
+                "render" => candidate["capabilities"]["renderMode"] = invalid,
+                "port" => candidate["port"] = invalid,
+                "baud" => candidate["baudRate"] = invalid,
+                "code_page" => candidate["escposCodePage"] = invalid,
+                _ => unreachable!(),
+            }
+            assert!(
+                safe_confirmed_candidate_connection(&candidate).is_err(),
+                "{path} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn wizard_print_candidate_validator_rejects_cross_field_contradictions() {
+        let valid = serde_json::json!({
+            "type": "bluetooth",
+            "serialPort": "COM17",
+            "baudRate": 38400,
+            "emulation": "star_line",
+            "render_mode": "raster_exact",
+            "cutPaper": false,
+            "escposCodePage": 15,
+            "capabilities": {
+                "status": "verified",
+                "resolvedTransport": "serial",
+                "resolvedAddress": "COM17",
+                "emulation": "star_line",
+                "renderMode": "raster_exact",
+                "baudRate": 38400,
+                "escposCodePage": 15,
+                "supportsCut": false,
+                "supportsLogo": true,
+                "lastVerifiedAt": "2026-08-12T10:00:00Z"
+            }
+        });
+        assert!(safe_confirmed_candidate_connection(&valid).is_ok());
+
+        let mut contradictions = Vec::new();
+        for (name, candidate) in [
+            ("serial capability baud null", {
+                let mut value = valid.clone();
+                value["capabilities"]["baudRate"] = serde_json::Value::Null;
+                value
+            }),
+            ("serial capability baud differs", {
+                let mut value = valid.clone();
+                value["capabilities"]["baudRate"] = serde_json::json!(9600);
+                value
+            }),
+            ("emulation differs", {
+                let mut value = valid.clone();
+                value["capabilities"]["emulation"] = serde_json::json!("escpos");
+                value
+            }),
+            ("render mode differs", {
+                let mut value = valid.clone();
+                value["capabilities"]["renderMode"] = serde_json::json!("text");
+                value
+            }),
+            ("cut support differs", {
+                let mut value = valid.clone();
+                value["capabilities"]["supportsCut"] = serde_json::json!(true);
+                value
+            }),
+            ("code page differs", {
+                let mut value = valid.clone();
+                value["capabilities"]["escposCodePage"] = serde_json::json!(14);
+                value
+            }),
+            ("capability code page missing", {
+                let mut value = valid.clone();
+                value["capabilities"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("escposCodePage");
+                value
+            }),
+        ] {
+            if safe_confirmed_candidate_connection(&candidate).is_ok() {
+                contradictions.push(name);
+            }
+        }
+        assert!(
+            contradictions.is_empty(),
+            "contradictory candidate evidence was accepted: {contradictions:?}"
+        );
+    }
+
+    #[test]
+    fn wizard_print_confirmed_candidate_requires_transport_specific_fields() {
+        let serial = serde_json::json!({
+            "type": "bluetooth",
+            "serialPort": "COM17",
+            "baudRate": 38400,
+            "emulation": "star_line",
+            "render_mode": "text",
+            "cutPaper": true,
+            "escposCodePage": 15,
+            "capabilities": {
+                "status": "verified",
+                "resolvedTransport": "serial",
+                "resolvedAddress": "COM17",
+                "emulation": "star_line",
+                "renderMode": "text",
+                "baudRate": 38400,
+                "escposCodePage": 15,
+                "supportsCut": true,
+                "supportsLogo": false,
+                "lastVerifiedAt": "2026-08-12T10:00:00Z"
+            }
+        });
+        let network = serde_json::json!({
+            "type": "network",
+            "ip": "192.0.2.94",
+            "port": 9100,
+            "emulation": "escpos",
+            "render_mode": "text",
+            "cutPaper": true,
+            "escposCodePage": 14,
+            "capabilities": {
+                "status": "verified",
+                "resolvedTransport": "raw_tcp",
+                "resolvedAddress": "192.0.2.94:9100",
+                "emulation": "escpos",
+                "renderMode": "text",
+                "baudRate": null,
+                "escposCodePage": 14,
+                "supportsCut": true,
+                "supportsLogo": false,
+                "lastVerifiedAt": "2026-08-12T10:00:00Z"
+            }
+        });
+        let mut missing_serial_baud = serial.clone();
+        missing_serial_baud
+            .as_object_mut()
+            .unwrap()
+            .remove("baudRate");
+        let mut missing_network_port = network.clone();
+        missing_network_port.as_object_mut().unwrap().remove("port");
+
+        let unexpectedly_accepted = [
+            ("serial baudRate", missing_serial_baud),
+            ("network port", missing_network_port),
+        ]
+        .into_iter()
+        .filter_map(|(name, candidate)| {
+            safe_confirmed_candidate_connection(&candidate)
+                .is_ok()
+                .then_some(name)
+        })
+        .collect::<Vec<_>>();
+        assert!(
+            unexpectedly_accepted.is_empty(),
+            "transport-specific confirmed fields were optional: {unexpectedly_accepted:?}"
+        );
+    }
+
+    #[test]
+    fn wizard_print_rollback_and_rejection_have_no_row_invalidation_or_kick() {
+        let db = test_db();
+        let invalidations = Cell::new(0usize);
+        let kicks = RefCell::new(Vec::<String>::new());
+        let result = print::enqueue_pre_rendered_test_print_with_hook(
+            &db,
+            wizard_print_request(
+                "rollback-session",
+                WizardSampleKind::TransportText,
+                printers::ResolvedPrinterTarget::RawTcp {
+                    host: "192.0.2.40".into(),
+                    port: 9100,
+                },
+                b"rollback".to_vec(),
+            ),
+            || Err("forced rollback".to_string()),
+        );
+        assert!(finish_wizard_print_enqueue(
+            result,
+            || invalidations.set(invalidations.get() + 1),
+            |job_id| kicks.borrow_mut().push(job_id.to_string()),
+        )
+        .is_err());
+        let conn = db.conn.lock().unwrap();
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM print_jobs", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 0);
+        assert_eq!(invalidations.get(), 0);
+        assert!(kicks.borrow().is_empty());
+    }
+
+    #[test]
+    fn wizard_print_encoding_uses_star_page_15_and_epson_page_14() {
+        let mut star = receipt_renderer::LayoutConfig::default();
+        star.character_set = "PC737_GREEK".into();
+        star.detected_brand = printers::PrinterBrand::Star;
+        star.emulation_mode = receipt_renderer::ReceiptEmulationMode::StarLine;
+        star.escpos_code_page = None;
+        let star_bytes = build_encoding_sample(&star);
+        assert!(star_bytes
+            .windows(4)
+            .any(|window| window == [0x1b, 0x1d, 0x74, 15]));
+
+        let mut epson = receipt_renderer::LayoutConfig::default();
+        epson.character_set = "PC737_GREEK".into();
+        epson.detected_brand = printers::PrinterBrand::Epson;
+        epson.emulation_mode = receipt_renderer::ReceiptEmulationMode::Escpos;
+        epson.escpos_code_page = None;
+        let epson_bytes = build_encoding_sample(&epson);
+        assert!(epson_bytes
+            .windows(3)
+            .any(|window| window == [0x1b, 0x74, 14]));
+    }
+
+    #[test]
+    fn wizard_print_encoding_candidate_overrides_opposite_manual_cp737_page() {
+        let db = test_db();
+        let star_profile = serde_json::json!({
+            "name": "Star MCP31",
+            "printerName": "192.0.2.95",
+            "printerType": "network",
+            "paperWidthMm": 80,
+            "characterSet": "PC737_GREEK",
+            "escposCodePage": 14,
+            "cutPaper": true,
+            "connectionJson": serde_json::json!({
+                "type": "network",
+                "ip": "192.0.2.95",
+                "port": 9100,
+                "emulation": "auto",
+                "render_mode": "text"
+            }).to_string()
+        });
+        let star_target = printers::resolve_printer_target(&star_profile).unwrap();
+        let star = prepare_wizard_sample(
+            &db,
+            &star_profile,
+            &star_target,
+            "Star MCP31",
+            &WizardSampleKind::Encoding,
+            0,
+            None,
+        )
+        .unwrap();
+        let star_observed = (
+            star.layout.escpos_code_page,
+            star.candidate_capabilities["escposCodePage"].as_u64(),
+            star.sample
+                .bytes
+                .windows(4)
+                .any(|window| window == [0x1b, 0x1d, 0x74, 15]),
+        );
+
+        let epson_profile = serde_json::json!({
+            "name": "Epson TM-T88",
+            "printerName": "192.0.2.96",
+            "printerType": "network",
+            "paperWidthMm": 80,
+            "characterSet": "PC737_GREEK",
+            "escposCodePage": 15,
+            "cutPaper": true,
+            "connectionJson": serde_json::json!({
+                "type": "network",
+                "ip": "192.0.2.96",
+                "port": 9100,
+                "emulation": "auto",
+                "render_mode": "text"
+            }).to_string()
+        });
+        let epson_target = printers::resolve_printer_target(&epson_profile).unwrap();
+        let confirmed_epson = serde_json::json!({
+            "type": "network",
+            "ip": "192.0.2.96",
+            "port": 9100,
+            "emulation": "escpos",
+            "render_mode": "text",
+            "cutPaper": true,
+            "escposCodePage": 14,
+            "capabilities": {
+                "status": "verified",
+                "resolvedTransport": "raw_tcp",
+                "resolvedAddress": "192.0.2.96:9100",
+                "emulation": "escpos",
+                "renderMode": "text",
+                "baudRate": null,
+                "escposCodePage": 14,
+                "supportsCut": true,
+                "supportsLogo": false,
+                "lastVerifiedAt": "2026-08-12T10:00:00Z"
+            }
+        });
+        let epson = prepare_wizard_sample(
+            &db,
+            &epson_profile,
+            &epson_target,
+            "Epson TM-T88",
+            &WizardSampleKind::Encoding,
+            0,
+            Some(&confirmed_epson),
+        )
+        .unwrap();
+        let epson_observed = (
+            epson.layout.escpos_code_page,
+            epson.candidate_capabilities["escposCodePage"].as_u64(),
+            epson
+                .sample
+                .bytes
+                .windows(3)
+                .any(|window| window == [0x1b, 0x74, 14]),
+        );
+
+        assert_eq!(
+            [star_observed, epson_observed],
+            [(Some(15), Some(15), true), (Some(14), Some(14), true)]
+        );
+    }
+
+    #[test]
+    fn wizard_print_confirmed_cut_false_freezes_and_emits_no_cut_command() {
+        let db = test_db();
+        let profile = serde_json::json!({
+            "name": "Epson no-cut candidate",
+            "printerName": "192.0.2.97",
+            "printerType": "network",
+            "driverType": "escpos",
+            "paperWidthMm": 80,
+            "characterSet": "PC737_GREEK",
+            "escposCodePage": 14,
+            "cutPaper": true,
+            "connectionJson": serde_json::json!({
+                "type": "network",
+                "ip": "192.0.2.97",
+                "port": 9100,
+                "emulation": "escpos",
+                "render_mode": "text"
+            }).to_string()
+        });
+        let target = printers::resolve_printer_target(&profile).unwrap();
+        let confirmed = serde_json::json!({
+            "type": "network",
+            "ip": "192.0.2.97",
+            "port": 9100,
+            "emulation": "escpos",
+            "render_mode": "text",
+            "cutPaper": false,
+            "escposCodePage": 14,
+            "capabilities": {
+                "status": "verified",
+                "resolvedTransport": "raw_tcp",
+                "resolvedAddress": "192.0.2.97:9100",
+                "emulation": "escpos",
+                "renderMode": "text",
+                "baudRate": null,
+                "escposCodePage": 14,
+                "supportsCut": false,
+                "supportsLogo": false,
+                "lastVerifiedAt": "2026-08-12T10:00:00Z"
+            }
+        });
+        let prepared = prepare_wizard_sample(
+            &db,
+            &profile,
+            &target,
+            "Epson no-cut candidate",
+            &WizardSampleKind::TransportText,
+            0,
+            Some(&confirmed),
+        )
+        .unwrap();
+        let request = managed_test_print_request(
+            &profile,
+            prepared,
+            &WizardSampleKind::TransportText,
+            "confirmed-no-cut",
+            None,
+        );
+        let outcome = print::enqueue_pre_rendered_test_print(&db, request).unwrap();
+        let conn = db.conn.lock().unwrap();
+        let bytes = crate::print_snapshot::load_snapshot(&conn, &outcome.job_id)
+            .unwrap()
+            .unwrap();
+        let envelope_json: String = conn
+            .query_row(
+                "SELECT render_profile_snapshot_json FROM print_jobs WHERE id = ?1",
+                [&outcome.job_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let envelope: serde_json::Value = serde_json::from_str(&envelope_json).unwrap();
+        let has_escpos_cut = bytes
+            .windows(4)
+            .any(|window| window == [0x1d, 0x56, 0x41, 0x10]);
+        let has_star_cut = bytes.windows(3).any(|window| window == [0x1b, 0x64, 0x01]);
+
+        assert_eq!(
+            (
+                envelope["cut_paper"].as_bool(),
+                has_escpos_cut,
+                has_star_cut
+            ),
+            (Some(false), false, false)
+        );
+    }
+
+    #[test]
+    fn wizard_print_branding_requires_real_non_empty_raster_prefix() {
+        let mut disabled = receipt_renderer::LayoutConfig::default();
+        disabled.show_logo = false;
+        disabled.logo_url = Some("data:image/png;base64,AA==".into());
+        assert_eq!(
+            build_branding_sample("Printer", &disabled)
+                .unwrap_err()
+                .code(),
+            "logo_not_configured"
+        );
+
+        let mut missing = receipt_renderer::LayoutConfig::default();
+        missing.show_logo = true;
+        missing.logo_url = Some("   ".into());
+        assert_eq!(
+            build_branding_sample("Printer", &missing)
+                .unwrap_err()
+                .code(),
+            "logo_not_configured"
+        );
+
+        let mut broken = receipt_renderer::LayoutConfig::default();
+        broken.show_logo = true;
+        broken.logo_url = Some("data:image/png;base64,not-valid".into());
+        let broken_error = build_branding_sample("Printer", &broken).unwrap_err();
+        assert_eq!(
+            (
+                broken_error.code(),
+                broken_error.logo_configured(),
+                broken_error.logo_included()
+            ),
+            ("logo_render_failed", true, false)
+        );
+
+        let mut encoded = Vec::new();
+        image::DynamicImage::ImageLuma8(image::GrayImage::from_pixel(2, 2, image::Luma([0])))
+            .write_to(
+                &mut std::io::Cursor::new(&mut encoded),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        let mut real = receipt_renderer::LayoutConfig::default();
+        real.show_logo = true;
+        real.logo_url = Some(format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(encoded)
+        ));
+        let sample = build_branding_sample("Printer", &real).unwrap();
+        assert!(sample.logo_included);
+        assert!(!sample.bytes.is_empty());
+        assert!(sample
+            .bytes
+            .windows(3)
+            .any(|window| window == [0x1b, b'*', 33]));
+    }
+
+    #[test]
+    fn wizard_print_response_dto_serializes_exact_success_and_failure_shapes() {
+        let queued = WizardPrintResponse::queued(print::PreRenderedTestPrintOutcome {
+            job_id: "11111111-1111-4111-8111-111111111111".into(),
+            duplicate: false,
+            queue_state: "pending".into(),
+            sample_kind: "encoding".into(),
+            candidate_connection_details: serde_json::json!({"type": "network"}),
+            candidate_capabilities: serde_json::json!({"status": "verified"}),
+            logo_configured: false,
+            logo_included: false,
+        });
+        assert_eq!(
+            serde_json::to_value(queued).unwrap(),
+            serde_json::json!({
+                "success": true,
+                "queued": true,
+                "duplicate": false,
+                "jobId": "11111111-1111-4111-8111-111111111111",
+                "queueState": "pending",
+                "sampleKind": "encoding",
+                "candidateConnectionDetails": {"type": "network"},
+                "candidateCapabilities": {"status": "verified"},
+                "logoConfigured": false,
+                "logoIncluded": false
+            })
+        );
+
+        let mut broken = receipt_renderer::LayoutConfig::default();
+        broken.show_logo = true;
+        broken.logo_url = Some("data:image/png;base64,not-valid".into());
+        let error = build_branding_sample("Brand Printer", &broken).unwrap_err();
+        let error_message = error.to_string();
+        let rejected = WizardPrintResponse::rejected(
+            "Brand Printer".into(),
+            WizardSampleKind::Branding,
+            &printers::ResolvedPrinterTarget::RawTcp {
+                host: "192.0.2.98".into(),
+                port: 9100,
+            },
+            error,
+        );
+        assert_eq!(
+            serde_json::to_value(rejected).unwrap(),
+            serde_json::json!({
+                "success": false,
+                "queued": false,
+                "printerName": "Brand Printer",
+                "sampleKind": "branding",
+                "errorCode": "logo_render_failed",
+                "error": error_message,
+                "resolvedTransport": "raw_tcp",
+                "resolvedAddress": "192.0.2.98:9100",
+                "verificationStatus": "unverified",
+                "logoConfigured": true,
+                "logoIncluded": false
+            })
+        );
+    }
+
     fn preview_profile_from_frontend(payload: serde_json::Value) -> serde_json::Value {
         normalize_draft_profile_payload(payload).expect("frontend profile payload should normalize")
+    }
+
+    fn insert_history_command_job(db: &db::DbState, job_id: &str, status: &str) {
+        let conn = db.conn.lock().expect("lock test database");
+        let order_id = format!("order-{job_id}");
+        conn.execute("INSERT INTO orders (id) VALUES (?1)", [&order_id])
+            .expect("insert safe legacy order source");
+        conn.execute(
+            "INSERT INTO print_jobs (
+                 id, entity_type, entity_id, status, retry_count, max_retries,
+                 last_error, warning_code, warning_message, last_attempt_at,
+                 completed_at, history_expires_at, created_at, updated_at
+             ) VALUES (
+                 ?1, 'order_receipt', ?2, ?3, 3, 3,
+                 'printer offline', 'paper_out', 'Load paper', datetime('now'),
+                 datetime('now'), ?4, datetime('now'), datetime('now')
+             )",
+            rusqlite::params![
+                job_id,
+                order_id,
+                status,
+                (Utc::now() + ChronoDuration::days(1)).to_rfc3339()
+            ],
+        )
+        .expect("insert print history command source");
+    }
+
+    #[test]
+    fn print_history_command_retry_continues_same_job_and_emits_once_before_kick() {
+        let db = test_db();
+        insert_history_command_job(&db, "retry-command-source", "failed");
+        let invalidations = Cell::new(0usize);
+        let kicks = RefCell::new(Vec::<String>::new());
+
+        let result = finish_print_queue_mutation(
+            execute_printer_retry_job(&db, "retry-command-source", Utc::now()),
+            retry_kick_job_id,
+            || invalidations.set(invalidations.get() + 1),
+            |job_id| kicks.borrow_mut().push(job_id.to_string()),
+        )
+        .expect("Retry command succeeds");
+
+        assert_eq!(
+            result,
+            serde_json::json!({
+                "success": true,
+                "jobId": "retry-command-source",
+                "newJobId": null,
+                "affected": 1,
+                "unchanged": false,
+                "duplicate": false
+            })
+        );
+        assert_eq!(invalidations.get(), 1);
+        assert_eq!(kicks.borrow().as_slice(), ["retry-command-source"]);
+        let conn = db.conn.lock().expect("lock test database");
+        let rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM print_jobs WHERE id = 'retry-command-source' AND status = 'pending'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read retried row");
+        assert_eq!(rows, 1);
+    }
+
+    #[test]
+    fn print_history_command_reprint_clones_and_kicks_the_new_job() {
+        let db = test_db();
+        insert_history_command_job(&db, "reprint-command-source", "cancelled");
+        let invalidations = Cell::new(0usize);
+        let kicks = RefCell::new(Vec::<String>::new());
+
+        let result = finish_print_queue_mutation(
+            execute_print_reprint_job(&db, "reprint-command-source", Utc::now()),
+            reprint_kick_job_id,
+            || invalidations.set(invalidations.get() + 1),
+            |job_id| kicks.borrow_mut().push(job_id.to_string()),
+        )
+        .expect("Reprint command succeeds");
+
+        let child_id = result["newJobId"]
+            .as_str()
+            .expect("Reprint exposes its new job ID")
+            .to_string();
+        assert_ne!(child_id, "reprint-command-source");
+        assert_eq!(
+            result,
+            serde_json::json!({
+                "success": true,
+                "jobId": "reprint-command-source",
+                "newJobId": child_id,
+                "affected": 1,
+                "unchanged": false,
+                "duplicate": false
+            })
+        );
+        assert_eq!(invalidations.get(), 1);
+        assert_eq!(kicks.borrow().as_slice(), [child_id.as_str()]);
+
+        let conn = db.conn.lock().expect("lock test database");
+        let source_status: String = conn
+            .query_row(
+                "SELECT status FROM print_jobs WHERE id = 'reprint-command-source'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read source status");
+        let child: (String, String) = conn
+            .query_row(
+                "SELECT status, reprint_of_job_id FROM print_jobs WHERE id = ?1",
+                [&child_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read Reprint child");
+        assert_eq!(source_status, "cancelled");
+        assert_eq!(child, ("pending".into(), "reprint-command-source".into()));
+    }
+
+    #[test]
+    fn print_history_command_coalesced_reprint_has_no_invalidation_or_kick() {
+        let db = test_db();
+        insert_history_command_job(&db, "coalesced-command-source", "printed");
+        let first =
+            crate::print_history::clone_reprint_job(&db, "coalesced-command-source", Utc::now())
+                .expect("create active child");
+        let active_child = first.new_job_id.expect("active child ID");
+        let invalidations = Cell::new(0usize);
+        let kicks = RefCell::new(Vec::<String>::new());
+
+        let result = finish_print_queue_mutation(
+            execute_print_reprint_job(&db, "coalesced-command-source", Utc::now()),
+            reprint_kick_job_id,
+            || invalidations.set(invalidations.get() + 1),
+            |job_id| kicks.borrow_mut().push(job_id.to_string()),
+        )
+        .expect("coalesced Reprint succeeds");
+
+        assert_eq!(result["newJobId"], active_child);
+        assert_eq!(result["affected"], 0);
+        assert_eq!(result["unchanged"], true);
+        assert_eq!(result["duplicate"], true);
+        assert_eq!(invalidations.get(), 0);
+        assert!(kicks.borrow().is_empty());
+    }
+
+    #[test]
+    fn print_history_command_rejection_has_no_invalidation_or_kick() {
+        let db = test_db();
+        insert_history_command_job(&db, "rejected-retry-source", "pending");
+        let invalidations = Cell::new(0usize);
+        let kicks = RefCell::new(Vec::<String>::new());
+
+        let result = finish_print_queue_mutation(
+            execute_printer_retry_job(&db, "rejected-retry-source", Utc::now()),
+            retry_kick_job_id,
+            || invalidations.set(invalidations.get() + 1),
+            |job_id| kicks.borrow_mut().push(job_id.to_string()),
+        );
+
+        assert!(result.is_err());
+        assert_eq!(invalidations.get(), 0);
+        assert!(kicks.borrow().is_empty());
+    }
+
+    #[test]
+    fn print_history_command_rollback_has_no_invalidation_or_kick() {
+        let db = test_db();
+        insert_history_command_job(&db, "rollback-command-source", "failed");
+        {
+            let conn = db.conn.lock().expect("lock test database");
+            conn.execute_batch(
+                "CREATE TRIGGER reject_command_reprint
+                 BEFORE INSERT ON print_jobs
+                 WHEN NEW.reprint_of_job_id = 'rollback-command-source'
+                 BEGIN
+                   SELECT RAISE(ABORT, 'forced command rollback');
+                 END;",
+            )
+            .expect("install rollback trigger");
+        }
+        let invalidations = Cell::new(0usize);
+        let kicks = RefCell::new(Vec::<String>::new());
+
+        let result = finish_print_queue_mutation(
+            execute_print_reprint_job(&db, "rollback-command-source", Utc::now()),
+            reprint_kick_job_id,
+            || invalidations.set(invalidations.get() + 1),
+            |job_id| kicks.borrow_mut().push(job_id.to_string()),
+        );
+
+        assert!(result.is_err());
+        assert_eq!(invalidations.get(), 0);
+        assert!(kicks.borrow().is_empty());
+        let conn = db.conn.lock().expect("lock test database");
+        let children: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM print_jobs WHERE reprint_of_job_id = 'rollback-command-source'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count rolled-back children");
+        assert_eq!(children, 0);
     }
 
     #[test]
@@ -3790,6 +6654,698 @@ mod dto_tests {
         })));
         assert_eq!(from_string.as_deref(), Some("pending"));
         assert_eq!(from_object.as_deref(), Some("failed"));
+    }
+
+    #[test]
+    fn parse_print_list_jobs_payload_preserves_filters_and_pagination_defaults() {
+        let parsed = parse_print_list_jobs_payload(Some(serde_json::json!({
+            "state": "dispatched",
+            "printerProfileId": "  profile-a  ",
+            "limit": 25,
+            "offset": 50
+        })));
+        assert_eq!(
+            parsed,
+            (Some("dispatched".into()), Some("profile-a".into()), 25, 50)
+        );
+        assert_eq!(
+            parse_print_list_jobs_payload(Some(serde_json::json!("pending"))),
+            (Some("pending".into()), None, 50, 0)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn print_list_jobs_blocking_runs_off_runtime_thread_and_preserves_json_or_inner_error() {
+        let runtime_thread = thread::current().id();
+        let (worker_thread_tx, worker_thread_rx) = std::sync::mpsc::channel();
+        let expected = serde_json::json!({
+            "success": true,
+            "jobs": [{ "id": "safe-job-id", "capabilities": { "retryable": true } }]
+        });
+        let closure_value = expected.clone();
+
+        let actual = run_print_list_jobs_blocking(move || {
+            worker_thread_tx
+                .send(thread::current().id())
+                .expect("record blocking worker thread");
+            Ok(closure_value)
+        })
+        .await
+        .expect("blocking queue snapshot result");
+
+        assert_eq!(actual, expected);
+        assert_ne!(
+            worker_thread_rx.recv().expect("blocking worker thread id"),
+            runtime_thread,
+            "SQLite snapshot/serialization must leave the current-thread runtime"
+        );
+        assert_eq!(
+            run_print_list_jobs_blocking(|| Err("queue-read-error".to_string())).await,
+            Err("queue-read-error".to_string()),
+            "domain errors must remain byte-for-byte unchanged"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn print_list_jobs_blocking_maps_worker_panic_to_fixed_private_error() {
+        let panic_error = run_print_list_jobs_blocking(|| -> Result<serde_json::Value, String> {
+            panic!("PRIVATE-QUEUE-PANIC-PAYLOAD")
+        })
+        .await
+        .expect_err("worker panic must become an IPC error");
+
+        assert_eq!(panic_error, "Print queue snapshot worker panicked");
+        assert!(!panic_error.contains("PRIVATE-QUEUE-PANIC-PAYLOAD"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn printer_ipc_blocking_runner_leaves_runtime_and_preserves_domain_errors() {
+        let runtime_thread = thread::current().id();
+        let (worker_thread_tx, worker_thread_rx) = std::sync::mpsc::channel();
+        let expected = serde_json::json!({
+            "success": true,
+            "message": "compatible printer command response"
+        });
+        let closure_value = expected.clone();
+
+        let actual = run_printer_ipc_blocking(move || {
+            worker_thread_tx
+                .send(thread::current().id())
+                .expect("record printer worker thread");
+            Ok(closure_value)
+        })
+        .await
+        .expect("blocking printer result");
+
+        assert_eq!(actual, expected);
+        assert_ne!(
+            worker_thread_rx.recv().expect("printer worker thread id"),
+            runtime_thread,
+            "printer command work must leave the current-thread Tokio runtime"
+        );
+        assert_eq!(
+            run_printer_ipc_blocking(|| Err::<serde_json::Value, _>("printer-domain-error".into()))
+                .await,
+            Err("printer-domain-error".to_string()),
+            "domain errors must remain byte-for-byte unchanged"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn printer_ipc_blocking_runner_maps_panics_to_fixed_private_error() {
+        let panic_error = run_printer_ipc_blocking(|| -> Result<serde_json::Value, String> {
+            panic!("PRIVATE-PRINTER-PANIC-PAYLOAD")
+        })
+        .await
+        .expect_err("printer worker panic must become a fixed IPC error");
+
+        assert_eq!(panic_error, "Printer command worker panicked");
+        assert!(!panic_error.contains("PRIVATE-PRINTER-PANIC-PAYLOAD"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn printer_ipc_blocking_status_probe_preserves_snapshot_off_runtime_thread() {
+        let db = Arc::new(test_db());
+        let profile = printers::create_printer_profile(
+            &db,
+            &serde_json::json!({
+                "name": "Status blocking probe",
+                "printerName": "192.0.2.179",
+                "driverType": "escpos",
+                "printerType": "network",
+                "role": "receipt",
+                "connectionJson": serde_json::json!({
+                    "type": "network",
+                    "ip": "192.0.2.179",
+                    "port": 9100,
+                    "emulation": "escpos",
+                    "render_mode": "text"
+                }).to_string()
+            }),
+        )
+        .expect("create status printer profile");
+        let profile_id = profile["profileId"]
+            .as_str()
+            .expect("status profile id")
+            .to_string();
+        let runtime_thread = thread::current().id();
+        let (worker_thread_tx, worker_thread_rx) = std::sync::mpsc::channel();
+        let worker_db = Arc::clone(&db);
+
+        let statuses = run_printer_ipc_blocking(move || {
+            worker_thread_tx
+                .send(thread::current().id())
+                .expect("record status worker thread");
+            collect_printer_status_map_with_probe(&worker_db, |_| Ok(()))
+        })
+        .await
+        .expect("collect status snapshot");
+
+        assert_ne!(
+            worker_thread_rx.recv().expect("status worker thread id"),
+            runtime_thread
+        );
+        assert_eq!(statuses[&profile_id]["printerId"], profile_id);
+        assert_eq!(statuses[&profile_id]["state"], "unverified");
+        assert_eq!(statuses[&profile_id]["connected"], true);
+        assert_eq!(statuses[&profile_id]["transportReachable"], true);
+        assert_eq!(statuses[&profile_id]["resolvedTransport"], "raw_tcp");
+        assert_eq!(statuses[&profile_id]["resolvedAddress"], "192.0.2.179:9100");
+        assert!(statuses[&profile_id]["lastSeen"].is_string());
+    }
+
+    #[test]
+    fn printer_ipc_status_and_diagnostics_preserve_command_response_contracts() {
+        let db = test_db();
+        let profile = printers::create_printer_profile(
+            &db,
+            &serde_json::json!({
+                "name": "Status contract printer",
+                "printerName": "192.0.2.178",
+                "driverType": "escpos",
+                "printerType": "network",
+                "role": "receipt",
+                "connectionJson": serde_json::json!({
+                    "type": "network",
+                    "ip": "192.0.2.178",
+                    "port": 9100,
+                    "emulation": "escpos",
+                    "render_mode": "text"
+                }).to_string()
+            }),
+        )
+        .expect("create status contract profile");
+        let profile_id = profile["profileId"]
+            .as_str()
+            .expect("status contract profile id");
+
+        let status = execute_printer_get_status_with_probe(&db, profile_id, |_| Ok(()))
+            .expect("status response");
+        assert_eq!(status["success"], true);
+        assert_eq!(status["printerId"], profile_id);
+        assert_eq!(status["state"], "unverified");
+        assert_eq!(status["connected"], true);
+        assert_eq!(status["transportReachable"], true);
+        assert_eq!(status["verificationStatus"], "unverified");
+        assert_eq!(status["resolvedTransport"], "raw_tcp");
+        assert_eq!(status["resolvedAddress"], "192.0.2.178:9100");
+        assert_eq!(status["queueLength"], 0);
+        assert_eq!(status["printerName"], "192.0.2.178");
+        assert!(status["lastSeen"].is_string());
+
+        let diagnostics =
+            execute_printer_diagnostics_with_probe(&db, profile_id, |_| Err("offline".into()))
+                .expect("diagnostics response");
+        assert_eq!(diagnostics["success"], true);
+        assert_eq!(diagnostics["diagnostics"]["printerId"], profile_id);
+        assert_eq!(diagnostics["diagnostics"]["connectionType"], "network");
+        assert_eq!(diagnostics["diagnostics"]["model"], "192.0.2.178");
+        assert_eq!(diagnostics["diagnostics"]["isOnline"], false);
+        assert_eq!(diagnostics["diagnostics"]["state"], "offline");
+        assert_eq!(
+            diagnostics["diagnostics"]["verificationStatus"],
+            "unverified"
+        );
+        assert_eq!(
+            diagnostics["diagnostics"]["recentJobs"],
+            serde_json::json!({"total": 0, "successful": 0, "failed": 0})
+        );
+    }
+
+    #[test]
+    fn printer_ipc_status_monitor_preserves_invalidation_event_contract() {
+        let mut statuses = serde_json::Map::new();
+        statuses.insert(
+            "printer-contract".into(),
+            serde_json::json!({"printerId": "printer-contract", "state": "offline"}),
+        );
+
+        assert_eq!(
+            printer_status_snapshot_event(statuses, "2026-08-13T10:15:30Z"),
+            serde_json::json!({
+                "status": "snapshot",
+                "statuses": {
+                    "printer-contract": {
+                        "printerId": "printer-contract",
+                        "state": "offline"
+                    }
+                },
+                "updatedAt": "2026-08-13T10:15:30Z"
+            })
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn printer_ipc_blocking_saved_sample_prepares_and_enqueues_off_runtime_thread() {
+        let db = Arc::new(test_db());
+        let profile = printers::create_printer_profile(
+            &db,
+            &serde_json::json!({
+                "name": "Saved blocking sample",
+                "printerName": "192.0.2.180",
+                "driverType": "escpos",
+                "printerType": "network",
+                "role": "receipt",
+                "characterSet": "PC737_GREEK",
+                "connectionJson": serde_json::json!({
+                    "type": "network",
+                    "ip": "192.0.2.180",
+                    "port": 9100,
+                    "emulation": "escpos",
+                    "render_mode": "text"
+                }).to_string()
+            }),
+        )
+        .expect("create saved printer profile");
+        let profile_id = profile["profileId"]
+            .as_str()
+            .expect("saved profile id")
+            .to_string();
+        let runtime_thread = thread::current().id();
+        let (worker_thread_tx, worker_thread_rx) = std::sync::mpsc::channel();
+        let worker_db = Arc::clone(&db);
+
+        let outcome = run_printer_ipc_blocking(move || {
+            worker_thread_tx
+                .send(thread::current().id())
+                .expect("record saved sample worker thread");
+            execute_saved_profile_test_enqueue(
+                &worker_db,
+                &profile_id,
+                WizardSampleKind::TransportText,
+                "saved-blocking-command",
+            )
+        })
+        .await
+        .expect("enqueue saved sample");
+
+        assert_ne!(
+            worker_thread_rx
+                .recv()
+                .expect("saved sample worker thread id"),
+            runtime_thread
+        );
+        assert_eq!(outcome.sample_kind, "transport_text");
+        let conn = db.conn.lock().expect("lock saved sample database");
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM print_jobs WHERE id = ?1 AND status = 'pending'",
+                [&outcome.job_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count saved sample row"),
+            1
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn printer_ipc_blocking_draft_sample_prepares_and_enqueues_off_runtime_thread() {
+        let db = Arc::new(test_db());
+        let payload = PrinterTestDraftPayload {
+            profile_draft: serde_json::json!({
+                "name": "Draft blocking sample",
+                "type": "network",
+                "connectionDetails": {
+                    "type": "network",
+                    "ip": "192.0.2.181",
+                    "port": 9100,
+                    "emulation": "escpos",
+                    "render_mode": "text"
+                },
+                "paperSize": "80mm",
+                "role": "receipt",
+                "characterSet": "PC737_GREEK",
+                "enabled": true
+            }),
+            sample_kind: WizardSampleKind::Encoding,
+            probe_attempt: 0,
+            wizard_session_id: "draft-blocking-command".into(),
+            confirmed_candidate_connection_details: None,
+        };
+        let runtime_thread = thread::current().id();
+        let (worker_thread_tx, worker_thread_rx) = std::sync::mpsc::channel();
+        let worker_db = Arc::clone(&db);
+
+        let outcome = run_printer_ipc_blocking(move || {
+            worker_thread_tx
+                .send(thread::current().id())
+                .expect("record draft sample worker thread");
+            execute_draft_profile_test_enqueue(&worker_db, payload)
+        })
+        .await
+        .expect("prepare draft sample");
+
+        assert_ne!(
+            worker_thread_rx
+                .recv()
+                .expect("draft sample worker thread id"),
+            runtime_thread
+        );
+        let DraftWizardEnqueue::Queued(outcome) = outcome else {
+            panic!("encoding draft should enqueue")
+        };
+        assert_eq!(outcome.sample_kind, "encoding");
+        let conn = db.conn.lock().expect("lock draft sample database");
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM print_jobs WHERE id = ?1 AND status = 'pending'",
+                [&outcome.job_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count draft sample row"),
+            1
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn printer_test_greek_direct_alias_enqueues_encoding_before_notify_and_kick() {
+        let db = Arc::new(test_db());
+        let profile = printers::create_printer_profile(
+            &db,
+            &serde_json::json!({
+                "name": "Greek direct compatibility",
+                "printerName": "192.0.2.182",
+                "driverType": "escpos",
+                "printerType": "network",
+                "role": "receipt",
+                "characterSet": "PC737_GREEK",
+                "connectionJson": serde_json::json!({
+                    "type": "network",
+                    "ip": "192.0.2.182",
+                    "port": 9100,
+                    "emulation": "escpos",
+                    "render_mode": "text"
+                }).to_string()
+            }),
+        )
+        .expect("create Greek direct printer profile");
+        let profile_id = profile["profileId"]
+            .as_str()
+            .expect("Greek direct profile id")
+            .to_string();
+        let worker_db = Arc::clone(&db);
+
+        let outcome = run_printer_ipc_blocking(move || {
+            execute_greek_compatibility_enqueue(&worker_db, &profile_id, "greek-managed-alias")
+        })
+        .await
+        .expect("Greek compatibility sample enqueue");
+
+        assert_eq!(outcome.sample_kind, "encoding");
+        assert!(!outcome.duplicate);
+        let job_id = outcome.job_id.clone();
+        let assert_pending_snapshot = || {
+            let conn = db.conn.lock().expect("lock Greek queue database");
+            assert_eq!(
+                conn.query_row(
+                    "SELECT status FROM print_jobs WHERE id = ?1",
+                    [&job_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .expect("Greek queue row exists"),
+                "pending"
+            );
+            let bytes = crate::print_snapshot::load_snapshot(&conn, &job_id)
+                .expect("load Greek snapshot")
+                .expect("Greek snapshot is durable");
+            assert!(bytes.windows(3).any(|window| window == [0x1b, 0x74, 14]));
+        };
+        let order = RefCell::new(Vec::new());
+        let response = finish_wizard_print_enqueue(
+            Ok(outcome),
+            || {
+                assert_pending_snapshot();
+                order.borrow_mut().push("notify");
+            },
+            |kicked_job_id| {
+                assert_eq!(kicked_job_id, job_id);
+                assert_pending_snapshot();
+                order.borrow_mut().push("kick");
+            },
+        )
+        .expect("finish Greek managed enqueue");
+        assert_eq!(order.into_inner(), vec!["notify", "kick"]);
+
+        let response = serde_json::to_value(response).expect("serialize Greek queued response");
+        assert_eq!(response["success"], true);
+        assert_eq!(response["queued"], true);
+        assert_eq!(response["sampleKind"], "encoding");
+        assert_eq!(response["queueState"], "pending");
+        assert!(response.get("latencyMs").is_none());
+        assert!(response.get("bytesWritten").is_none());
+
+        let duplicate = execute_greek_compatibility_enqueue(
+            &db,
+            profile["profileId"].as_str().expect("profile id"),
+            "different-session-same-target",
+        )
+        .expect("coalesce Greek duplicate");
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.job_id, job_id);
+        let notifications = Cell::new(0);
+        let kicks = Cell::new(0);
+        finish_wizard_print_enqueue(
+            Ok(duplicate),
+            || notifications.set(notifications.get() + 1),
+            |_| kicks.set(kicks.get() + 1),
+        )
+        .expect("finish duplicate Greek enqueue");
+        assert_eq!((notifications.get(), kicks.get()), (0, 0));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn printer_discovery_blocking_sources_leave_runtime_before_async_lan_merge() {
+        let db = Arc::new(test_db());
+        let runtime_thread = thread::current().id();
+        let (worker_thread_tx, worker_thread_rx) = std::sync::mpsc::channel();
+        let worker_db = Arc::clone(&db);
+        let sender = worker_thread_tx.clone();
+        let usb_sender = worker_thread_tx.clone();
+        let bluetooth_sender = worker_thread_tx.clone();
+        let bluetooth_serial_sender = worker_thread_tx.clone();
+
+        let snapshot = run_printer_ipc_blocking(move || {
+            collect_discovery_blocking_with_sources(
+                &worker_db,
+                true,
+                true,
+                move || {
+                    sender
+                        .send(thread::current().id())
+                        .expect("system source thread");
+                    vec!["System Queue".to_string()]
+                },
+                move |_| {
+                    usb_sender
+                        .send(thread::current().id())
+                        .expect("USB source thread");
+                    vec![serde_json::json!({
+                        "name": "USB Printer",
+                        "type": "usb",
+                        "address": "COM7"
+                    })]
+                },
+                move |_| {
+                    bluetooth_sender
+                        .send(thread::current().id())
+                        .expect("Bluetooth source thread");
+                    Ok(vec![serde_json::json!({
+                        "name": "Bluetooth Printer",
+                        "type": "bluetooth",
+                        "address": "AA:BB:CC:DD:EE:FF"
+                    })])
+                },
+                move |_| {
+                    bluetooth_serial_sender
+                        .send(thread::current().id())
+                        .expect("Bluetooth serial source thread");
+                    vec![]
+                },
+                move || {
+                    worker_thread_tx
+                        .send(thread::current().id())
+                        .expect("local IP source thread");
+                    vec![std::net::Ipv4Addr::new(192, 168, 1, 42)]
+                },
+            )
+        })
+        .await
+        .expect("collect blocking discovery sources");
+
+        for _ in 0..5 {
+            assert_ne!(
+                worker_thread_rx.recv().expect("blocking discovery thread"),
+                runtime_thread
+            );
+        }
+        assert_eq!(snapshot.system_printer_names, vec!["System Queue"]);
+        assert_eq!(
+            snapshot.local_ips,
+            vec![std::net::Ipv4Addr::new(192, 168, 1, 42)]
+        );
+
+        let lan = vec![serde_json::json!({
+            "name": "LAN Printer (192.168.1.19)",
+            "type": "network",
+            "address": "192.168.1.19",
+            "port": 9100
+        })];
+        let response = network_scan_response(snapshot, lan);
+        assert_eq!(response["success"], true);
+        assert_eq!(response["type"], "network");
+        assert_eq!(response["printers"][0]["name"], "System Queue");
+        assert_eq!(response["printers"][1]["name"], "USB Printer");
+        assert_eq!(
+            response["printers"][2]["name"],
+            "LAN Printer (192.168.1.19)"
+        );
+    }
+
+    #[test]
+    fn printer_discovery_response_helpers_preserve_bluetooth_and_combined_shapes() {
+        assert_eq!(
+            system_printers_response(vec!["Receipt Queue".into(), "Kitchen Queue".into()]),
+            serde_json::json!({
+                "success": true,
+                "printers": ["Receipt Queue", "Kitchen Queue"]
+            })
+        );
+
+        let bluetooth_snapshot = BlockingDiscoverySnapshot {
+            configured: ConfiguredPrinterLookup::default(),
+            system_printer_names: vec![],
+            usb_serial: vec![],
+            bluetooth: vec![serde_json::json!({
+                "name": "Star Bluetooth",
+                "type": "bluetooth",
+                "address": "AA:BB:CC:DD:EE:FF"
+            })],
+            local_ips: vec![],
+        };
+        let bluetooth = bluetooth_scan_response(bluetooth_snapshot);
+        assert_eq!(bluetooth["success"], true);
+        assert_eq!(bluetooth["type"], "bluetooth");
+        assert_eq!(bluetooth["message"], "Discovered 1 Bluetooth device(s)");
+        assert_eq!(bluetooth["printers"][0]["name"], "Star Bluetooth");
+
+        let combined_snapshot = BlockingDiscoverySnapshot {
+            configured: ConfiguredPrinterLookup::default(),
+            system_printer_names: vec!["Windows Queue".into()],
+            usb_serial: vec![],
+            bluetooth: vec![serde_json::json!({
+                "name": "Star Bluetooth",
+                "type": "bluetooth",
+                "address": "AA:BB:CC:DD:EE:FF"
+            })],
+            local_ips: vec![],
+        };
+        let combined = printer_discover_response(
+            combined_snapshot,
+            vec![serde_json::json!({
+                "name": "LAN Printer",
+                "type": "network",
+                "address": "192.168.1.19"
+            })],
+            true,
+            true,
+        );
+        assert_eq!(combined["success"], true);
+        assert_eq!(combined["printers"].as_array().map(Vec::len), Some(3));
+        assert_eq!(combined["printers"][0]["name"], "Windows Queue");
+        assert_eq!(combined["printers"][1]["name"], "LAN Printer");
+        assert_eq!(combined["printers"][2]["name"], "Star Bluetooth");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn printer_ipc_blocking_drawer_preserves_guarded_errors_and_hides_panics() {
+        let runtime_thread = thread::current().id();
+        let (worker_thread_tx, worker_thread_rx) = std::sync::mpsc::channel();
+        let response = run_guarded_printer_ipc_blocking(move || {
+            worker_thread_tx
+                .send(thread::current().id())
+                .expect("record drawer worker thread");
+            Ok(serde_json::json!({"success": true, "message": "drawer opened"}))
+        })
+        .await
+        .expect("guarded drawer response");
+        assert_eq!(response["success"], true);
+        assert_ne!(
+            worker_thread_rx.recv().expect("drawer worker thread id"),
+            runtime_thread
+        );
+
+        let domain_error = run_guarded_printer_ipc_blocking(|| {
+            Err::<serde_json::Value, _>("drawer-domain-error".to_string())
+        })
+        .await
+        .expect_err("drawer domain error");
+        assert!(matches!(
+            domain_error,
+            auth::GuardedCommandError::Message(ref message) if message == "drawer-domain-error"
+        ));
+
+        let panic_error =
+            run_guarded_printer_ipc_blocking(|| -> Result<serde_json::Value, String> {
+                panic!("PRIVATE-DRAWER-PANIC-PAYLOAD")
+            })
+            .await
+            .expect_err("drawer worker panic");
+        assert!(matches!(
+            panic_error,
+            auth::GuardedCommandError::Message(ref message)
+                if message == "Printer command worker panicked"
+                    && !message.contains("PRIVATE-DRAWER-PANIC-PAYLOAD")
+        ));
+    }
+
+    #[test]
+    fn print_queue_event_gate_rejects_token_only_non_durable_result() {
+        let mut token_only = serde_json::json!({
+            "success": true,
+            "durableChanged": false,
+            "activeStopsRequested": 1
+        });
+        assert!(!take_print_queue_durable_changed(&mut token_only));
+        assert!(token_only.get("durableChanged").is_none());
+
+        let mut committed = serde_json::json!({
+            "success": true,
+            "durableChanged": true
+        });
+        assert!(take_print_queue_durable_changed(&mut committed));
+        assert!(committed.get("durableChanged").is_none());
+    }
+
+    #[test]
+    fn print_queue_control_payload_rejects_malformed_or_ambiguous_scope() {
+        assert!(parse_print_queue_control_payload(Some(serde_json::json!({
+            "printerProfileId": "profile-a",
+            "statuses": "pending"
+        })))
+        .is_err());
+        assert!(parse_print_queue_control_payload(Some(serde_json::json!({
+            "printerProfileId": "   "
+        })))
+        .is_err());
+        assert!(parse_print_queue_control_payload(Some(serde_json::json!({
+            "printerProfileID": "profile-a"
+        })))
+        .is_err());
+        assert!(parse_print_queue_control_payload(Some(serde_json::json!(42))).is_err());
+    }
+
+    #[test]
+    fn print_queue_control_payload_preserves_only_explicit_scopes() {
+        let global = parse_print_queue_control_payload(None).unwrap();
+        assert_eq!(global.printer_profile_id, None);
+        assert!(global.statuses.is_empty());
+
+        let object_global = parse_print_queue_control_payload(Some(serde_json::json!({}))).unwrap();
+        assert_eq!(object_global.printer_profile_id, None);
+
+        let profile =
+            parse_print_queue_control_payload(Some(serde_json::json!("  profile-a  "))).unwrap();
+        assert_eq!(profile.printer_profile_id.as_deref(), Some("profile-a"));
     }
 
     #[test]

@@ -3399,7 +3399,11 @@ pub fn list_z_reports(db: &DbState, payload: &Value) -> Result<Value, String> {
 // ---------------------------------------------------------------------------
 
 /// Enqueue a z_report for printing via the print spooler.
-pub fn print_z_report(db: &DbState, payload: &Value) -> Result<Value, String> {
+pub fn print_z_report(
+    db: &DbState,
+    payload: &Value,
+    invalidator: &dyn crate::print::PrintQueueInvalidator,
+) -> Result<Value, String> {
     let z_report_id = str_field(payload, "zReportId")
         .or_else(|| str_field(payload, "z_report_id"))
         .or_else(|| str_field(payload, "id"))
@@ -3416,7 +3420,7 @@ pub fn print_z_report(db: &DbState, payload: &Value) -> Result<Value, String> {
         .map_err(|_| format!("Z-report not found: {z_report_id}"))?;
     }
 
-    crate::print::enqueue_print_job(db, "z_report", &z_report_id, None)
+    crate::print::enqueue_print_job(db, "z_report", &z_report_id, None, invalidator)
 }
 
 fn get_end_of_day_status_at(
@@ -5235,6 +5239,21 @@ mod tests {
     use chrono::{LocalResult, TimeZone};
     use rusqlite::Connection;
 
+    #[derive(Default)]
+    struct CountingPrintQueueInvalidator(std::sync::atomic::AtomicUsize);
+
+    impl crate::print::PrintQueueInvalidator for CountingPrintQueueInvalidator {
+        fn invalidate_print_queue(&self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
+    }
+
+    impl CountingPrintQueueInvalidator {
+        fn count(&self) -> usize {
+            self.0.load(std::sync::atomic::Ordering::Acquire)
+        }
+    }
+
     fn test_db() -> DbState {
         let conn = Connection::open_in_memory().expect("open in-memory db");
         conn.execute_batch(
@@ -5276,6 +5295,38 @@ mod tests {
         local_datetime(year, month, day, hour, minute, second)
             .with_timezone(&Utc)
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    }
+
+    #[test]
+    fn print_z_report_invalidates_once_per_committed_job_insert() {
+        let db = test_db();
+        let shift_id = seed_closed_shift(&db);
+        let generated = generate_z_report(&db, &serde_json::json!({ "shiftId": shift_id }))
+            .expect("generate z-report");
+        let z_report_id = generated["zReportId"].as_str().expect("z-report id");
+        let invalidator = CountingPrintQueueInvalidator::default();
+        let payload = serde_json::json!({ "zReportId": z_report_id });
+
+        let first = print_z_report(&db, &payload, &invalidator).expect("enqueue z-report print");
+        assert_eq!(first["success"], true);
+        assert_eq!(invalidator.count(), 1);
+
+        let duplicate =
+            print_z_report(&db, &payload, &invalidator).expect("deduplicate z-report print");
+        assert_eq!(duplicate["duplicate"], true);
+        assert_eq!(invalidator.count(), 1);
+
+        assert!(print_z_report(
+            &db,
+            &serde_json::json!({ "zReportId": "missing-z-report" }),
+            &invalidator,
+        )
+        .is_err());
+        assert_eq!(
+            invalidator.count(),
+            1,
+            "lookup failure must not invalidate without a print INSERT"
+        );
     }
 
     /// Insert a closed shift with associated data for testing.

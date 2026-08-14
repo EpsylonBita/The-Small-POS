@@ -10,6 +10,7 @@ const read = (...segments: string[]) =>
 
 const panel = () =>
   read('src', 'renderer', 'components', 'printing', 'PrintQueuePanel.tsx');
+const printQueueHook = () => read('src', 'renderer', 'hooks', 'usePrintQueue.ts');
 const eventBridge = () => read('src', 'lib', 'event-bridge.ts');
 const appEvents = () => read('src', 'renderer', 'hooks', 'useAppEvents.ts');
 const orderApproval = () =>
@@ -19,46 +20,26 @@ const orderApproval = () =>
 // with no interval and no event subscription, and lived only in Settings, so a
 // stuck queue was invisible until the operator manually hit Refresh.
 
-test('PrintQueuePanel auto-refreshes on an interval with cleanup', () => {
+test('PrintQueuePanel delegates live refresh and request sequencing to usePrintQueue', () => {
   const source = panel();
 
-  assert.match(source, /setInterval\(/, 'the panel must poll for live queue status');
-  assert.match(
-    source,
-    /clearInterval\(/,
-    'the poll interval must be cleared on unmount to avoid a leak',
-  );
-  // Background polls must be silent (no loading spinner flicker, no toast spam).
-  assert.match(
-    source,
-    /loadQueue\(\{ silent: true \}\)/,
-    'the interval must call loadQueue in silent mode',
-  );
-  assert.match(
-    source,
-    /silent/,
-    'loadQueue must support a silent background path distinct from the manual load',
-  );
+  assert.match(source, /usePrintQueue\(\{ limit, offset: 0 \}\)/);
+  assert.doesNotMatch(source, /setInterval\(|clearInterval\(|getBridge\(|loadSeqRef/);
+
+  const hook = printQueueHook();
+  assert.match(hook, /printer:queue-changed/);
+  assert.match(hook, /VISIBLE_POLL_MS = 5_000/);
+  assert.match(hook, /sequence !== requestSequenceRef\.current/);
 });
 
-test('PrintQueuePanel surfaces stuck jobs in the UI', () => {
+test('PrintQueuePanel renders native whole-queue counts without recomputing a visible subset', () => {
   const source = panel();
 
-  assert.match(
-    source,
-    /failedCount/,
-    'the panel must derive a count of failed/stuck jobs',
-  );
-  assert.match(
-    source,
-    /=== 'failed'/,
-    'the stuck-job count is based on failed job status',
-  );
-  assert.match(
-    source,
-    /settings\.printQueue\.stuckWarning/,
-    'a localized stuck-jobs warning must be shown',
-  );
+  assert.match(source, /queue\.counts\.active/);
+  assert.match(source, /queue\.counts\.failed/);
+  assert.match(source, /queue\.counts\.stale/);
+  assert.match(source, /queue\.counts\.history/);
+  assert.doesNotMatch(source, /failedCount|\.filter\(.*status/);
 });
 
 test('print-worker-alert is registered on the event bridge so onEvent can deliver it', () => {
@@ -100,28 +81,26 @@ test('useAppEvents raises a global operator toast when the print worker is faili
 
 // Regression (review of #5): a silent background poll can race a mutation's refresh;
 // out-of-order responses must not clobber fresher state.
-test('the panel drops out-of-order load responses (last-write-wins)', () => {
-  const source = panel();
+test('usePrintQueue drops out-of-order load responses (last-write-wins)', () => {
+  const source = printQueueHook();
 
-  assert.match(source, /loadSeqRef/, 'a monotonic request token must guard against stale responses');
+  assert.match(source, /requestSequenceRef/, 'a monotonic request token must guard against stale responses');
   assert.match(
     source,
-    /seq !== loadSeqRef\.current/,
+    /sequence !== requestSequenceRef\.current/,
     'a stale load response must be dropped instead of clobbering fresher state',
   );
 });
 
-// Regression (review of #5): the banner must not point at failed jobs outside the
-// rendered window (which have no reachable Retry/Cancel control).
-test('the stuck-jobs banner counts only the visible, rendered jobs', () => {
+// Native counts cover the full query and intentionally overlap; pagination is
+// expanded from offset zero so inserts cannot shift an appended page.
+test('the panel expands the live queue from offset zero without rewriting native totals', () => {
   const source = panel();
 
-  assert.match(source, /visibleJobs/, 'the render and the count must use the same visible window');
-  assert.match(
-    source,
-    /visibleJobs\.filter\(/,
-    'failedCount must be derived from the rendered slice so the banner is not misleading',
-  );
+  assert.match(source, /usePrintQueue\(\{ limit, offset: 0 \}\)/);
+  assert.match(source, /Math\.min\(MAX_LIMIT, current \+ LIMIT_STEP\)/);
+  assert.match(source, /queue\.pagination\.total/);
+  assert.doesNotMatch(source, /offset:\s*limit|setJobs\(|\.concat\(/);
 });
 
 test('queue controls reject backend success:false responses instead of showing a false success toast', () => {

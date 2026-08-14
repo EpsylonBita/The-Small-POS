@@ -927,11 +927,10 @@ export const StaffScheduleView: React.FC = memo(() => {
       // icon is its idiom, and it must not read as success.
       if (status === 'not_filed') {
         toast(
-          response.data?.message
-            || t(
-              'staffSchedule.ergani.publishNotFiled',
-              'Schedule saved locally only — NOT filed with ERGANI. You or your accountant must still declare it.',
-            ),
+          t(
+            'staffSchedule.ergani.publishNotFiled',
+            'Schedule saved locally only — NOT filed with ERGANI. You or your accountant must still declare it.',
+          ),
           { icon: '⚠️', duration: 8000 },
         );
       } else if (status === 'blocked') {

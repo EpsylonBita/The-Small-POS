@@ -13,6 +13,20 @@
 
 import { detectPlatform } from "./platform-detect";
 import type { UpdateInfo } from "./update-contracts";
+import {
+  normalizePrintQueueSnapshot,
+  type PrintQueueCancelAllOptions,
+  type PrintQueueCancelAllResult,
+  type PrintQueueCancelJobResult,
+  type PrintQueueListOptions,
+  type PrintQueuePauseResult,
+  type PrintQueueReprintRequest,
+  type PrintQueueReprintResult,
+  type PrintQueueResumeResult,
+  type PrintQueueRetryResult,
+  type PrintQueueSnapshot,
+  type PrintQueueControlOptions,
+} from "../renderer/components/printing/print-queue-contract";
 import type {
   AuthSetupPinRequest,
   PrivilegedActionConfirmRequest,
@@ -919,8 +933,16 @@ export interface RecordPaymentParams {
   table_session_id?: string;
   seatNumber?: number;
   seat_number?: number;
+  /**
+   * Stable opaque identifier for one collection request. Required at runtime
+   * when collectOutstandingBalance is true; reuse it only for the same retry.
+   */
   idempotencyKey?: string;
   idempotency_key?: string;
+  /** Native must collect the order's live outstanding balance, ignoring a stale renderer amount. */
+  collectOutstandingBalance?: boolean;
+  /** Opaque generation from getSettlementSnapshot; required for native outstanding collection. */
+  expectedSettlementGeneration?: string;
   items?: Array<{
     itemIndex: number;
     itemName?: string;
@@ -933,6 +955,63 @@ export interface RecordPaymentParams {
     item_amount_cents?: number;
     quantity?: number;
   }>;
+}
+
+export interface PaymentSettlementRow {
+  id: string;
+  orderId: string;
+  method: string;
+  amount: number;
+  currency: string;
+  status: "completed";
+  cashReceived?: number | null;
+  changeGiven?: number | null;
+  transactionRef?: string | null;
+  discountAmount: number;
+  paymentOrigin: string;
+  terminalApproved: boolean;
+  terminalDeviceId?: string | null;
+  staffId?: string | null;
+  staffShiftId?: string | null;
+  syncStatus: string;
+  createdAt: string;
+  updatedAt: string;
+  refundedAmount: number;
+  remainingRefundable: number;
+  items: unknown[];
+}
+
+export interface PaymentSettlementSnapshot {
+  success: true;
+  orderId: string;
+  orderTotal: number;
+  netPaid: number;
+  outstandingAmount: number;
+  completedPayments: PaymentSettlementRow[];
+  generation: string;
+}
+
+export interface RecordPaymentFiscalCheckout {
+  success: boolean;
+  approved: boolean;
+  skipped?: boolean;
+  deduplicated?: boolean;
+  orphanedLocally?: boolean;
+  requiresReconciliation?: boolean;
+  error?: string;
+  transaction?: Record<string, unknown>;
+}
+
+export interface RecordPaymentResult extends IpcResult {
+  orderId?: string;
+  paymentId?: string;
+  method?: "cash" | "card" | "room_charge";
+  amount?: number;
+  paymentApproved?: boolean;
+  paymentPersisted?: boolean;
+  requiresReconciliation?: boolean;
+  fiscalCheckout?: RecordPaymentFiscalCheckout;
+  settlement?: Omit<PaymentSettlementSnapshot, "success" | "orderId">;
 }
 
 export interface ResolvePaymentBlockerParams {
@@ -1405,7 +1484,7 @@ export interface PlatformBridge {
     ): Promise<IpcResult<UpdatePaymentMethodResult>>;
     printReceipt(receiptData: any, type?: string): Promise<IpcResult>;
     printKitchenTicket(ticketData: any): Promise<IpcResult>;
-    recordPayment(params: RecordPaymentParams): Promise<IpcResult>;
+    recordPayment(params: RecordPaymentParams): Promise<RecordPaymentResult>;
     voidPayment(
       paymentId: string,
       reason: string,
@@ -1413,6 +1492,7 @@ export interface PlatformBridge {
       staffShiftId?: string,
     ): Promise<IpcResult>;
     getOrderPayments(orderId: string): Promise<any[]>;
+    getSettlementSnapshot(orderId: string): Promise<PaymentSettlementSnapshot>;
     getReceiptPreview(orderId: string): Promise<IpcResult<{ html: string }>>;
     getPaidItems(orderId: string): Promise<any[]>;
     printSplitReceipt(paymentId: string): Promise<IpcResult>;
@@ -1737,10 +1817,7 @@ export interface PlatformBridge {
 
   // -- Printer ---------------------------------------------------------------
   printer: {
-    listJobs(params?: {
-      status?: string;
-      printerProfileId?: string;
-    }): Promise<any>;
+    listJobs(params?: PrintQueueListOptions): Promise<PrintQueueSnapshot>;
     listSystemPrinters(): Promise<any[]>;
     scanNetwork(): Promise<any[]>;
     scanBluetooth(): Promise<any[]>;
@@ -1756,14 +1833,11 @@ export interface PlatformBridge {
     getStatus(printerId: string): Promise<any>;
     getAllStatuses(): Promise<any>;
     submitJob(job: any): Promise<IpcResult>;
-    cancelJob(jobId: string): Promise<IpcResult>;
-    cancelAllJobs(params?: {
-      printerProfileId?: string;
-      statuses?: string[];
-    }): Promise<IpcResult>;
-    pauseQueue(params?: { printerProfileId?: string }): Promise<IpcResult>;
-    retryJob(jobId: string): Promise<IpcResult>;
-    resumeQueue(params?: { printerProfileId?: string }): Promise<IpcResult>;
+    cancelJob(jobId: string): Promise<PrintQueueCancelJobResult>;
+    cancelAllJobs(params?: PrintQueueCancelAllOptions): Promise<PrintQueueCancelAllResult>;
+    pauseQueue(params?: PrintQueueControlOptions): Promise<PrintQueuePauseResult>;
+    retryJob(jobId: string): Promise<PrintQueueRetryResult>;
+    resumeQueue(params?: PrintQueueControlOptions): Promise<PrintQueueResumeResult>;
     test(printerId: string): Promise<IpcResult>;
     testDraft(
       profileDraftOrPayload: any,
@@ -1791,7 +1865,9 @@ export interface PlatformBridge {
     getProfile(profileId: string): Promise<any>;
     setDefaultProfile(profileId: string): Promise<IpcResult>;
     getDefaultProfile(): Promise<any>;
-    reprintJob(jobId: string): Promise<IpcResult>;
+    reprintJob(
+      request: PrintQueueReprintRequest | string,
+    ): Promise<PrintQueueReprintResult>;
   };
 
   // -- Hardware --------------------------------------------------------------
@@ -2208,6 +2284,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   "payment:record": "payments.recordPayment",
   "payment:void": "payments.voidPayment",
   "payment:get-order-payments": "payments.getOrderPayments",
+  "payment:get-settlement-snapshot": "payments.getSettlementSnapshot",
   "payment:get-receipt-preview": "payments.getReceiptPreview",
   "payment:get-paid-items": "payments.getPaidItems",
   "payment:print-split-receipt": "payments.printSplitReceipt",
@@ -2859,6 +2936,8 @@ export class TauriBridge implements PlatformBridge {
       }),
     getOrderPayments: (orderId: string) =>
       this.inv("payment:get-order-payments", orderId),
+    getSettlementSnapshot: (orderId: string) =>
+      this.inv("payment:get-settlement-snapshot", orderId),
     getReceiptPreview: (orderId: string) =>
       this.inv("payment:get-receipt-preview", orderId),
     getPaidItems: (orderId: string) =>
@@ -3201,8 +3280,10 @@ export class TauriBridge implements PlatformBridge {
   };
 
   printer = {
-    listJobs: (params?: { status?: string; printerProfileId?: string }) =>
-      this.inv("printer:list-jobs", params || {}),
+    listJobs: async (params?: PrintQueueListOptions) =>
+      normalizePrintQueueSnapshot(
+        await this.inv("printer:list-jobs", params || {}),
+      ),
     listSystemPrinters: () => this.inv("printer:list-system-printers"),
     scanNetwork: () => this.inv("printer:scan-network"),
     scanBluetooth: () => this.inv("printer:scan-bluetooth"),
@@ -3216,16 +3297,16 @@ export class TauriBridge implements PlatformBridge {
     getStatus: (id: string) => this.inv("printer:get-status", id),
     getAllStatuses: () => this.inv("printer:get-all-statuses"),
     submitJob: (j: any) => this.inv("printer:submit-job", j),
-    cancelAllJobs: (params?: {
-      printerProfileId?: string;
-      statuses?: string[];
-    }) => this.inv("printer:cancel-all-jobs", params || {}),
-    cancelJob: (id: string) => this.inv("printer:cancel-job", id),
-    pauseQueue: (params?: { printerProfileId?: string }) =>
-      this.inv("printer:pause-queue", params || {}),
-    retryJob: (id: string) => this.inv("printer:retry-job", id),
-    resumeQueue: (params?: { printerProfileId?: string }) =>
-      this.inv("printer:resume-queue", params || {}),
+    cancelAllJobs: (params?: PrintQueueCancelAllOptions) =>
+      this.inv("printer:cancel-all-jobs", params || {}) as Promise<PrintQueueCancelAllResult>,
+    cancelJob: (id: string) =>
+      this.inv("printer:cancel-job", id) as Promise<PrintQueueCancelJobResult>,
+    pauseQueue: (params?: PrintQueueControlOptions) =>
+      this.inv("printer:pause-queue", params || {}) as Promise<PrintQueuePauseResult>,
+    retryJob: (id: string) =>
+      this.inv("printer:retry-job", id) as Promise<PrintQueueRetryResult>,
+    resumeQueue: (params?: PrintQueueControlOptions) =>
+      this.inv("printer:resume-queue", params || {}) as Promise<PrintQueueResumeResult>,
     test: (id: string) => this.inv("printer:test", id),
     testDraft: (profileDraftOrPayload: any, sampleKind?: string) => {
       const payload =
@@ -3266,7 +3347,8 @@ export class TauriBridge implements PlatformBridge {
     setDefaultProfile: (id: string) =>
       this.inv("printer:set-default-profile", id),
     getDefaultProfile: () => this.inv("printer:get-default-profile"),
-    reprintJob: (id: string) => this.inv("print:reprint-job", id),
+    reprintJob: (request: PrintQueueReprintRequest | string) =>
+      this.inv("print:reprint-job", request) as Promise<PrintQueueReprintResult>,
   };
 
   // Wave 5 H: hardware.* channel names were the only namespace using

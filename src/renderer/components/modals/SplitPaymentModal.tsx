@@ -40,7 +40,7 @@ interface SplitPaymentModalProps {
   isOpen: boolean; onClose: () => void; orderId: string; orderTotal: number; items: CartItem[];
   onSplitComplete: (result: SplitPaymentResult) => void | Promise<void>; existingPayments?: any[];
   initialMode?: TabMode; isGhostOrder?: boolean; collectionMode?: SplitPaymentCollectionMode;
-  allowDiscounts?: boolean;
+  allowDiscounts?: boolean; isReconciliationPending?: boolean;
 }
 
 type OrderFinancialState = SplitOrderFinancials;
@@ -104,7 +104,7 @@ const extractOrderFinancialState = (order: any, fallbackTotal: number): OrderFin
   return { totalAmount, subtotal, discountAmount, discountPercentage, taxAmount, deliveryFee, tipAmount };
 };
 
-export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, onClose, orderId, orderTotal, items, onSplitComplete, existingPayments = EMPTY_EXISTING_PAYMENTS, initialMode = 'by-amount', isGhostOrder = false, collectionMode, allowDiscounts = true }) => {
+export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, onClose, orderId, orderTotal, items, onSplitComplete, existingPayments = EMPTY_EXISTING_PAYMENTS, initialMode = 'by-amount', isGhostOrder = false, collectionMode, allowDiscounts = true, isReconciliationPending = false }) => {
   const { t } = useTranslation();
   const bridge = getBridge();
   // Mirrors the module-scoped guard into render state so the UI can lock the
@@ -189,13 +189,14 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
   }, [alreadyPaidAmount, normalizedItems, orderFinancials.totalAmount, paidItemIndexSet, t]);
   const persistedOutstanding = useMemo(() => round2(Math.max(0, orderFinancials.totalAmount - alreadyPaidAmount)), [alreadyPaidAmount, orderFinancials.totalAmount]);
   const processingPortionId = useMemo(() => portions.find((portion) => portion.status === 'processing')?.id ?? null, [portions]);
+  const isCloseLocked = isReconciliationPending || Boolean(processingPortionId) || isProcessing || isTerminalChargeInFlight;
   const activeDiscountTotal = useMemo(() => round2(portions.filter((portion) => portion.status !== 'paid').reduce((sum, portion) => sum + portion.discountAmount, 0)), [portions]);
   const assignedDraftAmount = useMemo(() => round2(portions.filter((portion) => portion.status !== 'paid').reduce((sum, portion) => sum + portion.amount, 0)), [portions]);
   const adjustedDue = useMemo(() => round2(Math.max(0, persistedOutstanding - activeDiscountTotal)), [activeDiscountTotal, persistedOutstanding]);
   const remaining = useMemo(() => round2(adjustedDue - assignedDraftAmount), [adjustedDue, assignedDraftAmount]);
   const hasPositiveAssignment = useMemo(() => portions.some((portion) => portion.status !== 'paid' && portion.amount > 0.009), [portions]);
   const anyItemsAssigned = useMemo(() => activeTab !== 'by-items' || availableItems.some((item) => itemAssignments[Number(item.itemIndex ?? 0)] !== undefined), [activeTab, availableItems, itemAssignments]);
-  const canConfirm = useMemo(() => hasPositiveAssignment && anyItemsAssigned && remaining >= -0.01 && !isInitializing && !isProcessing && !processingPortionId && !isTerminalChargeInFlight, [anyItemsAssigned, hasPositiveAssignment, isInitializing, isProcessing, isTerminalChargeInFlight, processingPortionId, remaining]);
+  const canConfirm = useMemo(() => hasPositiveAssignment && anyItemsAssigned && remaining >= -0.01 && !isInitializing && !isProcessing && !processingPortionId && !isTerminalChargeInFlight && !isReconciliationPending, [anyItemsAssigned, hasPositiveAssignment, isInitializing, isProcessing, isReconciliationPending, isTerminalChargeInFlight, processingPortionId, remaining]);
 
   const getPortion = useCallback((portionId: string) => portions.find((portion) => portion.id === portionId) ?? null, [portions]);
   const updatePortion = useCallback((portionId: string, updater: (portion: SplitPortion) => SplitPortion) => setPortions((current) => current.map((portion) => portion.id === portionId ? updater(portion) : portion)), []);
@@ -341,6 +342,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
 
   const resolveReadyTerminal = useCallback(async () => { const raw: any = await bridge.ecr.getDefaultTerminal(); const device = raw?.device ?? raw?.data?.device ?? null; const deviceId = typeof device?.id === 'string' ? device.id : ''; if (!deviceId) return null; const status: any = await bridge.ecr.getDeviceStatus(deviceId); return status?.connected === true && status?.ready === true && status?.busy !== true ? { deviceId, name: device?.name || deviceId } : null; }, [bridge]);
   const handleTerminalCardPayment = useCallback(async (portionId: string) => {
+    if (isReconciliationPending) return;
     const portion = getPortion(portionId); if (!portion || portion.status !== 'draft') return; if (portion.amount <= 0.009) return;
     // Gap review P0-01: the guard must be armed synchronously BEFORE the first
     // await. The pre-flight IPC below yields long enough for a double-tap to
@@ -394,7 +396,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
       terminalChargeGuard.release(portionId);
       setIsTerminalChargeInFlight(false);
     }
-  }, [activeTab, alreadyPaidAmount, bridge, completeAndClose, ensureLatestOutstanding, getPortion, orderFinancials, orderId, persistFinancials, processingPortionId, receiptMode, recordPortionPayment, resolveReadyTerminal, safePrintSplitReceipt, setPortionMethod, t, updatePortion]);
+  }, [activeTab, alreadyPaidAmount, bridge, completeAndClose, ensureLatestOutstanding, getPortion, isReconciliationPending, orderFinancials, orderId, persistFinancials, processingPortionId, receiptMode, recordPortionPayment, resolveReadyTerminal, safePrintSplitReceipt, setPortionMethod, t, updatePortion]);
 
   const handleConfirm = useCallback(async () => {
     if (!canConfirm) return;
@@ -427,7 +429,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
   }, [activeTab, canConfirm, completeAndClose, ensureLatestOutstanding, orderFinancials, persistFinancials, portions, receiptMode, recordPortionPayment, safePrintSplitReceipt, t]);
 
   const MethodToggle: React.FC<{ portion: SplitPortion }> = ({ portion }) => {
-    const locked = portion.status !== 'draft' || isProcessing || isTerminalChargeInFlight;
+    const locked = portion.status !== 'draft' || isProcessing || isTerminalChargeInFlight || isReconciliationPending;
     return (
       <div className="flex gap-1 rounded-2xl bg-slate-100/80 p-0.5 dark:bg-white/5">
         <button
@@ -455,7 +457,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
     if (!collectionMode?.enabled) {
       return null;
     }
-    const locked = portion.status !== 'draft' || isProcessing || isTerminalChargeInFlight;
+    const locked = portion.status !== 'draft' || isProcessing || isTerminalChargeInFlight || isReconciliationPending;
     const showDriverShift = collectionMode.allowDriverShift === true;
     const selectedOwner = portion.collectedBy ?? defaultCollectedBy ?? 'cashier_drawer';
     return (
@@ -852,22 +854,27 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
     <>
       <LiquidGlassModal
         isOpen={isOpen}
-        onClose={
-          processingPortionId || isProcessing || isTerminalChargeInFlight
-            ? () => undefined
-            : onClose
-        }
+        onClose={onClose}
         title={t("splitPayment.title", "Split Payment")}
         size="xl"
         className="!max-w-4xl !max-h-[96vh]"
+        closeMode="request"
+        closeDisabled={isCloseLocked}
         closeOnBackdrop={false}
-        closeOnEscape={
-          !processingPortionId && !isProcessing && !isTerminalChargeInFlight
-        }
+        closeOnEscape={!isCloseLocked}
         footer={footer}
         contentClassName="flex min-h-0 flex-col overflow-hidden !px-6 !py-5"
       >
-        <div className="flex min-h-0 flex-1 flex-col space-y-3">
+          <div
+            className="relative flex min-h-0 flex-1 flex-col space-y-3"
+            aria-busy={isReconciliationPending}
+            inert={isReconciliationPending ? true : undefined}
+          >
+            {isReconciliationPending && (
+              <div className="absolute inset-0 z-50 flex items-center justify-center rounded-2xl bg-white/70 backdrop-blur-sm dark:bg-slate-950/70">
+                <Loader2 className="h-8 w-8 animate-spin text-emerald-600 dark:text-emerald-300" />
+              </div>
+            )}
           <div className="flex-shrink-0 text-center">
             <p className="mb-0.5 text-sm liquid-glass-modal-text-muted">
               {t("splitPayment.orderTotal", "Order Total")}

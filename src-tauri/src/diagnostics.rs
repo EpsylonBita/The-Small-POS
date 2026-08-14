@@ -648,17 +648,16 @@ fn get_printer_status(conn: &rusqlite::Connection) -> Value {
     // Last 5 print jobs
     let mut recent_jobs = Vec::new();
     if let Ok(mut stmt) = conn.prepare(
-        "SELECT id, entity_type, entity_id, status, created_at, warning_code
+        "SELECT id, entity_type, status, created_at, warning_code
          FROM print_jobs ORDER BY created_at DESC LIMIT 5",
     ) {
         if let Ok(rows) = stmt.query_map([], |row| {
             Ok(json!({
                 "id": row.get::<_, String>(0)?,
                 "entityType": row.get::<_, String>(1)?,
-                "entityId": row.get::<_, String>(2)?,
-                "status": row.get::<_, String>(3)?,
-                "createdAt": row.get::<_, String>(4)?,
-                "warningCode": row.get::<_, Option<String>>(5)?,
+                "status": row.get::<_, String>(2)?,
+                "createdAt": row.get::<_, String>(3)?,
+                "warningCode": row.get::<_, Option<String>>(4)?,
             }))
         }) {
             for row in rows.flatten() {
@@ -787,7 +786,7 @@ pub fn export_diagnostics_with_options(
         export_options.redact_sensitive,
     );
     let printers = redact_value_for_export(
-        get_printer_diagnostics(&conn),
+        get_printer_diagnostics(&conn)?,
         export_options.redact_sensitive,
     );
 
@@ -1036,6 +1035,13 @@ fn should_redact_key(key: &str) -> bool {
         "headers",
         "card_number",
         "cardnumber",
+        "output_path",
+        "outputpath",
+        "document_snapshot_zlib",
+        "document_snapshot_sha256",
+        "render_profile_snapshot_json",
+        "logo_data",
+        "logodata",
     ];
     if sensitive_exact.contains(&normalized.as_str())
         || normalized.ends_with("_payload")
@@ -1055,6 +1061,12 @@ fn should_redact_key(key: &str) -> bool {
         "authorization",
         "cookie",
         "pin",
+        "snapshot",
+        "envelope",
+        "logo_data",
+        "logodata",
+        "output_path",
+        "outputpath",
     ];
     sensitive_markers
         .iter()
@@ -1074,7 +1086,7 @@ fn get_recent_sync_errors(conn: &rusqlite::Connection, limit: i64) -> Vec<Value>
                 "id": row.get::<_, String>(0)?,
                 "entityType": row.get::<_, String>(1)?,
                 "status": row.get::<_, String>(2)?,
-                "lastError": row.get::<_, String>(3)?,
+                "lastError": crate::print::safe_operational_error(row.get(3)?, 1024),
                 "retryCount": row.get::<_, i64>(4)?,
                 "createdAt": row.get::<_, String>(5)?,
                 "updatedAt": row.get::<_, Option<String>>(6)?,
@@ -1088,59 +1100,175 @@ fn get_recent_sync_errors(conn: &rusqlite::Connection, limit: i64) -> Vec<Value>
     errors
 }
 
-fn get_printer_diagnostics(conn: &rusqlite::Connection) -> Value {
-    let mut profiles = Vec::new();
-    if let Ok(mut stmt) = conn.prepare(
-        "SELECT id, name, system_printer_name, is_default, drawer_mode, created_at
-         FROM printer_profiles ORDER BY is_default DESC, name",
-    ) {
-        if let Ok(rows) = stmt.query_map([], |row| {
+fn bounded_diagnostic_text(value: Option<String>, max_chars: usize) -> Option<String> {
+    let value = value?;
+    let bounded: String = value
+        .trim()
+        .chars()
+        .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
+        .take(max_chars)
+        .collect();
+    (!bounded.is_empty()).then_some(bounded)
+}
+
+fn get_printer_diagnostics(conn: &rusqlite::Connection) -> Result<Value, String> {
+    let mut profile_statement = conn
+        .prepare(
+            "SELECT id, name, printer_name, driver_type, printer_type, role,
+                    is_default, enabled, drawer_mode, created_at
+             FROM printer_profiles ORDER BY is_default DESC, name",
+        )
+        .map_err(|error| format!("prepare printer profiles diagnostics: {error}"))?;
+    let profiles = profile_statement
+        .query_map([], |row| {
             Ok(json!({
                 "id": row.get::<_, String>(0)?,
-                "name": row.get::<_, String>(1)?,
-                "systemPrinterName": row.get::<_, String>(2)?,
-                "isDefault": row.get::<_, bool>(3)?,
-                "drawerMode": row.get::<_, Option<String>>(4)?,
-                "createdAt": row.get::<_, String>(5)?,
+                "name": bounded_diagnostic_text(row.get(1)?, 160),
+                "printerName": bounded_diagnostic_text(row.get(2)?, 256),
+                "driverType": row.get::<_, String>(3)?,
+                "printerType": row.get::<_, String>(4)?,
+                "role": row.get::<_, String>(5)?,
+                "isDefault": row.get::<_, bool>(6)?,
+                "enabled": row.get::<_, bool>(7)?,
+                "drawerMode": row.get::<_, Option<String>>(8)?,
+                "createdAt": row.get::<_, String>(9)?,
             }))
-        }) {
-            for row in rows.flatten() {
-                profiles.push(row);
-            }
-        }
-    }
+        })
+        .map_err(|error| format!("query printer profiles diagnostics: {error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("read printer profiles diagnostics: {error}"))?;
+    drop(profile_statement);
 
-    // Last 10 print jobs with their status
-    let mut recent_jobs = Vec::new();
-    if let Ok(mut stmt) = conn.prepare(
-        "SELECT id, entity_type, entity_id, status, printer_profile_id, retry_count,
-                warning_code, warning_message, created_at, last_attempt_at
-         FROM print_jobs ORDER BY created_at DESC LIMIT 10",
-    ) {
-        if let Ok(rows) = stmt.query_map([], |row| {
+    // Parent queue history deliberately excludes entity identity/content,
+    // immutable snapshot/envelope fields, and output paths.
+    let mut jobs_statement = conn
+        .prepare(
+            "SELECT id, entity_type, status, printer_profile_id, retry_count,
+                    warning_code, warning_message, last_error, created_at, last_attempt_at
+             FROM print_jobs ORDER BY created_at DESC LIMIT 10",
+        )
+        .map_err(|error| format!("prepare print history diagnostics: {error}"))?;
+    let recent_jobs = jobs_statement
+        .query_map([], |row| {
             Ok(json!({
                 "id": row.get::<_, String>(0)?,
                 "entityType": row.get::<_, String>(1)?,
-                "entityId": row.get::<_, String>(2)?,
-                "status": row.get::<_, String>(3)?,
-                "printerProfileId": row.get::<_, Option<String>>(4)?,
-                "retryCount": row.get::<_, i64>(5)?,
-                "warningCode": row.get::<_, Option<String>>(6)?,
-                "warningMessage": row.get::<_, Option<String>>(7)?,
+                "status": row.get::<_, String>(2)?,
+                "printerProfileId": row.get::<_, Option<String>>(3)?,
+                "retryCount": row.get::<_, i64>(4)?,
+                "warningCode": row.get::<_, Option<String>>(5)?,
+                "warningMessage": crate::print::safe_operational_error(row.get(6)?, 512),
+                "lastError": crate::print::safe_operational_error(row.get(7)?, 1024),
                 "createdAt": row.get::<_, String>(8)?,
                 "lastAttemptAt": row.get::<_, Option<String>>(9)?,
             }))
-        }) {
-            for row in rows.flatten() {
-                recent_jobs.push(row);
-            }
-        }
-    }
+        })
+        .map_err(|error| format!("query print history diagnostics: {error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("read print history diagnostics: {error}"))?;
+    drop(jobs_statement);
 
-    json!({
+    let mut attempts_statement = conn
+        .prepare(
+            "SELECT a.id, a.print_job_id, a.transport, a.resolved_target,
+                    a.document_name, a.spool_job_id, a.state,
+                    a.native_status_bits, a.native_status_text,
+                    a.started_at, a.last_seen_at, a.completed_at,
+                    a.cancel_requested_at, a.cancel_confirmed_at, a.last_error
+             FROM print_job_attempts a
+             WHERE (
+                 a.state IN (
+                     'created', 'submitting', 'windows_queued', 'windows_printing',
+                     'paused', 'cancel_requested', 'unknown', 'cancel_failed'
+                 )
+                 OR (a.state = 'spool_error' AND a.spool_job_id IS NOT NULL)
+             )
+               AND a.id = (
+                   SELECT latest.id FROM print_job_attempts latest
+                   WHERE latest.print_job_id = a.print_job_id
+                   ORDER BY latest.attempt_number DESC LIMIT 1
+               )
+             ORDER BY a.started_at DESC LIMIT 50",
+        )
+        .map_err(|error| format!("prepare active print attempts diagnostics: {error}"))?;
+    let active_attempts = attempts_statement
+        .query_map([], |row| {
+            let attempt_id = row.get::<_, String>(0)?;
+            let job_id = row.get::<_, String>(1)?;
+            let transport = row.get::<_, String>(2)?;
+            let marker = row.get::<_, String>(4)?;
+            let windows_job_id = if transport == "windows" {
+                row.get::<_, Option<i64>>(5)?.filter(|job_id| *job_id > 0)
+            } else {
+                None
+            };
+            let ownership_marker = if windows_job_id.is_some() {
+                match (
+                    uuid::Uuid::parse_str(&job_id),
+                    uuid::Uuid::parse_str(&attempt_id),
+                    crate::windows_spooler::parse_document_marker(&marker),
+                ) {
+                    (Ok(job_uuid), Ok(attempt_uuid), Ok(parsed))
+                        if parsed.local_job_id == job_uuid && parsed.attempt_id == attempt_uuid =>
+                    {
+                        Some(marker)
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            Ok(json!({
+                "attemptId": attempt_id,
+                "jobId": job_id,
+                "transport": transport,
+                "resolvedTarget": bounded_diagnostic_text(row.get(3)?, 256),
+                "ownershipMarker": ownership_marker,
+                "windowsJobId": windows_job_id,
+                "state": row.get::<_, String>(6)?,
+                "nativeStatusBits": row.get::<_, Option<i64>>(7)?,
+                "nativeStatusText": bounded_diagnostic_text(row.get(8)?, 256),
+                "startedAt": row.get::<_, String>(9)?,
+                "lastSeenAt": row.get::<_, Option<String>>(10)?,
+                "completedAt": row.get::<_, Option<String>>(11)?,
+                "cancelRequestedAt": row.get::<_, Option<String>>(12)?,
+                "cancelConfirmedAt": row.get::<_, Option<String>>(13)?,
+                "lastError": crate::print::safe_operational_error(row.get(14)?, 1024),
+            }))
+        })
+        .map_err(|error| format!("query active print attempts diagnostics: {error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("read active print attempts diagnostics: {error}"))?;
+    drop(attempts_statement);
+
+    let mut circuits_statement = conn
+        .prepare(
+            "SELECT target_key, transport, circuit_state, blocked_reason, blocked_at, updated_at
+             FROM print_target_state
+             ORDER BY updated_at DESC LIMIT 50",
+        )
+        .map_err(|error| format!("prepare print target diagnostics: {error}"))?;
+    let target_circuits = circuits_statement
+        .query_map([], |row| {
+            Ok(json!({
+                "targetKey": bounded_diagnostic_text(row.get(0)?, 320),
+                "transport": row.get::<_, String>(1)?,
+                "circuitState": row.get::<_, String>(2)?,
+                "blockedReason": crate::print::safe_operational_error(row.get(3)?, 512),
+                "blockedAt": row.get::<_, Option<String>>(4)?,
+                "updatedAt": row.get::<_, String>(5)?,
+            }))
+        })
+        .map_err(|error| format!("query print target diagnostics: {error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("read print target diagnostics: {error}"))?;
+
+    Ok(json!({
         "profiles": profiles,
         "recentJobs": recent_jobs,
-    })
+        "activeAttempts": active_attempts,
+        "targetCircuits": target_circuits,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -1561,10 +1689,231 @@ mod tests {
     }
 
     #[test]
+    fn printer_diagnostics_export_safe_attempt_evidence_without_print_content() {
+        let dir = std::env::temp_dir().join(format!("diag_printing_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_state = crate::db::init(&dir).unwrap();
+        let (job_id, attempt_id, marker) = {
+            let conn = db_state.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO printer_profiles
+                 (id, name, driver_type, printer_name, created_at, updated_at)
+                 VALUES ('diag-profile', 'Front Receipt', 'windows', 'Front Queue',
+                         datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            let job_id = uuid::Uuid::new_v4().to_string();
+            conn.execute(
+                "INSERT INTO print_jobs
+                 (id, entity_type, entity_id, entity_payload_json, printer_profile_id,
+                  status, output_path, document_snapshot_version, document_snapshot_zlib,
+                  document_snapshot_sha256, render_profile_snapshot_json,
+                  created_at, updated_at)
+                 VALUES (?1, 'order_receipt', 'DIAG-PRIVATE-CUSTOMER', ?2, 'diag-profile',
+                         'dispatched', ?3, 1, ?4, ?5, ?6, datetime('now'), datetime('now'))",
+                params![
+                    job_id,
+                    r#"{"customer":"DIAG-PRIVATE-PAYLOAD","logoData":"DIAG-PRIVATE-LOGO"}"#,
+                    r#"C:\private\DIAG-PRIVATE-OUTPUT.html"#,
+                    b"DIAG-PRIVATE-SNAPSHOT".as_slice(),
+                    "DIAG-PRIVATE-HASH",
+                    r#"{"fixturePayload":"DIAG-PRIVATE-ENVELOPE"}"#,
+                ],
+            )
+            .unwrap();
+            let identity = crate::print_dispatch::create_attempt(
+                &conn,
+                crate::print_dispatch::NewAttempt {
+                    local_job_id: job_id.clone(),
+                    target: crate::print_dispatch::PrinterTargetKey::WindowsQueue(
+                        "Front Queue".into(),
+                    ),
+                    document_kind: "order_receipt".into(),
+                    bytes_requested: 64,
+                    now: chrono::Utc::now(),
+                },
+            )
+            .unwrap();
+            crate::print_dispatch::transition_attempt(
+                &conn,
+                identity.attempt_id,
+                crate::print_dispatch::DispatchState::Submitting,
+                crate::print_dispatch::AttemptObservation::default(),
+            )
+            .unwrap();
+            let marker = crate::print_dispatch::read_attempt(&conn, identity.attempt_id)
+                .unwrap()
+                .unwrap()
+                .document_name;
+            crate::print_dispatch::persist_spool_started(
+                &conn,
+                identity.attempt_id,
+                &crate::windows_spooler::SpoolStarted {
+                    job_id: 73,
+                    printer_name: "Front Queue".into(),
+                    document_name: marker.clone(),
+                    submitted_at: chrono::Utc::now(),
+                },
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE print_job_attempts
+                 SET state = 'cancel_requested', native_status_bits = 8,
+                     native_status_text = 'Spooling',
+                     cancel_requested_at = datetime('now'),
+                     last_error = 'Native control pending: file:///C:/private/DIAG-FILE-URL/receipt.html token=DIAG-ATTEMPT-SECRET'
+                 WHERE id = ?1",
+                [identity.attempt_id.to_string()],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE print_jobs
+                 SET warning_message = 'Render warning: https://example.invalid/private?token=DIAG-WARNING-SECRET',
+                     last_error = 'Render failed: /srv/private/DIAG-UNIX-PATH/receipt.html'
+                 WHERE id = ?1",
+                [&job_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO print_target_state
+                 (target_key, transport, circuit_state, blocked_reason, blocked_at, updated_at)
+                 VALUES ('windows:front queue', 'windows', 'open',
+                         'Target blocked: C:\\private\\DIAG-WINDOWS-PATH\\receipt.html api_key=DIAG-CIRCUIT-SECRET',
+                         datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            (job_id, identity.attempt_id, marker)
+        };
+
+        let export_path = export_diagnostics_with_options(
+            &db_state,
+            &dir,
+            DiagnosticsExportOptions {
+                include_logs: false,
+                redact_sensitive: true,
+            },
+        )
+        .unwrap();
+        let file = std::fs::File::open(&export_path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let diagnostics = read_zip_json(&mut archive, "printer_diagnostics.json");
+        let encoded = serde_json::to_string(&diagnostics).unwrap();
+
+        assert_eq!(
+            diagnostics["profiles"][0]["printerName"],
+            json!("Front Queue")
+        );
+        assert_eq!(diagnostics["activeAttempts"][0]["jobId"], json!(job_id));
+        assert_eq!(
+            diagnostics["activeAttempts"][0]["attemptId"],
+            json!(attempt_id.to_string())
+        );
+        assert_eq!(diagnostics["activeAttempts"][0]["windowsJobId"], json!(73));
+        assert_eq!(
+            diagnostics["activeAttempts"][0]["ownershipMarker"],
+            json!(marker)
+        );
+        assert_eq!(
+            diagnostics["activeAttempts"][0]["state"],
+            json!("cancel_requested")
+        );
+        assert_eq!(
+            diagnostics["activeAttempts"][0]["nativeStatusBits"],
+            json!(8)
+        );
+        assert_eq!(
+            diagnostics["activeAttempts"][0]["nativeStatusText"],
+            json!("Spooling")
+        );
+        assert_eq!(
+            diagnostics["activeAttempts"][0]["lastError"],
+            json!("Native control pending: [redacted-sensitive-detail]")
+        );
+        assert_eq!(
+            diagnostics["recentJobs"][0]["warningMessage"],
+            json!("Render warning: [redacted-sensitive-detail]")
+        );
+        assert_eq!(
+            diagnostics["recentJobs"][0]["lastError"],
+            json!("Render failed: [redacted-sensitive-detail]")
+        );
+        assert_eq!(
+            diagnostics["targetCircuits"][0]["blockedReason"],
+            json!("Target blocked: [redacted-sensitive-detail]")
+        );
+        assert!(diagnostics["activeAttempts"][0]["cancelRequestedAt"].is_string());
+        for forbidden in [
+            "DIAG-PRIVATE-CUSTOMER",
+            "DIAG-PRIVATE-PAYLOAD",
+            "DIAG-PRIVATE-LOGO",
+            "DIAG-PRIVATE-OUTPUT",
+            "DIAG-PRIVATE-SNAPSHOT",
+            "DIAG-PRIVATE-HASH",
+            "DIAG-PRIVATE-ENVELOPE",
+            "DIAG-FILE-URL",
+            "DIAG-ATTEMPT-SECRET",
+            "DIAG-WARNING-SECRET",
+            "DIAG-UNIX-PATH",
+            "DIAG-WINDOWS-PATH",
+            "DIAG-CIRCUIT-SECRET",
+            "entityPayloadJson",
+            "outputPath",
+            "snapshot",
+            "envelope",
+            "logoData",
+        ] {
+            assert!(
+                !encoded.contains(forbidden),
+                "leaked {forbidden}: {encoded}"
+            );
+        }
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index).unwrap();
+            let name = entry.name().to_string();
+            assert!(
+                !name.starts_with("logs/"),
+                "logs unexpectedly exported: {name}"
+            );
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).unwrap();
+            let contents = String::from_utf8_lossy(&bytes);
+            for sentinel in [
+                "DIAG-PRIVATE-CUSTOMER",
+                "DIAG-PRIVATE-PAYLOAD",
+                "DIAG-PRIVATE-LOGO",
+                "DIAG-PRIVATE-OUTPUT",
+                "DIAG-PRIVATE-SNAPSHOT",
+                "DIAG-PRIVATE-HASH",
+                "DIAG-PRIVATE-ENVELOPE",
+                "DIAG-FILE-URL",
+                "DIAG-ATTEMPT-SECRET",
+                "DIAG-WARNING-SECRET",
+                "DIAG-UNIX-PATH",
+                "DIAG-WINDOWS-PATH",
+                "DIAG-CIRCUIT-SECRET",
+            ] {
+                assert!(
+                    !contents.contains(sentinel),
+                    "bundle entry {name} leaked {sentinel}"
+                );
+            }
+        }
+        drop(archive);
+        drop(db_state);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_should_redact_key_matches_sensitive_markers() {
         assert!(should_redact_key("api_key"));
         assert!(should_redact_key("Authorization"));
         assert!(should_redact_key("staff_pin"));
+        assert!(should_redact_key("output_path"));
+        assert!(should_redact_key("document_snapshot_zlib"));
+        assert!(should_redact_key("render_profile_snapshot_json"));
+        assert!(should_redact_key("logo_data"));
         assert!(!should_redact_key("status"));
     }
 

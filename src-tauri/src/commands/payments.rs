@@ -1,8 +1,38 @@
 use chrono::Utc;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
 use tauri::{Emitter, Manager};
 
 use crate::{db, payload_arg0_as_string, payments, refunds, resolve_order_id};
+
+static ACTIVE_PAYMENT_RECORDS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn active_payment_records() -> &'static Mutex<HashSet<String>> {
+    ACTIVE_PAYMENT_RECORDS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+#[derive(Debug)]
+struct PaymentRecordReservation(String);
+
+impl Drop for PaymentRecordReservation {
+    fn drop(&mut self) {
+        if let Ok(mut active) = active_payment_records().lock() {
+            active.remove(&self.0);
+        }
+    }
+}
+
+fn reserve_payment_record(order_id: &str) -> Result<PaymentRecordReservation, String> {
+    let mut active = active_payment_records()
+        .lock()
+        .map_err(|error| format!("lock active payment collections: {error}"))?;
+    if !active.insert(order_id.to_string()) {
+        return Err("A payment collection is already in progress for this order".to_string());
+    }
+    Ok(PaymentRecordReservation(order_id.to_string()))
+}
 
 #[derive(Debug)]
 struct PaymentUpdateStatusPayload {
@@ -214,15 +244,203 @@ fn payment_payload_has_terminal_approval(payload: &serde_json::Value) -> bool {
         .unwrap_or(false)
 }
 
+fn sanitize_outstanding_collection_trust_fields(
+    payload: &mut serde_json::Value,
+) -> Result<(), String> {
+    let payment = payload.as_object_mut().ok_or("Invalid payment payload")?;
+    for field in [
+        "terminalApproved",
+        "terminal_approved",
+        "paymentOrigin",
+        "payment_origin",
+        "terminalDeviceId",
+        "terminal_device_id",
+        "deviceId",
+        "device_id",
+        "transactionRef",
+        "transaction_ref",
+        "transactionId",
+        "transaction_id",
+    ] {
+        payment.remove(field);
+    }
+    Ok(())
+}
+
 fn should_fiscalize_full_balance_before_record(
     input: &payments::PaymentRecordInput,
     terminal_approved: bool,
+    collect_outstanding: bool,
     balance: payments::OrderPaymentBalanceSnapshot,
 ) -> bool {
-    !terminal_approved
+    (!terminal_approved || collect_outstanding)
         && matches!(input.method.as_str(), "cash" | "card")
-        && balance.net_paid <= 0.01
+        && (collect_outstanding || balance.net_paid <= 0.01)
         && (input.amount - balance.outstanding_amount).abs() <= 0.01
+}
+
+fn fiscal_checkout_not_approved_response(checkout: serde_json::Value) -> serde_json::Value {
+    let error = checkout
+        .get("error")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!("Fiscal checkout was not approved"));
+    let requires_reconciliation = checkout
+        .get("requiresReconciliation")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    serde_json::json!({
+        "success": false,
+        "errorCode": "FISCAL_CHECKOUT_NOT_APPROVED",
+        "paymentApproved": false,
+        "paymentPersisted": false,
+        "requiresReconciliation": requires_reconciliation,
+        "error": error,
+        "fiscalCheckout": checkout,
+    })
+}
+
+fn post_fiscal_persistence_failure_response(
+    _internal_error: &str,
+    checkout: &serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "success": false,
+        "errorCode": "PAYMENT_PERSISTENCE_RECONCILIATION_REQUIRED",
+        "paymentApproved": true,
+        "paymentPersisted": false,
+        "requiresReconciliation": true,
+        "error": "The fiscal payment was approved, but local persistence could not be completed. Reconcile this payment before retrying.",
+        "fiscalCheckout": checkout,
+    })
+}
+
+fn outstanding_collection_fiscal_reference(
+    order_id: &str,
+    balance: payments::OrderPaymentBalanceSnapshot,
+    idempotency_key: &str,
+) -> String {
+    let mut reference_digest = Sha256::new();
+    reference_digest.update(b"outstanding-collection-reference-v1\0");
+    reference_digest.update(
+        crate::money::Cents::round_half_even(balance.order_total)
+            .as_i64()
+            .to_le_bytes(),
+    );
+    reference_digest.update(
+        crate::money::Cents::round_half_even(balance.net_paid)
+            .as_i64()
+            .to_le_bytes(),
+    );
+    reference_digest.update(
+        crate::money::Cents::round_half_even(balance.outstanding_amount)
+            .as_i64()
+            .to_le_bytes(),
+    );
+    reference_digest.update(balance.ledger_generation);
+    reference_digest.update(idempotency_key.as_bytes());
+    let reference_generation: [u8; 32] = reference_digest.finalize().into();
+    let reference_token = payments::settlement_generation_token(&reference_generation);
+    format!("{order_id}:collect-outstanding:{}", &reference_token[..32])
+}
+
+fn validate_outstanding_idempotency_key(payload: &serde_json::Value) -> Result<&str, &'static str> {
+    let Some(key) = payload
+        .get("idempotencyKey")
+        .or_else(|| payload.get("idempotency_key"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+    else {
+        return Err("IDEMPOTENCY_KEY_REQUIRED");
+    };
+    if key.is_empty() {
+        return Err("IDEMPOTENCY_KEY_REQUIRED");
+    }
+    if key.len() > 128
+        || !key.is_ascii()
+        || !key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.'))
+    {
+        return Err("IDEMPOTENCY_KEY_INVALID");
+    }
+    Ok(key)
+}
+
+fn outstanding_idempotency_error_response(error_code: &str) -> serde_json::Value {
+    serde_json::json!({
+        "success": false,
+        "errorCode": error_code,
+        "paymentApproved": false,
+        "paymentPersisted": false,
+        "requiresReconciliation": false,
+        "error": "A valid payment attempt identifier is required before collecting the outstanding balance.",
+    })
+}
+
+fn collect_outstanding_error_response(
+    error_code: &str,
+    error: &str,
+    settlement: &payments::OrderSettlementSnapshot,
+) -> serde_json::Value {
+    serde_json::json!({
+        "success": false,
+        "errorCode": error_code,
+        "paymentApproved": false,
+        "paymentPersisted": false,
+        "error": error,
+        "settlement": {
+            "orderTotal": settlement.order_total,
+            "netPaid": settlement.net_paid,
+            "outstandingAmount": settlement.outstanding_amount,
+            "completedPayments": settlement.completed_payments,
+            "generation": payments::settlement_generation_token(&settlement.ledger_generation),
+        },
+    })
+}
+
+fn validate_collect_outstanding_generation(
+    payload: &serde_json::Value,
+    settlement: &payments::OrderSettlementSnapshot,
+) -> Result<(), serde_json::Value> {
+    let expected = payload
+        .get("expectedSettlementGeneration")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let current = payments::settlement_generation_token(&settlement.ledger_generation);
+    match expected {
+        Some(expected) if expected == current => Ok(()),
+        Some(_) => Err(collect_outstanding_error_response(
+            "BALANCE_CHANGED",
+            "The order balance changed. Refresh the payment details before collecting it.",
+            settlement,
+        )),
+        None => Err(collect_outstanding_error_response(
+            "EXPECTED_SETTLEMENT_REQUIRED",
+            "An atomic settlement snapshot is required before collecting the outstanding balance.",
+            settlement,
+        )),
+    }
+}
+
+fn load_order_settlement_read_transaction(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+) -> Result<payments::OrderSettlementSnapshot, String> {
+    conn.execute_batch("BEGIN DEFERRED")
+        .map_err(|error| format!("begin payment settlement read: {error}"))?;
+    let loaded = payments::load_order_settlement_snapshot(conn, order_id);
+    match loaded {
+        Ok(snapshot) => {
+            conn.execute_batch("COMMIT")
+                .map_err(|error| format!("commit payment settlement read: {error}"))?;
+            Ok(snapshot)
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
 }
 
 #[tauri::command]
@@ -355,23 +573,112 @@ pub async fn payment_record(
     mgr: tauri::State<'_, crate::ecr::DeviceManager>,
 ) -> Result<serde_json::Value, String> {
     let mut payload = arg0.ok_or("Missing payment payload")?;
-    let input = payments::build_payment_record_input(&payload)?;
+    let collect_outstanding = payments::payload_collects_outstanding_balance(&payload);
+    if collect_outstanding {
+        sanitize_outstanding_collection_trust_fields(&mut payload)?;
+        if let Err(error_code) = validate_outstanding_idempotency_key(&payload) {
+            return Ok(outstanding_idempotency_error_response(error_code));
+        }
+    }
+    let requested_input = payments::build_payment_record_input(&payload)?;
     let terminal_approved = payment_payload_has_terminal_approval(&payload);
-    let (order_id, balance) = {
+    let order_id = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let order_id = resolve_order_id(&conn, &input.order_id).ok_or("Order not found")?;
-        let balance = payments::load_order_payment_balance_snapshot(&conn, &order_id)?;
-        (order_id, balance)
+        resolve_order_id(&conn, &requested_input.order_id).ok_or("Order not found")?
     };
+    // Keep two renderer invocations for the same order from reaching fiscal
+    // hardware concurrently. The reservation is process-local and releases on
+    // every return path, including fiscal rejection and persistence errors.
+    let _reservation = reserve_payment_record(&order_id)?;
+    let (balance, initial_settlement) = if collect_outstanding {
+        let settlement = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            load_order_settlement_read_transaction(&conn, &order_id)?
+        };
+        let balance = payments::OrderPaymentBalanceSnapshot {
+            order_total: settlement.order_total,
+            net_paid: settlement.net_paid,
+            outstanding_amount: settlement.outstanding_amount,
+            completed_payment_count: settlement.completed_payments.len() as i64,
+            ledger_generation: settlement.ledger_generation,
+        };
+        (balance, Some(settlement))
+    } else {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        (
+            payments::load_order_payment_balance_snapshot(&conn, &order_id)?,
+            None,
+        )
+    };
+    if collect_outstanding {
+        let settlement = initial_settlement
+            .as_ref()
+            .expect("collect-outstanding settlement was loaded");
+        if let Err(response) = validate_collect_outstanding_generation(&payload, settlement) {
+            return Ok(response);
+        }
+        payments::prepare_outstanding_collection_payload(&mut payload, balance)?;
+    }
+    let input = payments::build_payment_record_input(&payload)?;
+    let mut committed_fiscal_checkout = None;
 
     // A normal pay-later order with one full-balance cash/card collection must
     // use the same cashier-first flow as initial checkout. Split payments and
     // a card payment already approved by a directly integrated EFT terminal
     // retain their existing collection paths.
-    if should_fiscalize_full_balance_before_record(&input, terminal_approved, balance) {
+    if should_fiscalize_full_balance_before_record(
+        &input,
+        terminal_approved,
+        collect_outstanding,
+        balance,
+    ) {
         let order = crate::sync::get_order_by_id(&db, &order_id)?;
+        let payment_idempotency_key = if collect_outstanding {
+            Some(
+                validate_outstanding_idempotency_key(&payload)
+                    .expect("collect-outstanding idempotency was validated"),
+            )
+        } else {
+            None
+        };
+        let prior_settlement = if collect_outstanding {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            Some(load_order_settlement_read_transaction(&conn, &order_id)?)
+        } else {
+            None
+        };
+        if let Some(snapshot) = prior_settlement.as_ref() {
+            let same_generation = (snapshot.order_total - balance.order_total).abs() <= 0.001
+                && (snapshot.net_paid - balance.net_paid).abs() <= 0.001
+                && (snapshot.outstanding_amount - balance.outstanding_amount).abs() <= 0.001
+                && snapshot.completed_payments.len() as i64 == balance.completed_payment_count
+                && snapshot.ledger_generation == balance.ledger_generation;
+            if !same_generation {
+                return Ok(collect_outstanding_error_response(
+                    "BALANCE_CHANGED",
+                    "The order balance changed before fiscal checkout. Refresh the payment details before collecting it.",
+                    snapshot,
+                ));
+            }
+        }
+        let fiscal_reference = if collect_outstanding {
+            outstanding_collection_fiscal_reference(
+                &order_id,
+                balance,
+                payment_idempotency_key.expect("outstanding collection requires idempotency"),
+            )
+        } else {
+            order_id.clone()
+        };
         let checkout = match crate::commands::ecr::fiscal_checkout_for_order_payload(
-            &db, &mgr, &order_id, &order, &payload,
+            &db,
+            &mgr,
+            &fiscal_reference,
+            &order,
+            &payload,
+            prior_settlement
+                .as_ref()
+                .map(|snapshot| snapshot.completed_payments.as_slice()),
         )
         .await
         {
@@ -390,20 +697,11 @@ pub async fn payment_record(
         if checkout.get("success").and_then(|value| value.as_bool()) != Some(true)
             || checkout.get("approved").and_then(|value| value.as_bool()) != Some(true)
         {
-            return Ok(serde_json::json!({
-                "success": false,
-                "errorCode": "FISCAL_CHECKOUT_NOT_APPROVED",
-                "paymentApproved": false,
-                "paymentPersisted": false,
-                "error": checkout
-                    .get("error")
-                    .cloned()
-                    .unwrap_or_else(|| serde_json::json!("Fiscal checkout was not approved")),
-                "fiscalCheckout": checkout,
-            }));
+            return Ok(fiscal_checkout_not_approved_response(checkout));
         }
 
         if checkout.get("skipped").and_then(|value| value.as_bool()) != Some(true) {
+            committed_fiscal_checkout = Some(checkout.clone());
             let transaction = checkout
                 .get("transaction")
                 .cloned()
@@ -417,6 +715,12 @@ pub async fn payment_record(
                         "transactionRef".to_string(),
                         serde_json::Value::String(transaction_id.to_string()),
                     );
+                    if collect_outstanding {
+                        payment.insert(
+                            "idempotencyKey".to_string(),
+                            serde_json::Value::String(transaction_id.to_string()),
+                        );
+                    }
                 }
                 payment.insert(
                     "fiscalReceiptNumber".to_string(),
@@ -441,7 +745,28 @@ pub async fn payment_record(
         }
     }
 
-    payments::record_payment(&db, &payload)
+    if collect_outstanding {
+        match payments::record_payment_with_expected_balance(&db, &payload, Some(balance)) {
+            Ok(result) => Ok(result),
+            Err(error) => match committed_fiscal_checkout.as_ref() {
+                Some(checkout) => {
+                    tracing::error!(
+                        target: "payments.outstanding_reconciliation",
+                        order_id = %order_id,
+                        transaction_id = ?checkout
+                            .get("transaction")
+                            .and_then(|transaction| transaction.get("transactionId")),
+                        error = %error,
+                        "Fiscal payment approved but local payment persistence failed"
+                    );
+                    Ok(post_fiscal_persistence_failure_response(&error, checkout))
+                }
+                None => Err(error),
+            },
+        }
+    } else {
+        payments::record_payment(&db, &payload)
+    }
 }
 
 #[tauri::command]
@@ -466,6 +791,15 @@ pub async fn payment_get_order_payments(
 ) -> Result<serde_json::Value, String> {
     let order_id = parse_order_id_payload(arg0)?;
     payments::get_order_payments(&db, &order_id)
+}
+
+#[tauri::command]
+pub async fn payment_get_settlement_snapshot(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+) -> Result<serde_json::Value, String> {
+    let order_id = parse_order_id_payload(arg0)?;
+    payments::get_order_settlement_snapshot(&db, &order_id)
 }
 
 #[tauri::command]
@@ -497,7 +831,8 @@ pub async fn payment_print_split_receipt(
         return Ok(serde_json::json!({ "success": true, "skipped": true }));
     }
     // Use split_receipt entity type for the print pipeline
-    let enqueue_result = crate::print::enqueue_print_job(&db, "split_receipt", &payment_id, None)?;
+    let enqueue_result =
+        crate::print::enqueue_print_job(&db, "split_receipt", &payment_id, None, &app)?;
 
     let data_dir = app
         .path()
@@ -663,13 +998,15 @@ mod dto_tests {
             order_total: 42.50,
             net_paid: 0.0,
             outstanding_amount: 42.50,
+            completed_payment_count: 0,
+            ledger_generation: [0; 32],
         };
 
         assert!(should_fiscalize_full_balance_before_record(
-            &input, false, balance
+            &input, false, false, balance
         ));
         assert!(!should_fiscalize_full_balance_before_record(
-            &input, true, balance
+            &input, true, false, balance
         ));
     }
 
@@ -684,20 +1021,324 @@ mod dto_tests {
         assert!(!should_fiscalize_full_balance_before_record(
             &split_input,
             false,
+            false,
             payments::OrderPaymentBalanceSnapshot {
                 order_total: 40.00,
                 net_paid: 0.0,
                 outstanding_amount: 40.00,
+                completed_payment_count: 0,
+                ledger_generation: [0; 32],
             }
         ));
         assert!(!should_fiscalize_full_balance_before_record(
             &split_input,
             false,
+            false,
             payments::OrderPaymentBalanceSnapshot {
                 order_total: 40.00,
                 net_paid: 20.00,
                 outstanding_amount: 20.00,
+                completed_payment_count: 1,
+                ledger_generation: [0; 32],
             }
         ));
+    }
+
+    #[test]
+    fn authoritative_card_collection_is_promoted_to_the_full_fiscal_checkout_path() {
+        let balance = payments::OrderPaymentBalanceSnapshot {
+            order_total: 42.50,
+            net_paid: 0.0,
+            outstanding_amount: 42.50,
+            completed_payment_count: 0,
+            ledger_generation: [0; 32],
+        };
+        let mut payload = serde_json::json!({
+            "orderId": "order-authoritative-card",
+            "method": "card",
+            "amount": 1.00,
+            "collectOutstandingBalance": true,
+        });
+
+        payments::prepare_outstanding_collection_payload(&mut payload, balance)
+            .expect("prepare authoritative card collection");
+        let input = payments::build_payment_record_input(&payload)
+            .expect("prepared card payment should parse");
+
+        assert_eq!(input.amount, 42.50);
+        assert!(should_fiscalize_full_balance_before_record(
+            &input, false, true, balance
+        ));
+    }
+
+    #[test]
+    fn authoritative_collection_discards_renderer_claimed_terminal_approval() {
+        let mut payload = serde_json::json!({
+            "orderId": "order-untrusted-terminal",
+            "method": "card",
+            "amount": 42.50,
+            "terminalApproved": true,
+            "paymentOrigin": "terminal",
+            "terminalDeviceId": "renderer-device",
+            "transactionRef": "renderer-transaction",
+        });
+
+        sanitize_outstanding_collection_trust_fields(&mut payload)
+            .expect("sanitize renderer terminal claims");
+
+        assert_eq!(payment_payload_has_terminal_approval(&payload), false);
+        assert!(payload.get("paymentOrigin").is_none());
+        assert!(payload.get("terminalDeviceId").is_none());
+        assert!(payload.get("transactionRef").is_none());
+    }
+
+    #[test]
+    fn authoritative_partial_card_collection_uses_final_fiscal_checkout() {
+        let balance = payments::OrderPaymentBalanceSnapshot {
+            order_total: 50.00,
+            net_paid: 20.00,
+            outstanding_amount: 30.00,
+            completed_payment_count: 1,
+            ledger_generation: [0; 32],
+        };
+        let mut payload = serde_json::json!({
+            "orderId": "order-authoritative-partial-card",
+            "method": "card",
+            "amount": 1.00,
+            "collectOutstandingBalance": true,
+        });
+
+        payments::prepare_outstanding_collection_payload(&mut payload, balance)
+            .expect("prepare authoritative remaining balance");
+        let input = payments::build_payment_record_input(&payload)
+            .expect("prepared remaining card payment should parse");
+
+        assert_eq!(input.amount, 30.00);
+        assert!(should_fiscalize_full_balance_before_record(
+            &input, false, true, balance
+        ));
+        assert!(
+            should_fiscalize_full_balance_before_record(&input, true, true, balance),
+            "renderer terminalApproved must not bypass native recovery fiscalization"
+        );
+    }
+
+    #[test]
+    fn payment_record_reservation_serializes_the_same_order_only() {
+        let first = reserve_payment_record("reservation-order-a").expect("reserve first order");
+        let duplicate = reserve_payment_record("reservation-order-a")
+            .expect_err("same order must be serialized");
+        let other = reserve_payment_record("reservation-order-b")
+            .expect("a different order can collect concurrently");
+
+        assert_eq!(
+            duplicate,
+            "A payment collection is already in progress for this order"
+        );
+        drop(other);
+        drop(first);
+        reserve_payment_record("reservation-order-a")
+            .expect("reservation must release when the command exits");
+    }
+
+    #[test]
+    fn outstanding_collection_fiscal_reference_is_stable_but_not_the_order_reference() {
+        let first = outstanding_collection_fiscal_reference(
+            "order-1",
+            payments::OrderPaymentBalanceSnapshot {
+                order_total: 50.0,
+                net_paid: 20.0,
+                outstanding_amount: 30.0,
+                completed_payment_count: 1,
+                ledger_generation: [0; 32],
+            },
+            "attempt-1",
+        );
+        let retry = outstanding_collection_fiscal_reference(
+            "order-1",
+            payments::OrderPaymentBalanceSnapshot {
+                order_total: 50.0,
+                net_paid: 20.0,
+                outstanding_amount: 30.0,
+                completed_payment_count: 1,
+                ledger_generation: [0; 32],
+            },
+            "attempt-1",
+        );
+        let later_generation = outstanding_collection_fiscal_reference(
+            "order-1",
+            payments::OrderPaymentBalanceSnapshot {
+                order_total: 50.0,
+                net_paid: 25.0,
+                outstanding_amount: 25.0,
+                completed_payment_count: 2,
+                ledger_generation: [1; 32],
+            },
+            "attempt-2",
+        );
+
+        assert_eq!(first, retry, "same collection retry must deduplicate");
+        assert_ne!(first, "order-1");
+        assert_ne!(first, later_generation);
+        assert!(
+            !first.contains("attempt-1"),
+            "renderer idempotency keys stay opaque"
+        );
+        assert!(first.starts_with("order-1:collect-outstanding:"));
+        assert_eq!(first.rsplit(':').next().map(str::len), Some(32));
+    }
+
+    #[test]
+    fn outstanding_collection_fiscal_reference_separates_changed_tender_attempts() {
+        let balance = payments::OrderPaymentBalanceSnapshot {
+            order_total: 42.0,
+            net_paid: 0.0,
+            outstanding_amount: 42.0,
+            completed_payment_count: 0,
+            ledger_generation: [0; 32],
+        };
+
+        let card = outstanding_collection_fiscal_reference("order-2", balance, "card-attempt");
+        let cash = outstanding_collection_fiscal_reference("order-2", balance, "cash-attempt");
+
+        assert_ne!(card, cash);
+    }
+
+    #[test]
+    fn outstanding_collection_attempt_key_is_required_bounded_and_opaque() {
+        assert_eq!(
+            validate_outstanding_idempotency_key(&serde_json::json!({})),
+            Err("IDEMPOTENCY_KEY_REQUIRED")
+        );
+        assert_eq!(
+            validate_outstanding_idempotency_key(&serde_json::json!({
+                "idempotencyKey": "x".repeat(129)
+            })),
+            Err("IDEMPOTENCY_KEY_INVALID")
+        );
+        assert_eq!(
+            validate_outstanding_idempotency_key(&serde_json::json!({
+                "idempotencyKey": "attempt with spaces"
+            })),
+            Err("IDEMPOTENCY_KEY_INVALID")
+        );
+        assert_eq!(
+            validate_outstanding_idempotency_key(&serde_json::json!({
+                "idempotencyKey": "selection-123:retry_1"
+            })),
+            Ok("selection-123:retry_1")
+        );
+
+        let response = outstanding_idempotency_error_response("IDEMPOTENCY_KEY_INVALID");
+        assert_eq!(response["errorCode"], "IDEMPOTENCY_KEY_INVALID");
+        assert_eq!(response["paymentApproved"], false);
+        assert_eq!(response["paymentPersisted"], false);
+        assert!(!response.to_string().contains("attempt with spaces"));
+    }
+
+    #[test]
+    fn same_attempt_key_reuses_identity_and_fresh_post_decline_key_can_reserve() {
+        let balance = payments::OrderPaymentBalanceSnapshot {
+            order_total: 42.0,
+            net_paid: 0.0,
+            outstanding_amount: 42.0,
+            completed_payment_count: 0,
+            ledger_generation: [0x42; 32],
+        };
+        let first = outstanding_collection_fiscal_reference("order-retry", balance, "click-1");
+        let retry = outstanding_collection_fiscal_reference("order-retry", balance, "click-1");
+        let fresh = outstanding_collection_fiscal_reference("order-retry", balance, "click-2");
+
+        assert_eq!(first, retry, "same request retry must reuse its identity");
+        assert_ne!(
+            first, fresh,
+            "a fresh click after definite failure must be able to reserve a new attempt"
+        );
+    }
+
+    #[test]
+    fn fiscal_reconciliation_requirement_is_exposed_at_the_payment_boundary() {
+        let response = fiscal_checkout_not_approved_response(serde_json::json!({
+            "success": false,
+            "approved": false,
+            "requiresReconciliation": true,
+            "error": "Prior card tender requires reconciliation"
+        }));
+
+        assert_eq!(response["success"], false);
+        assert_eq!(response["paymentApproved"], false);
+        assert_eq!(response["paymentPersisted"], false);
+        assert_eq!(response["requiresReconciliation"], true);
+        assert_eq!(response["fiscalCheckout"]["requiresReconciliation"], true);
+    }
+
+    #[test]
+    fn collect_outstanding_requires_the_renderers_atomic_settlement_generation() {
+        let settlement = payments::OrderSettlementSnapshot {
+            order_total: 42.50,
+            net_paid: 10.00,
+            outstanding_amount: 32.50,
+            completed_payments: vec![serde_json::json!({
+                "id": "payment-1",
+                "status": "completed",
+                "method": "cash",
+                "amount": 10.00,
+            })],
+            ledger_generation: [0xab; 32],
+        };
+        let expected = payments::settlement_generation_token(&settlement.ledger_generation);
+
+        assert!(validate_collect_outstanding_generation(
+            &serde_json::json!({ "expectedSettlementGeneration": expected }),
+            &settlement,
+        )
+        .is_ok());
+
+        let stale = validate_collect_outstanding_generation(
+            &serde_json::json!({ "expectedSettlementGeneration": "stale" }),
+            &settlement,
+        )
+        .expect_err("stale renderer generation must fail before fiscal checkout");
+        assert_eq!(stale["errorCode"], "BALANCE_CHANGED");
+        assert_eq!(stale["paymentApproved"], false);
+        assert_eq!(stale["paymentPersisted"], false);
+        assert_eq!(stale["settlement"]["generation"], expected);
+        assert_eq!(
+            stale["settlement"]["completedPayments"][0]["id"],
+            "payment-1"
+        );
+
+        let missing = validate_collect_outstanding_generation(&serde_json::json!({}), &settlement)
+            .expect_err("recovery collection must require an atomic snapshot token");
+        assert_eq!(missing["errorCode"], "EXPECTED_SETTLEMENT_REQUIRED");
+    }
+
+    #[test]
+    fn post_approval_persistence_failure_requires_reconciliation_instead_of_retry() {
+        let approval = serde_json::json!({
+            "success": true,
+            "approved": true,
+            "transaction": {
+                "transactionId": "fiscal-approved-before-db-failure",
+                "deviceId": "cashier-1",
+            }
+        });
+
+        let response = post_fiscal_persistence_failure_response(
+            "Outstanding balance changed during payment collection",
+            &approval,
+        );
+
+        assert_eq!(response["success"], false);
+        assert_eq!(response["paymentApproved"], true);
+        assert_eq!(response["paymentPersisted"], false);
+        assert_eq!(response["requiresReconciliation"], true);
+        assert!(!response
+            .to_string()
+            .contains("Outstanding balance changed during payment collection"));
+        assert_eq!(
+            response["fiscalCheckout"]["transaction"]["transactionId"],
+            "fiscal-approved-before-db-failure"
+        );
     }
 }

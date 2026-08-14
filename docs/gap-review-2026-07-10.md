@@ -790,13 +790,15 @@ process_pending_jobs writes a timestamped HTML file for every job before dispatc
 
 **Fix.** Add an age-based sweep of the receipts directory to the existing 24h purge path (delete files older than N days, keeping the output_path of still-referenced jobs), or delete the artifact when its job row is purged.
 
-### P2-22 — Printer test, verification, and cash-drawer IPC commands run blocking hardware I/O directly on the Tokio runtime
+### P2-22 — Resolved in software: printer command hardware and verification work no longer blocks the Tokio runtime
 
-> ✅ verified (single skeptic) · Printing · `pos-tauri/src-tauri/src/commands/print.rs:2895`
+> ✅ resolved 2026-08-13 · Printing · physical MCP31 acceptance pending
 
-printers.rs:1378-1384 documents that print_raw_to_tcp is blocking (connect_timeout 3s, 5s write timeouts, thread::sleep per chunk) and that 'Async callers SHOULD wrap this call in spawn_blocking'. The worker loop and payment/kitchen paths were fixed (Wave 2 C12, commit 81a111aaa), but several async #[tauri::command] handlers still call the blocking dispatch inline: printer_test (commands/print.rs:2895), printer_test_draft via run_verification_dispatch (2709), printer_test_greek_direct (3147), and printer_open_cash_drawer -> drawer::open_cash_drawer which does TcpStream::connect_timeout (commands/print.rs:3335, drawer.rs:106). build_sample_bytes (2663) can additionally trigger the up-to-8s…
+Saved-profile and Draft/Encoding/Branding samples now perform profile resolution, rendering (including bounded logo preparation), immutable snapshot persistence, and SQLite enqueue work inside `tokio::task::spawn_blocking`. The durable enqueue still completes before the queue invalidation event and processing kick. The existing `printer_test_greek_direct` IPC name remains available to the settings UI, but it now creates the same managed, frozen Encoding sample before any hardware I/O instead of dispatching an untracked raw print. `printer_open_cash_drawer` authorizes first, performs its blocking TCP/serial work off-runtime, and emits its existing success event only after the worker returns successfully. Single/all-printer status, diagnostics, the background status monitor, and system/network/Bluetooth discovery primitives likewise move synchronous TCP/serial/Winspool/PowerShell work off the Tauri async executor.
 
-**Fix.** Wrap the print_raw_for_target / open_cash_drawer calls in these commands with tokio::task::spawn_blocking, mirroring the pattern already used in start_print_worker and spawn_pending_job_processing.
+Focused current-thread tests prove that each command family leaves the Tokio runtime thread while preserving domain errors, fixed panic/cancellation IPC messages, managed enqueue ordering, status/event fields, discovery response contracts, and the Greek managed-queue response. The broader command DTO and wizard suites also cover duplicate suppression, rollback, frozen bytes, and post-commit notification behavior.
+
+**Remaining hardware limitations.** This closes the async-runtime defect, not physical-delivery uncertainty. Windows `EndDocPrinter` proves spooler acceptance and raw TCP completion proves bytes were sent; neither proves marks reached paper. The POS cannot repair power, paper-out, cabling, a refused TCP service, or a faulty Windows port monitor, does not restart the Windows Spooler, and refuses to control a native job whose POS ownership cannot be proven. Older untracked jobs may still require one manual cleanup. Physical MCP31 blocked-queue, POS-only cancellation, non-POS-job preservation, Greek/logo, and reprint-history acceptance remains a release gate when an authorized terminal and operator are available. The separate `commands/hardware.rs::drawer_open` path remains tracked under P2-11 rather than this printing finding.
 
 ### P2-23 — Fiscal submission results (MARK/UID/validation QR) never reach the printed receipt
 

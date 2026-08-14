@@ -1,5 +1,8 @@
 use chrono::{DateTime, Duration, TimeZone, Utc};
-use rusqlite::{types::ValueRef, Connection, OpenFlags, OptionalExtension};
+use rusqlite::{
+    types::{Value as SqlValue, ValueRef},
+    Connection, OpenFlags, OptionalExtension, TransactionBehavior,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
@@ -26,6 +29,8 @@ const RESTORE_FILE_NAME: &str = "restore.json";
 const DENSE_RETENTION_HOURS: i64 = 24;
 const TOTAL_RETENTION_DAYS: i64 = 7;
 const DEFAULT_SNAPSHOT_INTERVAL_SECS: u64 = 15 * 60;
+const RESTORED_ATTEMPT_UNKNOWN_OUTCOME_ERROR: &str =
+    "Recovery cancelled an orphaned attempt; previous print outcome is unknown";
 // Wave 5 C18: `parity_sync_queue` (added in migration v44) and
 // `conflict_audit_log` were absent from both `POINT_TABLES` and
 // `FINGERPRINT_TABLES`. Snapshots taken while items were queued in those
@@ -230,20 +235,259 @@ fn pending_restore_dir(root: &Path) -> PathBuf {
     root.join(RECOVERY_PENDING_DIR)
 }
 
+fn parse_restored_attempt_target(value: &str, tag: &str) -> Option<(String, u64)> {
+    let rest = value.strip_prefix(&format!("{tag}:"))?;
+    let (length, rest) = rest.split_once(':')?;
+    let length = length.parse::<usize>().ok()?;
+    if rest.len() <= length || !rest.is_char_boundary(length) || rest.as_bytes()[length] != b':' {
+        return None;
+    }
+    let component = rest[..length].to_owned();
+    let suffix = rest[length + 1..].parse::<u64>().ok()?;
+    Some((component, suffix))
+}
+
+fn restored_attempt_target_key(transport: &str, resolved_target: &str) -> Option<String> {
+    let target = match transport {
+        "windows" => {
+            crate::print_dispatch::PrinterTargetKey::WindowsQueue(resolved_target.to_owned())
+        }
+        "raw_tcp" => {
+            let (host, port) = parse_restored_attempt_target(resolved_target, "host")?;
+            crate::print_dispatch::PrinterTargetKey::RawTcp {
+                host,
+                port: u16::try_from(port).ok()?,
+            }
+        }
+        "serial" => {
+            let (port_name, baud_rate) = parse_restored_attempt_target(resolved_target, "port")?;
+            crate::print_dispatch::PrinterTargetKey::Serial {
+                port_name,
+                baud_rate: u32::try_from(baud_rate).ok()?,
+            }
+        }
+        _ => return None,
+    };
+    crate::print_dispatch::normalize_target(&target).ok()
+}
+
+struct RestoredAttemptCandidate {
+    row_id: i64,
+    attempt_id: String,
+    print_job_id: String,
+    transport: String,
+    resolved_target: String,
+    document_name: String,
+    spool_job_id: SqlValue,
+    state: String,
+}
+
+fn restored_attempt_matches_windows_reconciliation_contract(
+    attempt: &RestoredAttemptCandidate,
+) -> bool {
+    if attempt.transport != "windows"
+        || !matches!(
+            attempt.state.as_str(),
+            "windows_queued"
+                | "windows_printing"
+                | "paused"
+                | "cancel_requested"
+                | "unknown"
+                | "cancel_failed"
+                | "spool_error"
+        )
+        || restored_attempt_target_key(&attempt.transport, &attempt.resolved_target).is_none()
+    {
+        return false;
+    }
+
+    let SqlValue::Integer(spool_job_id) = &attempt.spool_job_id else {
+        return false;
+    };
+    let Ok(spool_job_id) = u32::try_from(*spool_job_id) else {
+        return false;
+    };
+    if spool_job_id == 0 {
+        return false;
+    }
+
+    let Ok(attempt_id) = Uuid::parse_str(&attempt.attempt_id) else {
+        return false;
+    };
+    let Ok(print_job_id) = Uuid::parse_str(&attempt.print_job_id) else {
+        return false;
+    };
+    let Ok(marker) = crate::windows_spooler::parse_document_marker(&attempt.document_name) else {
+        return false;
+    };
+    marker.attempt_id == attempt_id && marker.local_job_id == print_job_id
+}
+
 fn cancel_replayable_restored_print_jobs(db_path: &Path) -> Result<usize, String> {
-    let conn = Connection::open(db_path)
+    let mut conn = Connection::open(db_path)
         .map_err(|e| format!("open restored database to cancel print replay: {e}"))?;
+    let columns = read_table_columns(&conn, "print_jobs")?;
+    let has_completed_at = columns.iter().any(|column| column == "completed_at");
+    let has_history_expires_at = columns.iter().any(|column| column == "history_expires_at");
+    let has_attempts = table_exists(&conn, "print_job_attempts")?;
+    let has_target_state = table_exists(&conn, "print_target_state")?;
+    let update = match (has_completed_at, has_history_expires_at) {
+        (true, true) => {
+            "UPDATE print_jobs
+             SET status = 'cancelled',
+                 warning_code = 'restored_cancelled',
+                 warning_message = 'Print job cancelled during recovery restore',
+                 updated_at = ?1,
+                 completed_at = ?1,
+                 history_expires_at = datetime(?1, '+30 days')
+             WHERE status IN ('pending', 'printing')"
+        }
+        (true, false) => {
+            "UPDATE print_jobs
+             SET status = 'cancelled',
+                 warning_code = 'restored_cancelled',
+                 warning_message = 'Print job cancelled during recovery restore',
+                 updated_at = ?1,
+                 completed_at = ?1
+             WHERE status IN ('pending', 'printing')"
+        }
+        (false, true) => {
+            "UPDATE print_jobs
+             SET status = 'cancelled',
+                 warning_code = 'restored_cancelled',
+                 warning_message = 'Print job cancelled during recovery restore',
+                 updated_at = ?1,
+                 history_expires_at = datetime(?1, '+30 days')
+             WHERE status IN ('pending', 'printing')"
+        }
+        (false, false) => {
+            "UPDATE print_jobs
+             SET status = 'cancelled',
+                 warning_code = 'restored_cancelled',
+                 warning_message = 'Print job cancelled during recovery restore',
+                 updated_at = ?1
+             WHERE status IN ('pending', 'printing')"
+        }
+    };
     let now = Utc::now().to_rfc3339();
-    conn.execute(
-        "UPDATE print_jobs
-         SET status = 'cancelled',
-             warning_code = 'restored_cancelled',
-             warning_message = 'Print job cancelled during recovery restore',
-             updated_at = ?1
-         WHERE status IN ('pending', 'printing')",
-        rusqlite::params![now],
-    )
-    .map_err(|e| format!("cancel replayable restored print jobs: {e}"))
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|e| format!("begin restored print cancellation transaction: {e}"))?;
+
+    if has_attempts {
+        let orphan_attempts = {
+            let restoration_candidates = format!(
+                "({} OR attempt.state = 'spool_error')",
+                crate::print_dispatch::shared_attempt_blocker_predicate_sql("attempt"),
+            );
+            let mut statement = tx
+                .prepare(&format!(
+                    "SELECT attempt.rowid, attempt.id, attempt.print_job_id,
+                            attempt.transport, attempt.resolved_target, attempt.document_name,
+                            attempt.spool_job_id, attempt.state
+                     FROM print_job_attempts attempt
+                     JOIN print_jobs job ON job.id = attempt.print_job_id
+                     WHERE job.status IN ('pending', 'printing')
+                       AND {restoration_candidates}",
+                ))
+                .map_err(|e| format!("prepare restored active print attempts: {e}"))?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok(RestoredAttemptCandidate {
+                        row_id: row.get(0)?,
+                        attempt_id: row.get(1)?,
+                        print_job_id: row.get(2)?,
+                        transport: row.get(3)?,
+                        resolved_target: row.get(4)?,
+                        document_name: row.get(5)?,
+                        spool_job_id: row.get(6)?,
+                        state: row.get(7)?,
+                    })
+                })
+                .map_err(|e| format!("query restored active print attempts: {e}"))?;
+            let mut attempts = Vec::new();
+            for row in rows {
+                let attempt =
+                    row.map_err(|e| format!("read restored active print attempt: {e}"))?;
+                if !restored_attempt_matches_windows_reconciliation_contract(&attempt) {
+                    attempts.push(attempt);
+                }
+            }
+            attempts
+        };
+
+        let terminalized_target_keys = orphan_attempts
+            .iter()
+            .filter_map(|attempt| {
+                restored_attempt_target_key(&attempt.transport, &attempt.resolved_target)
+            })
+            .collect::<HashSet<_>>();
+        for attempt in orphan_attempts {
+            tx.execute(
+                "UPDATE print_job_attempts
+                 SET state = 'cancelled',
+                     last_seen_at = ?1,
+                     completed_at = ?1,
+                     cancel_confirmed_at = ?1,
+                     last_error = ?2
+                 WHERE rowid = ?3",
+                rusqlite::params![now, RESTORED_ATTEMPT_UNKNOWN_OUTCOME_ERROR, attempt.row_id],
+            )
+            .map_err(|e| format!("terminalize restored orphan print attempt: {e}"))?;
+        }
+
+        if has_target_state && !terminalized_target_keys.is_empty() {
+            let remaining_blocker_keys = {
+                let shared_blocker = crate::print_dispatch::shared_attempt_blocker_predicate_sql(
+                    "print_job_attempts",
+                );
+                let mut statement = tx
+                    .prepare(&format!(
+                        "SELECT transport, resolved_target
+                         FROM print_job_attempts
+                         WHERE {shared_blocker}",
+                    ))
+                    .map_err(|e| format!("prepare remaining restored attempt blockers: {e}"))?;
+                let rows = statement
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })
+                    .map_err(|e| format!("query remaining restored attempt blockers: {e}"))?;
+                let mut keys = HashSet::new();
+                for row in rows {
+                    let (transport, resolved_target) =
+                        row.map_err(|e| format!("read remaining restored attempt blocker: {e}"))?;
+                    if let Some(key) = restored_attempt_target_key(&transport, &resolved_target) {
+                        keys.insert(key);
+                    }
+                }
+                keys
+            };
+
+            for target_key in terminalized_target_keys {
+                if remaining_blocker_keys.contains(&target_key) {
+                    continue;
+                }
+                tx.execute(
+                    "UPDATE print_target_state
+                     SET circuit_state = 'closed',
+                         blocked_reason = NULL,
+                         blocked_at = NULL,
+                         updated_at = ?1
+                     WHERE target_key = ?2 AND circuit_state = 'open'",
+                    rusqlite::params![now, target_key],
+                )
+                .map_err(|e| format!("reset restored orphan print target circuit: {e}"))?;
+            }
+        }
+    }
+
+    let cancelled = tx
+        .execute(update, rusqlite::params![now])
+        .map_err(|e| format!("cancel replayable restored print jobs: {e}"))?;
+    tx.commit()
+        .map_err(|e| format!("commit restored print cancellation transaction: {e}"))?;
+    Ok(cancelled)
 }
 
 pub(crate) fn ensure_recovery_dirs(app_data_dir: &Path) -> Result<(), String> {
@@ -1507,6 +1751,83 @@ mod tests {
         .expect("count print jobs by status")
     }
 
+    fn stored_attempt_target(
+        target: &crate::print_dispatch::PrinterTargetKey,
+    ) -> (&'static str, String) {
+        match target {
+            crate::print_dispatch::PrinterTargetKey::WindowsQueue(queue) => {
+                ("windows", queue.clone())
+            }
+            crate::print_dispatch::PrinterTargetKey::RawTcp { host, port } => {
+                ("raw_tcp", format!("host:{}:{host}:{port}", host.len()))
+            }
+            crate::print_dispatch::PrinterTargetKey::Serial {
+                port_name,
+                baud_rate,
+            } => (
+                "serial",
+                format!("port:{}:{port_name}:{baud_rate}", port_name.len()),
+            ),
+        }
+    }
+
+    fn insert_restored_job_attempt(
+        conn: &Connection,
+        job_id: Uuid,
+        job_status: &str,
+        attempt_id: Uuid,
+        target: &crate::print_dispatch::PrinterTargetKey,
+        attempt_state: &str,
+        spool_job_id: Option<i64>,
+    ) {
+        conn.execute(
+            "INSERT INTO print_jobs (
+                id, entity_type, entity_id, status, created_at, updated_at
+             ) VALUES (?1, 'order_receipt', ?1, ?2, ?3, ?3)",
+            params![job_id.to_string(), job_status, "2026-07-01T00:00:00Z"],
+        )
+        .expect("insert restored parent print job");
+        let (transport, resolved_target) = stored_attempt_target(target);
+        let document_name =
+            crate::windows_spooler::format_document_marker(job_id, attempt_id, "order_receipt")
+                .expect("format restored attempt document marker");
+        conn.execute(
+            "INSERT INTO print_job_attempts (
+                id, print_job_id, attempt_number, transport, resolved_target,
+                document_name, spool_job_id, state, bytes_requested, bytes_written,
+                started_at, last_seen_at
+             ) VALUES (?1, ?2, 1, ?3, ?4, ?5, ?6, ?7, 10, 0, ?8, ?8)",
+            params![
+                attempt_id.to_string(),
+                job_id.to_string(),
+                transport,
+                resolved_target,
+                document_name,
+                spool_job_id,
+                attempt_state,
+                "2026-07-01T00:00:00Z",
+            ],
+        )
+        .expect("insert restored print attempt");
+    }
+
+    fn insert_stale_target_circuit(
+        conn: &Connection,
+        target: &crate::print_dispatch::PrinterTargetKey,
+    ) -> String {
+        let target_key = crate::print_dispatch::normalize_target(target)
+            .expect("normalize restored attempt target");
+        let (transport, _) = stored_attempt_target(target);
+        conn.execute(
+            "INSERT INTO print_target_state (
+                target_key, transport, circuit_state, blocked_reason, blocked_at, updated_at
+             ) VALUES (?1, ?2, 'open', 'stale restored outcome', ?3, ?3)",
+            params![target_key, transport, "2026-07-01T00:00:00Z"],
+        )
+        .expect("insert stale restored target circuit");
+        target_key
+    }
+
     #[test]
     fn manual_snapshot_is_listed_with_table_counts() {
         let app_data_dir = temp_app_dir("recovery_snapshot");
@@ -1550,7 +1871,7 @@ mod tests {
     }
 
     #[test]
-    fn staged_restore_replaces_db_on_next_start() {
+    fn staged_v73_restore_cancels_replayable_jobs_with_history_timestamps() {
         let app_data_dir = temp_app_dir("recovery_restore");
         {
             let db_state = db::init(&app_data_dir).expect("init db");
@@ -1570,9 +1891,16 @@ mod tests {
                     "INSERT INTO print_jobs (
                         id, entity_type, entity_id, status, created_at, updated_at
                      ) VALUES (?1, 'order_receipt', 'order-before', 'pending', datetime('now'), datetime('now'))",
-                    params!["job-before"],
+                    params!["job-before-pending"],
                 )
                 .expect("insert pending print job");
+                conn.execute(
+                    "INSERT INTO print_jobs (
+                        id, entity_type, entity_id, status, created_at, updated_at
+                     ) VALUES (?1, 'order_receipt', 'order-before', 'printing', datetime('now'), datetime('now'))",
+                    params!["job-before-printing"],
+                )
+                .expect("insert printing print job");
             }
             let point = create_manual_snapshot(&db_state).expect("create snapshot");
             {
@@ -1590,12 +1918,694 @@ mod tests {
             stage_restore_from_point(&db_state, &point.id).expect("stage restore");
         }
 
+        let restore_started_at = Utc::now();
         maybe_apply_pending_restore(&app_data_dir)
             .expect("apply pending restore")
             .expect("restore payload");
+        let restore_finished_at = Utc::now();
         assert_eq!(count_orders(&app_data_dir), 1);
-        assert_eq!(count_print_jobs_by_status(&app_data_dir, "cancelled"), 1);
+        assert_eq!(count_print_jobs_by_status(&app_data_dir, "cancelled"), 2);
         assert_eq!(count_print_jobs_by_status(&app_data_dir, "pending"), 0);
+        assert_eq!(count_print_jobs_by_status(&app_data_dir, "printing"), 0);
+
+        let history_expires_at = {
+            let conn = Connection::open(app_data_dir.join("pos.db")).expect("open restored db");
+            let mut statement = conn
+                .prepare(
+                    "SELECT id, updated_at, completed_at, history_expires_at
+                     FROM print_jobs
+                     ORDER BY id",
+                )
+                .expect("prepare restored print history query");
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                })
+                .expect("query restored print history")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("collect restored print history");
+
+            assert_eq!(rows.len(), 2);
+            let mut common_expiry = None;
+            for (id, updated_at, completed_at, history_expires_at) in rows {
+                let completed_at = completed_at
+                    .unwrap_or_else(|| panic!("restored job {id} missing completed_at"));
+                let history_expires_at = history_expires_at
+                    .unwrap_or_else(|| panic!("restored job {id} missing history_expires_at"));
+                assert_eq!(completed_at, updated_at, "restored job {id}");
+
+                let completed_at_utc = DateTime::parse_from_rfc3339(&completed_at)
+                    .expect("parse restored completion timestamp")
+                    .with_timezone(&Utc);
+                assert!(completed_at_utc >= restore_started_at, "restored job {id}");
+                assert!(completed_at_utc <= restore_finished_at, "restored job {id}");
+
+                let expected_expiry = (completed_at_utc + Duration::days(30))
+                    .format("%Y-%m-%d %H:%M:%S")
+                    .to_string();
+                assert_eq!(history_expires_at, expected_expiry, "restored job {id}");
+                if let Some(expected_common_expiry) = &common_expiry {
+                    assert_eq!(&history_expires_at, expected_common_expiry);
+                } else {
+                    common_expiry = Some(history_expires_at);
+                }
+            }
+            common_expiry.expect("restored print history expiry")
+        };
+
+        let history_expires_at =
+            chrono::NaiveDateTime::parse_from_str(&history_expires_at, "%Y-%m-%d %H:%M:%S")
+                .expect("parse restored history expiry")
+                .and_utc();
+        let restored_db = db::init(&app_data_dir).expect("reopen restored db");
+        let before_expiry = crate::print_history::purge_expired_print_jobs_at(
+            &restored_db,
+            &app_data_dir,
+            history_expires_at - Duration::seconds(1),
+        )
+        .expect("purge restored history before expiry");
+        assert_eq!(before_expiry.rows_deleted, 0);
+        let at_expiry = crate::print_history::purge_expired_print_jobs_at(
+            &restored_db,
+            &app_data_dir,
+            history_expires_at,
+        )
+        .expect("purge restored history at expiry");
+        assert_eq!(at_expiry.rows_deleted, 2);
+        drop(restored_db);
+
+        let _ = fs::remove_dir_all(app_data_dir);
+    }
+
+    #[test]
+    fn staged_v73_restore_releases_orphan_lanes_but_preserves_owned_windows_attempt() {
+        use crate::print_dispatch::{
+            DispatchError, DispatchManager, DispatchState, PrinterTargetKey,
+        };
+
+        let app_data_dir = temp_app_dir("recovery_restore_attempts");
+        let nonce = Uuid::new_v4().to_string();
+        let raw_target = PrinterTargetKey::RawTcp {
+            host: format!("restore-raw-{nonce}.local"),
+            port: 9100,
+        };
+        let serial_target = PrinterTargetKey::Serial {
+            port_name: format!("COM-{nonce}"),
+            baud_rate: 115_200,
+        };
+        let invalid_windows_target =
+            PrinterTargetKey::WindowsQueue(format!("Restore Invalid {nonce}"));
+        let owned_windows_target = PrinterTargetKey::WindowsQueue(format!("Restore Owned {nonce}"));
+        let raw_job = Uuid::new_v4();
+        let serial_job = Uuid::new_v4();
+        let invalid_windows_job = Uuid::new_v4();
+        let owned_windows_job = Uuid::new_v4();
+        let raw_attempt = Uuid::new_v4();
+        let serial_attempt = Uuid::new_v4();
+        let invalid_windows_attempt = Uuid::new_v4();
+        let owned_windows_attempt = Uuid::new_v4();
+        let stale_target_keys;
+
+        {
+            let db_state = db::init(&app_data_dir).expect("init v73 restore db");
+            {
+                let conn = db_state.conn.lock().expect("lock v73 restore db");
+                insert_restored_job_attempt(
+                    &conn,
+                    raw_job,
+                    "pending",
+                    raw_attempt,
+                    &raw_target,
+                    "submitting",
+                    None,
+                );
+                insert_restored_job_attempt(
+                    &conn,
+                    serial_job,
+                    "printing",
+                    serial_attempt,
+                    &serial_target,
+                    "unknown",
+                    None,
+                );
+                insert_restored_job_attempt(
+                    &conn,
+                    invalid_windows_job,
+                    "pending",
+                    invalid_windows_attempt,
+                    &invalid_windows_target,
+                    "windows_queued",
+                    Some(0),
+                );
+                insert_restored_job_attempt(
+                    &conn,
+                    owned_windows_job,
+                    "printing",
+                    owned_windows_attempt,
+                    &owned_windows_target,
+                    "windows_queued",
+                    Some(4_242),
+                );
+                stale_target_keys = [
+                    insert_stale_target_circuit(&conn, &raw_target),
+                    insert_stale_target_circuit(&conn, &serial_target),
+                    insert_stale_target_circuit(&conn, &invalid_windows_target),
+                ];
+            }
+            let point = create_manual_snapshot(&db_state).expect("create v73 attempt snapshot");
+            stage_restore_from_point(&db_state, &point.id).expect("stage v73 attempt restore");
+        }
+
+        let restore_started_at = Utc::now();
+        maybe_apply_pending_restore(&app_data_dir)
+            .expect("apply v73 attempt restore")
+            .expect("v73 attempt restore payload");
+        let restore_finished_at = Utc::now();
+
+        let conn = Connection::open(app_data_dir.join("pos.db")).expect("open restored v73 db");
+        let mut restore_stamp = None;
+        for job_id in [raw_job, serial_job, invalid_windows_job, owned_windows_job] {
+            let row: (String, String, Option<String>, Option<String>) = conn
+                .query_row(
+                    "SELECT status, updated_at, completed_at, history_expires_at
+                     FROM print_jobs WHERE id = ?1",
+                    [job_id.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .expect("read restored parent metadata");
+            assert_eq!(row.0, "cancelled", "restored parent {job_id}");
+            assert_eq!(row.2.as_deref(), Some(row.1.as_str()));
+            let restored_at = DateTime::parse_from_rfc3339(&row.1)
+                .expect("parse restored parent timestamp")
+                .with_timezone(&Utc);
+            assert!(restored_at >= restore_started_at);
+            assert!(restored_at <= restore_finished_at);
+            assert_eq!(
+                row.3,
+                Some(
+                    (restored_at + Duration::days(30))
+                        .format("%Y-%m-%d %H:%M:%S")
+                        .to_string()
+                )
+            );
+            if let Some(expected) = &restore_stamp {
+                assert_eq!(&row.1, expected);
+            } else {
+                restore_stamp = Some(row.1);
+            }
+        }
+        let restore_stamp = restore_stamp.expect("common restore timestamp");
+
+        for attempt_id in [raw_attempt, serial_attempt, invalid_windows_attempt] {
+            let row: (
+                String,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            ) = conn
+                .query_row(
+                    "SELECT state, last_seen_at, completed_at, cancel_confirmed_at, last_error
+                     FROM print_job_attempts WHERE id = ?1",
+                    [attempt_id.to_string()],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    },
+                )
+                .expect("read terminalized restored attempt");
+            assert_eq!(row.0, "cancelled", "restored attempt {attempt_id}");
+            assert_eq!(row.1.as_deref(), Some(restore_stamp.as_str()));
+            assert_eq!(row.2.as_deref(), Some(restore_stamp.as_str()));
+            assert_eq!(row.3.as_deref(), Some(restore_stamp.as_str()));
+            assert_eq!(
+                row.4.as_deref(),
+                Some("Recovery cancelled an orphaned attempt; previous print outcome is unknown")
+            );
+        }
+
+        let owned: (String, i64, Option<String>, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT state, spool_job_id, completed_at, cancel_confirmed_at, last_error
+                 FROM print_job_attempts WHERE id = ?1",
+                [owned_windows_attempt.to_string()],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("read preserved owned Windows attempt");
+        assert_eq!(owned, ("windows_queued".into(), 4_242, None, None, None));
+
+        for target_key in stale_target_keys {
+            let row: (String, Option<String>, Option<String>, String) = conn
+                .query_row(
+                    "SELECT circuit_state, blocked_reason, blocked_at, updated_at
+                     FROM print_target_state WHERE target_key = ?1",
+                    [target_key],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .expect("read reset restored target circuit");
+            assert_eq!(row, ("closed".into(), None, None, restore_stamp.clone()));
+        }
+
+        let manager = DispatchManager::hydrate(&conn).expect("hydrate restored dispatch manager");
+        for target in [raw_target, serial_target, invalid_windows_target] {
+            let mut lease = manager
+                .claim(target)
+                .expect("terminalized restored lane must be claimable");
+            lease.release_unstarted();
+        }
+        assert!(matches!(
+            manager.claim(owned_windows_target.clone()),
+            Err(DispatchError::LaneBusy)
+        ));
+        let active =
+            crate::print_dispatch::active_attempts_for_target(&conn, &owned_windows_target)
+                .expect("owned Windows attempt remains reconcilable");
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].identity.attempt_id, owned_windows_attempt);
+        assert_eq!(active[0].state, DispatchState::WindowsQueued);
+        assert_eq!(active[0].spool_job_id, Some(4_242));
+        drop(conn);
+
+        let _ = fs::remove_dir_all(app_data_dir);
+    }
+
+    #[test]
+    fn restore_preserves_every_valid_windows_attempt_despite_newer_active_and_terminal_attempts() {
+        use crate::print_dispatch::{DispatchError, DispatchManager, PrinterTargetKey};
+
+        let app_data_dir = temp_app_dir("recovery_restore_windows_contract");
+        let db_state = db::init(&app_data_dir).expect("init Windows contract restore db");
+        let nonce = Uuid::new_v4().to_string();
+        let valid_target = PrinterTargetKey::WindowsQueue(format!("Valid Restore {nonce}"));
+        let created_target = PrinterTargetKey::WindowsQueue(format!("Created Restore {nonce}"));
+        let submitting_target =
+            PrinterTargetKey::WindowsQueue(format!("Submitting Restore {nonce}"));
+        let fractional_target =
+            PrinterTargetKey::WindowsQueue(format!("Fractional Restore {nonce}"));
+        let blob_target = PrinterTargetKey::WindowsQueue(format!("Blob Restore {nonce}"));
+        let shared_target = PrinterTargetKey::WindowsQueue(format!("Shared Restore {nonce}"));
+        let terminal_target = PrinterTargetKey::WindowsQueue(format!("Terminal Restore {nonce}"));
+        let bad_marker_target =
+            PrinterTargetKey::WindowsQueue(format!("Bad Marker Restore {nonce}"));
+        let too_large_target = PrinterTargetKey::WindowsQueue(format!("Too Large Restore {nonce}"));
+
+        let valid_job = Uuid::new_v4();
+        let created_job = Uuid::new_v4();
+        let submitting_job = Uuid::new_v4();
+        let fractional_job = Uuid::new_v4();
+        let blob_job = Uuid::new_v4();
+        let multi_attempt_job = Uuid::new_v4();
+        let bad_marker_job = Uuid::new_v4();
+        let too_large_job = Uuid::new_v4();
+        let valid_attempt = Uuid::new_v4();
+        let created_attempt = Uuid::new_v4();
+        let submitting_attempt = Uuid::new_v4();
+        let fractional_attempt = Uuid::new_v4();
+        let blob_attempt = Uuid::new_v4();
+        let non_latest_attempt = Uuid::new_v4();
+        let same_target_active_attempt = Uuid::new_v4();
+        let newer_terminal_attempt = Uuid::new_v4();
+        let bad_marker_attempt = Uuid::new_v4();
+        let too_large_attempt = Uuid::new_v4();
+
+        {
+            let conn = db_state
+                .conn
+                .lock()
+                .expect("lock Windows contract restore db");
+            for (job, attempt, target, state, spool_job_id) in [
+                (
+                    valid_job,
+                    valid_attempt,
+                    &valid_target,
+                    "windows_queued",
+                    1_i64,
+                ),
+                (created_job, created_attempt, &created_target, "created", 2),
+                (
+                    submitting_job,
+                    submitting_attempt,
+                    &submitting_target,
+                    "submitting",
+                    3,
+                ),
+                (
+                    fractional_job,
+                    fractional_attempt,
+                    &fractional_target,
+                    "windows_queued",
+                    4,
+                ),
+                (blob_job, blob_attempt, &blob_target, "windows_queued", 5),
+                (
+                    multi_attempt_job,
+                    non_latest_attempt,
+                    &shared_target,
+                    "windows_queued",
+                    6,
+                ),
+                (
+                    bad_marker_job,
+                    bad_marker_attempt,
+                    &bad_marker_target,
+                    "windows_queued",
+                    8,
+                ),
+                (
+                    too_large_job,
+                    too_large_attempt,
+                    &too_large_target,
+                    "windows_queued",
+                    i64::from(u32::MAX) + 1,
+                ),
+            ] {
+                insert_restored_job_attempt(
+                    &conn,
+                    job,
+                    "pending",
+                    attempt,
+                    target,
+                    state,
+                    Some(spool_job_id),
+                );
+            }
+
+            conn.execute(
+                "UPDATE print_job_attempts
+                 SET spool_job_id = CAST(4.5 AS REAL)
+                 WHERE id = ?1",
+                [fractional_attempt.to_string()],
+            )
+            .expect("store fractional REAL JobId");
+            conn.execute(
+                "UPDATE print_job_attempts
+                 SET spool_job_id = X'00000005'
+                 WHERE id = ?1",
+                [blob_attempt.to_string()],
+            )
+            .expect("store BLOB JobId");
+            conn.execute(
+                "UPDATE print_job_attempts
+                 SET document_name = 'not-a-pos-owned-document'
+                 WHERE id = ?1",
+                [bad_marker_attempt.to_string()],
+            )
+            .expect("corrupt restored ownership marker");
+
+            let (_, shared_resolved_target) = stored_attempt_target(&shared_target);
+            let same_target_document_name = crate::windows_spooler::format_document_marker(
+                multi_attempt_job,
+                same_target_active_attempt,
+                "order_receipt",
+            )
+            .expect("format same-target restored attempt marker");
+            conn.execute(
+                "INSERT INTO print_job_attempts (
+                    id, print_job_id, attempt_number, transport, resolved_target,
+                    document_name, spool_job_id, state, bytes_requested, bytes_written,
+                    started_at, last_seen_at
+                 ) VALUES (?1, ?2, 2, 'windows', ?3, ?4, ?5, 'windows_queued',
+                           10, 0, ?6, ?6)",
+                params![
+                    same_target_active_attempt.to_string(),
+                    multi_attempt_job.to_string(),
+                    shared_resolved_target,
+                    same_target_document_name,
+                    i64::from(u32::MAX),
+                    "2026-07-01T00:00:01Z",
+                ],
+            )
+            .expect("insert same-target restored Windows attempt");
+
+            let (_, terminal_resolved_target) = stored_attempt_target(&terminal_target);
+            let terminal_document_name = crate::windows_spooler::format_document_marker(
+                multi_attempt_job,
+                newer_terminal_attempt,
+                "order_receipt",
+            )
+            .expect("format newer terminal restored attempt marker");
+            conn.execute(
+                "INSERT INTO print_job_attempts (
+                    id, print_job_id, attempt_number, transport, resolved_target,
+                    document_name, spool_job_id, state, bytes_requested, bytes_written,
+                    started_at, last_seen_at, completed_at
+                 ) VALUES (?1, ?2, 3, 'windows', ?3, ?4, ?5, 'spool_completed',
+                           10, 10, ?6, ?6, ?6)",
+                params![
+                    newer_terminal_attempt.to_string(),
+                    multi_attempt_job.to_string(),
+                    terminal_resolved_target,
+                    terminal_document_name,
+                    9_i64,
+                    "2026-07-01T00:00:02Z",
+                ],
+            )
+            .expect("insert newer terminal restored Windows attempt");
+
+            let stored_types: (String, String) = conn
+                .query_row(
+                    "SELECT
+                       (SELECT typeof(spool_job_id) FROM print_job_attempts WHERE id = ?1),
+                       (SELECT typeof(spool_job_id) FROM print_job_attempts WHERE id = ?2)",
+                    params![fractional_attempt.to_string(), blob_attempt.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("read corrupt restored JobId storage classes");
+            assert_eq!(stored_types, ("real".into(), "blob".into()));
+        }
+
+        cancel_replayable_restored_print_jobs(&db_state.db_path)
+            .expect("cancel attempts outside Windows reconciliation contract");
+
+        let conn = db_state
+            .conn
+            .lock()
+            .expect("relock Windows contract restore db");
+        for attempt_id in [
+            valid_attempt,
+            non_latest_attempt,
+            same_target_active_attempt,
+        ] {
+            assert_eq!(
+                conn.query_row(
+                    "SELECT state FROM print_job_attempts WHERE id = ?1",
+                    [attempt_id.to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .expect("read preserved reconcilable attempt"),
+                "windows_queued",
+                "attempt {attempt_id} must remain reconcilable"
+            );
+        }
+        for attempt_id in [
+            created_attempt,
+            submitting_attempt,
+            fractional_attempt,
+            blob_attempt,
+            bad_marker_attempt,
+            too_large_attempt,
+        ] {
+            let row: (String, Option<String>, Option<String>, Option<String>) = conn
+                .query_row(
+                    "SELECT state, completed_at, cancel_confirmed_at, last_error
+                     FROM print_job_attempts WHERE id = ?1",
+                    [attempt_id.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .expect("read terminalized non-reconcilable attempt");
+            assert_eq!(row.0, "cancelled", "attempt {attempt_id}");
+            assert!(row.1.is_some(), "attempt {attempt_id}");
+            assert_eq!(row.2, row.1, "attempt {attempt_id}");
+            assert_eq!(
+                row.3.as_deref(),
+                Some("Recovery cancelled an orphaned attempt; previous print outcome is unknown"),
+                "attempt {attempt_id}"
+            );
+        }
+        for job_id in [valid_job, multi_attempt_job] {
+            assert_eq!(
+                conn.query_row(
+                    "SELECT status FROM print_jobs WHERE id = ?1",
+                    [job_id.to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .expect("read restored parent cancellation"),
+                "cancelled",
+                "recovery must cancel parent replay without discarding reconcilable Windows attempts"
+            );
+        }
+
+        let manager = DispatchManager::hydrate(&conn)
+            .expect("hydrate only contract-valid restored Windows attempts");
+        for target in [valid_target, shared_target] {
+            assert!(matches!(
+                manager.claim(target),
+                Err(DispatchError::LaneBusy)
+            ));
+        }
+        for target in [
+            created_target,
+            submitting_target,
+            fractional_target,
+            blob_target,
+            bad_marker_target,
+            too_large_target,
+            terminal_target,
+        ] {
+            let mut lease = manager
+                .claim(target)
+                .expect("non-reconcilable restored Windows lane must be released");
+            lease.release_unstarted();
+        }
+        drop(conn);
+        drop(db_state);
+
+        let _ = fs::remove_dir_all(app_data_dir);
+    }
+
+    #[test]
+    fn restore_cancellation_rolls_back_parent_attempt_and_circuit_together() {
+        use crate::print_dispatch::PrinterTargetKey;
+
+        let app_data_dir = temp_app_dir("recovery_restore_atomic");
+        let db_state = db::init(&app_data_dir).expect("init atomic restore db");
+        let job_id = Uuid::new_v4();
+        let attempt_id = Uuid::new_v4();
+        let target = PrinterTargetKey::RawTcp {
+            host: format!("atomic-{}.local", Uuid::new_v4()),
+            port: 9100,
+        };
+        let target_key;
+        {
+            let conn = db_state.conn.lock().expect("lock atomic restore db");
+            insert_restored_job_attempt(
+                &conn,
+                job_id,
+                "pending",
+                attempt_id,
+                &target,
+                "submitting",
+                None,
+            );
+            target_key = insert_stale_target_circuit(&conn, &target);
+            conn.execute_batch(
+                "CREATE TRIGGER inject_restore_final_parent_failure
+                 AFTER UPDATE OF status ON print_jobs
+                 WHEN NEW.status = 'cancelled'
+                 BEGIN
+                     SELECT CASE WHEN (
+                         SELECT state FROM print_job_attempts
+                         WHERE print_job_id = NEW.id
+                     ) <> 'cancelled'
+                     THEN RAISE(ABORT, 'attempt was not terminal before parent mutation') END;
+                     SELECT CASE WHEN (
+                         SELECT circuit_state FROM print_target_state LIMIT 1
+                     ) <> 'closed'
+                     THEN RAISE(ABORT, 'circuit was not reset before parent mutation') END;
+                     SELECT RAISE(ABORT, 'injected after final parent mutation');
+                 END;",
+            )
+            .expect("install final parent mutation failure trigger");
+        }
+
+        let error = cancel_replayable_restored_print_jobs(&db_state.db_path)
+            .expect_err("final parent failure must roll back restore cancellation");
+        assert!(error.contains("injected after final parent mutation"));
+
+        let conn = db_state.conn.lock().expect("relock atomic restore db");
+        let parent: (String, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT status, completed_at, history_expires_at
+                 FROM print_jobs WHERE id = ?1",
+                [job_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read rolled-back parent");
+        assert_eq!(parent, ("pending".into(), None, None));
+        let attempt: (String, Option<String>, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT state, completed_at, cancel_confirmed_at, last_error
+                 FROM print_job_attempts WHERE id = ?1",
+                [attempt_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("read rolled-back attempt");
+        assert_eq!(attempt, ("submitting".into(), None, None, None));
+        assert_eq!(
+            conn.query_row(
+                "SELECT circuit_state FROM print_target_state WHERE target_key = ?1",
+                [target_key],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("read rolled-back circuit"),
+            "open"
+        );
+        drop(conn);
+        drop(db_state);
+
+        let _ = fs::remove_dir_all(app_data_dir);
+    }
+
+    #[test]
+    fn restored_print_job_cancellation_supports_pre_v73_schema_without_history_columns() {
+        let app_data_dir = temp_app_dir("recovery_restore_pre_v73");
+        let db_path = app_data_dir.join("pre-v73.db");
+        {
+            let conn = Connection::open(&db_path).expect("open pre-v73 db");
+            conn.execute_batch(
+                "CREATE TABLE print_jobs (
+                    id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL CHECK (
+                        status IN ('pending', 'printing', 'printed', 'failed', 'cancelled')
+                    ),
+                    warning_code TEXT,
+                    warning_message TEXT,
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO print_jobs (id, status, updated_at)
+                VALUES ('legacy-pending', 'pending', '2026-07-01T00:00:00Z');
+                INSERT INTO print_jobs (id, status, updated_at)
+                VALUES ('legacy-printing', 'printing', '2026-07-01T00:00:00Z');",
+            )
+            .expect("create pre-v73 print job schema");
+            let columns = read_table_columns(&conn, "print_jobs").expect("read pre-v73 columns");
+            assert!(!columns.iter().any(|column| column == "completed_at"));
+            assert!(!columns.iter().any(|column| column == "history_expires_at"));
+        }
+
+        assert_eq!(
+            cancel_replayable_restored_print_jobs(&db_path)
+                .expect("cancel replayable pre-v73 print jobs"),
+            2
+        );
+        let conn = Connection::open(&db_path).expect("reopen pre-v73 db");
+        let cancelled = conn
+            .query_row(
+                "SELECT COUNT(*) FROM print_jobs WHERE status = 'cancelled'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count cancelled pre-v73 print jobs");
+        assert_eq!(cancelled, 2);
+        drop(conn);
 
         let _ = fs::remove_dir_all(app_data_dir);
     }

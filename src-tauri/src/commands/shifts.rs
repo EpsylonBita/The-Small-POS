@@ -703,7 +703,7 @@ pub async fn shift_close(
         .or(requested_shift_id);
     if let Some(shift_id) = shift_id {
         if crate::print::is_print_action_enabled(&db, "shift_close") {
-            match print::enqueue_print_job(&db, "shift_checkout", &shift_id, None) {
+            match print::enqueue_print_job(&db, "shift_checkout", &shift_id, None, &app) {
                 Ok(job) => {
                     if let Some(obj) = result.as_object_mut() {
                         obj.insert("autoPrintJob".to_string(), job);
@@ -821,6 +821,7 @@ pub async fn shift_get_summary(
 pub async fn shift_print_checkout(
     arg0: Option<serde_json::Value>,
     db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let payload = parse_shift_print_checkout_payload(arg0)?;
     let summary = match shift_service::get_shift_summary(&db, &payload.shift_id) {
@@ -879,6 +880,7 @@ pub async fn shift_print_checkout(
         &payload.shift_id,
         None,
         Some(&print_payload),
+        &app,
     ) {
         Ok(job) => Ok(serde_json::json!({
             "success": true,

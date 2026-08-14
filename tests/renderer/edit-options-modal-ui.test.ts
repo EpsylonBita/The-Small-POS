@@ -7,10 +7,9 @@ const projectRoot = process.cwd();
 const modalPath = path.join(projectRoot, 'src', 'renderer', 'components', 'modals', 'EditOptionsModal.tsx');
 const source = readFileSync(modalPath, 'utf8');
 
-// Touch-first POS language: glass modal, rounded-2xl option cards, active press feedback only (no
-// hover), no native title tooltips, neutral grey icon chips, and semantic accents -- green for the
-// "edit items" action, amber/yellow for the payment + order-type utility, neutral for customer info,
-// muted grey for disabled payment. No off-theme blue/violet survives.
+// Touch-first POS language: glass modal, rounded-2xl option cards, active/focus feedback only (no
+// hover), no native title tooltips, and semantic contrast-safe surfaces -- green for the "edit items"
+// action, amber/yellow for payment + order-type, neutral for customer info and disabled payment.
 test('EditOptionsModal uses the touch POS palette: glass modal, rounded-2xl cards, active press, no hover/blue/violet', () => {
   // Glass modal shell with its component-prop heading preserved (a React prop, not a DOM tooltip).
   assert.match(source, /<LiquidGlassModal/);
@@ -21,8 +20,11 @@ test('EditOptionsModal uses the touch POS palette: glass modal, rounded-2xl card
   assert.ok(rounded2xl.length >= 8, `expected rounded-2xl cards and icon chips, found ${rounded2xl.length}`);
   assert.doesNotMatch(source, /rounded-lg|rounded-md/);
 
-  // Active press feedback only -- no hover-era classes anywhere.
-  assert.match(source, /active:bg-white\/10 active:scale-\[0\.99\]/);
+  // Theme-specific active feedback and visible keyboard focus; no hover-era classes anywhere.
+  assert.match(source, /active:bg-slate-100[^"']*dark:active:bg-slate-800/);
+  assert.match(source, /active:bg-emerald-100[^"']*dark:active:bg-emerald-500\/20/);
+  assert.match(source, /active:bg-amber-100[^"']*dark:active:bg-amber-500\/20/);
+  assert.match(source, /focus-visible:outline-none focus-visible:ring-2/);
   assert.doesNotMatch(source, /hover:/);
   assert.doesNotMatch(source, /group-hover:/);
   assert.doesNotMatch(source, /dark:hover:/);
@@ -32,27 +34,38 @@ test('EditOptionsModal uses the touch POS palette: glass modal, rounded-2xl card
 });
 
 test('EditOptionsModal accents are semantic (neutral customer, green items, amber payment + order-type, yellow active, muted disabled)', () => {
-  // Customer info: neutral outline + neutral grey icon (was blue).
-  assert.match(source, /onClick=\{onEditInfo\}[\s\S]*?border-white\/15 dark:border-white\/10 bg-white\/5 active:bg-white\/10/);
-  assert.match(source, /w-6 h-6 text-gray-600 dark:text-zinc-300/);
+  assert.match(source, /import \{ liquidGlassModalTone \} from '\.\.\/\.\.\/styles\/designSystem'/);
 
-  // Edit order items: semantic green outline + green icon.
-  assert.match(source, /border-green-200\/50 dark:border-green-400\/30 bg-white\/5 active:bg-white\/10/);
-  assert.match(source, /w-6 h-6 text-green-600 dark:text-green-400/);
+  // Customer info: the shared neutral tone supplies an opaque light card and a dark counterpart.
+  assert.match(source, /onClick=\{onEditInfo\}[\s\S]*?liquidGlassModalTone\('neutral'\)/);
+  assert.match(source, /border-slate-300 bg-white\/80 dark:border-white\/10 dark:bg-slate-800\/80/);
+  assert.match(source, /w-6 h-6 text-slate-600 dark:text-slate-300/);
 
-  // Payment: amber when editable; muted grey + cursor-not-allowed when disabled.
-  assert.match(source, /border-amber-200\/50 dark:border-amber-400\/30 bg-white\/5 active:bg-white\/10/);
-  assert.match(source, /text-amber-600 dark:text-amber-400/);
-  assert.match(source, /border-gray-200\/50 dark:border-white\/10 bg-white\/5 opacity-70 cursor-not-allowed/);
-  assert.match(source, /text-gray-500 dark:text-gray-400/);
+  // Edit order items: semantic success surface and matching high-contrast icon chip.
+  assert.match(source, /onClick=\{onEditOrder\}[\s\S]*?liquidGlassModalTone\('success'\)/);
+  assert.match(source, /border-emerald-200 bg-emerald-100\/80 dark:border-emerald-400\/30 dark:bg-emerald-500\/15/);
+  assert.match(source, /w-6 h-6 text-emerald-700 dark:text-emerald-300/);
 
-  // Change order type: amber utility container + amber icon (was violet); the selected type chip is
-  // the yellow POS "selected" treatment.
-  assert.match(source, /border-amber-200\/50 dark:border-amber-400\/30 bg-white\/5 liquid-glass-modal-text/);
+  // Payment: shared warning tone when editable; neutral readable surface when disabled.
+  assert.match(source, /canEditPayment\s*\? `[\s\S]*?liquidGlassModalTone\('warning'\)/);
+  assert.match(source, /: `[^`]*liquidGlassModalTone\('neutral'\)[^`]*cursor-not-allowed/);
+  assert.doesNotMatch(source, /liquidGlassModalTone\('neutral'\)[^`]*opacity-/);
+  assert.match(source, /border-amber-200 bg-amber-100\/80 dark:border-amber-400\/30 dark:bg-amber-500\/15/);
+  assert.match(source, /text-amber-700 dark:text-amber-300/);
+  assert.match(source, /text-slate-500 dark:text-slate-400/);
+
+  // Change order type: warning surface + amber chip; selected stays yellow and inactive choices own
+  // explicit light/dark surfaces instead of white-on-white glass.
+  assert.match(source, /orderCount === 1[\s\S]*?liquidGlassModalTone\('warning'\)/);
   assert.match(source, /border-yellow-400 bg-yellow-400 text-black cursor-default/);
+  assert.match(source, /border-slate-300 bg-white\/80 text-slate-900[^`]*dark:border-white\/20 dark:bg-white\/10 dark:text-slate-100/);
+});
 
-  // Neutral grey icon chips for every option.
-  assert.match(source, /bg-gray-200\/70 dark:bg-zinc-800\/80/);
+test('EditOptionsModal descriptions remain fully opaque and no light-theme content falls back to white text', () => {
+  assert.doesNotMatch(source, /text-sm opacity-75 liquid-glass-modal-text-muted/);
+  assert.match(source, /text-sm liquid-glass-modal-text-muted/);
+  assert.doesNotMatch(source, /(?<!dark:)text-white(?:\/\d+)?/);
+  assert.doesNotMatch(source, /(?<!dark:)border-white(?:\/\d+)?/);
 });
 
 test('EditOptionsModal keeps all callbacks + i18n keys and carries no native title tooltips', () => {

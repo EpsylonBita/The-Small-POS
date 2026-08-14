@@ -3,11 +3,12 @@ import type { TFunction } from 'i18next'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'react-hot-toast'
 import { LiquidGlassModal, POSGlassSwitch } from '../ui/pos-glass-components'
-import { liquidGlassModalButton } from '../../styles/designSystem'
+import { liquidGlassModalButton, liquidGlassModalTone } from '../../styles/designSystem'
 import { Activity, AlertTriangle, ChefHat, ChevronDown, CreditCard, FileText, Info, Package, Pencil, Printer, Receipt, Tag, Trash2, Truck, UserCheck, Wine, XCircle } from 'lucide-react'
 import { getBridge, offEvent, onEvent } from '../../../lib'
 import type { ReceiptSamplePreviewRequest, ReceiptSamplePreviewResponse } from '../../../lib'
 import PrinterSetupWizard from './PrinterSetupWizard'
+import { parseWizardEnqueueResponse } from './printer-setup-verification'
 import { ReceiptScaleSlider } from '../ui/ReceiptScaleSlider'
 import { PrinterSupportEntryPoint } from '../support/PrinterSupportEntryPoint'
 import { buildPrinterSupportContext } from '../../support'
@@ -298,11 +299,11 @@ const verificationLabel = (value: unknown, t: TFunction): string => {
 
 const verificationTone = (value: unknown): string => {
   const status = normalizeVerificationStatus(value)
-  if (status === 'verified') return 'bg-emerald-500/10 border-emerald-500/30 text-emerald-200'
-  if (status === 'degraded') return 'bg-amber-500/10 border-amber-500/30 text-amber-200'
+  if (status === 'verified') return liquidGlassModalTone('success')
+  if (status === 'degraded') return liquidGlassModalTone('warning')
   // candidate = pending/needs-verification (informational) -> amber, not blue
-  if (status === 'candidate') return 'bg-amber-500/10 border-amber-400/30 text-amber-100'
-  return 'bg-white/5 border-white/10 liquid-glass-modal-text-muted'
+  if (status === 'candidate') return liquidGlassModalTone('warning')
+  return liquidGlassModalTone('neutral')
 }
 
 // View modes for the modal
@@ -442,6 +443,8 @@ const PrinterSettingsModal: React.FC<Props> = ({
   const [selectedPrinter, setSelectedPrinter] = useState<PrinterConfig | null>(null)
   const [diagnostics, setDiagnostics] = useState<PrinterDiagnostics | null>(null)
   const [loading, setLoading] = useState(false)
+  const [wizardBusy, setWizardBusy] = useState(false)
+  const wizardBusyRef = useRef(false)
   const [scanning, setScanning] = useState(false)
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null)
   const [autoConfig, setAutoConfig] = useState<{
@@ -455,6 +458,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
   const [orgLogoSource, setOrgLogoSource] = useState('')
   const [logoSaving, setLogoSaving] = useState(false)
   const [logoLoaded, setLogoLoaded] = useState(false)
+  const [persistedLogoConfigured, setPersistedLogoConfigured] = useState(false)
   // Form state for add/edit
   const [formData, setFormData] = useState({
     name: '',
@@ -540,18 +544,35 @@ const PrinterSettingsModal: React.FC<Props> = ({
   }, [api])
 
   const loadReceiptLogoSettings = useCallback(async () => {
+    setLogoLoaded(false)
+    setPersistedLogoConfigured(false)
     try {
-      const [showLogoRaw, logoSourceRaw, orgLogoRaw, textScaleRaw, logoScaleRaw, layoutDensityScaleRaw] = await Promise.all([
+      const [showLogoRaw, logoSourceRaw, orgLogoRaw] = await Promise.all([
         bridge.settings.get({ category: 'receipt', key: 'show_logo', defaultValue: false }),
         bridge.settings.get({ category: 'receipt', key: 'logo_source' }),
         bridge.settings.get({ category: 'organization', key: 'logo_url' }),
+      ])
+      const loadedLogoEnabled = parseBooleanSetting(showLogoRaw)
+      const loadedLogoSource = asTrimmedString(logoSourceRaw)
+      const loadedOrganizationLogo = asTrimmedString(orgLogoRaw)
+      setLogoEnabled(loadedLogoEnabled)
+      setLogoSourceOverride(loadedLogoSource)
+      setOrgLogoSource(loadedOrganizationLogo)
+      setPersistedLogoConfigured(
+        loadedLogoEnabled && Boolean(loadedLogoSource || loadedOrganizationLogo),
+      )
+      setLogoLoaded(true)
+
+      const [textScaleResult, logoScaleResult, layoutDensityScaleResult] = await Promise.allSettled([
         bridge.settings.get({ category: 'receipt', key: 'text_scale' }),
         bridge.settings.get({ category: 'receipt', key: 'logo_scale' }),
         bridge.settings.get({ category: 'receipt', key: 'layout_density_scale' }),
       ])
-      setLogoEnabled(parseBooleanSetting(showLogoRaw))
-      setLogoSourceOverride(asTrimmedString(logoSourceRaw))
-      setOrgLogoSource(asTrimmedString(orgLogoRaw))
+      const textScaleRaw = textScaleResult.status === 'fulfilled' ? textScaleResult.value : null
+      const logoScaleRaw = logoScaleResult.status === 'fulfilled' ? logoScaleResult.value : null
+      const layoutDensityScaleRaw = layoutDensityScaleResult.status === 'fulfilled'
+        ? layoutDensityScaleResult.value
+        : null
       const parsedTextScale = parseFloat(asTrimmedString(textScaleRaw))
       const parsedLogoScale = parseFloat(asTrimmedString(logoScaleRaw))
       const parsedLayoutDensityScale = parseFloat(asTrimmedString(layoutDensityScaleRaw))
@@ -566,10 +587,10 @@ const PrinterSettingsModal: React.FC<Props> = ({
       } else {
         setLayoutDensityScale(1)
       }
-      setLogoLoaded(true)
     } catch (e) {
       console.error('Failed to load receipt logo settings:', e)
-      setLogoLoaded(true)
+      setPersistedLogoConfigured(false)
+      setLogoLoaded(false)
     }
   }, [bridge])
 
@@ -603,6 +624,9 @@ const PrinterSettingsModal: React.FC<Props> = ({
           logo_source: logoSourceOverride.trim(),
         },
       })
+      setPersistedLogoConfigured(
+        logoEnabled && Boolean(logoSourceOverride.trim() || orgLogoSource.trim()),
+      )
       toast.success(t('settings.printer.logoSettingsSaved', 'Receipt logo settings saved'))
     } catch (e) {
       console.error('Failed to save logo settings:', e)
@@ -610,7 +634,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
     } finally {
       setLogoSaving(false)
     }
-  }, [bridge, logoEnabled, logoSourceOverride, t])
+  }, [bridge, logoEnabled, logoSourceOverride, orgLogoSource, t])
 
   const handleLogoFileSelected = useCallback(
     (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -1093,23 +1117,17 @@ const PrinterSettingsModal: React.FC<Props> = ({
     const printerName = printer?.name || 'Printer'
 
     try {
-      const result: any = await api?.printerTestGreekDirect?.(printerId)
-      if (result?.success) {
-        const latencyInfo = result.latencyMs ? ` (${result.latencyMs}ms)` : ''
-        const cpInfo = result.escposCodePage != null ? ` [CP=${result.escposCodePage}]` : ' [CP=Auto]'
-        const dispatched = normalizeResolvedTransport(result?.resolvedTransport) === 'raw_tcp' || normalizeResolvedTransport(result?.resolvedTransport) === 'serial'
-        const successText = dispatched
-          ? t('settings.printer.greekTestPrintDispatched', 'Greek test print dispatched')
-          : t('settings.printer.greekTestPrintSuccess', 'Greek test print sent')
-        toast.success(`${printerName}: ${successText}${cpInfo}${latencyInfo}`)
+      const result: unknown = await api?.printerTestGreekDirect?.(printerId)
+      const parsed = parseWizardEnqueueResponse('encoding', result)
+      if (parsed.ok) {
+        toast.success(`${printerName}: ${t('settings.printer.greekTestPrintQueued', 'Greek test print queued')}`)
       } else {
-        const errorMsg = result?.error || t('settings.printer.testPrintFailed')
-        toast.error(`${printerName}: ${errorMsg}`, { duration: 6000 })
+        console.error('Greek test print returned an invalid managed queue response')
+        toast.error(`${printerName}: ${t('settings.printer.testPrintFailed')}`, { duration: 6000 })
       }
     } catch (e) {
       console.error('Greek test print failed:', e)
-      const errorMessage = e instanceof Error ? e.message : String(t('settings.printer.testPrintFailed'))
-      toast.error(`${printerName}: ${errorMessage}`, { duration: 6000 })
+      toast.error(`${printerName}: ${t('settings.printer.testPrintFailed')}`, { duration: 6000 })
     } finally {
       setLoading(false)
     }
@@ -1370,9 +1388,9 @@ const PrinterSettingsModal: React.FC<Props> = ({
               className={`p-2 rounded-lg border ${
                 rolePrinters.length > 0
                   ? hasOnline
-                    ? 'bg-green-500/10 border-green-500/30'
-                    : 'bg-yellow-500/10 border-yellow-500/30'
-                  : 'bg-white/5 border-white/10'
+                    ? liquidGlassModalTone('success')
+                    : liquidGlassModalTone('warning')
+                  : liquidGlassModalTone('neutral')
               }`}
             >
               <div className="flex items-center gap-1 text-sm">
@@ -1396,12 +1414,12 @@ const PrinterSettingsModal: React.FC<Props> = ({
     <button
       type="button"
       onClick={() => toggleSection(key)}
-      className="w-full flex items-center justify-between px-3 py-2 rounded-lg bg-white/5 transition-colors"
+      className="w-full flex items-center justify-between px-3 py-2 rounded-lg bg-slate-100/80 text-slate-900 transition-colors active:bg-slate-200/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/60 dark:bg-white/5 dark:text-slate-100 dark:active:bg-white/10 dark:focus-visible:ring-amber-300/60"
     >
-      <span className="text-xs font-semibold text-white/90 uppercase tracking-wider">
+      <span className="text-xs font-semibold text-slate-900 dark:text-white/90 uppercase tracking-wider">
         {t(labelKey, labelDefault)}
       </span>
-      <ChevronDown className={`w-3.5 h-3.5 text-white/50 transition-transform ${openSections[key as keyof typeof openSections] ? 'rotate-180' : ''}`} />
+      <ChevronDown className={`w-3.5 h-3.5 text-slate-500 dark:text-white/50 transition-transform ${openSections[key as keyof typeof openSections] ? 'rotate-180' : ''}`} />
     </button>
   )
 
@@ -1423,35 +1441,37 @@ const PrinterSettingsModal: React.FC<Props> = ({
       <div
         key={key}
         onClick={() => handleReceiptActionToggle(key)}
-        className={`flex min-h-[4.25rem] w-full cursor-pointer items-center gap-3 rounded-xl border px-3 py-2.5 text-left transition-all active:scale-[0.99] ${
+        className={`flex min-h-[4.25rem] w-full cursor-pointer items-center gap-3 rounded-xl border px-3 py-2.5 text-left transition-all active:scale-[0.99] focus-within:ring-2 focus-within:ring-emerald-500/60 dark:focus-within:ring-emerald-300/60 ${
           enabled
-            ? 'border-emerald-400/40 bg-emerald-500/[0.07] shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]'
-            : 'border-white/10 bg-white/[0.03]'
+            ? 'border-emerald-300 bg-emerald-50 text-emerald-900 dark:border-emerald-400/30 dark:bg-emerald-500/10 dark:text-emerald-100 shadow-sm dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]'
+            : 'border-slate-200 bg-slate-50/80 text-slate-800 dark:border-white/10 dark:bg-slate-900/60 dark:text-slate-100'
         }`}
       >
         <span
           className={`flex h-8 w-8 shrink-0 items-center justify-center ${
-            enabled ? 'text-emerald-300' : 'text-white/45'
+            enabled ? 'text-emerald-600 dark:text-emerald-300' : 'text-slate-500 dark:text-slate-400'
           }`}
           aria-hidden="true"
         >
           <Icon className="h-5 w-5" />
         </span>
         <span className="min-w-0 flex-1">
-          <span className={`block whitespace-normal break-words text-sm font-semibold leading-tight ${enabled ? 'text-white' : 'text-white/70'}`}>
+          <span className={`block whitespace-normal break-words text-sm font-semibold leading-tight ${enabled ? 'text-emerald-950 dark:text-emerald-100' : 'text-slate-900 dark:text-slate-100'}`}>
             {label}
           </span>
           <span className="mt-1 flex flex-wrap items-center gap-2">
             <span
               className={`text-[10px] font-semibold uppercase tracking-[0.16em] ${
-                enabled ? 'text-emerald-200/90' : 'text-white/35'
+                enabled ? 'text-emerald-700 dark:text-emerald-300' : 'text-slate-600 dark:text-slate-400'
               }`}
             >
               {stateLabel}
             </span>
             <span
               className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] ${
-                enabled ? 'border-emerald-300/35 bg-transparent text-emerald-200/90' : 'border-transparent bg-white/[0.06] text-white/35'
+                enabled
+                  ? 'border-emerald-300 bg-emerald-100/80 text-emerald-800 dark:border-emerald-300/35 dark:bg-transparent dark:text-emerald-300'
+                  : 'border-slate-300 bg-white/70 text-slate-600 dark:border-white/10 dark:bg-white/[0.06] dark:text-slate-400'
               }`}
             >
               AUTO
@@ -1480,11 +1500,11 @@ const PrinterSettingsModal: React.FC<Props> = ({
   // Render printer list view
   const renderListView = () => (
     <div className="space-y-4">
-      <div className="inline-flex rounded-lg bg-white/5 border border-white/10 p-1">
+      <div className={`inline-flex rounded-lg border p-1 ${liquidGlassModalTone('neutral')}`}>
         <button
           onClick={() => setSetupMode('quick')}
           className={`px-3 py-1.5 text-xs rounded-md transition active:scale-95 ${
-            setupMode === 'quick' ? 'bg-amber-500/20 text-amber-100' : 'liquid-glass-modal-text-muted'
+            setupMode === 'quick' ? liquidGlassModalTone('warning') : liquidGlassModalTone('neutral')
           }`}
           type="button"
         >
@@ -1493,7 +1513,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
         <button
           onClick={() => setSetupMode('expert')}
           className={`px-3 py-1.5 text-xs rounded-md transition active:scale-95 ${
-            setupMode === 'expert' ? 'bg-amber-500/20 text-amber-100' : 'liquid-glass-modal-text-muted'
+            setupMode === 'expert' ? liquidGlassModalTone('warning') : liquidGlassModalTone('neutral')
           }`}
           type="button"
         >
@@ -1501,7 +1521,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
         </button>
       </div>
 
-      <div className="rounded-2xl border border-amber-500/20 bg-amber-500/10 p-3 text-xs text-amber-100">
+      <div className={`rounded-2xl border p-3 text-xs ${liquidGlassModalTone('warning')}`}>
         {t(
           'settings.printer.verificationFirstHint',
           'Use Quick Setup first. It verifies a working transport and encoding path before you rely on a printer in live service.',
@@ -1556,7 +1576,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
             return (
               <div
                 key={printer.id}
-                className="p-3 rounded-lg bg-white/5 border border-white/10 flex items-center justify-between"
+                className={`p-3 rounded-lg border flex items-center justify-between ${liquidGlassModalTone('neutral')}`}
               >
                 <div className="flex items-center gap-3">
                   <StatusIndicator state={status?.state || 'offline'} />
@@ -1564,7 +1584,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
                     <div className="font-medium liquid-glass-modal-text">
                       {printer.name}
                       {printer.isDefault && (
-                        <span className="ml-2 text-xs bg-amber-500/20 text-amber-200 px-2 py-0.5 rounded">
+                        <span className={`ml-2 rounded border px-2 py-0.5 text-xs ${liquidGlassModalTone('warning')}`}>
                           {t('settings.printer.default')}
                         </span>
                       )}
@@ -1578,11 +1598,11 @@ const PrinterSettingsModal: React.FC<Props> = ({
                       <span className={`px-2 py-0.5 rounded border ${verificationTone(verificationStatus)}`}>
                         {verificationLabel(verificationStatus, t)}
                       </span>
-                      <span className="px-2 py-0.5 rounded border border-white/10 liquid-glass-modal-text-muted">
+                      <span className={`px-2 py-0.5 rounded border ${liquidGlassModalTone('neutral')}`}>
                         {transportLabel(resolvedTransport, t)}
                       </span>
                       {transportReachable === false && verificationStatus !== 'verified' && (
-                        <span className="px-2 py-0.5 rounded border border-amber-500/30 text-amber-200">
+                        <span className={`px-2 py-0.5 rounded border ${liquidGlassModalTone('warning')}`}>
                           {t('settings.printer.transportUnreachable', 'Transport unreachable')}
                         </span>
                       )}
@@ -1633,11 +1653,11 @@ const PrinterSettingsModal: React.FC<Props> = ({
         <div className="space-y-3 pl-1 pr-1">
           {renderReceiptActionGrid(RECEIPT_ACTION_KEYS.slice(0, 8))}
           <div className="flex items-center gap-2 py-1">
-            <div className="flex-1 border-t border-white/10" />
-            <span className="text-[10px] uppercase tracking-wider text-white/30">
+            <div className="flex-1 border-t border-slate-300 dark:border-white/10" />
+            <span className="text-[10px] uppercase tracking-wider text-slate-600 dark:text-slate-400">
               {t('settings.printer.receiptActions.newTriggersLabel', 'New triggers')}
             </span>
-            <div className="flex-1 border-t border-white/10" />
+            <div className="flex-1 border-t border-slate-300 dark:border-white/10" />
           </div>
           {renderReceiptActionGrid(RECEIPT_ACTION_KEYS.slice(8))}
         </div>
@@ -1659,7 +1679,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
         </button>
       </div>
 
-      <div className="rounded-2xl border border-amber-500/20 bg-amber-500/10 p-3 text-xs text-amber-100">
+      <div className={`rounded-2xl border p-3 text-xs ${liquidGlassModalTone('warning')}`}>
         {t(
           'settings.printer.discoveredOnlyHint',
           'Discovery does not mean printable yet. Complete the verification wizard before using a discovered printer in service.',
@@ -1675,7 +1695,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
           {discoveredPrinters.map((printer, idx) => (
             <div
               key={idx}
-              className="p-3 rounded-lg bg-white/5 border border-white/10 flex items-center justify-between"
+              className={`p-3 rounded-lg border flex items-center justify-between ${liquidGlassModalTone('neutral')}`}
             >
               <div>
                 <div className="font-medium liquid-glass-modal-text">{printer.name}</div>
@@ -1762,7 +1782,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
           {viewMode === 'edit' ? t('settings.printer.editPrinter') : t('settings.printer.addPrinter')}
         </h3>
 
-        <div className="rounded-2xl border border-amber-500/20 bg-amber-500/10 p-3 text-xs text-amber-100">
+        <div className={`rounded-2xl border p-3 text-xs ${liquidGlassModalTone('warning')}`}>
           <div className="font-medium mb-1">
             {t('settings.printer.quickSetupFirstTitle', 'Quick setup first')}
           </div>
@@ -2749,6 +2769,14 @@ const PrinterSettingsModal: React.FC<Props> = ({
   const renderWizardView = () => (
     <PrinterSetupWizard
       existingPrinters={printers as any}
+      logoSettingsLoaded={logoLoaded}
+      logoConfigured={logoLoaded && persistedLogoConfigured}
+      onBusyChange={handleWizardBusyChange}
+      onOpenLogoSettings={() => {
+        setSetupMode('expert')
+        setOpenSections(prev => ({ ...prev, logo: true }))
+        setViewMode('add')
+      }}
       onCancel={() => setViewMode('list')}
       onOpenExpert={() => {
         setSetupMode('expert')
@@ -2761,6 +2789,15 @@ const PrinterSettingsModal: React.FC<Props> = ({
       }}
     />
   )
+
+  const handleWizardBusyChange = useCallback((busy: boolean) => {
+    wizardBusyRef.current = busy
+    setWizardBusy(busy)
+  }, [])
+
+  const handleModalClose = () => {
+    if (!wizardBusyRef.current) onClose()
+  }
 
   // Render content based on view mode
   const renderContent = () => {
@@ -2784,12 +2821,12 @@ const PrinterSettingsModal: React.FC<Props> = ({
   return (
     <LiquidGlassModal
       isOpen={isOpen}
-      onClose={onClose}
+      onClose={handleModalClose}
       title={t('settings.printer.title')}
       size="lg"
       className={viewMode === 'add' || viewMode === 'edit' ? '!max-w-5xl' : '!max-w-2xl'}
-      closeOnBackdrop={true}
-      closeOnEscape={true}
+      closeOnBackdrop={!wizardBusy}
+      closeOnEscape={!wizardBusy}
     >
       <div className="p-6">
         {renderContent()}

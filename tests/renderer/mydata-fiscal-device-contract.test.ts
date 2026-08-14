@@ -71,7 +71,7 @@ test('initial checkout waits for fiscal approval before order and payment persis
   );
   const checkoutCommandSource = ordersCommandSource.slice(checkoutCommandAt);
   const checkoutAt = checkoutCommandSource.indexOf('fiscal_checkout_for_order_payload');
-  const createAt = checkoutCommandSource.indexOf('sync::create_order(&db, &normalized)');
+  const createAt = checkoutCommandSource.indexOf('sync::create_order(&db, &normalized, &app)');
   assert.ok(checkoutCommandAt >= 0, 'initial-payment command missing');
   assert.ok(checkoutAt >= 0, 'native fiscal checkout orchestration missing');
   assert.ok(createAt > checkoutAt, 'order must only be created after fiscal approval');

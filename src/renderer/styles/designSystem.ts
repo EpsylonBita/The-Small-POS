@@ -241,6 +241,19 @@ export const liquidGlassModalButton = (variant = 'primary', size: 'sm' | 'md' | 
 // radius comes from the shared .liquid-glass-modal-card token (--pos-glass-radius-medium)
 export const liquidGlassModalCard = () => 'liquid-glass-modal-card p-4';
 
+export type LiquidGlassModalTone = 'neutral' | 'success' | 'warning' | 'danger';
+
+/** Readable semantic surfaces for light and dark modal content. */
+export const liquidGlassModalTone = (tone: LiquidGlassModalTone): string => {
+  const tones: Record<LiquidGlassModalTone, string> = {
+    neutral: 'border-slate-200 bg-slate-50 text-slate-800 dark:border-white/10 dark:bg-slate-900/60 dark:text-slate-100',
+    success: 'border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-400/30 dark:bg-emerald-500/10 dark:text-emerald-100',
+    warning: 'border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-400/30 dark:bg-amber-500/10 dark:text-amber-100',
+    danger: 'border-rose-300 bg-rose-50 text-rose-800 dark:border-rose-400/30 dark:bg-rose-500/10 dark:text-rose-100',
+  };
+  return tones[tone];
+};
+
 /**
  * Badge styling with liquid glass effect.
  *

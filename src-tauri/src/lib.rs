@@ -59,6 +59,9 @@ mod panic_hook;
 mod payment_integrity;
 mod payments;
 mod print;
+mod print_dispatch;
+mod print_history;
+mod print_snapshot;
 mod printers;
 mod receipt_renderer;
 mod recovery;
@@ -72,6 +75,7 @@ mod storage;
 mod sync;
 pub mod sync_queue; // pub so integration tests can call create_tables / enqueue_payload_item
 mod terminal_helpers;
+mod windows_spooler;
 mod zreport;
 
 #[cfg(test)]
@@ -1144,6 +1148,7 @@ pub fn run() {
             commands::payments::payment_update_payment_status,
             commands::payments::payment_update_payment_method,
             commands::payments::payment_get_order_payments,
+            commands::payments::payment_get_settlement_snapshot,
             commands::payments::payment_get_receipt_preview,
             commands::payments::payment_get_paid_items,
             commands::payments::payment_print_split_receipt,

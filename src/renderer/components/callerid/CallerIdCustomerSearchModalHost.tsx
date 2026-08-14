@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { CallerIdCustomerSearchRequest } from '../../hooks/useCallerIdNotifications'
 import { useAcquiredModules } from '../../hooks/useAcquiredModules'
@@ -31,8 +31,15 @@ export function CallerIdCustomerSearchModalHost({
 }: CallerIdCustomerSearchModalHostProps) {
   const { t } = useTranslation()
   const [addCustomerPhone, setAddCustomerPhone] = useState<string | null>(null)
+  const [addAddressCustomer, setAddAddressCustomer] = useState<CallerIdOrderCustomer | null>(null)
   const [addedCustomer, setAddedCustomer] = useState<CallerIdOrderCustomer | null>(null)
   const [isMinimized, setIsMinimized] = useState(false)
+  const addAddressGenerationRef = useRef(0)
+  const activeAddAddressSessionRef = useRef<{
+    generation: number
+    requestKey: string
+    customerId: string
+  } | null>(null)
   const {
     hasDeliveryModule,
     hasTablesModule,
@@ -57,11 +64,32 @@ export function CallerIdCustomerSearchModalHost({
     hasTablesModule,
   ])
 
+  const invalidateAddAddressSession = useCallback(() => {
+    addAddressGenerationRef.current += 1
+    activeAddAddressSessionRef.current = null
+  }, [])
+
+  const openAddAddressSession = useCallback((customer: CallerIdOrderCustomer) => {
+    if (!request) return
+    const generation = addAddressGenerationRef.current + 1
+    addAddressGenerationRef.current = generation
+    activeAddAddressSessionRef.current = {
+      generation,
+      requestKey: request.requestKey,
+      customerId: String(customer.id),
+    }
+    setAddAddressCustomer(customer)
+  }, [request])
+
   useEffect(() => {
+    invalidateAddAddressSession()
     setAddCustomerPhone(null)
+    setAddAddressCustomer(null)
     setAddedCustomer(null)
     setIsMinimized(false)
-  }, [request?.requestKey])
+  }, [invalidateAddAddressSession, request?.requestKey])
+
+  useEffect(() => () => invalidateAddAddressSession(), [invalidateAddAddressSession])
 
   const finishCallerIdLookup = useCallback((
     customer: CallerIdOrderCustomer | null,
@@ -95,23 +123,28 @@ export function CallerIdCustomerSearchModalHost({
       }),
     )
     setAddCustomerPhone(null)
+    setAddAddressCustomer(null)
     setAddedCustomer(null)
     setIsMinimized(false)
     onClose()
   }, [onClose, onContinueToOrderType, request])
 
   const closeCurrentLookup = useCallback(() => {
+    invalidateAddAddressSession()
     setAddCustomerPhone(null)
+    setAddAddressCustomer(null)
     setAddedCustomer(null)
     setIsMinimized(false)
     onClose()
-  }, [onClose])
+  }, [invalidateAddAddressSession, onClose])
+
+  const renderedAddAddressSession = activeAddAddressSessionRef.current
 
   return (
     <>
       <CustomerSearchModal
         key={request?.requestKey ?? 'caller-id-search-closed'}
-        isOpen={Boolean(request) && addCustomerPhone === null}
+        isOpen={Boolean(request) && addCustomerPhone === null && addAddressCustomer === null}
         lookupOnly
         initialCustomer={addedCustomer as never}
         initialSearchTerm={request?.displayPhone ?? ''}
@@ -133,6 +166,9 @@ export function CallerIdCustomerSearchModalHost({
                 : phone,
           )
         }
+        onAddNewAddress={hasDeliveryModule
+          ? (customer) => openAddAddressSession(customer as unknown as CallerIdOrderCustomer)
+          : undefined}
         onContinueWithoutCustomer={(phone) =>
           finishCallerIdLookup(null, phone)
         }
@@ -151,20 +187,45 @@ export function CallerIdCustomerSearchModalHost({
         onClose={closeCurrentLookup}
       />
 
-      {request && addCustomerPhone !== null && (
+      {request && (addCustomerPhone !== null || addAddressCustomer !== null) && (
         <AddCustomerModal
           isOpen
-          mode="new"
+          mode={addAddressCustomer ? 'addAddress' : 'new'}
           initialPhone={addCustomerPhone || request.displayPhone}
+          initialCustomer={addAddressCustomer as never}
           onCustomerAdded={(customer) => {
+            if (addAddressCustomer) {
+              const activeSession = activeAddAddressSessionRef.current
+              const savedCustomerId = String((customer as CallerIdOrderCustomer).id)
+              if (
+                !renderedAddAddressSession
+                || !activeSession
+                || activeSession.generation !== renderedAddAddressSession.generation
+                || activeSession.requestKey !== renderedAddAddressSession.requestKey
+                || activeSession.customerId !== renderedAddAddressSession.customerId
+                || request.requestKey !== renderedAddAddressSession.requestKey
+                || savedCustomerId !== renderedAddAddressSession.customerId
+              ) {
+                return
+              }
+              invalidateAddAddressSession()
+            }
             setAddedCustomer(customer as unknown as CallerIdOrderCustomer)
             setAddCustomerPhone(null)
+            setAddAddressCustomer(null)
           }}
           callerIdWorkspace={{
             suspended: isMinimized,
             onMinimize: () => setIsMinimized(true),
           }}
-          onClose={() => setAddCustomerPhone(null)}
+          onClose={() => {
+            if (addAddressCustomer) {
+              setAddedCustomer(addAddressCustomer)
+              invalidateAddAddressSession()
+            }
+            setAddCustomerPhone(null)
+            setAddAddressCustomer(null)
+          }}
         />
       )}
 
@@ -172,10 +233,12 @@ export function CallerIdCustomerSearchModalHost({
         <CallerIdMinimizedPanel
           title={
             addedCustomer?.name ||
+            addAddressCustomer?.name ||
             t('modals.customerSearch.incomingCaller', 'Incoming caller')
           }
           phone={
             addCustomerPhone ||
+            (typeof addAddressCustomer?.phone === 'string' ? addAddressCustomer.phone : '') ||
             (typeof addedCustomer?.phone === 'string' ? addedCustomer.phone : '') ||
             request.displayPhone
           }
