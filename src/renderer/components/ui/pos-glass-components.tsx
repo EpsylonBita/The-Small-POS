@@ -734,6 +734,9 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
   const closeFinalizedRef = React.useRef<boolean>(false)
   const enterActionRef = React.useRef(onEnterKey)
   const enterKeyEnabledRef = React.useRef(enterKeyEnabled)
+  const closeActionRef = React.useRef(onClose)
+  const closeModeRef = React.useRef(closeMode)
+  const closeDisabledRef = React.useRef(closeDisabled)
 
   const isTopMostDialog = React.useCallback(() => {
     if (!containerRef.current) {
@@ -777,19 +780,30 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
     enterKeyEnabledRef.current = enterKeyEnabled
   }, [enterKeyEnabled, onEnterKey])
 
-  // Handle close with animation
-  const handleClose = React.useCallback(() => {
-    if (isClosing || closeDisabled) return
+  React.useEffect(() => {
+    closeActionRef.current = onClose
+    closeModeRef.current = closeMode
+    closeDisabledRef.current = closeDisabled
+  }, [closeDisabled, closeMode, onClose])
 
-    if (closeMode === 'request') {
-      onClose()
+  // Handle close with animation
+  // Close intent is read from refs so this callback keeps a stable identity. It is a
+  // dependency of the focus/keyboard effect below, and callers overwhelmingly pass an
+  // inline `onClose` arrow (101 call sites) -- depending on those props directly made
+  // the effect tear down and re-subscribe on every parent render, re-arming the focus
+  // timer and yanking the caret out of whatever field was being typed into.
+  const handleClose = React.useCallback(() => {
+    if (isClosing || closeDisabledRef.current) return
+
+    if (closeModeRef.current === 'request') {
+      closeActionRef.current()
       return
     }
 
     closeFinalizedRef.current = false
     externalClosingRef.current = false
     setIsClosing(true)
-  }, [closeDisabled, closeMode, isClosing, onClose])
+  }, [isClosing])
 
   // Handle animation end
   const handleAnimationEnd = React.useCallback((event: React.AnimationEvent<HTMLDivElement>) => {
@@ -839,22 +853,46 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
       // Store current overflow value
       previousOverflowRef.current = document.body.style.overflow
 
-      // Focus first focusable element after a brief delay
-      const focusTimer = setTimeout(() => {
+      // True while a descendant already holds the caret.
+      const modalOwnsFocus = () => {
+        const active = document.activeElement
+        return (
+          active instanceof HTMLElement &&
+          active !== containerRef.current &&
+          containerRef.current?.contains(active) === true
+        )
+      }
+
+      // Where focus should land when the shell claims it: the caller's preferred field
+      // if it is on screen, otherwise the first focusable control.
+      const focusPreferredTarget = () => {
+        const container = containerRef.current
+        if (!container) return
+
         const preferredFocus = initialFocusRef?.current
         if (preferredFocus && preferredFocus.offsetParent !== null) {
           preferredFocus.focus()
           return
         }
 
-        if (containerRef.current) {
-          const focusableElements = getFocusableElements(containerRef.current)
-          if (focusableElements.length > 0) {
-            focusableElements[0]?.focus()
-          } else {
-            containerRef.current?.focus()
-          }
+        const focusableElements = getFocusableElements(container)
+        if (focusableElements.length > 0) {
+          focusableElements[0]?.focus()
+        } else {
+          container.focus()
         }
+      }
+
+      // Focus first focusable element after a brief delay
+      const focusTimer = setTimeout(() => {
+        // A descendant may already own the caret by now: React applies `autoFocus`
+        // during the mount commit, and some panels focus their own field from a layout
+        // effect -- both land before this 50ms timer. Firing unconditionally stole
+        // focus off a half-typed field and parked it on the header's close button (the
+        // first focusable in the shell), so the operator's first keystroke registered
+        // and every one after it went nowhere. Only claim focus if nothing inside has it.
+        if (modalOwnsFocus()) return
+        focusPreferredTarget()
       }, 50)
 
       // Handle Escape key
@@ -931,28 +969,36 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
 
       // Handle focusin to redirect focus back to modal if it escapes
       const handleFocusIn = (e: FocusEvent) => {
+        const container = containerRef.current
+        if (!container) return
+
         const target = e.target as Node;
 
         // Don't trap focus if target is in another modal (nested modals)
         const isInAnotherModal = target instanceof Element &&
           target.closest('[role="dialog"]') &&
-          !containerRef.current?.contains(target);
+          !container.contains(target);
 
         if (isInAnotherModal) {
           return; // Let the nested modal handle its own focus
         }
 
-        if (!containerRef.current?.contains(target)) {
-          e.preventDefault();
-          e.stopPropagation();
+        if (container.contains(target)) return
 
-          const focusableElements = getFocusableElements(containerRef.current!)
-          if (focusableElements.length > 0) {
-            focusableElements[0]?.focus()
-          } else {
-            containerRef.current?.focus()
-          }
+        e.preventDefault();
+        e.stopPropagation();
+
+        // Focus falls to the body whenever the focused control is merely removed -- which
+        // a modal does to itself on every step swap (the check-in panes animate in and
+        // out). Re-arming the close button there put a destructive control under the
+        // operator's next Enter, mid-form. Park focus on the dialog instead: still
+        // trapped, nothing armed, and Tab still walks into the first field.
+        if (target === document.body) {
+          container.focus()
+          return
         }
+
+        focusPreferredTarget()
       }
 
       // Add event listeners
