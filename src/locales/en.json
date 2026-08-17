@@ -5498,6 +5498,7 @@
         "moveEarlier": "Move earlier",
         "moveLater": "Move later",
         "capReached": "That is as many pages as one invoice can hold. Finish this one and start another for the rest.",
+        "stoppedEarly": "The scanner stopped before the feeder was empty. If any pages are still in it, add them before you finish.",
         "finishAndStartAnother": "Finish this one and start another",
         "needAPage": "Add at least one page before finishing."
       },

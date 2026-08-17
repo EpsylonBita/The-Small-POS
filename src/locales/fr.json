@@ -5498,6 +5498,7 @@
         "moveEarlier": "Déplacer avant",
         "moveLater": "Déplacer après",
         "capReached": "C'est le maximum de pages pour une facture. Terminez celle-ci et commencez-en une autre pour le reste.",
+        "stoppedEarly": "Le scanner s'est arrêté avant que le chargeur soit vide. S'il reste des pages dedans, ajoutez-les avant de terminer.",
         "finishAndStartAnother": "Terminer celle-ci et en commencer une autre",
         "needAPage": "Ajoutez au moins une page avant de terminer."
       },

@@ -11,7 +11,7 @@
 //! 1. **The contract** — [`ScannerBackend`] / [`ScannerJob`]. Two small traits
 //!    describing what a scanner can do: name its devices, and hand over one
 //!    page at a time until the feeder runs dry.
-//! 2. **The logic** — [`acquire_pages`], [`test_scan`], [`normalize_to_png`],
+//! 2. **The logic** — [`acquire_pages`], [`test_scan`], [`normalize_to_jpeg`],
 //!    [`map_hresult`], [`WiaHost`]. The page loop (ADF vs flatbed), the page
 //!    cap, the durable write, the reason-code mapping, and the thread
 //!    lifecycle all live here, above the trait, and are covered by the mock
@@ -63,12 +63,56 @@ use super::MAX_CAPTURE_PAGES;
 /// and a re-test replaces it in place rather than accumulating files.
 pub const TEST_SCAN_CAPTURE_ID: &str = "_test";
 
-/// Every captured page is stored as PNG (design D-Rust2).
-const PAGE_MIME: &str = "image/png";
+/// Every captured page is stored as JPEG.
+///
+/// This was PNG (design D-Rust2), and PNG was the wrong tool. It is lossless,
+/// built for logos and diagrams; a scan is sensor noise across every square
+/// millimetre of paper, and lossless means that noise must be preserved
+/// exactly. Measured on the five real pages this terminal captured from an HP
+/// DeskJet 3700 series on 2026-08-16 — 1700x3400, RGB8, 17,340,000 bytes raw:
+///
+///   PNG (what shipped)   7,177,459 .. 7,305,581 bytes   (6.8 .. 7.0 MB)
+///   JPEG q=95            1,494,727 .. 1,501,163 bytes   (1.43 MB)
+///   JPEG q=90            1,105,135 .. 1,110,099 bytes   (1.05 MB)
+///   JPEG q=85            1,000,956 .. 1,005,181 bytes   (0.96 MB)
+///
+/// Not one pixel is given up for that: the page is re-encoded at exactly the
+/// resolution the scanner produced, so everything the recognizer reads is still
+/// there. Only the encoding changed.
+///
+/// `image/jpeg` is on the allowlist at every step behind this one —
+/// `files::PAGE_MIME_EXTENSIONS` (`.jpg`), the server's attachments route, and
+/// the OCR service's `ALLOWED_IMAGE_TYPES` — so nothing downstream needs to
+/// learn a new format.
+const PAGE_MIME: &str = "image/jpeg";
 
-/// Fixed moderate scan resolution. High enough for OCR on a printed invoice,
-/// low enough that an A4 page stays inside `MAX_CAPTURE_PAGE_BYTES` and inside
-/// the server's per-file upload limit.
+/// Quality for a stored page, chosen by measuring the round trip rather than by
+/// taste. Per-channel error of the decoded JPEG against the original scan, and
+/// separately against only those pixels the scan already had below luma 128 —
+/// the ink, which is the signal OCR actually reads:
+///
+///   q=95   1.43 MB   max error  8..11   RMSE 0.58   ink RMSE 0.54
+///   q=90   1.05 MB   max error     13   RMSE 0.74   ink RMSE 0.69
+///   q=85   0.96 MB   max error  25..26  RMSE 1.54   ink RMSE 1.31
+///   q=80   0.86 MB   max error  53..58  RMSE 2.58   ink RMSE 2.29
+///
+/// 95 rather than the customary 85 because there is nothing to spend the
+/// difference on. Dropping to 85 saves 0.47 MB and multiplies the error on the
+/// ink by two and a half; 1.43 MB is already about a fifth of the PNG it
+/// replaces and a seventh of `MAX_CAPTURE_PAGE_BYTES`. The one thing this
+/// change must not cost is what the recognizer can read.
+///
+/// Greyscale was measured and deliberately *not* applied: at q=95 it is
+/// 1,431,605 bytes against colour's 1,494,727 — a 4.2% saving — in exchange for
+/// throwing away the colour on a stamp, a signature, or a highlighted total.
+const PAGE_JPEG_QUALITY: u8 = 95;
+
+/// Fixed moderate scan resolution, requested through WIA_IPS_XRES/YRES.
+///
+/// A request, not a guarantee. The HP DeskJet 3700 series ignores it and
+/// returns 1700x3400 whatever this says — the same driver that advertises a
+/// document feeder the machine does not physically have. Page size is therefore
+/// held by the encoding (see `PAGE_MIME`), never by this number.
 const SCAN_DPI: i32 = 200;
 
 /// How long a caller waits on the host thread before giving up on it.
@@ -196,6 +240,23 @@ pub fn map_hresult(hresult: i32) -> ScanErrorCode {
         // WIA_ERROR_BUSY, WIA_ERROR_DEVICE_LOCKED.
         0x8021_0006 | 0x8021_000D => ScanErrorCode::DeviceBusy,
 
+        // A driverless eSCL scanner answers over HTTP, and Windows surfaces the
+        // status verbatim as `0x8019_0000 | status`. These three all mean the same
+        // thing to a person standing at the till: not now, in a moment.
+        //   409 Conflict          — measured on an HP DeskJet 3700 series on
+        //                           2026-08-16: it refuses a second job for roughly
+        //                           30 seconds after finishing one, while reporting
+        //                           `State: Idle` and every job `Completed`. So the
+        //                           setup flow's own test scan locks the device, and
+        //                           the invoice scan the user starts seconds later is
+        //                           refused. Unmapped, that reached them as "the
+        //                           scanner did not answer, check it is connected" —
+        //                           sending them to inspect a cable over a device
+        //                           that is working and simply not ready yet.
+        //   429 Too Many Requests — the same thing said politely.
+        //   503 Service Unavailable — warming up, or another till got there first.
+        0x8019_0199 | 0x8019_01A9 | 0x8019_01F7 => ScanErrorCode::DeviceBusy,
+
         // WIA_S_NO_DEVICE_AVAILABLE, WIA_ERROR_ITEM_DELETED.
         0x8021_0015 | 0x8021_0009 => ScanErrorCode::DeviceRemoved,
         // ERROR_FILE_NOT_FOUND (a stale device id no longer resolves) and
@@ -283,6 +344,23 @@ pub struct AcquireOutcome {
     /// [`MAX_CAPTURE_PAGES`] — the UI then offers "finish this one and start
     /// another" rather than a bare error (R12.3).
     pub reached_page_cap: bool,
+    /// `true` when the run ended without the device ever saying it was finished.
+    ///
+    /// Today that is exactly one situation: the busy-after-a-page break in
+    /// [`acquire_pages`]. Keeping those pages is right — they are scanned,
+    /// encoded and durable — but the feeder may still hold sheets, and a run
+    /// reported as a plain success is a run the user ends by pressing Done over
+    /// a half-captured invoice. So the outcome carries the doubt instead of
+    /// hiding it, and the UI spends one sentence on it (R12.1).
+    ///
+    /// It cannot be narrowed further from inside this loop, and that costs
+    /// something: on the HP DeskJet 3700 series — a flatbed whose driver
+    /// advertises a feeder — a perfectly complete one-page scan also ends on a
+    /// busy answer, and will raise the same sentence. The two are
+    /// indistinguishable here; the device says "busy", never "that was the last
+    /// one". A conditional sentence on a finished flatbed scan is the cheap
+    /// error. Silence over sheets still in a real ADF is the expensive one.
+    pub stopped_early: bool,
 }
 
 /// Where the test scan's page landed, for visual confirmation (R2.2).
@@ -292,14 +370,17 @@ pub struct TestScanOutcome {
     pub byte_size: u64,
 }
 
-/// Re-encode whatever the driver transferred as PNG.
+/// Re-encode whatever the driver transferred as JPEG at [`PAGE_JPEG_QUALITY`].
 ///
 /// Two jobs in one decode: it normalizes every scanner's output to the single
 /// format the capture store and the upload transport expect, and it *proves the
 /// bytes are an image* before they are written as evidence. A truncated or
 /// garbled transfer fails here rather than surfacing later as an invoice the
 /// server cannot read.
-pub fn normalize_to_png(bytes: &[u8]) -> Result<Vec<u8>, ScanError> {
+///
+/// It re-encodes and never scales: the page keeps the exact pixel dimensions the
+/// scanner produced.
+pub fn normalize_to_jpeg(bytes: &[u8]) -> Result<Vec<u8>, ScanError> {
     if bytes.is_empty() {
         return Err(ScanError::device_error(
             "the scanner returned no image data",
@@ -308,11 +389,21 @@ pub fn normalize_to_png(bytes: &[u8]) -> Result<Vec<u8>, ScanError> {
 
     let decoded = image::load_from_memory(bytes)
         .map_err(|e| ScanError::device_error(format!("decode scanned page: {e}")))?;
-
     let mut encoded = Vec::new();
-    decoded
-        .write_to(&mut Cursor::new(&mut encoded), image::ImageFormat::Png)
-        .map_err(|e| ScanError::device_error(format!("encode scanned page: {e}")))?;
+    // `JpegEncoder` rather than `write_to(ImageFormat::Jpeg)`: that path takes no
+    // quality and silently applies the crate default of 75, which measured an
+    // ink RMSE of 2.78 against q=95's 0.54 on these same pages.
+    //
+    // JPEG carries no alpha channel, but no transfer is lost to that: the
+    // encoder was checked against every colour type a driver could decode to —
+    // Rgb8 (what the real scans are), Rgba8, Luma8, LumaA8 and Rgb16 — and it
+    // converts all five rather than refusing any.
+    image::codecs::jpeg::JpegEncoder::new_with_quality(
+        &mut Cursor::new(&mut encoded),
+        PAGE_JPEG_QUALITY,
+    )
+    .encode_image(&decoded)
+    .map_err(|e| ScanError::device_error(format!("encode scanned page: {e}")))?;
 
     Ok(encoded)
 }
@@ -361,18 +452,56 @@ pub fn acquire_pages(
     let mut pages: Vec<WrittenPage> = Vec::new();
     let mut page_index = start_page_index;
     let mut reached_page_cap = false;
+    let mut stopped_early = false;
 
     while page_index < limit {
-        match job.transfer_page()? {
+        let transfer = match job.transfer_page() {
+            Ok(transfer) => transfer,
+            // A stack that has ALREADY produced pages and then reports busy is
+            // finished, not failed. Discovered on an HP DeskJet 3700 series,
+            // 2026-08-16: its driver advertises a document feeder the machine
+            // does not physically have and no flatbed, so `feed_mode` is
+            // `Feeder` and this loop asks for a second sheet. The device — a
+            // flatbed that has just scanned the one sheet on the glass — answers
+            // 409 Conflict, which `?` turned into a hard error.
+            //
+            // The user watched the scanner pull the page, scan it, finish, and
+            // then saw "0 pages" and a failure. The page was written durably
+            // before the second transfer was ever attempted; the error simply
+            // threw the whole run away on the way out.
+            //
+            // Narrow on purpose: only DeviceBusy, and only once at least one
+            // page exists. A busy device on the FIRST page is a real failure and
+            // still surfaces.
+            //
+            // Keeping the pages is only half the fix. On a GENUINE ADF the same
+            // break ends a stack that is not finished — a WIA lock, or the
+            // 429/503 a driverless eSCL scanner answers under load — and
+            // reporting that as an ordinary success is the identical defect
+            // wearing the other face: the user sees the pages that arrived, no
+            // error, no notice, and presses Done while sheets are still in the
+            // feeder. So the run is kept AND flagged; `stopped_early` is what
+            // the UI turns into a sentence.
+            Err(error) if !pages.is_empty() && error.code == ScanErrorCode::DeviceBusy => {
+                tracing::warn!(
+                    "scanner reported busy after {} page(s); the stack may be unfinished: {error}",
+                    pages.len(),
+                );
+                stopped_early = true;
+                break;
+            }
+            Err(error) => return Err(error),
+        };
+        match transfer {
             PageTransfer::FeederEmpty => break,
             PageTransfer::Page(bytes) => {
-                let png = normalize_to_png(&bytes)?;
+                let page = normalize_to_jpeg(&bytes)?;
                 let written = files::write_page_blocking(
                     app_data_dir,
                     capture_id,
                     page_index,
                     PAGE_MIME,
-                    &png,
+                    &page,
                 )
                 .map_err(ScanError::device_error)?;
                 pages.push(written);
@@ -396,6 +525,7 @@ pub fn acquire_pages(
         pages,
         feeder_used: feed_mode == FeedMode::Feeder,
         reached_page_cap,
+        stopped_early,
     })
 }
 
@@ -775,6 +905,46 @@ pub fn is_scanner_device_type(device_type: i32) -> bool {
     device_type == WIA_SCANNER_DEVICE_TYPE
 }
 
+/// Windows' software-device path for a driverless eSCL scanner (AirScan /
+/// Mopria). Case-insensitive because device ids are not case-normalised.
+const ESCL_DEVICE_ID_PREFIX: &str = r"SWD\Escl\";
+
+/// A driverless network scanner, which WIA reports as `UnspecifiedDeviceType`
+/// (65535) rather than `ScannerDeviceType`.
+///
+/// The device id is the discriminator, not the type, and it is a safe one: the
+/// `SWD\Escl\` enumerator exists only for the eSCL *scan* protocol. A camera
+/// can report an unspecified type; it cannot arrive under this path.
+pub fn is_escl_scanner(device_id: &str) -> bool {
+    // `get` rather than a range index: slicing a &str on a byte offset panics if
+    // it lands mid-codepoint, and a device id is not guaranteed to be ASCII. A
+    // discovery helper must never be able to take the process down.
+    device_id
+        .get(..ESCL_DEVICE_ID_PREFIX.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(ESCL_DEVICE_ID_PREFIX))
+}
+
+/// The discovery predicate, verified against real hardware on 2026-08-16.
+///
+/// A type check alone hid the only entry that works. An HP DeskJet 3700 series
+/// on the network, installed by Windows' own WSD/IPP class driver with no vendor
+/// software, appears TWICE:
+///
+///   * `{6BDD1FC6-…}\0000`, `Type = 1` — passes a type-only filter, and every
+///     transfer fails `0x80210003 WIA_ERROR_PAPER_EMPTY`. Both entries mis-report
+///     the hardware as feeder-only with no flatbed; this one believes it and asks
+///     a document feeder the device does not physically have.
+///   * `SWD\Escl\…`, `Type = 65535` — excluded by a type-only filter, and the one
+///     that actually scans the glass (verified: 1700x3400).
+///
+/// So the old predicate did not merely miss a device: on the class of hardware
+/// most shops own — any modern network MFP set up without vendor software — it
+/// kept the entry that cannot scan and dropped the entry that can, then reported
+/// "the scanner did not answer".
+pub fn is_scanner_device(device_type: i32, device_id: &str) -> bool {
+    is_scanner_device_type(device_type) || is_escl_scanner(device_id)
+}
+
 #[cfg(windows)]
 mod com {
     //! Raw `IDispatch` against the WIA Automation layer (`wiaaut.dll`).
@@ -804,7 +974,7 @@ mod com {
     use windows::Win32::System::Variant::{VariantChangeType, VARIANT, VAR_CHANGE_FLAGS, VT_BSTR};
 
     use super::{
-        is_scanner_device_type, map_hresult, FeedMode, PageTransfer, ScanError, ScannerBackend,
+        is_scanner_device, map_hresult, FeedMode, PageTransfer, ScanError, ScannerBackend,
         ScannerDeviceInfo, ScannerJob, SCAN_DPI,
     };
 
@@ -1160,12 +1330,15 @@ mod com {
                 let Ok(device_type) = info.get_i32("Type") else {
                     continue;
                 };
-                if !is_scanner_device_type(device_type) {
-                    continue;
-                }
+                // The id is read BEFORE the filter now: a driverless eSCL scanner
+                // is identified by its device path, not by its type, so the type
+                // alone cannot decide whether to keep the entry.
                 let Ok(device_id) = info.get_string("DeviceID") else {
                     continue;
                 };
+                if !is_scanner_device(device_type, &device_id) {
+                    continue;
+                }
 
                 let name = PropertyBag(match info.get_object("Properties") {
                     Ok(properties) => properties,
@@ -1241,11 +1414,13 @@ mod com {
     /// sheet, so a "try PNG, fall back to JPEG" loop can silently eat a page of
     /// somebody's invoice. One question, one answer, one transfer per sheet.
     ///
-    /// PNG is preferred (lossless, and what the capture store keeps anyway);
-    /// JPEG is the universal fallback. Both are formats the `image` crate
-    /// decodes, which is what [`super::normalize_to_png`] needs. A driver that
-    /// will not enumerate its formats gets PNG, the automation layer's own
-    /// default conversion target.
+    /// PNG is still preferred for the *transfer* even though the page is now
+    /// stored as JPEG: a lossless handoff from the device followed by exactly
+    /// one JPEG encode beats JPEG off the glass followed by a second,
+    /// generation-losing re-encode. JPEG is the universal fallback. Both are
+    /// formats the `image` crate decodes, which is what
+    /// [`super::normalize_to_jpeg`] needs. A driver that will not enumerate its
+    /// formats gets PNG, the automation layer's own default conversion target.
     fn choose_format(item: &Dispatch) -> String {
         let Ok(formats) = item.get_object("Formats") else {
             return WIA_FORMAT_PNG.to_string();
@@ -1404,6 +1579,44 @@ mod tests {
         image
             .write_to(&mut Cursor::new(&mut out), format)
             .expect("encode fixture");
+        out
+    }
+
+    /// A PNG transfer that behaves like a real scan: paper white carrying
+    /// sensor noise, with ink at deliberately off-grid positions.
+    ///
+    /// Both properties are load-bearing. Noise is what PNG could not compress
+    /// and what JPEG quality actually trades against; ink that avoided the 8x8
+    /// DCT grid is where quality loss shows. A flat or grid-aligned fixture
+    /// round-trips near-perfectly at *every* quality — measured: black bars on
+    /// a 4px pitch gave a max error of 3 even at q=50 — so it would pin
+    /// nothing.
+    fn scan_like_page() -> Vec<u8> {
+        let mut page = image::RgbImage::new(128, 128);
+        // Deterministic LCG, so the fixture is byte-identical on every machine.
+        let mut seed: u32 = 0x1234_5678;
+        let mut next = move || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 16) as i32 & 0xff
+        };
+        for y in 0..128u32 {
+            for x in 0..128u32 {
+                let noise = (next() % 24) - 12;
+                let ink = ((x + 3) / 7) % 3 == 0 && ((y + 5) / 11) % 2 == 0;
+                let base = if ink { 30 } else { 238 };
+                let value = (base + noise).clamp(0, 255) as u8;
+                page.put_pixel(
+                    x,
+                    y,
+                    image::Rgb([value, value.saturating_add(2), value.saturating_sub(3)]),
+                );
+            }
+        }
+
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgb8(page)
+            .write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png)
+            .expect("encode scan-like fixture");
         out
     }
 
@@ -1575,6 +1788,17 @@ mod tests {
             // WIA_ERROR_BUSY / _DEVICE_LOCKED.
             (0x8021_0006, ScanErrorCode::DeviceBusy),
             (0x8021_000D, ScanErrorCode::DeviceBusy),
+            // eSCL over HTTP: `0x8019_0000 | status`. 409 is the one measured in
+            // the field — an HP DeskJet 3700 series refuses a second job for about
+            // 30s after finishing one. Left in DeviceError it read as "check the
+            // scanner is connected", over a scanner that was connected and working.
+            (0x8019_0199, ScanErrorCode::DeviceBusy), // 409 Conflict
+            (0x8019_01A9, ScanErrorCode::DeviceBusy), // 429 Too Many Requests
+            (0x8019_01F7, ScanErrorCode::DeviceBusy), // 503 Service Unavailable
+            // Neighbouring HTTP statuses stay generic — being an HTTP error is not
+            // by itself a reason to tell someone to wait.
+            (0x8019_0194, ScanErrorCode::DeviceError), // 404 Not Found
+            (0x8019_01F4, ScanErrorCode::DeviceError), // 500 Internal Server Error
             // WIA_S_NO_DEVICE_AVAILABLE / _ITEM_DELETED / ERROR_DEVICE_REMOVED.
             (0x8021_0015, ScanErrorCode::DeviceRemoved),
             (0x8021_0009, ScanErrorCode::DeviceRemoved),
@@ -1603,6 +1827,59 @@ mod tests {
             assert!(
                 !is_scanner_device_type(other),
                 "device type {other} is not a scanner",
+            );
+        }
+    }
+
+    /// The real device ids from the HP DeskJet 3700 series that exposed this,
+    /// captured from the founder's machine on 2026-08-16.
+    const REAL_ESCL_ID: &str = r"SWD\Escl\807a6605-07cc-d481-a8df-ca8281aedc12";
+    const REAL_WSD_SCANNER_ID: &str = r"{6BDD1FC6-810F-11D0-BEC7-08002BE2092F}\0000";
+    const WIA_UNSPECIFIED_DEVICE_TYPE: i32 = 65535;
+
+    #[test]
+    fn discovery_keeps_a_driverless_escl_scanner() {
+        // The entry that actually scans. WIA calls it "unspecified", so a
+        // type-only filter drops it — which is the whole defect.
+        assert!(is_scanner_device(WIA_UNSPECIFIED_DEVICE_TYPE, REAL_ESCL_ID));
+        assert!(is_escl_scanner(REAL_ESCL_ID));
+
+        // Device ids are not case-normalised by Windows.
+        assert!(is_escl_scanner(r"swd\escl\807a6605-07cc-d481"));
+        assert!(is_escl_scanner(r"SWD\ESCL\807a6605-07cc-d481"));
+    }
+
+    #[test]
+    fn discovery_still_keeps_a_plain_scanner() {
+        // Widening must not cost the case that already worked.
+        assert!(is_scanner_device(
+            WIA_SCANNER_DEVICE_TYPE,
+            REAL_WSD_SCANNER_ID
+        ));
+    }
+
+    #[test]
+    fn discovery_still_rejects_cameras_even_when_unspecified() {
+        // The reason the type filter existed. A camera may report ANY type,
+        // including the unspecified one the eSCL path uses — so the id has to
+        // carry the decision, and a camera cannot arrive under `SWD\Escl\`.
+        for (device_type, device_id) in [
+            (2, r"{6BDD1FC6-810F-11D0-BEC7-08002BE2092F}\0001"),
+            (3, r"\\?\usb#vid_046d&pid_0825#mi_00"),
+            (WIA_UNSPECIFIED_DEVICE_TYPE, r"SWD\Something\else"),
+            (
+                WIA_UNSPECIFIED_DEVICE_TYPE,
+                r"{6BDD1FC6-810F-11D0-BEC7-08002BE2092F}\0002",
+            ),
+            (WIA_UNSPECIFIED_DEVICE_TYPE, ""),
+            // Near-misses: the prefix has to be a prefix, not a substring.
+            (WIA_UNSPECIFIED_DEVICE_TYPE, r"SWD\EsclCamera\0001"),
+            (WIA_UNSPECIFIED_DEVICE_TYPE, r"USB\SWD\Escl\spoofed"),
+            (WIA_UNSPECIFIED_DEVICE_TYPE, r"SWD\Escl"),
+        ] {
+            assert!(
+                !is_scanner_device(device_type, device_id),
+                "type {device_type} id {device_id} must not reach an invoice picker",
             );
         }
     }
@@ -1685,7 +1962,7 @@ mod tests {
         let dir = files::capture_dir(temp.path(), "capture-a").expect("capture dir");
         assert_eq!(
             page_names(&dir),
-            ["page-000.png", "page-001.png", "page-002.png"]
+            ["page-000.jpg", "page-001.jpg", "page-002.jpg"]
         );
     }
 
@@ -1716,7 +1993,9 @@ mod tests {
         let temp = TempDir::new();
 
         // Two pages already on the document (a flatbed user pressing "Add
-        // another page" twice).
+        // another page" twice). Seeded as PNG on purpose: that is what a
+        // document half-captured before the JPEG switch looks like, and the
+        // upgrade must append to it rather than orphan it.
         for index in 0..2 {
             files::write_page_blocking(temp.path(), "capture-a", index, "image/png", &png_bytes())
                 .expect("seed page");
@@ -1749,9 +2028,10 @@ mod tests {
             [
                 "page-000.png",
                 "page-001.png",
-                "page-002.png",
-                "page-003.png"
-            ]
+                "page-002.jpg",
+                "page-003.jpg"
+            ],
+            "the two formats coexist, and the zero-padded index still orders them",
         );
     }
 
@@ -1843,8 +2123,159 @@ mod tests {
             let bytes = std::fs::read(&page.file_path).expect("page on disk");
             assert_eq!(page.byte_size, bytes.len() as u64);
             assert_eq!(page.content_hash, files::sha256_hex(&bytes));
-            assert_eq!(page.mime, "image/png");
+            assert_eq!(page.mime, "image/jpeg");
         }
+    }
+
+    #[test]
+    fn a_flatbed_that_calls_itself_a_feeder_still_yields_its_page() {
+        // The defect the founder hit on 2026-08-16, and the one that made the
+        // whole feature look broken: the scanner physically scanned the sheet,
+        // and the app reported "0 pages" and a failure.
+        //
+        // An HP DeskJet 3700 series advertises a document feeder it does not have
+        // and no flatbed, so `feed_mode` is `Feeder` and the loop asks for a
+        // second sheet. The device — a flatbed with nothing more to give — answers
+        // 409 Conflict, i.e. DeviceBusy. That must end the stack, not delete it.
+        let temp = TempDir::new();
+        let mut plan = JobPlan::feeder(1);
+        plan.steps.pop_back();
+        plan.steps.push_back(Err(ScanError::busy("409 Conflict")));
+
+        let mut backend = MockScanner::with_plan(plan);
+        let outcome = acquire_pages(
+            &mut backend,
+            "wia-1",
+            temp.path(),
+            "capture-flatbed-liar",
+            0,
+            MAX_CAPTURE_PAGES,
+        )
+        .expect("one page survives a busy device that has already delivered it");
+
+        assert_eq!(outcome.pages.len(), 1, "the scanned page must not be lost");
+        assert!(!outcome.reached_page_cap);
+    }
+
+    #[test]
+    fn a_feeder_run_cut_short_by_a_busy_device_is_reported_as_incomplete() {
+        // The price of the rule above, paid out loud instead of quietly.
+        //
+        // On a GENUINE ADF the same break ends a stack that is NOT finished: a
+        // WIA lock, or the 429/503 a driverless eSCL scanner answers under load.
+        // Keeping the pages is right. Handing them back as an ordinary success
+        // is the same defect as before with the sign flipped — the user sees
+        // pages, no error, no notice, and presses Done with sheets still in the
+        // feeder. The outcome has to carry the doubt.
+        let temp = TempDir::new();
+        let mut plan = JobPlan::feeder(2);
+        // Drop the FeederEmpty that would have ended the run honestly, so the
+        // device stops answering mid-stack instead.
+        plan.steps.pop_back();
+        plan.steps
+            .push_back(Err(ScanError::busy("429 Too Many Requests")));
+
+        let mut backend = MockScanner::with_plan(plan);
+        let outcome = acquire_pages(
+            &mut backend,
+            "wia-1",
+            temp.path(),
+            "capture-truncated-stack",
+            0,
+            MAX_CAPTURE_PAGES,
+        )
+        .expect("the pages already transferred survive a busy device");
+
+        assert_eq!(
+            outcome.pages.len(),
+            2,
+            "nothing already scanned is thrown away",
+        );
+        assert!(
+            outcome.stopped_early,
+            "the feeder never said it was empty, so this run must NOT read as a finished one",
+        );
+        // The two signals are different situations and must not be conflated:
+        // the cap is a known, bounded ending; this is an unknown one.
+        assert!(!outcome.reached_page_cap);
+    }
+
+    #[test]
+    fn the_two_normal_endings_are_not_flagged_as_incomplete() {
+        // A flag raised on every scan is a flag nobody reads. It has to be
+        // silent on both ways a run legitimately finishes, or the sentence it
+        // buys becomes noise and stops meaning anything.
+        let temp = TempDir::new();
+
+        let mut feeder = MockScanner::with_plan(JobPlan::feeder(3));
+        let drained = acquire_pages(
+            &mut feeder,
+            "wia-1",
+            temp.path(),
+            "capture-drained",
+            0,
+            MAX_CAPTURE_PAGES,
+        )
+        .expect("acquire");
+        assert!(
+            !drained.stopped_early,
+            "a feeder that reported itself empty finished its stack",
+        );
+
+        let mut flatbed = MockScanner::with_plan(JobPlan::flatbed());
+        let glass = acquire_pages(
+            &mut flatbed,
+            "wia-1",
+            temp.path(),
+            "capture-glass",
+            0,
+            MAX_CAPTURE_PAGES,
+        )
+        .expect("acquire");
+        assert!(
+            !glass.stopped_early,
+            "one sheet on the glass is a complete run, not a truncated one",
+        );
+
+        let mut full = MockScanner::with_plan(JobPlan::feeder(MAX_CAPTURE_PAGES + 5));
+        let capped = acquire_pages(
+            &mut full,
+            "wia-1",
+            temp.path(),
+            "capture-capped",
+            0,
+            MAX_CAPTURE_PAGES,
+        )
+        .expect("acquire");
+        assert!(capped.reached_page_cap);
+        assert!(
+            !capped.stopped_early,
+            "the cap is a known ending with its own sentence; it must not raise this one too",
+        );
+    }
+
+    #[test]
+    fn a_device_busy_on_the_very_first_page_is_still_a_failure() {
+        // The other half of the rule. Nothing was scanned, so there is nothing to
+        // rescue and the user must be told — otherwise a busy scanner silently
+        // produces an empty document.
+        let temp = TempDir::new();
+        let mut plan = JobPlan::feeder(1);
+        plan.steps.clear();
+        plan.steps.push_back(Err(ScanError::busy("409 Conflict")));
+
+        let mut backend = MockScanner::with_plan(plan);
+        let error = acquire_pages(
+            &mut backend,
+            "wia-1",
+            temp.path(),
+            "capture-busy-first",
+            0,
+            MAX_CAPTURE_PAGES,
+        )
+        .expect_err("a busy device with no pages is a failure");
+
+        assert_eq!(error.code, ScanErrorCode::DeviceBusy);
     }
 
     #[test]
@@ -1872,7 +2303,7 @@ mod tests {
         let dir = files::capture_dir(temp.path(), "capture-a").expect("capture dir");
         assert_eq!(
             page_names(&dir),
-            ["page-000.png", "page-001.png"],
+            ["page-000.jpg", "page-001.jpg"],
             "a failure never takes already-captured pages with it",
         );
     }
@@ -1901,22 +2332,84 @@ mod tests {
     // -- image normalization ----------------------------------------------
 
     #[test]
-    fn every_transferred_format_is_stored_as_png() {
+    fn every_transferred_format_is_stored_as_jpeg_at_full_resolution() {
         for (label, bytes) in [("png", png_bytes()), ("jpeg", jpeg_bytes())] {
-            let normalized = normalize_to_png(&bytes)
+            let normalized = normalize_to_jpeg(&bytes)
                 .unwrap_or_else(|e| panic!("normalize {label} transfer: {e}"));
             assert_eq!(
-                &normalized[..8],
-                b"\x89PNG\r\n\x1a\n",
-                "{label} transfer must be stored as PNG",
+                &normalized[..3],
+                b"\xff\xd8\xff",
+                "{label} transfer must be stored as JPEG",
+            );
+
+            // The founder's constraint, pinned: the *encoding* changed, the
+            // picture did not. A page that came back smaller than it was
+            // scanned would be taking detail away from the recognizer, which is
+            // the one thing this change was not allowed to do.
+            let before = image::load_from_memory(&bytes).expect("decode transfer");
+            let after = image::load_from_memory(&normalized).expect("decode stored page");
+            assert_eq!(
+                image::GenericImageView::dimensions(&after),
+                image::GenericImageView::dimensions(&before),
+                "{label} transfer must keep every pixel it arrived with",
             );
         }
     }
 
     #[test]
+    fn a_stored_page_holds_the_quality_the_constant_promises() {
+        // Without this, `PAGE_JPEG_QUALITY` is a number nothing ever reads back:
+        // it could be dropped to the crate's own default of 75 and every other
+        // test in this file would still pass, because the rest only check the
+        // format and the filename.
+        //
+        // Measured on `scan_like_page` with image 0.25.9 — max per-channel error
+        // and RMSE of the decoded page against the original transfer:
+        //
+        //   q=95 (ours)           maxErr  9   RMSE 1.98
+        //   q=90                  maxErr 15   RMSE 3.78
+        //   q=85                  maxErr 24   RMSE 5.19
+        //   q=75 (crate default)  maxErr 41   RMSE 7.04
+        //
+        // The bounds below sit between q=95 and q=90, so any lowering of the
+        // quality fails here instead of quietly reaching a real invoice.
+        let source = scan_like_page();
+        let original = image::load_from_memory(&source)
+            .expect("decode fixture")
+            .to_rgb8();
+
+        let stored = normalize_to_jpeg(&source).expect("normalize");
+        let round_trip = image::load_from_memory(&stored)
+            .expect("decode stored page")
+            .to_rgb8();
+
+        let (mut max_err, mut sum_squares, mut samples) = (0u32, 0f64, 0u64);
+        for (before, after) in original.pixels().zip(round_trip.pixels()) {
+            for channel in 0..3 {
+                let diff = (before.0[channel] as i32 - after.0[channel] as i32).unsigned_abs();
+                max_err = max_err.max(diff);
+                sum_squares += (diff as f64) * (diff as f64);
+                samples += 1;
+            }
+        }
+        let rmse = (sum_squares / samples as f64).sqrt();
+
+        assert!(
+            max_err <= 12,
+            "stored page drifted {max_err} levels from the scan — PAGE_JPEG_QUALITY \
+             looks lowered (q=95 measured 9, q=90 measured 15)",
+        );
+        assert!(
+            rmse <= 2.5,
+            "stored page RMSE {rmse:.2} exceeds the q=95 bound — PAGE_JPEG_QUALITY \
+             looks lowered (q=95 measured 1.98, q=90 measured 3.78)",
+        );
+    }
+
+    #[test]
     fn a_garbled_transfer_is_refused_instead_of_stored_as_evidence() {
         for bytes in [Vec::new(), b"not an image at all".to_vec()] {
-            let error = normalize_to_png(&bytes).expect_err("garbled transfer");
+            let error = normalize_to_jpeg(&bytes).expect_err("garbled transfer");
             assert_eq!(error.code, ScanErrorCode::DeviceError);
         }
     }
@@ -1924,7 +2417,7 @@ mod tests {
     // -- test scan ---------------------------------------------------------
 
     #[test]
-    fn a_test_scan_writes_one_png_under_the_test_directory() {
+    fn a_test_scan_writes_one_jpeg_under_the_test_directory() {
         let temp = TempDir::new();
         let mut backend = MockScanner::with_plan(JobPlan::feeder(4));
         let transfers = Arc::clone(&backend.transfers);
@@ -1936,7 +2429,7 @@ mod tests {
         assert_eq!(outcome.file_path.parent(), Some(expected_dir.as_path()));
         assert_eq!(
             outcome.file_path.file_name().and_then(|n| n.to_str()),
-            Some("page-000.png"),
+            Some("page-000.jpg"),
         );
 
         let bytes = std::fs::read(&outcome.file_path).expect("test page on disk");
@@ -1971,7 +2464,7 @@ mod tests {
         let dir = files::capture_dir(temp.path(), TEST_SCAN_CAPTURE_ID).expect("test capture dir");
         assert_eq!(
             page_names(&dir),
-            ["page-000.png"],
+            ["page-000.jpg"],
             "test scans must not accumulate files on the terminal",
         );
     }

@@ -319,6 +319,16 @@ export interface AcquiredPages {
   feederUsed: boolean;
   /** True when the transfer stopped because the document hit the page cap. */
   reachedPageCap: boolean;
+  /**
+   * True when the run ended without the device ever saying it was finished —
+   * it went busy mid-stack instead.
+   *
+   * The pages that came back are real and already on disk. What is not known is
+   * whether the feeder still holds sheets, and a run that reports this must not
+   * be presented as an ordinary, finished success: that is how somebody presses
+   * Done over half an invoice.
+   */
+  stoppedEarly: boolean;
 }
 
 /**
@@ -335,11 +345,13 @@ export async function acquireFromScanner(input: {
     pages?: CapturePageRow[];
     feederUsed?: boolean;
     reachedPageCap?: boolean;
+    stoppedEarly?: boolean;
   }>('capture_scanner_acquire', input);
   return toOutcome(result, (value) => ({
     pages: Array.isArray(value.pages) ? (value.pages as CapturePageRow[]) : [],
     feederUsed: value.feederUsed === true,
     reachedPageCap: value.reachedPageCap === true,
+    stoppedEarly: value.stoppedEarly === true,
   }));
 }
 

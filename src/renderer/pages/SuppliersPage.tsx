@@ -1004,6 +1004,18 @@ const SuppliersPage: React.FC = () => {
               )
             )
           );
+        } else if (outcome.stoppedEarly) {
+          // This is the FIRST run of the stack, and it happens here rather than
+          // in the pages panel — so the panel's own notice never gets the
+          // chance to speak for it. Without this, a feeder cut short by a busy
+          // device opens a panel showing pages, saying nothing at all, over an
+          // invoice that is not all there. [R12.1]
+          toast.error(
+            t(
+              'suppliers.capture.pages.stoppedEarly',
+              'The scanner stopped before the feeder was empty. If any pages are still in it, add them before you finish.'
+            )
+          );
         }
       }
       await refreshCaptureQueue();

@@ -291,6 +291,45 @@ describe('CapturePagesPanel', () => {
     await waitFor(() => expect(props.onFinishAndStartAnother).toHaveBeenCalledWith('cap-1'));
   });
 
+  it('says the run was cut short instead of letting it look like a clean finish', async () => {
+    // The other half of keeping the pages a busy device already delivered. On a
+    // genuine feeder that break leaves sheets in the tray, and a success with
+    // no notice is how somebody presses Done over half an invoice.
+    renderPanel();
+    await screen.findByTestId('capture-page-0');
+
+    mocks.acquireFromScanner.mockResolvedValue({
+      ok: true,
+      pages: [page(0), page(1)],
+      feederUsed: true,
+      reachedPageCap: false,
+      stoppedEarly: true,
+    });
+
+    fireEvent.click(screen.getByTestId('capture-add-page'));
+
+    const notice = await screen.findByTestId('capture-pages-notice');
+    expect(notice).toHaveTextContent(
+      'The scanner stopped before the feeder was empty. If any pages are still in it, add them before you finish.',
+    );
+    // A sentence, not a wall: the way out is the button already on screen.
+    expect(screen.getByTestId('capture-add-page')).toBeEnabled();
+    expect(screen.getByTestId('capture-done')).toBeEnabled();
+  });
+
+  it('stays quiet when the feeder finished on its own', async () => {
+    // A notice on every scan is a notice nobody reads. The default mock is a
+    // complete run, so nothing may be said about it.
+    renderPanel();
+    await screen.findByTestId('capture-page-0');
+
+    fireEvent.click(screen.getByTestId('capture-add-page'));
+
+    await waitFor(() => expect(mocks.acquireFromScanner).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByTestId('capture-add-page')).toBeEnabled());
+    expect(screen.queryByTestId('capture-pages-notice')).not.toBeInTheDocument();
+  });
+
   it('hides the re-scan control for sources that cannot be re-driven from here', async () => {
     renderPanel({ deviceId: null });
     await screen.findByTestId('capture-page-0');

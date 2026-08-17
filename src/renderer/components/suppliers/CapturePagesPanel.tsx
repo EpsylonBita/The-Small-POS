@@ -18,6 +18,11 @@
  * - **The page cap is a sentence, not a wall.** Hitting ten pages offers to
  *   finish this invoice and start the next one, because a long delivery note
  *   is a real thing and refusing it outright would strand the user (R12.3).
+ * - **A run that did not finish never looks like one that did.** A scanner that
+ *   goes busy mid-stack hands back real pages with sheets possibly still in the
+ *   feeder. Those pages are kept, and the panel says the run was cut short,
+ *   because the alternative is a normal-looking success the user ends by
+ *   pressing Done over half an invoice (R12.1).
  *
  * Re-scanning a page replaces it *in place*: the new page is acquired onto the
  * end, the old one is removed, and the order is rewritten so the replacement
@@ -191,6 +196,18 @@ export const CapturePagesPanel: React.FC<CapturePagesPanelProps> = ({
         t(
           'suppliers.capture.pages.capReached',
           'That is as many pages as one invoice can hold. Finish this one and start another for the rest.',
+        ),
+      );
+    } else if (outcome.stoppedEarly) {
+      // The run kept its pages but the device never said it was finished. A
+      // silent success here is the exact failure this panel exists to avoid:
+      // the user counts what is on screen, sees no complaint, and presses Done
+      // while sheets are still in the feeder. One sentence, and "Add another
+      // page" — already sitting right there — is the way out. [R12.1]
+      setNotice(
+        t(
+          'suppliers.capture.pages.stoppedEarly',
+          'The scanner stopped before the feeder was empty. If any pages are still in it, add them before you finish.',
         ),
       );
     }

@@ -5498,6 +5498,7 @@
         "moveEarlier": "Nach vorne schieben",
         "moveLater": "Nach hinten schieben",
         "capReached": "Mehr Seiten passen nicht in eine Rechnung. Schließen Sie diese ab und beginnen Sie für den Rest eine neue.",
+        "stoppedEarly": "Der Scanner hat angehalten, bevor der Einzug leer war. Wenn noch Seiten darin liegen, fügen Sie sie hinzu, bevor Sie abschließen.",
         "finishAndStartAnother": "Diese abschließen und eine neue beginnen",
         "needAPage": "Fügen Sie mindestens eine Seite hinzu, bevor Sie abschließen."
       },

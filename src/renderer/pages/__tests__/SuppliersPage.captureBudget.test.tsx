@@ -512,6 +512,44 @@ describe('R15.1 — starting a scan is within the two-interaction budget', () =>
     expect(walk.interactionCount).toBe(1);
     expect(screen.getByText('No scanner set up yet')).toBeInTheDocument();
   });
+
+  // The first run of a stack happens HERE, not in the pages panel — the single
+  // click starts the document and drives the scanner before the panel exists.
+  // So the panel's own notice cannot speak for it, and if this page stays quiet
+  // a feeder cut short opens a panel showing pages and saying nothing at all.
+  it('says so when the very first feeder run is cut short, rather than opening a silent panel', async () => {
+    mocks.acquireFromScanner.mockResolvedValue({
+      ok: true,
+      pages: [page(0)],
+      feederUsed: true,
+      reachedPageCap: false,
+      stoppedEarly: true,
+    });
+
+    const walk = await landOnSuppliers();
+    walk.press(screen.getByTestId('capture-scan-invoice'));
+    await screen.findByTestId('capture-page-0');
+
+    expect(
+      await screen.findByText(
+        'The scanner stopped before the feeder was empty. If any pages are still in it, add them before you finish.',
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it('says nothing extra when that first run finished on its own', async () => {
+    // A notice raised every scan is a notice nobody reads — and it would also
+    // put a second thing to dismiss inside the two-interaction budget.
+    const walk = await landOnSuppliers();
+    walk.press(screen.getByTestId('capture-scan-invoice'));
+    await screen.findByTestId('capture-page-0');
+
+    expect(
+      screen.queryByText(
+        'The scanner stopped before the feeder was empty. If any pages are still in it, add them before you finish.',
+      ),
+    ).not.toBeInTheDocument();
+  });
 });
 
 // ---------------------------------------------------------------------------

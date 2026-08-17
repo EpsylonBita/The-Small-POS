@@ -5498,6 +5498,7 @@
         "moveEarlier": "Sposta prima",
         "moveLater": "Sposta dopo",
         "capReached": "Sono tutte le pagine che una fattura può contenere. Chiudi questa e comincia un'altra per il resto.",
+        "stoppedEarly": "Lo scanner si è fermato prima che l'alimentatore fosse vuoto. Se sono rimaste delle pagine dentro, aggiungile prima di chiudere.",
         "finishAndStartAnother": "Chiudi questa e comincia un'altra",
         "needAPage": "Aggiungi almeno una pagina prima di chiudere."
       },

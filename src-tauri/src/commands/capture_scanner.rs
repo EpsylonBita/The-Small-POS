@@ -71,8 +71,8 @@ pub async fn capture_scanner_list() -> Result<Value, String> {
 /// One silent test page from a device, for visual confirmation (R2.2).
 ///
 /// Silent means silent: no vendor dialog, no user interaction. The returned
-/// path points at a PNG under `captures/_test/` that the settings flow shows so
-/// the user can see for themselves that the right machine answered.
+/// path points at a JPEG under `captures/_test/` that the settings flow shows
+/// so the user can see for themselves that the right machine answered.
 #[tauri::command]
 pub async fn capture_scanner_test(
     arg0: Option<Value>,
@@ -112,6 +112,12 @@ pub async fn capture_scanner_test(
 /// one row fails, the remaining rows are still attempted and the response
 /// reports what actually landed — the *files* are already durable either way,
 /// so a partial record is recoverable, whereas an abandoned response is not.
+///
+/// A run can succeed and still be unfinished. `stoppedEarly` says so, and the
+/// renderer owes it a sentence: a device that goes busy mid-stack hands back
+/// real pages with sheets possibly still in the feeder, and a response that
+/// looked like any other success is how someone presses Done over half an
+/// invoice.
 #[tauri::command]
 pub async fn capture_scanner_acquire(
     arg0: Option<Value>,
@@ -181,6 +187,10 @@ pub async fn capture_scanner_acquire(
         "pages": recorded,
         "feederUsed": outcome.feeder_used,
         "reachedPageCap": outcome.reached_page_cap,
+        // The run kept its pages but the device never said it was finished.
+        // Reported alongside them, never instead of them: the pages are real,
+        // and so is the doubt about what is still in the feeder (R12.1).
+        "stoppedEarly": outcome.stopped_early,
     }))
 }
 
