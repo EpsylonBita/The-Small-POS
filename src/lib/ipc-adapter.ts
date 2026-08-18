@@ -2429,6 +2429,11 @@ export const CHANNEL_MAP: Record<string, string> = {
   "inventory:get-stock-metrics": "inventory.getStockMetrics",
   "products:get-catalog-count": "products.getCatalogCount",
 
+  // WebView2 memory trim (direct-invoke). The renderer asks the Rust side
+  // to dip the webview to the Low memory-usage target after known
+  // Blink-garbage cliffs like the check-in modal closing.
+  "memory:trim-webview": "memory.trimWebview",
+
   // Menu
   "menu:get-categories": "menu.getCategories",
   "menu:get-subcategories": "menu.getSubcategories",

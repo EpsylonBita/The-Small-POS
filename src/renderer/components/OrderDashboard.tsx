@@ -5515,24 +5515,26 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
                 const skippedMessages: string[] = [];
                 if (skippedNonDelivery > 0) {
-                  skippedMessages.push(`${skippedNonDelivery} non-delivery`);
+                  skippedMessages.push(
+                    t("orderDashboard.mapSkippedNonDelivery", {
+                      count: skippedNonDelivery,
+                    }),
+                  );
                 }
                 if (skippedMissingAddress > 0) {
                   skippedMessages.push(
-                    `${skippedMissingAddress} missing address`,
+                    t("orderDashboard.mapSkippedMissingAddress", {
+                      count: skippedMissingAddress,
+                    }),
                   );
                 }
 
                 toast.success(
                   optimizationResult.route.chunked
                     ? t("orderDashboard.openedOptimizedMapsChunked", {
-                        defaultValue:
-                          "Opened {{count}} optimized route launch(es).",
                         count: optimizationResult.route.launches.length,
                       })
                     : t("orderDashboard.openedInMaps", {
-                        defaultValue:
-                          "Opened Google Maps for {{count}} delivery stop(s).",
                         count: routeStops.length,
                       }),
                 );
@@ -5540,15 +5542,33 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                 if (skippedMessages.length > 0) {
                   toast(
                     t("orderDashboard.mapSkippedOrders", {
-                      defaultValue: "Skipped {{details}}.",
                       details: skippedMessages.join(", "),
                     }),
                   );
                 }
 
-                optimizationResult.route.warnings.forEach((warning) => {
-                  toast(warning);
-                });
+                // Server route notices arrive as machine codes and are spoken
+                // in THIS till's language. The legacy `warnings` sentences are
+                // English prose from the server — they were toasted verbatim
+                // on Greek tills (observed live 2026-08-18) and are only the
+                // fallback for a route payload that predates the codes.
+                const warningDetails =
+                  optimizationResult.route.warningDetails ?? null;
+                if (warningDetails) {
+                  warningDetails.forEach(({ code, params }) => {
+                    const key = `orderDashboard.routeWarnings.${code}`;
+                    const translated = t(key, { ...params });
+                    toast(
+                      translated === key
+                        ? t("orderDashboard.routeWarnings.generic")
+                        : translated,
+                    );
+                  });
+                } else {
+                  optimizationResult.route.warnings.forEach((warning) => {
+                    toast(warning);
+                  });
+                }
               } catch (e) {
                 console.error("Failed to open Google Maps:", e);
                 toast.error(t("orderDashboard.mapOpenFailed"));

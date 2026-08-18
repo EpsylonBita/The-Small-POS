@@ -15,6 +15,7 @@ import { useI18n } from '../contexts/i18n-context';
 import { useTheme } from '../contexts/theme-context';
 import logoDark from '../assets/logo-black.png';
 import logoLight from '../assets/logo-white.png';
+import './AppWindowFrame.css';
 
 export type AppFrameUpdateStatus =
   | 'checking'
@@ -73,9 +74,12 @@ function updateTone(status: AppFrameUpdateStatus, isDark: boolean): string {
     case 'available':
     case 'checking':
     case 'downloading':
+      // Black letters on a solid yellow surface in BOTH themes — the
+      // founder's spec (2026-08-18): the amber-on-amber text read as orange
+      // and washed out on the till.
       return isDark
-        ? 'border-amber-400/45 bg-amber-400/14 text-amber-100 shadow-[0_0_24px_rgba(251,191,36,0.16)]'
-        : 'border-amber-500/45 bg-amber-200/70 text-zinc-950 shadow-[0_12px_28px_rgba(245,158,11,0.14)]';
+        ? 'border-amber-500/60 bg-amber-300 text-zinc-950 shadow-[0_0_24px_rgba(251,191,36,0.24)]'
+        : 'border-amber-500/45 bg-amber-300 text-zinc-950 shadow-[0_12px_28px_rgba(245,158,11,0.18)]';
     case 'downloaded':
     case 'install-pending':
       return isDark
@@ -427,6 +431,10 @@ export const AppWindowFrame: React.FC<AppWindowFrameProps> = ({
       </div>
 
       {update && UpdateIcon && (
+        /* BELOW the bar, not on it (founder spec 2026-08-18): centred on the
+           bar it covered the natural grab area of the drag surface — grabbing
+           the pill is a no-drag zone, so the window "would not move". The bar
+           keeps its own clean surface; the pill floats under its edge. */
         <button
           type="button"
           data-app-frame-update
@@ -434,12 +442,12 @@ export const AppWindowFrame: React.FC<AppWindowFrameProps> = ({
           data-update-status={update.status}
           onClick={update.onOpen}
           aria-label={updateLabel}
-          className={`absolute left-1/2 top-1/2 z-30 inline-flex h-8 max-w-[420px] -translate-x-1/2 -translate-y-1/2 items-center justify-center gap-2 rounded-xl border px-3 text-xs font-semibold transition-transform duration-150 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/80 ${updateTone(update.status, isDark)}`}
+          className={`app-frame-update-pill absolute left-1/2 top-full z-30 mt-1.5 inline-flex h-8 max-w-[420px] -translate-x-1/2 items-center justify-center gap-2 rounded-xl border px-3 text-xs font-semibold transition-transform duration-150 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/80 ${updateTone(update.status, isDark)}`}
         >
           <UpdateIcon className={`h-4 w-4 shrink-0 ${update.busy ? 'animate-spin' : ''}`} />
           <span className="truncate">{update.label}</span>
           {update.detail && (
-            <span className={`hidden max-w-[130px] truncate sm:inline ${isDark ? 'text-white/62' : 'text-zinc-900/60'}`}>
+            <span className={`hidden max-w-[130px] truncate sm:inline ${isDark ? 'text-zinc-900/70' : 'text-zinc-900/60'}`}>
               {update.detail}
             </span>
           )}

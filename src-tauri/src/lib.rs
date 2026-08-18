@@ -52,6 +52,7 @@ mod hardware_manager;
 mod idempotency;
 mod incident_reporting;
 mod loyalty;
+mod memory_trim;
 mod menu;
 mod money;
 mod order_ownership;
@@ -651,6 +652,12 @@ pub fn run() {
                 } else {
                     warn!("Startup: main window not found for shell decorations assertion");
                 }
+
+                // Tills run for days with a tiny, quiet JS heap, so the
+                // unified major GC starves and Blink-side garbage accumulates
+                // without bound (measured: blink_gc 490MB→33MB on one forced
+                // collection). Periodically ask WebView2 to collect.
+                memory_trim::spawn_periodic_trim(app.handle().clone());
             }
 
             let app_data_dir = app.path().app_data_dir().map_err(|e| {
@@ -975,6 +982,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             // App lifecycle
+            memory_trim::memory_trim_webview,
             commands::runtime::app_shutdown,
             commands::runtime::app_restart,
             commands::runtime::app_get_version,

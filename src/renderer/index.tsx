@@ -7,6 +7,16 @@ import "./styles/glassmorphism.css";
 // Ensure screen capture IPC listeners are registered at startup
 import "./services/ScreenCaptureHandler";
 
+// Keep the User Timing buffer bounded. React's development build records a
+// performance.measure per component render and never clears them — measured
+// at 34,000+ entries (hundreds of MB of blink_gc) after an hour of dev use.
+// Release builds record none, so there this clears an empty buffer for free.
+// 5 minutes of history is plenty for any profiling session.
+window.setInterval(() => {
+  performance.clearMeasures();
+  performance.clearMarks();
+}, 5 * 60 * 1000);
+
 // Get the root element
 const container = document.getElementById("root");
 

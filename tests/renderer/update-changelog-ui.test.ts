@@ -88,9 +88,14 @@ test('secondary update surfaces use amber glass styling instead of cyan alerts',
 
   assert.match(notificationSource, /text-amber-300/);
   assert.match(progressSource, /h-full bg-amber-400/);
-  assert.match(toastSource, /text-amber-200/);
-  assert.match(toastSource, /border-amber-300\/35/);
-  assert.match(toastSource, /bg-zinc-950\/90/);
+  // The update toast is a SOLID YELLOW surface with black lettering (founder
+  // spec 2026-08-18) — the old dark glass with amber-on-dark text read as
+  // orange and washed out on the till.
+  assert.match(toastSource, /bg-amber-300/);
+  assert.match(toastSource, /text-zinc-950/);
+  assert.match(toastSource, /border-amber-500\/45/);
+  assert.doesNotMatch(toastSource, /bg-zinc-950/);
+  assert.doesNotMatch(toastSource, /text-white/);
   assert.match(toastSource, /active:scale-\[0\.98\]/);
   assert.match(toastSource, /focus-visible:ring-amber-300\/80/);
   assert.match(toastSource, /e\.preventDefault\(\)/);

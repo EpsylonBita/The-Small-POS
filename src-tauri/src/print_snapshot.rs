@@ -1,4 +1,7 @@
 use flate2::{write::ZlibEncoder, Compression, Decompress, FlushDecompress, Status};
+// Only the cfg(test) seeding/read-back helpers below touch SQLite directly; the shipped
+// encode/decode pair is pure. Production snapshot I/O lives in `prepare_managed_attempt`.
+#[cfg(test)]
 use rusqlite::{Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use std::io::Write;
@@ -89,6 +92,16 @@ pub fn decode_print_payload(
     Ok(decoded)
 }
 
+/// Test-only snapshot seeding.
+///
+/// Production no longer writes snapshots through a standalone helper:
+/// `print_dispatch::prepare_managed_attempt` performs the same write-if-absent inside the
+/// immediate transaction that claims the parent job, and additionally verifies an already
+/// stored snapshot matches the frozen dispatch. Keeping a second writable path in the
+/// shipped binary would let a caller persist a snapshot without claiming the parent, which
+/// is the split-transaction shape the managed pipeline exists to remove. Retained behind
+/// cfg(test) purely so tests can seed a snapshot directly.
+#[cfg(test)]
 pub fn persist_snapshot_if_absent(
     conn: &Connection,
     job_id: &str,
@@ -137,6 +150,12 @@ pub fn persist_snapshot_if_absent(
     }
 }
 
+/// Test-only snapshot read-back.
+///
+/// Used by tests to assert what the live path stored; production decodes the snapshot
+/// inline in `prepare_managed_attempt` (to prove immutability against the frozen
+/// dispatch) rather than reloading it through a helper.
+#[cfg(test)]
 pub fn load_snapshot(conn: &Connection, job_id: &str) -> Result<Option<Vec<u8>>, String> {
     match read_snapshot_columns(conn, job_id)? {
         None => Ok(None),
@@ -156,6 +175,8 @@ pub fn load_snapshot(conn: &Connection, job_id: &str) -> Result<Option<Vec<u8>>,
     }
 }
 
+// Test-only: exists solely to back the two cfg(test) helpers above.
+#[cfg(test)]
 #[derive(Debug)]
 struct SnapshotColumns {
     version: Option<i64>,
@@ -164,6 +185,7 @@ struct SnapshotColumns {
     render_profile_json: Option<String>,
 }
 
+#[cfg(test)]
 impl SnapshotColumns {
     fn is_empty(&self) -> bool {
         self.version.is_none()
@@ -180,6 +202,8 @@ impl SnapshotColumns {
     }
 }
 
+// Test-only: exists solely to back the two cfg(test) helpers above.
+#[cfg(test)]
 fn read_snapshot_columns(
     conn: &Connection,
     job_id: &str,

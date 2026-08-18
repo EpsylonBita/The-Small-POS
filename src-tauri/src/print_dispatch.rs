@@ -68,6 +68,11 @@ pub(crate) fn attempt_state_is_shared_blocker(
 }
 
 impl DispatchState {
+    /// Test-only roster of every state, used to pin the `as_str` / `from_str` round trip
+    /// so a new variant cannot be added without a persisted spelling. Production never
+    /// iterates the states -- it only maps a single value in either direction -- so this
+    /// stays out of the shipped binary.
+    #[cfg(test)]
     pub(crate) const ALL: [Self; 13] = [
         Self::Created,
         Self::Submitting,
@@ -141,6 +146,8 @@ pub(crate) struct AttemptIdentity {
     pub target_key: PrinterTargetKey,
 }
 
+/// Test-only input to [`create_attempt`]; see the note there.
+#[cfg(test)]
 pub(crate) struct NewAttempt {
     pub local_job_id: String,
     pub target: PrinterTargetKey,
@@ -253,6 +260,10 @@ pub(crate) enum DispatchError {
     InvalidByteCount,
     #[error("print attempt does not exist")]
     MissingAttempt,
+    // Test-only: raised solely by the cfg(test) `create_attempt` seam. The production
+    // entry point (`prepare_managed_attempt`) reports an unusable parent as
+    // `ParentNotEligible`, because it claims the row rather than merely probing it.
+    #[cfg(test)]
     #[error("print job does not exist")]
     MissingPrintJob,
     #[error("print job id is not a UUID")]
@@ -277,6 +288,10 @@ pub(crate) enum DispatchError {
     CircuitOpen,
     #[error("printer target lane is not retained for reconciliation")]
     LaneNotRetained,
+    // Test-only: raised solely by the cfg(test) `reconcile` seam below, which surfaces
+    // `commit_reconciliation_transaction`'s "target not released" result as an error.
+    // Production reads that result as a bool through `reconcile_owned_windows_attempt`.
+    #[cfg(test)]
     #[error("printer target still has active reconciliation blockers")]
     TargetStillBlocked,
     #[error("native reconciliation was cancelled before durable commit")]
@@ -365,6 +380,17 @@ fn timestamp(value: DateTime<Utc>) -> String {
     value.to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
+/// Test-only attempt seeding.
+///
+/// Production always enters through [`prepare_managed_attempt`], which does everything
+/// this does **and** claims the parent row (`pending` -> `printing`) in the same immediate
+/// transaction, freezes the document snapshot, and honours the queue-paused gate. This
+/// one only checks that a parent exists, so a caller could append an attempt to a job it
+/// never claimed -- exactly the split-transaction shape that let jobs strand in
+/// `printing`. Kept behind cfg(test) because tests legitimately need to fabricate an
+/// attempt without driving a full managed dispatch; it must never become reachable from
+/// shipped code.
+#[cfg(test)]
 pub(crate) fn create_attempt(
     conn: &Connection,
     request: NewAttempt,
@@ -2032,7 +2058,18 @@ impl DispatchManager {
         })
     }
 
-    pub(crate) fn finish_attempt(
+    /// Test adapter over the shipped finalizer.
+    ///
+    /// The lane, lease and circuit-breaker assertions below used to run against a second
+    /// copy of this logic (`finish_attempt`), which settled the attempt but left the
+    /// parent `print_jobs` row untouched -- the split-write shape that stranded jobs in
+    /// `printing`. Those guarantees now exercise `finalize_attempt_and_parent`, the
+    /// routine production actually calls, so they cannot silently drift from it.
+    ///
+    /// Mirrors the live precondition (`prepare_managed_attempt` has already claimed the
+    /// parent into `printing`) and picks the parent transition implied by the outcome.
+    #[cfg(test)]
+    pub(crate) fn finish_attempt_for_test(
         &self,
         conn: &Connection,
         lease: &mut AttemptLease,
@@ -2041,100 +2078,32 @@ impl DispatchManager {
         blocked_reason: Option<&str>,
         now: DateTime<Utc>,
     ) -> Result<ApplyResult, DispatchError> {
-        if !Arc::ptr_eq(&self.lanes, &lease.lanes) {
-            return Err(DispatchError::LeaseOwnershipMismatch);
-        }
-        let opens_circuit = matches!(
-            outcome,
-            DispatchState::Unknown | DispatchState::CancelFailed
-        );
-        if !opens_circuit && !outcome.is_terminal() {
-            return Err(DispatchError::InvalidLaneOutcome);
-        }
-        let reason = blocked_reason
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
-        if opens_circuit && reason.is_none() {
-            return Err(DispatchError::MissingBlockedReason);
-        }
-
-        let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-        let attempt = read_attempt(&tx, attempt_id)?.ok_or(DispatchError::MissingAttempt)?;
-        if normalize_target(&attempt.identity.target_key)? != lease.normalized_key {
-            return Err(DispatchError::AttemptTargetMismatch);
-        }
-        if !opens_circuit {
-            let circuit_is_open = tx.query_row(
-                "SELECT EXISTS(
-                     SELECT 1 FROM print_target_state
-                     WHERE target_key = ?1 AND circuit_state = 'open'
-                 )",
-                [&lease.normalized_key],
-                |row| row.get::<_, bool>(0),
-            )?;
-            if circuit_is_open {
-                return Err(DispatchError::CircuitOpen);
-            }
-        }
-        let result = transition_attempt(
-            &tx,
+        conn.execute(
+            "UPDATE print_jobs SET status = 'printing'
+             WHERE id = (SELECT print_job_id FROM print_job_attempts WHERE id = ?1)
+               AND status <> 'printing'",
+            [attempt_id.to_string()],
+        )?;
+        let parent = match blocked_reason {
+            Some(error) => ParentTransition::ManualFailure {
+                error: error.to_owned(),
+            },
+            None => ParentTransition::Dispatched {
+                output_path: "windows://test".to_owned(),
+            },
+        };
+        self.finalize_attempt_and_parent(
+            conn,
+            lease,
             attempt_id,
             outcome,
+            parent,
             AttemptObservation {
                 now,
-                last_error: reason.map(str::to_owned),
+                last_error: blocked_reason.map(str::to_owned),
                 ..AttemptObservation::default()
             },
-        )?;
-        if result == ApplyResult::NotApplied {
-            return Ok(result);
-        }
-
-        let (transport, _) = transport_and_resolved(&lease.target);
-        let now = timestamp(now);
-        if opens_circuit {
-            tx.execute(
-                "INSERT INTO print_target_state
-                 (target_key, transport, circuit_state, blocked_reason, blocked_at, updated_at)
-                 VALUES (?1, ?2, 'open', ?3, ?4, ?4)
-                 ON CONFLICT(target_key) DO UPDATE SET
-                     transport = excluded.transport,
-                     circuit_state = 'open',
-                     blocked_reason = excluded.blocked_reason,
-                     blocked_at = excluded.blocked_at,
-                     updated_at = excluded.updated_at",
-                params![lease.normalized_key, transport, reason, now],
-            )?;
-        } else {
-            tx.execute(
-                "INSERT INTO print_target_state
-                 (target_key, transport, circuit_state, blocked_reason, blocked_at, updated_at)
-                 VALUES (?1, ?2, 'closed', NULL, NULL, ?3)
-                 ON CONFLICT(target_key) DO UPDATE SET
-                     transport = excluded.transport,
-                     circuit_state = 'closed',
-                     blocked_reason = NULL,
-                     blocked_at = NULL,
-                     updated_at = excluded.updated_at
-                 WHERE print_target_state.circuit_state <> 'open'",
-                params![lease.normalized_key, transport, now],
-            )?;
-        }
-        tx.commit()?;
-
-        if opens_circuit {
-            let mut lanes = self.lanes.lock().map_err(|_| DispatchError::LockPoisoned)?;
-            if lanes.get(&lease.normalized_key) != Some(&LaneBlock::Held(lease.token)) {
-                return Err(DispatchError::LaneBusy);
-            }
-            lanes.insert(
-                lease.normalized_key.clone(),
-                LaneBlock::OpenHeld(lease.token),
-            );
-        } else {
-            lease.mark_terminal(outcome)?;
-        }
-        Ok(ApplyResult::Applied)
+        )
     }
 
     pub(crate) fn finalize_attempt_and_parent(
@@ -2417,6 +2386,16 @@ impl DispatchManager {
         Ok(true)
     }
 
+    /// Test seam over the live reconciliation commit.
+    ///
+    /// The body is `commit_reconciliation_transaction` -- the same private routine
+    /// production drives through `reconcile_owned_windows_attempt` -- so tests written
+    /// against this exercise real behaviour, not a copy. It exists only because that
+    /// routine takes an open `Transaction` and a cancellation flag, which a unit test has
+    /// no reason to construct. Production does not use it: it needs the released/blocked
+    /// result as a value, plus the cancellation and target-blocking handling this wrapper
+    /// discards.
+    #[cfg(test)]
     pub(crate) fn reconcile(
         &self,
         conn: &Connection,
@@ -5218,7 +5197,7 @@ mod tests {
             let mut lease = manager.claim(target.clone()).unwrap();
             assert_eq!(
                 manager
-                    .finish_attempt(
+                    .finish_attempt_for_test(
                         &conn,
                         &mut lease,
                         attempt.attempt_id,
@@ -5312,7 +5291,7 @@ mod tests {
             let mut lease = manager.claim(target.clone()).unwrap();
             assert_eq!(
                 manager
-                    .finish_attempt(
+                    .finish_attempt_for_test(
                         &conn,
                         &mut lease,
                         attempt.attempt_id,
@@ -5380,7 +5359,7 @@ mod tests {
         let mut lease = manager.claim(target.clone()).unwrap();
         assert_eq!(
             manager
-                .finish_attempt(
+                .finish_attempt_for_test(
                     &conn,
                     &mut lease,
                     attempt.attempt_id,
@@ -5404,6 +5383,152 @@ mod tests {
         );
     }
 
+    /// Pins the shipped retry ladder below the cap. These assertions used to live in
+    /// `print.rs` against `mark_print_job_failed`, which production stopped calling when
+    /// the managed pipeline landed -- so the ladder could have drifted from
+    /// `ParentTransition::RetryableFailure` without a single red test.
+    #[test]
+    fn retryable_failure_requeues_and_schedules_backoff_below_max_retries() {
+        let conn = test_db();
+        let job_id = Uuid::new_v4().to_string();
+        let (manager, mut lease, attempt) =
+            prepared_raw_attempt(&conn, &job_id, "retry-ladder.local", 3, 0);
+
+        assert_eq!(
+            manager
+                .finalize_attempt_and_parent(
+                    &conn,
+                    &mut lease,
+                    attempt.attempt_id,
+                    DispatchState::SpoolError,
+                    ParentTransition::RetryableFailure {
+                        error: "printer offline".into(),
+                    },
+                    AttemptObservation {
+                        now: at(2),
+                        last_error: Some("printer offline".into()),
+                        ..AttemptObservation::default()
+                    },
+                )
+                .unwrap(),
+            ApplyResult::Applied
+        );
+
+        let (status, retry_count, next_retry_at, last_error): (
+            String,
+            i64,
+            Option<String>,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT status, retry_count, next_retry_at, last_error
+                 FROM print_jobs WHERE id = ?1",
+                [&job_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            status, "pending",
+            "a retryable failure below the cap must requeue"
+        );
+        assert_eq!(retry_count, 1);
+        assert_eq!(last_error, "printer offline");
+        assert!(
+            next_retry_at.is_some(),
+            "a requeued job must carry its backoff deadline"
+        );
+    }
+
+    /// The other half of the ladder: the attempt that exhausts `max_retries` is terminal
+    /// and must not leave a backoff deadline behind for the worker to pick up.
+    #[test]
+    fn retryable_failure_is_terminal_once_max_retries_is_reached() {
+        let conn = test_db();
+        let job_id = Uuid::new_v4().to_string();
+        let (manager, mut lease, attempt) =
+            prepared_raw_attempt(&conn, &job_id, "retry-exhausted.local", 1, 0);
+
+        assert_eq!(
+            manager
+                .finalize_attempt_and_parent(
+                    &conn,
+                    &mut lease,
+                    attempt.attempt_id,
+                    DispatchState::SpoolError,
+                    ParentTransition::RetryableFailure {
+                        error: "printer offline".into(),
+                    },
+                    AttemptObservation {
+                        now: at(2),
+                        last_error: Some("printer offline".into()),
+                        ..AttemptObservation::default()
+                    },
+                )
+                .unwrap(),
+            ApplyResult::Applied
+        );
+
+        let (status, retry_count, next_retry_at): (String, i64, Option<String>) = conn
+            .query_row(
+                "SELECT status, retry_count, next_retry_at FROM print_jobs WHERE id = ?1",
+                [&job_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "failed", "the capped attempt must be terminal");
+        assert_eq!(retry_count, 1);
+        assert!(
+            next_retry_at.is_none(),
+            "an exhausted job must not schedule another attempt"
+        );
+    }
+
+    /// Fail-closed contract for an ambiguous dispatch. Production picks
+    /// `ParentTransition::ManualFailure` whenever the write may already have reached the
+    /// printer (a post-start spooler error, or the dispatch timeout), so the queue must
+    /// never re-send a receipt that could duplicate. This used to be asserted indirectly,
+    /// by string-matching error text through `is_non_retryable_print_error`.
+    #[test]
+    fn manual_failure_is_terminal_and_never_schedules_an_auto_retry() {
+        let conn = test_db();
+        let job_id = Uuid::new_v4().to_string();
+        let (manager, mut lease, attempt) =
+            prepared_raw_attempt(&conn, &job_id, "ambiguous-dispatch.local", 3, 0);
+
+        assert_eq!(
+            manager
+                .finalize_attempt_and_parent(
+                    &conn,
+                    &mut lease,
+                    attempt.attempt_id,
+                    DispatchState::Unknown,
+                    ParentTransition::ManualFailure {
+                        error: "printer state is unknown".into(),
+                    },
+                    AttemptObservation {
+                        now: at(2),
+                        last_error: Some("printer state is unknown".into()),
+                        ..AttemptObservation::default()
+                    },
+                )
+                .unwrap(),
+            ApplyResult::Applied
+        );
+
+        let (status, next_retry_at): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, next_retry_at FROM print_jobs WHERE id = ?1",
+                [&job_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "failed");
+        assert!(
+            next_retry_at.is_none(),
+            "an ambiguous dispatch must never queue an automatic re-send"
+        );
+    }
+
     #[test]
     fn manager_cannot_finish_a_lease_owned_by_another_manager() {
         let conn = test_db();
@@ -5421,7 +5546,7 @@ mod tests {
         let target = PrinterTargetKey::WindowsQueue("Front".into());
         let mut lease = owner.claim(target).unwrap();
         assert!(matches!(
-            stranger.finish_attempt(
+            stranger.finish_attempt_for_test(
                 &conn,
                 &mut lease,
                 attempt.attempt_id,
@@ -5513,7 +5638,7 @@ mod tests {
         let mut terminal_lease = finisher.claim(target.clone()).unwrap();
         assert_eq!(
             opener
-                .finish_attempt(
+                .finish_attempt_for_test(
                     &conn,
                     &mut open_lease,
                     unknown_attempt.attempt_id,
@@ -5526,7 +5651,7 @@ mod tests {
         );
 
         assert!(matches!(
-            finisher.finish_attempt(
+            finisher.finish_attempt_for_test(
                 &conn,
                 &mut terminal_lease,
                 terminal_attempt.attempt_id,
@@ -5586,7 +5711,7 @@ mod tests {
         let manager = DispatchManager::isolated_for_test();
         let mut lease = manager.claim(target.clone()).unwrap();
         assert!(matches!(
-            manager.finish_attempt(
+            manager.finish_attempt_for_test(
                 &conn,
                 &mut lease,
                 attempt.attempt_id,

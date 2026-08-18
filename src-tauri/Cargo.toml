@@ -1,6 +1,6 @@
 [package]
 name = "the-small-pos"
-version = "1.4.67"
+version = "1.4.68"
 description = "The Small POS - Desktop point-of-sale (Tauri v2)"
 authors = ["The Small Team <dev@thesmall.app>"]
 edition = "2021"
@@ -138,6 +138,13 @@ windows = { version = "0.61", features = [
   "Win32_System_Ole",
   "Win32_System_Variant",
 ] }
+
+# WebView2 COM interfaces for `memory_trim` — the periodic
+# SetMemoryUsageTargetLevel call that forces the browser to collect Blink-side
+# garbage (see src/memory_trim.rs for the measured story). Already in the
+# lockfile transitively through tauri-runtime-wry at this exact version, so
+# this adds no new crate; it only lets our code name ICoreWebView2_19.
+webview2-com = "0.38"
 
 [dev-dependencies]
 # Test-level serialization for tests that touch process-global state (OS keyring

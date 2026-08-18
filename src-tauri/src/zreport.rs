@@ -3272,6 +3272,15 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
         }
     }
 
+    // Deliberately NO `last_z_report_timestamp` write here: generating a Z
+    // row is not closing the day. `report_generate_z_report` generates and
+    // then DISCARDS a single-shift report as a preview, and the submission
+    // flow can fail after generation — advancing the retention marker from
+    // this function would let a mere preview hide (and later prune) orders
+    // no Z has settled. The marker moves only inside
+    // `apply_local_day_rollover`'s transaction, the atomic close that also
+    // discards the Z on failure.
+
     info!(
         z_report_id = %z_report_id,
         shift_id = %shift_id,
@@ -4907,6 +4916,15 @@ fn apply_local_day_rollover(
     }
 
     let result = (|| -> Result<Value, String> {
+        // THIS is the moment the working day closes — the founder's model has
+        // no other: a day opens with its first activity and ends only here,
+        // whether it ran two hours or five days. The marker anchors the local
+        // ledger's retention (`business_day::retention_cutoff_utc`): the
+        // orders view and the daily prune both read it, so nothing is hidden
+        // or deleted until a Z has settled it. It advances only inside this
+        // transaction — the atomic rollover whose failure also discards the
+        // freshly generated Z — never at Z *generation*, which previews
+        // exercise and discard.
         db::set_setting(
             &conn,
             "system",
@@ -5479,10 +5497,30 @@ mod tests {
         }
 
         let payload = serde_json::json!({ "shiftId": shift_id });
+        {
+            let conn = db.conn.lock().unwrap();
+            assert!(
+                crate::business_day::stored_period_start(&conn).is_none(),
+                "no day has closed yet — the marker must be absent before the first Z"
+            );
+        }
         let result = generate_z_report(&db, &payload).expect("generate should succeed");
 
         assert_eq!(result["success"], true);
         assert_eq!(result["existing"], false);
+
+        // Generating a Z row must NOT close the day: previews generate and
+        // discard, and the submission flow can still fail after generation.
+        // The retention marker advances only inside
+        // `apply_local_day_rollover`'s transaction (pinned below in
+        // `test_apply_local_day_rollover_advances_day_close_marker`).
+        {
+            let conn = db.conn.lock().unwrap();
+            assert!(
+                crate::business_day::stored_period_start(&conn).is_none(),
+                "Z generation alone must never advance the day-close marker"
+            );
+        }
 
         let report = &result["report"];
         assert_eq!(report["grossSales"], 100.0);
@@ -7111,6 +7149,59 @@ mod tests {
     // ---------------------------------------------------------------
     // Gap 8: Data clearing (local day rollover)
     // ---------------------------------------------------------------
+
+    #[test]
+    fn test_apply_local_day_rollover_advances_day_close_marker() {
+        // The founder's law: the day closes at the Z — and "at the Z" means
+        // this transaction, the atomic rollover. Retention (orders view +
+        // prune via `business_day::retention_cutoff_utc`) anchors to the
+        // marker this writes.
+        let db = test_db();
+        seed_closed_shift(&db);
+        {
+            let conn = db.conn.lock().unwrap();
+            assert!(crate::business_day::stored_period_start(&conn).is_none());
+        }
+
+        apply_local_day_rollover(&db, "2026-02-16", "2026-02-16T23:59:59Z")
+            .expect("rollover should succeed");
+
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            crate::business_day::stored_period_start(&conn).as_deref(),
+            Some("2026-02-16T23:59:59Z"),
+            "the rollover transaction is the one and only day-close marker writer"
+        );
+    }
+
+    #[test]
+    fn test_preview_generate_and_discard_leaves_day_close_marker_untouched() {
+        // `report_generate_z_report` previews a single shift by generating a
+        // real Z row and discarding it. That round trip must leave retention
+        // completely untouched — a preview that advanced the marker would
+        // hide (and later prune) orders no Z has settled.
+        let db = test_db();
+        let shift_id = seed_closed_shift(&db);
+
+        let result = generate_z_report(&db, &serde_json::json!({ "shiftId": shift_id }))
+            .expect("generate should succeed");
+        let z_report_id = result["report"]["id"].as_str().unwrap().to_string();
+        discard_generated_z_report_by_id(&db, &z_report_id).expect("discard should succeed");
+
+        let conn = db.conn.lock().unwrap();
+        assert!(
+            crate::business_day::stored_period_start(&conn).is_none(),
+            "a generate-and-discard preview must never advance the day-close marker"
+        );
+        let rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM z_reports WHERE id = ?1",
+                params![z_report_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 0, "the previewed Z row must be gone after discard");
+    }
 
     #[test]
     fn test_apply_local_day_rollover_clears_operational_data() {

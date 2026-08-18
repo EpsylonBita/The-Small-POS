@@ -1366,11 +1366,14 @@ pub async fn sync_clear_old_orders(
     )?;
     let cleared = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        // Same clock as the data: the business day's start as a UTC instant.
-        // A local DATE here loses the running evening between local midnight
-        // and UTC midnight — the same defect the orders read had.
-        let cutoff_utc = crate::business_day::current_business_day_start_utc(&conn, Local::now());
-        clear_old_orders_before(&conn, &cutoff_utc)?
+        // Deletion is EARNED by a Z report, never by time passing (the
+        // founder's day model — a day may run two hours or five days and
+        // closes only at the Z). No Z yet → nothing to clear: the whole
+        // ledger is the open day.
+        match crate::business_day::retention_cutoff_utc(&conn) {
+            Some(cutoff_utc) => clear_old_orders_before(&conn, &cutoff_utc)?,
+            None => 0,
+        }
     };
     emit_sync_status_snapshot(&app, &db, &sync_state).await;
     Ok(serde_json::json!({ "success": true, "cleared": cleared }))

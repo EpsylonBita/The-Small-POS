@@ -37,7 +37,14 @@ export interface OptimizedDeliveryRoutePlan {
   chunkCount: number
   originSource: 'branch-db' | 'synced-branch-fallback'
   optimizationMethod: string
+  /** Legacy English sentences — shown only by builds without the codes. */
   warnings: string[]
+  /**
+   * Machine codes for the same notices, translated on this side under
+   * `orderDashboard.routeWarnings.<code>` (all five locales). A code this
+   * build does not know renders the `generic` sentence, never raw English.
+   */
+  warningDetails?: Array<{ code: string; params?: Record<string, number> }>
 }
 
 type TerminalSettingGetter = <T = unknown>(category: string, key: string, defaultValue?: T) => T | undefined
@@ -364,12 +371,22 @@ export function buildSingleDeliveryRouteStop(order: unknown): DeliveryRouteStopP
   }
 }
 
+// The store ORIGIN's maps value is ADDRESS-FIRST on purpose. Stored branch
+// coordinates rot silently — observed live 2026-08-18: the branch's text
+// address was correct while its saved coordinates pointed ~2km away, so
+// routes departed from whatever street Google reverse-named off the stale
+// point. The text address is what the shop audits, so it wins and Google
+// geocodes it at open time; coordinates remain the fallback.
 function locationToMapsValue(location: { address: string | null; coordinates: { lat: number; lng: number } | null }): string {
+  if (location.address) {
+    return location.address
+  }
+
   if (location.coordinates) {
     return `${location.coordinates.lat},${location.coordinates.lng}`
   }
 
-  return location.address || ''
+  return ''
 }
 
 export function buildGoogleMapsDirectionsUrl(

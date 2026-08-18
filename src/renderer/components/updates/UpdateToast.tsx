@@ -39,13 +39,13 @@ export const UpdateToast: React.FC<UpdateToastProps> = ({ t, version, onOpenDial
         }
       }}
     >
-      <RefreshCw className="w-6 h-6 text-amber-200" />
+      <RefreshCw className="w-6 h-6 text-zinc-900" />
       <div>
-        <div className="font-semibold text-white">{translate('updates.title.available')}</div>
-        <div className="text-sm text-white/80">
+        <div className="font-semibold text-zinc-950">{translate('updates.title.available')}</div>
+        <div className="text-sm text-zinc-900/80">
           {translate('updates.toast.readyToDownload', { version })}
         </div>
-        <div className="text-xs text-white/60 mt-1">{translate('updates.toast.clickToView')}</div>
+        <div className="text-xs text-zinc-900/60 mt-1">{translate('updates.toast.clickToView')}</div>
       </div>
     </div>
   );
@@ -64,7 +64,7 @@ export function showUpdateToast(version: string, onOpenDialog: () => void): stri
       <div
         className={`${
           t.visible ? 'animate-enter' : 'animate-leave'
-        } pointer-events-auto w-full max-w-md rounded-2xl border border-amber-300/35 bg-zinc-950/90 shadow-[0_18px_48px_rgba(0,0,0,0.32)] backdrop-blur-xl`}
+        } pointer-events-auto w-full max-w-md rounded-2xl border border-amber-500/45 bg-amber-300 shadow-[0_18px_48px_rgba(120,53,15,0.28)]`}
       >
         <UpdateToast t={t} version={version} onOpenDialog={onOpenDialog} />
       </div>

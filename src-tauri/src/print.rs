@@ -60,10 +60,11 @@ const DISPATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20)
 const NATIVE_QUEUE_CONTROL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 const PRINT_HISTORY_PURGE_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// Error recorded when a hardware dispatch exceeds `DISPATCH_TIMEOUT`. The
-/// wording is deliberately matched by `is_non_retryable_print_error` so a
-/// timed-out job fails closed (no automatic re-send that could duplicate a
-/// receipt that may already have printed).
+/// Error recorded when a hardware dispatch exceeds `DISPATCH_TIMEOUT`.
+///
+/// Failing closed no longer depends on this wording: the dispatch path decides
+/// structurally, routing a timeout to `ParentTransition::ManualFailure` because the write
+/// may already have reached the printer. The text is operator-facing only.
 const DISPATCH_TIMEOUT_ERROR: &str = "Printer did not respond within the dispatch timeout; the receipt may or may not have printed. Automatic retry stopped to prevent duplicate output. Check the printer, then retry manually if needed.";
 
 pub trait PrintQueueInvalidator: Send + Sync {
@@ -2859,7 +2860,18 @@ pub fn pause_and_cancel_pos_jobs(
 // Status updates
 // ---------------------------------------------------------------------------
 
-/// Mark a print job as dispatched to a printer transport.
+/// Test-only fixture: force a job into the `dispatched` state.
+///
+/// Production reaches `dispatched` only through
+/// `DispatchManager::finalize_attempt_and_parent` with
+/// `ParentTransition::Dispatched`, which runs the same UPDATE inside the attempt's
+/// transaction and additionally requires the row to be `printing` with this attempt as
+/// the latest one. This standalone version accepts `pending` too and ignores attempts, so
+/// shipping it would leave a way to complete a job without settling its attempt -- the
+/// split-write shape that stranded jobs in `printing`. Retained behind cfg(test) because
+/// tests for neighbouring live features (`list_print_jobs`, `set_print_job_warning`)
+/// need a job in a successful state without driving a full managed dispatch.
+#[cfg(test)]
 pub fn mark_print_job_dispatched(
     db: &DbState,
     job_id: &str,
@@ -2918,7 +2930,16 @@ pub fn set_print_job_warning(
     Ok(())
 }
 
-/// Mark a print job as failed with an error message.
+/// Test-only fixture: record a retryable failure and advance the retry counter.
+///
+/// The escalation contract this encodes (retry_count += 1, back to `pending` until
+/// `max_retries`, exponential `next_retry_at`, terminal `failed` on the last attempt) is
+/// live production behaviour -- but production runs it through
+/// `ParentTransition::RetryableFailure` inside `finalize_attempt_and_parent`, which holds
+/// the identical UPDATE. The shipped contract is pinned against that live path by
+/// `retryable_failure_escalates_to_failed_at_max_retries` below; this fixture stays only
+/// so tests of neighbouring features can age a job cheaply.
+#[cfg(test)]
 pub fn mark_print_job_failed(db: &DbState, job_id: &str, error_msg: &str) -> Result<(), String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let now = Utc::now().to_rfc3339();
@@ -2954,7 +2975,12 @@ pub fn mark_print_job_failed(db: &DbState, job_id: &str, error_msg: &str) -> Res
     Ok(())
 }
 
-/// Mark a print job as permanently failed (no retry).
+/// Test-only fixture: force a job into the terminal `failed` state.
+///
+/// Superseded in production by `ParentTransition::ManualFailure`, which carries the
+/// identical UPDATE inside `finalize_attempt_and_parent`. See
+/// [`mark_print_job_dispatched`] for why the standalone form must not ship.
+#[cfg(test)]
 pub fn mark_print_job_failed_non_retryable(
     db: &DbState,
     job_id: &str,
@@ -2984,19 +3010,6 @@ pub fn mark_print_job_failed_non_retryable(
         "Print job failed (non-retryable)"
     );
     Ok(())
-}
-
-fn is_non_retryable_print_error(error_msg: &str) -> bool {
-    let normalized = error_msg.to_ascii_lowercase();
-    normalized.contains("no hardware printer profile resolved")
-        || normalized.contains("not found")
-        || normalized.contains("unknown entity_type")
-        // A dispatch timeout or a network write-deadline leaves the print in an
-        // unknown physical state, so we fail closed (manual retry only) instead of
-        // auto-resending a possible duplicate — same stance as a stale `printing` row.
-        || normalized.contains("did not respond within the dispatch timeout")
-        || normalized.contains("within the write deadline")
-        || normalized.contains("raw print state is unknown")
 }
 
 /// Lock the shared DB connection, recovering from mutex poisoning.
@@ -17207,29 +17220,6 @@ mod tests {
     }
 
     #[test]
-    fn test_non_retryable_error_classifier() {
-        assert!(is_non_retryable_print_error(
-            "No hardware printer profile resolved for entity type order_receipt"
-        ));
-        assert!(!is_non_retryable_print_error("printer offline"));
-    }
-
-    #[test]
-    fn test_windows_raw_spool_unknown_state_errors_are_non_retryable() {
-        for error in [
-            "WritePrinter failed for \"Receipt\": wrote 80/120 bytes; raw print state is unknown",
-            "Partial spool write for \"Receipt\": wrote 80/120 bytes; raw print state is unknown",
-            "EndPagePrinter failed for \"Receipt\"; raw print state is unknown",
-            "EndDocPrinter failed for \"Receipt\"; raw print state is unknown",
-        ] {
-            assert!(
-                is_non_retryable_print_error(error),
-                "uncertain Windows spool errors must require an operator retry: {error}"
-            );
-        }
-    }
-
-    #[test]
     fn test_z_report_expense_entries_preserve_each_reason() {
         let entries = z_report_expense_entries(&serde_json::json!({
             "expenses": {
@@ -18020,12 +18010,10 @@ mod tests {
             err.contains("did not respond within the dispatch timeout"),
             "unexpected error: {err}"
         );
-        // Fail-closed: a timed-out dispatch is non-retryable so the queue does not
-        // auto-resend a receipt that may already have printed.
-        assert!(
-            is_non_retryable_print_error(&err),
-            "dispatch timeout must be classified non-retryable"
-        );
+        // Fail-closed is enforced structurally, not by this wording: the timeout arm of
+        // `dispatch_managed_windows_attempt` finalizes with
+        // `ParentTransition::ManualFailure`. That contract is pinned by
+        // `manual_failure_is_terminal_and_never_schedules_an_auto_retry` in print_dispatch.
     }
 
     #[test]
@@ -18042,17 +18030,6 @@ mod tests {
 
         assert!(out.is_err());
         assert!(cancel.load(Ordering::Acquire));
-    }
-
-    #[test]
-    fn test_tcp_write_deadline_error_is_non_retryable() {
-        // A network write that hits the aggregate deadline (#8) leaves the print in
-        // an unknown state, so it must fail closed (no auto-resend) like a timeout.
-        let err = "Network printer 10.0.0.9:9100 did not accept the receipt within the write deadline; the print may be incomplete. Automatic retry stopped to prevent duplicate output.";
-        assert!(
-            is_non_retryable_print_error(err),
-            "a TCP write-deadline error must be non-retryable"
-        );
     }
 
     // ---- #2: paused-profile exclusion happens in SQL, before LIMIT ----

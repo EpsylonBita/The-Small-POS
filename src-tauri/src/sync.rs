@@ -2129,38 +2129,38 @@ pub(crate) fn remote_order_visible_to_current_terminal(
     ))
 }
 
-/// Get the current operational day's orders.
+/// Get the open working day's orders.
 ///
-/// The ledger is day-scoped by design: the daily prune
-/// (`commands::sync::clear_old_orders_before`) deletes every pre-today row
-/// except a live, never-settled table tab (gap review P0-03). This read
-/// mirrors that exact retention set — today's rows plus any still-open
-/// unsettled table tab from a previous day — so rows the prune is about to
-/// delete are never parsed and re-serialized on every render event. The day
-/// boundary is the same `Local` calendar date the prune uses.
+/// The day is Z-BOUNDED, never clock-bounded (the founder's model, stated
+/// 2026-08-18: a terminal may open today and close its day five days later,
+/// or in two hours). The cutoff is the last Z report's moment — floored to a
+/// still-open crossing shift — from [`crate::business_day::retention_cutoff_utc`];
+/// with no Z ever generated the read is unbounded, mirroring the prune
+/// (`commands::sync::clear_old_orders_before`), which likewise deletes
+/// nothing until a Z has settled a day. The two must keep reading the same
+/// retention set, so rows the prune may delete are never parsed and
+/// re-serialized on every render event.
 pub fn get_all_orders(db: &DbState) -> Result<Vec<Value>, String> {
-    // The cutoff is a UTC INSTANT, never a local date string: `created_at` is
-    // stored in UTC, and a local-date prefix comparison loses every order made
-    // between local midnight and UTC midnight (observed live at 01:12 local —
-    // a fresh order vanished from the till on the next refetch).
     let cutoff_utc = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        crate::business_day::current_business_day_start_utc(&conn, Local::now())
+        crate::business_day::retention_cutoff_utc(&conn)
     };
-    get_all_orders_since_utc(db, &cutoff_utc)
+    get_all_orders_since_utc(db, cutoff_utc.as_deref())
 }
 
-/// Day-bounded ledger read backing [`get_all_orders`].
+/// Ledger read backing [`get_all_orders`].
 ///
-/// `cutoff_utc` is an RFC3339 UTC instant (`+00:00` offset); a row is returned
-/// when its `created_at` is on/after that instant OR it is an open unsettled
-/// table tab (the rows [`crate::commands::sync::clear_old_orders_before`]
-/// keeps). Full-timestamp comparison in the SAME clock as the column — the
-/// stored strings are uniform RFC3339 UTC, so lexicographic order is
-/// chronological order.
+/// `cutoff_utc` is an RFC3339 UTC instant (`+00:00` offset — never `Z`:
+/// lexicographically `'+' < 'Z'`, so an equal-second row would be wrongly
+/// excluded); a row is returned when its `created_at` is on/after that
+/// instant OR it is an open unsettled table tab (the rows
+/// [`crate::commands::sync::clear_old_orders_before`] keeps). `None` returns
+/// the whole ledger — the no-Z-yet day is unbounded. Full-timestamp
+/// comparison in the SAME clock as the column — the stored strings are
+/// uniform RFC3339 UTC, so lexicographic order is chronological order.
 pub(crate) fn get_all_orders_since_utc(
     db: &DbState,
-    cutoff_utc: &str,
+    cutoff_utc: Option<&str>,
 ) -> Result<Vec<Value>, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let visibility_scope = load_order_terminal_visibility_scope(&conn);
@@ -2208,7 +2208,7 @@ pub(crate) fn get_all_orders_since_utc(
                     integration_environment, is_test
              FROM orders
              WHERE COALESCE(is_ghost, 0) = 0
-               AND (created_at >= ?1 OR {open_table_tab})
+               AND (?1 IS NULL OR created_at >= ?1 OR {open_table_tab})
              ORDER BY created_at ASC"),
         )
         .map_err(|e| e.to_string())?;
@@ -19957,8 +19957,8 @@ mod tests {
         set_terminal_setting(&db, "owner_terminal_db_id", "owner-test-db");
         set_terminal_setting(&db, "source_terminal_id", "terminal-efe99d27");
 
-        // `get_all_orders` is day-bounded to the current operational day, so
-        // these isolation fixtures must be created "today" to be visible.
+        // The ledger read is Z-bounded; this fixture DB has no Z, so the
+        // read is unbounded and the seeded dates only pick stable ordering.
         let today = Local::now().format("%Y-%m-%d").to_string();
         {
             let conn = db.conn.lock().unwrap();
@@ -20023,8 +20023,8 @@ mod tests {
         set_terminal_setting(&db, "owner_terminal_db_id", "owner-test-db");
         set_terminal_setting(&db, "source_terminal_id", "terminal-efe99d27");
 
-        // `get_all_orders` is day-bounded to the current operational day, so
-        // these isolation fixtures must be created "today" to be visible.
+        // The ledger read is Z-bounded; this fixture DB has no Z, so the
+        // read is unbounded and the seeded dates only pick stable ordering.
         let today = Local::now().format("%Y-%m-%d").to_string();
         {
             let conn = db.conn.lock().unwrap();
@@ -20100,6 +20100,82 @@ mod tests {
         .unwrap();
     }
 
+    /// The founder's day model, live-reported 2026-08-18: overnight orders
+    /// made during an open check-in vanished from the till at a clock
+    /// boundary. The day is Z-BOUNDED — however long it runs, nothing hides
+    /// until a Z report settles it, and a still-open shift that crosses the
+    /// Z keeps its whole story visible.
+    #[test]
+    fn orders_stay_visible_until_a_z_report_closes_the_day() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            // A day that has been running for five days, exactly as allowed.
+            seed_day_bound_order(
+                &conn,
+                "opened-days-ago",
+                "2026-08-13T18:00:00Z",
+                "completed",
+                "paid",
+                "pickup",
+                None,
+            );
+            seed_day_bound_order(
+                &conn,
+                "overnight",
+                "2026-08-18T01:11:00Z",
+                "pending",
+                "pending",
+                "pickup",
+                None,
+            );
+        }
+
+        // No Z has ever closed a day: the whole ledger is the open day.
+        let visible = |db: &DbState| {
+            get_all_orders(db)
+                .expect("get all orders")
+                .iter()
+                .map(|o| o["id"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(visible(&db), vec!["opened-days-ago", "overnight"]);
+
+        // A Z between the two rows settles the older day: only the open
+        // day's order remains.
+        {
+            let conn = db.conn.lock().unwrap();
+            crate::db::set_setting(
+                &conn,
+                "system",
+                "last_z_report_timestamp",
+                "2026-08-15T00:00:00Z",
+            )
+            .unwrap();
+        }
+        assert_eq!(visible(&db), vec!["overnight"]);
+
+        // A still-active shift that CROSSES that Z floors the cutoff to its
+        // check-in: closing a colleague's day must never hide an open one.
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO staff_shifts (
+                     id, staff_id, staff_name, role_type, branch_id, terminal_id,
+                     check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                     status, calculation_version, sync_status, created_at, updated_at
+                 ) VALUES (
+                     'crossing-shift', 'staff-1', 'Crossing', 'cashier', 'b1', 't1',
+                     '2026-08-12T09:00:00Z', 0, 0,
+                     'active', 2, 'pending', '2026-08-12T09:00:00Z', '2026-08-12T09:00:00Z'
+                 )",
+                [],
+            )
+            .unwrap();
+        }
+        assert_eq!(visible(&db), vec!["opened-days-ago", "overnight"]);
+    }
+
     /// The read must return exactly the rows the daily prune
     /// (`clear_old_orders_before`) would KEEP: today's rows plus a live,
     /// never-settled table tab from a previous day. A stale settled row from
@@ -20148,7 +20224,7 @@ mod tests {
             );
         }
 
-        let orders = get_all_orders_since_utc(&db, &format!("{today}T00:00:00+00:00"))
+        let orders = get_all_orders_since_utc(&db, Some(&format!("{today}T00:00:00+00:00")))
             .expect("get all orders");
         let ids: Vec<&str> = orders
             .iter()
@@ -20205,7 +20281,7 @@ mod tests {
         }
 
         let today = Local::now().format("%Y-%m-%d").to_string();
-        let orders = get_all_orders_since_utc(&db, &format!("{today}T00:00:00+00:00"))
+        let orders = get_all_orders_since_utc(&db, Some(&format!("{today}T00:00:00+00:00")))
             .expect("get all orders");
         assert!(
             orders.is_empty(),
@@ -20249,7 +20325,7 @@ mod tests {
             );
         }
 
-        let orders = get_all_orders_since_utc(&db, "2026-05-11T00:00:00+00:00")
+        let orders = get_all_orders_since_utc(&db, Some("2026-05-11T00:00:00+00:00"))
             .expect("get orders since cutoff");
         let ids: Vec<&str> = orders
             .iter()
@@ -20290,7 +20366,7 @@ mod tests {
             );
         }
 
-        let orders = get_all_orders_since_utc(&db, "2026-08-17T04:00:00+00:00")
+        let orders = get_all_orders_since_utc(&db, Some("2026-08-17T04:00:00+00:00"))
             .expect("get orders since business-day start");
         let ids: Vec<&str> = orders
             .iter()

@@ -110,6 +110,9 @@ pub struct SpoolSubmission {
 pub enum SpoolerOperation {
     SubmitRaw,
     GetJob,
+    // UNWIRED (queue-scan capability). Only produced by `enum_jobs`, which has no
+    // caller yet -- see the "Queue-scan capability" note above `enum_jobs` below.
+    #[allow(dead_code)]
     EnumJobs,
     ControlJob,
 }
@@ -194,6 +197,11 @@ pub enum SpoolerError {
         reason: BufferSizingIssue,
         requested: usize,
     },
+    // Test-only. Production never raises this: the dispatch deadline is enforced one
+    // layer up, where `print.rs` waits on the submission channel and maps a timeout to
+    // `ParentTransition::ManualFailure`. Only the fake spooler constructs it, to drive
+    // that path. Kept behind cfg(test) so it stays out of the shipped error surface.
+    #[cfg(test)]
     #[error("spooler {operation:?} operation timed out")]
     TimedOut { operation: SpoolerOperation },
     #[error(
@@ -383,6 +391,11 @@ fn validate_write_count(expected: u32, written: u32) -> Result<(), SpoolerError>
     }
 }
 
+// UNWIRED (queue-scan capability). Decodes one JOB_INFO_1W slot from a whole-queue
+// enumeration; only `enum_jobs` produces these. The single-job path (`get_job`, which
+// production does use) reads its snapshot directly and never batches. Retained with the
+// rest of the queue-scan capability -- see the note above `enum_jobs` below.
+#[allow(dead_code)]
 struct LevelOneJobFields<'a> {
     job_id: WindowsJobId,
     printer_name: Option<&'a [u16]>,
@@ -394,6 +407,9 @@ struct LevelOneJobFields<'a> {
     pages_printed: u32,
 }
 
+// UNWIRED (queue-scan capability). Sole consumer of `LevelOneJobFields`; reachable only
+// through `enum_jobs`. See the note above `enum_jobs` below.
+#[allow(dead_code)]
 fn snapshot_from_level_one(fields: LevelOneJobFields<'_>) -> SpoolJobSnapshot {
     let decode = |value: Option<&[u16]>| {
         value
@@ -427,6 +443,24 @@ pub trait WindowsSpooler: Send + Sync + 'static {
         job_id: WindowsJobId,
     ) -> Result<Option<SpoolJobSnapshot>, SpoolerError>;
 
+    // UNWIRED -- queue-scan capability, kept deliberately.
+    //
+    // Enumerates every job on a printer queue. Nothing calls it: crash recovery does not
+    // need it, because `persist_spool_started` records the native job id and recovery
+    // re-reads that one job through `get_job`.
+    //
+    // Its intended consumer was never written -- an orphan sweep that scans a queue for
+    // entries whose spool id we lost (marker parsed back out of the document name via
+    // `parse_document_marker`) plus legacy entries from older POS builds
+    // (`is_exact_legacy_pos_document_name`). That feature needs an operator-confirmation
+    // UI before it may act on anything, which is why it stopped here.
+    //
+    // Retained rather than deleted: the real implementation is vetted `unsafe` EnumJobs
+    // code with non-obvious buffer sizing and alignment handling that is expensive to
+    // reconstruct. Deleting it would also strand `SpoolerOperation::EnumJobs`,
+    // `LevelOneJobFields`, `snapshot_from_level_one` and
+    // `is_exact_legacy_pos_document_name`, which exist only to serve it.
+    #[allow(dead_code)]
     fn enum_jobs(&self, printer_name: &str) -> Result<Vec<SpoolJobSnapshot>, SpoolerError>;
 
     fn control_job(
@@ -1916,6 +1950,10 @@ pub fn validate_owned_job(
 /// Only narrow historical test names are classified as legacy POS documents.
 /// Subsequent UI/control code must still require a discovered queue and
 /// explicit operator confirmation before acting on any legacy entry.
+// UNWIRED (queue-scan capability). The "discovered queue" this classifies entries from
+// can only come from `enum_jobs`, which has no caller yet, so nothing reaches this.
+// See the note above `enum_jobs`.
+#[allow(dead_code)]
 pub fn is_exact_legacy_pos_document_name(value: &str) -> bool {
     matches!(
         value,

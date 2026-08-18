@@ -1,6 +1,7 @@
-import React, { useState, useEffect, forwardRef, useImperativeHandle } from 'react';
+import React, { useState, useEffect, useRef, forwardRef, useImperativeHandle } from 'react';
 import { AlertTriangle, CheckCircle } from 'lucide-react';
 import { useShift } from '../contexts/shift-context';
+import { getBridge } from '../../lib';
 import { StaffShiftModal } from './modals/StaffShiftModal';
 import { toast } from 'react-hot-toast';
 import { useI18n } from '../contexts/i18n-context';
@@ -24,6 +25,25 @@ export const ShiftManager = forwardRef<ShiftManagerRef, ShiftManagerProps>(({ su
   const [showShiftModal, setShowShiftModal] = useState(false);
   const [shiftModalMode, setShiftModalMode] = useState<'checkin' | 'checkout'>('checkin');
   const [hasPromptedCheckIn, setHasPromptedCheckIn] = useState(false);
+  const shiftModalWasOpenRef = useRef(false);
+
+  // The check-in/checkout modal is the till's biggest producer of Blink-side
+  // garbage, which only a major GC can reclaim — and the POS's tiny JS heap
+  // means that GC almost never fires on its own (measured on the shop till:
+  // blink_gc 490MB→33MB on one forced collection). When the modal closes,
+  // ask the Rust side to have WebView2 take out the trash. The delay lets the
+  // exit animation and falling-edge state shedding finish first; reopening
+  // within it cancels the trim.
+  useEffect(() => {
+    const wasOpen = shiftModalWasOpenRef.current;
+    shiftModalWasOpenRef.current = showShiftModal;
+    if (wasOpen && !showShiftModal) {
+      const timer = setTimeout(() => {
+        void getBridge().invoke('memory:trim-webview').catch(() => {});
+      }, 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [showShiftModal]);
 
   // Auto-prompt check-in when logged in without active shift
   useEffect(() => {

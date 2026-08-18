@@ -194,7 +194,14 @@ const BulkActionsBar: React.FC<BulkActionsBarProps> = React.memo(({
               )}
               <button className={getButtonStyles('warning')} onClick={(e) => { e.preventDefault(); onBulkAction('edit'); }}><Pencil className="w-4 h-4" />{t('bulkActions.edit')}</button>
               <button className={getButtonStyles('danger')} onClick={(e) => { e.preventDefault(); onBulkAction('cancel'); }}><X className="w-4 h-4" />{t('bulkActions.cancel')}</button>
-              <button className={getButtonStyles('map')} onClick={(e) => { e.preventDefault(); onBulkAction('map'); }}><MapIcon className="w-4 h-4" />{t('bulkActions.map')}</button>
+              {/* Multi-stop route planner: meaningful from TWO deliveries up
+                  (the founder's spec, 2026-08-18). A single delivery already
+                  has its own store→customer route on the order card's pin,
+                  so showing this button for one selection produced two
+                  buttons for the same job that opened different maps. */}
+              {selectedCount >= 2 && (
+                <button className={getButtonStyles('map')} onClick={(e) => { e.preventDefault(); onBulkAction('map'); }}><MapIcon className="w-4 h-4" />{t('bulkActions.map')}</button>
+              )}
             </>
           )}
 

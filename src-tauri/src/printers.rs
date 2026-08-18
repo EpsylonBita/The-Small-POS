@@ -302,11 +302,27 @@ pub fn detect_network_printer_brand(host: &str) -> PrinterBrand {
     detected
 }
 
+/// Outcome of one raw dispatch, returned by the production `RawPrinter` trait.
+///
+/// Only `bytes_written` is consumed today. The other three are the diagnostic record of
+/// the dispatch, and the managed pipeline now persists the same facts on the attempt row
+/// (`print_job_attempts.bytes_requested` / `.document_name` / `.spool_job_id`, written by
+/// `prepare_managed_attempt` and `persist_spool_started`), so nothing reads them back off
+/// this struct. Kept rather than dropped: they are populated by three production call
+/// sites and asserted by the transport tests below, and removing them would reshape a
+/// production trait plus eight test doubles for no behavioural gain.
 #[derive(Debug, Clone)]
 pub struct RawPrintResult {
+    /// Unconsumed diagnostic: the attempt row is the system of record.
+    #[allow(dead_code)]
     pub bytes_requested: usize,
     pub bytes_written: usize,
+    /// Unconsumed diagnostic: the attempt row is the system of record.
+    #[allow(dead_code)]
     pub doc_name: String,
+    /// Unconsumed diagnostic: `persist_spool_started` is what actually records the
+    /// native spool id against the attempt.
+    #[allow(dead_code)]
     pub spool_job_id: Option<u32>,
 }
 
@@ -1381,27 +1397,6 @@ fn connect_tcp_socket(
         "Failed to connect to network printer {target}: {}",
         last_error.unwrap_or_else(|| "unknown connection error".to_string())
     ))
-}
-
-fn write_raw_payload_in_chunks<W: std::io::Write>(
-    writer: &mut W,
-    data: &[u8],
-    chunk_size: usize,
-    chunk_delay: Duration,
-    deadline: Instant,
-    cancel: &AtomicBool,
-    target_label: &str,
-) -> Result<usize, String> {
-    write_raw_payload_in_chunks_with_evidence(
-        writer,
-        data,
-        chunk_size,
-        chunk_delay,
-        deadline,
-        cancel,
-        target_label,
-    )
-    .map_err(|failure| failure.message)
 }
 
 fn write_raw_payload_in_chunks_with_evidence<W: std::io::Write>(
@@ -2929,7 +2924,7 @@ mod tests {
     fn partial_raw_stream_failure_reports_unknown_state_instead_of_retryable_error() {
         let mut writer = FailOnSecondWrite { writes: 0 };
         let cancel = AtomicBool::new(false);
-        let error = write_raw_payload_in_chunks(
+        let error = write_raw_payload_in_chunks_with_evidence(
             &mut writer,
             &[1, 2, 3, 4, 5, 6, 7, 8],
             4,
@@ -2938,7 +2933,8 @@ mod tests {
             &cancel,
             "network printer 192.168.1.19:9100",
         )
-        .expect_err("the second chunk must fail");
+        .expect_err("the second chunk must fail")
+        .message;
 
         assert!(
             error.contains("wrote 4/8 bytes"),

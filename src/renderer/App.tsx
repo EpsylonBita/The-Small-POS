@@ -743,6 +743,11 @@ function AppContent() {
   const { setStaff } = useShift();
   const autoUpdater = useAutoUpdater();
   const windowState = useWindowState();
+  // The version whose "available" pill the user already clicked THIS run.
+  // Deliberately in-memory (founder spec 2026-08-18): once opened, the pill
+  // stays gone until the app restarts — but a DIFFERENT version arriving in
+  // the same session still announces itself.
+  const [updatePillSeenForVersion, setUpdatePillSeenForVersion] = useState<string | null>(null);
   const openUpdateCheck = useCallback(() => {
     autoUpdater.openUpdateDialog();
   }, [autoUpdater.openUpdateDialog]);
@@ -765,12 +770,32 @@ function AppContent() {
       return undefined;
     }
 
+    const availableVersion = autoUpdater.updateInfo?.version || null;
+    // Once the user has OPENED this version's announcement, the pill stays
+    // hidden for the rest of the run (it returns on the next launch, or for
+    // a different version). Active work — downloading, installing — still
+    // shows: that is progress the user started, not a nag.
+    if (
+      status === 'available' &&
+      availableVersion &&
+      updatePillSeenForVersion === availableVersion
+    ) {
+      return undefined;
+    }
+
+    const onOpen = () => {
+      if (status === 'available' && availableVersion) {
+        setUpdatePillSeenForVersion(availableVersion);
+      }
+      autoUpdater.openUpdateDialog();
+    };
+
     return {
       status,
       label: getFrameUpdateLabel(status, t),
       detail: getFrameUpdateDetail(autoUpdater, status, t),
       busy: status === 'downloading' || status === 'installing',
-      onOpen: autoUpdater.openUpdateDialog,
+      onOpen,
     };
   }, [
     autoUpdater.available,
@@ -786,6 +811,7 @@ function AppContent() {
     autoUpdater.ready,
     autoUpdater.updateInfo?.version,
     t,
+    updatePillSeenForVersion,
   ]);
   const silentRefreshOrders = useOrderStore((state) => state.silentRefresh);
   const parityQueueStatusRef = useRef<{

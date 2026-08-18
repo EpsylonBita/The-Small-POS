@@ -1,0 +1,61 @@
+/*
+ * The update pill's "going-around" ring (founder spec 2026-08-18: «το κίτρινο
+ * να έχει κάποιο animation γύρω γύρω»). A thin conic highlight orbits the
+ * pill's border while an update is AVAILABLE — the states the user already
+ * acted on (downloading, installing) keep their own spinner icon instead, so
+ * the orbit only ever nags about the one decision still open.
+ *
+ * Built as a masked conic-gradient on ::before so the pill's own background
+ * and text are untouched; @property animates the angle (WebView2/Chromium
+ * has supported it since 85). Reduced-motion users get a static ring.
+ */
+@property --app-frame-ring-angle {
+  syntax: '<angle>';
+  inherits: false;
+  initial-value: 0deg;
+}
+
+.app-frame-update-pill {
+  position: absolute; /* restated so ::before always has its containing box */
+}
+
+.app-frame-update-pill[data-update-status='available']::before {
+  content: '';
+  position: absolute;
+  inset: -3px;
+  border-radius: 0.875rem; /* pill rounded-xl (0.75rem) + the 3px outset */
+  padding: 2px;
+  background: conic-gradient(
+    from var(--app-frame-ring-angle),
+    rgba(120, 53, 15, 0) 0deg,
+    rgba(120, 53, 15, 0.85) 300deg,
+    rgba(120, 53, 15, 0) 360deg
+  );
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  animation: app-frame-ring-spin 2.4s linear infinite;
+  pointer-events: none;
+}
+
+@keyframes app-frame-ring-spin {
+  to {
+    --app-frame-ring-angle: 360deg;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-frame-update-pill[data-update-status='available']::before {
+    animation: none;
+    background: conic-gradient(
+      from 0deg,
+      rgba(120, 53, 15, 0.45) 0deg,
+      rgba(120, 53, 15, 0.45) 360deg
+    );
+  }
+}

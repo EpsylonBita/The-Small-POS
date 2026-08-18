@@ -165,8 +165,15 @@ test('AppWindowFrame keeps update access visible and uses compact no-drag window
   assert.match(source, /data-update-status=\{update\.status\}/);
   assert.match(source, /statusIcon/);
   assert.match(source, /updateTone\(update\.status, isDark\)/);
-  assert.match(source, /absolute left-1\/2 top-1\/2/);
-  assert.match(source, /-translate-x-1\/2 -translate-y-1\/2/);
+  // The pill lives BELOW the bar (founder spec 2026-08-18): centred on the
+  // bar it covered the natural grab area — a no-drag zone — so the window
+  // read as "not draggable". The bar keeps its own clean surface.
+  assert.match(source, /app-frame-update-pill/);
+  assert.match(source, /absolute left-1\/2 top-full/);
+  assert.doesNotMatch(source, /data-app-frame-update[\s\S]{0,600}-translate-y-1\/2/);
+  assert.match(source, /import '\.\/AppWindowFrame\.css'/);
+  // Black letters on the solid yellow surface in BOTH themes.
+  assert.doesNotMatch(source, /text-amber-100/);
 
   for (const control of ['minimize', 'fullscreen', 'close']) {
     assert.match(source, new RegExp(`data-app-window-control="${control}"`));
@@ -224,7 +231,13 @@ test('App wires updater state into the frame on login and main POS routes', () =
   assert.match(source, /if \(status === 'not-available' \|\| status === 'checking'\) \{/);
   assert.match(source, /const hasActionableUpdate =/);
   assert.match(source, /if \(!hasActionableUpdate\) \{/);
-  assert.match(source, /onOpen: autoUpdater\.openUpdateDialog/);
+  // The pill's onOpen is a wrapper, not the raw dialog opener: clicking the
+  // "available" announcement records the version as seen for THIS run
+  // (founder spec 2026-08-18 — the pill returns on the next launch, or for a
+  // different version), and only then opens the dialog.
+  assert.match(source, /setUpdatePillSeenForVersion\(availableVersion\)/);
+  assert.match(source, /updatePillSeenForVersion === availableVersion/);
+  assert.match(source, /autoUpdater\.openUpdateDialog\(\)/);
   assert.match(source, /autoUpdater\.currentVersion\.toLowerCase\(\) !== 'unknown'/);
   assert.match(source, /const openUpdateCheck = useCallback/);
   assert.match(source, /event\.key\.toLowerCase\(\) === 'u'/);

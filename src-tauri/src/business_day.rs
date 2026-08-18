@@ -200,10 +200,17 @@ pub(crate) fn current_business_day_report_date_at(
 /// The `+00:00` suffix (never `Z`) is deliberate: `created_at` rows end in
 /// `+00:00`, and lexicographic comparison of an exactly-equal second against a
 /// `Z`-suffixed cutoff would order `'+' < 'Z'` and wrongly exclude the row.
+// Test-only since the Z-anchored day shipped: production retention/view runs
+// through `retention_cutoff_utc` (last Z report, floored to the oldest open
+// shift), never a clock boundary — "τίποτα δεν διαγράφεται αν δεν γίνει
+// αναφορά Ζ". The cfg(test) gate makes the old clock cutoff uncallable from
+// release code while the tests below keep pinning the `+00:00` suffix trap.
+#[cfg(test)]
 pub(crate) fn current_business_day_start_utc(conn: &Connection, now: DateTime<Local>) -> String {
     business_day_start_utc_at_minutes(now, resolve_business_day_start_minutes(conn))
 }
 
+#[cfg(test)]
 fn business_day_start_utc_at_minutes(now: DateTime<Local>, start_minutes: u32) -> String {
     use chrono::{NaiveDate, TimeZone, Utc};
 
@@ -273,6 +280,56 @@ pub(crate) fn shift_contains_timestamp(
 
 pub(crate) fn stored_period_start(conn: &Connection) -> Option<String> {
     db::get_setting(conn, "system", "last_z_report_timestamp")
+}
+
+/// The local ledger's retention cutoff under the founder's day model
+/// (stated 2026-08-18, verbatim): «όλα πρέπει να είναι άνοιγμα ημέρας —
+/// κλείσιμο ημέρας, όχι βάση ώρας ή ημέρας· ένα τερματικό μπορεί να ανοίγει
+/// σήμερα και να κλείνει μετά από 5 μέρες, ή σε 2 ώρες». A terminal's
+/// working day is opened by its first activity and closed ONLY by a Z
+/// report — never by a clock or a calendar.
+///
+/// The cutoff is therefore the moment the last Z was generated: everything
+/// before it belongs to settled, reported days and may be pruned locally
+/// (the server keeps it forever); everything after it is the open day and
+/// must survive. One refinement: a still-active staff shift that CROSSES
+/// the last Z keeps its whole story — the cutoff is floored to the oldest
+/// open shift's check-in, so closing another colleague's day can never hide
+/// an open one's orders.
+///
+/// `None` means "no Z has ever closed a day on this terminal": nothing may
+/// be pruned and the ledger read stays unbounded. Deletion is EARNED by a Z,
+/// never by time passing. (Observed live 2026-08-18: overnight orders made
+/// during an open check-in vanished from the till at a clock boundary while
+/// their shift was still active — the clock-anchored cutoff this replaces.)
+pub(crate) fn retention_cutoff_utc(conn: &Connection) -> Option<String> {
+    let last_z = stored_period_start(conn)
+        .as_deref()
+        .and_then(parse_rfc3339)?;
+
+    let open_shift_floor = conn
+        .query_row(
+            "SELECT MIN(check_in_time) FROM staff_shifts WHERE status = 'active'",
+            [],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten();
+    let open_shift_floor = open_shift_floor.as_deref().and_then(parse_rfc3339);
+
+    let cutoff = match open_shift_floor {
+        Some(floor) if floor < last_z => floor,
+        _ => last_z,
+    };
+    // `+00:00`, never `Z`: lexicographically '+' < 'Z', so an equal-second
+    // row would be wrongly excluded by a 'Z'-suffixed cutoff. Seconds
+    // precision truncates the cutoff EARLIER, which errs toward keeping and
+    // showing a boundary row — the safe direction on both paths.
+    Some(
+        cutoff
+            .with_timezone(&chrono::Utc)
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, false),
+    )
 }
 
 fn infer_branch_period_start(
