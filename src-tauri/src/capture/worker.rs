@@ -123,6 +123,16 @@ const ATTACHMENTS_PATH: &str = "/api/pos/suppliers/import/attachments";
 const OCR_PATH: &str = "/api/pos/suppliers/import/ocr";
 const OCTET_STREAM: &str = "application/octet-stream";
 
+/// Recognition gets its own request budget instead of the 30-second API
+/// default. On a cold serverless start the OCR route creates a recognition
+/// worker and may fetch language packs before answering — observed worst case
+/// just under a minute. With the default budget the client hung up at exactly
+/// 30s, the capture re-queued, and the identical doomed request repeated for
+/// a day (51 attempts) while the server kept doing work nobody received.
+/// Generous is correct here: the worker processes one document at a time and
+/// the user is never waiting on this screen (R6.2 — results surface later).
+const OCR_RECOGNITION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
 /// Statuses the worker is responsible for moving forward. `capturing` is the
 /// user's, `ready_review` is the user's, and the terminal states are nobody's.
 ///
@@ -702,11 +712,12 @@ async fn advance_document(
     }
     emit_status(app, &capture_id, CaptureStatus::Reading, None);
 
-    let recognition = crate::admin_fetch_detailed(
+    let recognition = crate::admin_fetch_detailed_with_timeout(
         Some(db.as_ref()),
         OCR_PATH,
         "POST",
         Some(json!({ "storageKeys": ordered })),
+        OCR_RECOGNITION_TIMEOUT,
     )
     .await;
 
@@ -723,6 +734,12 @@ async fn advance_document(
             info!(capture_id = %capture_id, "Captured invoice is ready to check");
         }
         Err(error) => {
+            // A transient failure re-queues with no reason recorded anywhere
+            // (DB, event, or UI) — this log line is deliberately the one place
+            // the actual transport error survives. Removing it returns the
+            // worker to retrying invisibly for days, which is how a torn-off
+            // storage download and a too-short client timeout each hid here.
+            warn!(capture_id = %capture_id, error = ?error, "Invoice recognition failed; capture will retry");
             let failure = classify_admin_error(&error);
             let status = {
                 let conn = lock(db)?;

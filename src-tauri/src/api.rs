@@ -12,7 +12,13 @@ use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 /// Default timeout for API requests (30 seconds).
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+///
+/// Callers whose server-side work legitimately outlasts this (today: the
+/// invoice OCR recognition step, which on a cold serverless start creates a
+/// recognition worker and fetches language packs before it can answer) must
+/// pass their own budget through [`fetch_from_admin_detailed_with_timeout`]
+/// instead of inheriting this one.
+pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const POS_CLIENT_VERSION_HEADER: &str = "x-pos-client-version";
 const POS_CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -538,6 +544,25 @@ pub async fn fetch_from_admin_detailed(
     method: &str,
     body: Option<Value>,
 ) -> Result<Value, AdminFetchError> {
+    fetch_from_admin_detailed_with_timeout(admin_url, api_key, path, method, body, DEFAULT_TIMEOUT)
+        .await
+}
+
+/// [`fetch_from_admin_detailed`] with a caller-chosen request timeout.
+///
+/// Exists for the rare request whose server-side work is *expected* to outlast
+/// [`DEFAULT_TIMEOUT`]. The OCR recognition call was the proof: the admin
+/// side finishes cold starts in ~a minute, but the client gave up at exactly
+/// 30s every time — the capture then re-queued and repeated the same doomed
+/// request forever, so the server did the work and nobody ever received it.
+pub async fn fetch_from_admin_detailed_with_timeout(
+    admin_url: &str,
+    api_key: &str,
+    path: &str,
+    method: &str,
+    body: Option<Value>,
+    timeout: Duration,
+) -> Result<Value, AdminFetchError> {
     let base = resolve_admin_base(admin_url)?;
     let resolved_api_key =
         extract_api_key_from_connection_string(api_key).unwrap_or_else(|| api_key.to_string());
@@ -556,7 +581,7 @@ pub async fn fetch_from_admin_detailed(
     let terminal_id = resolve_terminal_id(api_key)?;
 
     let mut req = pos_request(client, http_method, &full_url)
-        .timeout(DEFAULT_TIMEOUT)
+        .timeout(timeout)
         .header("X-POS-API-Key", resolved_api_key)
         .header("x-terminal-id", &terminal_id)
         .header("Content-Type", "application/json");

@@ -365,11 +365,32 @@ async fn admin_fetch_detailed(
     method: &str,
     body: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, api::AdminFetchError> {
+    admin_fetch_detailed_with_timeout(db, path, method, body, api::DEFAULT_TIMEOUT).await
+}
+
+/// [`admin_fetch_detailed`] with a caller-chosen request timeout, for the
+/// rare call whose server-side work is expected to outlast the default —
+/// see `api::fetch_from_admin_detailed_with_timeout` for why this exists.
+async fn admin_fetch_detailed_with_timeout(
+    db: Option<&db::DbState>,
+    path: &str,
+    method: &str,
+    body: Option<serde_json::Value>,
+    timeout: std::time::Duration,
+) -> Result<serde_json::Value, api::AdminFetchError> {
     validate_admin_api_path(path)?;
 
     let (normalized_admin_url, api_key) = resolve_admin_endpoint(db).await?;
 
-    api::fetch_from_admin_detailed(&normalized_admin_url, &api_key, path, method, body).await
+    api::fetch_from_admin_detailed_with_timeout(
+        &normalized_admin_url,
+        &api_key,
+        path,
+        method,
+        body,
+        timeout,
+    )
+    .await
 }
 
 /// Send a **raw byte body** to the admin dashboard over the terminal's
