@@ -1,0 +1,36 @@
+/*
+ * OrderCard de-glass treatment (founder-approved visual/perf change).
+ *
+ * Every order card used to be its own `backdrop-blur-sm` compositor surface,
+ * and overdue delivery cards ran an infinite `animate-pulse` over FOUR stacked
+ * inset box-shadows — 38 visible cards meant 38 live blur layers repainting
+ * forever. The blur is gone (the card now paints a solid colour sampled from
+ * what the blur looked like over the app gradient), and the overdue pulse is
+ * finite: it draws attention for a few cycles, then settles into a steady
+ * high-contrast red state (single inset shadow + red border/left edge, all
+ * still applied via Tailwind classes in OrderCard.tsx).
+ *
+ * 4 iterations x 1.2s ~= 5 seconds of pulsing per appearance, then zero
+ * further animation work. The keyframes end at opacity 1, so the card holds
+ * the fully-lit overdue treatment once the animation stops.
+ */
+
+@keyframes order-card-overdue-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+
+.order-card-overdue-pulse {
+  animation: order-card-overdue-pulse 1.2s ease-in-out 4;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .order-card-overdue-pulse {
+    animation: none;
+  }
+}

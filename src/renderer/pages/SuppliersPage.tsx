@@ -67,8 +67,10 @@ import {
   deviceKey,
   doubleCheckCount,
   mapRecognitionToDraft,
+  mergeDraftOverPrefill,
   needsDoubleCheck,
   suggestPurchaseOrders,
+  type StoredCaptureDraft,
 } from '../utils/capture-review';
 import type { CaptureSourceConfig, ConfidenceTier } from '../types/supplier-capture';
 
@@ -882,14 +884,17 @@ const SuppliersPage: React.FC = () => {
   const openCaptureReview = useCallback(
     (document: CaptureDocumentRow) => {
       const prefill = mapRecognitionToDraft(document.recognition);
-      const draft = document.draft;
-      const draftRowsFromDraft = Array.isArray(draft?.rows)
-        ? (draft?.rows as ImportRawRow[])
-        : null;
-
-      const rows = draftRowsFromDraft ?? prefill.rows;
-      const supplier = (draft?.supplier as Record<string, string> | undefined) ?? prefill.supplier;
-      const invoice = (draft?.invoice as Record<string, string> | undefined) ?? prefill.invoice;
+      // Field-aware merge, not `draft ?? prefill`: the capture pipeline stores
+      // an all-empty placeholder draft at scan time, and the naive precedence
+      // let that placeholder beat a successful read — the first recognition
+      // that ever returned data opened as a blank form with its extracted
+      // phone, ΑΦΜ and invoice date silently discarded. Real edits still win
+      // (R8.6); blanks are filled from the recognition.
+      const { rows: mergedRows, supplier, invoice } = mergeDraftOverPrefill(
+        document.draft as StoredCaptureDraft | null,
+        prefill,
+      );
+      const rows = mergedRows as ImportRawRow[];
 
       setSupplierName(supplier.name || '');
       setSupplierEmail(supplier.email || '');

@@ -22,7 +22,8 @@ import { useTheme } from '../contexts/theme-context';
 import { toast } from 'react-hot-toast';
 import OrderDetailsModal from '../components/modals/OrderDetailsModal';
 import { formatCurrency } from '../utils/format';
-import { formatCompactOrderNumberForDisplay, resolveMergedOrderNumber } from '../utils/orderNumberUtils';
+import { formatCompactOrderNumberForDisplay } from '../utils/orderNumberUtils';
+import { mergeHybridOrders, toIdentitySet } from '../utils/hybridOrderMerge';
 import { resolveTableServiceCustomerNumber } from '../utils/tableOrderFlow';
 import { getBridge, isBrowser, offEvent, onEvent } from '../../lib';
 
@@ -210,63 +211,6 @@ const normalizeOrder = (raw: any, source: 'local' | 'remote'): Order | null => {
     cancelled_at: asString(raw.cancelled_at) || asString(raw.cancelledAt),
     source,
   };
-};
-
-const toIdentitySet = (order: Order): Set<string> => {
-  const keys = [
-    order.id,
-    order.supabase_id,
-    order.client_order_id,
-    order.client_request_id,
-    order.order_number,
-  ]
-    .filter((v): v is string => !!v)
-    .map((v) => v.trim().toLowerCase());
-  return new Set(keys);
-};
-
-const sharesIdentity = (a: Order, b: Order): boolean => {
-  const aKeys = toIdentitySet(a);
-  const bKeys = toIdentitySet(b);
-  for (const key of aKeys) {
-    if (bKeys.has(key)) return true;
-  }
-  return false;
-};
-
-const isPendingOrQueuedLocal = (order: Order): boolean => {
-  const syncStatus = (order.sync_status || '').toLowerCase();
-  return order.source === 'local' && (syncStatus === 'pending' || syncStatus === 'queued');
-};
-
-const mergeHybridOrders = (localOrders: Order[], remoteOrders: Order[]): Order[] => {
-  const merged: Order[] = [];
-  const upsert = (incoming: Order) => {
-    const index = merged.findIndex((existing) => sharesIdentity(existing, incoming));
-    if (index === -1) {
-      merged.push(incoming);
-      return;
-    }
-
-    const existing = merged[index];
-    if (isPendingOrQueuedLocal(existing) && incoming.source === 'remote') {
-      return;
-    }
-
-    const existingTs = new Date(existing.updated_at).getTime();
-    const incomingTs = new Date(incoming.updated_at).getTime();
-    if (Number.isNaN(existingTs) || incomingTs >= existingTs) {
-      merged[index] = {
-        ...existing,
-        ...incoming,
-        order_number: resolveMergedOrderNumber(existing.order_number, incoming.order_number),
-      };
-    }
-  };
-
-  localOrders.forEach(upsert);
-  remoteOrders.forEach(upsert);
-  return merged;
 };
 
 const extractOrderArray = (raw: any): any[] => {

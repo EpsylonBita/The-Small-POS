@@ -287,7 +287,7 @@ const KitchenDisplayPage: React.FC = () => {
   } = useResolvedPosIdentity('branch');
   const localOrders = useOrderStore((state) => state.orders);
   const loadLocalOrders = useOrderStore((state) => state.loadOrders);
-  const updateOrderStatus = useOrderStore((state) => state.updateOrderStatus);
+  const updateOrderStatusDetailed = useOrderStore((state) => state.updateOrderStatusDetailed);
   const localOrderLookup = useMemo(() => {
     const lookup = new Map<string, Record<string, unknown>>();
     localOrders.forEach((order) => {
@@ -705,8 +705,12 @@ const KitchenDisplayPage: React.FC = () => {
     }
 
     if (order.source === 'local-order') {
-      const ok = await updateOrderStatus(order.sourceOrderId || order.id, newStatus);
-      if (!ok) {
+      // The board already moved the ticket optimistically — that movement is
+      // the success feedback, so only a failure speaks (localized, where the
+      // store's old hardcoded-English toast came from).
+      const { success } = await updateOrderStatusDetailed(order.sourceOrderId || order.id, newStatus);
+      if (!success) {
+        toast.error(t('orders.messages.statusUpdateFailed'));
         fetchOrders();
       }
       return;

@@ -167,6 +167,77 @@ export function mapRecognitionToDraft(
   };
 }
 
+// ---------------------------------------------------------------------------
+// Draft ⊕ recognition merge (R8.6)
+// ---------------------------------------------------------------------------
+
+/** The draft shape `capture_documents.draft_json` stores. */
+export interface StoredCaptureDraft {
+  rows?: unknown;
+  supplier?: unknown;
+  invoice?: unknown;
+}
+
+/**
+ * A row with nothing a person could have typed in it. Quantity, unit and
+ * minStockLevel are ignored on purpose — the capture-time placeholder row
+ * already carries `1`, `'pcs'` and `0`, so they cannot distinguish a template
+ * from authorship.
+ */
+function isBlankDraftRow(raw: unknown): boolean {
+  if (!raw || typeof raw !== 'object') return true;
+  const record = raw as Record<string, unknown>;
+  const authored = ['name', 'nameEl', 'sku', 'barcode', 'category', 'subcategory', 'notes'].some(
+    (key) => typeof record[key] === 'string' && (record[key] as string).trim() !== '',
+  );
+  const cost = record.cost;
+  return !authored && !(typeof cost === 'number' && cost > 0);
+}
+
+function fillBlanks<T extends object>(draft: unknown, prefill: T): T {
+  const source = draft && typeof draft === 'object' ? (draft as Record<string, unknown>) : {};
+  const merged: T = { ...prefill };
+  for (const key of Object.keys(prefill)) {
+    const value = source[key];
+    if (typeof value === 'string' && value.trim() !== '') {
+      (merged as Record<string, string>)[key] = value;
+    }
+  }
+  return merged;
+}
+
+/**
+ * What the drawer should actually open with, given a stored draft AND a
+ * recognition prefill.
+ *
+ * R8.6 says saved review *edits* win over the raw recognition — but the
+ * capture pipeline stores an all-empty placeholder draft at scan time, long
+ * before anyone edits anything. A naive `draft ?? prefill` therefore let the
+ * placeholder win over a successful read, and the first recognition that ever
+ * returned data in production (capture fa7cfbbe, 2026-08-18) opened as a
+ * blank form with its extracted phone, ΑΦΜ and invoice date silently
+ * discarded. The rule enforced here: a draft value wins only where a person
+ * could actually have put it —
+ *
+ * - supplier/invoice fields: field by field, a non-empty draft value wins,
+ *   an empty one is filled from the recognition;
+ * - rows: the draft's rows win only if at least one row shows authorship,
+ *   otherwise the recognition's rows are used.
+ */
+export function mergeDraftOverPrefill(
+  draft: StoredCaptureDraft | null | undefined,
+  prefill: CaptureReviewPrefill,
+): { rows: CaptureDraftRow[]; supplier: CaptureDraftSupplier; invoice: CaptureDraftInvoice } {
+  const draftRows = Array.isArray(draft?.rows) ? (draft?.rows as CaptureDraftRow[]) : null;
+  const rowsAuthored = draftRows !== null && draftRows.some((row) => !isBlankDraftRow(row));
+
+  return {
+    rows: rowsAuthored && draftRows ? draftRows : prefill.rows,
+    supplier: fillBlanks(draft?.supplier, prefill.supplier),
+    invoice: fillBlanks(draft?.invoice, prefill.invoice),
+  };
+}
+
 /**
  * Whether a row should carry the "double-check this" highlight (R7.1).
  *

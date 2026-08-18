@@ -15,6 +15,7 @@ import {
 import type { PaymentIntegrityErrorPayload } from '../../lib/ipc-contracts';
 import { pollFiscalReceiptStatus } from '../services/fiscal-status';
 import { sortOrdersOldestFirst } from '../utils/order-sorting';
+import { debugLog } from '../utils/debugLog';
 import { getVisibleOrderNumber } from '../utils/orderNumberUtils';
 
 // Track self-created order IDs to suppress "new order received" toasts for own orders.
@@ -475,7 +476,7 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
 
       // Listen for real-time order updates from main process
       const handleOrderRealtimeUpdate = (orderData: Partial<Order>) => {
-        console.log('📡 Received real-time order update (remote wins):', orderData);
+        debugLog('📡 Received real-time order update (remote wins):', orderData);
 
         // Always accept remote: merge/overwrite local snapshot with remote payload
         set((state) => {
@@ -981,18 +982,16 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
     },
 
     updateOrderStatus: async (orderId: string, status: Order['status'], options?: UpdateOrderStatusOptions) => {
+      // Deliberately no toast here. The store used to announce the outcome in
+      // hardcoded English while the calling screen announced the same action
+      // through i18n — staff saw every action twice, in two languages. The
+      // screen that owns the action owns the notification; the store only
+      // reports the result.
       const result = await get().updateOrderStatusDetailed(orderId, status, options);
-      if (result.success) {
-        toast.success('Order status updated');
-        return true;
-      }
-
-      if (!result.paymentIntegrityPayload) {
+      if (!result.success && !result.paymentIntegrityPayload) {
         console.error('Failed to update order status:', result.errorMessage);
-        toast.error(result.errorMessage || ERROR_MESSAGES.GENERIC_ERROR);
       }
-
-      return false;
+      return result.success;
     },
 
     createOrder: async (orderData: Partial<Order>) => {
@@ -1368,14 +1367,12 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
 
 
           get()._invalidateCache();
-          toast.success('Order approved');
           return true;
         }
         throw new Error(result?.error || 'Failed to approve order');
       } catch (error) {
         const posError = ErrorFactory.businessLogic('Failed to approve order', { error });
         get()._setError(posError);
-        toast.error('Failed to approve order');
         return false;
       } finally {
         get()._setLoading(operation, false);
@@ -1407,14 +1404,12 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
 
 
           get()._invalidateCache();
-          toast.success('Order declined');
           return true;
         }
         throw new Error(result?.error || 'Failed to decline order');
       } catch (error) {
         const posError = ErrorFactory.businessLogic('Failed to decline order', { error });
         get()._setError(posError);
-        toast.error('Failed to decline order');
         return false;
       } finally {
         get()._setLoading(operation, false);
@@ -1463,14 +1458,12 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
 
 
           get()._invalidateCache();
-          toast.success(driverName ? `Driver assigned: ${driverName}` : 'Driver assigned');
           return true;
         }
         throw new Error(result?.error || 'Failed to assign driver');
       } catch (error) {
         const posError = ErrorFactory.businessLogic('Failed to assign driver', { error });
         get()._setError(posError);
-        toast.error('Failed to assign driver');
         return false;
       } finally {
         get()._setLoading(operation, false);

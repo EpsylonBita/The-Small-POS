@@ -2129,10 +2129,42 @@ pub(crate) fn remote_order_visible_to_current_terminal(
     ))
 }
 
-/// Get all orders, most recent first.
+/// Get the current operational day's orders.
+///
+/// The ledger is day-scoped by design: the daily prune
+/// (`commands::sync::clear_old_orders_before`) deletes every pre-today row
+/// except a live, never-settled table tab (gap review P0-03). This read
+/// mirrors that exact retention set — today's rows plus any still-open
+/// unsettled table tab from a previous day — so rows the prune is about to
+/// delete are never parsed and re-serialized on every render event. The day
+/// boundary is the same `Local` calendar date the prune uses.
 pub fn get_all_orders(db: &DbState) -> Result<Vec<Value>, String> {
+    // The cutoff is a UTC INSTANT, never a local date string: `created_at` is
+    // stored in UTC, and a local-date prefix comparison loses every order made
+    // between local midnight and UTC midnight (observed live at 01:12 local —
+    // a fresh order vanished from the till on the next refetch).
+    let cutoff_utc = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        crate::business_day::current_business_day_start_utc(&conn, Local::now())
+    };
+    get_all_orders_since_utc(db, &cutoff_utc)
+}
+
+/// Day-bounded ledger read backing [`get_all_orders`].
+///
+/// `cutoff_utc` is an RFC3339 UTC instant (`+00:00` offset); a row is returned
+/// when its `created_at` is on/after that instant OR it is an open unsettled
+/// table tab (the rows [`crate::commands::sync::clear_old_orders_before`]
+/// keeps). Full-timestamp comparison in the SAME clock as the column — the
+/// stored strings are uniform RFC3339 UTC, so lexicographic order is
+/// chronological order.
+pub(crate) fn get_all_orders_since_utc(
+    db: &DbState,
+    cutoff_utc: &str,
+) -> Result<Vec<Value>, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let visibility_scope = load_order_terminal_visibility_scope(&conn);
+    let open_table_tab = crate::business_day::open_unsettled_table_tab_expr("orders");
     // W6: `orders.payment_method` was dropped in v55. The SELECT keeps
     // the same column ordering (`paymentMethod` stays at index 25)
     // by substituting a derive subquery that matches
@@ -2140,7 +2172,7 @@ pub fn get_all_orders(db: &DbState) -> Result<Vec<Value>, String> {
     // don't change — the JSON field is still populated, just computed.
     let mut stmt = conn
         .prepare(
-            "SELECT id, order_number, display_order_number, customer_name, customer_phone, customer_email, customer_id,
+            &format!("SELECT id, order_number, display_order_number, customer_name, customer_phone, customer_email, customer_id,
                     items, total_amount, tax_amount, subtotal, status,
                     cancellation_reason, order_type, table_number, delivery_address,
                     delivery_notes, name_on_ringer, special_instructions,
@@ -2176,12 +2208,13 @@ pub fn get_all_orders(db: &DbState) -> Result<Vec<Value>, String> {
                     integration_environment, is_test
              FROM orders
              WHERE COALESCE(is_ghost, 0) = 0
-             ORDER BY created_at ASC",
+               AND (created_at >= ?1 OR {open_table_tab})
+             ORDER BY created_at ASC"),
         )
         .map_err(|e| e.to_string())?;
 
     let rows = stmt
-        .query_map([], |row| {
+        .query_map(params![cutoff_utc], |row| {
             // Parse items JSON
             let items_str: String = row.get(7)?;
             let items: Value = serde_json::from_str(&items_str).unwrap_or_else(|e| {
@@ -19924,6 +19957,9 @@ mod tests {
         set_terminal_setting(&db, "owner_terminal_db_id", "owner-test-db");
         set_terminal_setting(&db, "source_terminal_id", "terminal-efe99d27");
 
+        // `get_all_orders` is day-bounded to the current operational day, so
+        // these isolation fixtures must be created "today" to be visible.
+        let today = Local::now().format("%Y-%m-%d").to_string();
         {
             let conn = db.conn.lock().unwrap();
             conn.execute(
@@ -19932,10 +19968,9 @@ mod tests {
                     status, sync_status, terminal_id, created_at, updated_at
                  ) VALUES (
                     'prod-old-local', '#PROD', '[]', 18.4, 1840,
-                    'completed', 'synced', 'terminal-d80762ac',
-                    '2026-05-11T10:00:00Z', '2026-05-11T10:00:00Z'
+                    'completed', 'synced', 'terminal-d80762ac', ?1, ?1
                  )",
-                [],
+                params![format!("{today}T10:00:00Z")],
             )
             .unwrap();
             conn.execute(
@@ -19944,10 +19979,9 @@ mod tests {
                     status, sync_status, terminal_id, created_at, updated_at
                  ) VALUES (
                     'test-local', '#TEST', '[]', 4.2, 420,
-                    'cancelled', 'synced', 'terminal-efe99d27',
-                    '2026-05-11T10:01:00Z', '2026-05-11T10:01:00Z'
+                    'cancelled', 'synced', 'terminal-efe99d27', ?1, ?1
                  )",
-                [],
+                params![format!("{today}T10:01:00Z")],
             )
             .unwrap();
             conn.execute(
@@ -19958,9 +19992,9 @@ mod tests {
                  ) VALUES (
                     'test-owned-remote', '#TEST-REMOTE', '[]', 6.9, 690,
                     'completed', 'synced', 'owner-test-db', 'terminal-efe99d27', 'terminal-efe99d27',
-                    '2026-05-11T10:02:00Z', '2026-05-11T10:02:00Z'
+                    ?1, ?1
                  )",
-                [],
+                params![format!("{today}T10:02:00Z")],
             )
             .unwrap();
         }
@@ -19989,6 +20023,9 @@ mod tests {
         set_terminal_setting(&db, "owner_terminal_db_id", "owner-test-db");
         set_terminal_setting(&db, "source_terminal_id", "terminal-efe99d27");
 
+        // `get_all_orders` is day-bounded to the current operational day, so
+        // these isolation fixtures must be created "today" to be visible.
+        let today = Local::now().format("%Y-%m-%d").to_string();
         {
             let conn = db.conn.lock().unwrap();
             conn.execute(
@@ -19999,9 +20036,9 @@ mod tests {
                  ) VALUES (
                     'prod-remote', '#PROD', '[]', 18.4, 1840,
                     'pending', 'synced', 'owner-prod-db', 'terminal-d80762ac', 'terminal-d80762ac',
-                    '2026-05-11T10:00:00Z', '2026-05-11T10:00:00Z'
+                    ?1, ?1
                  )",
-                [],
+                params![format!("{today}T10:00:00Z")],
             )
             .unwrap();
             conn.execute(
@@ -20012,9 +20049,9 @@ mod tests {
                  ) VALUES (
                     'test-remote', '#TEST', '[]', 4.2, 420,
                     'pending', 'synced', 'owner-test-db', 'terminal-efe99d27', 'terminal-efe99d27',
-                    '2026-05-11T10:01:00Z', '2026-05-11T10:01:00Z'
+                    ?1, ?1
                  )",
-                [],
+                params![format!("{today}T10:01:00Z")],
             )
             .unwrap();
         }
@@ -20031,6 +20068,240 @@ mod tests {
             .collect();
 
         assert_eq!(ids, vec!["test-remote"]);
+    }
+
+    /// Seed one order row. `columns`/`values` beyond the base set let a test
+    /// shape prune-relevant fields (order_type, payment_status, table_number).
+    fn seed_day_bound_order(
+        conn: &Connection,
+        id: &str,
+        created_at: &str,
+        status: &str,
+        payment_status: &str,
+        order_type: &str,
+        table_number: Option<&str>,
+    ) {
+        conn.execute(
+            "INSERT INTO orders (
+                id, order_number, items, total_amount, total_amount_cents,
+                status, sync_status, payment_status, order_type, table_number,
+                created_at, updated_at
+             ) VALUES (?1, ?2, '[]', 10.0, 1000, ?3, 'synced', ?4, ?5, ?6, ?7, ?7)",
+            params![
+                id,
+                format!("#{id}"),
+                status,
+                payment_status,
+                order_type,
+                table_number,
+                created_at,
+            ],
+        )
+        .unwrap();
+    }
+
+    /// The read must return exactly the rows the daily prune
+    /// (`clear_old_orders_before`) would KEEP: today's rows plus a live,
+    /// never-settled table tab from a previous day. A stale settled row from
+    /// yesterday — a row the prune is about to delete — must NOT come back.
+    /// Dropping the day bound in `get_all_orders` turns this red.
+    #[test]
+    fn get_all_orders_excludes_rows_the_daily_prune_would_delete() {
+        let db = test_db();
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        let yesterday = (Local::now() - ChronoDuration::days(1))
+            .format("%Y-%m-%d")
+            .to_string();
+
+        {
+            let conn = db.conn.lock().unwrap();
+            // Stale, settled pickup from yesterday: the prune deletes it.
+            seed_day_bound_order(
+                &conn,
+                "stale-settled",
+                &format!("{yesterday}T09:00:00Z"),
+                "completed",
+                "paid",
+                "pickup",
+                None,
+            );
+            // Live table tab opened yesterday, still unsettled: the prune
+            // keeps it (gap review P0-03), so the read must too.
+            seed_day_bound_order(
+                &conn,
+                "stale-open-tab",
+                &format!("{yesterday}T22:00:00Z"),
+                "pending",
+                "pending",
+                "dine-in",
+                Some("5"),
+            );
+            // Today's row: always visible.
+            seed_day_bound_order(
+                &conn,
+                "today-order",
+                &format!("{today}T08:00:00Z"),
+                "pending",
+                "pending",
+                "pickup",
+                None,
+            );
+        }
+
+        let orders = get_all_orders_since_utc(&db, &format!("{today}T00:00:00+00:00"))
+            .expect("get all orders");
+        let ids: Vec<&str> = orders
+            .iter()
+            .filter_map(|order| order.get("id").and_then(Value::as_str))
+            .collect();
+
+        // created_at ASC: yesterday's live tab sorts before today's order.
+        assert_eq!(ids, vec!["stale-open-tab", "today-order"]);
+    }
+
+    /// A stale table tab is only carved out while it is genuinely live and
+    /// unsettled — a cancelled tab and a tab with settled payment activity
+    /// are dead history, exactly as the prune treats them.
+    #[test]
+    fn get_all_orders_day_bound_drops_dead_stale_table_tabs() {
+        let db = test_db();
+        let yesterday = (Local::now() - ChronoDuration::days(1))
+            .format("%Y-%m-%d")
+            .to_string();
+
+        {
+            let conn = db.conn.lock().unwrap();
+            // Cancelled tab from yesterday: dead, prune deletes it.
+            seed_day_bound_order(
+                &conn,
+                "stale-cancelled-tab",
+                &format!("{yesterday}T20:00:00Z"),
+                "cancelled",
+                "pending",
+                "dine-in",
+                Some("3"),
+            );
+            // Tab from yesterday with a completed payment row: settled
+            // activity, prune deletes it at rollover.
+            seed_day_bound_order(
+                &conn,
+                "stale-settled-tab",
+                &format!("{yesterday}T21:00:00Z"),
+                "pending",
+                "pending",
+                "dine-in",
+                Some("4"),
+            );
+            conn.execute(
+                "INSERT INTO order_payments (
+                    id, order_id, method, amount, status, created_at, updated_at
+                 ) VALUES (
+                    'pay-stale-tab', 'stale-settled-tab', 'cash', 10.0, 'completed',
+                    ?1, ?1
+                 )",
+                params![format!("{yesterday}T21:05:00Z")],
+            )
+            .unwrap();
+        }
+
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        let orders = get_all_orders_since_utc(&db, &format!("{today}T00:00:00+00:00"))
+            .expect("get all orders");
+        assert!(
+            orders.is_empty(),
+            "dead stale tabs must not be returned: {orders:?}"
+        );
+    }
+
+    /// The explicit operational-day parameter pins the boundary itself:
+    /// rows created on the given day stay, rows created before it go.
+    #[test]
+    fn get_all_orders_for_operational_day_bounds_at_the_given_day() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            seed_day_bound_order(
+                &conn,
+                "before-day",
+                "2026-05-10T23:59:59Z",
+                "completed",
+                "paid",
+                "pickup",
+                None,
+            );
+            seed_day_bound_order(
+                &conn,
+                "on-day",
+                "2026-05-11T00:00:00Z",
+                "completed",
+                "paid",
+                "pickup",
+                None,
+            );
+            seed_day_bound_order(
+                &conn,
+                "after-day",
+                "2026-05-12T07:00:00Z",
+                "pending",
+                "pending",
+                "pickup",
+                None,
+            );
+        }
+
+        let orders = get_all_orders_since_utc(&db, "2026-05-11T00:00:00+00:00")
+            .expect("get orders since cutoff");
+        let ids: Vec<&str> = orders
+            .iter()
+            .filter_map(|order| order.get("id").and_then(Value::as_str))
+            .collect();
+
+        assert_eq!(ids, vec!["on-day", "after-day"]);
+    }
+
+    /// The founder's 01:12 regression, pinned: local says 18 Aug, UTC still says
+    /// 17 Aug, and the old local-DATE filter (`substr(created_at,1,10) >=
+    /// '2026-08-18'`) dropped every order of the running evening — the first
+    /// order vanished from the till the moment the second one triggered a
+    /// refetch. The cutoff is now the business day's start as a UTC INSTANT
+    /// (17 Aug 04:00Z = 07:00 local), so the whole evening stays visible.
+    #[test]
+    fn orders_made_after_local_midnight_survive_the_refetch() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            // The founder's three orders, stamps taken from his own ledger.
+            for (id, stamp) in [
+                ("ord-00001", "2026-08-17T22:11:30+00:00"),
+                ("ord-00002", "2026-08-17T22:12:07+00:00"),
+                ("ord-00003", "2026-08-17T22:12:34+00:00"),
+            ] {
+                seed_day_bound_order(&conn, id, stamp, "pending", "paid", "pickup", None);
+            }
+            // Yesterday morning's settled order — before the business day began.
+            seed_day_bound_order(
+                &conn,
+                "ord-prior-morning",
+                "2026-08-17T03:59:59+00:00",
+                "completed",
+                "paid",
+                "pickup",
+                None,
+            );
+        }
+
+        let orders = get_all_orders_since_utc(&db, "2026-08-17T04:00:00+00:00")
+            .expect("get orders since business-day start");
+        let ids: Vec<&str> = orders
+            .iter()
+            .filter_map(|order| order.get("id").and_then(Value::as_str))
+            .collect();
+
+        assert_eq!(
+            ids,
+            vec!["ord-00001", "ord-00002", "ord-00003"],
+            "every order of the running evening must survive a refetch"
+        );
     }
 
     #[test]

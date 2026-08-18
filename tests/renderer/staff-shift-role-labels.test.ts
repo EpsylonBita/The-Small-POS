@@ -115,7 +115,7 @@ test('Round 313: the PIN step has a touch numeric keypad wired to enteredPin, wi
   // The Continue submit button lives in the hoisted check-in footer with the exact same gating, so it stays
   // the only click-submit and is visible at the bottom on first open.
   const footerStart = modalSource.indexOf('const renderCheckInFooter = () => {');
-  const footerEnd = modalSource.indexOf('// Debug logging', footerStart);
+  const footerEnd = modalSource.indexOf('// Keyboard Shortcuts', footerStart);
   assert.ok(footerStart > 0 && footerEnd > footerStart, 'renderCheckInFooter must exist');
   const footer = modalSource.slice(footerStart, footerEnd);
   assert.match(footer, /void handlePinSubmit\(\);/, 'the Continue button is the click-submit path');
@@ -219,7 +219,7 @@ test('start-shift wizard uses the yellow brand accent without orange or amber UI
   const rolePresentationStart = modalSource.indexOf('const ROLE_PRESENTATIONS');
   const rolePresentationEnd = modalSource.indexOf('const isErganiIntegration', rolePresentationStart);
   const checkInStart = modalSource.indexOf('const renderRoleBadge');
-  const checkInEnd = modalSource.indexOf('// Debug logging', checkInStart);
+  const checkInEnd = modalSource.indexOf('// Keyboard Shortcuts', checkInStart);
   assert.ok(rolePresentationStart > 0 && rolePresentationEnd > rolePresentationStart);
   assert.ok(checkInStart > 0 && checkInEnd > checkInStart);
 
@@ -244,7 +244,7 @@ test('start-shift disabled states keep readable text without fading the whole ca
     modalSource.indexOf('if (busyInfo)', busyCardStart) + 1,
   );
   const checkInFooterStart = modalSource.indexOf('const renderCheckInFooter');
-  const checkInFooterEnd = modalSource.indexOf('// Debug logging', checkInFooterStart);
+  const checkInFooterEnd = modalSource.indexOf('// Keyboard Shortcuts', checkInFooterStart);
   assert.ok(busyCardStart > 0 && busyCardEnd > busyCardStart);
   assert.ok(checkInFooterStart > 0 && checkInFooterEnd > checkInFooterStart);
 
@@ -267,7 +267,7 @@ test('cashier-first notice uses readable semantic text on its light yellow surfa
 
 test('start-shift person icons are standalone without decorative rounded icon tiles', () => {
   const checkInStart = modalSource.indexOf('const renderRoleBadge');
-  const checkInEnd = modalSource.indexOf('// Debug logging', checkInStart);
+  const checkInEnd = modalSource.indexOf('// Keyboard Shortcuts', checkInStart);
   assert.ok(checkInStart > 0 && checkInEnd > checkInStart);
   const checkIn = modalSource.slice(checkInStart, checkInEnd);
 

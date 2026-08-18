@@ -81,6 +81,7 @@ import {
 import TableOrderIcon from "./icons/TableOrderIcon";
 import PickupOrderIcon from "./icons/PickupOrderIcon";
 import { toLocalDateString } from "../utils/date";
+import { debugLog } from "../utils/debugLog";
 import {
   buildChangedReservationUpdate,
   reservationsService,
@@ -426,7 +427,6 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       filter,
       setFilter,
       isLoading,
-      updateOrderStatus,
       updateOrderStatusDetailed,
       loadOrders,
       silentRefresh,
@@ -1859,7 +1859,15 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       estimatedTime?: number,
     ) => {
       try {
-        await approveOrder(orderId, estimatedTime);
+        // The store no longer toasts (it used to say "Order approved" in
+        // hardcoded English on top of this screen's localized messages) —
+        // success and failure are both announced here, once, translated.
+        const ok = await approveOrder(orderId, estimatedTime);
+        if (ok) {
+          toast.success(t("orderApprovalPanel.approved"));
+        } else {
+          toast.error(t("orderDashboard.approveOrderFailed"));
+        }
         await loadOrders();
         setShowApprovalPanel(false);
         setSelectedOrderForApproval(null);
@@ -1872,7 +1880,12 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     // Handle order decline
     const handleDeclineOrder = async (orderId: string, reason: string) => {
       try {
-        await declineOrder(orderId, reason);
+        const ok = await declineOrder(orderId, reason);
+        if (ok) {
+          toast.success(t("orderApprovalPanel.declined"));
+        } else {
+          toast.error(t("orderDashboard.declineOrderFailed"));
+        }
         await loadOrders();
         setShowApprovalPanel(false);
         setSelectedOrderForApproval(null);
@@ -2685,7 +2698,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         return;
       }
 
-      console.log(
+      debugLog(
         "[handleCustomerSelectedDirect] Called with customer:",
         JSON.stringify(
           {
@@ -2698,7 +2711,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           2,
         ),
       );
-      console.log(
+      debugLog(
         "[handleCustomerSelectedDirect] Current orderType:",
         orderType,
       );
@@ -2709,7 +2722,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       const resolvedAddress = resolveCanonicalCustomerAddress(
         normalizedCustomer,
       );
-      console.log(
+      debugLog(
         "[handleCustomerSelectedDirect] resolvedAddress:",
         JSON.stringify(resolvedAddress, null, 2),
       );
@@ -2719,12 +2732,12 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         setDeliveryZoneInfo(null);
         const hasAddress =
           resolvedAddress?.street_address || normalizedCustomer.address;
-        console.log(
+        debugLog(
           "[handleCustomerSelectedDirect] Delivery check - hasAddress:",
           hasAddress,
         );
         if (!hasAddress) {
-          console.log(
+          debugLog(
             "[handleCustomerSelectedDirect] No address - opening addAddress modal",
           );
           toast.error(
@@ -2922,7 +2935,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         return;
       }
 
-      console.log(
+      debugLog(
         "[handleNewCustomerAdded] Called with customer:",
         JSON.stringify(
           {
@@ -2936,7 +2949,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           2,
         ),
       );
-      console.log("[handleNewCustomerAdded] Current orderType:", orderType);
+      debugLog("[handleNewCustomerAdded] Current orderType:", orderType);
 
       const normalizedCustomer = withMaterializedCustomerAddresses(
         customer as OrderFlowCustomer,
@@ -2944,7 +2957,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       const resolvedAddress = resolveCanonicalCustomerAddress(
         normalizedCustomer,
       );
-      console.log(
+      debugLog(
         "[handleNewCustomerAdded] resolvedAddress:",
         JSON.stringify(resolvedAddress, null, 2),
       );
@@ -2954,12 +2967,12 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         setDeliveryZoneInfo(null);
         const hasAddress =
           resolvedAddress?.street_address || normalizedCustomer.address;
-        console.log(
+        debugLog(
           "[handleNewCustomerAdded] Delivery check - hasAddress:",
           hasAddress,
         );
         if (!hasAddress) {
-          console.log(
+          debugLog(
             "[handleNewCustomerAdded] No address found - keeping addAddress modal open",
           );
           toast.error(
@@ -3009,7 +3022,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       }
 
       // Store the customer info and proceed to menu
-      console.log(
+      debugLog(
         "[handleNewCustomerAdded] Setting existingCustomer to:",
         normalizedCustomer?.name,
       );
@@ -3017,7 +3030,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
       const customerInfoData =
         buildCustomerInfoFromOrderFlowCustomer(normalizedCustomer);
-      console.log(
+      debugLog(
         "[handleNewCustomerAdded] Setting customerInfo to:",
         JSON.stringify(customerInfoData, null, 2),
       );
@@ -3026,14 +3039,14 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       setSpecialInstructions(customerInfoData.notes || "");
 
       // Close add customer modal and open menu modal
-      console.log("[handleNewCustomerAdded] Opening MenuModal");
+      debugLog("[handleNewCustomerAdded] Opening MenuModal");
       setShowAddCustomerModal(false);
       setShowMenuModal(true);
     };
 
     // Handler for saving customer info from modal (New Order Flow)
     const handleNewOrderCustomerInfoSave = (info: any) => {
-      console.log(
+      debugLog(
         "[handleNewOrderCustomerInfoSave] Called with info:",
         JSON.stringify(info, null, 2),
       );
@@ -3052,14 +3065,14 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         },
         notes: "",
       };
-      console.log(
+      debugLog(
         "[handleNewOrderCustomerInfoSave] Setting customerInfo:",
         JSON.stringify(customerInfoData, null, 2),
       );
       setCustomerInfo(customerInfoData);
 
       // Close customer info modal and open menu modal
-      console.log("[handleNewOrderCustomerInfoSave] Opening MenuModal");
+      debugLog("[handleNewOrderCustomerInfoSave] Opening MenuModal");
       setShowCustomerInfoModal(false);
       setShowMenuModal(true);
     };
@@ -3130,7 +3143,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
     // Helper functions for menu modal
     const getCustomerForMenu = () => {
-      console.log(
+      debugLog(
         "[getCustomerForMenu] BUILD v2026.01.05.1 - existingCustomer:",
         !!existingCustomer,
         "customerInfo:",
@@ -3145,7 +3158,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           phone_number: existingCustomer.phone,
           email: existingCustomer.email,
         };
-        console.log(
+        debugLog(
           "[getCustomerForMenu] Returning from existingCustomer:",
           result,
         );
@@ -3157,13 +3170,13 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           phone_number: customerInfo.phone,
           email: customerInfo.email,
         };
-        console.log(
+        debugLog(
           "[getCustomerForMenu] Returning from customerInfo:",
           result,
         );
         return result;
       }
-      console.log("[getCustomerForMenu] Returning null");
+      debugLog("[getCustomerForMenu] Returning null");
       return null;
     };
 
@@ -3174,7 +3187,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           )
         : null;
       if (resolvedAddress?.street_address) {
-        console.log(
+        debugLog(
           "[getSelectedAddress] Found canonical address from existingCustomer:",
           resolvedAddress.street_address,
         );
@@ -3185,7 +3198,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       if (customerInfo?.address) {
         const streetValue = customerInfo.address.street || "";
         if (streetValue) {
-          console.log(
+          debugLog(
             "[getSelectedAddress] Found address from customerInfo.address:",
             streetValue,
           );
@@ -3218,7 +3231,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           };
         }
       }
-      console.log(
+      debugLog(
         "[getSelectedAddress] No address found. existingCustomer:",
         !!existingCustomer,
         "customerInfo:",
@@ -3251,7 +3264,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
       if (isGhostOrder || autoPrintSuppressed) {
         const printResult: any = await bridge.payments.printReceipt(orderId);
-        console.log(
+        debugLog(
           "[OrderDashboard] Receipt print result:",
           printResult,
         );
@@ -3279,7 +3292,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       if (fiscalResult?.skipped) {
         return;
       }
-      console.log("[OrderDashboard] Fiscal print result:", fiscalResult);
+      debugLog("[OrderDashboard] Fiscal print result:", fiscalResult);
     };
 
     // Handle order completion from menu modal. Resolves false on failure so
@@ -3306,11 +3319,11 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         return outcome.completionResult;
       };
       try {
-        console.log(
+        debugLog(
           "[OrderDashboard.handleOrderComplete] orderData:",
           orderData,
         );
-        console.log(
+        debugLog(
           "[OrderDashboard.handleOrderComplete] orderData.items with notes:",
           orderData.items?.map((item: any) => ({
             name: item.name,
@@ -3318,31 +3331,31 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             special_instructions: item.special_instructions,
           })),
         );
-        console.log(
+        debugLog(
           "[OrderDashboard.handleOrderComplete] orderData.address:",
           orderData.address,
         );
-        console.log(
+        debugLog(
           "[OrderDashboard.handleOrderComplete] existingCustomer:",
           existingCustomer,
         );
-        console.log(
+        debugLog(
           "[OrderDashboard.handleOrderComplete] existingCustomer?.address:",
           existingCustomer?.address,
         );
-        console.log(
+        debugLog(
           "[OrderDashboard.handleOrderComplete] customerInfo:",
           customerInfo,
         );
-        console.log(
+        debugLog(
           "[OrderDashboard.handleOrderComplete] customerInfo?.address:",
           customerInfo?.address,
         );
-        console.log(
+        debugLog(
           "[OrderDashboard.handleOrderComplete] getSelectedAddress():",
           getSelectedAddress(),
         );
-        console.log(
+        debugLog(
           "[OrderDashboard.handleOrderComplete] selectedOrderType:",
           selectedOrderType,
         );
@@ -3365,12 +3378,12 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           const legacyCustomerAddress = existingCustomer?.address;
           const customerInfoAddress = customerInfo?.address;
 
-          console.log("[OrderDashboard.handleOrderComplete] addr:", addr);
-          console.log(
+          debugLog("[OrderDashboard.handleOrderComplete] addr:", addr);
+          debugLog(
             "[OrderDashboard.handleOrderComplete] legacyCustomerAddress:",
             legacyCustomerAddress,
           );
-          console.log(
+          debugLog(
             "[OrderDashboard.handleOrderComplete] customerInfoAddress:",
             customerInfoAddress,
           );
@@ -3451,11 +3464,11 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             }
           }
 
-          console.log(
+          debugLog(
             "[OrderDashboard.handleOrderComplete] deliveryAddress built:",
             deliveryAddress,
           );
-          console.log(
+          debugLog(
             "[OrderDashboard.handleOrderComplete] Individual fields:",
             {
               deliveryCity,
@@ -3472,7 +3485,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             orderData.customer?.id,
           );
           if (!deliveryAddress && persistedCustomerId) {
-            console.log(
+            debugLog(
               "[OrderDashboard.handleOrderComplete] Attempting database fallback for customerId:",
               persistedCustomerId,
             );
@@ -3486,7 +3499,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                     dbCustomer as OrderFlowCustomer,
                   ),
                 );
-                console.log(
+                debugLog(
                   "[OrderDashboard.handleOrderComplete] Database customer found:",
                   dbCustomer,
                 );
@@ -3535,7 +3548,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                   }
                   if (!deliveryAddress)
                     deliveryAddress = parts.filter(Boolean).join(", ");
-                  console.log(
+                  debugLog(
                     "[OrderDashboard.handleOrderComplete] Database fallback address from addresses[]:",
                     deliveryAddress,
                   );
@@ -3543,7 +3556,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                 // Check legacy customer.address field (simple string)
                 else if (dbCustomer.address) {
                   deliveryAddress = dbCustomer.address;
-                  console.log(
+                  debugLog(
                     "[OrderDashboard.handleOrderComplete] Database fallback address from customer.address:",
                     deliveryAddress,
                   );
@@ -3737,9 +3750,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           if (paymentResult?.success === false) {
             throw new Error(paymentResult.error || "Failed to record payment");
           }
-          await silentRefresh().catch((err) =>
-            console.debug("[OrderDashboard] Silent refresh after fallback payment failed:", err),
-          );
+          await silentRefresh().catch((err) => {
+            console.debug("[OrderDashboard] Silent refresh after fallback payment failed:", err);
+          });
           finalizeCreatedOrderPayment(existingOrderId, isGhostOrder, {
             askBeforePrint: askBeforeFallbackPrint,
             autoPrintSuppressed: askBeforeFallbackPrint,
@@ -3874,7 +3887,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           staff_shift_id: isTableOrder ? actualWaiterShiftId || null : undefined,
         };
 
-        console.log(
+        debugLog(
           "[OrderDashboard] Creating order with data:",
           orderToCreate,
         );
@@ -3887,9 +3900,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
           const roomCharge = (result as any).roomCharge;
           if (isRoomChargePayment && roomCharge?.applied === false && result.orderId) {
-            await silentRefresh().catch((err) =>
-              console.debug("[OrderDashboard] Silent refresh after room-charge fallback failed:", err),
-            );
+            await silentRefresh().catch((err) => {
+              console.debug("[OrderDashboard] Silent refresh after room-charge fallback failed:", err);
+            });
             orderData.paymentData.existingOrderId = result.orderId;
             orderData.paymentData.existingOrderNumber = result.orderNumber;
             orderData.paymentData.roomChargeFallback = true;
@@ -4063,9 +4076,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             setTableStatusFilter("occupied");
           }
           // Refresh orders in background - don't block UI
-          silentRefresh().catch((err) =>
-            console.debug("[OrderDashboard] Background refresh error:", err),
-          );
+          silentRefresh().catch((err) => {
+            console.debug("[OrderDashboard] Background refresh error:", err);
+          });
 
           if (!isGhostOrder && couponId && result.orderId) {
             couponRedemptionService
@@ -5409,7 +5422,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             toast.error(t("orderDashboard.noCancelledOrdersSelected"));
           } else {
             for (const order of cancelledOrders) {
-              const success = await updateOrderStatus(order.id, "pending");
+              const { success } = await updateOrderStatusDetailed(
+                order.id,
+                "pending",
+              );
               if (!success) {
                 toast.error(
                   t("orderDashboard.returnToOrdersFailed", {
@@ -5588,7 +5604,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         // server's `cancellation_reason` column and shows up in both the
         // pos-tauri order detail view and the admin dashboard.
         for (const orderId of pendingCancelOrders) {
-          const success = await updateOrderStatus(
+          const { success } = await updateOrderStatusDetailed(
             orderId,
             "cancelled",
             cancellationOptions,
@@ -5948,7 +5964,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             orderToEdit.order_number || orderToEdit.orderNumber,
           );
 
-          console.log(
+          debugLog(
             "[OrderDashboard] handleEditOrder - orderId:",
             orderToEdit.id,
             "supabaseId:",
@@ -6336,7 +6352,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     // Get order items for the first selected order (for editing)
     const getSelectedOrderItems = () => {
       if (pendingEditOrders.length === 0) {
-        console.log(
+        debugLog(
           "[OrderDashboard] getSelectedOrderItems: No pending edit orders",
         );
         return [];
@@ -6345,7 +6361,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       const firstOrder = orders.find(
         (order) => order.id === pendingEditOrders[0],
       );
-      console.log(
+      debugLog(
         "[OrderDashboard] getSelectedOrderItems: firstOrder:",
         firstOrder?.id,
         "items:",

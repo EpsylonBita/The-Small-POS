@@ -182,6 +182,49 @@ pub(crate) fn current_business_day_report_date_at(
     business_day_report_date_at_minutes(now, resolve_business_day_start_minutes(conn))
 }
 
+/// The instant the CURRENT business day began, as a UTC RFC3339 string with a
+/// `+00:00` offset — directly comparable to `orders.created_at`.
+///
+/// This exists because comparing a LOCAL date string against a UTC timestamp
+/// prefix loses orders between local midnight and UTC midnight: at 01:12 local
+/// (UTC+3), `Local::now()` says 2026-08-18 while a just-created order's
+/// `created_at` still reads 2026-08-17TXX:XXZ — so `substr(created_at,1,10) >=
+/// '2026-08-18'` silently drops every order of the running evening. The founder
+/// watched an order vanish from the till at 01:12 the night this shipped.
+///
+/// The boundary is the configured business-day start (default 07:00 local),
+/// which also gives the correct shop semantics for free: an order at 01:00
+/// belongs to the evening still in progress, not to a calendar day nobody has
+/// opened yet.
+///
+/// The `+00:00` suffix (never `Z`) is deliberate: `created_at` rows end in
+/// `+00:00`, and lexicographic comparison of an exactly-equal second against a
+/// `Z`-suffixed cutoff would order `'+' < 'Z'` and wrongly exclude the row.
+pub(crate) fn current_business_day_start_utc(conn: &Connection, now: DateTime<Local>) -> String {
+    business_day_start_utc_at_minutes(now, resolve_business_day_start_minutes(conn))
+}
+
+fn business_day_start_utc_at_minutes(now: DateTime<Local>, start_minutes: u32) -> String {
+    use chrono::{NaiveDate, TimeZone, Utc};
+
+    let report_date = business_day_report_date_at_minutes(now, start_minutes);
+    let date =
+        NaiveDate::parse_from_str(&report_date, "%Y-%m-%d").unwrap_or_else(|_| now.date_naive());
+    let naive_start = date
+        .and_hms_opt(start_minutes / 60, start_minutes % 60, 0)
+        .unwrap_or_else(|| date.and_hms_opt(0, 0, 0).expect("midnight exists"));
+    // `earliest()` resolves the one ambiguous local hour a DST fall-back
+    // creates; a boundary inside a spring-forward gap falls back to `now`,
+    // which can only widen the window, never lose a fresh order.
+    let local_start = Local
+        .from_local_datetime(&naive_start)
+        .earliest()
+        .unwrap_or(now);
+    local_start
+        .with_timezone(&Utc)
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
+}
+
 pub(crate) fn local_report_date_from_timestamp(value: &str) -> String {
     DateTime::parse_from_rfc3339(value)
         .map(|dt| dt.with_timezone(&Local).format("%Y-%m-%d").to_string())
@@ -403,6 +446,40 @@ mod tests {
             current_business_day_report_date_at(&conn, local_datetime(2026, 2, 17, 7, 0, 0)),
             "2026-02-17"
         );
+    }
+
+    /// The cutoff instant must be the boundary hour of the report date, in
+    /// UTC, with a `+00:00` suffix — asserted by parsing the string back and
+    /// converting to Local, so the test holds on any machine timezone (dev is
+    /// UTC+3, CI is UTC).
+    #[test]
+    fn business_day_start_utc_is_the_boundary_hour_as_a_utc_instant() {
+        use chrono::TimeZone;
+
+        let boundary_minutes = 7 * 60;
+        for (h, m) in [(1u32, 12u32), (6, 59), (7, 0), (13, 30), (23, 59)] {
+            let now = Local.with_ymd_and_hms(2026, 8, 18, h, m, 0).unwrap();
+            let cutoff = business_day_start_utc_at_minutes(now, boundary_minutes);
+
+            assert!(
+                cutoff.ends_with("+00:00"),
+                "cutoff must carry +00:00, never Z, to compare against created_at: {cutoff}"
+            );
+            let parsed = DateTime::parse_from_rfc3339(&cutoff)
+                .expect("cutoff parses")
+                .with_timezone(&Local);
+            assert_eq!(
+                (parsed.hour(), parsed.minute()),
+                (7, 0),
+                "start instant must sit on the boundary hour (now {h:02}:{m:02})"
+            );
+            let expected_date = business_day_report_date_at_minutes(now, boundary_minutes);
+            assert_eq!(
+                parsed.date_naive().format("%Y-%m-%d").to_string(),
+                expected_date,
+                "before the boundary the day is yesterday's (now {h:02}:{m:02})"
+            );
+        }
     }
 
     #[test]

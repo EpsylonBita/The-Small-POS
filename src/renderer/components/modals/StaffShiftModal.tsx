@@ -14,6 +14,7 @@ import { formatMoneyInputWithCents, parseMoneyInputValue } from '../../utils/mon
 import { calculateDriverReturn } from '../../utils/driver-checkout';
 import { toLocalDateString } from '../../utils/date';
 import { posApiGet } from '../../utils/api-helpers';
+import { debugLog } from '../../utils/debugLog';
 import { loadFiscalOrderReportingEntitlement } from '../../utils/fiscal-integration-entitlement';
 import { ProgressStepper, Step, StepStatus } from '../ui/ProgressStepper';
 import { ConfirmDialog, ConfirmVariant } from '../ui/ConfirmDialog';
@@ -1162,6 +1163,33 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     }
   }, [isOpen, effectiveMode, effectiveShift?.id, effectiveShift?.role_type]);
 
+  // Falling-edge cleanup: release heavy per-session state as the modal CLOSES
+  // instead of holding it in renderer memory until the next open resets it.
+  // shiftSummary / expenses / staffPaymentsList are already cleared by the
+  // checkout-load effect above when `isOpen` drops. availableStaff,
+  // staffActiveShifts and busyElsewhereByStaffId are deliberately KEPT: a
+  // direct checkout open (mode="checkout") never calls loadStaff(), and the
+  // cashier staff-payment form (openStaffPaymentForm and its paid-to dropdown)
+  // reads them from the last check-in open of this same mounted instance.
+  useEffect(() => {
+    if (isOpen) {
+      return;
+    }
+    setLastShiftResult(null);
+    setCheckoutPaymentBlockers([]);
+    // Mirrors resetStaffPaymentForm() so the payment form cannot re-open
+    // half-cleared with a stale staff selection over an emptied history.
+    setShowStaffPaymentForm(false);
+    setEditingStaffPaymentId(null);
+    setSelectedStaffForPayment(null);
+    setPaymentAmount('');
+    setPaymentType('wage');
+    setPaymentNotes('');
+    setPaymentHistory([]);
+    setDailyPaymentTotal(0);
+    setExpectedPayment(null);
+  }, [isOpen]);
+
   useEffect(() => {
     if (!canRecordInlineExpenses) {
       setShowExpenseForm(false);
@@ -1179,7 +1207,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         // So we need to check result.data, not just result
         const shift = result?.data || result;
         const hasActiveShift = shift && typeof shift === 'object' && shift.status === 'active';
-        console.log('[loadActiveShiftsForStaff] Staff:', s.name, 'ID:', s.id, 'Result:', result, 'Shift:', hasActiveShift ? 'ACTIVE' : 'null');
+        debugLog('[loadActiveShiftsForStaff] Staff:', s.name, 'ID:', s.id, 'Result:', result, 'Shift:', hasActiveShift ? 'ACTIVE' : 'null');
         if (hasActiveShift) map.set(s.id, shift);
       } catch (e) {
         console.warn('[loadActiveShiftsForStaff] Failed to fetch active shift for', s.id, e);
@@ -5623,18 +5651,6 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     return <div className={checkInFooterClass}>{inner}</div>;
   };
 
-  // Debug logging
-  console.log('🔍 StaffShiftModal render:', {
-    isOpen,
-    mode,
-    localMode,
-    effectiveMode,
-    activeShift,
-    checkoutShift,
-    effectiveShift,
-    staff
-  });
-
   // Keyboard Shortcuts
   useKeyboardShortcut('ctrl+s', (e) => {
     if (confirmDialog.isOpen && confirmDialog.onConfirm) {
@@ -5652,6 +5668,21 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       handleCheckOut();
     }
   });
+
+  // Closed-state early return (same pattern as OrderDetailsModal). Without it,
+  // the whole check-in/checkout vDOM below — including the eagerly evaluated
+  // renderCheckInContent()/renderCheckoutContent() call — was rebuilt on every
+  // context-driven parent render while the modal was CLOSED, because React
+  // constructs children before LiquidGlassModal can decide to return null.
+  // Every hook above still runs while closed, so no listener or reset effect
+  // is lost. Trade-off, accepted: a parent-driven close (isOpen flipping
+  // false, e.g. the post-checkout auto-close) unmounts instantly instead of
+  // playing LiquidGlassModal's exit animation; user-driven closes (Escape /
+  // header X) still animate, because LiquidGlassModal only invokes onClose
+  // after its exit animation completes.
+  if (!isOpen) {
+    return null;
+  }
 
   return (
     <>

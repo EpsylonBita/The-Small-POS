@@ -485,8 +485,15 @@ class ScreenCaptureHandler {
 
       this.controlChannel = event.channel
       this.controlChannel.onmessage = (message) => this.handleControlMessage(message.data)
-      this.controlChannel.onopen = () => console.log('[ScreenCapture] Control channel open')
-      this.controlChannel.onclose = () => console.log('[ScreenCapture] Control channel closed')
+      // Braces matter: a statement-position console.log is stripped from
+      // production builds (vite.config.ts esbuild.pure); an implicit-return
+      // arrow makes the call's value "used", which defeats the strip.
+      this.controlChannel.onopen = () => {
+        console.log('[ScreenCapture] Control channel open')
+      }
+      this.controlChannel.onclose = () => {
+        console.log('[ScreenCapture] Control channel closed')
+      }
       this.controlChannel.onerror = (error) => console.warn('[ScreenCapture] Control channel error', error)
     }
 

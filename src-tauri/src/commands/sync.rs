@@ -1364,10 +1364,13 @@ pub async fn sync_clear_old_orders(
         &db,
         crate::recovery::RecoveryPointKind::PreClearOperationalData,
     )?;
-    let today = Local::now().format("%Y-%m-%d").to_string();
     let cleared = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        clear_old_orders_before(&conn, &today)?
+        // Same clock as the data: the business day's start as a UTC instant.
+        // A local DATE here loses the running evening between local midnight
+        // and UTC midnight — the same defect the orders read had.
+        let cutoff_utc = crate::business_day::current_business_day_start_utc(&conn, Local::now());
+        clear_old_orders_before(&conn, &cutoff_utc)?
     };
     emit_sync_status_snapshot(&app, &db, &sync_state).await;
     Ok(serde_json::json!({ "success": true, "cleared": cleared }))
@@ -1381,29 +1384,29 @@ pub async fn sync_clear_old_orders(
 /// it was opened.
 pub(crate) fn clear_old_orders_before(
     conn: &rusqlite::Connection,
-    today: &str,
+    cutoff_utc: &str,
 ) -> Result<usize, String> {
     let open_table_tab = crate::business_day::open_unsettled_table_tab_expr("o");
     let _ = conn.execute(
         &format!(
             "DELETE FROM sync_queue WHERE entity_type = 'order' AND entity_id IN (
                 SELECT o.id FROM orders o
-                WHERE substr(o.created_at, 1, 10) < ?1
+                WHERE o.created_at < ?1
                   AND NOT {open_table_tab}
             )"
         ),
-        rusqlite::params![today],
+        rusqlite::params![cutoff_utc],
     );
     conn.execute(
         &format!(
             "DELETE FROM orders
              WHERE id IN (
                 SELECT o.id FROM orders o
-                WHERE substr(o.created_at, 1, 10) < ?1
+                WHERE o.created_at < ?1
                   AND NOT {open_table_tab}
              )"
         ),
-        rusqlite::params![today],
+        rusqlite::params![cutoff_utc],
     )
     .map_err(|e| e.to_string())
 }
@@ -1679,7 +1682,7 @@ mod dto_tests {
         )
         .expect("insert old settled order");
 
-        let cleared = clear_old_orders_before(&conn, "2026-02-16").expect("clear");
+        let cleared = clear_old_orders_before(&conn, "2026-02-16T00:00:00+00:00").expect("clear");
 
         assert_eq!(cleared, 1, "only the settled pre-today order is cleared");
         let remaining_id: String = conn

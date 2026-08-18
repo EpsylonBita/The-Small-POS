@@ -30,6 +30,7 @@ import {
   CAPTURE_I18N_PREFIX,
   doubleCheckCount,
   mapRecognitionToDraft,
+  mergeDraftOverPrefill,
   needsDoubleCheck,
   reasonKey,
   statusKey,
@@ -146,6 +147,85 @@ describe('mapRecognitionToDraft', () => {
     }
     expect(JSON.stringify(prefill)).not.toContain('confidence":0');
     expect(Object.keys(prefill)).not.toContain('confidenceScore');
+  });
+});
+
+describe('mergeDraftOverPrefill', () => {
+  /** The all-empty draft the capture pipeline stores at scan time. */
+  const placeholderDraft = () => ({
+    invoice: { invoiceDate: '', invoiceNumber: '' },
+    rows: [
+      {
+        barcode: '',
+        category: '',
+        cost: 0,
+        minStockLevel: 0,
+        name: '',
+        notes: '',
+        quantity: 1,
+        sku: '',
+        subcategory: '',
+        unit: 'pcs',
+      },
+    ],
+    supplier: { email: '', name: '', notes: '', phone: '' },
+  });
+
+  it('lets a successful read through the capture-time placeholder draft', () => {
+    // The founder's own bug, by timestamp: capture fa7cfbbe read successfully
+    // on 2026-08-18 (phone, ΑΦΜ-in-notes, invoice date extracted) and the
+    // review opened blank, because the scan-time placeholder draft beat the
+    // recognition under a naive `draft ?? prefill`.
+    const prefill = mapRecognitionToDraft({
+      parsed: {
+        supplier: { name: null, phone: '23910-59188', notes: 'VAT: 1360595852' },
+        invoice: { invoiceNumber: null, invoiceDate: '2026-08-13' },
+        rows: [],
+      },
+      quality: 'poor',
+    });
+
+    const merged = mergeDraftOverPrefill(placeholderDraft(), prefill);
+
+    expect(merged.supplier.phone).toBe('23910-59188');
+    expect(merged.supplier.notes).toBe('VAT: 1360595852');
+    expect(merged.invoice.invoiceDate).toBe('2026-08-13');
+    // No parsed rows and no authored rows: the recognition's empty list wins
+    // (the drawer adds its own blank row for manual entry).
+    expect(merged.rows).toEqual([]);
+  });
+
+  it('keeps a real edit over the recognition, field by field', () => {
+    const prefill = mapRecognitionToDraft(recognition());
+    const draft = placeholderDraft();
+    draft.supplier.name = 'Διορθωμένος Προμηθευτής';
+
+    const merged = mergeDraftOverPrefill(draft, prefill);
+
+    // The edited field survives; the untouched ones fill from the read.
+    expect(merged.supplier.name).toBe('Διορθωμένος Προμηθευτής');
+    expect(merged.supplier.phone).toBe('2101234567');
+    expect(merged.invoice.invoiceNumber).toBe('INV-4471');
+  });
+
+  it('lets authored rows win wholesale over parsed rows', () => {
+    const prefill = mapRecognitionToDraft(recognition());
+    const draft = placeholderDraft();
+    draft.rows[0].name = 'Χειροκίνητη γραμμή';
+
+    const merged = mergeDraftOverPrefill(draft, prefill);
+
+    expect(merged.rows).toHaveLength(1);
+    expect(merged.rows[0].name).toBe('Χειροκίνητη γραμμή');
+  });
+
+  it('treats a missing draft as no draft at all', () => {
+    const prefill = mapRecognitionToDraft(recognition());
+
+    const merged = mergeDraftOverPrefill(null, prefill);
+
+    expect(merged.supplier).toEqual(prefill.supplier);
+    expect(merged.rows).toBe(prefill.rows);
   });
 });
 

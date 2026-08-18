@@ -24,6 +24,7 @@ import {
   type StoreMapOrigin,
 } from '../../utils/delivery-routing';
 import { getBridge } from '../../../lib';
+import './OrderCard.css';
 
 interface OrderCardProps {
   order: Order | any;
@@ -462,11 +463,22 @@ export const OrderCard = memo<OrderCardProps>(({
 
   return (
     <div
-      className={`relative rounded-2xl sm:rounded-full py-3 sm:py-3 px-3 sm:px-6 cursor-pointer transform transition-all duration-300 backdrop-blur-sm touch-feedback ${resolvedTheme === 'light'
-        ? 'bg-[#fffaf1]/90 border border-amber-100/80 shadow-sm active:bg-[#f8ecd9]/95'
-        : 'bg-white/10 border border-white/20 shadow-lg active:bg-white/20'
+      // De-glass (founder-approved): the card used to be `backdrop-blur-sm` over a
+      // translucent bg, which made EVERY card a live compositor blur surface. The
+      // replacement paints what that blur actually averaged out to over the app's
+      // AnimatedBackground: dark = white/10 over a black field with warm blurred
+      // orbs ~= a warm dark gray (#26231e, kept at /95 so a whisper of the orb glow
+      // still reads through — plain alpha blending, no backdrop read); light =
+      // #fffaf1 at 90% over the warm-white field ~= solid #fef8ee. The overdue
+      // (>40 min) delivery treatment keeps its attention signal but is no longer a
+      // perpetual repaint: one inset shadow (was four stacked) and a FINITE pulse
+      // (`order-card-overdue-pulse`, 4 cycles then steady — see OrderCard.css)
+      // instead of infinite `animate-pulse`.
+      className={`relative rounded-2xl sm:rounded-full py-3 sm:py-3 px-3 sm:px-6 cursor-pointer transform transition-all duration-300 touch-feedback ${resolvedTheme === 'light'
+        ? 'bg-[#fef8ee] border border-amber-100/80 shadow-sm active:bg-[#f8ecd9]'
+        : 'bg-[#26231e]/95 border border-white/20 shadow-lg active:bg-[#38342c]/95'
         } ${deliveryOlderThan40
-          ? 'border-red-500/60 shadow-[inset_0_0_15px_rgba(239,68,68,0.6),inset_0_0_30px_rgba(239,68,68,0.4),inset_0_0_50px_rgba(239,68,68,0.25),inset_0_0_80px_rgba(239,68,68,0.15)] animate-pulse'
+          ? 'border-red-500/60 shadow-[inset_0_0_40px_6px_rgba(239,68,68,0.45)] order-card-overdue-pulse'
           : ''
         } border-l-4 ${deliveryOlderThan40 ? 'border-l-red-500' : leftEdgeColorClass} ${isSelected ? 'ring-2 ring-blue-400/50 scale-[1.02] shadow-lg' : ''
         }`}

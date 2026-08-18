@@ -881,6 +881,13 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       setGhostModeArmed(false);
       setGhostModeArmedAt(null);
       setGhostModeFeatureEnabled(false);
+      // Falling-edge cleanup: release the loaded menu catalog while closed.
+      // menuItemsForCategoryTabs is cleared by its own loader effect below;
+      // categories reload on the next open (loadCategories fires on every
+      // isOpen rising edge) and combos reload whenever the combos category
+      // is selected, so nothing relies on these arrays surviving a close.
+      setCategories([]);
+      setCombos([]);
     }
   }, [isOpen, cartItems.length]);
 
@@ -2459,6 +2466,22 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     }
     return `${typeLabel} ${t('modals.menu.order')}`;
   };
+
+  // Closed-state early return (same pattern as OrderDetailsModal).
+  // OrderDashboard mounts this modal twice, unconditionally; without this the
+  // full menu-surface vDOM (grid, cart, header) was rebuilt on every parent
+  // render while closed, because React constructs children before
+  // LiquidGlassModal can decide to return null. Every hook above still runs
+  // while closed, so the isOpen-gated loaders and their falling-edge cleanups
+  // keep their existing semantics; everything rendered after the shared modal
+  // below was already gated on `isOpen &&` or on open-only local state.
+  // Trade-off, accepted: a parent-driven close (isOpen flipping false)
+  // unmounts instantly instead of playing LiquidGlassModal's exit animation —
+  // this modal's own header X and discard-confirm already closed through
+  // onClose -> parent state, i.e. the same external path.
+  if (!isOpen) {
+    return null;
+  }
 
   return (
     <>

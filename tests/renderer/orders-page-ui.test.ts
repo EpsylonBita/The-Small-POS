@@ -197,8 +197,16 @@ test('OrdersPage prefers a visible business order number and preserves it across
     source,
     /asString\(raw\.display_order_number\)[\s\S]*?asString\(raw\.displayOrderNumber\)[\s\S]*?asString\(raw\.order_number\)[\s\S]*?id\.slice\(0, 8\)/,
   );
-  // The merge keeps the business number instead of blindly spreading the remote one.
-  assert.match(source, /order_number: resolveMergedOrderNumber\(existing\.order_number, incoming\.order_number\)/);
+  // The merge keeps the business number instead of blindly spreading the remote
+  // one. The merge now lives in the shared hybridOrderMerge util (O(local+remote)
+  // identity-map rewrite); the page must use it and the util must still route
+  // order numbers through resolveMergedOrderNumber.
+  assert.match(source, /import \{ mergeHybridOrders, toIdentitySet \} from '\.\.\/utils\/hybridOrderMerge'/);
+  const mergeSource = readFileSync(
+    path.join(process.cwd(), 'src', 'renderer', 'utils', 'hybridOrderMerge.ts'),
+    'utf8',
+  );
+  assert.match(mergeSource, /order_number: resolveMergedOrderNumber\(existing\.order_number, incoming\.order_number\)/);
   // The compact display passes created_at so a truly-internal order shows a time, not a fake hash #.
   assert.match(source, /formatCompactOrderNumberForDisplay\(order\.order_number, order\.created_at\)/);
 });
