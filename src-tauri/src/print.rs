@@ -2335,7 +2335,47 @@ fn durable_pause_and_cancel_pos_jobs_with_conn(
         .collect::<HashSet<_>>();
     let mut changed_windows_job_ids = HashSet::new();
     let mut handled_non_windows_job_ids = HashSet::new();
+    let mut finalized_nonwindows_job_ids: HashSet<String> = HashSet::new();
     for (job_id, parent_state, attempt_id, transport, attempt_state, spool_job_id) in candidates {
+        // Same dead-worker finalization as the single-job cancel (see
+        // durable_cancel_print_job): raw/serial transports have no spooler
+        // oracle, so an attempt a dead worker parked in a blocker state
+        // ('unknown' after a mid-write network failure) never resolves and
+        // bricks its printer lane across restarts. The bulk cancel is an
+        // operator resolution too. In production `additional_job_ids` carries
+        // the live-registered set — live workers keep the cooperative flow.
+        let nonwindows_blocker = transport
+            .as_deref()
+            .is_some_and(|transport| transport != "windows")
+            && attempt_state_is_active_blocker(attempt_state.as_deref(), spool_job_id);
+        if nonwindows_blocker && !additional_job_ids.contains(&job_id) {
+            let Some(attempt_uuid) = attempt_id
+                .as_deref()
+                .and_then(|value| Uuid::parse_str(value).ok())
+            else {
+                return Err("Active non-Windows attempt has an invalid identity".into());
+            };
+            let changed = tx
+                .execute(
+                    "UPDATE print_job_attempts
+                     SET state = 'cancelled',
+                         cancel_requested_at = COALESCE(cancel_requested_at, ?1),
+                         completed_at = COALESCE(completed_at, ?1),
+                         last_seen_at = CASE
+                             WHEN last_seen_at IS NULL OR last_seen_at <= ?1 THEN ?1
+                             ELSE last_seen_at
+                         END
+                     WHERE id = ?2 AND state IN (
+                         'created', 'submitting', 'paused', 'cancel_requested',
+                         'unknown', 'cancel_failed'
+                     )",
+                    params![now_text, attempt_uuid.to_string()],
+                )
+                .map_err(|error| format!("Finalize dead non-Windows POS attempt: {error}"))?;
+            if changed == 1 {
+                finalized_nonwindows_job_ids.insert(job_id.clone());
+            }
+        }
         let active_windows = transport.as_deref() == Some("windows")
             && spool_job_id.is_some()
             && attempt_state_is_active_blocker(attempt_state.as_deref(), spool_job_id);
@@ -2373,6 +2413,31 @@ fn durable_pause_and_cancel_pos_jobs_with_conn(
         if active_windows_job_ids.contains(&job_id)
             || !handled_non_windows_job_ids.insert(job_id.clone())
         {
+            continue;
+        }
+
+        if finalized_nonwindows_job_ids.contains(&job_id) {
+            // The blocker rows are finalized; close a parent that never
+            // reached a terminal state, keep a 'failed' parent's history and
+            // warning untouched.
+            let parent_closed = if parent_state == "pending" || parent_state == "printing" {
+                tx.execute(
+                    "UPDATE print_jobs
+                     SET status = 'cancelled',
+                         warning_code = 'operator_cancelled',
+                         warning_message = 'POS print cancelled after its transport worker died with an unconfirmed result',
+                         completed_at = ?1,
+                         history_expires_at = datetime(?1, '+30 days'),
+                         updated_at = ?1
+                     WHERE id = ?2 AND status = ?3",
+                    params![now_text, job_id, parent_state],
+                )
+                .map_err(|error| format!("Close parent of finalized POS attempt: {error}"))?
+            } else {
+                0
+            };
+            plan.affected += 1;
+            plan.local_cancelled += parent_closed;
             continue;
         }
 
@@ -2652,6 +2717,54 @@ fn durable_cancel_print_job(db: &DbState, job_id: &str) -> Result<Value, String>
     let has_active_attempt = candidates.iter().any(|(_, _, _, state, spool_job_id)| {
         attempt_state_is_active_blocker(state.as_deref(), *spool_job_id)
     });
+    // The print-deadlock of 19/08 (live at the shop): a raw TCP receipt died
+    // mid-write (90112/109831 bytes, os error 10060) and parked its attempt
+    // in 'unknown' as the worker's dying act. There is no spooler oracle for
+    // raw/serial transports, so nothing ever resolves that row — yet it keeps
+    // counting as the printer lane's active blocker, and hydration re-retains
+    // the lane after every restart. The operator card says "check the
+    // physical printer before retrying manually", which makes CANCEL the
+    // designed resolution — so cancel must be able to finalize a dead
+    // non-Windows attempt. Guarded on !live_registered: an attempt whose
+    // worker is still alive keeps the cooperative-stop flow, and Windows
+    // attempts keep cancel_requested (their spooler CAN still answer).
+    let mut dead_nonwindows_finalized = 0usize;
+    if windows_attempt_ids.is_empty() && !live_registered {
+        for (_, attempt_id, transport, attempt_state, spool_job_id) in &candidates {
+            let is_dead_nonwindows_blocker = transport
+                .as_deref()
+                .is_some_and(|transport| transport != "windows")
+                && attempt_state_is_active_blocker(attempt_state.as_deref(), *spool_job_id);
+            if !is_dead_nonwindows_blocker {
+                continue;
+            }
+            let Some(attempt_id) = attempt_id
+                .as_deref()
+                .and_then(|value| Uuid::parse_str(value).ok())
+            else {
+                return Err("Active non-Windows attempt has an invalid identity".into());
+            };
+            let changed = tx
+                .execute(
+                    "UPDATE print_job_attempts
+                     SET state = 'cancelled',
+                         cancel_requested_at = COALESCE(cancel_requested_at, ?1),
+                         completed_at = COALESCE(completed_at, ?1),
+                         last_seen_at = CASE
+                             WHEN last_seen_at IS NULL OR last_seen_at <= ?1 THEN ?1
+                             ELSE last_seen_at
+                         END
+                     WHERE id = ?2 AND state IN (
+                         'created', 'submitting', 'paused', 'cancel_requested',
+                         'unknown', 'cancel_failed'
+                     )",
+                    params![now_text, attempt_id.to_string()],
+                )
+                .map_err(|error| format!("Finalize dead non-Windows POS attempt: {error}"))?;
+            dead_nonwindows_finalized += usize::from(changed == 1);
+        }
+        durable_changed |= dead_nonwindows_finalized > 0;
+    }
     let (affected, unchanged, local_cancelled, request_stop) = if !windows_attempt_ids.is_empty() {
         (
             usize::from(durable_changed),
@@ -2659,6 +2772,28 @@ fn durable_cancel_print_job(db: &DbState, job_id: &str) -> Result<Value, String>
             0,
             true,
         )
+    } else if dead_nonwindows_finalized > 0 {
+        // The lane's durable blockers are gone; if the parent never reached a
+        // terminal state, close it as operator-cancelled so it stops counting
+        // as active. A parent already 'failed' keeps its status and warning —
+        // the history card still tells the unknown-transport story.
+        let parent_closed = if parent_state == "pending" || parent_state == "printing" {
+            tx.execute(
+                "UPDATE print_jobs
+                 SET status = 'cancelled',
+                     warning_code = 'operator_cancelled',
+                     warning_message = 'POS print cancelled after its transport worker died with an unconfirmed result',
+                     completed_at = ?1,
+                     history_expires_at = datetime(?1, '+30 days'),
+                     updated_at = ?1
+                 WHERE id = ?2 AND status = ?3",
+                params![now_text, job_id, parent_state],
+            )
+            .map_err(|error| format!("Close parent of finalized POS attempt: {error}"))?
+        } else {
+            0
+        };
+        (dead_nonwindows_finalized, 0, parent_closed, false)
     } else if !has_active_attempt && parent_state == "pending" {
         let changed = tx
             .execute(
@@ -9460,6 +9595,143 @@ mod tests {
         )
         .unwrap();
         attempt.attempt_id
+    }
+
+    /// A raw TCP attempt parked in 'unknown' — the exact durable residue of
+    /// the 19/08 shop incident: the worker died mid-write (os error 10060)
+    /// and left the printer lane bricked.
+    fn add_unknown_raw_attempt(conn: &Connection, job_id: &str) -> Uuid {
+        let now = Utc::now();
+        let attempt = create_attempt(
+            conn,
+            NewAttempt {
+                local_job_id: job_id.to_owned(),
+                target: PrinterTargetKey::RawTcp {
+                    host: "192.168.1.19".into(),
+                    port: 9100,
+                },
+                document_kind: "receipt".into(),
+                bytes_requested: 109_831,
+                now,
+            },
+        )
+        .unwrap();
+        transition_attempt(
+            conn,
+            attempt.attempt_id,
+            DispatchState::Submitting,
+            AttemptObservation {
+                now,
+                ..AttemptObservation::default()
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE print_job_attempts SET state = 'unknown' WHERE id = ?1",
+            [attempt.attempt_id.to_string()],
+        )
+        .unwrap();
+        attempt.attempt_id
+    }
+
+    /// 19/08 shop deadlock, single-job cancel: a dead raw attempt in
+    /// 'unknown' must be finalizable by the operator, clearing both the
+    /// active count and the attention (stale) count.
+    #[test]
+    fn dead_raw_unknown_attempt_is_cancelled_and_frees_the_queue() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        let (job_id, attempt_id) = {
+            let conn = db.conn.lock().unwrap();
+            let job_id = insert_control_job(&conn, "failed", Some("profile-lan"));
+            let attempt_id = add_unknown_raw_attempt(&conn, &job_id);
+            (job_id, attempt_id)
+        };
+
+        let before = print_queue_snapshot(&db, None, None, 20, 0).unwrap();
+        assert_eq!(before.counts.active, 1, "the dead attempt counts active");
+        assert_eq!(before.counts.stale, 1, "and needs attention");
+
+        let result = durable_cancel_print_job(&db, &job_id).unwrap();
+        assert_eq!(result["success"], true);
+        assert_eq!(result["affected"], 1);
+        assert_eq!(result["durableChanged"], true);
+
+        let conn = db.conn.lock().unwrap();
+        let attempt = crate::print_dispatch::read_attempt(&conn, attempt_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(attempt.state, DispatchState::Cancelled);
+        drop(conn);
+
+        let after = print_queue_snapshot(&db, None, None, 20, 0).unwrap();
+        assert_eq!(after.counts.active, 0, "the lane blocker is gone");
+        assert_eq!(after.counts.stale, 0, "the attention badge clears");
+        assert_eq!(after.counts.history, 1, "the failed job stays visible");
+    }
+
+    /// The dead-attempt finalization must never touch a LIVE raw worker —
+    /// that one keeps the cooperative stop flow.
+    #[test]
+    fn live_raw_attempt_keeps_the_cooperative_cancel_flow() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        let (job_id, attempt_id) = {
+            let conn = db.conn.lock().unwrap();
+            let job_id = insert_control_job(&conn, "printing", Some("profile-lan"));
+            let attempt_id = add_unknown_raw_attempt(&conn, &job_id);
+            (job_id, attempt_id)
+        };
+
+        let guard = ActivePrintGuard::register(&db, &job_id, None).unwrap();
+        let result = durable_cancel_print_job(&db, &job_id).unwrap();
+        assert_eq!(
+            result["activeStopsRequested"], 1,
+            "a live worker gets the cooperative stop"
+        );
+
+        let conn = db.conn.lock().unwrap();
+        let attempt = crate::print_dispatch::read_attempt(&conn, attempt_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            attempt.state,
+            DispatchState::Unknown,
+            "a live attempt is never force-finalized"
+        );
+        drop(conn);
+        drop(guard);
+    }
+
+    /// 19/08 shop deadlock, bulk path: «Παύση και ακύρωση εργασιών POS» must
+    /// finalize the same dead raw attempts instead of reporting failure.
+    #[test]
+    fn bulk_cancel_finalizes_dead_raw_unknown_attempts() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        let (job_id, attempt_id) = {
+            let conn = db.conn.lock().unwrap();
+            let job_id = insert_control_job(&conn, "failed", Some("profile-lan"));
+            let attempt_id = add_unknown_raw_attempt(&conn, &job_id);
+            (job_id, attempt_id)
+        };
+
+        let plan = durable_pause_and_cancel_pos_jobs(&db, None, Utc::now()).unwrap();
+        assert!(plan.affected >= 1, "the dead attempt's job counts affected");
+
+        let conn = db.conn.lock().unwrap();
+        let attempt = crate::print_dispatch::read_attempt(&conn, attempt_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(attempt.state, DispatchState::Cancelled);
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM print_jobs WHERE id = ?1",
+                [job_id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "failed", "a failed parent keeps its history story");
     }
 
     fn add_terminal_windows_attempt(conn: &Connection, job_id: &str, queue: &str) -> Uuid {
