@@ -17,15 +17,31 @@ export function useTerminalSettings() {
 
   useEffect(() => {
     let mounted = true
+    let retryTimer: ReturnType<typeof setTimeout> | undefined
 
-    const load = async () => {
+    // A mount racing app startup (DB still migrating/locking) can see this
+    // invoke fail or return an empty map — and nothing ever heals it: the
+    // 'terminal-settings-updated' event this hook listens for has no Rust
+    // emitter today, so one bad first load meant an empty settings map for
+    // the whole session (live symptom: the order card's map pin lost its
+    // store origin and degraded to a pin-only search). Retry with backoff
+    // until a non-empty map arrives.
+    const load = async (attempt = 0) => {
       try {
-        setLoading(true)
+        if (attempt === 0) setLoading(true)
         setError(null)
         const s = await bridge.terminalConfig.getSettings()
-        if (mounted) setSettings(s || {})
+        if (!mounted) return
+        setSettings(s || {})
+        if ((!s || Object.keys(s).length === 0) && attempt < 5) {
+          retryTimer = setTimeout(() => load(attempt + 1), 2000 * (attempt + 1))
+        }
       } catch (e: any) {
-        if (mounted) setError(e?.message || 'Failed to load terminal settings')
+        if (!mounted) return
+        setError(e?.message || 'Failed to load terminal settings')
+        if (attempt < 5) {
+          retryTimer = setTimeout(() => load(attempt + 1), 2000 * (attempt + 1))
+        }
       } finally {
         if (mounted) setLoading(false)
       }
@@ -40,6 +56,7 @@ export function useTerminalSettings() {
 
     return () => {
       mounted = false
+      if (retryTimer !== undefined) clearTimeout(retryTimer)
       offEvent('terminal-settings-updated', handleTerminalSettingsUpdated)
     }
   }, [bridge])

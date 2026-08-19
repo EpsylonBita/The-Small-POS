@@ -3848,6 +3848,7 @@
       "unavailable": "Nicht verfügbar",
       "noStaffSelected": "Bitte wählen Sie einen Mitarbeiter",
       "shiftStarted": "Schicht erfolgreich gestartet",
+      "drawerContinuityWarning": "Kassenlade stimmt nicht: zuletzt mit {{previous}} € geschlossen, aber mit {{opening}} € geöffnet. Bitte vor dem Fortfahren nachzählen.",
       "shiftEnded": "Schicht erfolgreich beendet",
       "failedToLoad": "Personalliste konnte nicht geladen werden. Bitte versuchen Sie es erneut.",
       "shiftSummary": "Schichtzusammenfassung",

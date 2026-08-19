@@ -3848,6 +3848,7 @@
       "unavailable": "Non disponibile",
       "noStaffSelected": "Seleziona un membro del personale",
       "shiftStarted": "Turno iniziato con successo",
+      "drawerContinuityWarning": "Cassetto non coerente: chiuso con {{previous}} € ma aperto con {{opening}} €. Ricontare il cassetto prima di continuare.",
       "shiftEnded": "Turno terminato con successo",
       "failedToLoad": "Impossibile caricare la lista del personale. Riprovare.",
       "shiftSummary": "Riepilogo turno",

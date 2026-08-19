@@ -3852,6 +3852,7 @@
       "staffAuthUnavailable": "Staff auth data is not available offline yet. Open the staff list while online first.",
       "noStaffSelected": "Please select a staff member",
       "shiftStarted": "Shift started successfully",
+      "drawerContinuityWarning": "Drawer mismatch: it last closed with {{previous}} € but you opened with {{opening}} €. Recount the drawer before continuing.",
       "shiftEnded": "Shift ended successfully",
       "failedToLoad": "Failed to load staff list. Please try again.",
       "shiftSummary": "Shift Summary",

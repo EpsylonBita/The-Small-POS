@@ -222,6 +222,12 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
     conn.execute_batch("BEGIN IMMEDIATE")
         .map_err(|e| format!("begin transaction: {e}"))?;
 
+    // Filled inside the transaction when the cashier's typed opening float
+    // does not match the terminal's last closing count (defect 4 below);
+    // rides on the success response so the UI can confront the cashier at
+    // the exact moment the discrepancy is still explainable.
+    let mut drawer_continuity_warning: Option<serde_json::Value> = None;
+
     let result = (|| -> Result<(), String> {
         // Re-check inside the transaction: this is the authoritative
         // guard. Any concurrent writer that beat us to `BEGIN IMMEDIATE`
@@ -297,6 +303,51 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
 
         // Create cash drawer session for cashier/manager roles
         if role_type == "cashier" || role_type == "manager" {
+            // Z-17/08 forensics, defect 4: on clean nights the typed closing
+            // count carries to the next opening TO THE CENT (132,98→132,98,
+            // 140,45→140,45…) — nobody touches the drawer in between. The
+            // night the books diverged, the till closed on a round "150,00"
+            // and the same cashier opened "124,67" with zero logged activity
+            // between: the closing count was never a real count. Surface the
+            // break at the moment it becomes visible instead of letting it
+            // surface as a phantom ±25€ in the next Z.
+            // Only genuinely counted closes qualify (reconciled = 1): the
+            // stuck-shift recovery flow force-closes drawers with a synthetic
+            // closing_amount of 0 and no count — comparing against that
+            // sentinel would greet every recovery with a false alarm.
+            let previous_close: Option<(i64, String)> = conn
+                .query_row(
+                    "SELECT COALESCE(closing_amount_cents, CAST(ROUND(closing_amount * 100) AS INTEGER), 0),
+                            COALESCE(closed_at, '')
+                     FROM cash_drawer_sessions
+                     WHERE terminal_id = ?1 AND closed_at IS NOT NULL
+                       AND COALESCE(reconciled, 0) = 1
+                     ORDER BY closed_at DESC
+                     LIMIT 1",
+                    params![terminal_id],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()
+                .map_err(|e| format!("query previous drawer close: {e}"))?;
+            if let Some((previous_closing_cents, closed_at)) = previous_close {
+                if previous_closing_cents != opening_cash_cents {
+                    let previous = Cents::new(previous_closing_cents).to_f64_dp2();
+                    warn!(
+                        terminal_id = %terminal_id,
+                        previous_closing = previous,
+                        opening = opening_cash,
+                        closed_at = %closed_at,
+                        "Drawer continuity break: opening differs from the terminal's last closing count"
+                    );
+                    drawer_continuity_warning = Some(serde_json::json!({
+                        "previousClosing": previous,
+                        "opening": opening_cash,
+                        "differenceCents": opening_cash_cents - previous_closing_cents,
+                        "previousClosedAt": closed_at,
+                    }));
+                }
+            }
+
             let drawer_id = Uuid::new_v4().to_string();
             // W4c dual-write: opening_amount → opening_amount_cents.
             conn.execute(
@@ -417,11 +468,15 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
 
     info!(shift_id = %shift_id, staff_id = %staff_id, role = %role_type, "Shift opened");
 
-    Ok(serde_json::json!({
+    let mut response = serde_json::json!({
         "success": true,
         "shiftId": shift_id,
         "message": format!("Shift opened for {} ({})", staff_id, role_type)
-    }))
+    });
+    if let Some(warning) = drawer_continuity_warning {
+        response["drawerContinuityWarning"] = warning;
+    }
+    Ok(response)
 }
 
 fn build_shift_open_sync_payload(
@@ -815,6 +870,14 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
             // Reconcile-at-close: re-derive drawer totals from source-of-truth tables.
             // This catches any missed incremental updates during the shift.
             // W4b-ii: cents-with-real-fallback shim wraps each SUM (4e removes).
+            // Z-17/08 forensics, defect 2 — a cancelled order that still has a
+            // 'completed' payment row (live case: order «δεν άνοιξε», 11,40,
+            // cancelled with its cash payment never voided) must not count as
+            // money in the drawer. REFUNDED orders deliberately stay in: their
+            // money WAS collected, and the refund line above subtracts it.
+            // Residual: an order paid, cancelled, and NOT refunded now
+            // undercounts expected by its amount — the correct flow for kept
+            // money is recording the refund/void, not the cancellation alone.
             let reconciled_cash_sales: f64 = conn
                 .query_row(
                     &format!(
@@ -825,6 +888,7 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                    AND op.method = 'cash'
                    AND op.status = 'completed'
                    AND COALESCE(o.is_ghost, 0) = 0
+                   AND LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'canceled')
                    AND {order_financial_expr} >= ?2
                    AND {order_financial_expr} <= ?3"
                     ),
@@ -842,6 +906,7 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                    AND op.method = 'card'
                    AND op.status = 'completed'
                    AND COALESCE(o.is_ghost, 0) = 0
+                   AND LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'canceled')
                    AND {order_financial_expr} >= ?2
                    AND {order_financial_expr} <= ?3"
                     ),
@@ -849,6 +914,27 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                     |row| row.get::<_, i64>(0).map(|c| Cents::new(c).to_f64_dp2()),
                 )
                 .unwrap_or(0.0);
+            // Z-17/08 forensics, defect 1 — this query was wrong on BOTH sides:
+            // card refunds (money that never left the drawer) lowered cash
+            // expected, while a cash refund PAID FROM THIS DRAWER for another
+            // shift's order (the live 0,09: cashier drawer refunding a
+            // driver-attributed order) was missed entirely, because the old
+            // WHERE keyed only on the order's shift attribution.
+            // - `refund_method` NULL (pre-v37 rows) keeps legacy cash
+            //   semantics; only an explicit 'card' is excluded.
+            // - Handler-tagged rows anchor on pa.created_at: the drawer pays
+            //   when the refund HAPPENS, not when the order was earned.
+            // - Known limit: two concurrently open cashier drawers would both
+            //   count a handler-tagged refund (payment_adjustments has no
+            //   drawer column yet); single-drawer shops are exact.
+            // - Cancelled orders stay SYMMETRIC with the sales exclusion
+            //   below: when this shift's cancelled sale is excluded from cash
+            //   sales, its refund must be excluded too, or a paid→cancelled→
+            //   refunded order (collect 11,40, hand back 11,40 — physically
+            //   net zero) would report a false 11,40 shortage. A cashier-
+            //   drawer refund for ANOTHER shift's cancelled order still
+            //   counts — that drawer never held the collection, the payout
+            //   is a real cash-out.
             let reconciled_refunds: f64 = conn
                 .query_row(
                     &format!(
@@ -856,11 +942,21 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                  FROM orders o
                  JOIN payment_adjustments pa ON pa.order_id = o.id
                  LEFT JOIN order_payments op ON op.id = pa.payment_id
-                 WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
-                   AND pa.adjustment_type = 'refund'
+                 WHERE pa.adjustment_type = 'refund'
+                   AND COALESCE(pa.refund_method, 'cash') = 'cash'
                    AND COALESCE(o.is_ghost, 0) = 0
-                   AND {order_financial_expr} >= ?2
-                   AND {order_financial_expr} <= ?3"
+                   AND (
+                        (COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
+                         AND LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'canceled')
+                         AND {order_financial_expr} >= ?2
+                         AND {order_financial_expr} <= ?3)
+                     OR (pa.cash_handler = 'cashier_drawer'
+                         AND (COALESCE(op.staff_shift_id, o.staff_shift_id) IS NULL
+                              OR COALESCE(op.staff_shift_id, o.staff_shift_id) <> ?1
+                              OR LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'canceled'))
+                         AND pa.created_at >= ?2
+                         AND pa.created_at <= ?3)
+                   )"
                     ),
                     params![shift_id, shift_check_in_time, now],
                     |row| row.get::<_, i64>(0).map(|c| Cents::new(c).to_f64_dp2()),
@@ -3483,6 +3579,18 @@ pub(crate) fn calculate_driver_return(
     .to_f64_dp2()
 }
 
+// Z-17/08 forensics, defect 3: this total is DEDUCTED from a driver's
+// expected cash return — so it must count only tips the driver actually
+// holds in cash. A card tip never passes through the driver's hands (live
+// case: Τάσος returned 19,00 of a 20,00 float against a 1,00 tip paid by
+// card), yet the old query deducted it. Gate: the payment-attributed tip
+// sum takes only cash payments, and the order-level tip fallbacks count
+// only when the delivery was cash-handled — signalled by
+// driver_earnings.payment_method = 'cash' (the COD path records cash there
+// without any order_payments row) or by a completed cash payment on the
+// order. A mixed cash+card order still attributes its order-level tip as
+// cash — the simple shapes dominate and the payment-attributed path is
+// exact.
 fn compute_driver_shift_tip_total_in_window(
     conn: &rusqlite::Connection,
     shift_id: &str,
@@ -3492,8 +3600,18 @@ fn compute_driver_shift_tip_total_in_window(
     let financial_expr = business_day::order_financial_timestamp_expr("o");
     let sql = format!(
         "SELECT COALESCE(SUM(MAX(
-                    COALESCE(o.tip_amount_cents, CAST(ROUND(o.tip_amount * 100) AS INTEGER), 0),
-                    COALESCE(de.tip_amount_cents, CAST(ROUND(de.tip_amount * 100) AS INTEGER), 0),
+                    CASE WHEN COALESCE(de.payment_method, '') = 'cash' OR EXISTS (
+                        SELECT 1 FROM order_payments opc
+                        WHERE opc.order_id = o.id
+                          AND opc.status = 'completed'
+                          AND opc.method = 'cash'
+                    ) THEN COALESCE(o.tip_amount_cents, CAST(ROUND(o.tip_amount * 100) AS INTEGER), 0) ELSE 0 END,
+                    CASE WHEN COALESCE(de.payment_method, '') = 'cash' OR EXISTS (
+                        SELECT 1 FROM order_payments opc
+                        WHERE opc.order_id = o.id
+                          AND opc.status = 'completed'
+                          AND opc.method = 'cash'
+                    ) THEN COALESCE(de.tip_amount_cents, CAST(ROUND(de.tip_amount * 100) AS INTEGER), 0) ELSE 0 END,
                     COALESCE((
                         SELECT SUM(COALESCE(
                             op.tip_amount_cents,
@@ -3504,6 +3622,7 @@ fn compute_driver_shift_tip_total_in_window(
                         WHERE op.order_id = o.id
                           AND op.tip_recipient_staff_shift_id = ?1
                           AND op.status = 'completed'
+                          AND op.method = 'cash'
                     ), 0)
                 )), 0)
          FROM orders o
@@ -4786,6 +4905,444 @@ mod tests {
         assert_eq!(
             returned, 78.5,
             "driver_cash_returned should exclude the tip kept by the driver"
+        );
+    }
+
+    /// Z-17/08 forensics defect 3: a CARD tip never passes through the
+    /// driver's hands — deducting it from the expected cash return (as the
+    /// old query did) makes an honest driver look short. Live case: Τάσος,
+    /// 20,00 float, card order, 1,00 card tip — owed 20,00, system said 19,00.
+    #[test]
+    fn test_driver_card_tip_is_not_deducted_from_expected_cash_return() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            // The driver's cash goes back to a responsible cashier drawer —
+            // same shape as test_driver_close_returns_cash_to_cashier.
+            conn.execute(
+                "INSERT INTO staff_shifts (id, staff_id, role_type, branch_id, terminal_id,
+                    check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                    status, calculation_version, sync_status, created_at, updated_at)
+                 VALUES ('ct-cashier', 'cashier-ct', 'cashier', 'branch-ct', 'term-ct',
+                    strftime('%Y-%m-%dT%H:%M:%fZ','now'), 500.0, 50000, 'active', 2, 'pending',
+                    strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO cash_drawer_sessions (id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                    opening_amount, opening_amount_cents, driver_cash_given, driver_cash_given_cents,
+                    opened_at, created_at, updated_at)
+                 VALUES ('ct-drawer', 'ct-cashier', 'cashier-ct', 'branch-ct', 'term-ct',
+                    500.0, 50000, 20.0, 2000,
+                    strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO staff_shifts (id, staff_id, role_type, branch_id, terminal_id,
+                    check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                    status, calculation_version, sync_status, created_at, updated_at)
+                 VALUES ('card-tip-driver', 'driver-ct', 'driver', 'branch-ct', 'term-ct',
+                    strftime('%Y-%m-%dT%H:%M:%fZ','now'), 20.0, 2000, 'active', 2, 'pending', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO orders (
+                    id, items, order_type, total_amount, total_amount_cents,
+                    tip_amount, tip_amount_cents, status, sync_status, created_at, updated_at
+                 ) VALUES (
+                    'ord-ct1', '[]', 'delivery', 72.9, 7290,
+                    1.0, 100, 'completed', 'pending', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                 )",
+                [],
+            )
+            .unwrap();
+            // Card delivery: no cash collected, the tip rode on the card.
+            conn.execute(
+                "INSERT INTO driver_earnings (id, driver_id, staff_shift_id, order_id, branch_id,
+                    tip_amount, tip_amount_cents, total_earning, total_earning_cents,
+                    payment_method, cash_collected, cash_collected_cents,
+                    created_at, updated_at)
+                 VALUES ('de-ct1', 'driver-ct', 'card-tip-driver', 'ord-ct1', 'branch-ct',
+                    1.0, 100, 1.0, 100, 'card', 0.0, 0, strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        // The driver holds only the 20,00 float — the card tip is settled on
+        // the card side, never from the wallet.
+        let payload = serde_json::json!({
+            "shiftId": "card-tip-driver",
+            "closingCash": 20.0,
+        });
+        let result = close_shift(&db, &payload).unwrap();
+        assert_eq!(result["success"], true);
+        assert_eq!(result["expected"], 20.0);
+        assert_eq!(result["variance"], 0.0);
+    }
+
+    /// Z-17/08 forensics defect 2: a cancelled order («δεν ανοιξε», 11,40)
+    /// whose completed cash payment was never voided must not count as money
+    /// in the drawer.
+    #[test]
+    fn test_cancelled_order_payment_does_not_count_as_drawer_cash() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        let open = serde_json::json!({
+            "staffId": "staff-cx", "branchId": "b-cx", "terminalId": "t-cx",
+            "roleType": "cashier", "openingCash": 100.0,
+        });
+        let shift_id = open_shift(&db, &open).unwrap()["shiftId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        {
+            let conn = db.conn.lock().unwrap();
+            for (oid, pid, status, amount, cents) in [
+                ("ord-cx-live", "pay-cx-live", "completed", 50.0, 5000),
+                ("ord-cx-dead", "pay-cx-dead", "cancelled", 11.4, 1140),
+            ] {
+                conn.execute(
+                    "INSERT INTO orders (
+                        id, items, order_type, total_amount, total_amount_cents,
+                        status, payment_status, staff_shift_id, sync_status, created_at, updated_at
+                     ) VALUES (?1, '[]', 'pickup', ?2, ?3, ?4, 'paid', ?5, 'pending', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                    params![oid, amount, cents, status, shift_id],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO order_payments (
+                        id, order_id, method, amount, amount_cents, staff_shift_id,
+                        status, sync_status, sync_state, created_at, updated_at
+                     ) VALUES (?1, ?2, 'cash', ?3, ?4, ?5, 'completed', 'pending', 'pending', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                    params![pid, oid, amount, cents, shift_id],
+                )
+                .unwrap();
+            }
+        }
+
+        // Pin every fixture row inside the [check_in, close] window: the
+        // fixtures were stamped by SQLite's clock while the window bounds come
+        // from chrono's — a millisecond of skew between the two made this
+        // test flaky.
+        {
+            let conn = db.conn.lock().unwrap();
+            let check_in: String = conn
+                .query_row(
+                    "SELECT check_in_time FROM staff_shifts WHERE id = ?1",
+                    params![shift_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            for sql in [
+                "UPDATE orders SET created_at = ?1, updated_at = ?1 WHERE id IN ('ord-cx-live', 'ord-cx-dead')",
+                "UPDATE order_payments SET created_at = ?1, updated_at = ?1 WHERE id IN ('pay-cx-live', 'pay-cx-dead')",
+            ] {
+                conn.execute(sql, params![check_in]).unwrap();
+            }
+        }
+
+        // Expected = 100 opening + 50 live cash. The cancelled 11,40 stays out.
+        let close = serde_json::json!({ "shiftId": shift_id, "closingCash": 150.0 });
+        let result = close_shift(&db, &close).unwrap();
+        assert_eq!(result["success"], true);
+        assert_eq!(result["expected"], 150.0);
+        assert_eq!(result["variance"], 0.0);
+    }
+
+    /// Z-17/08 forensics defect 1, both faces: a CARD refund must not lower
+    /// cash expected, while a CASH refund handed from THIS cashier drawer for
+    /// another shift's order (the live 0,09) must.
+    #[test]
+    fn test_refunds_count_cash_only_and_follow_the_paying_drawer() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        let open = serde_json::json!({
+            "staffId": "staff-rf", "branchId": "b-rf", "terminalId": "t-rf",
+            "roleType": "cashier", "openingCash": 100.0,
+        });
+        let shift_id = open_shift(&db, &open).unwrap()["shiftId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        {
+            let conn = db.conn.lock().unwrap();
+            // A cashier cash sale of 50 with a CARD refund of 5: the 5 went
+            // back onto the card, the drawer still holds all 50.
+            conn.execute(
+                "INSERT INTO orders (id, items, order_type, total_amount, total_amount_cents,
+                    status, payment_status, staff_shift_id, sync_status, created_at, updated_at)
+                 VALUES ('ord-rf-card', '[]', 'pickup', 50.0, 5000, 'completed', 'paid', ?1,
+                    'pending', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                params![shift_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO order_payments (id, order_id, method, amount, amount_cents,
+                    staff_shift_id, status, sync_status, sync_state, created_at, updated_at)
+                 VALUES ('pay-rf-card', 'ord-rf-card', 'cash', 50.0, 5000, ?1,
+                    'completed', 'pending', 'pending', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                params![shift_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type,
+                    amount, amount_cents, reason, sync_state, created_at, updated_at,
+                    refund_method, cash_handler, adjustment_context)
+                 VALUES ('adj-rf-card', 'pay-rf-card', 'ord-rf-card', 'refund',
+                    5.0, 500, 'card refund', 'pending', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+                    'card', NULL, 'manual')",
+                [],
+            )
+            .unwrap();
+            // A DRIVER-shift order whose 0,09 cash refund the cashier drawer
+            // paid out (cash_handler = 'cashier_drawer').
+            conn.execute(
+                "INSERT INTO staff_shifts (id, staff_id, role_type, branch_id, terminal_id,
+                    check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                    status, calculation_version, sync_status, created_at, updated_at)
+                 VALUES ('rf-driver', 'driver-rf', 'driver', 'b-rf', 't-rf',
+                    strftime('%Y-%m-%dT%H:%M:%fZ','now'), 0.0, 0, 'active', 2, 'pending', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO orders (id, items, order_type, total_amount, total_amount_cents,
+                    status, payment_status, staff_shift_id, sync_status, created_at, updated_at)
+                 VALUES ('ord-rf-drv', '[]', 'delivery', 41.34, 4134, 'completed', 'paid', 'rf-driver',
+                    'pending', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO order_payments (id, order_id, method, amount, amount_cents,
+                    staff_shift_id, status, sync_status, sync_state, created_at, updated_at)
+                 VALUES ('pay-rf-drv', 'ord-rf-drv', 'cash', 41.34, 4134, 'rf-driver',
+                    'completed', 'pending', 'pending', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type,
+                    amount, amount_cents, reason, sync_state, created_at, updated_at,
+                    refund_method, cash_handler, adjustment_context)
+                 VALUES ('adj-rf-drv', 'pay-rf-drv', 'ord-rf-drv', 'refund',
+                    0.09, 9, 'cash refund from cashier drawer', 'pending', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+                    'cash', 'cashier_drawer', 'manual')",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Pin every fixture row inside the [check_in, close] window: the
+        // fixtures were stamped by SQLite's clock while the window bounds come
+        // from chrono's — a millisecond of skew between the two made this
+        // test flaky.
+        {
+            let conn = db.conn.lock().unwrap();
+            let check_in: String = conn
+                .query_row(
+                    "SELECT check_in_time FROM staff_shifts WHERE id = ?1",
+                    params![shift_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            for sql in [
+                "UPDATE orders SET created_at = ?1, updated_at = ?1 WHERE id IN ('ord-rf-card', 'ord-rf-drv')",
+                "UPDATE order_payments SET created_at = ?1, updated_at = ?1 WHERE id IN ('pay-rf-card', 'pay-rf-drv')",
+                "UPDATE payment_adjustments SET created_at = ?1, updated_at = ?1 WHERE id IN ('adj-rf-card', 'adj-rf-drv')",
+            ] {
+                conn.execute(sql, params![check_in]).unwrap();
+            }
+        }
+
+        // Expected = 100 opening + 50 cash sale − 0,09 cashier-drawer cash
+        // refund. The 5,00 card refund must not appear anywhere in cash.
+        let close = serde_json::json!({ "shiftId": shift_id, "closingCash": 149.91 });
+        let result = close_shift(&db, &close).unwrap();
+        assert_eq!(result["success"], true);
+        assert_eq!(result["expected"], 149.91);
+        assert_eq!(result["variance"], 0.0);
+    }
+
+    /// Z-17/08 forensics defect 4: on clean nights the closing count carries
+    /// to the next opening to the cent. When it does not, the opening must
+    /// carry a continuity warning so the break surfaces immediately instead
+    /// of as a phantom variance in the next Z.
+    #[test]
+    fn test_opening_that_breaks_the_closing_carry_gets_a_continuity_warning() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        let open1 = serde_json::json!({
+            "staffId": "staff-cc1", "branchId": "b-cc", "terminalId": "t-cc",
+            "roleType": "cashier", "openingCash": 132.67,
+        });
+        let first = open_shift(&db, &open1).unwrap();
+        assert!(
+            first.get("drawerContinuityWarning").is_none(),
+            "a terminal with no drawer history opens without a warning"
+        );
+        let first_id = first["shiftId"].as_str().unwrap().to_string();
+        close_shift(
+            &db,
+            &serde_json::json!({ "shiftId": first_id, "closingCash": 150.0 }),
+        )
+        .unwrap();
+
+        // The founder's night: closed on a typed «150,00», opened on the real
+        // 124,67 — the warning must name both numbers.
+        let open2 = serde_json::json!({
+            "staffId": "staff-cc2", "branchId": "b-cc", "terminalId": "t-cc",
+            "roleType": "cashier", "openingCash": 124.67,
+        });
+        let second = open_shift(&db, &open2).unwrap();
+        let warning = second
+            .get("drawerContinuityWarning")
+            .expect("a mismatched opening must carry the continuity warning");
+        assert_eq!(warning["previousClosing"], 150.0);
+        assert_eq!(warning["opening"], 124.67);
+        let second_id = second["shiftId"].as_str().unwrap().to_string();
+        close_shift(
+            &db,
+            &serde_json::json!({ "shiftId": second_id, "closingCash": 124.67 }),
+        )
+        .unwrap();
+
+        // A faithful carry opens silently.
+        let open3 = serde_json::json!({
+            "staffId": "staff-cc3", "branchId": "b-cc", "terminalId": "t-cc",
+            "roleType": "cashier", "openingCash": 124.67,
+        });
+        let third = open_shift(&db, &open3).unwrap();
+        assert!(
+            third.get("drawerContinuityWarning").is_none(),
+            "an opening equal to the last closing carries no warning"
+        );
+    }
+
+    /// Codex P1 on the cancelled-order exclusion: collect 11,40, cancel,
+    /// hand the 11,40 back — physically net zero. Excluding only the sale
+    /// while still subtracting the refund would report a false shortage.
+    #[test]
+    fn test_cancelled_then_refunded_order_nets_zero() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        let open = serde_json::json!({
+            "staffId": "staff-cr", "branchId": "b-cr", "terminalId": "t-cr",
+            "roleType": "cashier", "openingCash": 100.0,
+        });
+        let shift_id = open_shift(&db, &open).unwrap()["shiftId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (id, items, order_type, total_amount, total_amount_cents,
+                    status, payment_status, staff_shift_id, sync_status, created_at, updated_at)
+                 VALUES ('ord-cr', '[]', 'pickup', 11.4, 1140, 'cancelled', 'paid', ?1,
+                    'pending', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                params![shift_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO order_payments (id, order_id, method, amount, amount_cents,
+                    staff_shift_id, status, sync_status, sync_state, created_at, updated_at)
+                 VALUES ('pay-cr', 'ord-cr', 'cash', 11.4, 1140, ?1,
+                    'completed', 'pending', 'pending', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                params![shift_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type,
+                    amount, amount_cents, reason, sync_state, created_at, updated_at,
+                    refund_method, cash_handler, adjustment_context)
+                 VALUES ('adj-cr', 'pay-cr', 'ord-cr', 'refund',
+                    11.4, 1140, 'cancelled and returned', 'pending',
+                    strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+                    'cash', 'cashier_drawer', 'manual')",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Pin every fixture row inside the [check_in, close] window: the
+        // fixtures were stamped by SQLite's clock while the window bounds come
+        // from chrono's — a millisecond of skew between the two made this
+        // test flaky.
+        {
+            let conn = db.conn.lock().unwrap();
+            let check_in: String = conn
+                .query_row(
+                    "SELECT check_in_time FROM staff_shifts WHERE id = ?1",
+                    params![shift_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            for sql in [
+                "UPDATE orders SET created_at = ?1, updated_at = ?1 WHERE id = 'ord-cr'",
+                "UPDATE order_payments SET created_at = ?1, updated_at = ?1 WHERE id = 'pay-cr'",
+                "UPDATE payment_adjustments SET created_at = ?1, updated_at = ?1 WHERE id = 'adj-cr'",
+            ] {
+                conn.execute(sql, params![check_in]).unwrap();
+            }
+        }
+
+        // Net zero: neither the excluded sale nor its mirror refund may move
+        // the drawer expectation.
+        let close = serde_json::json!({ "shiftId": shift_id, "closingCash": 100.0 });
+        let result = close_shift(&db, &close).unwrap();
+        assert_eq!(result["success"], true);
+        assert_eq!(result["expected"], 100.0);
+        assert_eq!(result["variance"], 0.0);
+    }
+
+    /// Codex P2 on the continuity check: the stuck-shift recovery flow
+    /// force-closes drawers with a synthetic closing of 0 and no count —
+    /// that sentinel must not fuel a false "last closed with 0" alarm.
+    #[test]
+    fn test_recovery_sentinel_close_does_not_trigger_continuity_warning() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO staff_shifts (id, staff_id, role_type, branch_id, terminal_id,
+                    check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                    status, calculation_version, sync_status, created_at, updated_at)
+                 VALUES ('shift-recovered', 'cashier-rec', 'cashier', 'b-rec', 't-rec',
+                    strftime('%Y-%m-%dT%H:%M:%fZ','now','-1 hour'), 120.0, 12000, 'abandoned', 2, 'pending',
+                    strftime('%Y-%m-%dT%H:%M:%fZ','now','-1 hour'), strftime('%Y-%m-%dT%H:%M:%fZ','now','-30 minutes'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO cash_drawer_sessions (id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                    opening_amount, opening_amount_cents, closing_amount, closing_amount_cents,
+                    opened_at, closed_at, created_at, updated_at)
+                 VALUES ('drawer-recovered', 'shift-recovered', 'cashier-rec', 'b-rec', 't-rec',
+                    120.0, 12000, 0.0, 0,
+                    strftime('%Y-%m-%dT%H:%M:%fZ','now','-1 hour'),
+                    strftime('%Y-%m-%dT%H:%M:%fZ','now','-30 minutes'),
+                    strftime('%Y-%m-%dT%H:%M:%fZ','now','-1 hour'),
+                    strftime('%Y-%m-%dT%H:%M:%fZ','now','-30 minutes'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        let open = serde_json::json!({
+            "staffId": "staff-rec", "branchId": "b-rec", "terminalId": "t-rec",
+            "roleType": "cashier", "openingCash": 120.0,
+        });
+        let result = open_shift(&db, &open).unwrap();
+        assert!(
+            result.get("drawerContinuityWarning").is_none(),
+            "an unreconciled force-closed drawer must not fuel a continuity alarm"
         );
     }
 

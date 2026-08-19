@@ -377,16 +377,55 @@ export function buildSingleDeliveryRouteStop(order: unknown): DeliveryRouteStopP
 // routes departed from whatever street Google reverse-named off the stale
 // point. The text address is what the shop audits, so it wins and Google
 // geocodes it at open time; coordinates remain the fallback.
+// Origin value for Google Maps: COORDINATES first, address text as fallback.
+//
+// Both poles have betrayed us, one day apart (2026-08-18/19):
+// - Stale coordinates pointed ~660m off and Google reverse-named the wrong
+//   street — so we flipped to address-first.
+// - The very next day the text betrayed too: Google resolved the branch's
+//   written "ΚΩΝΣΤΑΝΤΙΝΟΥΠΟΛΕΩΣ 62" onto the RENAMED "Γιάννη Χαλκίδη 62"
+//   in a different neighborhood, ~2.5km from the shop.
+// The durable rule: coordinates taken from the shop's own Google listing are
+// immune to street renames and homonym streets, so once corrected at the
+// source (branches.latitude/longitude) they win; the human-written address
+// remains the fallback for a branch that never got coordinates.
 function locationToMapsValue(location: { address: string | null; coordinates: { lat: number; lng: number } | null }): string {
-  if (location.address) {
-    return location.address
-  }
-
   if (location.coordinates) {
     return `${location.coordinates.lat},${location.coordinates.lng}`
   }
 
+  if (location.address) {
+    return location.address
+  }
+
   return ''
+}
+
+// A destination like "Πλαταιών 38" with no city rides only on Google's IP
+// bias — the same street exists in other cities, and a mis-biased lookup
+// routes the driver hundreds of km away. When the stop's address carries no
+// context of its own (no comma), borrow the city tail from the store's
+// written address: the shop's customers are in the shop's city.
+export function withStoreCityContext(destination: string | null | undefined, originAddress: string | null | undefined): string {
+  if (!destination) {
+    return ''
+  }
+
+  if (destination.includes(',')) {
+    return destination
+  }
+
+  const originText = normalizeText(originAddress)
+  if (!originText || !originText.includes(',')) {
+    return destination
+  }
+
+  const cityTail = originText.slice(originText.lastIndexOf(',') + 1).trim()
+  if (!cityTail) {
+    return destination
+  }
+
+  return `${destination}, ${cityTail}`
 }
 
 export function buildGoogleMapsDirectionsUrl(
@@ -395,7 +434,7 @@ export function buildGoogleMapsDirectionsUrl(
 ): string | null {
   const destination = stop.coordinates
     ? `${stop.coordinates.lat},${stop.coordinates.lng}`
-    : normalizeText(stop.address)
+    : withStoreCityContext(normalizeText(stop.address), origin?.address ?? null)
 
   if (!destination) {
     return null

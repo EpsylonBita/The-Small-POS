@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { toast } from 'react-hot-toast';
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { X, Clock, Euro, FileText, Plus, AlertCircle, User, ChevronRight, AlertTriangle, CheckCircle, XCircle, Banknote, CreditCard, Star, Check, Trash2, Pencil, QrCode, Delete } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -2349,6 +2350,26 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
       if (result.success) {
         const shiftId = result?.shiftId || result?.data?.shiftId || result?.data?.id;
+        // Z-17/08 forensics: when the typed opening float breaks the
+        // terminal's close→open carry (drawer closed on one number, opened
+        // on another with nothing in between), confront the cashier NOW —
+        // at close time the same break surfaces as an unexplainable ±€
+        // variance nobody can reconstruct.
+        const continuity = (result as { drawerContinuityWarning?: { previousClosing?: number; opening?: number } })
+          .drawerContinuityWarning;
+        if (
+          continuity
+          && typeof continuity.previousClosing === 'number'
+          && typeof continuity.opening === 'number'
+        ) {
+          toast(
+            t('modals.staffShift.drawerContinuityWarning', {
+              previous: continuity.previousClosing.toFixed(2),
+              opening: continuity.opening.toFixed(2),
+            }),
+            { duration: 15000, icon: '⚠️' },
+          );
+        }
         setSuccess(t('modals.staffShift.shiftStarted'));
         // Update the global shift context to the checked-in staff so guards lift
         setStaff({

@@ -3848,6 +3848,7 @@
       "unavailable": "Indisponible",
       "noStaffSelected": "Veuillez sélectionner un membre du personnel",
       "shiftStarted": "Service démarré avec succès",
+      "drawerContinuityWarning": "Écart de caisse : fermée avec {{previous}} € mais ouverte avec {{opening}} €. Recomptez la caisse avant de continuer.",
       "shiftEnded": "Service terminé avec succès",
       "failedToLoad": "Échec du chargement de la liste du personnel. Veuillez réessayer.",
       "shiftSummary": "Résumé du service",
