@@ -789,6 +789,10 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   const totalOrders = summarySales.totalOrders ?? 0;
   const cashCollected = summarySales.cashSales ?? 0;
   const cardCollected = summarySales.cardSales ?? 0;
+  // THE-437: money the delivery platform is holding for us (prepaid online
+  // orders, and COD its own riders collected). Revenue, but never drawer cash.
+  const platformOnlineCollected = summarySales.platformOnlineSales ?? 0;
+  const platformCodCollected = summarySales.platformCodSales ?? 0;
   const totalSales = summarySales.totalSales ?? 0;
   const staffEarnedSoFar = staffReportsSorted.reduce(
     (total, staff) => total + resolveShiftEarnedTotal(staff),
@@ -815,7 +819,10 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     drawerDrops -
     driverCashGiven +
     driverCashReturned;
-  const otherCollected = Math.max(0, storeEarnedSoFar - cashCollected - cardCollected);
+  const otherCollected = Math.max(
+    0,
+    storeEarnedSoFar - cashCollected - cardCollected - platformOnlineCollected - platformCodCollected,
+  );
   const totalCashOut = expensesTotal + staffPaymentsTotal + drawerDrops + driverCashGiven;
   const totalCashInAdjustments = driverCashReturned;
   const netAfterExpenses = storeEarnedSoFar - expensesTotal - staffPaymentsTotal;
@@ -869,6 +876,12 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     { key: 'start', label: t('modals.zReport.opening'), value: formatMoney(drawerOpening), tone: strongTextClass },
     { key: 'cash', label: t('modals.zReport.cashSales'), value: `+${formatMoney(cashCollected)}`, tone: 'text-emerald-600 dark:text-emerald-300' },
     { key: 'card', label: t('modals.zReport.cardSales'), value: formatMoney(cardCollected), tone: strongTextClass },
+    ...(platformOnlineCollected > 0
+      ? [{ key: 'platformOnline', label: t('modals.zReport.platformOnlineSales'), value: formatMoney(platformOnlineCollected), tone: strongTextClass }]
+      : []),
+    ...(platformCodCollected > 0
+      ? [{ key: 'platformCod', label: t('modals.zReport.platformCodSales'), value: formatMoney(platformCodCollected), tone: strongTextClass }]
+      : []),
     ...(otherCollected > 0
       ? [{ key: 'other', label: t('common.other', { defaultValue: 'Other' }), value: formatMoney(otherCollected), tone: strongTextClass }]
       : []),

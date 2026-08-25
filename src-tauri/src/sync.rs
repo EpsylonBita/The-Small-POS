@@ -11158,6 +11158,21 @@ fn sync_remote_order_snapshot_into_local(
         recompute_local_order_payment_snapshot(conn, local_order_id, updated_at.as_str())?;
     }
 
+    // THE-437: a platform-carried order can arrive already delivered from the
+    // server (the platform's rider picked it up, the follow-up webhook closed
+    // it). The local command path that auto-settles on «Παραδόθηκε» never ran
+    // for it, so settle here — same eligibility guard, idempotent on the
+    // outstanding balance.
+    if updated > 0 && matches!(status.as_deref(), Some("delivered") | Some("completed")) {
+        if let Err(error) = crate::payments::auto_settle_platform_order(conn, local_order_id) {
+            tracing::warn!(
+                order_id = %local_order_id,
+                error = %error,
+                "Platform auto-settlement on synced delivered status failed"
+            );
+        }
+    }
+
     Ok(updated)
 }
 

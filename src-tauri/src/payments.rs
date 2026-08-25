@@ -1614,6 +1614,155 @@ pub(crate) fn record_payment_in_connection(
 ///
 /// Inserts into `order_payments`, updates the order's `payment_status`
 /// and `payment_method`, and enqueues a sync entry.
+/// THE-437: how a food-delivery platform order settles from the store's side.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum PlatformSettlementKind {
+    /// The customer paid the platform online — the money arrives by bank
+    /// settlement, never through this till.
+    PrepaidOnline,
+    /// Cash on delivery collected by the PLATFORM's own rider — same as
+    /// prepaid from the store's point of view: the platform banks it.
+    /// COD carried by the STORE's driver is deliberately NOT here; that cash
+    /// really does enter the drawer through the normal collection flow.
+    PlatformCollectedCod,
+}
+
+impl PlatformSettlementKind {
+    /// Order-specific reference: sync forwards transaction_ref as the server's
+    /// org-wide `external_transaction_id`, so a constant here would 409 every
+    /// settlement after the first. The Z-report classifier matches on the
+    /// `platform_settlement:{kind}` prefix.
+    fn transaction_ref(self, order_id: &str) -> String {
+        match self {
+            PlatformSettlementKind::PrepaidOnline => {
+                format!("platform_settlement:online:{order_id}")
+            }
+            PlatformSettlementKind::PlatformCollectedCod => {
+                format!("platform_settlement:cod:{order_id}")
+            }
+        }
+    }
+}
+
+/// Reads the order's platform payment disposition from
+/// `ghost_metadata.food_delivery` (written by the aggregator ingest, PR #155).
+/// Returns None for non-platform orders and for platform COD carried by the
+/// store's own driver — those must go through real payment collection.
+pub(crate) fn platform_settlement_kind(
+    conn: &Connection,
+    order_id: &str,
+) -> Option<PlatformSettlementKind> {
+    let (plugin, external_order_id, ghost_metadata): (String, String, String) = conn
+        .query_row(
+            "SELECT COALESCE(plugin, ''), COALESCE(external_plugin_order_id, ''),
+                    COALESCE(ghost_metadata, '')
+             FROM orders WHERE id = ?1",
+            params![order_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .ok()?;
+
+    let is_platform_order =
+        crate::print::is_food_delivery_plugin(&plugin) || !external_order_id.trim().is_empty();
+    if !is_platform_order {
+        return None;
+    }
+
+    let food_delivery = serde_json::from_str::<Value>(&ghost_metadata)
+        .ok()?
+        .get("food_delivery")
+        .cloned()?;
+    let prepaid = food_delivery.get("prepaid").and_then(Value::as_bool) == Some(true);
+    let method = food_delivery
+        .get("payment_method")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let provider = food_delivery
+        .get("delivery_provider")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+
+    if prepaid || method == "online" {
+        return Some(PlatformSettlementKind::PrepaidOnline);
+    }
+    if method == "cash" && provider == "platform_delivery" {
+        return Some(PlatformSettlementKind::PlatformCollectedCod);
+    }
+    None
+}
+
+/// THE-437: settle a platform-settled order automatically when it is marked
+/// delivered/completed. The operator must never be asked to "collect" money
+/// the platform is holding — prepaid orders and COD carried by the platform's
+/// rider both arrive by bank settlement. Records the outstanding balance as
+/// `method='other'`, which by construction never credits
+/// `cash_drawer_sessions.total_cash_sales`, so the drawer expectation stays
+/// untouched. Returns Ok(true) when a payment row was written.
+pub(crate) fn auto_settle_platform_order(
+    conn: &Connection,
+    order_id: &str,
+) -> Result<bool, String> {
+    let Some(kind) = platform_settlement_kind(conn, order_id) else {
+        return Ok(false);
+    };
+    let snapshot = load_order_payment_balance_snapshot(conn, order_id)?;
+    if Cents::round_half_even(snapshot.outstanding_amount).as_i64() <= 0 {
+        return Ok(false);
+    }
+
+    let input = PaymentRecordInput {
+        order_id: order_id.to_string(),
+        method: "other".to_string(),
+        amount: snapshot.outstanding_amount,
+        currency: "EUR".to_string(),
+        tip_amount: 0.0,
+        cash_received: None,
+        change_given: None,
+        transaction_ref: Some(kind.transaction_ref(order_id)),
+        idempotency_key: Some(format!("platform-settle-{order_id}")),
+        discount_amount: 0.0,
+        payment_origin: "manual".to_string(),
+        terminal_device_id: None,
+        table_session_id: None,
+        seat_number: None,
+        requested_staff_id: None,
+        requested_staff_shift_id: None,
+        requested_tip_recipient_role: None,
+        requested_tip_recipient_staff_id: None,
+        requested_tip_recipient_staff_shift_id: None,
+        collected_by: None,
+        items: Vec::new(),
+    };
+
+    // The sync path can call this from inside an open transaction; only manage
+    // one of our own when the connection is in autocommit mode.
+    let own_transaction = conn.is_autocommit();
+    if own_transaction {
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| format!("begin platform settlement: {e}"))?;
+    }
+    let outcome = record_payment_in_connection(conn, &input, &PaymentInsertOptions::local());
+    match outcome {
+        Ok(_) => {
+            if own_transaction {
+                conn.execute_batch("COMMIT")
+                    .map_err(|e| format!("commit platform settlement: {e}"))?;
+            }
+            Ok(true)
+        }
+        Err(error) => {
+            if own_transaction {
+                let _ = conn.execute_batch("ROLLBACK");
+            }
+            Err(error)
+        }
+    }
+}
+
 #[allow(clippy::type_complexity)]
 pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
     record_payment_with_expected_balance(db, payload, None)
@@ -6889,5 +7038,121 @@ mod tests {
         assert_eq!(completed[0]["amount"], 12.00);
         assert_eq!(completed[0]["refundedAmount"], 2.00);
         assert_eq!(completed[0]["remainingRefundable"], 10.00);
+    }
+
+    #[test]
+    fn test_platform_settlement_kind_reads_the_order_disposition() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        let insert = |id: &str, plugin: &str, metadata: &str| {
+            conn.execute(
+                "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, plugin, external_plugin_order_id, ghost_metadata, created_at, updated_at)
+                 VALUES (?1, '[]', 5.9, 590, 'in_transit', 'pending', ?2, 'ext-1', ?3, datetime('now'), datetime('now'))",
+                params![id, plugin, metadata],
+            )
+            .unwrap();
+        };
+
+        // COD carried by the platform's own rider: the platform banks it.
+        insert(
+            "ord-plat-cod",
+            "efood",
+            r#"{"food_delivery":{"payment_method":"cash","prepaid":false,"delivery_provider":"platform_delivery","short_code":"42"}}"#,
+        );
+        assert_eq!(
+            platform_settlement_kind(&conn, "ord-plat-cod"),
+            Some(PlatformSettlementKind::PlatformCollectedCod)
+        );
+
+        // Prepaid online platform order.
+        insert(
+            "ord-plat-online",
+            "efood",
+            r#"{"food_delivery":{"payment_method":"online","prepaid":true}}"#,
+        );
+        assert_eq!(
+            platform_settlement_kind(&conn, "ord-plat-online"),
+            Some(PlatformSettlementKind::PrepaidOnline)
+        );
+
+        // COD carried by the STORE's driver: real cash enters the drawer, the
+        // operator must collect it — no auto settlement.
+        insert(
+            "ord-store-cod",
+            "efood",
+            r#"{"food_delivery":{"payment_method":"cash","prepaid":false,"delivery_provider":"restaurant_delivery"}}"#,
+        );
+        assert_eq!(platform_settlement_kind(&conn, "ord-store-cod"), None);
+
+        // Non-platform order: metadata never consulted.
+        conn.execute(
+            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at)
+             VALUES ('ord-local', '[]', 5.9, 590, 'pending', 'pending', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        assert_eq!(platform_settlement_kind(&conn, "ord-local"), None);
+    }
+
+    #[test]
+    fn test_platform_auto_settlement_books_bank_money_not_drawer_cash() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO staff_shifts (id, staff_id, role_type, check_in_time, status, sync_status, created_at, updated_at)
+             VALUES ('shift-ps', 'staff-1', 'cashier', datetime('now'), 'active', 'pending', datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO cash_drawer_sessions (id, staff_shift_id, cashier_id, branch_id, terminal_id, opening_amount, opening_amount_cents, opened_at, created_at, updated_at)
+             VALUES ('cd-ps', 'shift-ps', 'staff-1', 'b1', 't1', 100.0, 10000, datetime('now'), datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, staff_shift_id, plugin, external_plugin_order_id, ghost_metadata, created_at, updated_at)
+             VALUES ('ord-ps1', '[]', 25.0, 2500, 'in_transit', 'pending', 'shift-ps', 'efood', 'ext-ps1',
+                     '{\"food_delivery\":{\"payment_method\":\"cash\",\"prepaid\":false,\"delivery_provider\":\"platform_delivery\"}}',
+                     datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+
+        assert!(auto_settle_platform_order(&conn, "ord-ps1").unwrap());
+
+        // The settlement row: method 'other', tagged as platform COD.
+        let (method, tx_ref, amount): (String, String, f64) = conn
+            .query_row(
+                "SELECT method, COALESCE(transaction_ref, ''), amount FROM order_payments WHERE order_id = 'ord-ps1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(method, "other");
+        assert_eq!(tx_ref, "platform_settlement:cod:ord-ps1");
+        assert!((amount - 25.0).abs() < 0.001);
+
+        // The order is settled.
+        let payment_status: String = conn
+            .query_row(
+                "SELECT payment_status FROM orders WHERE id = 'ord-ps1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(payment_status, "paid");
+
+        // The drawer never expects this money.
+        let cash_sales: f64 = conn
+            .query_row(
+                "SELECT COALESCE(total_cash_sales, 0) FROM cash_drawer_sessions WHERE id = 'cd-ps'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cash_sales, 0.0);
+
+        // Fully settled: a second delivered/completed transition is a no-op.
+        assert!(!auto_settle_platform_order(&conn, "ord-ps1").unwrap());
     }
 }

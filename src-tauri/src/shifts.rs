@@ -888,6 +888,7 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                    AND op.method = 'cash'
                    AND op.status = 'completed'
                    AND COALESCE(o.is_ghost, 0) = 0
+                   AND COALESCE(o.is_test, 0) = 0
                    AND LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'canceled')
                    AND {order_financial_expr} >= ?2
                    AND {order_financial_expr} <= ?3"
@@ -906,6 +907,7 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                    AND op.method = 'card'
                    AND op.status = 'completed'
                    AND COALESCE(o.is_ghost, 0) = 0
+                   AND COALESCE(o.is_test, 0) = 0
                    AND LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'canceled')
                    AND {order_financial_expr} >= ?2
                    AND {order_financial_expr} <= ?3"
@@ -1241,6 +1243,7 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                  LEFT JOIN order_payments op ON op.order_id = o.id AND op.status = 'completed'
                  WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
                    AND COALESCE(o.is_ghost, 0) = 0
+                   AND COALESCE(o.is_test, 0) = 0
                    AND o.status NOT IN ('cancelled', 'canceled')
                    AND {order_financial_expr} >= ?2
                    AND {order_financial_expr} <= ?3"

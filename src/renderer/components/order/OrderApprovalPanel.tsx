@@ -324,6 +324,13 @@ export function OrderApprovalPanel({
   // Platform cash = cash on delivery: the rider hands off on this line, so it
   // must carry the exact amount to collect.
   const isPlatformCashOnDelivery = requestedPaymentMethod === 'cash' && Boolean(orderPlatform);
+  // THE-437: who ends up with the cash decides what the store must do. With
+  // the platform's own rider the platform banks it — the till never sees it.
+  const codCollectedByPlatform =
+    isPlatformCashOnDelivery &&
+    String(resolveFoodDeliveryMetadata(fullOrder || order)?.delivery_provider ?? '')
+      .trim()
+      .toLowerCase() === 'platform_delivery';
   const collectAmountLabel = formatCurrency(resolveOrderTotalAmount(fullOrder || order, 0));
   const paymentMethodLabel = requestedPaymentMethod === 'cash'
     ? (isPlatformCashOnDelivery
@@ -335,7 +342,12 @@ export function OrderApprovalPanel({
         ? t('orderApprovalPanel.paymentOnline', { defaultValue: 'Paid online' })
         : t('orderApprovalPanel.paymentPending', { defaultValue: 'Pending' });
   const paymentMethodDescription = requestedPaymentMethod === 'cash'
-    ? (isPlatformCashOnDelivery
+    ? (codCollectedByPlatform
+        ? t('orderApprovalPanel.paymentCashOnDeliveryPlatformDescription', {
+            defaultValue: "The platform's rider collects {{amount}} — the platform settles it to you by bank.",
+            amount: collectAmountLabel,
+          })
+        : isPlatformCashOnDelivery
         ? t('orderApprovalPanel.paymentCashOnDeliveryDescription', {
             defaultValue: 'Collect {{amount}} from the customer at handoff.',
             amount: collectAmountLabel,

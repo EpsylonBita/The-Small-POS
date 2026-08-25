@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { toast } from 'react-hot-toast'
 import { LiquidGlassModal, POSGlassSwitch } from '../ui/pos-glass-components'
 import { liquidGlassModalButton, liquidGlassModalTone } from '../../styles/designSystem'
-import { Activity, AlertTriangle, ChefHat, ChevronDown, CreditCard, FileText, Info, Package, Pencil, Printer, Receipt, Tag, Trash2, Truck, UserCheck, Wine, XCircle } from 'lucide-react'
+import { Activity, AlertTriangle, ChefHat, ChevronDown, CreditCard, FileText, FlaskConical, Info, Package, PackageCheck, Pencil, Printer, Receipt, Tag, Trash2, Truck, UserCheck, Wine, XCircle } from 'lucide-react'
 import { getBridge, offEvent, onEvent } from '../../../lib'
 import type { ReceiptSamplePreviewRequest, ReceiptSamplePreviewResponse } from '../../../lib'
 import PrinterSetupWizard from './PrinterSetupWizard'
@@ -327,20 +327,27 @@ const StatusIndicator: React.FC<{ state: PrinterState }> = ({ state }) => {
 }
 
 const RECEIPT_ACTION_KEYS = [
-  'after_order', 'after_edit', 'payment_receipt', 'split_receipt', 'shift_close',
-  'driver_assigned', 'z_report', 'kitchen_ticket', 'on_complete', 'on_cancel',
+  'after_order', 'after_edit', 'after_approve', 'payment_receipt', 'split_receipt', 'shift_close',
+  'driver_assigned', 'z_report', 'kitchen_ticket', 'on_complete', 'on_cancel', 'print_sandbox_orders',
 ] as const
 type ReceiptActionKey = typeof RECEIPT_ACTION_KEYS[number]
 const RECEIPT_ACTION_DEFAULTS: Record<ReceiptActionKey, boolean> = {
-  after_order: true, after_edit: true, payment_receipt: true, split_receipt: true, shift_close: true,
+  after_order: true, after_edit: true, after_approve: true, payment_receipt: true, split_receipt: true, shift_close: true,
   driver_assigned: true, z_report: true, kitchen_ticket: true,
   on_complete: false, on_cancel: false,
+  // Sandbox/test orders never print unless someone is actively running an
+  // integration test at this till; the slips carry a «ΔΟΚΙΜΗ TEST» banner.
+  print_sandbox_orders: false,
 }
 const camelCase = (s: string) => s.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase())
 const getReceiptActionIcon = (key: ReceiptActionKey) => {
   switch (key) {
     case 'after_edit':
       return Pencil
+    case 'after_approve':
+      return PackageCheck
+    case 'print_sandbox_orders':
+      return FlaskConical
     case 'payment_receipt':
       return CreditCard
     case 'split_receipt':

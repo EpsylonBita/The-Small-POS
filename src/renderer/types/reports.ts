@@ -81,6 +81,10 @@ export interface ZReportData {
     totalSales: number;
     cashSales: number;
     cardSales: number;
+    /** THE-437: platform-held money — prepaid online platform orders. */
+    platformOnlineSales?: number;
+    /** THE-437: COD collected by the platform's own rider (banks it to us). */
+    platformCodSales?: number;
     cashPercent?: number;
     cardPercent?: number;
     counts?: { cashOrders: number; cardOrders: number };

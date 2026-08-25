@@ -16,6 +16,7 @@ import {
   resolveOrderDisplayTitle,
 } from '../../utils/orderDisplay';
 import { formatCompactOrderNumberForDisplay, getVisibleOrderNumber } from '../../utils/orderNumberUtils';
+import { resolveFoodDeliveryShortCode } from '../../utils/foodDeliveryMetadata';
 import { formatCurrency } from '../../utils/format';
 import { openExternalUrl } from '../../utils/external-url';
 import {
@@ -117,6 +118,12 @@ export const OrderCard = memo<OrderCardProps>(({
 
   // Format the stable order number from the order itself
   const formatOrderNumber = () => {
+    // Platform orders headline the rider-facing 4-digit short code (efood's
+    // «#4545»), never the long external order id embedded in order_number.
+    const platformShortCode = resolveFoodDeliveryShortCode(order);
+    if (platformShortCode) {
+      return `#${platformShortCode}`;
+    }
     const orderNum = getVisibleOrderNumber(order);
     if (orderNum) {
       const trimmedOrderNum = orderNum.trim();

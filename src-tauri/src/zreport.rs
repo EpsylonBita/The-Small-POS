@@ -2609,7 +2609,14 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
     let mut pay_stmt = conn
         .prepare(
             // W4b-iii: cents-with-real-fallback shim (removed in 4e).
-            "SELECT op.method, COUNT(*) as cnt,
+            // THE-437: platform_ref splits bank-settled platform money out of
+            // `other` — see the multi-shift twin in build_z_report_for_date.
+            "SELECT op.method,
+                    CASE WHEN op.method NOT IN ('cash','card')
+                              AND COALESCE(op.transaction_ref, '') LIKE 'platform_settlement:%'
+                         THEN COALESCE(op.transaction_ref, '')
+                         ELSE '' END AS platform_ref,
+                    COUNT(*) as cnt,
                     COALESCE(SUM(COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER))), 0) as total
              FROM order_payments op
              JOIN orders o ON o.id = op.order_id
@@ -2618,37 +2625,50 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
                AND COALESCE(o.is_ghost, 0) = 0
                AND COALESCE(o.is_test, 0) = 0
                AND o.status NOT IN ('cancelled', 'canceled')
-             GROUP BY op.method",
+             GROUP BY op.method, platform_ref",
         )
         .map_err(|e| format!("prepare payment query: {e}"))?;
 
     let mut cash_sales = 0.0_f64;
     let mut card_sales = 0.0_f64;
     let mut other_sales = 0.0_f64;
+    let mut platform_online_sales = 0.0_f64;
+    let mut platform_cod_sales = 0.0_f64;
     let mut cash_count = 0_i64;
     let mut card_count = 0_i64;
     let mut other_count = 0_i64;
+    let mut platform_online_count = 0_i64;
+    let mut platform_cod_count = 0_i64;
 
     let pay_rows = pay_stmt
         .query_map(params![shift_id], |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?,
-                Cents::new(row.get::<_, i64>(2)?).to_f64_dp2(),
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                Cents::new(row.get::<_, i64>(3)?).to_f64_dp2(),
             ))
         })
         .map_err(|e| format!("query payments: {e}"))?;
 
     for row in pay_rows.flatten() {
-        let (method, count, total) = row;
+        let (method, platform_ref, count, total) = row;
         match method.as_str() {
             "cash" => {
-                cash_sales = total;
-                cash_count = count;
+                cash_sales += total;
+                cash_count += count;
             }
             "card" => {
-                card_sales = total;
-                card_count = count;
+                card_sales += total;
+                card_count += count;
+            }
+            _ if platform_ref.starts_with("platform_settlement:online") => {
+                platform_online_sales += total;
+                platform_online_count += count;
+            }
+            _ if platform_ref.starts_with("platform_settlement:cod") => {
+                platform_cod_sales += total;
+                platform_cod_count += count;
             }
             _ => {
                 other_sales += total;
@@ -2996,6 +3016,8 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
         "cash": { "count": cash_count, "total": cash_sales },
         "card": { "count": card_count, "total": card_sales },
         "other": { "count": other_count, "total": other_sales },
+        "platform_online": { "count": platform_online_count, "total": platform_online_sales },
+        "platform_cod": { "count": platform_cod_count, "total": platform_cod_sales },
     });
     let sales_by_type = load_sales_by_type_for_shift(&conn, &shift_id)?;
     let drawer_rows = load_drawer_rows_for_shift(&conn, &shift_id)?;
@@ -3034,7 +3056,8 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
     // nested) carries a `_cents` integer sibling so admin-dashboard can
     // read either shape during the bake window.
     let total_sales = gross_sales - discounts_total;
-    let day_total = cash_sales + card_sales + other_sales;
+    let day_total =
+        cash_sales + card_sales + other_sales + platform_online_sales + platform_cod_sales;
     let mut report_json = serde_json::json!({
         "date": report_date,
         "shifts": shift_counts,
@@ -3048,6 +3071,10 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
             "cashSales_cents": Cents::round_half_even(cash_sales).as_i64(),
             "cardSales": card_sales,
             "cardSales_cents": Cents::round_half_even(card_sales).as_i64(),
+            "platformOnlineSales": platform_online_sales,
+            "platformOnlineSales_cents": Cents::round_half_even(platform_online_sales).as_i64(),
+            "platformCodSales": platform_cod_sales,
+            "platformCodSales_cents": Cents::round_half_even(platform_cod_sales).as_i64(),
             "dineInOrders": dine_in_orders,
             "dineInSales": dine_in_sales,
             "dineInSales_cents": Cents::round_half_even(dine_in_sales).as_i64(),
@@ -3088,6 +3115,10 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
             "cashTotal_cents": Cents::round_half_even(cash_sales).as_i64(),
             "cardTotal": card_sales,
             "cardTotal_cents": Cents::round_half_even(card_sales).as_i64(),
+            "platformOnlineTotal": platform_online_sales,
+            "platformOnlineTotal_cents": Cents::round_half_even(platform_online_sales).as_i64(),
+            "platformCodTotal": platform_cod_sales,
+            "platformCodTotal_cents": Cents::round_half_even(platform_cod_sales).as_i64(),
             "total": day_total,
             "total_cents": Cents::round_half_even(day_total).as_i64(),
             "totalOrders": total_orders,
@@ -3660,8 +3691,18 @@ fn build_z_report_for_date(
     let payment_scope_expr = business_day::order_financial_timestamp_expr("o");
     let payment_scope_predicate = lower_bound_mode.sql_predicate(&payment_scope_expr, "?1");
     // W4b-iii: cents-with-real-fallback shim (removed in 4e).
+    // THE-437: platform-settled money (prepaid online, or COD collected by the
+    // platform's own rider) is auto-recorded as method='other' with a
+    // `platform_settlement:*` transaction_ref. Split it out of the catch-all
+    // `other` bucket so the Z shows it as its own line — revenue that arrives
+    // by bank settlement and must never look like drawer cash.
     let payment_scope_sql = format!(
-        "SELECT op.method, COUNT(*) as cnt,
+        "SELECT op.method,
+                CASE WHEN op.method NOT IN ('cash','card')
+                          AND COALESCE(op.transaction_ref, '') LIKE 'platform_settlement:%'
+                     THEN COALESCE(op.transaction_ref, '')
+                     ELSE '' END AS platform_ref,
+                COUNT(*) as cnt,
                 COALESCE(SUM(COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER))), 0) as total
          FROM order_payments op
          JOIN orders o ON o.id = op.order_id
@@ -3672,7 +3713,7 @@ fn build_z_report_for_date(
            AND COALESCE(o.is_ghost, 0) = 0
            AND COALESCE(o.is_test, 0) = 0
            AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
-         GROUP BY op.method"
+         GROUP BY op.method, platform_ref"
     );
     let mut pay_stmt = conn
         .prepare(&payment_scope_sql)
@@ -3681,30 +3722,43 @@ fn build_z_report_for_date(
     let mut cash_sales = 0.0_f64;
     let mut card_sales = 0.0_f64;
     let mut other_sales = 0.0_f64;
+    let mut platform_online_sales = 0.0_f64;
+    let mut platform_cod_sales = 0.0_f64;
     let mut cash_count = 0_i64;
     let mut card_count = 0_i64;
     let mut other_count = 0_i64;
+    let mut platform_online_count = 0_i64;
+    let mut platform_cod_count = 0_i64;
 
     let pay_rows = pay_stmt
         .query_map(params![period_start, cutoff_param, branch_id], |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?,
-                Cents::new(row.get::<_, i64>(2)?).to_f64_dp2(),
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                Cents::new(row.get::<_, i64>(3)?).to_f64_dp2(),
             ))
         })
         .map_err(|e| format!("query payments: {e}"))?;
 
     for row in pay_rows.flatten() {
-        let (method, count, total) = row;
+        let (method, platform_ref, count, total) = row;
         match method.as_str() {
             "cash" => {
-                cash_sales = total;
-                cash_count = count;
+                cash_sales += total;
+                cash_count += count;
             }
             "card" => {
-                card_sales = total;
-                card_count = count;
+                card_sales += total;
+                card_count += count;
+            }
+            _ if platform_ref.starts_with("platform_settlement:online") => {
+                platform_online_sales += total;
+                platform_online_count += count;
+            }
+            _ if platform_ref.starts_with("platform_settlement:cod") => {
+                platform_cod_sales += total;
+                platform_cod_count += count;
             }
             _ => {
                 other_sales += total;
@@ -4038,6 +4092,8 @@ fn build_z_report_for_date(
         "cash": { "count": cash_count, "total": cash_sales },
         "card": { "count": card_count, "total": card_sales },
         "other": { "count": other_count, "total": other_sales },
+        "platform_online": { "count": platform_online_count, "total": platform_online_sales },
+        "platform_cod": { "count": platform_cod_count, "total": platform_cod_sales },
     });
     let sales_by_type = load_sales_by_type_for_period(
         &conn,
@@ -4138,7 +4194,8 @@ fn build_z_report_for_date(
     // W4d-iv additive emission: every monetary float key carries a `_cents`
     // sibling. Mirrors the single-shift body at line 2844.
     let total_sales = gross_sales - discounts_total;
-    let day_total = cash_sales + card_sales + other_sales;
+    let day_total =
+        cash_sales + card_sales + other_sales + platform_online_sales + platform_cod_sales;
     let mut report_json = serde_json::json!({
         "date": date,
         "shifts": {
@@ -4157,6 +4214,10 @@ fn build_z_report_for_date(
             "cashSales_cents": Cents::round_half_even(cash_sales).as_i64(),
             "cardSales": card_sales,
             "cardSales_cents": Cents::round_half_even(card_sales).as_i64(),
+            "platformOnlineSales": platform_online_sales,
+            "platformOnlineSales_cents": Cents::round_half_even(platform_online_sales).as_i64(),
+            "platformCodSales": platform_cod_sales,
+            "platformCodSales_cents": Cents::round_half_even(platform_cod_sales).as_i64(),
             "dineInOrders": dine_in_orders,
             "dineInSales": dine_in_sales,
             "dineInSales_cents": Cents::round_half_even(dine_in_sales).as_i64(),
@@ -4197,6 +4258,10 @@ fn build_z_report_for_date(
             "cashTotal_cents": Cents::round_half_even(cash_sales).as_i64(),
             "cardTotal": card_sales,
             "cardTotal_cents": Cents::round_half_even(card_sales).as_i64(),
+            "platformOnlineTotal": platform_online_sales,
+            "platformOnlineTotal_cents": Cents::round_half_even(platform_online_sales).as_i64(),
+            "platformCodTotal": platform_cod_sales,
+            "platformCodTotal_cents": Cents::round_half_even(platform_cod_sales).as_i64(),
             "total": day_total,
             "total_cents": Cents::round_half_even(day_total).as_i64(),
             "totalOrders": total_orders,

@@ -545,6 +545,19 @@ pub fn auto_print_entity_types_for_order_type(order_type: &str) -> &'static [&'s
 /// Existing triggers default to true when absent; new triggers default to false.
 /// `after_edit` is a deliberate exception: an edited order must reprint its
 /// updated receipt unless the operator explicitly disables it.
+/// Whether the operator explicitly allowed sandbox/test orders to print
+/// (receipt_actions/print_sandbox_orders). Default OFF: test orders must never
+/// produce paper during a live business day unless someone is actively running
+/// an integration test at this till.
+pub(crate) fn sandbox_prints_allowed(conn: &rusqlite::Connection) -> bool {
+    matches!(
+        crate::db::get_setting(conn, "receipt_actions", "print_sandbox_orders")
+            .as_deref()
+            .map(str::trim),
+        Some("true" | "1" | "yes" | "on")
+    )
+}
+
 pub fn is_print_action_enabled(db: &DbState, key: &str) -> bool {
     let conn = match db.conn.lock() {
         Ok(c) => c,
@@ -704,7 +717,11 @@ pub fn enqueue_print_job_with_payload(
         false
     };
 
-    if is_sandbox_order {
+    // THE-437 follow-up: the sandbox guard stays the default, but during
+    // integration testing the operator can flip receipt_actions/
+    // print_sandbox_orders to see real paper — every such slip prints with a
+    // «ΔΟΚΙΜΗ TEST» banner so it can never pass for a customer receipt.
+    if is_sandbox_order && !sandbox_prints_allowed(&conn) {
         return Ok(serde_json::json!({
             "success": true,
             "skipped": true,
@@ -5030,7 +5047,9 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
                     COALESCE(payment_status, ''),
                     COALESCE(payment_transaction_id, ''),
                     COALESCE(ghost_metadata, ''),
-                    COALESCE(plugin, '')
+                    COALESCE(plugin, ''),
+                    COALESCE(is_test, 0),
+                    COALESCE(external_plugin_order_id, '')
              FROM orders WHERE id = ?1",
             params![order_id],
             |row| {
@@ -5064,6 +5083,8 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
                     row.get::<_, String>(26)?,
                     row.get::<_, String>(27)?,
                     row.get::<_, String>(28)?,
+                    row.get::<_, i64>(29)?,
+                    row.get::<_, String>(30)?,
                 ))
             },
         )
@@ -5098,6 +5119,8 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
         payment_transaction_id,
         ghost_metadata,
         plugin,
+        is_test,
+        external_order_id,
     ) = order;
     let payment_method = derived_payment_method;
     let menu_lookup = build_menu_category_lookup(&conn);
@@ -5136,6 +5159,22 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
     let special_instructions =
         strip_platform_items_fallback(&special_instructions, !items.is_empty());
     push_unique_trimmed_note(&mut order_notes, Some(&special_instructions));
+
+    // THE-434 faithful slip: platform orders headline the rider's short code
+    // (efood's own receipt prints «#4545» as the biggest element), so the big
+    // reverse banner shows the 4-digit code and the long platform order id
+    // moves to its own footer line — mirroring efood's «ΚΩΔΙΚΟΣ ΠΑΡΑΓΓΕΛΙΑΣ».
+    let platform_short_code = if is_food_delivery_plugin(&plugin) {
+        food_delivery_short_code(&ghost_metadata)
+    } else {
+        None
+    };
+    if platform_short_code.is_some() {
+        let external_order_id = external_order_id.trim();
+        if !external_order_id.is_empty() {
+            order_notes.push(format!("ΚΩΔΙΚΟΣ ΠΑΡΑΓΓΕΛΙΑΣ: {external_order_id}"));
+        }
+    }
 
     let effective_discount = discount_amount.max(0.0);
     let computed_subtotal =
@@ -5300,11 +5339,11 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
 
     Ok(OrderReceiptDoc {
         order_id: order_id.to_string(),
-        order_number: if order_number.is_empty() {
+        order_number: platform_short_code.unwrap_or(if order_number.is_empty() {
             order_id.to_string()
         } else {
             order_number
-        },
+        }),
         order_type,
         status,
         created_at,
@@ -5328,7 +5367,20 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
         // Platform orders print who they belong to, the rider's short code,
         // and the handoff payment line; the completed/canceled variants
         // overwrite this with their own label downstream.
-        status_label: platform_slip_banner(&plugin, &ghost_metadata, &payment_status, total_amount),
+        status_label: {
+            let banner =
+                platform_slip_banner(&plugin, &ghost_metadata, &payment_status, total_amount);
+            if is_test != 0 {
+                // Sandbox slips only print behind the print_sandbox_orders
+                // override — when they do, the paper must say so loudly.
+                Some(match banner {
+                    Some(banner) => format!("ΔΟΚΙΜΗ TEST · {banner}"),
+                    None => "ΔΟΚΙΜΗ TEST".to_string(),
+                })
+            } else {
+                banner
+            }
+        },
         cancellation_reason: None,
     })
 }
@@ -5612,6 +5664,19 @@ pub(crate) fn is_food_delivery_plugin(plugin: &str) -> bool {
     )
 }
 
+/// The rider-facing 4-digit code from ghost_metadata.food_delivery — the
+/// number efood's own slip prints huge («#4545») and riders match orders by.
+fn food_delivery_short_code(ghost_metadata_json: &str) -> Option<String> {
+    serde_json::from_str::<Value>(ghost_metadata_json)
+        .ok()?
+        .get("food_delivery")?
+        .get("short_code")?
+        .as_str()
+        .map(str::trim)
+        .filter(|code| !code.is_empty())
+        .map(str::to_string)
+}
+
 fn platform_slip_banner(
     plugin: &str,
     ghost_metadata_json: &str,
@@ -5747,11 +5812,15 @@ fn build_kitchen_ticket_doc(db: &DbState, order_id: &str) -> Result<KitchenTicke
 
     Ok(KitchenTicketDoc {
         order_id: order_id.to_string(),
-        order_number: if order_number.is_empty() {
-            order_id.to_string()
-        } else {
-            order_number
-        },
+        // Platform orders: the kitchen matches bags to riders by the same
+        // 4-digit short code the receipt and efood's own slip headline.
+        order_number: food_delivery_short_code(&ghost_metadata).unwrap_or(
+            if order_number.is_empty() {
+                order_id.to_string()
+            } else {
+                order_number
+            },
+        ),
         order_type,
         created_at,
         table_number: if table_number.is_empty() {
@@ -6572,6 +6641,19 @@ fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &st
         cash_sales,
         drawer_cash_sales,
         card_sales,
+        platform_online_sales: number_from_paths(
+            payload,
+            &[
+                "/sales/platformOnlineSales",
+                "/daySummary/platformOnlineTotal",
+            ],
+        )
+        .unwrap_or(0.0),
+        platform_cod_sales: number_from_paths(
+            payload,
+            &["/sales/platformCodSales", "/daySummary/platformCodTotal"],
+        )
+        .unwrap_or(0.0),
         refunds_total,
         drawer_refunds_total,
         voids_total,
@@ -6773,6 +6855,19 @@ fn build_z_report_doc(db: &DbState, z_report_id: &str) -> Result<ZReportDoc, Str
         cash_sales,
         drawer_cash_sales: number_from_paths(&rj, &["/cashDrawer/cashSales"]),
         card_sales,
+        platform_online_sales: number_from_paths(
+            &rj,
+            &[
+                "/sales/platformOnlineSales",
+                "/daySummary/platformOnlineTotal",
+            ],
+        )
+        .unwrap_or(0.0),
+        platform_cod_sales: number_from_paths(
+            &rj,
+            &["/sales/platformCodSales", "/daySummary/platformCodTotal"],
+        )
+        .unwrap_or(0.0),
         refunds_total,
         drawer_refunds_total: number_from_paths(&rj, &["/cashDrawer/totalRefunds"]),
         voids_total,
@@ -16698,6 +16793,102 @@ mod tests {
             .as_array()
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn faithful_platform_slip_headlines_the_short_code() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            insert_receipt_order(&conn, "ord-efood-slip", "EFOOD-1787677685257-64656281", 2.6);
+            conn.execute(
+                r#"UPDATE orders
+                   SET plugin = 'efood',
+                       external_plugin_order_id = '64656281',
+                       ghost_metadata = '{"food_delivery":{"short_code":"20","payment_method":"cash","prepaid":false,"delivery_provider":"vendor_delivery"}}'
+                   WHERE id = 'ord-efood-slip'"#,
+                [],
+            )
+            .unwrap();
+        }
+
+        // The receipt mirrors efood's own slip: the 4-digit rider code is the
+        // big number, the long platform id becomes the footer line.
+        let doc = build_order_receipt_doc(&db, "ord-efood-slip").unwrap();
+        assert_eq!(doc.order_number, "20");
+        assert!(doc
+            .order_notes
+            .iter()
+            .any(|note| note == "ΚΩΔΙΚΟΣ ΠΑΡΑΓΓΕΛΙΑΣ: 64656281"));
+        let label = doc.status_label.unwrap_or_default();
+        assert!(label.contains("EFOOD #20"), "banner missing: {label}");
+        assert!(label.contains("ΑΝΤΙΚΑΤΑΒΟΛΗ"), "COD line missing: {label}");
+
+        // The kitchen matches bags to riders by the same code.
+        let kitchen = build_kitchen_ticket_doc(&db, "ord-efood-slip").unwrap();
+        assert_eq!(kitchen.order_number, "20");
+    }
+
+    #[test]
+    fn test_print_sandbox_orders_override_lets_test_slips_through() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            insert_receipt_order(&conn, "ord-sandbox-ovr", "TEST-9", 4.20);
+            conn.execute(
+                "UPDATE orders
+                 SET integration_environment = 'sandbox', is_test = 1
+                 WHERE id = 'ord-sandbox-ovr'",
+                [],
+            )
+            .unwrap();
+            crate::db::set_setting(&conn, "receipt_actions", "print_sandbox_orders", "true")
+                .unwrap();
+        }
+
+        let result = enqueue_print_job(
+            &db,
+            "order_receipt",
+            "ord-sandbox-ovr",
+            None,
+            &NoopPrintQueueInvalidator,
+        )
+        .unwrap();
+        assert_eq!(result["success"], true);
+        assert!(result.get("skipped").is_none() || result["skipped"] != true);
+        assert_eq!(
+            list_print_jobs(&db, None)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // The slip itself is branded as a test document.
+        let doc = build_order_receipt_doc(&db, "ord-sandbox-ovr").unwrap();
+        let label = doc.status_label.unwrap_or_default();
+        assert!(
+            label.starts_with("ΔΟΚΙΜΗ TEST"),
+            "sandbox slip must carry the test banner, got: {label}"
+        );
+
+        // Flipping the override back off restores the production guard.
+        {
+            let conn = db.conn.lock().unwrap();
+            crate::db::set_setting(&conn, "receipt_actions", "print_sandbox_orders", "false")
+                .unwrap();
+            conn.execute("DELETE FROM print_jobs", []).unwrap();
+        }
+        let blocked = enqueue_print_job(
+            &db,
+            "order_receipt",
+            "ord-sandbox-ovr",
+            None,
+            &NoopPrintQueueInvalidator,
+        )
+        .unwrap();
+        assert_eq!(blocked["skipped"], true);
     }
 
     #[test]

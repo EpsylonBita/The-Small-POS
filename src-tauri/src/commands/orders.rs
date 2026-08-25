@@ -2297,6 +2297,17 @@ pub async fn order_update_status(
         let previous_status =
             ensure_order_status_transition_allowed(&conn, &actual_order_id, &status)?;
         if status_requires_payment_integrity_guard(&status) {
+            // THE-437: prepaid and platform-rider-COD orders settle by bank —
+            // record their settlement automatically instead of asking the
+            // operator to collect money the platform is holding. Failure falls
+            // through to the normal blocker so the operator still gets a path.
+            if let Err(error) = payments::auto_settle_platform_order(&conn, &actual_order_id) {
+                tracing::warn!(
+                    order_id = %actual_order_id,
+                    error = %error,
+                    "Platform auto-settlement failed; falling back to payment blockers"
+                );
+            }
             let blockers = payment_integrity::load_order_payment_blockers(&conn, &actual_order_id)?;
             if !blockers.is_empty() {
                 let action_label = if status == "delivered" {

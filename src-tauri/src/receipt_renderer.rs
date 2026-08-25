@@ -420,6 +420,12 @@ pub struct ZReportDoc {
     #[serde(default)]
     pub drawer_cash_sales: Option<f64>,
     pub card_sales: f64,
+    /// THE-437: platform-held money — prepaid online platform orders.
+    #[serde(default)]
+    pub platform_online_sales: f64,
+    /// THE-437: COD collected by the platform's own rider (bank-settled).
+    #[serde(default)]
+    pub platform_cod_sales: f64,
     pub refunds_total: f64,
     #[serde(default)]
     pub drawer_refunds_total: Option<f64>,
@@ -657,6 +663,8 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "CASH DRAWER" => "ΤΑΜΕΙΟ",
             "STAFF" => "ΠΡΟΣΩΠΙΚΟ",
             "Cash Sales" => "Πωλήσεις Μετρητών",
+            "Platform Online" => "Πλατφόρμα Online",
+            "Platform COD" => "Αντικαταβ. Πλατφόρμας",
             "Till Cash Sales" => "Μετρητά Ταμείου",
             "Net Driver Cash" => "Καθαρά από Οδηγούς",
             "All Cash Out" => "Σύνολο Εκροών",
@@ -787,6 +795,8 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "CASH DRAWER" => "KASSENSCHADE",
             "STAFF" => "PERSONAL",
             "Cash Sales" => "Barumsatz",
+            "Platform Online" => "Plattform Online",
+            "Platform COD" => "Plattform-Nachnahme",
             "Till Cash Sales" => "Barumsatz Kasse",
             "Net Driver Cash" => "Fahrer Bargeld netto",
             "All Cash Out" => "Alle Barausgaben",
@@ -917,6 +927,8 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "CASH DRAWER" => "CAISSE",
             "STAFF" => "PERSONNEL",
             "Cash Sales" => "Ventes especes",
+            "Platform Online" => "Plateforme en ligne",
+            "Platform COD" => "C/R plateforme",
             "Till Cash Sales" => "Ventes especes caisse",
             "Net Driver Cash" => "Especes livreurs nettes",
             "All Cash Out" => "Toutes sorties especes",
@@ -1047,6 +1059,8 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "CASH DRAWER" => "CASSETTO CASSA",
             "STAFF" => "PERSONALE",
             "Cash Sales" => "Vendite contanti",
+            "Platform Online" => "Piattaforma online",
+            "Platform COD" => "Contrassegno piattaforma",
             "Till Cash Sales" => "Contanti vendite cassa",
             "Net Driver Cash" => "Contanti corrieri netti",
             "All Cash Out" => "Tutte le uscite cassa",
@@ -3839,6 +3853,20 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                 esc(receipt_label(lang, "Card")),
                 money(doc.card_sales),
             ));
+            if doc.platform_online_sales > 0.0 {
+                body.push_str(&format!(
+                    "<div class=\"line\"><span>{}</span><span>{}</span></div>",
+                    esc(receipt_label(lang, "Platform Online")),
+                    money(doc.platform_online_sales),
+                ));
+            }
+            if doc.platform_cod_sales > 0.0 {
+                body.push_str(&format!(
+                    "<div class=\"line\"><span>{}</span><span>{}</span></div>",
+                    esc(receipt_label(lang, "Platform COD")),
+                    money(doc.platform_cod_sales),
+                ));
+            }
             if doc.refunds_total > 0.0 {
                 body.push_str(&format!(
                     "<div class=\"line\"><span>{}</span><span>-{}</span></div>",
@@ -4012,8 +4040,7 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                 "<div class=\"section\"><div class=\"center\"><strong>{}</strong></div>\
                  <div class=\"line\"><span>{}</span><span>{}</span></div>\
                  <div class=\"line\"><span>{}</span><span>{}</span></div>\
-                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
-                 <div class=\"line\"><strong>{}</strong><strong>{}</strong></div></div>",
+                 <div class=\"line\"><span>{}</span><span>{}</span></div>",
                 esc(receipt_label(lang, "TOTAL")),
                 esc(receipt_label(lang, "Orders")),
                 doc.total_orders,
@@ -4021,6 +4048,23 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                 money(doc.cash_sales),
                 esc(receipt_label(lang, "Card")),
                 money(doc.card_sales),
+            ));
+            if doc.platform_online_sales > 0.0 {
+                body.push_str(&format!(
+                    "<div class=\"line\"><span>{}</span><span>{}</span></div>",
+                    esc(receipt_label(lang, "Platform Online")),
+                    money(doc.platform_online_sales),
+                ));
+            }
+            if doc.platform_cod_sales > 0.0 {
+                body.push_str(&format!(
+                    "<div class=\"line\"><span>{}</span><span>{}</span></div>",
+                    esc(receipt_label(lang, "Platform COD")),
+                    money(doc.platform_cod_sales),
+                ));
+            }
+            body.push_str(&format!(
+                "<div class=\"line\"><strong>{}</strong><strong>{}</strong></div></div>",
                 esc(receipt_label(lang, "Net")),
                 money(doc.net_sales),
             ));
@@ -7302,6 +7346,20 @@ fn render_classic_non_customer_raster_exact_ttf(
                 &money_with_currency_locale(doc.card_sales, &cur, comma),
                 preset.item_style,
             );
+            if doc.platform_online_sales > 0.0 {
+                canvas.draw_pair(
+                    &format!("{}:", receipt_label(lang, "Platform Online")),
+                    &money_with_currency_locale(doc.platform_online_sales, &cur, comma),
+                    preset.item_style,
+                );
+            }
+            if doc.platform_cod_sales > 0.0 {
+                canvas.draw_pair(
+                    &format!("{}:", receipt_label(lang, "Platform COD")),
+                    &money_with_currency_locale(doc.platform_cod_sales, &cur, comma),
+                    preset.item_style,
+                );
+            }
             canvas.draw_pair(
                 &format!("{}:", receipt_label(lang, "Refunds")),
                 &money_with_currency_locale(doc.refunds_total, &cur, comma),
@@ -7513,6 +7571,20 @@ fn render_classic_non_customer_raster_exact_ttf(
                 &money_with_currency_locale(doc.card_sales, &cur, comma),
                 preset.item_style,
             );
+            if doc.platform_online_sales > 0.0 {
+                canvas.draw_pair(
+                    &format!("{}:", receipt_label(lang, "Platform Online")),
+                    &money_with_currency_locale(doc.platform_online_sales, &cur, comma),
+                    preset.item_style,
+                );
+            }
+            if doc.platform_cod_sales > 0.0 {
+                canvas.draw_pair(
+                    &format!("{}:", receipt_label(lang, "Platform COD")),
+                    &money_with_currency_locale(doc.platform_cod_sales, &cur, comma),
+                    preset.item_style,
+                );
+            }
             canvas.draw_pair(
                 &format!("{}:", receipt_label(lang, "Net")),
                 &money_with_currency_locale(doc.net_sales, &cur, comma),
@@ -9258,6 +9330,22 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                 &money_locale(doc.card_sales, comma),
                 width,
             );
+            if doc.platform_online_sales > 0.0 {
+                emit_pair(
+                    &mut builder,
+                    receipt_label(lang, "Platform Online"),
+                    &money_locale(doc.platform_online_sales, comma),
+                    width,
+                );
+            }
+            if doc.platform_cod_sales > 0.0 {
+                emit_pair(
+                    &mut builder,
+                    receipt_label(lang, "Platform COD"),
+                    &money_locale(doc.platform_cod_sales, comma),
+                    width,
+                );
+            }
             builder.bold(true);
             emit_pair(
                 &mut builder,
