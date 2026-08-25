@@ -1,13 +1,17 @@
 import React, { useMemo, useCallback } from "react";
 import { useTheme } from '../contexts/theme-context';
 import { useI18n } from '../contexts/i18n-context';
-import { User, CheckCircle, Pencil, X, Map as MapIcon, Eye, RotateCcw } from 'lucide-react';
+import { User, CheckCircle, Pencil, X, Map as MapIcon, Eye, RotateCcw, PackageCheck } from 'lucide-react';
 import type { TabId } from './OrderTabsBar';
 
 interface BulkActionsBarProps {
   selectedCount: number;
   selectionType?: 'pickup' | 'delivery' | null;
   deliverySelectionCanBeCompleted?: boolean;
+  // «Έτοιμη» (THE-435): every selected order is a platform order that can
+  // still advance to 'ready' — the button relays prepared/ready to the
+  // platform, summoning the platform's own rider.
+  platformReadySelectionEligible?: boolean;
   // Shared with OrderTabsBar so hub tabs (tables/rooms/services) typecheck. Non-order
   // tabs have no bulk selection, so getActionsForTab falls through to [] for them.
   activeTab: TabId;
@@ -27,6 +31,7 @@ const BulkActionsBar: React.FC<BulkActionsBarProps> = React.memo(({
   selectedCount,
   selectionType = null,
   deliverySelectionCanBeCompleted = false,
+  platformReadySelectionEligible = false,
   activeTab,
   onBulkAction,
   onClearSelection
@@ -181,6 +186,12 @@ const BulkActionsBar: React.FC<BulkActionsBarProps> = React.memo(({
           {activeTab === 'orders' && selectionType === 'delivery' && (
             <>
               <button className={getButtonStyles('primary')} onClick={(e) => { e.preventDefault(); onBulkAction('assign'); }}><User className="w-4 h-4" />{t('bulkActions.driver')}</button>
+              {/* Platform orders only: relays prepared/ready to the platform so
+                  THEIR rider is dispatched. «Οδηγός» stays for phone orders and
+                  for platform agreements served by store drivers (THE-435). */}
+              {platformReadySelectionEligible && (
+                <button className={getButtonStyles('success')} onClick={(e) => { e.preventDefault(); onBulkAction('platform_ready'); }}><PackageCheck className="w-4 h-4" />{t('bulkActions.ready')}</button>
+              )}
               {/* The "Set as Pickup" (Παραλαβή) shortcut used to live here.
                   Removed 2026-04-22: the EditOptionsModal now exposes the
                   same delivery → pickup conversion inline alongside the
@@ -207,6 +218,11 @@ const BulkActionsBar: React.FC<BulkActionsBarProps> = React.memo(({
 
           {activeTab === 'orders' && selectionType === 'pickup' && (
             <>
+              {/* Platform takeaway orders need the same prepared/ready relay —
+                  efood notifies the customer their pickup is ready. */}
+              {platformReadySelectionEligible && (
+                <button className={getButtonStyles('success')} onClick={(e) => { e.preventDefault(); onBulkAction('platform_ready'); }}><PackageCheck className="w-4 h-4" />{t('bulkActions.ready')}</button>
+              )}
               <button className={`${getButtonStyles('success')}`} onClick={(e) => { e.preventDefault(); onBulkAction('delivered'); }}><CheckCircle className="w-4 h-4" />{t('bulkActions.delivered')}</button>
               <button className={getButtonStyles('warning')} onClick={(e) => { e.preventDefault(); onBulkAction('edit'); }}><Pencil className="w-4 h-4" />{t('bulkActions.edit')}</button>
               <button className={getButtonStyles('danger')} onClick={(e) => { e.preventDefault(); onBulkAction('cancel'); }}><X className="w-4 h-4" />{t('bulkActions.cancel')}</button>

@@ -563,6 +563,10 @@ pub fn is_print_action_enabled(db: &DbState, key: &str) -> bool {
                 | "driver_assigned"
                 | "z_report"
                 | "kitchen_ticket"
+                // Deliberate default-on exception like after_edit: approving a
+                // platform order must hand the rider a slip without an extra
+                // operator step (THE-434, founder decision 2026-08-25).
+                | "after_approve"
         ),
         Some(v) => matches!(v.trim(), "true" | "1" | "yes" | "on"),
     }
@@ -5025,7 +5029,8 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
                     COALESCE(delivery_notes, ''), COALESCE(special_instructions, ''),
                     COALESCE(payment_status, ''),
                     COALESCE(payment_transaction_id, ''),
-                    COALESCE(ghost_metadata, '')
+                    COALESCE(ghost_metadata, ''),
+                    COALESCE(plugin, '')
              FROM orders WHERE id = ?1",
             params![order_id],
             |row| {
@@ -5058,6 +5063,7 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
                     row.get::<_, String>(25)?,
                     row.get::<_, String>(26)?,
                     row.get::<_, String>(27)?,
+                    row.get::<_, String>(28)?,
                 ))
             },
         )
@@ -5091,6 +5097,7 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
         payment_status,
         payment_transaction_id,
         ghost_metadata,
+        plugin,
     ) = order;
     let payment_method = derived_payment_method;
     let menu_lookup = build_menu_category_lookup(&conn);
@@ -5126,6 +5133,8 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
     let kiosk_context_note = kiosk_context_note_from_metadata(&ghost_metadata);
     push_unique_trimmed_note(&mut order_notes, kiosk_context_note.as_deref());
     push_unique_trimmed_note(&mut order_notes, Some(&delivery_notes));
+    let special_instructions =
+        strip_platform_items_fallback(&special_instructions, !items.is_empty());
     push_unique_trimmed_note(&mut order_notes, Some(&special_instructions));
 
     let effective_discount = discount_amount.max(0.0);
@@ -5316,7 +5325,10 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
         adjustments,
         masked_card,
         order_notes,
-        status_label: None,
+        // Platform orders print who they belong to, the rider's short code,
+        // and the handoff payment line; the completed/canceled variants
+        // overwrite this with their own label downstream.
+        status_label: platform_slip_banner(&plugin, &ghost_metadata, &payment_status, total_amount),
         cancellation_reason: None,
     })
 }
@@ -5575,6 +5587,83 @@ fn build_split_receipt_doc(db: &DbState, payment_id: &str) -> Result<OrderReceip
     })
 }
 
+/// Rider-facing banner for platform orders (THE-434, Plan-B first version —
+/// the faithful efood-template pass follows once reference slips exist): the
+/// platform name plus the short code riders match orders by, plus the payment
+/// line the handoff depends on (collect X€ vs already paid).
+/// Food-delivery platforms whose slips are handed to an external rider.
+/// Internal sources (`pos`, `kiosk`, `web`, `android-ios`) deliberately fail
+/// this check: the kiosk route stores `platform = 'web'`, and those receipts
+/// must not grow a rider banner. Mirrors KNOWN_EXTERNAL_PLUGINS (delivery
+/// subset) in src/renderer/utils/plugin-icons.tsx.
+pub(crate) fn is_food_delivery_plugin(plugin: &str) -> bool {
+    matches!(
+        plugin.trim().to_ascii_lowercase().as_str(),
+        "efood"
+            | "wolt"
+            | "box"
+            | "glovo"
+            | "bolt_food"
+            | "uber_eats"
+            | "just_eat_takeaway"
+            | "deliveroo"
+            | "foodora"
+            | "smood"
+    )
+}
+
+fn platform_slip_banner(
+    plugin: &str,
+    ghost_metadata_json: &str,
+    payment_status: &str,
+    total_amount: f64,
+) -> Option<String> {
+    let plugin = plugin.trim();
+    if !is_food_delivery_plugin(plugin) {
+        return None;
+    }
+    let food_delivery = serde_json::from_str::<Value>(ghost_metadata_json)
+        .ok()
+        .and_then(|metadata| metadata.get("food_delivery").cloned())
+        .unwrap_or(Value::Null);
+    let short_code = food_delivery
+        .get("short_code")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let prepaid = food_delivery.get("prepaid").and_then(Value::as_bool);
+    let method = food_delivery
+        .get("payment_method")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+
+    let mut banner = plugin.to_uppercase();
+    if !short_code.is_empty() {
+        banner.push_str(&format!(" #{short_code}"));
+    }
+    if prepaid == Some(true) || payment_status.eq_ignore_ascii_case("paid") {
+        banner.push_str(" · ΠΛΗΡΩΜΕΝΗ");
+    } else if method.eq_ignore_ascii_case("cash") {
+        banner.push_str(&format!(" · ΑΝΤΙΚΑΤΑΒΟΛΗ {total_amount:.2}€"));
+    }
+    Some(banner)
+}
+
+/// The ingest appends a "--- Order Items ---" text fallback to
+/// special_instructions on platform orders (a relic of the pre-order_items
+/// era). When the document prints real item rows, that block duplicates them
+/// on paper — keep only the customer's own note above the marker.
+fn strip_platform_items_fallback(special_instructions: &str, has_items: bool) -> String {
+    if !has_items {
+        return special_instructions.to_string();
+    }
+    match special_instructions.find("--- Order Items ---") {
+        Some(index) => special_instructions[..index].trim_end().to_string(),
+        None => special_instructions.to_string(),
+    }
+}
+
 fn build_kitchen_ticket_doc(db: &DbState, order_id: &str) -> Result<KitchenTicketDoc, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let (
@@ -5682,6 +5771,8 @@ fn build_kitchen_ticket_doc(db: &DbState, order_id: &str) -> Result<KitchenTicke
         },
         special_instructions: {
             let mut notes = Vec::new();
+            let special_instructions =
+                strip_platform_items_fallback(&special_instructions, !items.is_empty());
             push_unique_trimmed_note(&mut notes, Some(&special_instructions));
             let kiosk_context_note = kiosk_context_note_from_metadata(&ghost_metadata);
             push_unique_trimmed_note(&mut notes, kiosk_context_note.as_deref());
@@ -9054,6 +9145,68 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread::ThreadId;
+
+    #[test]
+    fn platform_slip_banner_speaks_rider() {
+        let metadata = r#"{"food_delivery":{"short_code":"42","payment_method":"cash","prepaid":false,"delivery_provider":"platform_delivery"}}"#;
+        assert_eq!(
+            platform_slip_banner("efood", metadata, "pending", 5.9),
+            Some("EFOOD #42 · ΑΝΤΙΚΑΤΑΒΟΛΗ 5.90€".to_string())
+        );
+
+        let prepaid =
+            r#"{"food_delivery":{"short_code":"42","payment_method":"online","prepaid":true}}"#;
+        assert_eq!(
+            platform_slip_banner("efood", prepaid, "paid", 5.9),
+            Some("EFOOD #42 · ΠΛΗΡΩΜΕΝΗ".to_string())
+        );
+
+        // Platform order without food_delivery metadata (wolt/box today):
+        // still branded, payment line only when payment_status says paid.
+        assert_eq!(
+            platform_slip_banner("wolt", "", "paid", 12.0),
+            Some("WOLT · ΠΛΗΡΩΜΕΝΗ".to_string())
+        );
+
+        // Non-platform orders get no banner at all.
+        assert_eq!(platform_slip_banner("", metadata, "pending", 5.9), None);
+
+        // Internal sources are not delivery platforms: the kiosk route stores
+        // platform='web', and 'pos'/'kiosk' receipts must never grow a rider
+        // banner even when metadata or payment_status would decorate one.
+        assert_eq!(platform_slip_banner("web", metadata, "paid", 5.9), None);
+        assert_eq!(platform_slip_banner("kiosk", "", "paid", 5.9), None);
+        assert_eq!(platform_slip_banner("pos", "", "pending", 5.9), None);
+
+        // The gate is case-insensitive — sync may deliver 'Efood'.
+        assert_eq!(
+            platform_slip_banner("Efood", prepaid, "paid", 5.9),
+            Some("EFOOD #42 · ΠΛΗΡΩΜΕΝΗ".to_string())
+        );
+    }
+
+    #[test]
+    fn strip_platform_items_fallback_keeps_only_the_customer_note() {
+        let ingest_note =
+            "Χωρίς κρεμμύδι :-)\n--- Order Items ---\n1x Espresso (1.10)\n1x Freddo (2.10)";
+        // Real item rows on the document → the text fallback would print the
+        // items twice; only the customer's own note survives.
+        assert_eq!(
+            strip_platform_items_fallback(ingest_note, true),
+            "Χωρίς κρεμμύδι :-)"
+        );
+        // No parsed items (legacy tokenless path) → the fallback is the only
+        // item listing and must stay.
+        assert_eq!(
+            strip_platform_items_fallback(ingest_note, false),
+            ingest_note
+        );
+        // Plain notes without the marker are untouched either way.
+        assert_eq!(
+            strip_platform_items_fallback("Ring the bell", true),
+            "Ring the bell"
+        );
+    }
 
     #[test]
     fn sanitize_path_segment_blocks_traversal_and_control_chars() {

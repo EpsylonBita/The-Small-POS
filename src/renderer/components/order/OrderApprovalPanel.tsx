@@ -160,9 +160,25 @@ function resolveKioskMetadata(order: Order | any): Record<string, any> | null {
     : null;
 }
 
-function resolveRequestedPaymentMethod(order: Order | any): 'cash' | 'card' | null {
+function resolveFoodDeliveryMetadata(order: Order | any): Record<string, any> | null {
+  const metadata = parseMetadataCandidate(order?.ghost_metadata ?? order?.ghostMetadata);
+  const foodDelivery = metadata?.food_delivery;
+  return foodDelivery && typeof foodDelivery === 'object' && !Array.isArray(foodDelivery)
+    ? foodDelivery as Record<string, any>
+    : null;
+}
+
+function resolveRequestedPaymentMethod(order: Order | any): 'cash' | 'card' | 'online' | null {
   const kioskMetadata = resolveKioskMetadata(order);
+  // Platform orders: the local orders.payment_method column no longer exists
+  // and the derived method stays 'pending' until a payment row lands, so the
+  // classified method travels in ghost_metadata.food_delivery instead.
+  const foodDeliveryMetadata = resolveFoodDeliveryMetadata(order);
+  if (foodDeliveryMetadata?.prepaid === true) {
+    return 'online';
+  }
   const candidates = [
+    foodDeliveryMetadata?.payment_method,
     order?.payment_method,
     order?.paymentMethod,
     kioskMetadata?.payment_method,
@@ -171,7 +187,7 @@ function resolveRequestedPaymentMethod(order: Order | any): 'cash' | 'card' | nu
 
   for (const candidate of candidates) {
     const normalized = String(candidate ?? '').trim().toLowerCase();
-    if (normalized === 'cash' || normalized === 'card') {
+    if (normalized === 'cash' || normalized === 'card' || normalized === 'online') {
       return normalized;
     }
   }
@@ -291,6 +307,12 @@ export function OrderApprovalPanel({
   const deliveryAddressRaw = order.delivery_address || order.address || '';
   const [deliveryAddress, setDeliveryAddress] = React.useState<string>(deliveryAddressRaw);
   const [fullOrder, setFullOrder] = React.useState<Order>(order);
+  // Riders and staff match platform orders by the platform's short code
+  // (efood: a 4-digit number), not our long internal order number.
+  const platformShortCode = orderPlatform
+    ? String(resolveFoodDeliveryMetadata(order)?.short_code ?? '').trim() || null
+    : null;
+  const headerOrderNumber = platformShortCode ?? orderNumber;
 
   // Additional delivery fields (snake_case from normalized data)
   const deliveryCity = order.delivery_city || '';
@@ -299,21 +321,31 @@ export function OrderApprovalPanel({
   const deliveryNotes = order.delivery_notes || '';
   const nameOnRinger = order.name_on_ringer || '';
   const requestedPaymentMethod = resolveRequestedPaymentMethod(fullOrder || order);
+  // Platform cash = cash on delivery: the rider hands off on this line, so it
+  // must carry the exact amount to collect.
+  const isPlatformCashOnDelivery = requestedPaymentMethod === 'cash' && Boolean(orderPlatform);
+  const collectAmountLabel = formatCurrency(resolveOrderTotalAmount(fullOrder || order, 0));
   const paymentMethodLabel = requestedPaymentMethod === 'cash'
-    ? t('orderApprovalPanel.paymentCash', { defaultValue: 'Cash' })
+    ? (isPlatformCashOnDelivery
+        ? t('orderApprovalPanel.paymentCashOnDelivery', { defaultValue: 'Cash on delivery' })
+        : t('orderApprovalPanel.paymentCash', { defaultValue: 'Cash' }))
     : requestedPaymentMethod === 'card'
       ? t('orderApprovalPanel.paymentCard', { defaultValue: 'Card' })
-      : t('orderApprovalPanel.paymentPending', { defaultValue: 'Pending' });
+      : requestedPaymentMethod === 'online'
+        ? t('orderApprovalPanel.paymentOnline', { defaultValue: 'Paid online' })
+        : t('orderApprovalPanel.paymentPending', { defaultValue: 'Pending' });
   const paymentMethodDescription = requestedPaymentMethod === 'cash'
-    ? t('orderApprovalPanel.paymentCashDescription', { defaultValue: 'Customer selected cash payment at the linked terminal.' })
+    ? (isPlatformCashOnDelivery
+        ? t('orderApprovalPanel.paymentCashOnDeliveryDescription', {
+            defaultValue: 'Collect {{amount}} from the customer at handoff.',
+            amount: collectAmountLabel,
+          })
+        : t('orderApprovalPanel.paymentCashDescription', { defaultValue: 'Customer selected cash payment at the linked terminal.' }))
     : requestedPaymentMethod === 'card'
       ? t('orderApprovalPanel.paymentCardDescription', { defaultValue: 'Customer selected card payment at the linked terminal.' })
-      : t('orderApprovalPanel.paymentPendingDescription', { defaultValue: 'Payment method is not available yet.' });
-
-  // Log payment method for debugging
-  console.log('[OrderApprovalPanel] order.payment_method:', order.payment_method);
-  console.log('[OrderApprovalPanel] order.paymentMethod:', order.paymentMethod);
-  console.log('[OrderApprovalPanel] full order object:', order);
+      : requestedPaymentMethod === 'online'
+        ? t('orderApprovalPanel.paymentOnlineDescription', { defaultValue: 'The platform already collected the payment — do not charge again.' })
+        : t('orderApprovalPanel.paymentPendingDescription', { defaultValue: 'Payment method is not available yet.' });
 
   // Fetch full order details if items are missing
   // Requirements: 2.1, 2.5, 2.6
@@ -723,12 +755,12 @@ export function OrderApprovalPanel({
                 >
                   {isKioskOrder
                     ? t('orderApprovalPanel.kioskOrderNumber', {
-                        number: orderNumber,
-                        defaultValue: `Order ${orderNumber}`,
+                        number: headerOrderNumber,
+                        defaultValue: `Order ${headerOrderNumber}`,
                       })
                     : t('orderApprovalPanel.orderNumber', {
-                        number: orderNumber,
-                        defaultValue: `Order #${orderNumber}`,
+                        number: headerOrderNumber,
+                        defaultValue: `Order #${headerOrderNumber}`,
                       })}
                 </h2>
                 {createdAt && (
@@ -777,7 +809,7 @@ export function OrderApprovalPanel({
                         onClick={() => setEstimatedTime(time)}
                         className={`min-h-[2.75rem] rounded-lg px-2 text-sm font-bold transition ${
                           estimatedTime === time
-                            ? 'border border-white bg-white text-black shadow-lg shadow-white/15'
+                            ? 'border border-amber-400 bg-amber-400 text-black shadow-lg shadow-amber-400/30'
                             : 'liquid-glass-modal-button'
                         }`}
                         aria-pressed={estimatedTime === time}
@@ -855,7 +887,7 @@ export function OrderApprovalPanel({
             <section className={`liquid-glass-modal-card p-4 ${
               requestedPaymentMethod === 'cash'
                 ? 'border-green-500/25 bg-green-500/10'
-                : requestedPaymentMethod === 'card'
+                : requestedPaymentMethod === 'card' || requestedPaymentMethod === 'online'
                   ? 'border-blue-500/25 bg-blue-500/10'
                   : ''
             }`}>
@@ -864,7 +896,7 @@ export function OrderApprovalPanel({
                   <Banknote className="h-5 w-5 flex-shrink-0 text-green-400" />
                 ) : (
                   <CreditCard className={`h-5 w-5 flex-shrink-0 ${
-                    requestedPaymentMethod === 'card'
+                    requestedPaymentMethod === 'card' || requestedPaymentMethod === 'online'
                       ? 'text-blue-400'
                       : 'liquid-glass-modal-text-muted'
                   }`} />

@@ -140,6 +140,7 @@ import {
 } from "../services/terminal-credentials";
 import { couponRedemptionService } from "../services/CouponRedemptionService";
 import { getBridge, offEvent, onEvent } from "../../lib";
+import { isExternalPlatform } from "../utils/plugin-icons";
 import type {
   EditSettlementOrderUpdates,
   OrderFinancialsUpdateParams,
@@ -1328,6 +1329,29 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           return status === "out_for_delivery";
         }),
       [selectedDeliveryOrders],
+    );
+
+    // «Έτοιμη» (THE-435): visible only when every selected order is a platform
+    // order still able to advance to 'ready' — pressing it relays the
+    // platform's prepared/ready call, which is what summons their rider.
+    const platformReadySelectionEligible = React.useMemo(
+      () =>
+        selectedOrderObjects.length > 0 &&
+        selectedOrderObjects.every((order) => {
+          const plugin =
+            order.plugin ||
+            order.order_plugin ||
+            order.platform ||
+            order.order_platform;
+          const externalId =
+            order.external_plugin_order_id || order.external_platform_order_id;
+          if (!plugin || !externalId || !isExternalPlatform(String(plugin))) {
+            return false;
+          }
+          const status = String(order.status || "").toLowerCase();
+          return ["pending", "confirmed", "preparing"].includes(status);
+        }),
+      [selectedOrderObjects],
     );
 
     const resetPickupToDeliveryFlow = useCallback(() => {
@@ -5279,6 +5303,36 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           return;
         }
 
+        if (action === "platform_ready") {
+          // Relay ready/prepared to the platform for every selected platform
+          // order. notifyPlatformReady sets status='ready' locally, queues the
+          // offline fallback, and fires the immediate PATCH in one call.
+          for (const order of selectedOrderObjects) {
+            try {
+              await bridge.orders.notifyPlatformReady(order.id);
+            } catch {
+              toast.error(
+                t("orderDashboard.platformReadyFailed", {
+                  defaultValue:
+                    "Failed to notify the platform for {{orderNumber}}",
+                  orderNumber: formatCompactOrderNumberForDisplay(
+                    getVisibleOrderNumber(order),
+                  ),
+                }),
+              );
+              return;
+            }
+          }
+          toast.success(
+            t("orderDashboard.platformReadySent", {
+              defaultValue: "Platform notified — rider is on the way",
+              count: selectedOrderObjects.length,
+            }),
+          );
+          handleClearSelection();
+          return;
+        }
+
         if (action === "delivered") {
           // Handle pickup orders immediately (mark as completed)
           if (pickupOrders.length > 0) {
@@ -6477,6 +6531,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             selectedCount={selectedOrders.length}
             selectionType={selectionType}
             deliverySelectionCanBeCompleted={deliverySelectionCanBeCompleted}
+            platformReadySelectionEligible={platformReadySelectionEligible}
             activeTab={activeTab}
             onBulkAction={handleBulkAction}
             onClearSelection={handleClearSelection}

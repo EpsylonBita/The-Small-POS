@@ -4027,6 +4027,15 @@ pub async fn order_approve(
         rusqlite::params![estimated_time, now, order_id],
     )
     .map_err(|e| format!("approve order: {e}"))?;
+    let (order_type, is_ghost, plugin, external_order_id): (String, i64, String, String) = conn
+        .query_row(
+            "SELECT COALESCE(order_type, ''), COALESCE(is_ghost, 0),
+                    COALESCE(plugin, ''), COALESCE(external_plugin_order_id, '')
+             FROM orders WHERE id = ?1",
+            rusqlite::params![order_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap_or((String::new(), 0, String::new(), String::new()));
 
     let payload = serde_json::json!({
         "orderId": order_id,
@@ -4043,6 +4052,30 @@ pub async fn order_approve(
             &db,
             build_order_status_patch_body(remote_order_id, "confirmed", estimated_time, None, None),
         );
+    }
+    // THE-434: the accept is the moment the store commits to the order — the
+    // rider slip must come out now, not when the operator remembers to
+    // reprint. Platform orders only: customer web/kiosk orders already
+    // auto-print on arrival, so approving them must not queue a second copy.
+    // Sandbox/test orders are skipped inside the enqueue path.
+    let is_platform_order =
+        crate::print::is_food_delivery_plugin(&plugin) || !external_order_id.trim().is_empty();
+    if is_ghost == 0
+        && is_platform_order
+        && crate::print::is_print_action_enabled(&db, "after_approve")
+    {
+        for entity_type in crate::print::auto_print_entity_types_for_order_type(&order_type) {
+            if let Err(error) =
+                crate::print::enqueue_print_job(&db, entity_type, &order_id, None, &app)
+            {
+                tracing::warn!(
+                    order_id = %order_id,
+                    entity_type = %entity_type,
+                    error = %error,
+                    "Failed to enqueue after-approve print job"
+                );
+            }
+        }
     }
     Ok(
         serde_json::json!({ "success": true, "orderId": order_id_raw, "estimatedTime": estimated_time }),

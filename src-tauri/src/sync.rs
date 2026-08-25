@@ -7356,6 +7356,18 @@ fn materialize_remote_order(
             .or_else(|| remote_order.get("ghostMetadata")),
         payment_method.as_deref(),
     );
+    // Sandbox/test platform orders must keep their marker through the normal
+    // sync pull — it is what excludes them from the local Z and blocks
+    // production printing (previously only order_save_from_remote set it, so
+    // pulled test orders landed as real sales).
+    let integration_environment = str_any(
+        remote_order,
+        &["integration_environment", "integrationEnvironment"],
+    )
+    .filter(|value| value == "sandbox" || value == "production")
+    .unwrap_or_else(|| "production".to_string());
+    let is_test = bool_any(remote_order, &["is_test", "isTest"])
+        .unwrap_or(integration_environment == "sandbox");
 
     // W6: `orders.payment_method` was dropped in v55; the remote
     // materializer preserves the inbound `payment_method` only in the
@@ -7374,7 +7386,8 @@ fn materialize_remote_order(
             branch_id, plugin, external_plugin_order_id,
             tax_rate, delivery_fee, is_ghost, ghost_source, ghost_metadata,
             delivery_address_id, delivery_latitude, delivery_longitude,
-            delivery_address_fingerprint, delivery_zone_id
+            delivery_address_fingerprint, delivery_zone_id,
+            integration_environment, is_test
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7,
             ?8, ?9, ?10, ?11, ?12,
@@ -7386,7 +7399,8 @@ fn materialize_remote_order(
             ?34, ?35, ?36, ?37, ?38,
             ?39, ?40, ?41, ?42, ?43,
             ?44, ?45, ?46, ?47,
-            ?48, ?49, ?50, ?51
+            ?48, ?49, ?50, ?51,
+            ?52, ?53
         )",
         params![
             local_id,
@@ -7440,6 +7454,8 @@ fn materialize_remote_order(
             delivery_longitude,
             delivery_address_fingerprint,
             delivery_zone_id,
+            integration_environment,
+            if is_test { 1_i64 } else { 0_i64 },
         ],
     )
     .map_err(|e| format!("materialize remote order: {e}"))?;
@@ -10998,6 +11014,21 @@ fn sync_remote_order_snapshot_into_local(
             .or_else(|| remote_order.get("ghostMetadata")),
         payment_method.as_deref(),
     );
+    // Same sandbox-marker preservation as the materializer: without it a
+    // pulled test order loses is_test on snapshot refresh and re-enters the
+    // local Z as a real sale.
+    let integration_environment = str_any(
+        remote_order,
+        &["integration_environment", "integrationEnvironment"],
+    )
+    .filter(|value| value == "sandbox" || value == "production");
+    let is_test = bool_any(remote_order, &["is_test", "isTest"])
+        .map(i64::from)
+        .or_else(|| {
+            integration_environment
+                .as_deref()
+                .map(|env| i64::from(env == "sandbox"))
+        });
 
     // W4c dual-write contract: when this UPDATE writes a REAL monetary
     // column (?4=total_amount, ?5=tax_amount, ?6=subtotal, ?25=discount_amount,
@@ -11059,6 +11090,8 @@ fn sync_remote_order_snapshot_into_local(
               delivery_longitude = COALESCE(?41, delivery_longitude),
               delivery_address_fingerprint = COALESCE(?42, delivery_address_fingerprint),
               delivery_zone_id = COALESCE(?43, delivery_zone_id),
+              integration_environment = COALESCE(?47, integration_environment),
+              is_test = COALESCE(?48, is_test),
               sync_status = 'synced',
               last_synced_at = datetime('now'),
               updated_at = COALESCE(?44, updated_at, ?45)
@@ -11110,6 +11143,8 @@ fn sync_remote_order_snapshot_into_local(
             Some(updated_at.clone()),
             repaired_at,
             local_order_id,
+            integration_environment,
+            is_test,
         ],
     )
     .map_err(|e| format!("sync remote order snapshot into local cache: {e}"))?;
@@ -19946,6 +19981,95 @@ mod tests {
             )
             .unwrap();
         assert_eq!(supabase_id, "remote-order-1");
+    }
+
+    #[test]
+    fn test_materialize_and_snapshot_preserve_sandbox_test_marker() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        // A sandbox platform order pulled through the normal sync must keep
+        // its marker: it is what excludes it from the local Z and blocks
+        // production printing.
+        let remote_order = serde_json::json!({
+            "id": "remote-efood-1",
+            "order_number": "EFOOD-1787210662238-64656041",
+            "platform": "efood",
+            "external_plugin_order_id": "64656041",
+            "integration_environment": "sandbox",
+            "is_test": true,
+            "items": [{ "name": "Espresso", "quantity": 1, "price": 1.1 }],
+            "total_amount": 1.1,
+            "status": "pending",
+            "payment_status": "pending",
+            "updated_at": "2026-08-20T07:01:39Z"
+        });
+
+        let local_id = materialize_remote_order(&conn, &remote_order)
+            .expect("materialize remote order")
+            .expect("local id");
+
+        let (is_test, environment, plugin): (i64, String, String) = conn
+            .query_row(
+                "SELECT is_test, integration_environment, plugin FROM orders WHERE id = ?1",
+                params![local_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(is_test, 1);
+        assert_eq!(environment, "sandbox");
+        assert_eq!(plugin, "efood");
+
+        // A snapshot refresh without the marker keys must NOT clear it…
+        let refresh_without_marker = serde_json::json!({
+            "id": "remote-efood-1",
+            "status": "confirmed",
+            "updated_at": "2026-08-20T07:05:00Z"
+        });
+        sync_remote_order_snapshot_into_local(
+            &conn,
+            &local_id,
+            &refresh_without_marker,
+            "2026-08-20T07:05:00Z",
+        )
+        .expect("snapshot refresh");
+        let is_test_after: i64 = conn
+            .query_row(
+                "SELECT is_test FROM orders WHERE id = ?1",
+                params![local_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(is_test_after, 1, "refresh without keys must keep is_test");
+
+        // …and a refresh that carries `integration_environment: sandbox`
+        // alone (no explicit is_test) still derives the marker.
+        conn.execute(
+            "UPDATE orders SET is_test = 0, integration_environment = 'production' WHERE id = ?1",
+            params![local_id],
+        )
+        .unwrap();
+        let refresh_with_environment = serde_json::json!({
+            "id": "remote-efood-1",
+            "integration_environment": "sandbox",
+            "updated_at": "2026-08-20T07:06:00Z"
+        });
+        sync_remote_order_snapshot_into_local(
+            &conn,
+            &local_id,
+            &refresh_with_environment,
+            "2026-08-20T07:06:00Z",
+        )
+        .expect("snapshot refresh with environment");
+        let (is_test_derived, environment_after): (i64, String) = conn
+            .query_row(
+                "SELECT is_test, integration_environment FROM orders WHERE id = ?1",
+                params![local_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(is_test_derived, 1);
+        assert_eq!(environment_after, "sandbox");
     }
 
     #[test]

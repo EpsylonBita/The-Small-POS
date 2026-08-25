@@ -24,6 +24,7 @@ import {
   type StoreMapOrigin,
 } from '../utils/delivery-routing';
 import { getVisibleOrderNumber } from '../utils/orderNumberUtils';
+import { getPluginColor, getPluginName, isExternalPlugin } from '../utils/plugin-icons';
 import { openExternalUrl } from '../utils/external-url';
 import { getBridge, offEvent, onEvent } from '../../lib';
 import { pageMotionContainer, pageMotionItem } from '../components/ui/page-motion';
@@ -77,6 +78,12 @@ interface Delivery {
   actualDeliveryTime?: string;
   createdAt: string;
   updatedAt: string;
+  // Platform (efood/wolt/…) identity: the mapper used to drop these, so a
+  // platform order was indistinguishable from a phone order on this page.
+  plugin?: string | null;
+  externalOrderId?: string | null;
+  shortCode?: string | null;
+  isTest?: boolean;
 }
 
 interface Driver {
@@ -180,6 +187,21 @@ const extractDeliveryAddress = (order: Record<string, any>): DeliveryAddress => 
   notes: order.delivery_notes || order.deliveryNotes,
 });
 
+const parseGhostMetadata = (value: unknown): Record<string, any> | null => {
+  if (!value) return null;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+  return typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, any>)
+    : null;
+};
+
 const mapOrderToDelivery = (order: Record<string, any>): Delivery | null => {
   const orderType = String(order.order_type || order.orderType || '').toLowerCase();
   if (orderType !== 'delivery') {
@@ -194,6 +216,13 @@ const mapOrderToDelivery = (order: Record<string, any>): Delivery | null => {
   const address = extractDeliveryAddress(order);
   const createdAt = order.created_at || order.createdAt || new Date().toISOString();
   const updatedAt = order.updated_at || order.updatedAt || createdAt;
+  const plugin = String(
+    order.plugin || order.order_plugin || order.platform || order.order_platform || '',
+  ).trim() || null;
+  const foodDelivery = parseGhostMetadata(order.ghost_metadata ?? order.ghostMetadata)?.food_delivery;
+  const shortCode = foodDelivery && typeof foodDelivery === 'object'
+    ? String((foodDelivery as Record<string, any>).short_code ?? '').trim() || null
+    : null;
 
   return {
     id,
@@ -220,6 +249,14 @@ const mapOrderToDelivery = (order: Record<string, any>): Delivery | null => {
     actualDeliveryTime: order.actual_delivery_time || order.actualDeliveryTime,
     createdAt,
     updatedAt,
+    plugin,
+    externalOrderId: String(
+      order.external_plugin_order_id || order.externalPluginOrderId || order.external_platform_order_id || '',
+    ).trim() || null,
+    shortCode,
+    isTest:
+      order.is_test === true || order.is_test === 1 ||
+      String(order.integration_environment || '').toLowerCase() === 'sandbox',
   };
 };
 
@@ -291,8 +328,21 @@ const DeliveryCard = memo<DeliveryCardProps>(({
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-3">
             <span className={`font-bold text-lg ${isDark ? 'text-white' : 'text-gray-900'}`}>
-              #{delivery.orderNumber}
+              #{delivery.shortCode ?? delivery.orderNumber}
             </span>
+            {delivery.plugin && isExternalPlugin(delivery.plugin) && (
+              <span
+                className="rounded-full px-2 py-0.5 text-xs font-bold uppercase tracking-wide text-white"
+                style={{ backgroundColor: getPluginColor(delivery.plugin) }}
+              >
+                {getPluginName(delivery.plugin)}
+              </span>
+            )}
+            {delivery.isTest && (
+              <span className="rounded-full border border-amber-400/60 px-2 py-0.5 text-xs font-bold uppercase tracking-wide text-amber-400">
+                TEST
+              </span>
+            )}
             <div
               className="flex items-center gap-1.5 px-2.5 py-1 rounded-2xl text-xs font-medium"
               style={{ backgroundColor: statusConfig.bgColor, color: statusConfig.color }}
