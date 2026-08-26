@@ -246,6 +246,29 @@ pub fn classify_incidents(health: &Value) -> Vec<PosIncidentCandidate> {
         });
     }
 
+    // A print queue can be broken WITHOUT anything failing. If a lane is wedged,
+    // jobs are never even attempted: no attempt row, no error, status stays
+    // 'pending' forever — so `printer.critical_failure` above, which counts
+    // FAILED jobs, stays silent. A till printed nothing for fifteen hours while
+    // this file reported it healthy. Age of the oldest pending job is the signal
+    // that actually catches it.
+    if let Some(stalled_minutes) = oldest_pending_print_job_age_minutes(health, Utc::now()) {
+        if stalled_minutes >= PRINT_JOB_STALL_ALERT_MINUTES {
+            incidents.push(PosIncidentCandidate {
+                issue_code: "printer.jobs_not_printing".to_string(),
+                severity: PosIncidentSeverity::High,
+                fingerprint: format!("{terminal_id}:printer.jobs_not_printing:stalled_pending"),
+                summary: "Receipts have been waiting to print and are not coming out.".to_string(),
+                evidence: json!({
+                    "oldestPendingMinutes": stalled_minutes,
+                    "thresholdMinutes": PRINT_JOB_STALL_ALERT_MINUTES,
+                    "configured": bool_path(health, &["printerStatus", "configured"]),
+                }),
+                should_report: true,
+            });
+        }
+    }
+
     let is_online = bool_path(health, &["isOnline"]);
     if !is_online && (pending_backlog > 0 || i64_path(health, &["pendingOrders"]) > 0) {
         incidents.push(PosIncidentCandidate {
@@ -527,6 +550,35 @@ fn backlog_total(health: &Value) -> i64 {
     total
 }
 
+/// How long a receipt may sit unprinted before it is worth an alert.
+///
+/// Printing is a seconds-scale operation, so anything still pending after this
+/// is not slow — it is stuck. Kept generous so an operator who deliberately
+/// pauses the queue for a few minutes does not raise an incident.
+const PRINT_JOB_STALL_ALERT_MINUTES: i64 = 20;
+
+/// Age in minutes of the oldest job still `pending`, or `None` when nothing is
+/// waiting.
+///
+/// Reads the same `printerStatus.recentJobs` window the failure counter uses, so
+/// it needs no new diagnostics plumbing. Jobs whose timestamp will not parse are
+/// skipped rather than treated as infinitely old — a malformed row must not
+/// manufacture an alert.
+fn oldest_pending_print_job_age_minutes(health: &Value, now: DateTime<Utc>) -> Option<i64> {
+    let jobs = value_path(health, &["printerStatus", "recentJobs"]).and_then(Value::as_array)?;
+
+    jobs.iter()
+        .filter(|job| {
+            string_path(job, &["status"])
+                .map(|status| status.eq_ignore_ascii_case("pending"))
+                .unwrap_or(false)
+        })
+        .filter_map(|job| string_path(job, &["createdAt"]))
+        .filter_map(|created| DateTime::parse_from_rfc3339(&created).ok())
+        .map(|created| (now - created.with_timezone(&Utc)).num_minutes())
+        .max()
+}
+
 fn printer_failed_job_count(health: &Value) -> i64 {
     let Some(jobs) = value_path(health, &["printerStatus", "recentJobs"]).and_then(Value::as_array)
     else {
@@ -545,6 +597,59 @@ fn printer_failed_job_count(health: &Value) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The failure counter above cannot see this: a wedged print lane never
+    /// FAILS a job, it just never attempts one. Age of the oldest pending job is
+    /// the only signal that catches it, and its absence is why a till printed
+    /// nothing for fifteen hours while telemetry called it healthy.
+    #[test]
+    fn classifier_detects_receipts_that_are_waiting_but_never_failing() {
+        let stalled = (Utc::now() - ChronoDuration::minutes(90)).to_rfc3339();
+        let health = json!({
+            "terminalContext": { "terminalId": "term-1" },
+            "printerStatus": {
+                "configured": true,
+                "recentJobs": [
+                    { "id": "j1", "status": "pending", "createdAt": stalled },
+                    { "id": "j2", "status": "printed", "createdAt": stalled }
+                ]
+            }
+        });
+
+        let incidents = classify_incidents(&health);
+        let incident = incidents
+            .iter()
+            .find(|candidate| candidate.issue_code == "printer.jobs_not_printing")
+            .expect("a receipt stuck for 90 minutes must raise an incident");
+
+        assert_eq!(incident.severity, PosIncidentSeverity::High);
+        assert!(
+            incidents
+                .iter()
+                .all(|candidate| candidate.issue_code != "printer.critical_failure"),
+            "nothing failed, so the failure detector must stay quiet - that is the whole point"
+        );
+    }
+
+    #[test]
+    fn classifier_ignores_a_freshly_queued_receipt() {
+        let health = json!({
+            "terminalContext": { "terminalId": "term-1" },
+            "printerStatus": {
+                "configured": true,
+                "recentJobs": [
+                    { "id": "j1", "status": "pending", "createdAt": Utc::now().to_rfc3339() }
+                ]
+            }
+        });
+
+        assert!(
+            classify_incidents(&health)
+                .iter()
+                .all(|candidate| candidate.issue_code != "printer.jobs_not_printing"),
+            "a receipt queued seconds ago is not stuck"
+        );
+    }
 
     #[test]
     fn classifier_detects_failed_financial_queue_without_raw_payload() {

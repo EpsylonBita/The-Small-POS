@@ -2386,6 +2386,87 @@ impl DispatchManager {
         Ok(true)
     }
 
+    /// Release in-memory lanes that no durable blocker justifies any more.
+    ///
+    /// `AttemptLease::drop` parks an unreleased lane as `Retained`, and the only
+    /// path that clears one runs through `reconcile_owned_windows_attempt_*`,
+    /// which refuses anything that is not `transport = 'windows'` carrying a real
+    /// spool id. A `raw_tcp` or `serial` lane that lands in `Retained` is
+    /// therefore unreachable for the entire life of the process: every later
+    /// `claim()` answers `LaneBusy`, `prepare_frozen_attempt` turns that into
+    /// `Ok(None)`, and the job sits pending with no attempt row and no error to
+    /// explain it. `hydrate` cannot help — it only ever inserts. A shop till
+    /// printed nothing for fifteen hours that way after a single operator
+    /// cancel, and only restarting the app cleared it.
+    ///
+    /// The durable tables are the authority, not this map. If nothing in
+    /// `print_job_attempts` still blocks a target, its lane must not stay held,
+    /// whatever transport it happens to use.
+    ///
+    /// Deliberately narrow: only `Retained`/`OpenRetained` are candidates, never
+    /// `Held` — a held lane belongs to a worker that is running right now. The
+    /// state is re-read under the lane lock before removal for that same reason.
+    /// Lock order matches the rest of this module: SQLite transaction first,
+    /// lane registry second, and the registry guard is kept across COMMIT so a
+    /// claim cannot interleave.
+    pub(crate) fn sweep_orphaned_lanes(
+        &self,
+        conn: &Connection,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<String>, DispatchError> {
+        let candidates: Vec<String> = {
+            let lanes = self.lanes.lock().map_err(|_| DispatchError::LockPoisoned)?;
+            lanes
+                .iter()
+                .filter(|(_, block)| {
+                    matches!(block, LaneBlock::Retained(_) | LaneBlock::OpenRetained(_))
+                })
+                .map(|(key, _)| key.clone())
+                .collect()
+        };
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+        let blocked: std::collections::HashSet<String> = active_target_blockers(&tx)?
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+
+        let mut released = Vec::new();
+        {
+            let mut lanes = self.lanes.lock().map_err(|_| DispatchError::LockPoisoned)?;
+            for key in candidates {
+                if blocked.contains(&key) {
+                    continue;
+                }
+                match lanes.get(&key).copied() {
+                    Some(LaneBlock::Retained(_) | LaneBlock::OpenRetained(_)) => {}
+                    // Claimed, or already gone, since the snapshot above.
+                    _ => continue,
+                }
+                // UPDATE, not UPSERT: without a row there is no circuit to close,
+                // and this avoids having to reconstruct a PrinterTargetKey (and
+                // its transport) from a normalized key string.
+                tx.execute(
+                    "UPDATE print_target_state
+                     SET circuit_state = 'closed',
+                         blocked_reason = NULL,
+                         blocked_at = NULL,
+                         updated_at = ?2
+                     WHERE target_key = ?1",
+                    params![key, timestamp(now)],
+                )?;
+                lanes.remove(&key);
+                released.push(key);
+            }
+            tx.commit()?;
+        }
+
+        Ok(released)
+    }
+
     /// Test seam over the live reconciliation commit.
     ///
     /// The body is `commit_reconciliation_transaction` -- the same private routine
@@ -2762,6 +2843,114 @@ mod tests {
         )
         .unwrap();
         (manager, lease, attempt)
+    }
+
+    /// A leaked raw lane used to be a life sentence.
+    ///
+    /// AttemptLease::drop parks an unreleased lane as Retained, and the only
+    /// clearing path is Windows-only, so a raw_tcp lane stuck there was
+    /// unreachable for the whole process: claim() answered LaneBusy forever and
+    /// the dispatcher deferred every job in silence. A till printed nothing for
+    /// fifteen hours that way.
+    #[test]
+    fn sweep_releases_a_retained_raw_lane_with_no_durable_blocker() {
+        let conn = test_db();
+        let job_id = Uuid::new_v4().to_string();
+        let (manager, lease, attempt) = prepared_raw_attempt(&conn, &job_id, "10.0.0.5", 3, 1);
+        let target = PrinterTargetKey::RawTcp {
+            host: "10.0.0.5".into(),
+            port: 9100,
+        };
+        let key = normalize_target(&target).unwrap();
+
+        // Nothing durable justifies the lane any more...
+        conn.execute(
+            "DELETE FROM print_job_attempts WHERE id = ?1",
+            params![attempt.attempt_id.to_string()],
+        )
+        .unwrap();
+        // ...but the lease drops without releasing, which is the leak itself.
+        drop(lease);
+        assert!(
+            matches!(
+                manager.lanes.lock().unwrap().get(&key),
+                Some(LaneBlock::Retained(_))
+            ),
+            "precondition: the drop must have retained the lane"
+        );
+
+        let released = manager.sweep_orphaned_lanes(&conn, at(9)).unwrap();
+
+        assert_eq!(released, vec![key.clone()]);
+        assert!(
+            manager.lanes.lock().unwrap().get(&key).is_none(),
+            "the lane must be claimable again"
+        );
+        assert!(
+            manager.claim(target).is_ok(),
+            "a swept lane must accept the next job"
+        );
+    }
+
+    /// The durable tables are the authority in BOTH directions: a lane whose
+    /// attempt still blocks it must survive the sweep untouched.
+    #[test]
+    fn sweep_keeps_a_retained_lane_whose_attempt_still_blocks() {
+        let conn = test_db();
+        let job_id = Uuid::new_v4().to_string();
+        let (manager, lease, _attempt) = prepared_raw_attempt(&conn, &job_id, "10.0.0.6", 3, 1);
+        let key = normalize_target(&PrinterTargetKey::RawTcp {
+            host: "10.0.0.6".into(),
+            port: 9100,
+        })
+        .unwrap();
+
+        // The attempt row stays: it is still Submitting, so it still blocks.
+        drop(lease);
+
+        let released = manager.sweep_orphaned_lanes(&conn, at(9)).unwrap();
+
+        assert!(released.is_empty(), "a justified lane must not be released");
+        assert!(
+            matches!(
+                manager.lanes.lock().unwrap().get(&key),
+                Some(LaneBlock::Retained(_))
+            ),
+            "the lane must stay retained while its attempt blocks it"
+        );
+    }
+
+    /// Held means a worker is printing RIGHT NOW. Sweeping that would hand the
+    /// same printer to a second job mid-write.
+    #[test]
+    fn sweep_never_touches_a_held_lane() {
+        let conn = test_db();
+        let job_id = Uuid::new_v4().to_string();
+        let (manager, lease, attempt) = prepared_raw_attempt(&conn, &job_id, "10.0.0.7", 3, 1);
+        let key = normalize_target(&PrinterTargetKey::RawTcp {
+            host: "10.0.0.7".into(),
+            port: 9100,
+        })
+        .unwrap();
+
+        // No durable blocker, so only the Held state protects it.
+        conn.execute(
+            "DELETE FROM print_job_attempts WHERE id = ?1",
+            params![attempt.attempt_id.to_string()],
+        )
+        .unwrap();
+
+        let released = manager.sweep_orphaned_lanes(&conn, at(9)).unwrap();
+
+        assert!(released.is_empty(), "a held lane is in use, not orphaned");
+        assert!(
+            matches!(
+                manager.lanes.lock().unwrap().get(&key),
+                Some(LaneBlock::Held(_))
+            ),
+            "the live worker must keep its lane"
+        );
+        drop(lease);
     }
 
     #[derive(Default)]

@@ -8695,6 +8695,32 @@ fn process_pending_jobs_with_adapters_outcome(
     let reconciliation =
         reconcile_windows_attempts_bounded(db, manager, Arc::clone(&spooler), windows_timeout)?;
     let conn = lock_conn_recovering(db);
+
+    // Liberate lanes the durable state no longer justifies, BEFORE the pause
+    // check — for the same reason reconciliation runs first: a paused queue must
+    // still release lanes, or unpausing prints nothing.
+    //
+    // AttemptLease::drop parks an unreleased lane as Retained, and the only
+    // path that clears one is Windows-only. A raw_tcp lane that lands there is
+    // unreachable for the life of the process: claim() answers LaneBusy forever,
+    // prepare_frozen_attempt turns that into Ok(None), and jobs pile up pending
+    // with no attempt row and no error. A till printed nothing for fifteen hours
+    // that way after one operator cancel; only a restart cleared it. Never fatal
+    // to the tick: if the sweep itself fails, dispatch still tries.
+    match manager.sweep_orphaned_lanes(&conn, Utc::now()) {
+        Ok(released) if !released.is_empty() => {
+            warn!(
+                released = released.len(),
+                targets = ?released,
+                "Released print lanes that no durable blocker justified"
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            warn!(error = %error, "Print lane sweep failed; dispatch continues");
+        }
+    }
+
     if is_print_queue_paused_with_conn(&conn, None) {
         return Ok(PrintProcessOutcome {
             processed: 0,
@@ -8706,6 +8732,7 @@ fn process_pending_jobs_with_adapters_outcome(
     drop(conn);
 
     let selected = jobs.len();
+    let mut deferred = 0usize;
     let mut prepared = Vec::new();
     for (job_id, entity_type, entity_id, payload_json, profile_id) in jobs {
         match prepare_frozen_attempt(
@@ -8719,7 +8746,21 @@ fn process_pending_jobs_with_adapters_outcome(
             profile_id.as_deref(),
         ) {
             Ok(Some(attempt)) => prepared.push(attempt),
-            Ok(None) => {}
+            // A deferral is not nothing. This arm used to be empty, and that is
+            // how a wedged lane stayed invisible: seven distinct decisions
+            // (cancel requested, profile paused, LaneBusy, CircuitOpen, guard
+            // not primary, queue paused, parent not eligible) all landed here
+            // and left no attempt row, no last_error and no log — so a till
+            // that printed nothing for fifteen hours looked healthy from every
+            // angle. Leave a trail even when there is nothing to record durably.
+            Ok(None) => {
+                deferred += 1;
+                warn!(
+                    job_id = %job_id,
+                    entity_type = %entity_type,
+                    "Print job deferred without an attempt"
+                );
+            }
             Err(error) => {
                 handle_managed_preparation_failure(db, &job_id, &error);
             }
@@ -8751,6 +8792,16 @@ fn process_pending_jobs_with_adapters_outcome(
             }
         }
     });
+    // Watchdog signal: work was waiting and not one job reached a transport.
+    // `processed` counts jobs SELECTED, not attempted, so on its own it reports
+    // a wedged dispatcher as a healthy one — that is why nothing ever alerted
+    // while a till sat silent for fifteen hours.
+    if selected > 0 && deferred == selected {
+        error!(
+            selected = selected,
+            "Print dispatch attempted nothing: every ready job was deferred"
+        );
+    }
     Ok(PrintProcessOutcome {
         processed: selected,
         changed: reconciliation.observed > 0 || reconciliation.failed > 0 || selected > 0,
