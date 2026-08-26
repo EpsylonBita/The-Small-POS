@@ -11425,11 +11425,16 @@ mod tests {
         let first_spooler = Arc::clone(&spooler);
         let (first_tx, first_rx) = std::sync::mpsc::channel();
         let first_worker = std::thread::spawn(move || {
+            // 10s, not 1s: the bound only decides how long we wait before
+            // declaring the PERMANENTLY-blocked target failed — the fast
+            // target must be given room to actually complete on a loaded CI
+            // runner, or it too counts as failed and the coalescing story
+            // below asserts the wrong world (seen live: failed=2 on master).
             let result = reconcile_windows_attempts_bounded(
                 &first_db,
                 &first_manager,
                 first_spooler as Arc<dyn WindowsSpooler>,
-                Duration::from_secs(1),
+                Duration::from_secs(10),
             );
             first_tx.send(result).unwrap();
         });
@@ -11473,7 +11478,7 @@ mod tests {
             &db,
             &manager,
             Arc::clone(&spooler) as Arc<dyn WindowsSpooler>,
-            Duration::from_secs(1),
+            Duration::from_secs(30),
         )
         .unwrap();
         assert_eq!(spooler.calls_for("Blocked Queue"), 2);
