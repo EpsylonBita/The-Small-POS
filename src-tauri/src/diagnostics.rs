@@ -666,11 +666,28 @@ fn get_printer_status(conn: &rusqlite::Connection) -> Value {
         }
     }
 
+    // Unrestricted pending aggregate, deliberately NOT derived from the five-row
+    // `recentJobs` window above. On a till with two printers a job can stay stuck
+    // on one while newer jobs keep completing through the other, pushing the
+    // stalled one out of that window — and with it, any alert that reads only
+    // `recentJobs`. The stall detector needs the whole queue, not the newest few.
+    let (pending_count, oldest_pending_created_at) = conn
+        .query_row(
+            "SELECT COUNT(*), MIN(created_at) FROM print_jobs WHERE status = 'pending'",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .unwrap_or((0, None));
+
     json!({
         "configured": profile_count > 0,
         "profileCount": profile_count,
         "defaultProfile": serde_json::Value::Null,
         "recentJobs": recent_jobs,
+        "pendingJobs": {
+            "count": pending_count,
+            "oldestCreatedAt": oldest_pending_created_at,
+        },
     })
 }
 

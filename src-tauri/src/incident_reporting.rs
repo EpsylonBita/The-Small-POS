@@ -560,11 +560,24 @@ const PRINT_JOB_STALL_ALERT_MINUTES: i64 = 20;
 /// Age in minutes of the oldest job still `pending`, or `None` when nothing is
 /// waiting.
 ///
-/// Reads the same `printerStatus.recentJobs` window the failure counter uses, so
-/// it needs no new diagnostics plumbing. Jobs whose timestamp will not parse are
-/// skipped rather than treated as infinitely old — a malformed row must not
+/// Prefers `printerStatus.pendingJobs.oldestCreatedAt`, an aggregate over the
+/// WHOLE queue, and falls back to scanning the five-row `recentJobs` window only
+/// for terminals still sending the older payload. Timestamps that will not parse
+/// are skipped rather than treated as infinitely old — a malformed row must not
 /// manufacture an alert.
 fn oldest_pending_print_job_age_minutes(health: &Value, now: DateTime<Utc>) -> Option<i64> {
+    // Preferred source: the unrestricted pending aggregate. `recentJobs` holds
+    // only the five NEWEST jobs, so on a till with two printers a job stuck on
+    // one slides out of that window while jobs keep completing through the
+    // other — and the alert would fall silent exactly when it matters most.
+    let from_aggregate = string_path(health, &["printerStatus", "pendingJobs", "oldestCreatedAt"])
+        .and_then(|created| DateTime::parse_from_rfc3339(&created).ok())
+        .map(|created| (now - created.with_timezone(&Utc)).num_minutes());
+    if from_aggregate.is_some() {
+        return from_aggregate;
+    }
+
+    // Fallback for a terminal still reporting the older payload shape.
     let jobs = value_path(health, &["printerStatus", "recentJobs"]).and_then(Value::as_array)?;
 
     jobs.iter()
@@ -628,6 +641,59 @@ mod tests {
                 .iter()
                 .all(|candidate| candidate.issue_code != "printer.critical_failure"),
             "nothing failed, so the failure detector must stay quiet - that is the whole point"
+        );
+    }
+
+    /// The five-row `recentJobs` window is not enough on a till with two
+    /// printers: a job stuck on one slides out of it while jobs keep completing
+    /// through the other. Reading only that window would go silent exactly when
+    /// the shop most needs telling.
+    #[test]
+    fn classifier_sees_a_stall_that_has_scrolled_out_of_the_recent_window() {
+        let stalled = (Utc::now() - ChronoDuration::minutes(180)).to_rfc3339();
+        let fresh = Utc::now().to_rfc3339();
+        let health = json!({
+            "terminalContext": { "terminalId": "term-1" },
+            "printerStatus": {
+                "configured": true,
+                // Not one pending row here — the stalled job is long gone from
+                // the newest five, pushed out by the second printer's traffic.
+                "recentJobs": [
+                    { "id": "a", "status": "printed", "createdAt": fresh },
+                    { "id": "b", "status": "printed", "createdAt": fresh },
+                    { "id": "c", "status": "printed", "createdAt": fresh },
+                    { "id": "d", "status": "printed", "createdAt": fresh },
+                    { "id": "e", "status": "printed", "createdAt": fresh }
+                ],
+                "pendingJobs": { "count": 1, "oldestCreatedAt": stalled }
+            }
+        });
+
+        let incident = classify_incidents(&health)
+            .into_iter()
+            .find(|candidate| candidate.issue_code == "printer.jobs_not_printing")
+            .expect("the whole-queue aggregate must still see the stalled job");
+
+        assert_eq!(incident.severity, PosIncidentSeverity::High);
+    }
+
+    /// An empty queue must not alert, even though the aggregate key is present.
+    #[test]
+    fn classifier_ignores_an_empty_pending_aggregate() {
+        let health = json!({
+            "terminalContext": { "terminalId": "term-1" },
+            "printerStatus": {
+                "configured": true,
+                "recentJobs": [],
+                "pendingJobs": { "count": 0, "oldestCreatedAt": null }
+            }
+        });
+
+        assert!(
+            classify_incidents(&health)
+                .iter()
+                .all(|candidate| candidate.issue_code != "printer.jobs_not_printing"),
+            "nothing is waiting, so nothing is stuck"
         );
     }
 
