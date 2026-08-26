@@ -46,6 +46,7 @@ import {
 } from '../../utils/tableCheckPayments';
 import { formatCurrency } from '../../utils/format';
 import { formatTableDisplayNumber } from '../../utils/table-display';
+import { shiftBelongsToCurrentBusinessDay } from '../../utils/business-day-shift';
 import { translateRoleName } from '../../utils/role-labels';
 import { renderModalPortal } from '../../utils/render-modal-portal';
 import {
@@ -1341,13 +1342,24 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
           return;
         }
         const staff = Array.isArray(result?.staff) ? result.staff : [];
+
+        // The mere existence of a shift id used to mean ACTIVE here, so a row
+        // left open weeks ago presented its owner as a waiter standing by the
+        // tables. Anchor on the business day the terminal reports instead.
+        const businessDayStartAt = result?.businessDayStartAt;
+
         const options = staff
           .filter(member => member?.id && member.isActive !== false && member.canLoginPos !== false)
           .map(member => ({
             id: String(member.id),
             name: member.name || staffMemberFallbackLabel,
             role: member.currentShift?.role || null,
-            active: Boolean(member.currentShift?.shiftId),
+            active:
+              Boolean(member.currentShift?.shiftId) &&
+              shiftBelongsToCurrentBusinessDay(
+                businessDayStartAt,
+                member.currentShift?.checkedInAt,
+              ),
           }));
         const tableServiceRoles = new Set(['server', 'waiter', 'cashier', 'manager']);
         const activeTableServiceOptions = options.filter(option =>

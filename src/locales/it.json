@@ -4113,7 +4113,8 @@
       "tipsReceived": "Mance ricevute",
       "tipsSeparateFromCashReturn": "Le mance sono registrate separatamente e non sono incluse nei contanti da restituire.",
       "tipAllocations": "Attribuzioni delle mance",
-      "tipOrder": "Ordine"
+      "tipOrder": "Ordine",
+      "busyElsewhereSince": "Connesso su {{terminal}} come {{role}} dal {{since}}"
     },
     "zReport": {
       "title": "Z-Report - {{date}}",

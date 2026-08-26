@@ -4113,7 +4113,8 @@
       "tipsReceived": "Erhaltene Trinkgelder",
       "tipsSeparateFromCashReturn": "Trinkgelder werden separat erfasst und sind nicht im zurückzugebenden Bargeld enthalten.",
       "tipAllocations": "Trinkgeldzuordnungen",
-      "tipOrder": "Bestellung"
+      "tipOrder": "Bestellung",
+      "busyElsewhereSince": "Angemeldet an {{terminal}} als {{role}} seit {{since}}"
     },
     "zReport": {
       "title": "Z-Report - {{date}}",

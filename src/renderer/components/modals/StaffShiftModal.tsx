@@ -1902,6 +1902,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           error?: unknown;
           busyTerminalName?: unknown;
           busyRole?: unknown;
+          busyCheckedInAt?: unknown;
         }
       | undefined,
   ): string => {
@@ -1934,6 +1935,23 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           typeof result?.busyRole === 'string' && result.busyRole.trim()
             ? result.busyRole.trim()
             : '';
+        // Say WHEN. `busyCheckedInAt` has always been on the payload
+        // (auth.rs check_in_busy_elsewhere_failure) and this message threw it
+        // away, so a shift stuck open for weeks read exactly like one opened
+        // five minutes ago — one cashier was reported busy on the Test Terminal
+        // for twenty days and nothing here let the operator tell. A business day
+        // may legitimately run for days, so the date is SHOWN, never used to
+        // hide the shift.
+        const checkedInAt =
+          typeof result?.busyCheckedInAt === 'string' ? new Date(result.busyCheckedInAt) : null;
+        if (checkedInAt && !Number.isNaN(checkedInAt.getTime())) {
+          return t('modals.staffShift.busyElsewhereSince', {
+            defaultValue: 'Checked in at {{terminal}} as {{role}} since {{since}}',
+            terminal: terminalName,
+            role,
+            since: checkedInAt.toLocaleString(),
+          });
+        }
         return t('modals.staffShift.busyElsewhere', {
           defaultValue: 'Checked in at {{terminal}} as {{role}}',
           terminal: terminalName,

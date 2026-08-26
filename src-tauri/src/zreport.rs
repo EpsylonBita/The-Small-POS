@@ -627,8 +627,11 @@ fn load_active_staff_closeout_blockers(
                  terminal_id,
                  check_in_time
              FROM staff_shifts
+             -- Same `?1 = ''` wildcard as the submission gate in
+             -- prepare_z_report_submission: these two must agree, or the
+             -- readiness panel shows a clean day that the submit then rejects.
              WHERE status = 'active'
-               AND (branch_id = ?1 OR branch_id IS NULL)
+               AND (?1 = '' OR branch_id = ?1 OR branch_id IS NULL)
                AND (?2 IS NULL OR check_in_time <= ?2)
              ORDER BY COALESCE(check_in_time, created_at, updated_at) ASC, id ASC",
         )
@@ -4602,10 +4605,19 @@ pub(crate) fn prepare_z_report_submission(
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
+                // `?1 = ''` is the house wildcard (business_day.rs:345/352/370/413,
+                // shifts.rs:3506): an unresolved branch must mean ALL rows, not
+                // "only rows with a NULL branch". branch_id here falls back to
+                // storage::get_credential("branch_id").unwrap_or_default(), so on a
+                // terminal whose keyring credential is missing or whose branch cache
+                // drifted it is the empty string — and without the wildcard this gate
+                // silently matched nothing and reported "no staff checked in" while
+                // the step-9 sweep below, which has no branch predicate at all, went
+                // on to touch exactly the rows the gate could not see.
                 "SELECT id, COALESCE(staff_name, staff_id) as name
                  FROM staff_shifts
                  WHERE status = 'active'
-                   AND (branch_id = ?1 OR branch_id IS NULL)
+                   AND (?1 = '' OR branch_id = ?1 OR branch_id IS NULL)
                    AND (?2 IS NULL OR check_in_time <= ?2)",
             )
             .map_err(|e| format!("prepare active-shift check: {e}"))?;
@@ -4905,6 +4917,78 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
     cleared.insert("cash_drawer_sessions".into(), serde_json::json!(c));
 
     // 9. staff_shifts by close/check-in timestamp.
+    //
+    // Close anything still open BEFORE the sweep. A Z-report ends the business
+    // day, so no shift may outlive it — and this DELETE used to match on the
+    // timestamp alone, erasing `status='active'` rows from local SQLite while
+    // the Supabase row kept `check_out_time IS NULL` forever. pos-tauri never
+    // hydrates staff_shifts back from the server, so once the local copy was
+    // gone, no terminal, no Z and no sync could ever close that row again. The
+    // `staff_shifts_one_open_per_staff` partial unique index then refused that
+    // person's check-ins on every OTHER terminal, while this one kept offering
+    // them as available (the busy check exempts shifts on our own terminal).
+    // One cashier sat in that state for twenty days.
+    //
+    // So: mark them abandoned, enqueue the closure so the server learns of it,
+    // and only then let the sweep drop the local row.
+    //
+    // This scan is deliberately branch-blind, exactly like the DELETE it guards.
+    // Do NOT add a branch predicate here to "match" the submission gate: the gate
+    // is branch-scoped and the sweep is not, and the safe way to reconcile that
+    // is for the protective step to cover everything the destructive step can
+    // reach — never the other way round.
+    let shifts_open_at_rollover: Vec<String> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id FROM staff_shifts
+                  WHERE datetime(COALESCE(check_out_time, check_in_time, created_at)) <= datetime(?1)
+                    AND id NOT IN (SELECT id FROM temp_rollover_protected_shift_ids)
+                    AND (check_out_time IS NULL OR status = 'active')",
+            )
+            .map_err(|e| format!("prepare rollover open-shift scan: {e}"))?;
+        let rows = stmt
+            .query_map(params![cutoff_at], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("scan shifts left open at rollover: {e}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("collect shifts left open at rollover: {e}"))?
+    };
+
+    for shift_id in &shifts_open_at_rollover {
+        conn.execute(
+            "UPDATE staff_shifts
+                SET status = 'abandoned',
+                    check_out_time = COALESCE(check_out_time, ?2),
+                    updated_at = ?2
+              WHERE id = ?1",
+            params![shift_id, cutoff_at],
+        )
+        .map_err(|e| format!("close shift {shift_id} left open at rollover: {e}"))?;
+
+        // Best-effort: the Admin z-report/submit route releases the terminal
+        // unit's staff server-side as well, so a queue hiccup here degrades the
+        // report rather than failing a close the server has already accepted.
+        if let Err(e) = crate::shifts::replace_unfinished_shift_sync_rows_with_current_snapshot(
+            conn, shift_id, cutoff_at,
+        ) {
+            warn!(
+                shift_id = %shift_id,
+                error = %e,
+                "Z-report: failed to enqueue closure for a shift left open at rollover"
+            );
+        }
+    }
+
+    if !shifts_open_at_rollover.is_empty() {
+        warn!(
+            count = shifts_open_at_rollover.len(),
+            "Z-report: closed shifts that were still open at day rollover"
+        );
+    }
+    cleared.insert(
+        "staff_shifts_closed_at_rollover".into(),
+        serde_json::json!(shifts_open_at_rollover.len()),
+    );
+
     let c = safe_delete(
         conn,
         "staff_shifts",
@@ -7626,6 +7710,118 @@ mod tests {
             )
             .unwrap();
         assert_eq!(pending, 1, "pending sync_queue entry should be preserved");
+    }
+
+    #[test]
+    fn test_active_staff_blockers_are_visible_when_branch_id_is_unresolved() {
+        // Regression: the gate filtered `(branch_id = ?1 OR branch_id IS NULL)`
+        // without the `?1 = ''` wildcard every sibling query uses. branch_id
+        // falls back to storage::get_credential("branch_id").unwrap_or_default(),
+        // so on a terminal with a missing keyring credential or a drifted branch
+        // cache it is "" — and the gate then matched nothing and declared the day
+        // clean, while the branch-blind step-9 sweep could still reach those rows.
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                opening_cash_amount, opening_cash_amount_cents,
+                check_in_time, check_out_time, status, calculation_version,
+                sync_status, created_at, updated_at
+             ) VALUES (
+                'shift-other-branch', 'staff-7', 'Still In', 'branch-1', 'term-1', 'cashier',
+                0.0, 0,
+                '2026-02-16T09:00:00Z', NULL, 'active', 2,
+                'pending', '2026-02-16T09:00:00Z', '2026-02-16T09:00:00Z'
+             )",
+            [],
+        )
+        .expect("insert active shift");
+
+        let unresolved = load_active_staff_closeout_blockers(&conn, "", None)
+            .expect("blocker scan with an unresolved branch should succeed");
+        assert_eq!(
+            unresolved.len(),
+            1,
+            "an unresolved branch must mean ALL rows, not just NULL-branch rows"
+        );
+
+        // A resolved branch still scopes normally.
+        let scoped = load_active_staff_closeout_blockers(&conn, "branch-1", None)
+            .expect("blocker scan for the real branch should succeed");
+        assert_eq!(scoped.len(), 1, "the shift's own branch still matches");
+
+        let other = load_active_staff_closeout_blockers(&conn, "branch-2", None)
+            .expect("blocker scan for a different branch should succeed");
+        assert_eq!(other.len(), 0, "a different resolved branch must not match");
+    }
+
+    #[test]
+    fn test_local_day_rollover_closes_shift_left_open_before_sweeping_it() {
+        // Regression: the sweep matched on timestamp alone, so a shift still
+        // status='active' was erased locally while the Supabase row kept
+        // check_out_time NULL forever. pos-tauri never pulls staff_shifts back
+        // from the server, so nothing could ever close it again — and the
+        // staff_shifts_one_open_per_staff unique index then blocked that
+        // person's check-ins on every other terminal.
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO staff_shifts (
+                    id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                    opening_cash_amount, opening_cash_amount_cents,
+                    check_in_time, check_out_time, status, calculation_version,
+                    sync_status, created_at, updated_at
+                 ) VALUES (
+                    'shift-left-open', 'staff-9', 'Left Open', 'branch-1', 'term-1', 'cashier',
+                    0.0, 0,
+                    '2026-02-16T09:00:00Z', NULL, 'active', 2,
+                    'pending', '2026-02-16T09:00:00Z', '2026-02-16T09:00:00Z'
+                 )",
+                [],
+            )
+            .expect("insert shift left open");
+        }
+
+        let result = apply_local_day_rollover(&db, "2026-02-16", "2026-02-16T23:59:59Z")
+            .expect("rollover should succeed");
+
+        assert_eq!(
+            result["staff_shifts_closed_at_rollover"], 1,
+            "the shift left open must be closed by the rollover, not silently dropped"
+        );
+
+        let conn = db.conn.lock().unwrap();
+
+        // The local row is still swept — but only after its closure was queued.
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM staff_shifts WHERE id = 'shift-left-open'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0, "row is swept once it has been closed");
+
+        // The closure has to reach the server, or the row there stays open forever.
+        let (queued, payload): (i64, String) = conn
+            .query_row(
+                "SELECT COUNT(*), COALESCE(MAX(data), '')
+                   FROM parity_sync_queue
+                  WHERE table_name = 'staff_shifts' AND record_id = 'shift-left-open'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            queued, 1,
+            "closure must be queued so the server learns the shift ended"
+        );
+        assert!(
+            payload.contains("2026-02-16T23:59:59Z"),
+            "queued closure should carry the rollover cutoff as the check-out time, got: {payload}"
+        );
     }
 
     #[test]

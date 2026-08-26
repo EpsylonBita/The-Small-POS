@@ -14,7 +14,7 @@ use std::sync::Mutex;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::{api, db, storage};
+use crate::{api, business_day, db, storage};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -589,12 +589,23 @@ pub async fn refresh_staff_auth_directory(
         }
     }
 
+    // The start of the terminal's CURRENT business day (its last Z), so callers
+    // can tell a shift that belongs to today from one left open weeks ago. A
+    // business day may legitimately run for days, so this is a boundary to
+    // compare against — never a wall-clock age limit.
+    let business_day_start_at = db
+        .conn
+        .lock()
+        .ok()
+        .map(|conn| business_day::resolve_period_start(&conn, &branch_id, None));
+
     Ok(serde_json::json!({
         "success": true,
         "branchId": branch_id,
         "currentTerminalId": current_terminal_id,
         "staff": public_staff_entries,
         "busyElsewhereStaffIds": busy_elsewhere_ids,
+        "businessDayStartAt": business_day_start_at,
         "staffCount": staff_count,
         "syncedAt": Utc::now().to_rfc3339(),
     }))

@@ -4106,7 +4106,8 @@
       "driverStartingCashHelper": "Προαιρετικό: εισάγετε τυχόν μετρητά που πήρε ο οδηγός από τον ενεργό ταμία πριν ξεκινήσουν οι διανομές.",
       "serverStartingCashTitle": "Εισάγετε το αρχικό ποσό σερβιτόρου",
       "serverStartingCashHelper": "Προαιρετικό: εισάγετε τυχόν μετρητά που πήρε ο σερβιτόρος από τον ενεργό ταμία πριν ξεκινήσει το σέρβις.",
-      "activeSince": "Ενεργός από {{time}}"
+      "activeSince": "Ενεργός από {{time}}",
+      "busyElsewhereSince": "Συνδεδεμένος στο {{terminal}} ως {{role}} από {{since}}"
     },
     "zReport": {
       "title": "Αναφορά Z - {{date}}",

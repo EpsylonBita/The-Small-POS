@@ -4113,7 +4113,8 @@
       "tipsReceived": "Tips Received",
       "tipsSeparateFromCashReturn": "Tips are recorded separately and are not included in the cash to return.",
       "tipAllocations": "Tip Allocations",
-      "tipOrder": "Order"
+      "tipOrder": "Order",
+      "busyElsewhereSince": "Checked in at {{terminal}} as {{role}} since {{since}}"
     },
     "zReport": {
       "title": "Z Report - {{date}}",

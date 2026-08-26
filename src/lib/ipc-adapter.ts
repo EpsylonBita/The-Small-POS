@@ -1373,6 +1373,13 @@ export interface PlatformBridge {
       syncedAt?: string;
       /** Terminal id this POS resolved from the keyring at fetch time. */
       currentTerminalId?: string;
+      /**
+       * Start of this terminal's CURRENT business day (its last Z). Compare a
+       * shift's `checkedInAt` against it to tell today's shift from one left
+       * open weeks ago. A boundary, not a wall-clock age limit — a business day
+       * may legitimately run for days.
+       */
+      businessDayStartAt?: string | null;
       /** Full staff payload as returned by the admin endpoint. */
       staff?: Array<{
         id: string;
