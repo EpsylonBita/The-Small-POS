@@ -7274,6 +7274,64 @@ fn materialize_remote_order(
         return Ok(Some(existing_local_id));
     }
 
+    // Admin already counted and closed this order under some Z-report, so it
+    // cannot be live. Checked BEFORE the local cutoff: a terminal that has
+    // never run its own Z has no cutoff at all — which is precisely the case
+    // where the whole remote history would otherwise land here (PR #164).
+    if remote_order_already_z_closed(remote_order) {
+        debug!(
+            remote_id = %remote_id,
+            "Skipping remote order Admin already closed with a Z-report"
+        );
+        return Ok(None);
+    }
+
+    // A finished order older than the retention cutoff was closed by a Z and
+    // deliberately swept from this till — refuse to resurrect it. The Z
+    // submission itself bumps orders.updated_at on the server a moment AFTER
+    // the till snapshots its sync watermark, so the very next incremental pull
+    // offers the whole closed day back; materializing it recreates every
+    // order as paid-with-no-local-payment and blocks the next shift close
+    // (observed live 26/08: 57 zombies from the 24/08 Z on the production
+    // till). What a Z closed stays closed.
+    if let Some(cutoff) = crate::business_day::retention_cutoff_utc(conn) {
+        let remote_status = remote_order
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        let financially_final = matches!(
+            remote_status.as_str(),
+            "completed" | "delivered" | "cancelled" | "canceled" | "refunded"
+        );
+        let remote_created_at = remote_order
+            .get("created_at")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if financially_final && !remote_created_at.is_empty() {
+            // SQLite datetime() normalizes both the server's timestamp shape
+            // and the cutoff's RFC3339 form; string comparison would not.
+            let precedes_cutoff: bool = conn
+                .query_row(
+                    "SELECT datetime(?1) < datetime(?2)",
+                    params![remote_created_at, cutoff],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+            if precedes_cutoff {
+                debug!(
+                    remote_id = %remote_id,
+                    status = %remote_status,
+                    "Skipping remote order from a Z-closed day (retention cutoff)"
+                );
+                return Ok(None);
+            }
+        }
+    }
+
     let client_order_id = remote_order
         .get("client_order_id")
         .and_then(Value::as_str)
@@ -9196,6 +9254,27 @@ fn sync_remote_payment_into_local_with_context(
         )
         .optional()
         .map_err(|e| format!("resolve local order for remote payment: {e}"))?;
+    // Fallback: the origin terminal stamps its local order id into the payment
+    // metadata — a local order that lost (or never gained) its supabase link
+    // still resolves through it instead of silently dropping the mirror.
+    let local_order_id = match local_order_id {
+        Some(id) => Some(id),
+        None => remote_payment
+            .pointer("/metadata/local_order_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .and_then(|candidate| {
+                conn.query_row(
+                    "SELECT id FROM orders WHERE id = ?1 LIMIT 1",
+                    params![candidate],
+                    |row| row.get(0),
+                )
+                .optional()
+                .ok()
+                .flatten()
+            }),
+    };
     let Some(local_order_id) = local_order_id else {
         return Ok(None);
     };
@@ -9831,11 +9910,6 @@ async fn reconcile_remote_orders(
         {
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
-            // Orders created at or before the last Z-report were already counted
-            // and cleared by the local day-rollover cleanup — do not re-materialize them.
-            let eod_cutoff: Option<String> =
-                crate::db::get_setting(&conn, "system", "last_z_report_timestamp");
-
             for remote_order in orders {
                 let remote_id = match remote_order.get("id").and_then(Value::as_str) {
                     Some(v) if !v.trim().is_empty() => v.to_string(),
@@ -9844,36 +9918,14 @@ async fn reconcile_remote_orders(
                 let local_id = match resolve_local_order_id(&conn, &remote_order) {
                     Some(v) => v,
                     None => {
-                        // Admin already counted and closed this order under some
-                        // Z-report, so it cannot be live. Checked BEFORE the local
-                        // cutoff below, because a terminal that has never run its
-                        // own Z has no cutoff at all — which is precisely the case
-                        // where the whole remote history would otherwise land here.
-                        if remote_order_already_z_closed(&remote_order) {
-                            debug!(
-                                remote_id = %remote_id,
-                                "Skipping materialization of an order Admin already closed with a Z-report"
-                            );
-                            continue;
-                        }
-
-                        // Skip materialization of orders that predate the last Z-report
-                        if let Some(ref cutoff) = eod_cutoff {
-                            let order_created = remote_order
-                                .get("created_at")
-                                .or_else(|| remote_order.get("createdAt"))
-                                .and_then(Value::as_str)
-                                .unwrap_or("");
-                            if !order_created.is_empty() && order_created <= cutoff.as_str() {
-                                debug!(
-                                    remote_id = %remote_id,
-                                    created_at = %order_created,
-                                    cutoff = %cutoff,
-                                    "Skipping materialization of pre-Z-report order"
-                                );
-                                continue;
-                            }
-                        }
+                        // Pre-Z-report filtering happens inside
+                        // materialize_remote_order: it is status-aware (a still
+                        // -open order is never hidden by a Z) and normalizes
+                        // timestamp shapes via SQLite datetime(). The raw
+                        // string comparison that used to live here treated
+                        // every 'T'-format created_at as newer than a space-
+                        // format cutoff, so a whole closed day could slip
+                        // through — or an open one be wrongly hidden.
                         match materialize_remote_order(&conn, &remote_order) {
                             Ok(Some(inserted_id)) => {
                                 info!(
@@ -11695,6 +11747,71 @@ async fn auto_heal_waiting_adjustments_missing_canonical_remote_payment_ids(
     .await
 }
 
+/// Periodic self-heal for «paid order, zero local payment rows» (the state
+/// that blocks shift close / Z submit with `missing_local_payment_row`). The
+/// canonical payments exist on the server — recorded on another terminal, or
+/// swept locally by a Z and then the order re-materialized — and only the
+/// local mirror is missing. Until now the targeted per-order pull ran ONLY at
+/// shift close / Z submit, and since the blocker prevents the close, the state
+/// was self-reinforcing (observed live 26/08: 57 blocked orders). Throttled to
+/// one pass per 2 minutes, 25 orders per pass.
+async fn sweep_paid_orders_missing_payment_mirrors(
+    db: &DbState,
+    admin_url: &str,
+    api_key: &str,
+) -> Result<usize, String> {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static LAST_SWEEP_UNIX: AtomicI64 = AtomicI64::new(0);
+    let now = Utc::now().timestamp();
+    let last = LAST_SWEEP_UNIX.load(Ordering::Relaxed);
+    if now - last < 120 {
+        return Ok(0);
+    }
+
+    let candidates: Vec<String> = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT o.id FROM orders o
+                  WHERE COALESCE(o.payment_status, '') = 'paid'
+                    AND COALESCE(o.is_ghost, 0) = 0
+                    AND LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'canceled', 'refunded')
+                    AND NOT EXISTS (
+                        SELECT 1 FROM order_payments op
+                         WHERE op.order_id = o.id AND op.status = 'completed'
+                    )
+                  ORDER BY o.created_at DESC
+                  LIMIT 25",
+            )
+            .map_err(|e| format!("prepare paid-without-mirror sweep: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("query paid-without-mirror sweep: {e}"))?;
+        rows.filter_map(|row| row.ok()).collect()
+    };
+    if candidates.is_empty() {
+        LAST_SWEEP_UNIX.store(now, Ordering::Relaxed);
+        return Ok(0);
+    }
+
+    let context = repair_local_payment_mirrors_for_orders_with_auth_context(
+        db,
+        &candidates,
+        admin_url,
+        api_key,
+    )
+    .await?;
+    LAST_SWEEP_UNIX.store(now, Ordering::Relaxed);
+    if context.repaired_payment_mirrors > 0 {
+        info!(
+            repaired = context.repaired_payment_mirrors,
+            candidates = candidates.len(),
+            "Payment-mirror sweep restored missing local payment rows"
+        );
+    }
+    Ok(context.repaired_payment_mirrors)
+}
+
 async fn repair_local_payment_mirrors_for_orders_with_auth_context(
     db: &DbState,
     order_ids: &[String],
@@ -12079,6 +12196,12 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
     }
     let reconciled_payments = reconcile_remote_payments(db, &admin_url, &api_key).await?;
     total_progress += reconciled_payments;
+    match sweep_paid_orders_missing_payment_mirrors(db, &admin_url, &api_key).await {
+        Ok(repaired) => total_progress += repaired,
+        Err(error) => {
+            warn!(error = %error, "Payment-mirror sweep failed; will retry next pass");
+        }
+    }
     let recovered_payment_conflicts =
         recover_payment_total_conflicts(db, &admin_url, &api_key).await?;
     total_progress += recovered_payment_conflicts;
@@ -20033,6 +20156,67 @@ mod tests {
             )
             .unwrap();
         assert_eq!(supabase_id, "remote-order-1");
+    }
+
+    #[test]
+    fn test_materialize_refuses_orders_from_a_z_closed_day() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        crate::db::set_setting(
+            &conn,
+            "system",
+            "last_z_report_timestamp",
+            "2026-08-25T03:07:15+00:00",
+        )
+        .unwrap();
+
+        // Finished + from before the Z cutoff: the Z swept it locally, and the
+        // server-side updated_at bump from the Z submission itself must not
+        // resurrect it as paid-with-no-local-payment (live 26/08: 57 zombies).
+        let closed_day_order = serde_json::json!({
+            "id": "remote-closed-1",
+            "order_number": "ORD-20260824-zombie",
+            "items": [],
+            "total_amount": 5.1,
+            "status": "completed",
+            "payment_status": "paid",
+            "created_at": "2026-08-24T21:03:57.17236+00:00",
+            "updated_at": "2026-08-25T03:07:15.137767+00:00"
+        });
+        assert!(materialize_remote_order(&conn, &closed_day_order)
+            .expect("materialize call")
+            .is_none());
+
+        // An UNFINISHED order from before the cutoff still materializes — an
+        // open story is never hidden by someone else's Z.
+        let open_before_cutoff = serde_json::json!({
+            "id": "remote-open-1",
+            "order_number": "ORD-20260824-open",
+            "items": [],
+            "total_amount": 3.0,
+            "status": "pending",
+            "payment_status": "pending",
+            "created_at": "2026-08-24T20:00:00+00:00",
+            "updated_at": "2026-08-24T20:00:00+00:00"
+        });
+        assert!(materialize_remote_order(&conn, &open_before_cutoff)
+            .expect("materialize call")
+            .is_some());
+
+        // A finished order from AFTER the cutoff belongs to the open day.
+        let closed_today = serde_json::json!({
+            "id": "remote-closed-today",
+            "order_number": "ORD-20260825-current",
+            "items": [],
+            "total_amount": 2.0,
+            "status": "completed",
+            "payment_status": "paid",
+            "created_at": "2026-08-25T10:00:00+00:00",
+            "updated_at": "2026-08-25T10:05:00+00:00"
+        });
+        assert!(materialize_remote_order(&conn, &closed_today)
+            .expect("materialize call")
+            .is_some());
     }
 
     #[test]

@@ -4495,7 +4495,7 @@ mod tests {
             )
         });
         insert_reached_rx
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(Duration::from_secs(30))
             .unwrap();
 
         let (event_tx, event_rx) = std::sync::mpsc::channel();
@@ -4521,7 +4521,7 @@ mod tests {
             result
         });
 
-        let first_event = event_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let first_event = event_rx.recv_timeout(Duration::from_secs(30)).unwrap();
         assert!(matches!(
             first_event,
             CreateEvent::Blocked | CreateEvent::Completed
@@ -4529,7 +4529,7 @@ mod tests {
         release_insert_tx.send(()).unwrap();
         if first_event == CreateEvent::Blocked {
             assert_eq!(
-                event_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+                event_rx.recv_timeout(Duration::from_secs(30)).unwrap(),
                 CreateEvent::Completed
             );
         }

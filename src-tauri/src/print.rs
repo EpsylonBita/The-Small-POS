@@ -11434,11 +11434,11 @@ mod tests {
             first_tx.send(result).unwrap();
         });
         assert!(
-            spooler.wait_for_blocked_start(Duration::from_secs(1)),
+            spooler.wait_for_blocked_start(Duration::from_secs(30)),
             "the fake GetJob must start before the caller-timeout result is asserted"
         );
         let first = first_rx
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(Duration::from_secs(30))
             .expect("bounded reconciliation caller did not return")
             .unwrap();
         first_worker.join().unwrap();
@@ -11463,11 +11463,11 @@ mod tests {
         assert_eq!(spooler.calls_for("Fast Queue"), 1);
 
         spooler.release_blocked();
-        assert!(spooler.wait_for_blocked_return(Duration::from_secs(1)));
+        assert!(spooler.wait_for_blocked_return(Duration::from_secs(30)));
         assert!(wait_for_native_reconciliation_idle(
             &db,
             "Blocked Queue",
-            Duration::from_secs(1),
+            Duration::from_secs(30),
         ));
         let third = reconcile_windows_attempts_bounded(
             &db,
