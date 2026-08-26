@@ -7218,6 +7218,30 @@ fn attach_kiosk_payment_method_to_metadata(
     Some(metadata.to_string())
 }
 
+/// Whether Admin's copy of this order was already counted and closed by a
+/// Z-report (`orders.is_closed` / `orders.z_report_id`).
+///
+/// Such an order can never be live, and materializing it is actively harmful:
+/// on a terminal that has never completed its own Z the `last_z_report_timestamp`
+/// cutoff is absent, so the pre-Z skip never fires and the ENTIRE remote history
+/// lands in the local ledger. `business_day::infer_branch_period_start` then
+/// takes MIN over it and drags the business-day anchor backwards — one terminal
+/// ended up stamping fresh shifts with a date 106 days old that way.
+///
+/// Absent fields mean "unknown", which is treated as NOT closed, so an Admin
+/// build that does not send these columns keeps exactly today's behaviour.
+fn remote_order_already_z_closed(remote_order: &Value) -> bool {
+    if remote_order.get("is_closed").and_then(Value::as_bool) == Some(true) {
+        return true;
+    }
+
+    match remote_order.get("z_report_id") {
+        None | Some(Value::Null) => false,
+        Some(Value::String(value)) => !value.trim().is_empty(),
+        Some(_) => true,
+    }
+}
+
 fn materialize_remote_order(
     conn: &rusqlite::Connection,
     remote_order: &Value,
@@ -9820,6 +9844,19 @@ async fn reconcile_remote_orders(
                 let local_id = match resolve_local_order_id(&conn, &remote_order) {
                     Some(v) => v,
                     None => {
+                        // Admin already counted and closed this order under some
+                        // Z-report, so it cannot be live. Checked BEFORE the local
+                        // cutoff below, because a terminal that has never run its
+                        // own Z has no cutoff at all — which is precisely the case
+                        // where the whole remote history would otherwise land here.
+                        if remote_order_already_z_closed(&remote_order) {
+                            debug!(
+                                remote_id = %remote_id,
+                                "Skipping materialization of an order Admin already closed with a Z-report"
+                            );
+                            continue;
+                        }
+
                         // Skip materialization of orders that predate the last Z-report
                         if let Some(ref cutoff) = eod_cutoff {
                             let order_created = remote_order
@@ -20517,6 +20554,35 @@ mod tests {
             vec!["ord-00001", "ord-00002", "ord-00003"],
             "every order of the running evening must survive a refetch"
         );
+    }
+
+    #[test]
+    fn remote_order_already_z_closed_reads_admins_markers() {
+        // Admin counted and closed it — never materialize, or the whole remote
+        // history lands locally on a terminal that has no Z cutoff of its own and
+        // drags the business-day anchor backwards.
+        assert!(remote_order_already_z_closed(
+            &serde_json::json!({ "is_closed": true })
+        ));
+        assert!(remote_order_already_z_closed(
+            &serde_json::json!({ "z_report_id": "0f6d0a2e-1111-4222-8333-444444444444" })
+        ));
+
+        // Live orders.
+        assert!(!remote_order_already_z_closed(
+            &serde_json::json!({ "is_closed": false, "z_report_id": null })
+        ));
+
+        // Backwards compatibility: an Admin build that does not send these columns
+        // must behave exactly as before, i.e. materialize normally.
+        assert!(!remote_order_already_z_closed(
+            &serde_json::json!({ "id": "order-1" })
+        ));
+
+        // Defensive: an empty string is not a report id.
+        assert!(!remote_order_already_z_closed(
+            &serde_json::json!({ "z_report_id": "   " })
+        ));
     }
 
     #[test]
