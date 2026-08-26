@@ -5382,6 +5382,37 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
             }
         },
         cancellation_reason: None,
+        // THE-434 v2: food-delivery orders switch the renderer to the faithful
+        // platform slip (modeled on the real efood slip #4579, 27/08/2026).
+        platform_slip: if crate::print::is_food_delivery_plugin(&plugin) {
+            let food_delivery = serde_json::from_str::<serde_json::Value>(&ghost_metadata)
+                .ok()
+                .and_then(|metadata| metadata.get("food_delivery").cloned())
+                .unwrap_or(serde_json::Value::Null);
+            let field = |key: &str| {
+                food_delivery
+                    .get(key)
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToString::to_string)
+            };
+            Some(receipt_renderer::PlatformSlipInfo {
+                plugin: plugin.trim().to_ascii_lowercase(),
+                external_order_id: Some(external_order_id.trim().to_string())
+                    .filter(|value| !value.is_empty()),
+                short_code: field("short_code"),
+                payment_method: field("payment_method"),
+                prepaid: food_delivery
+                    .get("prepaid")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+                delivery_provider: field("delivery_provider"),
+                is_test: is_test != 0,
+            })
+        } else {
+            None
+        },
     })
 }
 
@@ -5636,6 +5667,7 @@ fn build_split_receipt_doc(db: &DbState, payment_id: &str) -> Result<OrderReceip
         order_notes,
         status_label: None,
         cancellation_reason: None,
+        platform_slip: None,
     })
 }
 
@@ -16883,6 +16915,42 @@ mod tests {
         // The kitchen matches bags to riders by the same code.
         let kitchen = build_kitchen_ticket_doc(&db, "ord-efood-slip").unwrap();
         assert_eq!(kitchen.order_number, "20");
+    }
+
+    #[test]
+    fn test_receipt_doc_carries_the_platform_slip_facts() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            insert_receipt_order(&conn, "ord-efood-slip", "EFOOD-1787-64656368", 20.30);
+            conn.execute(
+                "UPDATE orders
+                 SET plugin = 'efood', external_plugin_order_id = '64656368',
+                     ghost_metadata = '{\"food_delivery\":{\"short_code\":\"4579\",\"payment_method\":\"cash\",\"prepaid\":false,\"delivery_provider\":\"platform_delivery\"}}'
+                 WHERE id = 'ord-efood-slip'",
+                [],
+            )
+            .unwrap();
+        }
+
+        let doc = build_order_receipt_doc(&db, "ord-efood-slip").unwrap();
+        let slip = doc
+            .platform_slip
+            .expect("platform order must carry slip facts");
+        assert_eq!(slip.plugin, "efood");
+        assert_eq!(slip.short_code.as_deref(), Some("4579"));
+        assert_eq!(slip.external_order_id.as_deref(), Some("64656368"));
+        assert_eq!(slip.payment_method.as_deref(), Some("cash"));
+        assert!(!slip.prepaid);
+        assert_eq!(slip.delivery_provider.as_deref(), Some("platform_delivery"));
+
+        // A plain local order stays on the standard receipt layout.
+        {
+            let conn = db.conn.lock().unwrap();
+            insert_receipt_order(&conn, "ord-local-slip", "ORD-1", 5.0);
+        }
+        let doc = build_order_receipt_doc(&db, "ord-local-slip").unwrap();
+        assert!(doc.platform_slip.is_none());
     }
 
     #[test]

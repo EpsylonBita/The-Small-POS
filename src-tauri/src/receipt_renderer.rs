@@ -249,6 +249,36 @@ pub struct OrderReceiptDoc {
     /// Cancellation reason shown under the CANCELED banner.
     #[serde(default)]
     pub cancellation_reason: Option<String>,
+    /// THE-434 v2: present on food-delivery platform orders — switches the
+    /// thermal receipt to the faithful platform slip layout (modeled on the
+    /// founder's real efood slip, order #4579, 27/08/2026).
+    #[serde(default)]
+    pub platform_slip: Option<PlatformSlipInfo>,
+}
+
+/// Raw platform facts for the faithful slip — labels are the renderer's job
+/// (it owns the language), so this carries data, not translations.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PlatformSlipInfo {
+    /// Plugin id, e.g. "efood" — printed as the big wordmark.
+    pub plugin: String,
+    /// The platform's long order code (ΚΩΔΙΚΟΣ ΠΑΡΑΓΓΕΛΙΑΣ, printed at the foot).
+    #[serde(default)]
+    pub external_order_id: Option<String>,
+    /// The rider-facing 4-digit code, printed huge (`#4579`).
+    #[serde(default)]
+    pub short_code: Option<String>,
+    /// Classified payment method from the ingest ("cash" / "online" / "card").
+    #[serde(default)]
+    pub payment_method: Option<String>,
+    #[serde(default)]
+    pub prepaid: bool,
+    /// "platform_delivery" = the platform's rider carries it; anything else is
+    /// the store's own driver.
+    #[serde(default)]
+    pub delivery_provider: Option<String>,
+    #[serde(default)]
+    pub is_test: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -665,6 +695,14 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Cash Sales" => "Πωλήσεις Μετρητών",
             "Platform Online" => "Πλατφόρμα Online",
             "Platform COD" => "Αντικαταβ. Πλατφόρμας",
+            "Rider tip" => "ΤΙΡ ΓΙΑ ΔΙΑΝΟΜΕΑ",
+            "Order Code" => "ΚΩΔΙΚΟΣ ΠΑΡΑΓΓΕΛΙΑΣ",
+            "Platform rider" => "ΔΙΑΝΟΜΕΑΣ ΠΛΑΤΦΟΡΜΑΣ",
+            "Store driver" => "ΔΙΚΟΣ ΣΑΣ ΔΙΑΝΟΜΕΑΣ",
+            "Cash on delivery" => "ΑΝΤΙΚΑΤΑΒΟΛΗ",
+            "Paid online" => "Πληρωμένη online",
+            "Partial subtotal" => "Μερικό σύνολο",
+            "Thank you for your order" => "Ευχαριστούμε για την παραγγελία σας",
             "Till Cash Sales" => "Μετρητά Ταμείου",
             "Net Driver Cash" => "Καθαρά από Οδηγούς",
             "All Cash Out" => "Σύνολο Εκροών",
@@ -797,6 +835,14 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Cash Sales" => "Barumsatz",
             "Platform Online" => "Plattform Online",
             "Platform COD" => "Plattform-Nachnahme",
+            "Rider tip" => "Trinkgeld Fahrer",
+            "Order Code" => "Bestellcode",
+            "Platform rider" => "Plattform-Fahrer",
+            "Store driver" => "Eigener Fahrer",
+            "Cash on delivery" => "Nachnahme",
+            "Paid online" => "Online bezahlt",
+            "Partial subtotal" => "Zwischensumme",
+            "Thank you for your order" => "Danke für Ihre Bestellung",
             "Till Cash Sales" => "Barumsatz Kasse",
             "Net Driver Cash" => "Fahrer Bargeld netto",
             "All Cash Out" => "Alle Barausgaben",
@@ -929,6 +975,14 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Cash Sales" => "Ventes especes",
             "Platform Online" => "Plateforme en ligne",
             "Platform COD" => "C/R plateforme",
+            "Rider tip" => "Pourboire livreur",
+            "Order Code" => "Code commande",
+            "Platform rider" => "Livreur plateforme",
+            "Store driver" => "Votre livreur",
+            "Cash on delivery" => "Contre-remboursement",
+            "Paid online" => "Payee en ligne",
+            "Partial subtotal" => "Sous-total partiel",
+            "Thank you for your order" => "Merci pour votre commande",
             "Till Cash Sales" => "Ventes especes caisse",
             "Net Driver Cash" => "Especes livreurs nettes",
             "All Cash Out" => "Toutes sorties especes",
@@ -1061,6 +1115,14 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Cash Sales" => "Vendite contanti",
             "Platform Online" => "Piattaforma online",
             "Platform COD" => "Contrassegno piattaforma",
+            "Rider tip" => "Mancia rider",
+            "Order Code" => "Codice ordine",
+            "Platform rider" => "Rider piattaforma",
+            "Store driver" => "Vostro rider",
+            "Cash on delivery" => "Contrassegno",
+            "Paid online" => "Pagato online",
+            "Partial subtotal" => "Subtotale parziale",
+            "Thank you for your order" => "Grazie per il vostro ordine",
             "Till Cash Sales" => "Contanti vendite cassa",
             "Net Driver Cash" => "Contanti corrieri netti",
             "All Cash Out" => "Tutte le uscite cassa",
@@ -6136,6 +6198,14 @@ fn render_classic_customer_raster_exact_ttf(
     let preset = canvas.preset;
     let cur = resolve_raster_currency_symbol(cfg, canvas.fonts);
 
+    if let Some(info) = doc.platform_slip.as_ref() {
+        draw_platform_slip_ttf(&mut canvas, doc, info, cfg, lang, &cur, comma);
+        if canvas.has_missing_glyphs() {
+            return Err("embedded font missing glyphs for classic raster exact body".to_string());
+        }
+        return Ok(canvas.into_cropped());
+    }
+
     canvas.draw_rule();
     if let Some(copy_label) = cfg
         .copy_label
@@ -6213,6 +6283,12 @@ fn render_classic_customer_raster_exact_ttf(
 
     let banner = format!("{order_label_upper} #{short_number}");
     canvas.draw_reverse_banner(&banner);
+    // THE-434: the platform / test banner (e.g. «ΔΟΚΙΜΗ TEST · EFOOD #21 ·
+    // ΑΝΤΙΚΑΤΑΒΟΛΗ 20.30») previously rendered only in the HTML preview —
+    // the thermal paths, the ones that reach actual paper, never drew it.
+    if let Some(status_label) = doc.status_label.as_deref().filter(|s| !s.is_empty()) {
+        canvas.draw_text_line(status_label, BitmapAlign::Center, preset.section_style);
+    }
     let meta_line = format!(
         "{} | {}: {}",
         format_datetime_human(&doc.created_at).replace(' ', " | "),
@@ -6503,6 +6579,18 @@ fn render_classic_customer_raster_exact_bitmap(
 
     let banner = format!("{order_label_upper} #{short_number}");
     canvas.draw_reverse_banner(&banner);
+    // THE-434: the platform / test banner (e.g. «ΔΟΚΙΜΗ TEST · EFOOD #21 ·
+    // ΑΝΤΙΚΑΤΑΒΟΛΗ 20.30») previously rendered only in the HTML preview —
+    // the thermal paths, the ones that reach actual paper, never drew it.
+    if let Some(status_label) = doc.status_label.as_deref().filter(|s| !s.is_empty()) {
+        canvas.draw_body_text_line(
+            status_label,
+            BitmapAlign::Center,
+            true,
+            canvas.normal_scale,
+            0,
+        );
+    }
     let meta_line = format!(
         "{} | {}: {}",
         format_datetime_human(&doc.created_at).replace(' ', " | "),
@@ -7660,6 +7748,433 @@ pub fn render_classic_raster_exact_preview_data_url(
     ))
 }
 
+/// The payment line of the faithful platform slip («Πληρωμένη online» /
+/// «ΑΝΤΙΚΑΤΑΒΟΛΗ 20,30€»). Empty when the ingest gave us nothing.
+fn platform_payment_line(
+    info: &PlatformSlipInfo,
+    doc: &OrderReceiptDoc,
+    lang: &str,
+    cur: &str,
+    comma: bool,
+) -> String {
+    if info.prepaid || info.payment_method.as_deref() == Some("online") {
+        return receipt_label(lang, "Paid online").to_string();
+    }
+    if info.payment_method.as_deref() == Some("cash") {
+        let total = doc
+            .totals
+            .iter()
+            .find(|line| line.emphasize)
+            .or_else(|| doc.totals.last())
+            .map(|line| line.amount)
+            .unwrap_or(0.0);
+        return format!(
+            "{} {}",
+            receipt_label(lang, "Cash on delivery"),
+            money_with_currency_locale(total, cur, comma)
+        );
+    }
+    // Metadata was incomplete: fall back to what the ledger actually
+    // recorded, so a settled order never prints as collect-on-handoff.
+    if let Some(payment) = doc.payments.first() {
+        return format!(
+            "{} {}",
+            payment.label,
+            money_with_currency_locale(payment.amount, cur, comma)
+        );
+    }
+    String::new()
+}
+
+fn platform_carrier_line(info: &PlatformSlipInfo, lang: &str) -> Option<&'static str> {
+    match info.delivery_provider.as_deref() {
+        Some("platform_delivery") => Some(receipt_label(lang, "Platform rider")),
+        Some("vendor_delivery") | Some("restaurant_delivery") | Some("store_delivery") => {
+            Some(receipt_label(lang, "Store driver"))
+        }
+        // Unknown or missing provider metadata: better no handoff instruction
+        // than a confidently wrong one.
+        _ => None,
+    }
+}
+
+/// The destination/contact block a driver fulfills with — present whenever
+/// the order carries delivery data, regardless of who carries it.
+fn platform_delivery_lines(doc: &OrderReceiptDoc, lang: &str) -> Vec<(String, String)> {
+    let mut lines = Vec::new();
+    let mut push = |label: &str, value: Option<&str>| {
+        if let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) {
+            lines.push((receipt_label(lang, label).to_string(), value.to_string()));
+        }
+    };
+    push("Address", doc.delivery_address.as_deref());
+    push("City", doc.delivery_city.as_deref());
+    push("Postal Code", doc.delivery_postal_code.as_deref());
+    push("Floor", doc.delivery_floor.as_deref());
+    push("Name on ringer", doc.name_on_ringer.as_deref());
+    push("Phone", doc.customer_phone.as_deref());
+    push("Driver", doc.driver_name.as_deref());
+    lines
+}
+
+fn platform_short_code(info: &PlatformSlipInfo, doc: &OrderReceiptDoc) -> String {
+    info.short_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|code| !code.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| extract_short_order_number(&doc.order_number).to_string())
+}
+
+/// Faithful platform slip, TTF raster path. Modeled line-for-line on the
+/// founder's real efood slip (#4579, 27/08/2026): wordmark, type/time/payment
+/// header, huge short code, items with «**» customer comments and material
+/// lines, totals, long code at the foot, store identity at the BOTTOM.
+fn draw_platform_slip_ttf(
+    canvas: &mut TtfReceiptComposer,
+    doc: &OrderReceiptDoc,
+    info: &PlatformSlipInfo,
+    cfg: &LayoutConfig,
+    lang: &str,
+    cur: &str,
+    comma: bool,
+) {
+    let preset = canvas.preset;
+    canvas.draw_reverse_banner(&info.plugin.to_uppercase());
+    if info.is_test {
+        canvas.draw_text_line("ΔΟΚΙΜΗ TEST", BitmapAlign::Center, preset.section_style);
+    }
+    // Completed / canceled variants keep their banner and reason — an
+    // auto-printed cancellation must never look like a live order.
+    if matches!(
+        doc.status.as_str(),
+        "completed" | "delivered" | "cancelled" | "canceled" | "refunded"
+    ) {
+        if let Some(label) = doc.status_label.as_deref().filter(|v| !v.is_empty()) {
+            canvas.draw_text_line(label, BitmapAlign::Center, preset.section_style);
+        }
+        if let Some(reason) = doc.cancellation_reason.as_deref().filter(|v| !v.is_empty()) {
+            canvas.draw_wrapped(reason, BitmapAlign::Center, preset.contact_style);
+        }
+    }
+    canvas.draw_rule();
+    let order_type_display = translate_order_type(lang, &doc.order_type);
+    canvas.draw_text_line(
+        &format!(
+            "{} {}",
+            order_type_display,
+            format_datetime_human(&doc.created_at)
+        ),
+        BitmapAlign::Center,
+        preset.meta_style,
+    );
+    if let Some(carrier) = platform_carrier_line(info, lang) {
+        canvas.draw_text_line(carrier, BitmapAlign::Center, preset.meta_style);
+    }
+    if let Some(name) = doc
+        .customer_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        canvas.draw_text_line(name, BitmapAlign::Center, preset.meta_style);
+    }
+    let payment = platform_payment_line(info, doc, lang, cur, comma);
+    if !payment.is_empty() {
+        canvas.draw_text_line(&payment, BitmapAlign::Center, preset.section_style);
+    }
+    canvas.draw_rule();
+    canvas.draw_reverse_banner(&format!("#{}", platform_short_code(info, doc)));
+    canvas.draw_rule();
+    // A store-delivered platform order is still a delivery: the slip must
+    // carry the destination and contact details the driver fulfills with.
+    let delivery_lines = platform_delivery_lines(doc, lang);
+    if !delivery_lines.is_empty() {
+        for (label, value) in &delivery_lines {
+            canvas.draw_pair(&format!("{label}:"), value, preset.contact_style);
+        }
+        canvas.draw_rule();
+    }
+    for item in &doc.items {
+        canvas.draw_pair(
+            &format!("{} {}", qty(item.quantity), item.name.to_uppercase()),
+            &money_with_currency_locale(item.total, cur, comma),
+            preset.item_style,
+        );
+        if let Some(note) = item
+            .note
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+        {
+            canvas.draw_wrapped(
+                &format!("** {}", note.to_uppercase()),
+                BitmapAlign::Left,
+                preset.contact_style,
+            );
+        }
+        let (with_items, without_items) = split_customizations(item);
+        for line in with_items {
+            canvas.draw_text_line(
+                &format!(
+                    "  {}",
+                    customization_display(lang, line, false).to_uppercase()
+                ),
+                BitmapAlign::Left,
+                preset.contact_style,
+            );
+        }
+        for line in without_items {
+            canvas.draw_text_line(
+                &format!(
+                    "  {} {}",
+                    receipt_label(lang, "Without").to_uppercase(),
+                    customization_display(lang, line, false).to_uppercase()
+                ),
+                BitmapAlign::Left,
+                preset.contact_style,
+            );
+        }
+    }
+    canvas.draw_rule();
+    for total in &doc.totals {
+        let style = if total.emphasize {
+            preset.section_style
+        } else {
+            preset.meta_style
+        };
+        canvas.draw_pair(
+            &total.label,
+            &money_with_currency_locale(total.amount, cur, comma),
+            style,
+        );
+    }
+    canvas.draw_rule();
+    canvas.draw_text_line(
+        &format_datetime_human(&doc.created_at),
+        BitmapAlign::Center,
+        preset.meta_style,
+    );
+    if let Some(code) = info
+        .external_order_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+    {
+        canvas.draw_text_line(
+            &format!("{}: {}", receipt_label(lang, "Order Code"), code),
+            BitmapAlign::Center,
+            preset.section_style,
+        );
+    }
+    canvas.draw_rule();
+    canvas.draw_text_line(
+        &cfg.organization_name,
+        BitmapAlign::Center,
+        preset.meta_style,
+    );
+    if let Some(address) = cfg
+        .store_address
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        canvas.draw_wrapped(address, BitmapAlign::Center, preset.contact_style);
+    }
+    if let Some(phone) = cfg
+        .store_phone
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        canvas.draw_text_line(phone, BitmapAlign::Center, preset.contact_style);
+    }
+    canvas.draw_wrapped(
+        receipt_label(lang, "Thank you for your order"),
+        BitmapAlign::Center,
+        preset.contact_style,
+    );
+}
+
+/// Faithful platform slip, ESC/POS text path (store header already emitted by
+/// the shared emit_header above the document body).
+#[allow(clippy::too_many_arguments)]
+fn emit_platform_slip_escpos(
+    builder: &mut EscPosBuilder,
+    doc: &OrderReceiptDoc,
+    info: &PlatformSlipInfo,
+    lang: &str,
+    cur: &str,
+    width: usize,
+    comma: bool,
+    use_star_commands: bool,
+) {
+    fn set_reverse(builder: &mut EscPosBuilder, use_star: bool, on: bool) {
+        if use_star {
+            builder.star_reverse(on);
+        } else {
+            builder.reverse(on);
+        }
+    }
+    fn emit_banner(builder: &mut EscPosBuilder, use_star: bool, width: usize, text: &str) {
+        let text_len = text.chars().count();
+        let pad_total = width.saturating_sub(text_len);
+        let pad_left = pad_total / 2;
+        let padded = format!(
+            "{}{}{}",
+            " ".repeat(pad_left),
+            text,
+            " ".repeat(pad_total - pad_left)
+        );
+        builder.center().bold(true);
+        set_reverse(builder, use_star, true);
+        builder.text(&padded).lf();
+        set_reverse(builder, use_star, false);
+        builder.bold(false);
+        builder.left();
+    }
+
+    emit_banner(
+        builder,
+        use_star_commands,
+        width,
+        &info.plugin.to_uppercase(),
+    );
+    if info.is_test {
+        builder.center().bold(true);
+        builder.text("ΔΟΚΙΜΗ TEST").lf();
+        builder.bold(false);
+        builder.left();
+    }
+    if matches!(
+        doc.status.as_str(),
+        "completed" | "delivered" | "cancelled" | "canceled" | "refunded"
+    ) {
+        builder.center().bold(true);
+        if let Some(label) = doc.status_label.as_deref().filter(|v| !v.is_empty()) {
+            builder.text(label).lf();
+        }
+        builder.bold(false);
+        if let Some(reason) = doc.cancellation_reason.as_deref().filter(|v| !v.is_empty()) {
+            emit_wrapped(builder, reason, width);
+        }
+        builder.left();
+    }
+    emit_rule(builder, width, '-');
+    let order_type_display = translate_order_type(lang, &doc.order_type);
+    builder.center();
+    builder
+        .text(&format!(
+            "{} {}",
+            order_type_display,
+            format_datetime_human(&doc.created_at)
+        ))
+        .lf();
+    if let Some(carrier) = platform_carrier_line(info, lang) {
+        builder.text(carrier).lf();
+    }
+    if let Some(name) = doc
+        .customer_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        builder.text(name).lf();
+    }
+    let payment = platform_payment_line(info, doc, lang, cur, comma);
+    if !payment.is_empty() {
+        builder.bold(true);
+        builder.text(&payment).lf();
+        builder.bold(false);
+    }
+    builder.left();
+    emit_rule(builder, width, '-');
+    emit_banner(
+        builder,
+        use_star_commands,
+        width,
+        &format!("#{}", platform_short_code(info, doc)),
+    );
+    emit_rule(builder, width, '-');
+    let delivery_lines = platform_delivery_lines(doc, lang);
+    if !delivery_lines.is_empty() {
+        for (label, value) in &delivery_lines {
+            emit_pair(builder, &format!("{label}:"), value, width);
+        }
+        emit_rule(builder, width, '-');
+    }
+    for item in &doc.items {
+        emit_pair(
+            builder,
+            &format!("{} {}", qty(item.quantity), item.name.to_uppercase()),
+            &money_with_currency_locale(item.total, cur, comma),
+            width,
+        );
+        if let Some(note) = item
+            .note
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+        {
+            builder.bold(true);
+            emit_wrapped(builder, &format!("** {}", note.to_uppercase()), width);
+            builder.bold(false);
+        }
+        let (with_items, without_items) = split_customizations(item);
+        for line in with_items {
+            builder
+                .text(&format!(
+                    "  {}",
+                    customization_display(lang, line, false).to_uppercase()
+                ))
+                .lf();
+        }
+        for line in without_items {
+            builder
+                .text(&format!(
+                    "  {} {}",
+                    receipt_label(lang, "Without").to_uppercase(),
+                    customization_display(lang, line, false).to_uppercase()
+                ))
+                .lf();
+        }
+    }
+    emit_rule(builder, width, '-');
+    for total in &doc.totals {
+        if total.emphasize {
+            builder.bold(true);
+        }
+        emit_pair(
+            builder,
+            &total.label,
+            &money_with_currency_locale(total.amount, cur, comma),
+            width,
+        );
+        if total.emphasize {
+            builder.bold(false);
+        }
+    }
+    emit_rule(builder, width, '-');
+    builder.center();
+    builder.text(&format_datetime_human(&doc.created_at)).lf();
+    if let Some(code) = info
+        .external_order_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+    {
+        builder.bold(true);
+        builder
+            .text(&format!("{}: {}", receipt_label(lang, "Order Code"), code))
+            .lf();
+        builder.bold(false);
+    }
+    builder
+        .text(receipt_label(lang, "Thank you for your order"))
+        .lf();
+    builder.left();
+}
+
 pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRender {
     let doc_target = escpos_document_target(document);
     let style = escpos_style(cfg, doc_target);
@@ -7730,6 +8245,30 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
 
     let lang = cfg.language.as_str();
     let comma = cfg.decimal_comma;
+    if let ReceiptDocument::OrderReceipt(doc) | ReceiptDocument::DeliverySlip(doc) = document {
+        if let Some(info) = doc.platform_slip.as_ref() {
+            emit_platform_slip_escpos(
+                &mut builder,
+                doc,
+                info,
+                lang,
+                &cfg.currency_symbol,
+                width,
+                comma,
+                use_star_commands,
+            );
+            if use_star_commands {
+                builder.lf().lf().lf().lf().star_cut();
+            } else {
+                builder.feed(4).cut();
+            }
+            return EscPosRender {
+                bytes: builder.build(),
+                warnings,
+                body_mode: EscPosBodyMode::Text,
+            };
+        }
+    }
     match document {
         ReceiptDocument::OrderReceipt(doc) => {
             let render_delivery_block = should_render_delivery_block(doc);
@@ -7754,6 +8293,13 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     builder.center().bold(true);
                     builder.text(&format!("[ {} ]", order_type_display)).lf();
                     builder.bold(false).left();
+                    if let Some(status_label) =
+                        doc.status_label.as_deref().filter(|s| !s.is_empty())
+                    {
+                        builder.center().bold(true);
+                        builder.text(status_label).lf();
+                        builder.bold(false).left();
+                    }
                     emit_pair(
                         &mut builder,
                         receipt_label(lang, "Order"),
@@ -7832,6 +8378,13 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     }
                     builder.bold(false);
                     builder.left();
+                    if let Some(status_label) =
+                        doc.status_label.as_deref().filter(|s| !s.is_empty())
+                    {
+                        builder.center().bold(true);
+                        builder.text(status_label).lf();
+                        builder.bold(false).left();
+                    }
                     // Date with full year + single-space pipes
                     let meta_line = format!(
                         "{} | {}: {}",

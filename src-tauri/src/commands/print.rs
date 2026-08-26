@@ -4574,6 +4574,7 @@ fn build_sample_receipt_doc() -> receipt_renderer::OrderReceiptDoc {
         delivery_slip_mode: Default::default(),
         status_label: None,
         cancellation_reason: None,
+        platform_slip: None,
     }
 }
 
