@@ -5058,7 +5058,7 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
                     COALESCE(plugin, ''),
                     COALESCE(is_test, 0),
                     COALESCE(external_plugin_order_id, ''),
-                    COALESCE(estimated_time, '')
+                    COALESCE(CAST(estimated_time AS TEXT), '')
              FROM orders WHERE id = ?1",
             params![order_id],
             |row| {
@@ -5098,7 +5098,10 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
                 ))
             },
         )
-        .map_err(|_| format!("Order not found: {order_id}"))?;
+        .map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => format!("Order not found: {order_id}"),
+            other => format!("Load order {order_id} for receipt: {other}"),
+        })?;
     let (
         order_number,
         order_type,
@@ -5426,8 +5429,20 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
                 ready_at: {
                     let trimmed = estimated_time_raw.trim();
                     if let Ok(minutes) = trimmed.parse::<i64>() {
-                        chrono::DateTime::parse_from_rfc3339(&created_at)
+                        // created_at is RFC3339 for app-created and materialized
+                        // rows, but SQLite's own "YYYY-MM-DD HH:MM:SS" (UTC)
+                        // appears on legacy/default-stamped rows — accept both.
+                        chrono::DateTime::parse_from_rfc3339(created_at.trim())
+                            .map(|start| start.with_timezone(&chrono::Utc))
                             .ok()
+                            .or_else(|| {
+                                chrono::NaiveDateTime::parse_from_str(
+                                    created_at.trim(),
+                                    "%Y-%m-%d %H:%M:%S",
+                                )
+                                .ok()
+                                .map(|naive| naive.and_utc())
+                            })
                             .map(|start| (start + chrono::Duration::minutes(minutes)).to_rfc3339())
                     } else if trimmed.len() >= 16 {
                         Some(trimmed.to_string())
@@ -17001,6 +17016,40 @@ mod tests {
         }
         let doc = build_order_receipt_doc(&db, "ord-local-slip").unwrap();
         assert!(doc.platform_slip.is_none());
+    }
+
+    #[test]
+    fn test_receipt_doc_survives_integer_estimated_time_from_the_accept_flow() {
+        // order_approve stores the accept's prep minutes as an INTEGER
+        // (`estimated_time INTEGER` column + i64 param). The doc SELECT used
+        // to read that column as TEXT, so every accepted platform order died
+        // at render with a misleading "Order not found" while regular orders
+        // (NULL estimated_time → '') kept printing — the exact "only efood
+        // fails" field pattern of 28/08.
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            insert_receipt_order(&conn, "ord-efood-eta", "EFOOD-1787-64656473", 12.60);
+            conn.execute(
+                "UPDATE orders
+                 SET plugin = 'efood', external_plugin_order_id = '64656473',
+                     estimated_time = 25,
+                     ghost_metadata = '{\"food_delivery\":{\"short_code\":\"4590\",\"payment_method\":\"card\",\"prepaid\":true,\"delivery_provider\":\"platform_delivery\"}}'
+                 WHERE id = 'ord-efood-eta'",
+                [],
+            )
+            .unwrap();
+        }
+
+        let doc = build_order_receipt_doc(&db, "ord-efood-eta")
+            .expect("integer prep minutes must not kill the render");
+        let slip = doc
+            .platform_slip
+            .expect("accepted platform order must carry slip facts");
+        assert!(
+            slip.ready_at.is_some(),
+            "prep minutes must produce the promised-ready time"
+        );
     }
 
     #[test]
