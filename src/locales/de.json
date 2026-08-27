@@ -4447,7 +4447,22 @@
       "characterCount": "{{current}}/{{max}} Zeichen",
       "confirm": "Stornierung bestätigen",
       "keepOrder": "Bestellung behalten",
-      "reasonRequired": "Bitte geben Sie einen Grund für die Stornierung an"
+      "reasonRequired": "Bitte geben Sie einen Grund für die Stornierung an",
+      "platformReasonLabel": "Grund für die Plattform *",
+      "platformReasonHint": "Die Plattform akzeptiert nur ihre offiziellen Gründe — Ihre Notiz bleibt intern.",
+      "platformReasonRequired": "Wählen Sie einen Stornogrund für die Plattform",
+      "internalNoteLabel": "Interne Notiz (optional)",
+      "platformReasons": {
+        "closed": "Geschäft geschlossen",
+        "item_unavailable": "Artikel nicht verfügbar",
+        "too_busy": "Zu viel Betrieb",
+        "no_courier": "Kein Kurier verfügbar",
+        "address_incomplete_misstated": "Adresse unvollständig / falsch",
+        "outside_delivery_area": "Außerhalb des Liefergebiets",
+        "bad_weather": "Schlechtes Wetter",
+        "duplicate_order": "Doppelte Bestellung",
+        "test_order": "Testbestellung"
+      }
     },
     "addCustomer": {
       "title": "Neuen Kunden hinzufügen",

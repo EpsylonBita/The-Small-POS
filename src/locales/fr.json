@@ -4447,7 +4447,22 @@
       "characterCount": "{{current}}/{{max}} caractères",
       "confirm": "Confirmer l'annulation",
       "keepOrder": "Conserver la commande",
-      "reasonRequired": "Veuillez fournir un motif d'annulation"
+      "reasonRequired": "Veuillez fournir un motif d'annulation",
+      "platformReasonLabel": "Motif pour la plateforme *",
+      "platformReasonHint": "La plateforme n'accepte que ses motifs officiels — votre note reste interne.",
+      "platformReasonRequired": "Choisissez un motif d'annulation pour la plateforme",
+      "internalNoteLabel": "Note interne (facultatif)",
+      "platformReasons": {
+        "closed": "Magasin fermé",
+        "item_unavailable": "Produit indisponible",
+        "too_busy": "Trop occupé",
+        "no_courier": "Aucun livreur disponible",
+        "address_incomplete_misstated": "Adresse incomplète / erronée",
+        "outside_delivery_area": "Hors zone de livraison",
+        "bad_weather": "Mauvais temps",
+        "duplicate_order": "Commande en double",
+        "test_order": "Commande de test"
+      }
     },
     "addCustomer": {
       "title": "Ajouter un nouveau client",

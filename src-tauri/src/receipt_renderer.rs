@@ -18,6 +18,14 @@ pub fn layout_revision() -> &'static str {
 const NOTO_SERIF_REGULAR_TTF: &[u8] = include_bytes!("../assets/fonts/NotoSerif-Regular.ttf");
 const NOTO_SERIF_BOLD_TTF: &[u8] = include_bytes!("../assets/fonts/NotoSerif-Bold.ttf");
 
+// Faithful platform-slip assets (1-bit, thermal-ready). Logos sourced from the
+// platforms' public marks; icons mirror the efood slip's header glyphs.
+const EFOOD_LOGO_PNG: &[u8] = include_bytes!("../assets/platform/efood-logo.png");
+const WOLT_LOGO_PNG: &[u8] = include_bytes!("../assets/platform/wolt-logo.png");
+const PLATFORM_ICON_HOME_PNG: &[u8] = include_bytes!("../assets/platform/icon-home.png");
+const PLATFORM_ICON_CHECK_PNG: &[u8] = include_bytes!("../assets/platform/icon-check.png");
+const PLATFORM_ICON_MONEY_PNG: &[u8] = include_bytes!("../assets/platform/icon-money.png");
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ReceiptTemplate {
@@ -279,6 +287,10 @@ pub struct PlatformSlipInfo {
     pub delivery_provider: Option<String>,
     #[serde(default)]
     pub is_test: bool,
+    /// RFC3339 of the promised pickup/ready moment (accept time + the prep
+    /// minutes the store gave) — the time the efood slip headlines.
+    #[serde(default)]
+    pub ready_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -700,6 +712,8 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Platform rider" => "ΔΙΑΝΟΜΕΑΣ ΠΛΑΤΦΟΡΜΑΣ",
             "Store driver" => "ΔΙΚΟΣ ΣΑΣ ΔΙΑΝΟΜΕΑΣ",
             "Cash on delivery" => "ΑΝΤΙΚΑΤΑΒΟΛΗ",
+            "Cash payment" => "Πληρωμή με μετρητά",
+            "Paid" => "Πληρωμένη",
             "Paid online" => "Πληρωμένη online",
             "Partial subtotal" => "Μερικό σύνολο",
             "Thank you for your order" => "Ευχαριστούμε για την παραγγελία σας",
@@ -840,6 +854,8 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Platform rider" => "Plattform-Fahrer",
             "Store driver" => "Eigener Fahrer",
             "Cash on delivery" => "Nachnahme",
+            "Cash payment" => "Barzahlung",
+            "Paid" => "Bezahlt",
             "Paid online" => "Online bezahlt",
             "Partial subtotal" => "Zwischensumme",
             "Thank you for your order" => "Danke für Ihre Bestellung",
@@ -980,6 +996,8 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Platform rider" => "Livreur plateforme",
             "Store driver" => "Votre livreur",
             "Cash on delivery" => "Contre-remboursement",
+            "Cash payment" => "Paiement en especes",
+            "Paid" => "Payee",
             "Paid online" => "Payee en ligne",
             "Partial subtotal" => "Sous-total partiel",
             "Thank you for your order" => "Merci pour votre commande",
@@ -1120,6 +1138,8 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Platform rider" => "Rider piattaforma",
             "Store driver" => "Vostro rider",
             "Cash on delivery" => "Contrassegno",
+            "Cash payment" => "Pagamento in contanti",
+            "Paid" => "Pagato",
             "Paid online" => "Pagato online",
             "Partial subtotal" => "Subtotale parziale",
             "Thank you for your order" => "Grazie per il vostro ordine",
@@ -5254,6 +5274,88 @@ impl TtfReceiptComposer {
         self.missing_glyph_count > 0
     }
 
+    /// Blit a grayscale asset at (x, y), scaled to `target_w`; returns (w, h).
+    fn blit_image_at(&mut self, img: &GrayImage, x: i32, y: i32, target_w: i32) -> (i32, i32) {
+        let ratio = target_w as f32 / img.width().max(1) as f32;
+        let target_h = ((img.height() as f32 * ratio).round() as i32).max(1);
+        let scaled = image::imageops::resize(
+            img,
+            target_w.max(1) as u32,
+            target_h as u32,
+            image::imageops::FilterType::Triangle,
+        );
+        for (px, py, pixel) in scaled.enumerate_pixels() {
+            if pixel.0[0] < 160 {
+                let dx = x + px as i32;
+                let dy = y + py as i32;
+                if dx >= 0
+                    && dy >= 0
+                    && dx < self.image.width() as i32
+                    && dy < self.image.height() as i32
+                {
+                    self.image.put_pixel(dx as u32, dy as u32, Luma([0]));
+                }
+            }
+        }
+        (target_w, target_h)
+    }
+
+    /// Centered image occupying `target_w` of the content width; advances y.
+    fn draw_image_centered(&mut self, img: &GrayImage, target_w: i32, gap_below: i32) {
+        let x = self.left_margin + (self.content_width - target_w) / 2;
+        let (_, h) = self.blit_image_at(img, x, self.y, target_w);
+        self.y += h + gap_below;
+    }
+
+    /// Word-wrapped text at a fixed x within `max_width`; returns the next y.
+    fn draw_wrapped_at(
+        &mut self,
+        text: &str,
+        x: i32,
+        max_width: i32,
+        style: RasterTextStyle,
+        mut y: i32,
+    ) -> i32 {
+        let mut line = String::new();
+        for word in text.split_whitespace() {
+            let candidate = if line.is_empty() {
+                word.to_string()
+            } else {
+                format!("{line} {word}")
+            };
+            if self.text_width(&candidate, style) > max_width && !line.is_empty() {
+                self.draw_text_at_position(&line, x, style, y);
+                y += style.line_height;
+                line = word.to_string();
+            } else {
+                line = candidate;
+            }
+        }
+        if !line.is_empty() {
+            self.draw_text_at_position(&line, x, style, y);
+            y += style.line_height;
+        }
+        y
+    }
+
+    /// A heavier separator, like the efood slip's section rules.
+    fn draw_thick_rule(&mut self) {
+        let y0 = self.y;
+        for dy in 0..3 {
+            for x in self.left_margin..(self.left_margin + self.content_width) {
+                let yy = y0 + dy;
+                if x >= 0
+                    && yy >= 0
+                    && (x as u32) < self.image.width()
+                    && (yy as u32) < self.image.height()
+                {
+                    self.image.put_pixel(x as u32, yy as u32, Luma([0]));
+                }
+            }
+        }
+        self.y += 3 + self.preset.small_gap;
+    }
+
     fn text_width(&self, text: &str, style: RasterTextStyle) -> i32 {
         let font = self.fonts.font(style.weight);
         let scale = Scale::uniform(style.size_px.max(1.0));
@@ -7748,40 +7850,76 @@ pub fn render_classic_raster_exact_preview_data_url(
     ))
 }
 
+fn decode_platform_asset(bytes: &[u8]) -> Option<GrayImage> {
+    image::load_from_memory(bytes)
+        .ok()
+        .map(|img| img.to_luma8())
+}
+
+fn platform_logo_image(plugin: &str) -> Option<&'static GrayImage> {
+    use std::sync::OnceLock;
+    static EFOOD: OnceLock<Option<GrayImage>> = OnceLock::new();
+    static WOLT: OnceLock<Option<GrayImage>> = OnceLock::new();
+    match plugin.trim().to_ascii_lowercase().as_str() {
+        "efood" => EFOOD
+            .get_or_init(|| decode_platform_asset(EFOOD_LOGO_PNG))
+            .as_ref(),
+        "wolt" => WOLT
+            .get_or_init(|| decode_platform_asset(WOLT_LOGO_PNG))
+            .as_ref(),
+        _ => None,
+    }
+}
+
+fn platform_icon(bytes: &'static [u8], slot: usize) -> Option<&'static GrayImage> {
+    use std::sync::OnceLock;
+    static ICONS: [OnceLock<Option<GrayImage>>; 3] =
+        [OnceLock::new(), OnceLock::new(), OnceLock::new()];
+    ICONS[slot]
+        .get_or_init(|| decode_platform_asset(bytes))
+        .as_ref()
+}
+
+/// «27 Αυγούστου 2026» — the efood slip writes the date long-form in Greek.
+fn platform_greek_long_date(created_at: &str) -> Option<String> {
+    let date_part = created_at.split(['T', ' ']).next()?;
+    let mut parts = date_part.split('-');
+    let year = parts.next()?;
+    let month: usize = parts.next()?.parse().ok()?;
+    let day: usize = parts.next()?.trim_start_matches('0').parse().ok()?;
+    const MONTHS: [&str; 12] = [
+        "Ιανουαρίου",
+        "Φεβρουαρίου",
+        "Μαρτίου",
+        "Απριλίου",
+        "Μαΐου",
+        "Ιουνίου",
+        "Ιουλίου",
+        "Αυγούστου",
+        "Σεπτεμβρίου",
+        "Οκτωβρίου",
+        "Νοεμβρίου",
+        "Δεκεμβρίου",
+    ];
+    if !(1..=12).contains(&month) {
+        return None;
+    }
+    Some(format!("{day} {} {year}", MONTHS[month - 1]))
+}
+
 /// The payment line of the faithful platform slip («Πληρωμένη online» /
 /// «ΑΝΤΙΚΑΤΑΒΟΛΗ 20,30€»). Empty when the ingest gave us nothing.
-fn platform_payment_line(
-    info: &PlatformSlipInfo,
-    doc: &OrderReceiptDoc,
-    lang: &str,
-    cur: &str,
-    comma: bool,
-) -> String {
+fn platform_payment_line(info: &PlatformSlipInfo, doc: &OrderReceiptDoc, lang: &str) -> String {
     if info.prepaid || info.payment_method.as_deref() == Some("online") {
         return receipt_label(lang, "Paid online").to_string();
     }
     if info.payment_method.as_deref() == Some("cash") {
-        let total = doc
-            .totals
-            .iter()
-            .find(|line| line.emphasize)
-            .or_else(|| doc.totals.last())
-            .map(|line| line.amount)
-            .unwrap_or(0.0);
-        return format!(
-            "{} {}",
-            receipt_label(lang, "Cash on delivery"),
-            money_with_currency_locale(total, cur, comma)
-        );
+        return receipt_label(lang, "Cash payment").to_string();
     }
-    // Metadata was incomplete: fall back to what the ledger actually
-    // recorded, so a settled order never prints as collect-on-handoff.
-    if let Some(payment) = doc.payments.first() {
-        return format!(
-            "{} {}",
-            payment.label,
-            money_with_currency_locale(payment.amount, cur, comma)
-        );
+    // Metadata was incomplete: the persisted payment rows still prove the
+    // order is settled, so it never prints as collect-on-handoff.
+    if !doc.payments.is_empty() {
+        return receipt_label(lang, "Paid").to_string();
     }
     String::new()
 }
@@ -7807,6 +7945,7 @@ fn platform_delivery_lines(doc: &OrderReceiptDoc, lang: &str) -> Vec<(String, St
             lines.push((receipt_label(lang, label).to_string(), value.to_string()));
         }
     };
+    push("Customer", doc.customer_name.as_deref());
     push("Address", doc.delivery_address.as_deref());
     push("City", doc.delivery_city.as_deref());
     push("Postal Code", doc.delivery_postal_code.as_deref());
@@ -7815,6 +7954,24 @@ fn platform_delivery_lines(doc: &OrderReceiptDoc, lang: &str) -> Vec<(String, St
     push("Phone", doc.customer_phone.as_deref());
     push("Driver", doc.driver_name.as_deref());
     lines
+}
+
+/// Consecutive items of the same offer carry the same «Offer name — comment»
+/// note prefix; print the offer name once and only the item's own comment on
+/// the repeats, mirroring how a human reads the deal block.
+fn platform_item_note_display(note: &str, last_prefix: &mut Option<String>) -> Option<String> {
+    let (prefix, rest) = match note.split_once(" — ") {
+        Some((prefix, rest)) => (prefix.trim(), Some(rest.trim())),
+        None => (note.trim(), None),
+    };
+    let repeated = last_prefix.as_deref() == Some(prefix);
+    *last_prefix = Some(prefix.to_string());
+    if repeated {
+        rest.filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+    } else {
+        Some(note.trim().to_string())
+    }
 }
 
 fn platform_short_code(info: &PlatformSlipInfo, doc: &OrderReceiptDoc) -> String {
@@ -7826,10 +7983,11 @@ fn platform_short_code(info: &PlatformSlipInfo, doc: &OrderReceiptDoc) -> String
         .unwrap_or_else(|| extract_short_order_number(&doc.order_number).to_string())
 }
 
-/// Faithful platform slip, TTF raster path. Modeled line-for-line on the
-/// founder's real efood slip (#4579, 27/08/2026): wordmark, type/time/payment
-/// header, huge short code, items with «**» customer comments and material
-/// lines, totals, long code at the foot, store identity at the BOTTOM.
+/// Faithful platform slip, TTF raster path — pixel-modeled on the founder's
+/// real efood slips (#4579 & #4585, 27/08/2026): platform logo, icon header
+/// row (type · pickup time + carrier · payment), big LEFT-aligned short code,
+/// items with «**» comments and material lines, heavy totals rules, the long
+/// order code right-aligned at the foot, store identity in a two-column footer.
 fn draw_platform_slip_ttf(
     canvas: &mut TtfReceiptComposer,
     doc: &OrderReceiptDoc,
@@ -7840,77 +7998,164 @@ fn draw_platform_slip_ttf(
     comma: bool,
 ) {
     let preset = canvas.preset;
-    canvas.draw_reverse_banner(&info.plugin.to_uppercase());
-    if info.is_test {
-        canvas.draw_text_line("ΔΟΚΙΜΗ TEST", BitmapAlign::Center, preset.section_style);
+    let body = preset.item_style;
+    let small = preset.contact_style;
+    let bold_of = |style: RasterTextStyle| RasterTextStyle {
+        weight: RasterTextWeight::Bold,
+        ..style
+    };
+    let scaled = |style: RasterTextStyle, factor: f32| RasterTextStyle {
+        size_px: style.size_px * factor,
+        line_height: ((style.line_height as f32) * factor).round() as i32,
+        ..style
+    };
+
+    // ── Logo (the real mark; wordmark text only as fallback) ──
+    if let Some(logo) = platform_logo_image(&info.plugin) {
+        let target_w = (canvas.content_width as f32 * 0.62) as i32;
+        canvas.draw_image_centered(logo, target_w, preset.medium_gap);
+    } else {
+        canvas.draw_text_line(
+            &info.plugin.to_uppercase(),
+            BitmapAlign::Center,
+            bold_of(scaled(body, 2.0)),
+        );
     }
-    // Completed / canceled variants keep their banner and reason — an
-    // auto-printed cancellation must never look like a live order.
+    if info.is_test {
+        canvas.draw_text_line("ΔΟΚΙΜΗ TEST", BitmapAlign::Center, bold_of(body));
+    }
     if matches!(
         doc.status.as_str(),
         "completed" | "delivered" | "cancelled" | "canceled" | "refunded"
     ) {
         if let Some(label) = doc.status_label.as_deref().filter(|v| !v.is_empty()) {
-            canvas.draw_text_line(label, BitmapAlign::Center, preset.section_style);
+            canvas.draw_text_line(label, BitmapAlign::Center, bold_of(body));
         }
         if let Some(reason) = doc.cancellation_reason.as_deref().filter(|v| !v.is_empty()) {
-            canvas.draw_wrapped(reason, BitmapAlign::Center, preset.contact_style);
+            canvas.draw_wrapped(reason, BitmapAlign::Center, small);
         }
     }
-    canvas.draw_rule();
+
+    // ── Icon header row: [home + type] [time + carrier] [check + payment] ──
+    let row_top = canvas.y;
+    let icon_w = (canvas.content_width as f32 * 0.14).clamp(40.0, 96.0) as i32;
+    let col_left_x = canvas.left_margin;
+    let col_right_x = canvas.left_margin + canvas.content_width - icon_w;
+    let mut left_h = 0;
+    if let Some(icon) = platform_icon(PLATFORM_ICON_HOME_PNG, 0) {
+        let (_, h) = canvas.blit_image_at(icon, col_left_x, row_top, icon_w);
+        left_h = h;
+    }
+    let mut right_h = 0;
+    // The real slips pair the payment state with an icon: check = paid by
+    // card/online (#4587), banknotes = cash to collect (#4586).
+    let paid = info.prepaid
+        || info.payment_method.as_deref() == Some("online")
+        || !doc.payments.is_empty();
+    let payment_icon = if paid {
+        platform_icon(PLATFORM_ICON_CHECK_PNG, 1)
+    } else {
+        platform_icon(PLATFORM_ICON_MONEY_PNG, 2)
+    };
+    if let Some(icon) = payment_icon {
+        let (_, h) = canvas.blit_image_at(icon, col_right_x, row_top, icon_w);
+        right_h = h;
+    }
+    // Center block: pickup label, BIG time, carrier.
+    let time_source = info.ready_at.as_deref().unwrap_or(&doc.created_at);
+    let time = format_datetime_human(time_source)
+        .split(' ')
+        .nth(1)
+        .map(|t| t.chars().take(5).collect::<String>())
+        .unwrap_or_default();
     let order_type_display = translate_order_type(lang, &doc.order_type);
-    canvas.draw_text_line(
-        &format!(
-            "{} {}",
-            order_type_display,
-            format_datetime_human(&doc.created_at)
-        ),
-        BitmapAlign::Center,
-        preset.meta_style,
-    );
+    let mut center_y = row_top;
+    canvas.draw_text_at_y(&order_type_display, BitmapAlign::Center, small, center_y);
+    center_y += small.line_height;
+    let time_style = bold_of(scaled(body, 1.5));
+    canvas.draw_text_at_y(&time, BitmapAlign::Center, time_style, center_y);
+    center_y += time_style.line_height;
     if let Some(carrier) = platform_carrier_line(info, lang) {
-        canvas.draw_text_line(carrier, BitmapAlign::Center, preset.meta_style);
+        canvas.draw_text_at_y(carrier, BitmapAlign::Center, small, center_y);
+        center_y += small.line_height;
     }
-    if let Some(name) = doc
-        .customer_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-    {
-        canvas.draw_text_line(name, BitmapAlign::Center, preset.meta_style);
-    }
-    let payment = platform_payment_line(info, doc, lang, cur, comma);
+
+    // Labels under the icons.
+    let under_left_y = row_top + left_h + 2;
+    canvas.draw_text_at_position(
+        &order_type_display.to_uppercase(),
+        col_left_x,
+        small,
+        under_left_y,
+    );
+    let payment = platform_payment_line(info, doc, lang);
+    let mut under_right_y = row_top + right_h + 2;
     if !payment.is_empty() {
-        canvas.draw_text_line(&payment, BitmapAlign::Center, preset.section_style);
+        let payment_w = canvas.text_width(&payment, small);
+        let px = (canvas.left_margin + canvas.content_width - payment_w).max(canvas.left_margin);
+        canvas.draw_text_at_position(&payment, px, small, under_right_y);
+        under_right_y += small.line_height;
     }
+    let row_bottom = center_y
+        .max(under_left_y + small.line_height)
+        .max(under_right_y)
+        .max(row_top + left_h.max(right_h));
+    canvas.y = row_bottom + preset.medium_gap;
+
+    canvas.draw_thick_rule();
+
+    // ── The rider-facing code: big, LEFT-aligned, plain black-on-white ──
+    canvas.draw_text_line(
+        &format!("#{}", platform_short_code(info, doc)),
+        BitmapAlign::Left,
+        bold_of(scaled(body, 2.4)),
+    );
     canvas.draw_rule();
-    canvas.draw_reverse_banner(&format!("#{}", platform_short_code(info, doc)));
-    canvas.draw_rule();
-    // A store-delivered platform order is still a delivery: the slip must
-    // carry the destination and contact details the driver fulfills with.
-    let delivery_lines = platform_delivery_lines(doc, lang);
-    if !delivery_lines.is_empty() {
-        for (label, value) in &delivery_lines {
-            canvas.draw_pair(&format!("{label}:"), value, preset.contact_style);
+    // The customer's order-level note gets its own block above the items,
+    // exactly where efood prints it (slip #4583).
+    let order_level_notes: Vec<&str> = doc
+        .order_notes
+        .iter()
+        .map(|note| note.trim())
+        .filter(|note| !note.is_empty() && !note.starts_with("ΚΩΔΙΚΟΣ ΠΑΡΑΓΓΕΛΙΑΣ"))
+        .collect();
+    if !order_level_notes.is_empty() {
+        for note in &order_level_notes {
+            canvas.draw_wrapped(&note.to_uppercase(), BitmapAlign::Left, bold_of(body));
         }
         canvas.draw_rule();
     }
+
+    // Destination block (store-driven platform orders still need it).
+    let delivery_lines = platform_delivery_lines(doc, lang);
+    if !delivery_lines.is_empty() {
+        for (label, value) in &delivery_lines {
+            canvas.draw_pair(&format!("{label}:"), value, small);
+        }
+        canvas.draw_rule();
+    }
+
+    // ── Items: qty + bold name + price; ** comment; materials beneath ──
+    let mut last_note_prefix: Option<String> = None;
     for item in &doc.items {
         canvas.draw_pair(
             &format!("{} {}", qty(item.quantity), item.name.to_uppercase()),
             &money_with_currency_locale(item.total, cur, comma),
-            preset.item_style,
+            bold_of(body),
         );
         if let Some(note) = item
             .note
             .as_deref()
             .map(str::trim)
             .filter(|n| !n.is_empty())
+            .and_then(|note| platform_item_note_display(note, &mut last_note_prefix))
         {
+            // «***» and regular weight — the real slip keeps item comments
+            // lighter than the bold names so they never read as materials.
             canvas.draw_wrapped(
-                &format!("** {}", note.to_uppercase()),
+                &format!("*** {}", note.to_uppercase()),
                 BitmapAlign::Left,
-                preset.contact_style,
+                small,
             );
         }
         let (with_items, without_items) = split_customizations(item);
@@ -7921,7 +8166,7 @@ fn draw_platform_slip_ttf(
                     customization_display(lang, line, false).to_uppercase()
                 ),
                 BitmapAlign::Left,
-                preset.contact_style,
+                small,
             );
         }
         for line in without_items {
@@ -7932,29 +8177,34 @@ fn draw_platform_slip_ttf(
                     customization_display(lang, line, false).to_uppercase()
                 ),
                 BitmapAlign::Left,
-                preset.contact_style,
+                small,
             );
         }
     }
-    canvas.draw_rule();
+
+    // ── Totals with the slip's heavy rules ──
+    canvas.draw_thick_rule();
     for total in &doc.totals {
         let style = if total.emphasize {
-            preset.section_style
+            bold_of(scaled(body, 1.2))
         } else {
-            preset.meta_style
+            body
         };
+        if total.emphasize {
+            canvas.draw_thick_rule();
+        }
         canvas.draw_pair(
-            &total.label,
+            receipt_label(lang, &total.label),
             &money_with_currency_locale(total.amount, cur, comma),
             style,
         );
     }
-    canvas.draw_rule();
-    canvas.draw_text_line(
-        &format_datetime_human(&doc.created_at),
-        BitmapAlign::Center,
-        preset.meta_style,
-    );
+
+    // ── Right-aligned date + long order code ──
+    canvas.add_gap(preset.medium_gap);
+    if let Some(date) = platform_greek_long_date(&doc.created_at) {
+        canvas.draw_text_line(&date, BitmapAlign::Right, body);
+    }
     if let Some(code) = info
         .external_order_id
         .as_deref()
@@ -7962,24 +8212,32 @@ fn draw_platform_slip_ttf(
         .filter(|c| !c.is_empty())
     {
         canvas.draw_text_line(
-            &format!("{}: {}", receipt_label(lang, "Order Code"), code),
-            BitmapAlign::Center,
-            preset.section_style,
+            &format!("{}:", receipt_label(lang, "Order Code")),
+            BitmapAlign::Right,
+            small,
         );
+        canvas.draw_text_line(code, BitmapAlign::Right, bold_of(body));
     }
-    canvas.draw_rule();
-    canvas.draw_text_line(
+    canvas.draw_thick_rule();
+
+    // ── Two-column footer: store identity left, thanks right ──
+    let footer_top = canvas.y;
+    let col_w = canvas.content_width / 2 - 8;
+    let mut left_y = footer_top;
+    canvas.draw_text_at_position(
         &cfg.organization_name,
-        BitmapAlign::Center,
-        preset.meta_style,
+        canvas.left_margin,
+        bold_of(small),
+        left_y,
     );
+    left_y += small.line_height;
     if let Some(address) = cfg
         .store_address
         .as_deref()
         .map(str::trim)
         .filter(|v| !v.is_empty())
     {
-        canvas.draw_wrapped(address, BitmapAlign::Center, preset.contact_style);
+        left_y = canvas.draw_wrapped_at(address, canvas.left_margin, col_w, small, left_y);
     }
     if let Some(phone) = cfg
         .store_phone
@@ -7987,13 +8245,13 @@ fn draw_platform_slip_ttf(
         .map(str::trim)
         .filter(|v| !v.is_empty())
     {
-        canvas.draw_text_line(phone, BitmapAlign::Center, preset.contact_style);
+        canvas.draw_text_at_position(phone, canvas.left_margin, small, left_y);
+        left_y += small.line_height;
     }
-    canvas.draw_wrapped(
-        receipt_label(lang, "Thank you for your order"),
-        BitmapAlign::Center,
-        preset.contact_style,
-    );
+    let thanks = receipt_label(lang, "Thank you for your order");
+    let right_x = canvas.left_margin + canvas.content_width / 2 + 8;
+    let right_y = canvas.draw_wrapped_at(thanks, right_x, col_w, small, footer_top);
+    canvas.y = left_y.max(right_y) + preset.medium_gap;
 }
 
 /// Faithful platform slip, ESC/POS text path (store header already emitted by
@@ -8073,19 +8331,10 @@ fn emit_platform_slip_escpos(
     if let Some(carrier) = platform_carrier_line(info, lang) {
         builder.text(carrier).lf();
     }
-    if let Some(name) = doc
-        .customer_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-    {
-        builder.text(name).lf();
-    }
-    let payment = platform_payment_line(info, doc, lang, cur, comma);
+
+    let payment = platform_payment_line(info, doc, lang);
     if !payment.is_empty() {
-        builder.bold(true);
         builder.text(&payment).lf();
-        builder.bold(false);
     }
     builder.left();
     emit_rule(builder, width, '-');
@@ -8103,6 +8352,7 @@ fn emit_platform_slip_escpos(
         }
         emit_rule(builder, width, '-');
     }
+    let mut last_note_prefix: Option<String> = None;
     for item in &doc.items {
         emit_pair(
             builder,
@@ -8115,6 +8365,7 @@ fn emit_platform_slip_escpos(
             .as_deref()
             .map(str::trim)
             .filter(|n| !n.is_empty())
+            .and_then(|note| platform_item_note_display(note, &mut last_note_prefix))
         {
             builder.bold(true);
             emit_wrapped(builder, &format!("** {}", note.to_uppercase()), width);
@@ -8146,7 +8397,7 @@ fn emit_platform_slip_escpos(
         }
         emit_pair(
             builder,
-            &total.label,
+            receipt_label(lang, &total.label),
             &money_with_currency_locale(total.amount, cur, comma),
             width,
         );
@@ -10717,6 +10968,124 @@ mod tests {
         };
         assert_eq!(total_label_text("en", &line), "Discount (10%)");
         assert_eq!(total_label_text("el", &line), "Έκπτωση (10%)");
+    }
+
+    #[test]
+    fn platform_slip_preview_renders_the_faithful_efood_layout() {
+        // Rendered preview of the faithful slip, modeled on the founder's real
+        // efood slips — saved to disk so a human can eyeball it before release.
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            language: "el".to_string(),
+            classic_customer_render_mode: ClassicCustomerRenderMode::RasterExact,
+            organization_name: "ΤΟ ΜΙΚΡΟ ΠΑΡΙΣΙ".to_string(),
+            store_address: Some("ΚΩΝΣΤΑΝΤΙΝΟΥΠΟΛΕΩΣ 62, 54641 ΘΕΣΣΑΛΟΝΙΚΗ".to_string()),
+            store_phone: Some("2310-008763".to_string()),
+            decimal_comma: true,
+            ..LayoutConfig::default()
+        };
+        let doc = OrderReceiptDoc {
+            order_id: "preview".to_string(),
+            order_number: "EFOOD-1787-64656368".to_string(),
+            order_type: "delivery".to_string(),
+            status: "confirmed".to_string(),
+            created_at: "2026-08-27T02:12:00+00:00".to_string(),
+            customer_name: Some("epsylon bita".to_string()),
+            customer_phone: Some("+306948128474".to_string()),
+            delivery_address: Some("Λεωφόρος Ηρακλείου 409, 14122, Αθήνα".to_string()),
+            items: vec![
+                ReceiptItem {
+                    name: "Φτιάξτε τη δική σας γλυκιά κρέπα".to_string(),
+                    quantity: 1.0,
+                    total: 5.30,
+                    customizations: vec![
+                        ReceiptCustomizationLine {
+                            name: "Φύλλο κρέπας".to_string(),
+                            quantity: 1.0,
+                            ..ReceiptCustomizationLine::default()
+                        },
+                        ReceiptCustomizationLine {
+                            name: "Nutella".to_string(),
+                            quantity: 1.0,
+                            ..ReceiptCustomizationLine::default()
+                        },
+                        ReceiptCustomizationLine {
+                            name: "Μπισκότο πτι-μπερ".to_string(),
+                            quantity: 1.0,
+                            ..ReceiptCustomizationLine::default()
+                        },
+                    ],
+                    ..ReceiptItem::default()
+                },
+                ReceiptItem {
+                    name: "Ελληνικός".to_string(),
+                    quantity: 1.0,
+                    total: 0.0,
+                    note: Some(
+                        "Με 1 καφέ της επιλογής σας, δώρο ακόμη 1 — καλά ψημένος".to_string(),
+                    ),
+                    customizations: vec![ReceiptCustomizationLine {
+                        name: "Πολύ γλυκός".to_string(),
+                        quantity: 1.0,
+                        ..ReceiptCustomizationLine::default()
+                    }],
+                    ..ReceiptItem::default()
+                },
+                ReceiptItem {
+                    name: "Τυρόπιτα".to_string(),
+                    quantity: 1.0,
+                    total: 0.71,
+                    note: Some(
+                        "Με 1 καφέ της επιλογής σας, δώρο ακόμη 1 — αν δεν έχει βάλτε σπανακόπιτα"
+                            .to_string(),
+                    ),
+                    ..ReceiptItem::default()
+                },
+            ],
+            totals: vec![
+                TotalsLine {
+                    label: "Subtotal".to_string(),
+                    amount: 5.51,
+                    emphasize: false,
+                    ..TotalsLine::default()
+                },
+                TotalsLine {
+                    label: "Delivery".to_string(),
+                    amount: 0.50,
+                    emphasize: false,
+                    ..TotalsLine::default()
+                },
+                TotalsLine {
+                    label: "TOTAL".to_string(),
+                    amount: 6.01,
+                    emphasize: true,
+                    ..TotalsLine::default()
+                },
+            ],
+            order_notes: vec![
+                "Ανοίγεις την μαύρη πόρτα από την μέσα πλευρά και καλείς το τηλέφωνο".to_string(),
+                "ΚΩΔΙΚΟΣ ΠΑΡΑΓΓΕΛΙΑΣ: 691215364".to_string(),
+            ],
+            platform_slip: Some(PlatformSlipInfo {
+                plugin: "efood".to_string(),
+                external_order_id: Some("691215364".to_string()),
+                short_code: Some("4585".to_string()),
+                payment_method: Some("cash".to_string()),
+                prepaid: false,
+                delivery_provider: Some("platform_delivery".to_string()),
+                is_test: false,
+                // Accepted with 20' prep: the headline time is 02:12 + 20'.
+                ready_at: Some("2026-08-27T02:32:00+00:00".to_string()),
+            }),
+            ..OrderReceiptDoc::default()
+        };
+        let image =
+            render_classic_customer_raster_exact_ttf(&ReceiptDocument::OrderReceipt(doc), &cfg)
+                .expect("platform slip renders");
+        assert!(image.height() > 400);
+        let out = std::env::temp_dir().join("platform_slip_preview.png");
+        image.save(&out).expect("save preview png");
+        eprintln!("preview saved: {}", out.display());
     }
 
     #[test]

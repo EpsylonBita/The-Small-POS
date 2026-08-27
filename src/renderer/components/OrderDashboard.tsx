@@ -7946,6 +7946,19 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         <OrderCancellationModal
           isOpen={showCancelModal}
           orderCount={pendingCancelOrders.length}
+          platformOrder={orders.some((order) => {
+            if (!pendingCancelOrders.includes(order.id)) {
+              return false;
+            }
+            const plugin =
+              order.plugin ||
+              order.order_plugin ||
+              order.platform ||
+              order.order_platform;
+            const externalId =
+              order.external_plugin_order_id || order.external_platform_order_id;
+            return Boolean(plugin && externalId && isExternalPlatform(String(plugin)));
+          })}
           onConfirmCancel={handleOrderCancellation}
           onClose={handleCancelModalClose}
         />

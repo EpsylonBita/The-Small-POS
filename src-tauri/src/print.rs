@@ -3543,6 +3543,14 @@ fn parse_item_customizations(item: &Value) -> Vec<ReceiptCustomizationLine> {
         "selectedIngredients",
     ] {
         if let Some(raw) = item.get(key) {
+            // Platform orders mirror server rows where `customizations` is an
+            // object wrapping the actual list ({"modifiers":[{name,price}],
+            // "external_sku":…}) — the materials live one level down.
+            let raw = if raw.is_object() {
+                raw.get("modifiers").unwrap_or(raw)
+            } else {
+                raw
+            };
             let parsed = parse_customization_entries(raw);
             if !parsed.is_empty() {
                 return parsed;
@@ -5049,7 +5057,8 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
                     COALESCE(ghost_metadata, ''),
                     COALESCE(plugin, ''),
                     COALESCE(is_test, 0),
-                    COALESCE(external_plugin_order_id, '')
+                    COALESCE(external_plugin_order_id, ''),
+                    COALESCE(estimated_time, '')
              FROM orders WHERE id = ?1",
             params![order_id],
             |row| {
@@ -5085,6 +5094,7 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
                     row.get::<_, String>(28)?,
                     row.get::<_, i64>(29)?,
                     row.get::<_, String>(30)?,
+                    row.get::<_, String>(31)?,
                 ))
             },
         )
@@ -5121,6 +5131,7 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
         plugin,
         is_test,
         external_order_id,
+        estimated_time_raw,
     ) = order;
     let payment_method = derived_payment_method;
     let menu_lookup = build_menu_category_lookup(&conn);
@@ -5346,7 +5357,7 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
         }),
         order_type,
         status,
-        created_at,
+        created_at: created_at.clone(),
         table_number: non_empty_field(table_number),
         customer_name: non_empty_field(customer_name),
         customer_phone: non_empty_field(customer_phone),
@@ -5409,6 +5420,21 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
                     .unwrap_or(false),
                 delivery_provider: field("delivery_provider"),
                 is_test: is_test != 0,
+                // The slip headlines the PROMISED time: accept moment + the
+                // prep minutes the store gave. estimated_time is minutes when
+                // numeric; a full timestamp passes through as-is.
+                ready_at: {
+                    let trimmed = estimated_time_raw.trim();
+                    if let Ok(minutes) = trimmed.parse::<i64>() {
+                        chrono::DateTime::parse_from_rfc3339(&created_at)
+                            .ok()
+                            .map(|start| (start + chrono::Duration::minutes(minutes)).to_rfc3339())
+                    } else if trimmed.len() >= 16 {
+                        Some(trimmed.to_string())
+                    } else {
+                        None
+                    }
+                },
             })
         } else {
             None
@@ -14857,6 +14883,27 @@ mod tests {
             params![drawer_id, shift_id],
         )
         .expect("insert active cashier drawer fixture");
+    }
+
+    #[test]
+    fn test_parse_item_customizations_from_server_object_shape() {
+        // The server mirrors platform items with customizations as an object
+        // wrapping the modifier list (live efood order 26/08) — the materials
+        // must not be dropped.
+        let item = serde_json::json!({
+            "customizations": {
+                "modifiers": [
+                    { "name": "Μονός", "price": 0 },
+                    { "name": "Πολύ γλυκός", "price": 0 }
+                ],
+                "external_sku": "1423280112",
+                "platform_source": "efood"
+            }
+        });
+        let parsed = parse_item_customizations(&item);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].name, "Μονός");
+        assert_eq!(parsed[1].name, "Πολύ γλυκός");
     }
 
     #[test]

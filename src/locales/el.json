@@ -4508,7 +4508,22 @@
       "characterCount": "{{current}}/{{max}} χαρακτήρες",
       "confirm": "Επιβεβαίωση Ακύρωσης",
       "keepOrder": "Διατήρηση παραγγελίας",
-      "reasonRequired": "Παρακαλώ παράσχετε λόγο ακύρωσης"
+      "reasonRequired": "Παρακαλώ παράσχετε λόγο ακύρωσης",
+      "platformReasonLabel": "Λόγος για την πλατφόρμα *",
+      "platformReasonHint": "Η πλατφόρμα δέχεται μόνο τους επίσημους λόγους της — το δικό σας σχόλιο μένει εσωτερικό.",
+      "platformReasonRequired": "Επιλέξτε λόγο ακύρωσης για την πλατφόρμα",
+      "internalNoteLabel": "Εσωτερικό σχόλιο (προαιρετικό)",
+      "platformReasons": {
+        "closed": "Το κατάστημα είναι κλειστό",
+        "item_unavailable": "Έλλειψη προϊόντος",
+        "too_busy": "Μεγάλος φόρτος καταστήματος",
+        "no_courier": "Δεν υπάρχει διαθέσιμος διανομέας",
+        "address_incomplete_misstated": "Ελλιπής / λανθασμένη διεύθυνση",
+        "outside_delivery_area": "Εκτός περιοχής παράδοσης",
+        "bad_weather": "Κακές καιρικές συνθήκες",
+        "duplicate_order": "Διπλότυπη παραγγελία",
+        "test_order": "Δοκιμαστική παραγγελία"
+      }
     },
     "orderType": {
       "title": "Παραγγελία",

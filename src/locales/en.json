@@ -4447,7 +4447,22 @@
       "characterCount": "{{current}}/{{max}} characters",
       "confirm": "Confirm Cancel",
       "keepOrder": "Keep order",
-      "reasonRequired": "Please provide a reason for cancellation"
+      "reasonRequired": "Please provide a reason for cancellation",
+      "platformReasonLabel": "Reason for the platform *",
+      "platformReasonHint": "The platform only accepts its official reasons — your note stays internal.",
+      "platformReasonRequired": "Pick a cancellation reason for the platform",
+      "internalNoteLabel": "Internal note (optional)",
+      "platformReasons": {
+        "closed": "Store is closed",
+        "item_unavailable": "Item unavailable",
+        "too_busy": "Store too busy",
+        "no_courier": "No courier available",
+        "address_incomplete_misstated": "Address incomplete / misstated",
+        "outside_delivery_area": "Outside delivery area",
+        "bad_weather": "Bad weather",
+        "duplicate_order": "Duplicate order",
+        "test_order": "Test order"
+      }
     },
     "addCustomer": {
       "title": "Add New Customer",

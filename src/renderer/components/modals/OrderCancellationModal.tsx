@@ -3,9 +3,33 @@ import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 
+/**
+ * The delivery platforms accept only their official cancellation reason codes
+ * (efood partner API enum) — free text never reaches them. For platform
+ * orders the operator picks one of these, so the platform receives a reason
+ * it recognizes; any extra note stays internal (appended after « — »).
+ */
+export const PLATFORM_CANCELLATION_REASONS = [
+  'CLOSED',
+  'ITEM_UNAVAILABLE',
+  'TOO_BUSY',
+  'NO_COURIER',
+  'ADDRESS_INCOMPLETE_MISSTATED',
+  'OUTSIDE_DELIVERY_AREA',
+  'BAD_WEATHER',
+  'DUPLICATE_ORDER',
+  'TEST_ORDER',
+] as const;
+export type PlatformCancellationReason = typeof PLATFORM_CANCELLATION_REASONS[number];
+
+const platformReasonLabelKey = (code: PlatformCancellationReason) =>
+  `modals.orderCancellation.platformReasons.${code.toLowerCase()}`;
+
 interface OrderCancellationModalProps {
   isOpen: boolean;
   orderCount: number;
+  /** True when any order being cancelled came from a delivery platform. */
+  platformOrder?: boolean;
   onConfirmCancel: (reason: string) => void;
   onClose: () => void;
 }
@@ -13,11 +37,13 @@ interface OrderCancellationModalProps {
 export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
   isOpen,
   orderCount,
+  platformOrder = false,
   onConfirmCancel,
   onClose
 }) => {
   const { t } = useTranslation();
   const [cancelReason, setCancelReason] = useState('');
+  const [platformCode, setPlatformCode] = useState<PlatformCancellationReason | null>(null);
   const reasonInputRef = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
@@ -33,17 +59,34 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
     return () => window.clearTimeout(focusTimer);
   }, [isOpen]);
 
+  const resetForm = () => {
+    setCancelReason('');
+    setPlatformCode(null);
+  };
+
+  const canConfirm = platformOrder ? platformCode !== null : Boolean(cancelReason.trim());
+
   const handleConfirm = () => {
-    if (!cancelReason.trim()) {
+    if (platformOrder && !platformCode) {
+      toast.error(t('modals.orderCancellation.platformReasonRequired'));
+      return;
+    }
+    if (!platformOrder && !cancelReason.trim()) {
       toast.error(t('modals.orderCancellation.reasonRequired'));
       return;
     }
-    onConfirmCancel(cancelReason);
-    setCancelReason(''); // Reset form
+    // Platform orders lead with the official code so the platform recognizes
+    // it; the operator's own note rides after « — » for our records only.
+    const note = cancelReason.trim();
+    const reason = platformCode
+      ? (note ? `${platformCode} — ${note}` : platformCode)
+      : note;
+    onConfirmCancel(reason);
+    resetForm();
   };
 
   const handleClose = () => {
-    setCancelReason(''); // Reset form on close
+    resetForm();
     onClose();
   };
 
@@ -70,7 +113,7 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
           <button
             type="button"
             onClick={handleConfirm}
-            disabled={!cancelReason.trim()}
+            disabled={!canConfirm}
             className="liquid-glass-modal-button liquid-glass-modal-error flex-1 rounded-xl disabled:opacity-50 disabled:saturate-0 disabled:cursor-not-allowed"
           >
             {t('modals.orderCancellation.confirm')}
@@ -82,9 +125,42 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
         {t('modals.orderCancellation.message', { count: orderCount })}
       </p>
 
+      {platformOrder && (
+        <div className="mb-6">
+          <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
+            {t('modals.orderCancellation.platformReasonLabel')}
+          </label>
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            {PLATFORM_CANCELLATION_REASONS.map((code) => {
+              const selected = platformCode === code;
+              return (
+                <button
+                  key={code}
+                  type="button"
+                  onClick={() => setPlatformCode(selected ? null : code)}
+                  aria-pressed={selected}
+                  className={`rounded-xl border px-3 py-2 text-left text-sm transition active:scale-[0.98] ${
+                    selected
+                      ? 'border-amber-400 bg-amber-400 text-black shadow-md shadow-amber-400/30'
+                      : 'border-white/20 bg-white/[0.06] liquid-glass-modal-text hover:bg-white/[0.12]'
+                  }`}
+                >
+                  {t(platformReasonLabelKey(code))}
+                </button>
+              );
+            })}
+          </div>
+          <div className="text-xs liquid-glass-modal-text-muted mt-2">
+            {t('modals.orderCancellation.platformReasonHint')}
+          </div>
+        </div>
+      )}
+
       <div className="mb-6">
         <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
-          {t('modals.orderCancellation.reasonLabel')}
+          {platformOrder
+            ? t('modals.orderCancellation.internalNoteLabel')
+            : t('modals.orderCancellation.reasonLabel')}
         </label>
         <textarea
           ref={reasonInputRef}
@@ -92,7 +168,7 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
           onChange={(e) => setCancelReason(e.target.value)}
           placeholder={t('modals.orderCancellation.reasonPlaceholder')}
           className="liquid-glass-modal-input w-full resize-none"
-          rows={4}
+          rows={platformOrder ? 2 : 4}
           maxLength={500}
         />
         <div className="text-xs liquid-glass-modal-text-muted mt-1">
