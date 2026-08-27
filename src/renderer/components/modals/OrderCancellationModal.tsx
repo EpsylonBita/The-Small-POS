@@ -46,6 +46,26 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
   const [platformCode, setPlatformCode] = useState<PlatformCancellationReason | null>(null);
   const reasonInputRef = useRef<HTMLTextAreaElement | null>(null);
 
+  // Picking a chip pre-fills the note with its label (and unpicking clears
+  // it), but an operator-typed note is never overwritten.
+  const selectPlatformCode = (code: PlatformCancellationReason, selected: boolean) => {
+    const previousLabel = platformCode ? t(platformReasonLabelKey(platformCode)) : null;
+    if (selected) {
+      setPlatformCode(null);
+      setCancelReason((current) => (current.trim() === previousLabel ? '' : current));
+      return;
+    }
+    const label = t(platformReasonLabelKey(code));
+    setPlatformCode(code);
+    setCancelReason((current) => {
+      const trimmed = current.trim();
+      if (!trimmed || trimmed === previousLabel) {
+        return label;
+      }
+      return current;
+    });
+  };
+
   useEffect(() => {
     if (!isOpen) {
       return;
@@ -114,7 +134,11 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
             type="button"
             onClick={handleConfirm}
             disabled={!canConfirm}
-            className="liquid-glass-modal-button liquid-glass-modal-error flex-1 rounded-xl disabled:opacity-50 disabled:saturate-0 disabled:cursor-not-allowed"
+            className={`liquid-glass-modal-button flex-1 rounded-xl disabled:opacity-50 disabled:saturate-0 disabled:cursor-not-allowed ${
+              canConfirm
+                ? '!bg-red-600 !text-white !border-red-600 hover:!bg-red-700 shadow-md shadow-red-600/30'
+                : 'liquid-glass-modal-error'
+            }`}
           >
             {t('modals.orderCancellation.confirm')}
           </button>
@@ -137,7 +161,7 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
                 <button
                   key={code}
                   type="button"
-                  onClick={() => setPlatformCode(selected ? null : code)}
+                  onClick={() => selectPlatformCode(code, selected)}
                   aria-pressed={selected}
                   className={`rounded-xl border px-3 py-2 text-left text-sm transition active:scale-[0.98] ${
                     selected

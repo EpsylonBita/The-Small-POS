@@ -516,7 +516,8 @@
       "allTypes": "Tutti i tipi",
       "dateFrom": "Data da",
       "clearAll": "Cancella tutti i filtri"
-    }
+    },
+    "sandboxPrintSkipped": "Ordine di prova — stampa saltata. Attivate «Stampa ordini di prova (sandbox)» nelle impostazioni stampante."
   },
   "menu": {
     "managementTabs": {

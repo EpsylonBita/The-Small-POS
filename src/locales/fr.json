@@ -516,7 +516,8 @@
       "allTypes": "Tous les types",
       "dateFrom": "Date depuis",
       "clearAll": "Effacer tous les filtres"
-    }
+    },
+    "sandboxPrintSkipped": "Commande de test — impression ignorée. Activez «Imprimer les commandes de test (sandbox)» dans les réglages imprimante."
   },
   "menu": {
     "managementTabs": {

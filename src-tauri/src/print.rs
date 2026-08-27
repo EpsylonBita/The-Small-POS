@@ -14502,7 +14502,10 @@ mod tests {
                 Duration::from_secs(1),
             )
         });
-        if !late.wait_until_started(Duration::from_secs(5)) {
+        // 30s, not 5: test-side patience only — on a loaded CI runner the
+        // detached native thread can take that long to be scheduled (fourth
+        // member of the print-concurrency flake family, run 33092046600).
+        if !late.wait_until_started(Duration::from_secs(30)) {
             late.release();
             let worker_result = worker.join().unwrap();
             panic!("Windows start callback did not finish before timeout: {worker_result:?}");

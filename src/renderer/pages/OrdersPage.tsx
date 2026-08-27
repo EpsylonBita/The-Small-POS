@@ -991,14 +991,9 @@ const OrdersPage: React.FC = () => {
           setOpenSelectedOrderPayment(false);
         }}
         onPrintReceipt={async () => {
-          if (selectedOrder?.is_test || selectedOrder?.integration_environment === 'sandbox') {
-            toast.error(
-              t('orders.sandboxPrintBlocked', {
-                defaultValue: 'Production receipt printing is disabled for sandbox orders.',
-              }),
-            );
-            return;
-          }
+          // Sandbox gating lives in the Rust enqueue guard, where the
+          // print_sandbox_orders override is honored — a client-side block
+          // here silently ignored the operator's toggle.
           const orderId = selectedOrder?.id;
           if (!orderId) {
             toast.error('No order ID available for printing');
@@ -1008,7 +1003,15 @@ const OrdersPage: React.FC = () => {
           try {
             const result = await bridge.payments.printReceipt(orderId, 'order_receipt');
             console.log('[OrdersPage] printReceipt result:', result);
-            if (result?.success) {
+            if ((result as any)?.skipped && (result as any)?.reason === 'sandbox_order') {
+              toast.error(
+                t('orders.sandboxPrintSkipped', {
+                  defaultValue:
+                    'Test order — printing skipped. Enable «Print sandbox test orders» in Printer Settings.',
+                }),
+                { id: 'print-receipt' },
+              );
+            } else if (result?.success) {
               toast.success('Receipt sent to printer', { id: 'print-receipt' });
             } else {
               toast.error(result?.error || 'Print job queued but may fail', { id: 'print-receipt' });

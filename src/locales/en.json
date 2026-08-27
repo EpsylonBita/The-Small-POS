@@ -516,7 +516,8 @@
       "allTypes": "All Types",
       "dateFrom": "Date From",
       "clearAll": "Clear all filters"
-    }
+    },
+    "sandboxPrintSkipped": "Test order — printing skipped. Enable «Print sandbox test orders» in Printer Settings."
   },
   "menu": {
     "managementTabs": {

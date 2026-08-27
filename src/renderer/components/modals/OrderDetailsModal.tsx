@@ -218,6 +218,10 @@ function flattenOrderCustomizationInput(customizations: any): any[] {
     parsed.ingredients,
     parsed.items,
     parsed.groups,
+    // Platform orders mirror server rows where customizations is an object
+    // wrapping the actual list ({modifiers:[...], external_sku, platform_source})
+    // — only the modifiers are materials; the metadata keys must never render.
+    parsed.modifiers,
   ]
     .filter(Array.isArray)
     .flatMap((entries) => flattenOrderCustomizationEntry(entries));
@@ -781,6 +785,13 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
     displayOrder.specialInstructions,
   ]
     .map((note) => normalizeText(note))
+    // The platform ingest appends a "--- Order Items ---" text fallback for
+    // legacy tokenless clients; the items render structured above, so only the
+    // customer's own words belong in the notes panel.
+    .map((note) => {
+      const marker = note.indexOf('--- Order Items ---');
+      return marker >= 0 ? note.slice(0, marker).trim() : note;
+    })
     .filter(
       (note, index, array) =>
         Boolean(note) &&
@@ -892,7 +903,10 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
         price: isWithoutItem(c) ? 0 : extractPrice(c),
         isWithout: isWithoutItem(c),
         isLittle: isLittleItem(c)
-      }));
+      }))
+      // Sandbox feeds ship junk materials (a literal ","); a material must
+      // carry at least one letter or digit to render.
+      .filter((c) => /[\p{L}\p{N}]/u.test(c.name));
   };
 
   const resolveCategoryPath = (item: any): string => {

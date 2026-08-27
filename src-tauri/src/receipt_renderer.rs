@@ -1992,7 +1992,9 @@ fn split_customizations(
     let mut with_items = Vec::new();
     let mut without_items = Vec::new();
     for customization in &item.customizations {
-        if customization.name.trim().is_empty() {
+        // Junk feed entries (efood sandbox ships a material literally named
+        // ",") must carry at least one letter or digit to print.
+        if !customization.name.trim().chars().any(char::is_alphanumeric) {
             continue;
         }
         if customization.is_without {

@@ -7888,7 +7888,15 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                   orderId,
                   "order_receipt",
                 );
-                if (result?.success) {
+                if ((result as any)?.skipped && (result as any)?.reason === "sandbox_order") {
+                  toast.error(
+                    t("orders.sandboxPrintSkipped", {
+                      defaultValue:
+                        "Test order — printing skipped. Enable «Print sandbox test orders» in Printer Settings.",
+                    }),
+                    { id: "dashboard-view-print" },
+                  );
+                } else if (result?.success) {
                   toast.success(
                     t("orderApprovalPanel.printSuccess", {
                       defaultValue: "Receipt printed successfully",

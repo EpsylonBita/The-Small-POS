@@ -516,7 +516,8 @@
       "allTypes": "Alle Arten",
       "dateFrom": "Datum ab",
       "clearAll": "Alle Filter löschen"
-    }
+    },
+    "sandboxPrintSkipped": "Testbestellung — Druck übersprungen. Aktivieren Sie «Sandbox-Testbestellungen drucken» in den Druckereinstellungen."
   },
   "menu": {
     "managementTabs": {
