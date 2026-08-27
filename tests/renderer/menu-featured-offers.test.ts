@@ -159,7 +159,13 @@ test('MenuModal hides the legacy Combos & Offers category while preserving autom
   assert.match(source, /validateCatalogOffers\(\{\s*catalogType:\s*'menu'/);
   assert.match(source, /createMenuRewardLine/);
   assert.match(source, /is_offer_reward:\s*true/);
-  assert.match(source, /const\s*\{\s*topSellerIds,\s*rankedTopSellerIds,\s*topSellers\s*\}\s*=\s*useFeaturedItems/);
+  // The destructure also carries lastUpdated/refresh for the live-refresh
+  // behavior (featured-live-refresh.test.ts); this pin only cares that the
+  // ranking trio still flows from useFeaturedItems.
+  assert.match(
+    source,
+    /const\s*\{\s*topSellerIds,\s*rankedTopSellerIds,\s*topSellers,[\s\S]{0,200}?\}\s*=\s*useFeaturedItems/,
+  );
   assert.match(source, /topSellers=\{topSellers\}/);
   assert.match(source, /categories=\{categories\}/);
   assert.match(source, /onShortcutNavigate=\{handleFeaturedShortcutNavigate\}/);

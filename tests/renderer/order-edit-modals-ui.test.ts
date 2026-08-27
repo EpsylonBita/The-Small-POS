@@ -83,14 +83,22 @@ test('Round 310: OrderCancellationModal uses the shared glass footer -- red conf
   assert.match(footer, /onClick=\{handleClose\}/);
   assert.match(footer, /liquid-glass-modal-button liquid-glass-modal-secondary flex-1 rounded-xl/);
 
-  // Destructive confirm = red error glass when enabled; disabled until a reason is typed, then subdued
-  // (desaturated + dimmed) but clearly disabled. Same width (flex-1), rounded, touch-sized.
+  // Destructive confirm (evolved with the platform-cancellation round, founder-requested): solid red
+  // with white letters when actionable, error-glass otherwise, and disabled until the modal's guard
+  // (typed reason, or an official platform reason code for platform orders) is satisfied. Same width
+  // (flex-1), rounded, touch-sized.
   assert.match(footer, /onClick=\{handleConfirm\}/);
-  assert.match(footer, /disabled=\{!cancelReason\.trim\(\)\}/);
+  assert.match(footer, /disabled=\{!canConfirm\}/);
   assert.match(
     footer,
-    /liquid-glass-modal-button liquid-glass-modal-error flex-1 rounded-xl disabled:opacity-50 disabled:saturate-0 disabled:cursor-not-allowed/,
+    /liquid-glass-modal-button flex-1 rounded-xl disabled:opacity-50 disabled:saturate-0 disabled:cursor-not-allowed/,
   );
+  assert.match(
+    footer,
+    /canConfirm\s*\?\s*'!bg-red-600 !text-white !border-red-600 active:!bg-red-700/,
+    'the actionable confirm must go fully red with white letters (tap feedback, not hover)',
+  );
+  assert.match(footer, /:\s*'liquid-glass-modal-error'/);
 
   // The old flat solid-red confirm block + its conditional neutral-zinc disabled twin are gone, and no
   // blue-leaning grey tokens slipped in.
@@ -109,7 +117,9 @@ test('both order-edit modals preserve LiquidGlassModal title props + business ca
   assert.match(editPayment, /onClick=\{handleSubmit\}/);
   assert.match(editPayment, /onSave\(selectedPaymentId, selectedMethod\)/);
   assert.match(cancellation, /onClick=\{handleConfirm\}/);
-  assert.match(cancellation, /onConfirmCancel\(cancelReason\)/);
+  // The confirm ships the composed reason: the official platform code first
+  // (platform orders), with any operator note appended after « — ».
+  assert.match(cancellation, /onConfirmCancel\(reason\)/);
 });
 
 // --- Round 316 (live QA, Greek/dark): inside OrderCancellationModal the SAFE/dismiss footer button read
@@ -132,24 +142,36 @@ test('Round 316: OrderCancellationModal safe button is keep/dismiss copy; red co
     'the safe button must not reuse the ambiguous orderCancellation.cancel key',
   );
 
-  // Destructive confirm stays red/error glass, keyed to the destructive label, and disabled until a reason
-  // is typed -- never recolored green/yellow/amber/emerald.
+  // Destructive confirm stays red (solid red when actionable, error glass otherwise), keyed to the
+  // destructive label, and disabled until the guard is satisfied (typed reason, or an official
+  // platform code for platform orders) -- never recolored green/yellow. The green/amber check is
+  // scoped to the footer because the modal BODY legitimately uses amber for the platform reason
+  // chips (the app's accent for selected state).
   assert.match(cancellation, /onClick=\{handleConfirm\}/);
   assert.match(cancellation, /\{t\('modals\.orderCancellation\.confirm'\)\}/);
   assert.match(
     cancellation,
-    /liquid-glass-modal-button liquid-glass-modal-error flex-1 rounded-xl disabled:opacity-50 disabled:saturate-0 disabled:cursor-not-allowed/,
+    /liquid-glass-modal-button flex-1 rounded-xl disabled:opacity-50 disabled:saturate-0 disabled:cursor-not-allowed/,
   );
-  assert.match(cancellation, /disabled=\{!cancelReason\.trim\(\)\}/);
-  assert.doesNotMatch(
-    cancellation,
-    /bg-(?:green|emerald|yellow|amber|lime)-/,
-    'the destructive confirm must not be recolored green/yellow',
-  );
+  assert.match(cancellation, /canConfirm\s*\?\s*'!bg-red-600 !text-white/);
+  assert.match(cancellation, /:\s*'liquid-glass-modal-error'/);
+  assert.match(cancellation, /disabled=\{!canConfirm\}/);
+  {
+    const footerStart = cancellation.indexOf('footer={(');
+    const footerEnd = cancellation.indexOf("t('modals.orderCancellation.message'", footerStart);
+    assert.ok(footerStart !== -1 && footerEnd > footerStart, 'footer prop must exist before the body');
+    const footer = cancellation.slice(footerStart, footerEnd);
+    assert.doesNotMatch(
+      footer,
+      /bg-(?:green|emerald|yellow|amber|lime)-/,
+      'the destructive confirm must not be recolored green/yellow',
+    );
+  }
 
-  // Cancellation guards/behavior preserved exactly (no API/flow change).
-  assert.match(cancellation, /onConfirmCancel\(cancelReason\)/);
+  // Cancellation guards/behavior preserved (the confirm ships the composed platform-aware reason).
+  assert.match(cancellation, /onConfirmCancel\(reason\)/);
   assert.match(cancellation, /toast\.error\(t\('modals\.orderCancellation\.reasonRequired'\)\)/);
+  assert.match(cancellation, /toast\.error\(t\('modals\.orderCancellation\.platformReasonRequired'\)\)/);
   assert.match(cancellation, /maxLength=\{500\}/);
   assert.match(cancellation, /reasonInputRef\.current\?\.focus\(\)/);
 });

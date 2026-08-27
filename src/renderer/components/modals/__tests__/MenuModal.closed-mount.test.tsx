@@ -63,7 +63,16 @@ vi.mock('../../../hooks/useDiscountSettings', () => {
 });
 
 vi.mock('../../../hooks/useFeaturedItems', () => {
-  const value = { topSellerIds: [], rankedTopSellerIds: [], topSellers: [] };
+  const value = {
+    topSellerIds: [],
+    rankedTopSellerIds: [],
+    topSellers: [],
+    lastUpdated: null,
+    refresh: vi.fn(async () => {}),
+    isLoading: false,
+    error: null,
+    isTopSeller: () => false,
+  };
   return { useFeaturedItems: () => value };
 });
 

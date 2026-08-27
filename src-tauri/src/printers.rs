@@ -419,6 +419,26 @@ impl ResolvedPrinterTarget {
 }
 
 const RAW_TCP_CONNECT_TIMEOUT_MS: u64 = 3000;
+// Single-socket thermal printers (Star, Epson LAN interfaces) actively refuse
+// a second TCP connection while they are busy printing or while a stale peer
+// still holds their one slot (os error 10061). A refusal therefore usually
+// means "busy right now", not "gone" — and because a connect failure proves
+// zero bytes reached the printer, retrying it can never double-print. Keep
+// re-trying inside the attempt for this long before surfacing the failure.
+const RAW_TCP_CONNECT_RETRY_BUDGET_MS: u64 = 15_000;
+const RAW_TCP_CONNECT_RETRY_BASE_DELAY_MS: u64 = 250;
+const RAW_TCP_CONNECT_RETRY_MAX_DELAY_MS: u64 = 4_000;
+// Drawer kicks ride immediately behind the receipt that just occupied the
+// printer, so they hit the busy slot constantly — but a kick must not stall
+// the dispatch worker for long either.
+pub(crate) const DRAWER_TCP_CONNECT_RETRY_BUDGET_MS: u64 = 4_000;
+// After the payload, half-close (FIN) and wait briefly for the printer to
+// close its side. Dropping the socket right after the last write left
+// single-socket printers holding a half-open session (slot occupied, every
+// later connect refused until outside activity or a power cycle cleared it —
+// field-observed), and an abortive close with unread ASB status bytes turns
+// into an RST that can discard the still-buffered tail of the receipt.
+const RAW_TCP_CLOSE_DRAIN_TIMEOUT_MS: u64 = 1_500;
 const RAW_TCP_WRITE_TIMEOUT_MS: u64 = 5000;
 // Aggregate wall-clock cap on the whole chunked write (kept under the 20s dispatch
 // watchdog so the transport returns a clean error before the watchdog abandons it).
@@ -1399,6 +1419,78 @@ fn connect_tcp_socket(
     ))
 }
 
+fn connect_retry_delay(retry: u32) -> Duration {
+    let factor = 1u64 << retry.min(6);
+    Duration::from_millis(
+        RAW_TCP_CONNECT_RETRY_BASE_DELAY_MS
+            .saturating_mul(factor)
+            .min(RAW_TCP_CONNECT_RETRY_MAX_DELAY_MS),
+    )
+}
+
+/// Connect to a network printer, absorbing the transient refusals its
+/// single-connection interface produces while it is busy. Every failure here
+/// is pre-write (zero bytes sent), so the retries are provably duplicate-safe.
+/// The operator cancel token aborts the wait promptly between tries.
+pub(crate) fn connect_tcp_socket_with_retry(
+    host: &str,
+    port: u16,
+    per_try_timeout_ms: u64,
+    budget: Duration,
+    cancel: &AtomicBool,
+) -> Result<std::net::TcpStream, String> {
+    let started = Instant::now();
+    let mut retry: u32 = 0;
+    loop {
+        if cancel.load(Ordering::Acquire) {
+            return Err(format!(
+                "Print dispatch to {host}:{port} was stopped by the operator while waiting for the printer to accept a connection."
+            ));
+        }
+        let error = match connect_tcp_socket(host, port, per_try_timeout_ms) {
+            Ok(stream) => {
+                if retry > 0 {
+                    info!(
+                        host = %host,
+                        port,
+                        retries = retry,
+                        waited_ms = started.elapsed().as_millis() as u64,
+                        "Printer accepted the connection after its busy slot freed"
+                    );
+                }
+                return Ok(stream);
+            }
+            Err(error) => error,
+        };
+        let delay = connect_retry_delay(retry);
+        if started.elapsed() + delay >= budget {
+            return Err(error);
+        }
+        retry += 1;
+        warn!(
+            host = %host,
+            port,
+            retry,
+            delay_ms = delay.as_millis() as u64,
+            error = %error,
+            "Printer refused the connection (single-socket interfaces refuse while busy); retrying"
+        );
+        let sleep_until = Instant::now() + delay;
+        loop {
+            let now = Instant::now();
+            if now >= sleep_until {
+                break;
+            }
+            if cancel.load(Ordering::Acquire) {
+                return Err(format!(
+                    "Print dispatch to {host}:{port} was stopped by the operator while waiting for the printer to accept a connection."
+                ));
+            }
+            std::thread::sleep((sleep_until - now).min(Duration::from_millis(50)));
+        }
+    }
+}
+
 fn write_raw_payload_in_chunks_with_evidence<W: std::io::Write>(
     writer: &mut W,
     data: &[u8],
@@ -1542,8 +1634,14 @@ pub(crate) fn print_raw_to_tcp_cancellable_with_evidence(
         "Sending raw data to network thermal printer"
     );
 
-    let mut stream = connect_tcp_socket(host, port, RAW_TCP_CONNECT_TIMEOUT_MS)
-        .map_err(|message| RawTransportFailure::definitely_not_sent(data.len(), message))?;
+    let mut stream = connect_tcp_socket_with_retry(
+        host,
+        port,
+        RAW_TCP_CONNECT_TIMEOUT_MS,
+        Duration::from_millis(RAW_TCP_CONNECT_RETRY_BUDGET_MS),
+        cancel,
+    )
+    .map_err(|message| RawTransportFailure::definitely_not_sent(data.len(), message))?;
     stream
         .set_write_timeout(Some(Duration::from_millis(RAW_TCP_WRITE_TIMEOUT_MS)))
         .map_err(|error| {
@@ -1590,6 +1688,8 @@ pub(crate) fn print_raw_to_tcp_cancellable_with_evidence(
         &target_label,
     )?;
 
+    drain_after_goodbye(&mut stream);
+
     info!(
         host = %host,
         port,
@@ -1599,6 +1699,32 @@ pub(crate) fn print_raw_to_tcp_cancellable_with_evidence(
     );
 
     Ok(raw_transport_result(data.len(), written, doc_name))
+}
+
+/// Half-close our side and read until the printer closes (or a short
+/// timeout). A `read == 0` proves the printer consumed the whole payload and
+/// released its connection slot; timing out just means this firmware never
+/// closes first, in which case the FIN we already sent still lets it reap the
+/// session on its own. Errors here never fail the print — the payload is
+/// already delivered to the socket.
+pub(crate) fn drain_after_goodbye(stream: &mut std::net::TcpStream) {
+    use std::io::Read;
+
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(RAW_TCP_CLOSE_DRAIN_TIMEOUT_MS)));
+    let deadline = Instant::now() + Duration::from_millis(RAW_TCP_CLOSE_DRAIN_TIMEOUT_MS);
+    let mut sink = [0u8; 512];
+    loop {
+        match stream.read(&mut sink) {
+            Ok(0) => break,
+            Ok(_) => {
+                if Instant::now() >= deadline {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
 }
 
 pub fn probe_printer_tcp(host: &str, port: u16) -> Result<(), String> {
@@ -4249,5 +4375,117 @@ mod tests {
             PrinterBrand::Unknown
         );
         assert_eq!(detect_printer_brand("POS-58"), PrinterBrand::Unknown);
+    }
+
+    #[test]
+    fn connect_retry_delay_backs_off_exponentially_with_a_cap() {
+        assert_eq!(connect_retry_delay(0), Duration::from_millis(250));
+        assert_eq!(connect_retry_delay(1), Duration::from_millis(500));
+        assert_eq!(connect_retry_delay(2), Duration::from_millis(1000));
+        assert_eq!(connect_retry_delay(3), Duration::from_millis(2000));
+        assert_eq!(connect_retry_delay(4), Duration::from_millis(4000));
+        // The cap holds for every later retry, including the shift-clamped tail.
+        assert_eq!(connect_retry_delay(5), Duration::from_millis(4000));
+        assert_eq!(connect_retry_delay(60), Duration::from_millis(4000));
+    }
+
+    /// Reserve an ephemeral localhost port, then release it so the test can
+    /// simulate a printer whose single connection slot is busy (connect gets
+    /// refused) until a listener re-binds the port later.
+    fn reserve_localhost_port() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("reserve ephemeral port");
+        let port = listener.local_addr().expect("reserved port addr").port();
+        drop(listener);
+        port
+    }
+
+    #[test]
+    fn connect_with_retry_waits_for_the_busy_printer_slot_to_free() {
+        let port = reserve_localhost_port();
+        let cancel = AtomicBool::new(false);
+
+        // The "printer" only starts accepting after ~1.2s of refusals, like a
+        // thermal printer whose one socket frees once the current job prints.
+        let accepter = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(1200));
+            let listener = TcpListener::bind(("127.0.0.1", port)).expect("late printer bind");
+            let (_stream, _) = listener.accept().expect("accept retried connection");
+        });
+
+        let result = connect_tcp_socket_with_retry(
+            "127.0.0.1",
+            port,
+            1000,
+            Duration::from_secs(10),
+            &cancel,
+        );
+        accepter.join().expect("late listener thread");
+        assert!(
+            result.is_ok(),
+            "retry must ride out the refusal window: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn connect_with_retry_reports_the_operator_stop_promptly() {
+        let port = reserve_localhost_port();
+        let cancel = AtomicBool::new(true);
+        let started = Instant::now();
+        let result = connect_tcp_socket_with_retry(
+            "127.0.0.1",
+            port,
+            1000,
+            Duration::from_secs(30),
+            &cancel,
+        );
+        let error = result.expect_err("a pre-set operator stop must abort the connect wait");
+        assert!(
+            error.contains("stopped by the operator"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the stop must not wait out the retry budget"
+        );
+    }
+
+    #[test]
+    fn raw_tcp_print_rides_out_a_transiently_refusing_printer() {
+        let port = reserve_localhost_port();
+        let cancel = AtomicBool::new(false);
+        let payload = b"ESC/POS receipt bytes".to_vec();
+        let expected_len = payload.len();
+
+        let printer = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(1200));
+            let listener = TcpListener::bind(("127.0.0.1", port)).expect("late printer bind");
+            let (mut stream, _) = listener.accept().expect("accept retried print");
+            let mut received = Vec::new();
+            // read_to_end returning proves our side half-closed (FIN) after the
+            // payload — the clean goodbye that releases the printer's slot.
+            stream
+                .read_to_end(&mut received)
+                .expect("drain printed bytes");
+            // ASB-style status bytes an ESC/POS printer may push back; the
+            // transport's drain must absorb them instead of tripping over them.
+            let _ = stream.write_all(&[0x14, 0x00]);
+            received
+        });
+
+        let result = print_raw_to_tcp_cancellable_with_evidence(
+            "127.0.0.1",
+            port,
+            &payload,
+            "busy-slot-test",
+            &cancel,
+        );
+        let received = printer.join().expect("printer thread");
+        let result = result.expect("print must succeed once the busy slot frees");
+        assert_eq!(result.bytes_written, expected_len);
+        assert_eq!(
+            received, payload,
+            "the printer must receive the full payload"
+        );
     }
 }

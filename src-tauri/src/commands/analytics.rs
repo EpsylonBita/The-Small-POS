@@ -409,7 +409,8 @@ pub(crate) fn top_sellers_aggregate_into_rolling(
         .prepare(
             "SELECT o.id, o.status, o.branch_id, o.created_at, o.items
              FROM orders o
-             WHERE o.id IN (SELECT id FROM temp_z_report_order_ids)",
+             WHERE o.id IN (SELECT id FROM temp_z_report_order_ids)
+               AND COALESCE(o.is_test, 0) = 0",
         )
         .map_err(|e| format!("top_sellers_rolling: prepare select: {e}"))?;
 
@@ -2333,7 +2334,8 @@ mod dto_tests {
                 branch_id TEXT,
                 created_at TEXT,
                 items TEXT,
-                is_ghost INTEGER DEFAULT 0
+                is_ghost INTEGER DEFAULT 0,
+                is_test INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE top_sellers_rolling (
                 branch_id TEXT NOT NULL,
@@ -2513,6 +2515,47 @@ mod dto_tests {
             .query_row("SELECT COUNT(*) FROM top_sellers_rolling", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 0, "cancelled orders must not contribute");
+    }
+
+    #[test]
+    fn top_sellers_aggregate_skips_sandbox_test_orders() {
+        let conn = setup_top_sellers_test_db();
+        // A sandbox certification order (ΔΟΚΙΜΗ TEST) rolled through Z must
+        // never enter the popularity archive that feeds the Featured tab.
+        conn.execute(
+            "INSERT INTO orders (id, status, branch_id, created_at, items, is_test)
+             VALUES ('ord-sandbox', 'completed', 'branch-A', '2026-05-03T12:00:00Z',
+                     '[{\"menu_item_id\": \"m1\", \"name\": \"Burger\", \"quantity\": 40}]', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO temp_z_report_order_ids (id) VALUES ('ord-sandbox')",
+            [],
+        )
+        .unwrap();
+        insert_order(
+            &conn,
+            "ord-real",
+            "branch-A",
+            "completed",
+            r#"[{"menu_item_id": "m2", "name": "Fries", "quantity": 1}]"#,
+        );
+
+        top_sellers_aggregate_into_rolling(&conn).unwrap();
+
+        let ids: Vec<String> = conn
+            .prepare("SELECT menu_item_id FROM top_sellers_rolling ORDER BY menu_item_id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["m2".to_string()],
+            "test orders must not contribute to popularity"
+        );
     }
 
     #[test]

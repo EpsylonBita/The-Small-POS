@@ -76,6 +76,7 @@ pub(crate) fn load_orders_for_period(
                     OR TRIM(COALESCE(branch_id, '')) = ''
                    )
                AND COALESCE(is_ghost, 0) = 0
+               AND COALESCE(is_test, 0) = 0
                AND substr(created_at, 1, 10) >= ?2
                AND substr(created_at, 1, 10) <= ?3",
         )
@@ -197,13 +198,15 @@ mod tests {
                 staff_id TEXT,
                 payment_method TEXT,
                 branch_id TEXT,
-                is_ghost INTEGER DEFAULT 0
+                is_ghost INTEGER DEFAULT 0,
+                is_test INTEGER NOT NULL DEFAULT 0
             );
             INSERT INTO orders VALUES
-              ('matching', 'completed', '2026-07-29T10:00:00Z', '[]', NULL, 'cash', 'branch-A', 0),
-              ('legacy-blank', 'completed', '2026-07-29T11:00:00Z', '[]', NULL, 'cash', '', 0),
-              ('legacy-null', 'completed', '2026-07-29T12:00:00Z', '[]', NULL, 'cash', NULL, 0),
-              ('other', 'completed', '2026-07-29T13:00:00Z', '[]', NULL, 'cash', 'branch-B', 0);",
+              ('matching', 'completed', '2026-07-29T10:00:00Z', '[]', NULL, 'cash', 'branch-A', 0, 0),
+              ('legacy-blank', 'completed', '2026-07-29T11:00:00Z', '[]', NULL, 'cash', '', 0, 0),
+              ('legacy-null', 'completed', '2026-07-29T12:00:00Z', '[]', NULL, 'cash', NULL, 0, 0),
+              ('other', 'completed', '2026-07-29T13:00:00Z', '[]', NULL, 'cash', 'branch-B', 0, 0),
+              ('sandbox', 'completed', '2026-07-29T14:00:00Z', '[]', NULL, 'cash', 'branch-A', 0, 1);",
         )
         .expect("setup orders");
 
@@ -215,5 +218,9 @@ mod tests {
         assert!(ids.contains("legacy-blank"));
         assert!(ids.contains("legacy-null"));
         assert!(!ids.contains("other"));
+        assert!(
+            !ids.contains("sandbox"),
+            "sandbox/test orders must never reach report aggregations"
+        );
     }
 }

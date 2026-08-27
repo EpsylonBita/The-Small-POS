@@ -45,8 +45,12 @@ interface UseFeaturedItemsReturn {
 
 const DEFAULT_LIMIT = 20;
 
-// Refresh every 6 hours
-const REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
+// Event-driven refreshes are throttled to this window. The ranking must feel
+// live during service — a lunchtime wave should reshuffle Featured within
+// minutes, not at the end of a 6-hour block. The aggregation is a cheap local
+// SQLite pass (current business day's orders + ≤35 daily archive buckets),
+// so a short window costs nothing.
+const REFRESH_INTERVAL_MS = 10 * 60 * 1000;
 
 function normalizeTopSellerResult(result: unknown): { items: TopSeller[]; error: string | null } {
   let rawItems: RawTopSeller[] = [];
@@ -116,7 +120,8 @@ function mergeRankedTopSellers(primary: TopSeller[], secondary: TopSeller[], lim
  *
  * Features:
  * - Loads on mount and when branchId changes
- * - Auto-refreshes every 6 hours
+ * - Event-driven refresh throttled to a short window so the ranking follows
+ *   the day's sales as they happen
  * - Falls back gracefully when no data available
  * - Works offline using local SQLite data
  *
@@ -224,7 +229,7 @@ export function useFeaturedItems(
     loadTopSellers();
   }, [loadTopSellers]);
 
-  // Event-driven refresh with 6-hour throttling to avoid unnecessary recomputation.
+  // Event-driven refresh, throttled to keep bursts of sync events cheap.
   useEffect(() => {
     const scheduleRefresh = (delayMs = 250, force = false) => {
       if (pendingRefreshRef.current) return;

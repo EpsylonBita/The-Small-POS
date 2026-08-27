@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 use std::io::Write;
-use std::net::{SocketAddr, TcpStream};
+use std::net::SocketAddr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -103,8 +103,19 @@ pub fn send_escpos_pulse_tcp(host: &str, port: u16) -> Result<(), String> {
         ));
     }
 
-    let stream = TcpStream::connect_timeout(&addr, TCP_CONNECT_TIMEOUT)
-        .map_err(|e| format!("TCP connect to {addr_str} failed: {e}"))?;
+    // The kick rides right behind the receipt that just occupied the printer's
+    // single connection slot, so a plain connect gets refused constantly while
+    // the printer is still feeding paper. Absorb that window with a short
+    // bounded retry instead of dropping the kick.
+    let never_cancelled = std::sync::atomic::AtomicBool::new(false);
+    let stream = printers::connect_tcp_socket_with_retry(
+        &addr.ip().to_string(),
+        addr.port(),
+        TCP_CONNECT_TIMEOUT.as_millis() as u64,
+        Duration::from_millis(printers::DRAWER_TCP_CONNECT_RETRY_BUDGET_MS),
+        &never_cancelled,
+    )
+    .map_err(|e| format!("TCP connect to {addr_str} failed: {e}"))?;
 
     stream
         .set_write_timeout(Some(TCP_WRITE_TIMEOUT))
@@ -117,6 +128,12 @@ pub fn send_escpos_pulse_tcp(host: &str, port: u16) -> Result<(), String> {
     writer
         .flush()
         .map_err(|e| format!("TCP flush to {addr_str}: {e}"))?;
+
+    // Same clean goodbye as receipts: leave no half-open session holding the
+    // printer's single connection slot.
+    if let Ok(mut stream) = writer.into_inner() {
+        printers::drain_after_goodbye(&mut stream);
+    }
 
     info!(addr = %addr_str, "ESC/POS drawer kick sent");
     Ok(())

@@ -411,7 +411,16 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     isValidating: isValidatingDeliveryFee,
   } = useDeliveryValidation({ debounceMs: 0 });
   const { staff } = useShift();
-  const { topSellerIds, rankedTopSellerIds, topSellers } = useFeaturedItems(staff?.branchId || null, {
+  // The weekly window already counts today's live orders, so with the short
+  // refresh cadence the ranking follows the day's waves without letting one
+  // early-morning sale displace the week's true bestsellers.
+  const {
+    topSellerIds,
+    rankedTopSellerIds,
+    topSellers,
+    lastUpdated: featuredLastUpdated,
+    refresh: refreshFeaturedItems,
+  } = useFeaturedItems(staff?.branchId || null, {
     strategy: 'weekly',
     limit: 20,
   });
@@ -467,6 +476,19 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       setCheckoutPhase('editing');
     }
   }, [isOpen]);
+
+  // Every menu open re-checks the Featured ranking so the tab keeps replacing
+  // items with what is actually selling right now. The 2-minute staleness
+  // guard keeps back-to-back orders from recomputing for nothing.
+  const featuredLastUpdatedRef = useRef(featuredLastUpdated);
+  featuredLastUpdatedRef.current = featuredLastUpdated;
+  useEffect(() => {
+    if (!isOpen) return;
+    const last = featuredLastUpdatedRef.current;
+    if (!last || Date.now() - last.getTime() > 2 * 60 * 1000) {
+      void refreshFeaturedItems();
+    }
+  }, [isOpen, refreshFeaturedItems]);
 
   // Capture keyboard input and redirect to search bar when typing printable characters
   useEffect(() => {

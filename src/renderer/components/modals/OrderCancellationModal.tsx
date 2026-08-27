@@ -136,7 +136,7 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
             disabled={!canConfirm}
             className={`liquid-glass-modal-button flex-1 rounded-xl disabled:opacity-50 disabled:saturate-0 disabled:cursor-not-allowed ${
               canConfirm
-                ? '!bg-red-600 !text-white !border-red-600 hover:!bg-red-700 shadow-md shadow-red-600/30'
+                ? '!bg-red-600 !text-white !border-red-600 active:!bg-red-700 shadow-md shadow-red-600/30'
                 : 'liquid-glass-modal-error'
             }`}
           >
@@ -166,7 +166,7 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
                   className={`rounded-xl border px-3 py-2 text-left text-sm transition active:scale-[0.98] ${
                     selected
                       ? 'border-amber-400 bg-amber-400 text-black shadow-md shadow-amber-400/30'
-                      : 'border-white/20 bg-white/[0.06] liquid-glass-modal-text hover:bg-white/[0.12]'
+                      : 'border-white/20 bg-white/[0.06] liquid-glass-modal-text active:bg-white/[0.12]'
                   }`}
                 >
                   {t(platformReasonLabelKey(code))}

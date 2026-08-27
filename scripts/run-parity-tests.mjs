@@ -99,6 +99,9 @@ const entryPoints = [
   path.join(testsRoot, 'renderer', 'automatic-update-check.test.ts'),
   path.join(testsRoot, 'renderer', 'release-1-4-33-i18n.test.ts'),
   path.join(testsRoot, 'renderer', 'featured-weekly-ranking.test.ts'),
+  // Featured must follow the day's sales live: minutes-scale refresh throttle
+  // plus a re-check whenever the order menu opens.
+  path.join(testsRoot, 'renderer', 'featured-live-refresh.test.ts'),
   path.join(testsRoot, 'renderer', 'menu-featured-offers.test.ts'),
   path.join(testsRoot, 'renderer', 'menu-management-page-ui.test.ts'),
   path.join(testsRoot, 'renderer', 'tip-and-floor-checkout.test.ts'),
@@ -117,6 +120,9 @@ const entryPoints = [
   // IDs are preserved.
   path.join(testsRoot, 'renderer', 'recovery-center-panel-ui.test.ts'),
   path.join(testsRoot, 'renderer', 'update-changelog-ui.test.ts'),
+  // Every shipped version must carry a plain-language changelog section —
+  // that section is what the update dialog shows the operator.
+  path.join(testsRoot, 'renderer', 'release-notes-changelog.test.ts'),
   path.join(testsRoot, 'renderer', 'z-report-closeout-sync.test.ts'),
   path.join(testsRoot, 'renderer', 'z-report-action-rail-scroll.test.ts'),
   path.join(testsRoot, 'renderer', 'display-pages-ui.test.ts'),
