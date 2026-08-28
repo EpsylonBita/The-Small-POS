@@ -148,6 +148,12 @@ export const OrderCard = memo<OrderCardProps>(({
         );
       }
 
+      // Satellite display code (e.g. M1-0042, minted by a waiter phone):
+      // the terminal marker IS the point — never strip it down to #0042.
+      if (/^[A-Za-z0-9]{1,4}-\d{1,6}$/.test(trimmedOrderNum)) {
+        return `#${trimmedOrderNum.toUpperCase()}`;
+      }
+
       // If it's already formatted like "POS-20251212-0001", extract the last part
       if (orderNum.includes('-')) {
         const parts = orderNum.split('-');

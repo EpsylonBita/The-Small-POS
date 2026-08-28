@@ -491,6 +491,11 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
   // Track active shifts per staff
   const [staffActiveShifts, setStaffActiveShifts] = useState<Map<string, any>>(new Map());
+  // Unit oversight (founder 27/08): shifts running on THIS register's satellite
+  // terminals (waiter phones) — shown among the checked-in staff with their
+  // terminal and live totals. Closing them from here lands with the
+  // remote-checkout flow; until then tapping explains where the shift runs.
+  const [satelliteShiftsByStaffId, setSatelliteShiftsByStaffId] = useState<Map<string, any>>(new Map());
 
   // Variance result state
   const [lastShiftResult, setLastShiftResult] = useState<{
@@ -844,12 +849,18 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     });
   }, [availableStaff]);
   const activeCheckInStaff = React.useMemo(
-    () => sortedAvailableStaff.filter((member) => staffActiveShifts.has(member.id)),
-    [sortedAvailableStaff, staffActiveShifts],
+    () =>
+      sortedAvailableStaff.filter(
+        (member) => staffActiveShifts.has(member.id) || satelliteShiftsByStaffId.has(member.id),
+      ),
+    [sortedAvailableStaff, staffActiveShifts, satelliteShiftsByStaffId],
   );
   const readyCheckInStaff = React.useMemo(
-    () => sortedAvailableStaff.filter((member) => !staffActiveShifts.has(member.id)),
-    [sortedAvailableStaff, staffActiveShifts],
+    () =>
+      sortedAvailableStaff.filter(
+        (member) => !staffActiveShifts.has(member.id) && !satelliteShiftsByStaffId.has(member.id),
+      ),
+    [sortedAvailableStaff, staffActiveShifts, satelliteShiftsByStaffId],
   );
   const selectedStaffRoles = React.useMemo(() => getStaffRoles(selectedStaff), [selectedStaff]);
   const selectedPrimaryRole = selectedStaffRoles[0];
@@ -1446,6 +1457,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           if (directoryResult?.success && Array.isArray(directoryResult.staff)) {
             const myTerminalId = (directoryResult.currentTerminalId ?? '').trim();
             const busy = new Map<string, { terminalName: string; role: string }>();
+            const satellites = new Map<string, any>();
             for (const entry of directoryResult.staff) {
               const cs = entry?.currentShift;
               if (!cs) continue;
@@ -1455,12 +1467,31 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
               // treat every open shift as "elsewhere" — mirrors the Rust
               // verify path's same-sided safe default.
               if (myTerminalId && shiftTerminal === myTerminalId) continue;
+              const parentOfShiftTerminal = (cs.parentTerminalId ?? '').trim();
+              if (myTerminalId && parentOfShiftTerminal === myTerminalId) {
+                // One of OUR satellites: checked in on this unit, not "elsewhere".
+                satellites.set(entry.id, {
+                  id: cs.shiftId,
+                  staff_id: entry.id,
+                  status: 'active',
+                  role_type: (cs.role ?? '').trim(),
+                  terminal_id: shiftTerminal,
+                  remote_terminal_name: (cs.terminalName ?? '').trim() || shiftTerminal,
+                  remote: true,
+                  check_in_time: cs.checkedInAt ?? null,
+                  total_orders_count: cs.totalOrdersCount ?? null,
+                  total_sales_amount: cs.totalSalesAmount ?? null,
+                  opening_cash_amount: cs.openingCashAmount ?? null,
+                });
+                continue;
+              }
               busy.set(entry.id, {
                 terminalName: (cs.terminalName ?? '').trim(),
                 role: (cs.role ?? '').trim(),
               });
             }
             setBusyElsewhereByStaffId(busy);
+            setSatelliteShiftsByStaffId(satellites);
           }
         }),
       ]);
@@ -1837,6 +1868,24 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     setEnteredPin('');
     setError('');
     setCheckInEligibility(null);
+
+    // Satellite shift: it runs on a child terminal — its drawer math lives
+    // there. Remote checkout from the main register ships next; explain
+    // instead of entering the LOCAL checkout flow with foreign numbers.
+    const satelliteShift = satelliteShiftsByStaffId.get(staffMember.id);
+    if (satelliteShift) {
+      setError(
+        t('modals.staffShift.satelliteShiftInfo', {
+          defaultValue:
+            '{{name}} is checked in on {{terminal}} ({{orders}} orders, {{sales}}). Checkout from the main register arrives in the next update — until then close the shift on that terminal.',
+          name: staffMember.name,
+          terminal: satelliteShift.remote_terminal_name,
+          orders: satelliteShift.total_orders_count ?? 0,
+          sales: formatCurrency(Number(satelliteShift.total_sales_amount ?? 0)),
+        }),
+      );
+      return;
+    }
 
     // If this staff already has an active shift, jump to checkout view for that shift
     const existingShift = staffActiveShifts.get(staffMember.id);
@@ -5093,9 +5142,21 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 <div className="mt-5 space-y-3">
                   {activeCheckInStaff.length > 0 ? (
                     activeCheckInStaff.map((staffMember) => {
-                      const activeShiftForMember = staffActiveShifts.get(staffMember.id);
+                      // The Rust getActive lookup is staff-wide, so a satellite
+                      // shift usually ALSO appears in staffActiveShifts as a
+                      // plain local row without remote metadata. Prefer the
+                      // directory-enriched satellite entry (one-open-shift-per-
+                      // staff guarantees they describe the same shift) so the
+                      // terminal chip and live totals always render.
+                      const activeShiftForMember =
+                        satelliteShiftsByStaffId.get(staffMember.id) ||
+                        staffActiveShifts.get(staffMember.id);
                       const activeRoleName = activeShiftForMember?.role_type || staffMember.role_name;
                       const activePresentation = getRolePresentation(activeRoleName);
+                      const satelliteTerminalName: string | null =
+                        activeShiftForMember?.remote === true
+                          ? String(activeShiftForMember?.remote_terminal_name || '')
+                          : null;
 
                       return (
                         <motion.button
@@ -5129,6 +5190,22 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                                         : t('shift.labels.active', 'Active'),
                                     })}
                                   </span>
+                                  {satelliteTerminalName ? (
+                                    <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-sky-300/40 bg-sky-500/15 px-3 py-1 text-xs font-semibold text-sky-200">
+                                      {t('modals.staffShift.satelliteTerminalChip', {
+                                        defaultValue: 'on {{terminal}}',
+                                        terminal: satelliteTerminalName,
+                                      })}
+                                      {' · '}
+                                      {t('modals.staffShift.satelliteTotalsChip', {
+                                        defaultValue: '{{orders}} orders · {{sales}}',
+                                        orders: activeShiftForMember?.total_orders_count ?? 0,
+                                        sales: formatCurrency(
+                                          Number(activeShiftForMember?.total_sales_amount ?? 0),
+                                        ),
+                                      })}
+                                    </span>
+                                  ) : null}
                                 </div>
                               </div>
                             </div>

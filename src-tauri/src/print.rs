@@ -5043,7 +5043,7 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
         crate::payments::derive_payment_method(&conn, order_id)?.unwrap_or_default();
     let order = conn
         .query_row(
-            "SELECT COALESCE(order_number, ''), COALESCE(order_type, ''), COALESCE(status, ''),
+            "SELECT COALESCE(NULLIF(display_order_number, ''), order_number, ''), COALESCE(order_type, ''), COALESCE(status, ''),
                     COALESCE(created_at, ''), COALESCE(table_number, ''), COALESCE(customer_name, ''),
                     COALESCE(customer_phone, ''), COALESCE(items, '[]'), COALESCE(total_amount, 0),
                     COALESCE(subtotal, 0), COALESCE(tax_amount, 0), COALESCE(discount_amount, 0),
@@ -5527,7 +5527,7 @@ fn build_split_receipt_doc(db: &DbState, payment_id: &str) -> Result<OrderReceip
         f64,
     ) = conn
         .query_row(
-            "SELECT COALESCE(order_number, ''), COALESCE(order_type, ''), COALESCE(status, ''),
+            "SELECT COALESCE(NULLIF(display_order_number, ''), order_number, ''), COALESCE(order_type, ''), COALESCE(status, ''),
                     COALESCE(created_at, ''), COALESCE(table_number, ''), COALESCE(customer_name, ''),
                     COALESCE(customer_phone, ''), COALESCE(items, '[]'), COALESCE(total_amount, 0)
              FROM orders WHERE id = ?1",
@@ -5823,7 +5823,7 @@ fn build_kitchen_ticket_doc(db: &DbState, order_id: &str) -> Result<KitchenTicke
         ghost_metadata,
     ) = conn
         .query_row(
-            "SELECT COALESCE(order_number, ''), COALESCE(order_type, ''), COALESCE(created_at, ''),
+            "SELECT COALESCE(NULLIF(display_order_number, ''), order_number, ''), COALESCE(order_type, ''), COALESCE(created_at, ''),
                     COALESCE(table_number, ''), COALESCE(delivery_address, ''), COALESCE(delivery_notes, ''),
                     COALESCE(special_instructions, ''), COALESCE(items, '[]'),
                     COALESCE(delivery_city, ''), COALESCE(delivery_postal_code, ''),
@@ -7380,7 +7380,7 @@ fn generate_kitchen_ticket_file(
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         conn.query_row(
             "SELECT
-                COALESCE(order_number, ''),
+                COALESCE(NULLIF(display_order_number, ''), order_number, ''),
                 COALESCE(order_type, ''),
                 COALESCE(table_number, ''),
                 COALESCE(delivery_address, ''),

@@ -44,6 +44,8 @@ interface WaiterDeviceStaff {
 interface WaiterDevice {
   terminalId: string
   name: string | null
+  /** Satellite order-code marker (e.g. "M1") — prefixes this device's order numbers. */
+  shortCode?: string | null
   location: string | null
   isActive: boolean
   online: boolean
@@ -339,6 +341,11 @@ export const WaiterDevicesSection: React.FC = () => {
                   <div className="min-w-0">
                     <span className="block truncate font-medium liquid-glass-modal-text">
                       {device.name?.trim() || device.terminalId}
+                      {device.shortCode?.trim() ? (
+                        <span className="ml-2 inline-flex items-center rounded-full border border-sky-300/40 bg-sky-500/15 px-2 py-0.5 text-[11px] font-semibold text-sky-200 align-middle">
+                          {device.shortCode.trim().toUpperCase()}
+                        </span>
+                      ) : null}
                     </span>
                     {device.location?.trim() ? (
                       <span className="block truncate text-xs liquid-glass-modal-text-muted">
