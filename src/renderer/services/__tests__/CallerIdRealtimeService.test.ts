@@ -2108,4 +2108,51 @@ describe('CallerIdRealtimeService', () => {
     expect(mocks.posApiPost).toHaveBeenCalledTimes(2)
     unsubscribe()
   })
+
+  it('backs off the config poll on terminals with no caller-id lines', async () => {
+    // Field incident 28/08: idle tills (no receiving lines configured — every
+    // shop without caller id) hammered /api/pos/caller-id/config ~95×/min.
+    // After a short fast warm-up the poll must idle to the slow cadence, and
+    // a line appearing later must still be picked up on the next slow poll.
+    vi.useFakeTimers()
+    mocks.posApiGet.mockResolvedValue({
+      success: true,
+      data: { receivingLines: [] },
+    })
+    const configCalls = () =>
+      mocks.posApiGet.mock.calls.filter(
+        ([path]) => path === '/api/pos/caller-id/config',
+      ).length
+
+    const unsubscribe = subscribeToCallerIdEvents('org-1', 'terminal-1', vi.fn())
+    await vi.advanceTimersByTimeAsync(10_000)
+    const afterWarmup = configCalls()
+
+    await vi.advanceTimersByTimeAsync(60_000)
+    const idleMinuteCalls = configCalls() - afterWarmup
+    expect(idleMinuteCalls).toBeGreaterThanOrEqual(1)
+    expect(idleMinuteCalls).toBeLessThanOrEqual(2)
+
+    // A line configured later is discovered by the next slow poll and the
+    // fast reconciliation cadence resumes.
+    mocks.posApiGet.mockResolvedValue({
+      success: true,
+      data: {
+        receivingLines: [
+          {
+            id: firstLineId,
+            name: 'Main line',
+            topic: `callerid:line:${firstLineId}`,
+            version: 1,
+          },
+        ],
+      },
+    })
+    await vi.advanceTimersByTimeAsync(61_000)
+    expect(mocks.channel).toHaveBeenCalledWith(
+      `callerid:line:${firstLineId}`,
+      expect.anything(),
+    )
+    unsubscribe()
+  })
 })

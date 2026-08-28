@@ -4118,7 +4118,25 @@
       "busyElsewhereSince": "Connecté sur {{terminal}} en tant que {{role}} depuis {{since}}",
       "satelliteShiftInfo": "{{name}} a pointé sur {{terminal}} ({{orders}} commandes, {{sales}}). La clôture depuis la caisse principale arrive dans la prochaine mise à jour — d'ici là, clôturez le service sur ce terminal.",
       "satelliteTerminalChip": "sur {{terminal}}",
-      "satelliteTotalsChip": "{{orders}} commandes · {{sales}}"
+      "satelliteTotalsChip": "{{orders}} commandes · {{sales}}",
+      "satelliteCheckout": {
+        "back": "Retour au personnel",
+        "title": "Remise de caisse — {{name}}",
+        "loading": "Chargement des chiffres du service…",
+        "previewFailed": "Impossible de charger les chiffres du service.",
+        "closeFailed": "Le serveur a refusé la clôture à distance.",
+        "drawerCreditFailed": "Service clôturé, mais le crédit de caisse a échoué : {{error}}. Enregistrez le montant manuellement.",
+        "success": "Service clôturé. Attendu {{expected}}, reçu {{counted}}.",
+        "orders": "Commandes",
+        "sales": "Ventes totales",
+        "cashSales": "Ventes en espèces",
+        "cardSales": "Ventes par carte",
+        "openingFloat": "Fonds de caisse",
+        "expectedCash": "Espèces attendues",
+        "countedLabel": "Espèces reçues de {{name}}",
+        "closing": "Clôture…",
+        "confirm": "Clôturer le service & recevoir les espèces"
+      }
     },
     "zReport": {
       "title": "Z-Report - {{date}}",

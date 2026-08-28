@@ -496,6 +496,31 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   // terminal and live totals. Closing them from here lands with the
   // remote-checkout flow; until then tapping explains where the shift runs.
   const [satelliteShiftsByStaffId, setSatelliteShiftsByStaffId] = useState<Map<string, any>>(new Map());
+  // Satellite remote checkout (v1.4.84): pane state, server preview, entry.
+  const [satelliteCheckout, setSatelliteCheckout] = useState<{
+    shift: any;
+    staff: StaffMember;
+  } | null>(null);
+  const [satellitePreview, setSatellitePreview] = useState<{
+    loading: boolean;
+    error: string | null;
+    figures: {
+      total_orders_count: number;
+      total_sales_amount: number;
+      total_cash_sales: number;
+      total_card_sales: number;
+      opening_cash_amount: number;
+      expected_cash_amount: number;
+    } | null;
+  }>({ loading: false, error: null, figures: null });
+  const [satelliteCountedCash, setSatelliteCountedCash] = useState('');
+  const [satelliteSubmitting, setSatelliteSubmitting] = useState(false);
+  const [satelliteResult, setSatelliteResult] = useState<{
+    counted: number;
+    expected: number;
+    variance: number;
+    staffName: string;
+  } | null>(null);
 
   // Variance result state
   const [lastShiftResult, setLastShiftResult] = useState<{
@@ -1869,21 +1894,39 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     setError('');
     setCheckInEligibility(null);
 
-    // Satellite shift: it runs on a child terminal — its drawer math lives
-    // there. Remote checkout from the main register ships next; explain
-    // instead of entering the LOCAL checkout flow with foreign numbers.
+    // Satellite shift: enter the remote-checkout pane — the main register
+    // reviews the server-computed figures and receives the cash (v1.4.84).
     const satelliteShift = satelliteShiftsByStaffId.get(staffMember.id);
     if (satelliteShift) {
-      setError(
-        t('modals.staffShift.satelliteShiftInfo', {
-          defaultValue:
-            '{{name}} is checked in on {{terminal}} ({{orders}} orders, {{sales}}). Checkout from the main register arrives in the next update — until then close the shift on that terminal.',
-          name: staffMember.name,
-          terminal: satelliteShift.remote_terminal_name,
-          orders: satelliteShift.total_orders_count ?? 0,
-          sales: formatCurrency(Number(satelliteShift.total_sales_amount ?? 0)),
-        }),
-      );
+      setSatelliteCheckout({ shift: satelliteShift, staff: staffMember });
+      setSatelliteCountedCash('');
+      setSatelliteResult(null);
+      setSatellitePreview({ loading: true, error: null, figures: null });
+      void bridge.shifts
+        .remoteCheckout({ shiftId: String(satelliteShift.id), action: 'preview' })
+        .then((res: any) => {
+          const payload = res?.data ?? res;
+          if (payload?.success && payload.figures) {
+            setSatellitePreview({ loading: false, error: null, figures: payload.figures });
+          } else {
+            setSatellitePreview({
+              loading: false,
+              error:
+                payload?.error ||
+                t('modals.staffShift.satelliteCheckout.previewFailed', {
+                  defaultValue: 'Could not load the shift figures from the server.',
+                }),
+              figures: null,
+            });
+          }
+        })
+        .catch((previewError: unknown) => {
+          setSatellitePreview({
+            loading: false,
+            error: String((previewError as Error)?.message || previewError),
+            figures: null,
+          });
+        });
       return;
     }
 
@@ -3452,6 +3495,204 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       minimal: true,
     };
   })();
+
+  const closeSatelliteCheckout = () => {
+    setSatelliteCheckout(null);
+    setSatellitePreview({ loading: false, error: null, figures: null });
+    setSatelliteCountedCash('');
+    setSatelliteResult(null);
+    setSelectedStaff(null);
+  };
+
+  const handleSatelliteRemoteCheckout = async () => {
+    if (!satelliteCheckout || !satellitePreview.figures || satelliteSubmitting) return;
+    const counted = parseFloat(satelliteCountedCash.replace(',', '.'));
+    if (!Number.isFinite(counted) || counted < 0) return;
+    setSatelliteSubmitting(true);
+    try {
+      const res: any = await bridge.shifts.remoteCheckout({
+        shiftId: String(satelliteCheckout.shift.id),
+        action: 'close',
+        countedCash: counted,
+        closedBy: staff?.databaseStaffId ?? null,
+      });
+      const payload = res?.data ?? res;
+      if (!payload?.success) {
+        setError(
+          payload?.error ||
+            t('modals.staffShift.satelliteCheckout.closeFailed', {
+              defaultValue: 'The remote checkout was rejected by the server.',
+            }),
+        );
+        return;
+      }
+
+      // Local drawer credit — exactly-once entry of the received cash into
+      // this register's day math (the server wrote no drawer field).
+      try {
+        const local = (await bridge.settings.get()) as any;
+        const branchId =
+          local?.['terminal.branch_id'] ?? local?.terminal?.branch_id ?? '';
+        const terminalId =
+          local?.['terminal.terminal_id'] ?? local?.terminal?.terminal_id ?? '';
+        await bridge.shifts.recordSatelliteHandover({
+          branchId: String(branchId),
+          terminalId: String(terminalId),
+          satelliteShiftId: String(satelliteCheckout.shift.id),
+          openingCash: Number(satellitePreview.figures.opening_cash_amount || 0),
+          countedCash: counted,
+        });
+      } catch (drawerError) {
+        // The shift IS closed server-side; surface the drawer failure loudly
+        // so the operator reconciles by hand instead of losing the amount.
+        setError(
+          t('modals.staffShift.satelliteCheckout.drawerCreditFailed', {
+            defaultValue:
+              'Shift closed, but crediting this drawer failed: {{error}}. Record the received cash manually.',
+            error: String((drawerError as Error)?.message || drawerError),
+          }),
+        );
+      }
+
+      const expected = Number(satellitePreview.figures.expected_cash_amount || 0);
+      setSatelliteResult({
+        counted,
+        expected,
+        variance: Math.round((counted - expected) * 100) / 100,
+        staffName: satelliteCheckout.staff.name,
+      });
+      void loadStaff();
+    } finally {
+      setSatelliteSubmitting(false);
+    }
+  };
+
+  const renderSatelliteCheckoutView = () => {
+    if (!satelliteCheckout) return null;
+    const figures = satellitePreview.figures;
+    const countedValue = parseFloat(satelliteCountedCash.replace(',', '.'));
+    const varianceValue =
+      figures && Number.isFinite(countedValue)
+        ? countedValue - Number(figures.expected_cash_amount || 0)
+        : null;
+    return (
+      <div className="space-y-4" data-testid="satellite-checkout-section">
+        <button
+          type="button"
+          onClick={closeSatelliteCheckout}
+          className="inline-flex items-center gap-2 text-sm font-semibold text-slate-600 dark:text-slate-300"
+        >
+          ← {t('modals.staffShift.satelliteCheckout.back', { defaultValue: 'Back to staff' })}
+        </button>
+
+        <div className={checkoutSurfaceClass}>
+          <h3 className="text-lg font-black liquid-glass-modal-text">
+            {t('modals.staffShift.satelliteCheckout.title', {
+              defaultValue: 'Cash handover — {{name}}',
+              name: satelliteCheckout.staff.name,
+            })}
+          </h3>
+          <p className={checkInMutedTextClass}>
+            {t('modals.staffShift.satelliteTerminalChip', {
+              defaultValue: 'on {{terminal}}',
+              terminal: satelliteCheckout.shift.remote_terminal_name,
+            })}
+            {satelliteCheckout.shift.check_in_time
+              ? ` · ${formatTime(satelliteCheckout.shift.check_in_time)}`
+              : ''}
+          </p>
+
+          {satelliteResult ? (
+            <div className={`mt-4 ${checkoutInsetSurfaceClass}`} data-testid="satellite-checkout-success">
+              <p className="text-base font-bold liquid-glass-modal-text">
+                {t('modals.staffShift.satelliteCheckout.success', {
+                  defaultValue:
+                    'Shift closed. Expected {{expected}}, received {{counted}}.',
+                  expected: formatCurrency(satelliteResult.expected),
+                  counted: formatCurrency(satelliteResult.counted),
+                })}
+              </p>
+              <div className="mt-2">
+                <VarianceBadge variance={satelliteResult.variance} />
+              </div>
+              <button
+                type="button"
+                onClick={closeSatelliteCheckout}
+                className="mt-4 rounded-2xl bg-yellow-400 px-5 py-3 font-bold text-black"
+              >
+                {t('common.done', { defaultValue: 'Done' })}
+              </button>
+            </div>
+          ) : satellitePreview.loading ? (
+            <p className={`mt-4 ${checkInMutedTextClass}`}>
+              {t('modals.staffShift.satelliteCheckout.loading', {
+                defaultValue: 'Loading shift figures from the server…',
+              })}
+            </p>
+          ) : satellitePreview.error ? (
+            <p className="mt-4 text-sm font-semibold text-rose-500">{satellitePreview.error}</p>
+          ) : figures ? (
+            <>
+              <div className={`mt-4 grid grid-cols-2 gap-3 ${checkoutInsetSurfaceClass}`}>
+                {[
+                  ['orders', t('modals.staffShift.satelliteCheckout.orders', { defaultValue: 'Orders' }), String(figures.total_orders_count)],
+                  ['sales', t('modals.staffShift.satelliteCheckout.sales', { defaultValue: 'Total sales' }), formatCurrency(figures.total_sales_amount)],
+                  ['cash', t('modals.staffShift.satelliteCheckout.cashSales', { defaultValue: 'Cash sales' }), formatCurrency(figures.total_cash_sales)],
+                  ['card', t('modals.staffShift.satelliteCheckout.cardSales', { defaultValue: 'Card sales' }), formatCurrency(figures.total_card_sales)],
+                  ['float', t('modals.staffShift.satelliteCheckout.openingFloat', { defaultValue: 'Opening float' }), formatCurrency(figures.opening_cash_amount)],
+                  ['expected', t('modals.staffShift.satelliteCheckout.expectedCash', { defaultValue: 'Expected cash' }), formatCurrency(figures.expected_cash_amount)],
+                ].map(([key, label, value]) => (
+                  <div key={key as string}>
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                      {label}
+                    </p>
+                    <p className="text-base font-bold liquid-glass-modal-text">{value}</p>
+                  </div>
+                ))}
+              </div>
+
+              <div className="mt-4">
+                <label className="block text-sm font-semibold liquid-glass-modal-text">
+                  {t('modals.staffShift.satelliteCheckout.countedLabel', {
+                    defaultValue: 'Cash received from {{name}}',
+                    name: satelliteCheckout.staff.name,
+                  })}
+                </label>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  value={satelliteCountedCash}
+                  onChange={event => setSatelliteCountedCash(event.target.value)}
+                  placeholder={formatCurrency(figures.expected_cash_amount)}
+                  className="mt-2 w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 text-lg font-bold text-slate-900 dark:border-white/15 dark:bg-black/30 dark:text-white"
+                  data-testid="satellite-counted-cash"
+                />
+                {varianceValue !== null ? (
+                  <div className="mt-2">
+                    <VarianceBadge variance={Math.round(varianceValue * 100) / 100} />
+                  </div>
+                ) : null}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => void handleSatelliteRemoteCheckout()}
+                disabled={satelliteSubmitting || !Number.isFinite(countedValue) || countedValue < 0}
+                className="mt-5 w-full rounded-2xl bg-yellow-400 px-5 py-4 text-base font-black text-black disabled:opacity-50"
+                data-testid="satellite-checkout-confirm"
+              >
+                {satelliteSubmitting
+                  ? t('modals.staffShift.satelliteCheckout.closing', { defaultValue: 'Closing…' })
+                  : t('modals.staffShift.satelliteCheckout.confirm', {
+                      defaultValue: 'Close shift & receive cash',
+                    })}
+              </button>
+            </>
+          ) : null}
+        </div>
+      </div>
+    );
+  };
 
   const checkoutSurfaceClass = 'rounded-[28px] border border-slate-200/80 bg-white/90 p-5 shadow-[0_18px_40px_rgba(15,23,42,0.08)] dark:border-white/10 dark:bg-white/[0.04] dark:shadow-[0_18px_40px_rgba(2,6,23,0.28)]';
   const checkoutInsetSurfaceClass = 'rounded-[24px] border border-slate-200/80 bg-slate-50/90 p-4 shadow-[0_10px_24px_rgba(15,23,42,0.05)] dark:border-white/10 dark:bg-black/25 dark:shadow-none';
@@ -5969,7 +6210,11 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
               animate="center"
               exit="exit"
             >
-              {effectiveMode === 'checkin' ? renderCheckInContent() : renderCheckoutContent()}
+              {satelliteCheckout
+                ? renderSatelliteCheckoutView()
+                : effectiveMode === 'checkin'
+                  ? renderCheckInContent()
+                  : renderCheckoutContent()}
             </motion.div>
           </AnimatePresence>
 

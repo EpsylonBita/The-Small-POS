@@ -4111,7 +4111,25 @@
       "busyElsewhereSince": "Συνδεδεμένος στο {{terminal}} ως {{role}} από {{since}}",
       "satelliteShiftInfo": "Ο/Η {{name}} έχει βάρδια στο {{terminal}} ({{orders}} παραγγελίες, {{sales}}). Η λήξη βάρδιας από το κεντρικό ταμείο έρχεται στην επόμενη ενημέρωση — μέχρι τότε η βάρδια κλείνει από εκείνο το τερματικό.",
       "satelliteTerminalChip": "στο {{terminal}}",
-      "satelliteTotalsChip": "{{orders}} παραγγελίες · {{sales}}"
+      "satelliteTotalsChip": "{{orders}} παραγγελίες · {{sales}}",
+      "satelliteCheckout": {
+        "back": "Πίσω στο προσωπικό",
+        "title": "Παράδοση ταμείου — {{name}}",
+        "loading": "Φόρτωση στοιχείων βάρδιας από τον διακομιστή…",
+        "previewFailed": "Δεν ήταν δυνατή η φόρτωση των στοιχείων της βάρδιας.",
+        "closeFailed": "Ο διακομιστής απέρριψε τη λήξη της βάρδιας.",
+        "drawerCreditFailed": "Η βάρδια έκλεισε, αλλά η πίστωση του ταμείου απέτυχε: {{error}}. Καταχωρίστε τα μετρητά χειροκίνητα.",
+        "success": "Η βάρδια έκλεισε. Αναμενόμενα {{expected}}, παραλήφθηκαν {{counted}}.",
+        "orders": "Παραγγελίες",
+        "sales": "Συνολικές πωλήσεις",
+        "cashSales": "Πωλήσεις μετρητών",
+        "cardSales": "Πωλήσεις κάρτας",
+        "openingFloat": "Αρχικό ποσό",
+        "expectedCash": "Αναμενόμενα μετρητά",
+        "countedLabel": "Μετρητά που παραλήφθηκαν από {{name}}",
+        "closing": "Κλείσιμο…",
+        "confirm": "Λήξη βάρδιας & παραλαβή μετρητών"
+      }
     },
     "zReport": {
       "title": "Αναφορά Z - {{date}}",

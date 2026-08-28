@@ -3521,6 +3521,70 @@ fn resolve_check_in_eligibility(
     })
 }
 
+/// Satellite remote checkout (v1.4.84): after the MAIN register closes a
+/// satellite shift through the admin remote-checkout endpoint, the received
+/// cash enters day math through THIS terminal's open cashier drawer —
+/// `driver_cash_given += opening` (pairs the float that was never ledgered
+/// at satellite check-in, so the day does not gain money from nowhere) and
+/// `driver_cash_returned += counted`. Exactly-once by design: the server
+/// endpoint deliberately performs no drawer write, and the drawer snapshot
+/// pushed at this cashier's own close converges the server copy.
+pub fn record_satellite_handover(
+    db: &DbState,
+    branch_id: &str,
+    terminal_id: &str,
+    satellite_shift_id: &str,
+    opening_cash: f64,
+    counted_cash: f64,
+) -> Result<Value, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let assignment = find_active_cashier_assignment(&conn, branch_id, terminal_id)?;
+    let (cashier_shift_id, drawer_id) = assignment.ok_or_else(|| {
+        "No active cashier drawer on this register. A cashier must be checked in to receive satellite cash.".to_string()
+    })?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let opening_cents = Cents::round_half_even(opening_cash).as_i64();
+    let counted_cents = Cents::round_half_even(counted_cash).as_i64();
+
+    if opening_cash > 0.0 {
+        conn.execute(
+            "UPDATE cash_drawer_sessions SET
+                driver_cash_given = COALESCE(driver_cash_given, 0) + ?1,
+                driver_cash_given_cents = COALESCE(driver_cash_given_cents, 0) + ?2,
+                updated_at = ?3
+             WHERE id = ?4",
+            params![opening_cash, opening_cents, now, drawer_id],
+        )
+        .map_err(|e| format!("record satellite handover (given): {e}"))?;
+    }
+    if counted_cash > 0.0 {
+        conn.execute(
+            "UPDATE cash_drawer_sessions SET
+                driver_cash_returned = COALESCE(driver_cash_returned, 0) + ?1,
+                driver_cash_returned_cents = COALESCE(driver_cash_returned_cents, 0) + ?2,
+                updated_at = ?3
+             WHERE id = ?4",
+            params![counted_cash, counted_cents, now, drawer_id],
+        )
+        .map_err(|e| format!("record satellite handover (returned): {e}"))?;
+    }
+
+    info!(
+        satellite_shift = %satellite_shift_id,
+        cashier_shift = %cashier_shift_id,
+        drawer = %drawer_id,
+        opening = %opening_cash,
+        counted = %counted_cash,
+        "Satellite handover recorded on cashier drawer"
+    );
+
+    Ok(serde_json::json!({
+        "cashierShiftId": cashier_shift_id,
+        "drawerId": drawer_id,
+    }))
+}
+
 fn find_active_cashier_assignment(
     conn: &rusqlite::Connection,
     branch_id: &str,

@@ -4118,7 +4118,25 @@
       "busyElsewhereSince": "Connesso su {{terminal}} come {{role}} dal {{since}}",
       "satelliteShiftInfo": "{{name}} ha fatto il check-in su {{terminal}} ({{orders}} ordini, {{sales}}). Il check-out dalla cassa principale arriva nel prossimo aggiornamento — fino ad allora chiudi il turno su quel terminale.",
       "satelliteTerminalChip": "su {{terminal}}",
-      "satelliteTotalsChip": "{{orders}} ordini · {{sales}}"
+      "satelliteTotalsChip": "{{orders}} ordini · {{sales}}",
+      "satelliteCheckout": {
+        "back": "Torna al personale",
+        "title": "Consegna cassa — {{name}}",
+        "loading": "Caricamento dei dati del turno…",
+        "previewFailed": "Impossibile caricare i dati del turno.",
+        "closeFailed": "Il server ha rifiutato la chiusura remota.",
+        "drawerCreditFailed": "Turno chiuso, ma l'accredito in cassa non è riuscito: {{error}}. Registra l'importo manualmente.",
+        "success": "Turno chiuso. Previsti {{expected}}, ricevuti {{counted}}.",
+        "orders": "Ordini",
+        "sales": "Vendite totali",
+        "cashSales": "Vendite in contanti",
+        "cardSales": "Vendite con carta",
+        "openingFloat": "Fondo cassa",
+        "expectedCash": "Contanti previsti",
+        "countedLabel": "Contanti ricevuti da {{name}}",
+        "closing": "Chiusura…",
+        "confirm": "Chiudi turno e ricevi contanti"
+      }
     },
     "zReport": {
       "title": "Z-Report - {{date}}",

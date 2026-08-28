@@ -102,6 +102,15 @@ export type CallerIdReceipt =
 
 const DELIVERY_TTL_MS = 30_000
 const CONFIG_POLL_MS = 1_000
+// A terminal with NO receiving lines configured has nothing to reconcile —
+// yet the 1s config poll hammered /api/pos/caller-id/config ~95×/min per
+// terminal in production (field observation, 28/08) on tills that never set
+// up caller id. Idle terminals back off to this cadence; the moment a config
+// poll returns a line (or anything is pending) the full 1s reconciliation
+// cadence resumes, so recognition and the line-readiness wizard are
+// untouched where caller id is actually in use.
+const CONFIG_IDLE_POLL_MS = 60_000
+const CONFIG_IDLE_POLLS_BEFORE_BACKOFF = 5
 const EVENT_POLL_MS = 1_000
 const MAX_POLLED_EVENTS = 50
 const CHANNEL_RETRY_BASE_MS = 1_000
@@ -356,6 +365,12 @@ export function subscribeToCallerIdEvents(
   let refreshInFlight = false
   let eventPollInFlight = false
   let nextEventPollAt = 0
+  // Non-zero while the terminal has no caller-id state at all — the config
+  // poll idles until this deadline instead of firing every second. The
+  // backoff arms only after several consecutive empty polls, so startup and
+  // first-line discovery keep the fast cadence.
+  let configIdleUntil = 0
+  let consecutiveIdlePolls = 0
   let catchupRevision = 0
   let configInterval: ReturnType<typeof setInterval> | null = null
   let eventPollInterval: ReturnType<typeof setInterval> | null = null
@@ -786,6 +801,25 @@ export function subscribeToCallerIdEvents(
         }
       }
       void pollPendingEvents()
+      // No lines, no channels, nothing pending: this terminal has caller id
+      // idle — after a few consecutive empty polls, back the config poll
+      // off. Any live state keeps the full 1s reconciliation cadence.
+      const callerIdIdle =
+        desiredLines.size === 0 &&
+        channels.size === 0 &&
+        retryTimers.size === 0 &&
+        pendingRemovals.size === 0 &&
+        postAttemptCatchupUntil.size === 0
+      if (callerIdIdle) {
+        consecutiveIdlePolls += 1
+        configIdleUntil =
+          consecutiveIdlePolls >= CONFIG_IDLE_POLLS_BEFORE_BACKOFF
+            ? monotonicNow() + CONFIG_IDLE_POLL_MS
+            : 0
+      } else {
+        consecutiveIdlePolls = 0
+        configIdleUntil = 0
+      }
     } catch {
       // Config polling is self-healing and intentionally logs no caller data.
     } finally {
@@ -795,7 +829,10 @@ export function subscribeToCallerIdEvents(
 
   void refresh()
   if (disposed) return dispose
-  configInterval = setInterval(() => void refresh(), CONFIG_POLL_MS)
+  configInterval = setInterval(() => {
+    if (monotonicNow() < configIdleUntil) return
+    void refresh()
+  }, CONFIG_POLL_MS)
   eventPollInterval = setInterval(
     () => void pollPendingEvents(),
     EVENT_POLL_MS,

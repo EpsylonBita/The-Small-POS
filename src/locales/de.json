@@ -4118,7 +4118,25 @@
       "busyElsewhereSince": "Angemeldet an {{terminal}} als {{role}} seit {{since}}",
       "satelliteShiftInfo": "{{name}} ist auf {{terminal}} eingecheckt ({{orders}} Bestellungen, {{sales}}). Der Checkout von der Hauptkasse kommt im nächsten Update — bis dahin wird die Schicht auf jenem Terminal geschlossen.",
       "satelliteTerminalChip": "auf {{terminal}}",
-      "satelliteTotalsChip": "{{orders}} Bestellungen · {{sales}}"
+      "satelliteTotalsChip": "{{orders}} Bestellungen · {{sales}}",
+      "satelliteCheckout": {
+        "back": "Zurück zum Personal",
+        "title": "Kassenübergabe — {{name}}",
+        "loading": "Schichtdaten werden vom Server geladen…",
+        "previewFailed": "Die Schichtdaten konnten nicht geladen werden.",
+        "closeFailed": "Der Server hat den Remote-Checkout abgelehnt.",
+        "drawerCreditFailed": "Schicht geschlossen, aber die Kassengutschrift schlug fehl: {{error}}. Bitte den Betrag manuell erfassen.",
+        "success": "Schicht geschlossen. Erwartet {{expected}}, erhalten {{counted}}.",
+        "orders": "Bestellungen",
+        "sales": "Gesamtumsatz",
+        "cashSales": "Barumsatz",
+        "cardSales": "Kartenumsatz",
+        "openingFloat": "Wechselgeld",
+        "expectedCash": "Erwartetes Bargeld",
+        "countedLabel": "Von {{name}} erhaltenes Bargeld",
+        "closing": "Wird geschlossen…",
+        "confirm": "Schicht schließen & Bargeld annehmen"
+      }
     },
     "zReport": {
       "title": "Z-Report - {{date}}",

@@ -4118,7 +4118,25 @@
       "busyElsewhereSince": "Checked in at {{terminal}} as {{role}} since {{since}}",
       "satelliteShiftInfo": "{{name}} is checked in on {{terminal}} ({{orders}} orders, {{sales}}). Checkout from the main register arrives in the next update — until then close the shift on that terminal.",
       "satelliteTerminalChip": "on {{terminal}}",
-      "satelliteTotalsChip": "{{orders}} orders · {{sales}}"
+      "satelliteTotalsChip": "{{orders}} orders · {{sales}}",
+      "satelliteCheckout": {
+        "back": "Back to staff",
+        "title": "Cash handover — {{name}}",
+        "loading": "Loading shift figures from the server…",
+        "previewFailed": "Could not load the shift figures from the server.",
+        "closeFailed": "The remote checkout was rejected by the server.",
+        "drawerCreditFailed": "Shift closed, but crediting this drawer failed: {{error}}. Record the received cash manually.",
+        "success": "Shift closed. Expected {{expected}}, received {{counted}}.",
+        "orders": "Orders",
+        "sales": "Total sales",
+        "cashSales": "Cash sales",
+        "cardSales": "Card sales",
+        "openingFloat": "Opening float",
+        "expectedCash": "Expected cash",
+        "countedLabel": "Cash received from {{name}}",
+        "closing": "Closing…",
+        "confirm": "Close shift & receive cash"
+      }
     },
     "zReport": {
       "title": "Z Report - {{date}}",

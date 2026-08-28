@@ -1150,6 +1150,7 @@ pub fn run() {
             commands::shifts::shift_open,
             commands::shifts::shift_close,
             commands::shifts::shift_get_active,
+            commands::shifts::shift_record_satellite_handover,
             commands::shifts::shift_get_by_id,
             commands::shifts::shift_get_sync_state,
             commands::shifts::shift_get_active_by_terminal,

@@ -732,6 +732,30 @@ pub async fn shift_close(
 }
 
 #[tauri::command]
+pub async fn shift_record_satellite_handover(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+) -> Result<serde_json::Value, String> {
+    let payload = arg0.ok_or_else(|| "Missing payload".to_string())?;
+    let branch_id = value_str(&payload, &["branch_id", "branchId"])
+        .ok_or_else(|| "branch_id required".to_string())?;
+    let terminal_id = value_str(&payload, &["terminal_id", "terminalId"])
+        .ok_or_else(|| "terminal_id required".to_string())?;
+    let satellite_shift_id = value_str(&payload, &["satellite_shift_id", "satelliteShiftId"])
+        .ok_or_else(|| "satellite_shift_id required".to_string())?;
+    let opening_cash = value_f64(&payload, &["opening_cash", "openingCash"]).unwrap_or(0.0);
+    let counted_cash = value_f64(&payload, &["counted_cash", "countedCash"]).unwrap_or(0.0);
+    shift_service::record_satellite_handover(
+        &db,
+        &branch_id,
+        &terminal_id,
+        &satellite_shift_id,
+        opening_cash,
+        counted_cash,
+    )
+}
+
+#[tauri::command]
 pub async fn shift_get_active(
     arg0: Option<serde_json::Value>,
     db: tauri::State<'_, db::DbState>,

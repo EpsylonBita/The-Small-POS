@@ -1696,6 +1696,19 @@ export interface PlatformBridge {
   shifts: {
     open(params: OpenShiftParams): Promise<IpcResult>;
     close(params: CloseShiftParams): Promise<IpcResult>;
+    remoteCheckout(params: {
+      shiftId: string;
+      action: "preview" | "close";
+      countedCash?: number;
+      closedBy?: string | null;
+    }): Promise<any>;
+    recordSatelliteHandover(params: {
+      branchId: string;
+      terminalId: string;
+      satelliteShiftId: string;
+      openingCash: number;
+      countedCash: number;
+    }): Promise<any>;
     printCheckout(params: ShiftPrintCheckoutParams): Promise<IpcResult>;
     getActive(staffId: string): Promise<any>;
     getById(shiftId: string): Promise<any>;
@@ -2379,6 +2392,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   // Shifts
   "shift:open": "shifts.open",
   "shift:close": "shifts.close",
+  "shift:record-satellite-handover": "shifts.recordSatelliteHandover",
   "shift:get-active": "shifts.getActive",
   "shift:get-by-id": "shifts.getById",
   "shift:get-sync-state": "shifts.getSyncState",
@@ -3167,6 +3181,48 @@ export class TauriBridge implements PlatformBridge {
   shifts = {
     open: (p: OpenShiftParams) => this.inv("shift:open", p),
     close: (p: CloseShiftParams) => this.inv("shift:close", p),
+    // Satellite remote checkout (v1.4.84): server close via admin API, then
+    // the local drawer credit so the received cash enters day math here.
+    remoteCheckout: (p: {
+      shiftId: string;
+      action: "preview" | "close";
+      countedCash?: number;
+      closedBy?: string | null;
+    }) =>
+      this.adminFetch<{
+        success: boolean;
+        already_closed?: boolean;
+        figures?: {
+          total_orders_count: number;
+          total_sales_amount: number;
+          total_cash_sales: number;
+          total_card_sales: number;
+          opening_cash_amount: number;
+          expected_cash_amount: number;
+        };
+        handover?: {
+          opening_cash_amount: number;
+          counted_cash: number;
+          expected_cash_amount: number;
+          cash_variance: number;
+        };
+        error?: string;
+      }>("/api/pos/shifts/remote-checkout", {
+        method: "POST",
+        body: {
+          shift_id: p.shiftId,
+          action: p.action,
+          ...(p.countedCash !== undefined ? { counted_cash: p.countedCash } : {}),
+          ...(p.closedBy ? { closed_by: p.closedBy } : {}),
+        },
+      }),
+    recordSatelliteHandover: (p: {
+      branchId: string;
+      terminalId: string;
+      satelliteShiftId: string;
+      openingCash: number;
+      countedCash: number;
+    }) => this.inv("shift:record-satellite-handover", p),
     printCheckout: (p: ShiftPrintCheckoutParams) =>
       this.inv("shift:print-checkout", p),
     getActive: (staffId: string) => this.inv("shift:get-active", staffId),
