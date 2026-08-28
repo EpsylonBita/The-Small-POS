@@ -4108,7 +4108,10 @@
       "serverStartingCashTitle": "Εισάγετε το αρχικό ποσό σερβιτόρου",
       "serverStartingCashHelper": "Προαιρετικό: εισάγετε τυχόν μετρητά που πήρε ο σερβιτόρος από τον ενεργό ταμία πριν ξεκινήσει το σέρβις.",
       "activeSince": "Ενεργός από {{time}}",
-      "busyElsewhereSince": "Συνδεδεμένος στο {{terminal}} ως {{role}} από {{since}}"
+      "busyElsewhereSince": "Συνδεδεμένος στο {{terminal}} ως {{role}} από {{since}}",
+      "satelliteShiftInfo": "Ο/Η {{name}} έχει βάρδια στο {{terminal}} ({{orders}} παραγγελίες, {{sales}}). Η λήξη βάρδιας από το κεντρικό ταμείο έρχεται στην επόμενη ενημέρωση — μέχρι τότε η βάρδια κλείνει από εκείνο το τερματικό.",
+      "satelliteTerminalChip": "στο {{terminal}}",
+      "satelliteTotalsChip": "{{orders}} παραγγελίες · {{sales}}"
     },
     "zReport": {
       "title": "Αναφορά Z - {{date}}",

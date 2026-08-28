@@ -4115,7 +4115,10 @@
       "tipsSeparateFromCashReturn": "Le mance sono registrate separatamente e non sono incluse nei contanti da restituire.",
       "tipAllocations": "Attribuzioni delle mance",
       "tipOrder": "Ordine",
-      "busyElsewhereSince": "Connesso su {{terminal}} come {{role}} dal {{since}}"
+      "busyElsewhereSince": "Connesso su {{terminal}} come {{role}} dal {{since}}",
+      "satelliteShiftInfo": "{{name}} ha fatto il check-in su {{terminal}} ({{orders}} ordini, {{sales}}). Il check-out dalla cassa principale arriva nel prossimo aggiornamento — fino ad allora chiudi il turno su quel terminale.",
+      "satelliteTerminalChip": "su {{terminal}}",
+      "satelliteTotalsChip": "{{orders}} ordini · {{sales}}"
     },
     "zReport": {
       "title": "Z-Report - {{date}}",

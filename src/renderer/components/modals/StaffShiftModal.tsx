@@ -5191,7 +5191,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                                     })}
                                   </span>
                                   {satelliteTerminalName ? (
-                                    <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-sky-300/40 bg-sky-500/15 px-3 py-1 text-xs font-semibold text-sky-200">
+                                    <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-sky-500/40 bg-sky-500/10 px-3 py-1 text-xs font-semibold text-sky-700 dark:text-sky-200">
                                       {t('modals.staffShift.satelliteTerminalChip', {
                                         defaultValue: 'on {{terminal}}',
                                         terminal: satelliteTerminalName,

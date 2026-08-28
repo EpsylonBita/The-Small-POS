@@ -716,7 +716,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Paid" => "Πληρωμένη",
             "Paid online" => "Πληρωμένη online",
             "Partial subtotal" => "Μερικό σύνολο",
-            "Thank you for your order" => "Ευχαριστούμε για την παραγγελία σας",
+            "Thank you for your order" => "Ευχαριστούμε για την προτίμηση",
             "Till Cash Sales" => "Μετρητά Ταμείου",
             "Net Driver Cash" => "Καθαρά από Οδηγούς",
             "All Cash Out" => "Σύνολο Εκροών",
@@ -858,7 +858,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Paid" => "Bezahlt",
             "Paid online" => "Online bezahlt",
             "Partial subtotal" => "Zwischensumme",
-            "Thank you for your order" => "Danke für Ihre Bestellung",
+            "Thank you for your order" => "Danke für Ihr Vertrauen",
             "Till Cash Sales" => "Barumsatz Kasse",
             "Net Driver Cash" => "Fahrer Bargeld netto",
             "All Cash Out" => "Alle Barausgaben",
@@ -1000,7 +1000,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Paid" => "Payee",
             "Paid online" => "Payee en ligne",
             "Partial subtotal" => "Sous-total partiel",
-            "Thank you for your order" => "Merci pour votre commande",
+            "Thank you for your order" => "Merci de votre confiance",
             "Till Cash Sales" => "Ventes especes caisse",
             "Net Driver Cash" => "Especes livreurs nettes",
             "All Cash Out" => "Toutes sorties especes",
@@ -1142,7 +1142,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Paid" => "Pagato",
             "Paid online" => "Pagato online",
             "Partial subtotal" => "Subtotale parziale",
-            "Thank you for your order" => "Grazie per il vostro ordine",
+            "Thank you for your order" => "Grazie per la preferenza",
             "Till Cash Sales" => "Contanti vendite cassa",
             "Net Driver Cash" => "Contanti corrieri netti",
             "All Cash Out" => "Tutte le uscite cassa",
@@ -5310,6 +5310,53 @@ impl TtfReceiptComposer {
     }
 
     /// Word-wrapped text at a fixed x within `max_width`; returns the next y.
+    /// Greedy word wrap into a column. A single word wider than the column
+    /// (Greek street names like «ΚΩΝΣΤΑΝΤΙΝΟΥΠΟΛΕΩΣ») is hard-broken by
+    /// characters instead of spilling into the neighbouring column.
+    fn wrap_to_width(&self, text: &str, max_width: i32, style: RasterTextStyle) -> Vec<String> {
+        let mut lines: Vec<String> = Vec::new();
+        let mut line = String::new();
+        for word in text.split_whitespace() {
+            let pieces: Vec<String> = if self.text_width(word, style) > max_width {
+                let mut parts = Vec::new();
+                let mut cur = String::new();
+                for ch in word.chars() {
+                    let mut candidate = cur.clone();
+                    candidate.push(ch);
+                    if self.text_width(&candidate, style) > max_width && !cur.is_empty() {
+                        parts.push(std::mem::take(&mut cur));
+                        cur.push(ch);
+                    } else {
+                        cur = candidate;
+                    }
+                }
+                if !cur.is_empty() {
+                    parts.push(cur);
+                }
+                parts
+            } else {
+                vec![word.to_string()]
+            };
+            for piece in pieces {
+                let candidate = if line.is_empty() {
+                    piece.clone()
+                } else {
+                    format!("{line} {piece}")
+                };
+                if self.text_width(&candidate, style) > max_width && !line.is_empty() {
+                    lines.push(std::mem::take(&mut line));
+                    line = piece;
+                } else {
+                    line = candidate;
+                }
+            }
+        }
+        if !line.is_empty() {
+            lines.push(line);
+        }
+        lines
+    }
+
     fn draw_wrapped_at(
         &mut self,
         text: &str,
@@ -5318,23 +5365,29 @@ impl TtfReceiptComposer {
         style: RasterTextStyle,
         mut y: i32,
     ) -> i32 {
-        let mut line = String::new();
-        for word in text.split_whitespace() {
-            let candidate = if line.is_empty() {
-                word.to_string()
-            } else {
-                format!("{line} {word}")
-            };
-            if self.text_width(&candidate, style) > max_width && !line.is_empty() {
-                self.draw_text_at_position(&line, x, style, y);
-                y += style.line_height;
-                line = word.to_string();
-            } else {
-                line = candidate;
-            }
-        }
-        if !line.is_empty() {
+        for line in self.wrap_to_width(text, max_width, style) {
             self.draw_text_at_position(&line, x, style, y);
+            y += style.line_height;
+        }
+        y
+    }
+
+    /// Wrap within a column and center every produced line inside it. The
+    /// platform slip's middle header column needs this: text centered over
+    /// the full paper width runs under the flanking icons and their captions
+    /// (field slip 28/08 — «ΔΙΚΟΣ ΣΑΣ ΔΙΑΝΟΜΕΑΣ» over «Πληρωμή με μετρητά»).
+    fn draw_centered_wrapped_in(
+        &mut self,
+        text: &str,
+        x: i32,
+        max_width: i32,
+        style: RasterTextStyle,
+        mut y: i32,
+    ) -> i32 {
+        for text_line in self.wrap_to_width(text, max_width, style) {
+            let w = self.text_width(&text_line, style);
+            let cx = x + ((max_width - w).max(0)) / 2;
+            self.draw_text_at_position(&text_line, cx, style, y);
             y += style.line_height;
         }
         y
@@ -7909,14 +7962,18 @@ fn platform_greek_long_date(created_at: &str) -> Option<String> {
     Some(format!("{day} {} {year}", MONTHS[month - 1]))
 }
 
-/// The payment line of the faithful platform slip («Πληρωμένη online» /
-/// «ΑΝΤΙΚΑΤΑΒΟΛΗ 20,30€»). Empty when the ingest gave us nothing.
+/// The tiny caption under the payment icon: just «Μετρητά» or «Κάρτα»
+/// (founder, 28/08) — the icon itself already says paid (check) vs collect
+/// (banknotes). Empty when the ingest gave us nothing.
 fn platform_payment_line(info: &PlatformSlipInfo, doc: &OrderReceiptDoc, lang: &str) -> String {
-    if info.prepaid || info.payment_method.as_deref() == Some("online") {
-        return receipt_label(lang, "Paid online").to_string();
-    }
     if info.payment_method.as_deref() == Some("cash") {
-        return receipt_label(lang, "Cash payment").to_string();
+        return receipt_label(lang, "Cash").to_string();
+    }
+    if info.prepaid
+        || info.payment_method.as_deref() == Some("online")
+        || info.payment_method.as_deref() == Some("card")
+    {
+        return receipt_label(lang, "Card").to_string();
     }
     // Metadata was incomplete: the persisted payment rows still prove the
     // order is settled, so it never prints as collect-on-handoff.
@@ -7929,32 +7986,91 @@ fn platform_payment_line(info: &PlatformSlipInfo, doc: &OrderReceiptDoc, lang: &
 fn platform_carrier_line(info: &PlatformSlipInfo, lang: &str) -> Option<&'static str> {
     match info.delivery_provider.as_deref() {
         Some("platform_delivery") => Some(receipt_label(lang, "Platform rider")),
-        Some("vendor_delivery") | Some("restaurant_delivery") | Some("store_delivery") => {
-            Some(receipt_label(lang, "Store driver"))
-        }
-        // Unknown or missing provider metadata: better no handoff instruction
-        // than a confidently wrong one.
+        // Store-driven deliveries print no carrier line — the store knows its
+        // own drivers, the label was just noise (founder, 28/08). Unknown or
+        // missing provider metadata prints nothing either: better no handoff
+        // instruction than a confidently wrong one.
         _ => None,
     }
 }
 
 /// The destination/contact block a driver fulfills with — present whenever
 /// the order carries delivery data, regardless of who carries it.
+/// Split a combined «Λεωφόρος Ηρακλείου 409, 14122, Αθήνα» delivery address
+/// into (street, postal, city). A comma-separated part whose digits form a
+/// 5-digit number is the postal code; the alphabetic part after it is the
+/// city. Conservative on purpose: with no postal token the string stays
+/// whole, so district names never get eaten by mistake.
+fn split_combined_address(address: &str) -> (String, Option<String>, Option<String>) {
+    let mut street_parts: Vec<&str> = Vec::new();
+    let mut postal: Option<String> = None;
+    let mut city: Option<String> = None;
+    for raw in address.split(',') {
+        let part = raw.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let compact: String = part.chars().filter(|c| !c.is_whitespace()).collect();
+        let is_postal = compact.len() == 5 && compact.chars().all(|c| c.is_ascii_digit());
+        if is_postal && postal.is_none() && !street_parts.is_empty() {
+            postal = Some(compact);
+        } else if postal.is_some() && city.is_none() && part.chars().any(char::is_alphabetic) {
+            city = Some(part.to_string());
+        } else {
+            street_parts.push(part);
+        }
+    }
+    (street_parts.join(", "), postal, city)
+}
+
 fn platform_delivery_lines(doc: &OrderReceiptDoc, lang: &str) -> Vec<(String, String)> {
+    // The founder's fixed contact form (28/08): on delivery slips all seven
+    // labels ALWAYS print, in this order, like efood's own template — a
+    // missing field stays visibly blank for handwriting instead of silently
+    // vanishing. Non-delivery platform orders keep only the filled lines.
+    // The address row is street-only («όχι μονοκόμματη»): postal and city
+    // ride in their own rows, extracted from the combined string when the
+    // dedicated fields are empty.
+    let force_full = doc.order_type.trim().eq_ignore_ascii_case("delivery");
+    let raw_address = doc.delivery_address.as_deref().map(str::trim).unwrap_or("");
+    let (street, extracted_postal, extracted_city) = split_combined_address(raw_address);
+    let field = |value: Option<&str>| {
+        value
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(ToString::to_string)
+    };
+    let city = field(doc.delivery_city.as_deref()).or(extracted_city);
+    let postal = field(doc.delivery_postal_code.as_deref()).or(extracted_postal);
+
     let mut lines = Vec::new();
-    let mut push = |label: &str, value: Option<&str>| {
-        if let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) {
-            lines.push((receipt_label(lang, label).to_string(), value.to_string()));
+    let mut push = |label: &str, value: String| {
+        if force_full || !value.is_empty() {
+            lines.push((receipt_label(lang, label).to_string(), value));
         }
     };
-    push("Customer", doc.customer_name.as_deref());
-    push("Address", doc.delivery_address.as_deref());
-    push("City", doc.delivery_city.as_deref());
-    push("Postal Code", doc.delivery_postal_code.as_deref());
-    push("Floor", doc.delivery_floor.as_deref());
-    push("Name on ringer", doc.name_on_ringer.as_deref());
-    push("Phone", doc.customer_phone.as_deref());
-    push("Driver", doc.driver_name.as_deref());
+    push(
+        "Customer",
+        field(doc.customer_name.as_deref()).unwrap_or_default(),
+    );
+    push("Address", street);
+    push("City", city.unwrap_or_default());
+    push("Postal Code", postal.unwrap_or_default());
+    push(
+        "Floor",
+        field(doc.delivery_floor.as_deref()).unwrap_or_default(),
+    );
+    push(
+        "Name on ringer",
+        field(doc.name_on_ringer.as_deref()).unwrap_or_default(),
+    );
+    push(
+        "Phone",
+        field(doc.customer_phone.as_deref()).unwrap_or_default(),
+    );
+    if let Some(driver) = field(doc.driver_name.as_deref()) {
+        lines.push((receipt_label(lang, "Driver").to_string(), driver));
+    }
     lines
 }
 
@@ -7990,6 +8106,47 @@ fn platform_short_code(info: &PlatformSlipInfo, doc: &OrderReceiptDoc) -> String
 /// row (type · pickup time + carrier · payment), big LEFT-aligned short code,
 /// items with «**» comments and material lines, heavy totals rules, the long
 /// order code right-aligned at the foot, store identity in a two-column footer.
+/// Title-case order-type for the slip's tiny icon caption («Παράδοση»),
+/// where the shared translate_order_type is deliberately all-caps.
+fn platform_order_type_caption(lang: &str, order_type: &str) -> String {
+    let normalized = order_type.trim().to_ascii_lowercase().replace('-', "_");
+    if lang == "el" {
+        match normalized.as_str() {
+            "pickup" => return "Παραλαβή".to_string(),
+            "delivery" => return "Παράδοση".to_string(),
+            "dine_in" => return "Επιτόπου".to_string(),
+            "takeaway" => return "Take away".to_string(),
+            _ => {}
+        }
+    }
+    // Other languages: soften the shared all-caps into Title case.
+    let upper = translate_order_type(lang, order_type);
+    let mut chars = upper.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase(),
+        None => upper,
+    }
+}
+
+/// Greek uppercase drops the tonos — «Φράουλες» prints «ΦΡΑΟΥΛΕΣ», exactly
+/// as efood's own slips set it. Rust's to_uppercase keeps the accent (ά→Ά),
+/// which reads as a smudge on thermal paper. Diaeresis (Ϊ/Ϋ) is kept.
+fn platform_uppercase(text: &str) -> String {
+    text.to_uppercase()
+        .chars()
+        .map(|ch| match ch {
+            'Ά' => 'Α',
+            'Έ' => 'Ε',
+            'Ή' => 'Η',
+            'Ί' => 'Ι',
+            'Ό' => 'Ο',
+            'Ύ' => 'Υ',
+            'Ώ' => 'Ω',
+            _ => ch,
+        })
+        .collect()
+}
+
 fn draw_platform_slip_ttf(
     canvas: &mut TtfReceiptComposer,
     doc: &OrderReceiptDoc,
@@ -8038,14 +8195,32 @@ fn draw_platform_slip_ttf(
         }
     }
 
-    // ── Icon header row: [home + type] [time + carrier] [check + payment] ──
+    // ── Icon header row: [home/caption] [BIG time + rider] [icon/caption] ──
+    // Each corner is one block: tiny caption under its icon, icon centered
+    // over the caption's width (founder, 28/08).
     let row_top = canvas.y;
     let icon_w = (canvas.content_width as f32 * 0.14).clamp(40.0, 96.0) as i32;
-    let col_left_x = canvas.left_margin;
-    let col_right_x = canvas.left_margin + canvas.content_width - icon_w;
+    let caption_style = scaled(small, 0.7);
+    // Plain case («Παράδοση»), not uppercase (founder, 28/08).
+    let left_caption = platform_order_type_caption(lang, &doc.order_type);
+    let right_caption = platform_payment_line(info, doc, lang);
+    let left_caption_w = canvas.text_width(&left_caption, caption_style);
+    let right_caption_w = if right_caption.is_empty() {
+        0
+    } else {
+        canvas.text_width(&right_caption, caption_style)
+    };
+    // Pull the corner blocks inward from the paper edges (founder, 28/08).
+    let edge_inset = (canvas.content_width as f32 * 0.05) as i32;
+    let left_block_w = icon_w.max(left_caption_w);
+    let right_block_w = icon_w.max(right_caption_w);
+    let left_block_x = canvas.left_margin + edge_inset;
+    let right_block_x = canvas.left_margin + canvas.content_width - right_block_w - edge_inset;
+
     let mut left_h = 0;
     if let Some(icon) = platform_icon(PLATFORM_ICON_HOME_PNG, 0) {
-        let (_, h) = canvas.blit_image_at(icon, col_left_x, row_top, icon_w);
+        let icon_x = left_block_x + (left_block_w - icon_w) / 2;
+        let (_, h) = canvas.blit_image_at(icon, icon_x, row_top, icon_w);
         left_h = h;
     }
     let mut right_h = 0;
@@ -8060,48 +8235,47 @@ fn draw_platform_slip_ttf(
         platform_icon(PLATFORM_ICON_MONEY_PNG, 2)
     };
     if let Some(icon) = payment_icon {
-        let (_, h) = canvas.blit_image_at(icon, col_right_x, row_top, icon_w);
+        let icon_x = right_block_x + (right_block_w - icon_w) / 2;
+        let (_, h) = canvas.blit_image_at(icon, icon_x, row_top, icon_w);
         right_h = h;
     }
-    // Center block: pickup label, BIG time, carrier.
+    // Center block: just the BIG promised time (and the platform rider line
+    // when one exists) — constrained between the corner blocks.
+    let center_pad = 10;
+    let center_x = left_block_x + left_block_w + center_pad;
+    let center_w = (right_block_x - center_pad - center_x).max(60);
     let time_source = info.ready_at.as_deref().unwrap_or(&doc.created_at);
     let time = format_datetime_human(time_source)
         .split(' ')
         .nth(1)
         .map(|t| t.chars().take(5).collect::<String>())
         .unwrap_or_default();
-    let order_type_display = translate_order_type(lang, &doc.order_type);
     let mut center_y = row_top;
-    canvas.draw_text_at_y(&order_type_display, BitmapAlign::Center, small, center_y);
-    center_y += small.line_height;
     let time_style = bold_of(scaled(body, 1.5));
-    canvas.draw_text_at_y(&time, BitmapAlign::Center, time_style, center_y);
-    center_y += time_style.line_height;
+    center_y = canvas.draw_centered_wrapped_in(&time, center_x, center_w, time_style, center_y);
     if let Some(carrier) = platform_carrier_line(info, lang) {
-        canvas.draw_text_at_y(carrier, BitmapAlign::Center, small, center_y);
-        center_y += small.line_height;
+        center_y = canvas.draw_centered_wrapped_in(carrier, center_x, center_w, small, center_y);
     }
 
-    // Labels under the icons.
-    let under_left_y = row_top + left_h + 2;
+    // Tiny captions centered under their icons, below BOTH the icons and the
+    // center block — the vertical separation is what makes overlap
+    // impossible on narrow paper.
+    let labels_y = (row_top + left_h.max(right_h) + 2).max(center_y + 2);
     canvas.draw_text_at_position(
-        &order_type_display.to_uppercase(),
-        col_left_x,
-        small,
-        under_left_y,
+        &left_caption,
+        left_block_x + (left_block_w - left_caption_w) / 2,
+        caption_style,
+        labels_y,
     );
-    let payment = platform_payment_line(info, doc, lang);
-    let mut under_right_y = row_top + right_h + 2;
-    if !payment.is_empty() {
-        let payment_w = canvas.text_width(&payment, small);
-        let px = (canvas.left_margin + canvas.content_width - payment_w).max(canvas.left_margin);
-        canvas.draw_text_at_position(&payment, px, small, under_right_y);
-        under_right_y += small.line_height;
+    if !right_caption.is_empty() {
+        canvas.draw_text_at_position(
+            &right_caption,
+            right_block_x + (right_block_w - right_caption_w) / 2,
+            caption_style,
+            labels_y,
+        );
     }
-    let row_bottom = center_y
-        .max(under_left_y + small.line_height)
-        .max(under_right_y)
-        .max(row_top + left_h.max(right_h));
+    let row_bottom = labels_y + caption_style.line_height;
     canvas.y = row_bottom + preset.medium_gap;
 
     canvas.draw_thick_rule();
@@ -8123,7 +8297,7 @@ fn draw_platform_slip_ttf(
         .collect();
     if !order_level_notes.is_empty() {
         for note in &order_level_notes {
-            canvas.draw_wrapped(&note.to_uppercase(), BitmapAlign::Left, bold_of(body));
+            canvas.draw_wrapped(&platform_uppercase(note), BitmapAlign::Left, bold_of(body));
         }
         canvas.draw_rule();
     }
@@ -8137,12 +8311,13 @@ fn draw_platform_slip_ttf(
         canvas.draw_rule();
     }
 
-    // ── Items: qty + bold name + price; ** comment; materials beneath ──
+    // ── Items: bold name; ** comment; materials; then the price on its own
+    // right-aligned line BELOW the materials (founder, 28/08) ──
     let mut last_note_prefix: Option<String> = None;
     for item in &doc.items {
-        canvas.draw_pair(
-            &format!("{} {}", qty(item.quantity), item.name.to_uppercase()),
-            &money_with_currency_locale(item.total, cur, comma),
+        canvas.draw_wrapped(
+            &format!("{} {}", qty(item.quantity), item.name.trim()),
+            BitmapAlign::Left,
             bold_of(body),
         );
         if let Some(note) = item
@@ -8155,33 +8330,40 @@ fn draw_platform_slip_ttf(
             // «***» and regular weight — the real slip keeps item comments
             // lighter than the bold names so they never read as materials.
             canvas.draw_wrapped(
-                &format!("*** {}", note.to_uppercase()),
+                &format!("*** {}", platform_uppercase(&note)),
                 BitmapAlign::Left,
                 small,
             );
         }
+        // Materials: smaller and lighter than the item name, pushed clearly
+        // to the right so they read as ingredients, and wrapped inside the
+        // indented column so long names never collide (founder, 28/08).
+        let materials_style = scaled(small, 0.85);
+        let materials_x = canvas.left_margin + 48;
+        let materials_w = (canvas.content_width - 48).max(60);
+        // Materials keep the platform's own casing («Ψωμί sandwich XL
+        // ψημένο») — uppercasing made them read heavier than they are
+        // (founder, 28/08).
         let (with_items, without_items) = split_customizations(item);
         for line in with_items {
-            canvas.draw_text_line(
-                &format!(
-                    "  {}",
-                    customization_display(lang, line, false).to_uppercase()
-                ),
-                BitmapAlign::Left,
-                small,
-            );
+            let text = customization_display(lang, line, false);
+            canvas.y =
+                canvas.draw_wrapped_at(&text, materials_x, materials_w, materials_style, canvas.y);
         }
         for line in without_items {
-            canvas.draw_text_line(
-                &format!(
-                    "  {} {}",
-                    receipt_label(lang, "Without").to_uppercase(),
-                    customization_display(lang, line, false).to_uppercase()
-                ),
-                BitmapAlign::Left,
-                small,
+            let text = format!(
+                "{} {}",
+                receipt_label(lang, "Without"),
+                customization_display(lang, line, false)
             );
+            canvas.y =
+                canvas.draw_wrapped_at(&text, materials_x, materials_w, materials_style, canvas.y);
         }
+        canvas.draw_text_line(
+            &money_with_currency_locale(item.total, cur, comma),
+            BitmapAlign::Right,
+            bold_of(body),
+        );
     }
 
     // ── Totals with the slip's heavy rules ──
@@ -8222,24 +8404,28 @@ fn draw_platform_slip_ttf(
     }
     canvas.draw_thick_rule();
 
-    // ── Two-column footer: store identity left, thanks right ──
-    let footer_top = canvas.y;
-    let col_w = canvas.content_width / 2 - 8;
-    let mut left_y = footer_top;
-    canvas.draw_text_at_position(
+    // ── Footer: store identity full-width, then the thanks alone at the
+    // very bottom (founder, 28/08) ──
+    let mut footer_y = canvas.draw_wrapped_at(
         &cfg.organization_name,
         canvas.left_margin,
+        canvas.content_width,
         bold_of(small),
-        left_y,
+        canvas.y,
     );
-    left_y += small.line_height;
     if let Some(address) = cfg
         .store_address
         .as_deref()
         .map(str::trim)
         .filter(|v| !v.is_empty())
     {
-        left_y = canvas.draw_wrapped_at(address, canvas.left_margin, col_w, small, left_y);
+        footer_y = canvas.draw_wrapped_at(
+            address,
+            canvas.left_margin,
+            canvas.content_width,
+            small,
+            footer_y,
+        );
     }
     if let Some(phone) = cfg
         .store_phone
@@ -8247,13 +8433,18 @@ fn draw_platform_slip_ttf(
         .map(str::trim)
         .filter(|v| !v.is_empty())
     {
-        canvas.draw_text_at_position(phone, canvas.left_margin, small, left_y);
-        left_y += small.line_height;
+        footer_y = canvas.draw_wrapped_at(
+            phone,
+            canvas.left_margin,
+            canvas.content_width,
+            small,
+            footer_y,
+        );
     }
+    canvas.y = footer_y + preset.small_gap;
     let thanks = receipt_label(lang, "Thank you for your order");
-    let right_x = canvas.left_margin + canvas.content_width / 2 + 8;
-    let right_y = canvas.draw_wrapped_at(thanks, right_x, col_w, small, footer_top);
-    canvas.y = left_y.max(right_y) + preset.medium_gap;
+    canvas.draw_wrapped(thanks, BitmapAlign::Center, small);
+    canvas.y += preset.medium_gap;
 }
 
 /// Faithful platform slip, ESC/POS text path (store header already emitted by
@@ -8356,10 +8547,11 @@ fn emit_platform_slip_escpos(
     }
     let mut last_note_prefix: Option<String> = None;
     for item in &doc.items {
-        emit_pair(
+        // Name first, materials beneath, then the price right-aligned on its
+        // own line BELOW the materials (founder, 28/08).
+        emit_wrapped(
             builder,
-            &format!("{} {}", qty(item.quantity), item.name.to_uppercase()),
-            &money_with_currency_locale(item.total, cur, comma),
+            &format!("{} {}", qty(item.quantity), item.name.trim()),
             width,
         );
         if let Some(note) = item
@@ -8370,27 +8562,30 @@ fn emit_platform_slip_escpos(
             .and_then(|note| platform_item_note_display(note, &mut last_note_prefix))
         {
             builder.bold(true);
-            emit_wrapped(builder, &format!("** {}", note.to_uppercase()), width);
+            emit_wrapped(builder, &format!("** {}", platform_uppercase(&note)), width);
             builder.bold(false);
         }
         let (with_items, without_items) = split_customizations(item);
         for line in with_items {
             builder
                 .text(&format!(
-                    "  {}",
-                    customization_display(lang, line, false).to_uppercase()
+                    "    {}",
+                    platform_uppercase(&customization_display(lang, line, false))
                 ))
                 .lf();
         }
         for line in without_items {
             builder
                 .text(&format!(
-                    "  {} {}",
-                    receipt_label(lang, "Without").to_uppercase(),
-                    customization_display(lang, line, false).to_uppercase()
+                    "    {} {}",
+                    platform_uppercase(receipt_label(lang, "Without")),
+                    platform_uppercase(&customization_display(lang, line, false))
                 ))
                 .lf();
         }
+        let price = money_with_currency_locale(item.total, cur, comma);
+        let pad = width.saturating_sub(price.chars().count());
+        builder.text(&format!("{}{}", " ".repeat(pad), price)).lf();
     }
     emit_rule(builder, width, '-');
     for total in &doc.totals {
@@ -10986,68 +11181,55 @@ mod tests {
             decimal_comma: true,
             ..LayoutConfig::default()
         };
+        // Mirrors the 28/08 field slip (#25): build-your-own sandwich with a
+        // long materials list, store driver, cash — the exact case whose
+        // header, materials, and footer collided before the typography fix.
+        let sandwich_materials = [
+            "Ψωμί sandwich XL ψημένο",
+            "Regato",
+            "Emmental",
+            "Λουκάνικο Φρανκφούρτης",
+            "Κόκκινη πιπεριά",
+            "Μαρούλι",
+            "Μαγιονέζα light",
+            "Πατάτες",
+            "Αυγό",
+        ];
         let doc = OrderReceiptDoc {
             order_id: "preview".to_string(),
-            order_number: "EFOOD-1787-64656368".to_string(),
+            order_number: "EFOOD-1787-64656506".to_string(),
             order_type: "delivery".to_string(),
             status: "confirmed".to_string(),
-            created_at: "2026-08-27T02:12:00+00:00".to_string(),
+            created_at: "2026-08-28T09:33:00+00:00".to_string(),
             customer_name: Some("epsylon bita".to_string()),
             customer_phone: Some("+306948128474".to_string()),
             delivery_address: Some("Λεωφόρος Ηρακλείου 409, 14122, Αθήνα".to_string()),
             items: vec![
                 ReceiptItem {
-                    name: "Φτιάξτε τη δική σας γλυκιά κρέπα".to_string(),
+                    name: "Κρέπα Merenda & φρέσκες φράουλες".to_string(),
                     quantity: 1.0,
-                    total: 5.30,
-                    customizations: vec![
-                        ReceiptCustomizationLine {
-                            name: "Φύλλο κρέπας".to_string(),
-                            quantity: 1.0,
-                            ..ReceiptCustomizationLine::default()
-                        },
-                        ReceiptCustomizationLine {
-                            name: "Nutella".to_string(),
-                            quantity: 1.0,
-                            ..ReceiptCustomizationLine::default()
-                        },
-                        ReceiptCustomizationLine {
-                            name: "Μπισκότο πτι-μπερ".to_string(),
-                            quantity: 1.0,
-                            ..ReceiptCustomizationLine::default()
-                        },
-                    ],
+                    total: 2.00,
                     ..ReceiptItem::default()
                 },
                 ReceiptItem {
-                    name: "Ελληνικός".to_string(),
+                    name: "Φτιάξτε το δικό σας sandwich".to_string(),
                     quantity: 1.0,
-                    total: 0.0,
-                    note: Some(
-                        "Με 1 καφέ της επιλογής σας, δώρο ακόμη 1 — καλά ψημένος".to_string(),
-                    ),
-                    customizations: vec![ReceiptCustomizationLine {
-                        name: "Πολύ γλυκός".to_string(),
-                        quantity: 1.0,
-                        ..ReceiptCustomizationLine::default()
-                    }],
-                    ..ReceiptItem::default()
-                },
-                ReceiptItem {
-                    name: "Τυρόπιτα".to_string(),
-                    quantity: 1.0,
-                    total: 0.71,
-                    note: Some(
-                        "Με 1 καφέ της επιλογής σας, δώρο ακόμη 1 — αν δεν έχει βάλτε σπανακόπιτα"
-                            .to_string(),
-                    ),
+                    total: 5.70,
+                    customizations: sandwich_materials
+                        .iter()
+                        .map(|name| ReceiptCustomizationLine {
+                            name: name.to_string(),
+                            quantity: 1.0,
+                            ..ReceiptCustomizationLine::default()
+                        })
+                        .collect(),
                     ..ReceiptItem::default()
                 },
             ],
             totals: vec![
                 TotalsLine {
                     label: "Subtotal".to_string(),
-                    amount: 5.51,
+                    amount: 7.30,
                     emphasize: false,
                     ..TotalsLine::default()
                 },
@@ -11059,25 +11241,22 @@ mod tests {
                 },
                 TotalsLine {
                     label: "TOTAL".to_string(),
-                    amount: 6.01,
+                    amount: 7.80,
                     emphasize: true,
                     ..TotalsLine::default()
                 },
             ],
-            order_notes: vec![
-                "Ανοίγεις την μαύρη πόρτα από την μέσα πλευρά και καλείς το τηλέφωνο".to_string(),
-                "ΚΩΔΙΚΟΣ ΠΑΡΑΓΓΕΛΙΑΣ: 691215364".to_string(),
-            ],
+            order_notes: vec!["ΚΩΔΙΚΟΣ ΠΑΡΑΓΓΕΛΙΑΣ: 64656506".to_string()],
             platform_slip: Some(PlatformSlipInfo {
                 plugin: "efood".to_string(),
-                external_order_id: Some("691215364".to_string()),
-                short_code: Some("4585".to_string()),
+                external_order_id: Some("64656506".to_string()),
+                short_code: Some("25".to_string()),
                 payment_method: Some("cash".to_string()),
                 prepaid: false,
-                delivery_provider: Some("platform_delivery".to_string()),
-                is_test: false,
-                // Accepted with 20' prep: the headline time is 02:12 + 20'.
-                ready_at: Some("2026-08-27T02:32:00+00:00".to_string()),
+                delivery_provider: Some("vendor_delivery".to_string()),
+                is_test: true,
+                // Accepted with 25' prep: the headline is the promised time.
+                ready_at: Some("2026-08-28T09:58:00+00:00".to_string()),
             }),
             ..OrderReceiptDoc::default()
         };
@@ -11088,6 +11267,53 @@ mod tests {
         let out = std::env::temp_dir().join("platform_slip_preview.png");
         image.save(&out).expect("save preview png");
         eprintln!("preview saved: {}", out.display());
+    }
+
+    #[test]
+    fn split_combined_address_extracts_postal_and_city() {
+        // The efood combined string: street stays, postal + city split out.
+        let (street, postal, city) = split_combined_address("Λεωφόρος Ηρακλείου 409, 14122, Αθήνα");
+        assert_eq!(street, "Λεωφόρος Ηρακλείου 409");
+        assert_eq!(postal.as_deref(), Some("14122"));
+        assert_eq!(city.as_deref(), Some("Αθήνα"));
+
+        // Spaced postal («141 22») still counts as one 5-digit code.
+        let (street, postal, city) = split_combined_address("Τσιμισκή 10, 546 24, Θεσσαλονίκη");
+        assert_eq!(street, "Τσιμισκή 10");
+        assert_eq!(postal.as_deref(), Some("54624"));
+        assert_eq!(city.as_deref(), Some("Θεσσαλονίκη"));
+
+        // No postal token → nothing is eaten: district names stay put.
+        let (street, postal, city) = split_combined_address("Παπάφη 100, Νέα Ελβετία");
+        assert_eq!(street, "Παπάφη 100, Νέα Ελβετία");
+        assert_eq!(postal, None);
+        assert_eq!(city, None);
+    }
+
+    #[test]
+    fn platform_delivery_lines_keep_the_address_row_street_only() {
+        let doc = OrderReceiptDoc {
+            order_type: "delivery".to_string(),
+            customer_name: Some("epsylon bita".to_string()),
+            customer_phone: Some("+306948128474".to_string()),
+            delivery_address: Some("Λεωφόρος Ηρακλείου 409, 14122, Αθήνα".to_string()),
+            ..OrderReceiptDoc::default()
+        };
+        let lines = platform_delivery_lines(&doc, "el");
+        let by_label = |label: &str| {
+            lines
+                .iter()
+                .find(|(l, _)| l == label)
+                .map(|(_, v)| v.clone())
+                .expect("label present")
+        };
+        // All seven rows always print on delivery, in the founder's order.
+        assert_eq!(lines.len(), 7, "full contact form: {lines:?}");
+        assert_eq!(by_label("Διεύθυνση"), "Λεωφόρος Ηρακλείου 409");
+        assert_eq!(by_label("Πόλη"), "Αθήνα");
+        assert_eq!(by_label("Τ.Κ."), "14122");
+        assert_eq!(by_label("Όροφος"), "");
+        assert_eq!(by_label("Κουδούνι"), "");
     }
 
     #[test]

@@ -4115,7 +4115,10 @@
       "tipsSeparateFromCashReturn": "Tips are recorded separately and are not included in the cash to return.",
       "tipAllocations": "Tip Allocations",
       "tipOrder": "Order",
-      "busyElsewhereSince": "Checked in at {{terminal}} as {{role}} since {{since}}"
+      "busyElsewhereSince": "Checked in at {{terminal}} as {{role}} since {{since}}",
+      "satelliteShiftInfo": "{{name}} is checked in on {{terminal}} ({{orders}} orders, {{sales}}). Checkout from the main register arrives in the next update — until then close the shift on that terminal.",
+      "satelliteTerminalChip": "on {{terminal}}",
+      "satelliteTotalsChip": "{{orders}} orders · {{sales}}"
     },
     "zReport": {
       "title": "Z Report - {{date}}",

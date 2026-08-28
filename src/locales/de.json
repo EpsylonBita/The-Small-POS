@@ -4115,7 +4115,10 @@
       "tipsSeparateFromCashReturn": "Trinkgelder werden separat erfasst und sind nicht im zurückzugebenden Bargeld enthalten.",
       "tipAllocations": "Trinkgeldzuordnungen",
       "tipOrder": "Bestellung",
-      "busyElsewhereSince": "Angemeldet an {{terminal}} als {{role}} seit {{since}}"
+      "busyElsewhereSince": "Angemeldet an {{terminal}} als {{role}} seit {{since}}",
+      "satelliteShiftInfo": "{{name}} ist auf {{terminal}} eingecheckt ({{orders}} Bestellungen, {{sales}}). Der Checkout von der Hauptkasse kommt im nächsten Update — bis dahin wird die Schicht auf jenem Terminal geschlossen.",
+      "satelliteTerminalChip": "auf {{terminal}}",
+      "satelliteTotalsChip": "{{orders}} Bestellungen · {{sales}}"
     },
     "zReport": {
       "title": "Z-Report - {{date}}",

@@ -4115,7 +4115,10 @@
       "tipsSeparateFromCashReturn": "Les pourboires sont enregistrés séparément et ne sont pas inclus dans les espèces à rendre.",
       "tipAllocations": "Attributions des pourboires",
       "tipOrder": "Commande",
-      "busyElsewhereSince": "Connecté sur {{terminal}} en tant que {{role}} depuis {{since}}"
+      "busyElsewhereSince": "Connecté sur {{terminal}} en tant que {{role}} depuis {{since}}",
+      "satelliteShiftInfo": "{{name}} a pointé sur {{terminal}} ({{orders}} commandes, {{sales}}). La clôture depuis la caisse principale arrive dans la prochaine mise à jour — d'ici là, clôturez le service sur ce terminal.",
+      "satelliteTerminalChip": "sur {{terminal}}",
+      "satelliteTotalsChip": "{{orders}} commandes · {{sales}}"
     },
     "zReport": {
       "title": "Z-Report - {{date}}",
