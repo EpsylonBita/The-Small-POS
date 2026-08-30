@@ -1971,7 +1971,7 @@ impl DispatchManager {
     }
 
     #[cfg(test)]
-    fn hydrate_isolated_for_test(conn: &Connection) -> Result<Self, DispatchError> {
+    pub(crate) fn hydrate_isolated_for_test(conn: &Connection) -> Result<Self, DispatchError> {
         Self::hydrate_with_registry(conn, Arc::new(Mutex::new(HashMap::new())))
     }
 

@@ -2381,6 +2381,7 @@ fn durable_pause_and_cancel_pos_jobs_with_conn(
                     "UPDATE print_job_attempts
                      SET state = 'cancelled',
                          cancel_requested_at = COALESCE(cancel_requested_at, ?1),
+                         cancel_confirmed_at = COALESCE(cancel_confirmed_at, ?1),
                          completed_at = COALESCE(completed_at, ?1),
                          last_seen_at = CASE
                              WHEN last_seen_at IS NULL OR last_seen_at <= ?1 THEN ?1
@@ -2770,6 +2771,7 @@ fn durable_cancel_print_job(db: &DbState, job_id: &str) -> Result<Value, String>
                     "UPDATE print_job_attempts
                      SET state = 'cancelled',
                          cancel_requested_at = COALESCE(cancel_requested_at, ?1),
+                         cancel_confirmed_at = COALESCE(cancel_confirmed_at, ?1),
                          completed_at = COALESCE(completed_at, ?1),
                          last_seen_at = CASE
                              WHEN last_seen_at IS NULL OR last_seen_at <= ?1 THEN ?1
@@ -2814,7 +2816,9 @@ fn durable_cancel_print_job(db: &DbState, job_id: &str) -> Result<Value, String>
         } else {
             0
         };
-        (dead_nonwindows_finalized, 0, parent_closed, false)
+        // 'affected' counts JOBS, like every other branch of this ladder —
+        // a job with several dead attempts still resolved exactly once.
+        (dead_nonwindows_finalized.min(1), 0, parent_closed, false)
     } else if !has_active_attempt && parent_state == "pending" {
         let changed = tx
             .execute(
@@ -8260,9 +8264,20 @@ fn prepare_frozen_attempt_with_hooks(
 
     let (bytes, envelope, target, output_path, pending_html, active) =
         if let Some((bytes, envelope, output_path)) = stored {
-            let active =
+            // Register under the association barrier, exactly like the fresh
+            // path below: cancel's live-worker check reads the registry under
+            // this same mutex, and registering outside it opened a TOCTOU
+            // window where a cancel could read a stale live-set and
+            // force-finalize an attempt whose worker was mid-registration —
+            // precisely on the retried (incident-class) jobs this snapshot
+            // path serves.
+            let active = {
+                let _profile_association_guard = profile_association_coordination()
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 ActivePrintGuard::register(db, job_id, Some(envelope.effective_profile_id.clone()))
-                    .map_err(|error| format!("Register active managed print attempt: {error}"))?;
+                    .map_err(|error| format!("Register active managed print attempt: {error}"))?
+            };
             profile_resolved_hook(&envelope.effective_profile_id);
             if !active.is_primary() {
                 return Ok(None);
@@ -9981,13 +9996,17 @@ mod tests {
     /// the 19/08 shop incident: the worker died mid-write (os error 10060)
     /// and left the printer lane bricked.
     fn add_unknown_raw_attempt(conn: &Connection, job_id: &str) -> Uuid {
+        add_unknown_raw_attempt_to(conn, job_id, "192.168.1.19")
+    }
+
+    fn add_unknown_raw_attempt_to(conn: &Connection, job_id: &str, host: &str) -> Uuid {
         let now = Utc::now();
         let attempt = create_attempt(
             conn,
             NewAttempt {
                 local_job_id: job_id.to_owned(),
                 target: PrinterTargetKey::RawTcp {
-                    host: "192.168.1.19".into(),
+                    host: host.into(),
                     port: 9100,
                 },
                 document_kind: "receipt".into(),
@@ -10050,6 +10069,76 @@ mod tests {
         assert_eq!(after.counts.history, 1, "the failed job stays visible");
     }
 
+    /// The other half of the 19/08 deadlock: finalizing the dead attempt is
+    /// not enough — the incident left `print_target_state.circuit_state='open'`
+    /// and no reconciler exists for raw transports, so the printer stayed
+    /// silently undispatchable across restarts (closed by hand in prod that
+    /// night). On this line the liberation is owned by the orphaned-lane
+    /// sweep (v1.4.74): once the operator cancel removes the durable blocker,
+    /// the next hydrate + sweep pass must close the circuit row and leave the
+    /// lane claimable. This pins the sweep's circuit-close UPDATE against a
+    /// real seeded `print_target_state` row — no other test does.
+    #[test]
+    fn cancelled_dead_raw_attempt_reopens_the_printer_lane_after_sweep() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        let host = format!("lane-test-{}", Uuid::new_v4().simple());
+        let target = PrinterTargetKey::RawTcp {
+            host: host.clone(),
+            port: 9100,
+        };
+        let target_key = crate::print_dispatch::normalize_target(&target).unwrap();
+        let (job_id, attempt_id) = {
+            let conn = db.conn.lock().unwrap();
+            let job_id = insert_control_job(&conn, "failed", Some("profile-lane-circuit"));
+            let attempt_id = add_unknown_raw_attempt_to(&conn, &job_id, &host);
+            // The incident's durable residue: the failed dispatch opened the
+            // target's circuit before the worker died.
+            conn.execute(
+                "INSERT INTO print_target_state
+                 (target_key, transport, circuit_state, blocked_reason, blocked_at, updated_at)
+                 VALUES (?1, 'raw_tcp', 'open', 'transport failure', ?2, ?2)",
+                params![target_key, Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+            (job_id, attempt_id)
+        };
+
+        let result = durable_cancel_print_job(&db, &job_id).unwrap();
+        assert_eq!(result["success"], true);
+
+        let conn = db.conn.lock().unwrap();
+        let attempt = crate::print_dispatch::read_attempt(&conn, attempt_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(attempt.state, DispatchState::Cancelled);
+        // A fresh process hydrates the persisted open circuit as an
+        // OpenRetained lane; with the blocker finalized, the very next sweep
+        // pass must free it.
+        let manager =
+            crate::print_dispatch::DispatchManager::hydrate_isolated_for_test(&conn).unwrap();
+        let released = manager.sweep_orphaned_lanes(&conn, Utc::now()).unwrap();
+        assert!(
+            released.contains(&target_key),
+            "the sweep must release the cancelled attempt's lane: {released:?}"
+        );
+        let circuit: String = conn
+            .query_row(
+                "SELECT circuit_state FROM print_target_state WHERE target_key = ?1",
+                params![target_key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            circuit, "closed",
+            "the sweep must close the circuit the dead attempt left open"
+        );
+        assert!(
+            manager.claim(target).is_ok(),
+            "the printer lane must be claimable again after cancel + sweep"
+        );
+    }
+
     /// The dead-attempt finalization must never touch a LIVE raw worker —
     /// that one keeps the cooperative stop flow.
     #[test]
@@ -10097,7 +10186,10 @@ mod tests {
         };
 
         let plan = durable_pause_and_cancel_pos_jobs(&db, None, Utc::now()).unwrap();
-        assert!(plan.affected >= 1, "the dead attempt's job counts affected");
+        assert_eq!(
+            plan.affected, 1,
+            "the dead attempt's job counts exactly once"
+        );
 
         let conn = db.conn.lock().unwrap();
         let attempt = crate::print_dispatch::read_attempt(&conn, attempt_id)
