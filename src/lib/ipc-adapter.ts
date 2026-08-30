@@ -1675,6 +1675,7 @@ export interface PlatformBridge {
   tables: {
     list(params?: TableBridgeListParams): Promise<AdminApiBridgeResponse<any>>;
     get(tableId: string): Promise<AdminApiBridgeResponse<any>>;
+    floorPlans(): Promise<AdminApiBridgeResponse<any>>;
     updateStatus(
       tableId: string,
       status: string,
@@ -3147,6 +3148,7 @@ export class TauriBridge implements PlatformBridge {
     list: (params?: TableBridgeListParams) =>
       this.inv("branch-data:get-tables", params || {}),
     get: (tableId: string) => this.adminFetch(`/api/pos/tables/${tableId}`),
+    floorPlans: () => this.adminFetch(`/api/pos/floor-plans`),
     updateStatus: (
       tableId: string,
       status: string,

@@ -126,6 +126,31 @@ export function getTableFloorPlanBounds(tables: FloorPlanTableLike[]) {
   return getTableFloorPlanLayout(tables).bounds;
 }
 
+/**
+ * Layout against an admin floor-plan canvas: NO normalization — walls and
+ * fixtures are stored in absolute canvas coordinates, so translating the
+ * table cluster would tear the furniture away from the architecture. Bounds
+ * grow past the canvas only if a table actually overflows it.
+ */
+export function getTableFloorPlanLayoutForCanvas(
+  tables: FloorPlanTableLike[],
+  canvas: { width: number; height: number },
+): TableFloorPlanLayout {
+  const nodes = tables.map((table, index) => resolveTableFloorPlanNode(table, index));
+  const maxX = nodes.length === 0 ? 0 : Math.max(...nodes.map(node => node.x + node.width));
+  const maxY = nodes.length === 0 ? 0 : Math.max(...nodes.map(node => node.y + node.height));
+
+  return {
+    nodes,
+    bounds: {
+      width: Math.max(Math.max(320, canvas.width), Math.ceil(maxX + FLOOR_PLAN_PADDING)),
+      height: Math.max(Math.max(240, canvas.height), Math.ceil(maxY + FLOOR_PLAN_PADDING)),
+    },
+    offsetX: 0,
+    offsetY: 0,
+  };
+}
+
 export function getTableShapePathForFloorPlan(
   shape: string | null | undefined,
   width: number,

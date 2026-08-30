@@ -4120,7 +4120,7 @@
       "satelliteTerminalChip": "su {{terminal}}",
       "satelliteTotalsChip": "{{orders}} ordini · {{sales}}",
       "satelliteCheckout": {
-        "back": "Torna al personale",
+        "back": "Indietro",
         "title": "Consegna cassa — {{name}}",
         "loading": "Caricamento dei dati del turno…",
         "previewFailed": "Impossibile caricare i dati del turno.",

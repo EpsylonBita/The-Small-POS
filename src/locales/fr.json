@@ -4120,7 +4120,7 @@
       "satelliteTerminalChip": "sur {{terminal}}",
       "satelliteTotalsChip": "{{orders}} commandes · {{sales}}",
       "satelliteCheckout": {
-        "back": "Retour au personnel",
+        "back": "Retour",
         "title": "Remise de caisse — {{name}}",
         "loading": "Chargement des chiffres du service…",
         "previewFailed": "Impossible de charger les chiffres du service.",

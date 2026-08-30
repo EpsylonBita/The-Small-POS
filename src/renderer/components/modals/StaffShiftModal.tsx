@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { toast } from 'react-hot-toast';
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
-import { X, Clock, Euro, FileText, Plus, AlertCircle, User, ChevronRight, AlertTriangle, CheckCircle, XCircle, Banknote, CreditCard, Star, Check, Trash2, Pencil, QrCode, Delete } from 'lucide-react';
+import { X, Clock, Euro, FileText, Plus, AlertCircle, User, ChevronLeft, ChevronRight, AlertTriangle, CheckCircle, XCircle, Banknote, CreditCard, Star, Check, Trash2, Pencil, QrCode, Delete } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useShift } from '../../contexts/shift-context';
 import { ShiftExpense, StaffPayment } from '../../types';
@@ -1097,6 +1097,13 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       // Reset any previous checkout override/session
       setLocalMode(null);
       setCheckoutShift(null);
+      // Reset any previous satellite remote-checkout pane — without this the
+      // modal reopens straight onto the last-tapped satellite card.
+      setSatelliteCheckout(null);
+      setSatellitePreview({ loading: false, error: null, figures: null });
+      setSatelliteCountedCash('');
+      setSatelliteSubmitting(false);
+      setSatelliteResult(null);
       setShowExpenseForm(false);
       setClosingCash('');
       setDriverActualCash('');
@@ -3577,14 +3584,6 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         : null;
     return (
       <div className="space-y-4" data-testid="satellite-checkout-section">
-        <button
-          type="button"
-          onClick={closeSatelliteCheckout}
-          className="inline-flex items-center gap-2 text-sm font-semibold text-slate-600 dark:text-slate-300"
-        >
-          ← {t('modals.staffShift.satelliteCheckout.back', { defaultValue: 'Back to staff' })}
-        </button>
-
         <div className={checkoutSurfaceClass}>
           <h3 className="text-lg font-black liquid-glass-modal-text">
             {t('modals.staffShift.satelliteCheckout.title', {
@@ -6069,6 +6068,20 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
             }`}
             data-testid="staff-shift-scroll-body"
           >
+          {/* Satellite handover: a real back button ABOVE the step circles
+              (founder 30/08 — the old inline text link was invisible). */}
+          {satelliteCheckout && (
+            <button
+              type="button"
+              onClick={closeSatelliteCheckout}
+              data-testid="satellite-checkout-back"
+              className="mb-2 inline-flex items-center gap-1.5 rounded-xl border border-slate-300/80 bg-white/90 px-4 py-2 text-sm font-bold text-slate-700 shadow-sm transition-colors active:bg-slate-100 dark:border-white/15 dark:bg-white/10 dark:text-white dark:active:bg-white/20"
+            >
+              <ChevronLeft size={18} strokeWidth={2.5} />
+              {t('modals.staffShift.satelliteCheckout.back', { defaultValue: 'Back' })}
+            </button>
+          )}
+
           {/* Progress Stepper used during Check In/Out */}
           {effectiveMode === 'checkin' && (
             <motion.div

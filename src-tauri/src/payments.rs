@@ -1269,6 +1269,21 @@ pub(crate) fn record_payment_in_connection(
                 .filter(|value| !value.is_empty())
                 .is_some();
 
+    // Mirrored/reconstructed payments ('sync_reconstructed' origin) describe
+    // money that changed hands on ANOTHER terminal — e.g. a waiter phone that
+    // collected cash at the table. They must keep the ORDER's own shift
+    // attribution: routing them through resolve_order_owner stamped THIS
+    // register's active cashier onto satellite money, pulling it into the
+    // local drawer's expected cash before any handover (field 30/08, geminix
+    // org — the +53€ that was never in the drawer). Every at-the-till flow
+    // ('terminal' AND 'manual' origins) keeps today's ownership resolution.
+    let mirrored_with_order_shift = input.payment_origin == "sync_reconstructed"
+        && order_staff_shift_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_some();
+
     let (resolved_shift_id, resolved_staff_id) = if explicit_cashier_drawer_shift {
         let shift_id = input
             .requested_staff_shift_id
@@ -1297,6 +1312,8 @@ pub(crate) fn record_payment_in_connection(
             .map(|value| value.to_string())
             .or(Some(shift_staff_id));
         (Some(shift_id), staff_id)
+    } else if mirrored_with_order_shift {
+        (order_staff_shift_id.clone(), order_staff_id.clone())
     } else if keep_delivery_unassigned {
         (None, None)
     } else if cashier_collected_delivery_cash {

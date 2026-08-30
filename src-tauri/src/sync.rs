@@ -9444,6 +9444,69 @@ fn sync_remote_payment_into_local_with_context(
         )));
     }
 
+    // Amount-mismatch adoption: when the order has EXACTLY ONE reconstructed
+    // placeholder for this method, it can only describe this same money —
+    // adopt it even when the amounts disagree (the placeholder was fabricated
+    // from a stale local total; hydration overwrites it with the remote
+    // truth). Without this, a wrong-amount placeholder and the real mirror
+    // both survive and the drawer double-counts (field 30/08: 19€ + 34€).
+    let lone_placeholder: Option<String> = {
+        let placeholders: Vec<String> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id
+                     FROM order_payments
+                     WHERE order_id = ?1
+                       AND payment_origin = 'sync_reconstructed'
+                       AND remote_payment_id IS NULL
+                       AND status = 'completed'
+                       AND method = ?2
+                     ORDER BY created_at ASC
+                     LIMIT 2",
+                )
+                .map_err(|e| format!("prepare lone placeholder lookup: {e}"))?;
+            let rows = stmt
+                .query_map(params![local_order_id, method], |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(|e| format!("resolve lone placeholder: {e}"))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| format!("collect lone placeholder: {e}"))?;
+            rows
+        };
+        if placeholders.len() == 1 {
+            placeholders.into_iter().next()
+        } else {
+            None
+        }
+    };
+
+    if let Some(local_payment_id) = lone_placeholder {
+        hydrate_local_payment_from_remote(
+            conn,
+            &local_order_id,
+            &local_payment_id,
+            &remote_payment_id,
+            &method,
+            amount,
+            &currency,
+            transaction_ref.as_deref(),
+            items,
+            &created_at,
+            &updated_at,
+        )?;
+        return Ok(Some(build_synced_remote_payment_mirror(
+            &local_order_id,
+            &local_payment_id,
+            &remote_payment_id,
+            &method,
+            amount,
+            transaction_ref.as_deref(),
+            metadata_local_payment_id.as_deref(),
+            &updated_at,
+        )));
+    }
+
     if let Some(transaction_ref) = transaction_ref.as_deref() {
         let orphan_local_payment_id: Option<String> = conn
             .query_row(
@@ -9701,6 +9764,15 @@ fn maybe_reconstruct_paid_remote_order_payment(
             },
         )
         .map_err(|e| format!("load local reconstruction context: {e}"))?;
+
+    // The REMOTE total is the authority for reconstructed money: the local
+    // row can lag (items added on a satellite were not yet mirrored — field
+    // 30/08: local 19€ vs real 34€ fabricated a 19€ payment that the real
+    // payment mirror then could not adopt, leaving 53€ in the drawer sums).
+    let remote_total = num_any(remote_order, &["total_amount", "totalAmount"])
+        .map(|value| crate::money::Cents::round_half_even(value).to_f64_dp2())
+        .filter(|value| *value > 0.0);
+    let order_total = remote_total.unwrap_or(order_total);
 
     if is_ghost != 0
         || order_total <= 0.0
@@ -10043,6 +10115,27 @@ async fn reconcile_remote_orders(
                         // `?4` parameter slot was repurposed for
                         // cancellation_reason (formerly `?8`).
                         let _ = &payment_method;
+                        // Table-service propagation (field 30/08, geminix org):
+                        // items ADDED to an open satellite order never reached
+                        // this mirror — the reconcile applied only status-level
+                        // fields, so the local copy kept the stale item list
+                        // and total (19€ vs the real 34€), and every consumer
+                        // of the local row (payment pairing, drawer sums,
+                        // prints) worked from wrong money. Apply items and the
+                        // money trio when the remote actually carries them;
+                        // absent keys leave the local values untouched.
+                        let remote_items_json: Option<String> = match remote_order
+                            .get("items")
+                            .or_else(|| remote_order.get("order_items"))
+                            .or_else(|| remote_order.get("orderItems"))
+                        {
+                            Some(Value::String(raw)) => Some(raw.clone()),
+                            Some(value) => serde_json::to_string(value).ok(),
+                            None => None,
+                        };
+                        let remote_total = num_any(&remote_order, &["total_amount", "totalAmount"]);
+                        let remote_subtotal = num_any(&remote_order, &["subtotal"]);
+                        let remote_tax = num_any(&remote_order, &["tax_amount", "taxAmount"]);
                         let updated = conn
                             .execute(
                                 "UPDATE orders
@@ -10053,7 +10146,11 @@ async fn reconcile_remote_orders(
                                      sync_status = 'synced',
                                      last_synced_at = datetime('now'),
                                      updated_at = ?6,
-                                     cancellation_reason = COALESCE(?4, cancellation_reason)
+                                     cancellation_reason = COALESCE(?4, cancellation_reason),
+                                     items = COALESCE(?8, items),
+                                     total_amount = COALESCE(?9, total_amount),
+                                     subtotal = COALESCE(?10, subtotal),
+                                     tax_amount = COALESCE(?11, tax_amount)
                                  WHERE id = ?7
                                    AND (
                                      COALESCE(supabase_id, '') != COALESCE(?1, '')
@@ -10063,6 +10160,10 @@ async fn reconcile_remote_orders(
                                      OR COALESCE(sync_status, '') != 'synced'
                                      OR COALESCE(updated_at, '') != COALESCE(?6, '')
                                      OR COALESCE(cancellation_reason, '') != COALESCE(?4, '')
+                                     OR (?8 IS NOT NULL AND COALESCE(items, '') != ?8)
+                                     OR (?9 IS NOT NULL AND COALESCE(total_amount, -1) != ?9)
+                                     OR (?10 IS NOT NULL AND COALESCE(subtotal, -1) != ?10)
+                                     OR (?11 IS NOT NULL AND COALESCE(tax_amount, -1) != ?11)
                                    )",
                                 params![
                                     remote_id,
@@ -10072,6 +10173,10 @@ async fn reconcile_remote_orders(
                                     payment_transaction_id,
                                     updated_at,
                                     local_id,
+                                    remote_items_json,
+                                    remote_total,
+                                    remote_subtotal,
+                                    remote_tax,
                                 ],
                             )
                             .unwrap_or(0);

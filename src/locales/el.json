@@ -4113,7 +4113,7 @@
       "satelliteTerminalChip": "στο {{terminal}}",
       "satelliteTotalsChip": "{{orders}} παραγγελίες · {{sales}}",
       "satelliteCheckout": {
-        "back": "Πίσω στο προσωπικό",
+        "back": "Πίσω",
         "title": "Παράδοση ταμείου — {{name}}",
         "loading": "Φόρτωση στοιχείων βάρδιας από τον διακομιστή…",
         "previewFailed": "Δεν ήταν δυνατή η φόρτωση των στοιχείων της βάρδιας.",

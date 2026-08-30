@@ -4120,7 +4120,7 @@
       "satelliteTerminalChip": "auf {{terminal}}",
       "satelliteTotalsChip": "{{orders}} Bestellungen · {{sales}}",
       "satelliteCheckout": {
-        "back": "Zurück zum Personal",
+        "back": "Zurück",
         "title": "Kassenübergabe — {{name}}",
         "loading": "Schichtdaten werden vom Server geladen…",
         "previewFailed": "Die Schichtdaten konnten nicht geladen werden.",

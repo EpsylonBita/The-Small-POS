@@ -57,7 +57,7 @@ import {
   RoomFloorChips,
   deriveRoomFloors,
 } from "./modals/RoomStayWorkflowModals";
-import { TableSelector, TableActionModal, TableCheckManagerModal, ReservationForm, TableFloorPlanView } from "./tables";
+import { TableSelector, TableActionModal, TableCheckManagerModal, ReservationForm, TableFloorPlanView, TableFloorPlanModal } from "./tables";
 import type { CreateReservationDto } from "./tables";
 import {
   AlertTriangle,
@@ -755,6 +755,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     const [tableViewMode, setTableViewMode] = useState<"list" | "floorplan">(
       "list",
     );
+    // Full-screen 2D plan (founder 30/08): the 2D toggle opens a modal instead
+    // of squeezing the plan into the inline grid area.
+    const [tableFloorPlanModalOpen, setTableFloorPlanModalOpen] = useState(false);
 
     // State for table order flow
     const [showTableSelector, setShowTableSelector] = useState(false);
@@ -6674,9 +6677,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                       </button>
                       <button
                         type="button"
-                        onClick={() => setTableViewMode("floorplan")}
+                        onClick={() => setTableFloorPlanModalOpen(true)}
                         className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-bold transition-colors ${
-                          tableViewMode === "floorplan"
+                          tableFloorPlanModalOpen
                             ? "bg-yellow-400 text-black"
                             : resolvedTheme === "light"
                               ? "text-slate-700 active:bg-[#fffaf1]"
@@ -6785,6 +6788,17 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                     data-testid="order-dashboard-table-scroll-region"
                     className="h-full min-h-0 overflow-y-auto overflow-x-hidden pb-28 pr-24 scrollbar-hide touch-scroll"
                   >
+                  <TableFloorPlanModal
+                    isOpen={tableFloorPlanModalOpen}
+                    onClose={() => setTableFloorPlanModalOpen(false)}
+                    tables={displayTables}
+                    isDark={resolvedTheme !== "light"}
+                    selectedTableId={selectedTable?.id ?? null}
+                    onTableSelect={(table) => {
+                      setTableFloorPlanModalOpen(false);
+                      handleTableSelect(table);
+                    }}
+                  />
                   {visibleTableCards.length === 0 ? (
                     <div
                       className={`flex min-h-full items-center justify-center rounded-xl border border-dashed py-10 text-center font-semibold ${

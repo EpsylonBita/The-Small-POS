@@ -70,9 +70,15 @@ test('the table-grid scroll containers and wheel handlers are still wired (no po
 test('TableFloorPlanView normalizes the layout so high-positioned tables start in view', () => {
   // The 2D floor plan opened blank when tables were positioned far from the origin
   // because bounds were sized from max X/Y only. It now uses the normalized layout
-  // helper that translates the cluster to the padding origin.
+  // helper that translates the cluster to the padding origin. With an admin
+  // floor-plan canvas (walls/fixtures decor, 30/08) the coordinates stay ABSOLUTE
+  // via getTableFloorPlanLayoutForCanvas so tables align with the architecture —
+  // normalization remains the no-canvas default.
   assert.match(floorPlanSource, /import \{[\s\S]*getTableFloorPlanLayout[\s\S]*\} from '\.\.\/\.\.\/utils\/tableFloorPlan';/);
-  assert.match(floorPlanSource, /const layout = useMemo\(\(\) => getTableFloorPlanLayout\(tables\), \[tables\]\)/);
+  assert.match(
+    floorPlanSource,
+    /canvas \? getTableFloorPlanLayoutForCanvas\(tables, canvas\) : getTableFloorPlanLayout\(tables\)/,
+  );
   assert.match(floorPlanSource, /const bounds = layout\.bounds/);
   assert.match(floorPlanSource, /layout\.nodes\.map\(/);
   // The pre-normalization bounds-only helper is no longer used here.

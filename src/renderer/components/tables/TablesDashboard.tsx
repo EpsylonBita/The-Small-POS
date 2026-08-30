@@ -6,6 +6,7 @@ import { useTables } from '../../hooks/useTables';
 import { useSystemClock } from '../../hooks/useSystemClock';
 import { ReservationInfoPanel } from './ReservationInfoPanel';
 import { TableFloorPlanView } from './TableFloorPlanView';
+import { TableFloorPlanModal } from './TableFloorPlanModal';
 import { FloatingActionButton } from '../ui/FloatingActionButton';
 import type { Order } from '../../types/orders';
 import type { RestaurantTable, TablesDashboardTab, TabConfig, TableStatus } from '../../types/tables';
@@ -809,6 +810,9 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
   const [filter, setFilter] = useState<TableStatus | 'all'>('all');
   const [floorFilter, setFloorFilter] = useState('all');
   const [tableViewMode, setTableViewMode] = useState<'list' | 'floorplan'>('list');
+  // Full-screen 2D plan (founder 30/08): the 2D toggle opens a modal instead
+  // of squeezing the plan into the inline grid area.
+  const [floorPlanModalOpen, setFloorPlanModalOpen] = useState(false);
   const [selectedTable, setSelectedTable] = useState<RestaurantTable | null>(null);
   const [showReservationPanel, setShowReservationPanel] = useState(false);
   const tableGridScrollRef = useRef<HTMLDivElement>(null);
@@ -1107,9 +1111,9 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
                 </button>
                 <button
                   type="button"
-                  onClick={() => setTableViewMode('floorplan')}
+                  onClick={() => setFloorPlanModalOpen(true)}
                   className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-sm font-semibold transition-colors ${
-                    tableViewMode === 'floorplan'
+                    floorPlanModalOpen
                       ? 'bg-yellow-400 text-black'
                       : isDark
                         ? 'text-slate-200 active:bg-white/[0.08]'
@@ -1196,6 +1200,17 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
             data-testid="tables-dashboard-table-scroll-region"
             className="h-full min-h-0 overflow-y-auto overflow-x-hidden pb-28 pr-24 scrollbar-hide touch-scroll"
           >
+          <TableFloorPlanModal
+            isOpen={floorPlanModalOpen}
+            onClose={() => setFloorPlanModalOpen(false)}
+            tables={tables}
+            isDark={isDark}
+            selectedTableId={selectedTable?.id ?? null}
+            onTableSelect={(table) => {
+              setFloorPlanModalOpen(false);
+              handleTableClick(table);
+            }}
+          />
           {tableViewMode === 'floorplan' ? (
             <TableFloorPlanView
               tables={filteredTables}

@@ -3,6 +3,8 @@ export { TablesDashboard } from './TablesDashboard';
 export { default as TablesDashboardDefault } from './TablesDashboard';
 export { TableFloorPlanView } from './TableFloorPlanView';
 export { default as TableFloorPlanViewDefault } from './TableFloorPlanView';
+export { TableFloorPlanModal } from './TableFloorPlanModal';
+export { default as TableFloorPlanModalDefault } from './TableFloorPlanModal';
 export { TableSelector, filterSelectableTables } from './TableSelector';
 export { default as TableSelectorDefault } from './TableSelector';
 export { TableActionModal } from './TableActionModal';

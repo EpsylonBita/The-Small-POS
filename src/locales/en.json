@@ -4120,7 +4120,7 @@
       "satelliteTerminalChip": "on {{terminal}}",
       "satelliteTotalsChip": "{{orders}} orders · {{sales}}",
       "satelliteCheckout": {
-        "back": "Back to staff",
+        "back": "Back",
         "title": "Cash handover — {{name}}",
         "loading": "Loading shift figures from the server…",
         "previewFailed": "Could not load the shift figures from the server.",
