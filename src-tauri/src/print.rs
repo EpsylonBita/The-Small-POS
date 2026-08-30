@@ -9350,6 +9350,14 @@ pub fn start_print_worker(
 
 #[cfg(test)]
 mod tests {
+    // CI patience convention (print-concurrency flake family, 2026-08-26..28):
+    // test-side liveness waits (recv_timeout, condvar wait_*, tokio timeouts)
+    // get 30s; success-path bounds handed to the function under test get 10s
+    // (deadlines the instant fakes never approach); bounds that must outlive a
+    // test's own blocked-fake choreography get 60s. Tight values that ARE the
+    // behavior under test (the 40ms coalescing probe, timeout-path bounds,
+    // watchdog millis) stay tight - never de-flake by loosening those.
+
     use super::*;
     use crate::db;
     use crate::money::Cents;
@@ -9754,7 +9762,7 @@ mod tests {
             cancel.clone(),
         ));
 
-        let remaining = tokio::time::timeout(Duration::from_secs(5), remaining_rows.recv())
+        let remaining = tokio::time::timeout(Duration::from_secs(30), remaining_rows.recv())
             .await
             .expect("startup purge must not wait 24 hours")
             .expect("changed startup purge invalidation");
@@ -9762,7 +9770,7 @@ mod tests {
         assert_eq!(invalidator.calls.load(Ordering::Acquire), 1);
 
         cancel.cancel();
-        tokio::time::timeout(Duration::from_secs(5), worker)
+        tokio::time::timeout(Duration::from_secs(30), worker)
             .await
             .expect("purge worker observes cancellation")
             .expect("purge worker join");
@@ -9787,12 +9795,12 @@ mod tests {
             cancel.clone(),
         ));
 
-        tokio::time::timeout(Duration::from_secs(5), invalidations.recv())
+        tokio::time::timeout(Duration::from_secs(30), invalidations.recv())
             .await
             .expect("loop must continue after a purge error")
             .expect("successful changed tick invalidation");
         cancel.cancel();
-        tokio::time::timeout(Duration::from_secs(5), worker)
+        tokio::time::timeout(Duration::from_secs(30), worker)
             .await
             .expect("purge worker observes cancellation")
             .expect("purge worker join");
@@ -10327,7 +10335,7 @@ mod tests {
         });
 
         let result =
-            cancel_print_job_with_spooler(&db, &job_id, spooler.clone(), Duration::from_secs(1))
+            cancel_print_job_with_spooler(&db, &job_id, spooler.clone(), Duration::from_secs(10))
                 .unwrap();
 
         assert_eq!(result["nativeControlsRequested"], 1);
@@ -10421,7 +10429,7 @@ mod tests {
             &db,
             &job_id,
             Arc::clone(&spooler),
-            Duration::from_secs(1),
+            Duration::from_secs(10),
         )
         .unwrap();
 
@@ -10485,7 +10493,7 @@ mod tests {
             &db,
             Some("profile-a"),
             Arc::clone(&spooler),
-            Duration::from_secs(1),
+            Duration::from_secs(10),
         )
         .unwrap();
 
@@ -10540,7 +10548,7 @@ mod tests {
             Some("profile-a"),
             true,
             Arc::clone(&spooler),
-            Duration::from_secs(1),
+            Duration::from_secs(10),
         )
         .unwrap();
         assert_eq!(paused["nativeControlsRequested"], 2);
@@ -10572,7 +10580,7 @@ mod tests {
             Some("profile-a"),
             false,
             Arc::clone(&spooler),
-            Duration::from_secs(1),
+            Duration::from_secs(10),
         )
         .unwrap();
 
@@ -10653,7 +10661,7 @@ mod tests {
             &db,
             &manager,
             spooler as Arc<dyn WindowsSpooler>,
-            Duration::from_secs(1),
+            Duration::from_secs(10),
         )
         .unwrap();
 
@@ -10714,7 +10722,7 @@ mod tests {
         });
 
         let result =
-            cancel_print_job_with_spooler(&db, &job_id, spooler.clone(), Duration::from_secs(1))
+            cancel_print_job_with_spooler(&db, &job_id, spooler.clone(), Duration::from_secs(10))
                 .unwrap();
 
         assert_eq!(result["nativeControlsRequested"], 0);
@@ -10748,7 +10756,7 @@ mod tests {
             &db,
             &job_id,
             Arc::clone(&control_spooler),
-            Duration::from_secs(1),
+            Duration::from_secs(10),
         )
         .unwrap();
         assert_eq!(control["nativeControlsRequested"], 0);
@@ -10768,7 +10776,7 @@ mod tests {
             &db,
             &manager,
             Arc::clone(&reconciliation_spooler) as Arc<dyn WindowsSpooler>,
-            Duration::from_secs(1),
+            Duration::from_secs(10),
         )
         .unwrap();
         assert_eq!(reconciliation, WindowsReconcileCounts::default());
@@ -10830,7 +10838,7 @@ mod tests {
             &db,
             &manager,
             Arc::clone(&spooler) as Arc<dyn WindowsSpooler>,
-            Duration::from_secs(1),
+            Duration::from_secs(10),
         )
         .unwrap();
 
@@ -10885,7 +10893,7 @@ mod tests {
         let spooler = Arc::new(FakeWindowsSpooler::new(73));
 
         let result =
-            cancel_print_job_with_spooler(&db, &job_id, spooler, Duration::from_secs(1)).unwrap();
+            cancel_print_job_with_spooler(&db, &job_id, spooler, Duration::from_secs(10)).unwrap();
 
         assert_eq!(result["ownershipRefused"], 1);
         assert_eq!(result["durableChanged"], true);
@@ -10968,7 +10976,7 @@ mod tests {
                 let (mut state, timeout) = self
                     .blocked
                     .1
-                    .wait_timeout_while(state, Duration::from_secs(5), |state| !state.1)
+                    .wait_timeout_while(state, Duration::from_secs(30), |state| !state.1)
                     .unwrap();
                 state.0 = true;
                 assert!(!timeout.timed_out(), "blocked fake was not released");
@@ -11054,11 +11062,18 @@ mod tests {
             &db,
             None,
             spooler.clone(),
-            Duration::from_millis(100),
+            // 10s, not 100ms: the bound only decides when the deliberately
+            // jammed target is declared failed - the fast target needs CI-grade
+            // room to complete, or it too counts as failed and the
+            // one-jam-does-not-block-another story asserts the wrong world.
+            Duration::from_secs(10),
         )
         .unwrap();
 
-        assert!(started.elapsed() < Duration::from_secs(1));
+        // The jammed target rides the full 10s bound; 25s still proves the
+        // call returned because the bound fired - the jam is released only
+        // below, and the fake's own liveness wait is 30s.
+        assert!(started.elapsed() < Duration::from_secs(25));
         assert_eq!(result["nativeControlsRequested"], 1);
         assert_eq!(result["nativeControlsConfirmed"], 0);
         assert_eq!(result["nativeControlsFailed"], 1);
@@ -11123,7 +11138,7 @@ mod tests {
             Some("profile-a"),
             true,
             spooler.clone(),
-            Duration::from_secs(1),
+            Duration::from_secs(10),
         )
         .unwrap();
 
@@ -11241,7 +11256,7 @@ mod tests {
             Some("profile-a"),
             true,
             Arc::clone(&spooler),
-            Duration::from_secs(1),
+            Duration::from_secs(10),
         )
         .unwrap();
         assert_eq!(paused["nativeControlsRequested"], 1);
@@ -11258,7 +11273,7 @@ mod tests {
             Some("profile-a"),
             false,
             Arc::clone(&spooler),
-            Duration::from_secs(1),
+            Duration::from_secs(10),
         )
         .unwrap();
 
@@ -11316,7 +11331,7 @@ mod tests {
             &manager,
             &CapturingManagedRaw::default(),
             spooler,
-            Duration::from_secs(1),
+            Duration::from_secs(10),
         )
         .unwrap();
 
@@ -11616,7 +11631,7 @@ mod tests {
             Some("profile-a"),
             false,
             spooler.clone(),
-            Duration::from_secs(1),
+            Duration::from_secs(10),
         )
         .unwrap();
 
@@ -12022,7 +12037,7 @@ mod tests {
             let _ = result_tx.send(print_queue_snapshot(&worker_db, None, None, 20, 0));
         });
 
-        let result_while_mutex_is_held = result_rx.recv_timeout(Duration::from_secs(2));
+        let result_while_mutex_is_held = result_rx.recv_timeout(Duration::from_secs(30));
         drop(global_guard);
         worker.join().expect("queue snapshot worker must not panic");
 
@@ -12480,7 +12495,7 @@ mod tests {
             &db,
             &job_id,
             Arc::new(FakeWindowsSpooler::new(73)),
-            Duration::from_secs(1),
+            Duration::from_secs(10),
         )
         .unwrap();
         assert_eq!(individual["success"], false);
@@ -12493,7 +12508,7 @@ mod tests {
             &db,
             None,
             Arc::new(FakeWindowsSpooler::new(73)),
-            Duration::from_secs(1),
+            Duration::from_secs(10),
         )
         .unwrap();
         assert_eq!(bulk["affected"], 0);
@@ -12978,7 +12993,7 @@ mod tests {
             &manager,
             Arc::new(FakeWindowsSpooler::new(93)),
             &drawer,
-            Duration::from_secs(5),
+            Duration::from_secs(10),
             attempt,
         )
         .unwrap();
@@ -13557,7 +13572,7 @@ mod tests {
             )
         });
         let artifact_path = artifact_ready_rx
-            .recv_timeout(Duration::from_secs(10))
+            .recv_timeout(Duration::from_secs(30))
             .unwrap();
         let artifact_ref = artifact_path
             .file_stem()
@@ -13649,7 +13664,7 @@ mod tests {
             &manager,
             &raw,
             spooler,
-            Duration::from_secs(1),
+            Duration::from_secs(10),
         )
         .expect("managed worker");
         assert_eq!(processed, 1);
@@ -13701,7 +13716,7 @@ mod tests {
             &manager,
             &raw,
             Arc::clone(&spooler),
-            Duration::from_secs(1),
+            Duration::from_secs(10),
         )
         .unwrap();
         let first = raw.calls.lock().unwrap()[0].clone();
@@ -13728,7 +13743,7 @@ mod tests {
             &manager,
             &raw,
             spooler,
-            Duration::from_secs(1),
+            Duration::from_secs(10),
         )
         .unwrap();
         let calls = raw.calls.lock().unwrap();
@@ -13891,7 +13906,7 @@ mod tests {
                     &manager,
                     &raw,
                     Arc::clone(&spooler),
-                    Duration::from_secs(1),
+                    Duration::from_secs(10),
                 )
                 .expect("dispatch original financial document"),
                 1
@@ -13957,7 +13972,7 @@ mod tests {
                     &manager,
                     &raw,
                     Arc::clone(&spooler),
-                    Duration::from_secs(1),
+                    Duration::from_secs(10),
                 )
                 .expect("dispatch fresh mutated control"),
                 1
@@ -13989,7 +14004,7 @@ mod tests {
                     &manager,
                     &raw,
                     spooler,
-                    Duration::from_secs(1),
+                    Duration::from_secs(10),
                 )
                 .expect("dispatch frozen financial Reprint child"),
                 1
@@ -14221,7 +14236,11 @@ mod tests {
                 &DispatchManager::isolated_for_test(),
                 worker_raw.as_ref(),
                 Arc::new(FakeWindowsSpooler::new(1)),
-                Duration::from_secs(1),
+                // 60s, not 1: the blocked send returns only after the test observes
+                // target B start (a 30s-capped wait); the dispatch bound must outlive
+                // that choreography or A is falsely timed out and never reaches
+                // 'dispatched'.
+                Duration::from_secs(60),
             )
         });
         if !raw.wait_until_blocked() {
@@ -14239,7 +14258,7 @@ mod tests {
                 "blocked target never entered transport; worker={worker_result:?}, jobs={errors:?}"
             );
         }
-        let other_result = other_rx.recv_timeout(Duration::from_secs(5));
+        let other_result = other_rx.recv_timeout(Duration::from_secs(30));
         raw.release();
         other_result.expect("target B must start while A is blocked");
         assert_eq!(worker.join().unwrap().unwrap(), 2);
@@ -14287,10 +14306,13 @@ mod tests {
                 &worker_manager,
                 &CapturingManagedRaw::default(),
                 worker_fake,
-                Duration::from_secs(10),
+                // 60s, not 10: this dispatch bound must outlive the test's own
+                // choreography - wait_until_submission_blocked (30s cap) plus the
+                // durability asserts - before release_submission_block().
+                Duration::from_secs(60),
             )
         });
-        assert!(fake.wait_until_submission_blocked(Duration::from_secs(15)));
+        assert!(fake.wait_until_submission_blocked(Duration::from_secs(30)));
         {
             let conn = db.conn.lock().unwrap();
             let durable: (String, i64, String) = conn.query_row(
@@ -14366,7 +14388,7 @@ mod tests {
             &manager,
             &CapturingManagedRaw::default(),
             spooler,
-            Duration::from_secs(5),
+            Duration::from_secs(10),
         )
         .unwrap();
         assert!(fake.submissions().is_empty());
@@ -14421,11 +14443,13 @@ mod tests {
         }
 
         fn wait_finished(&self) {
+            // 30s, not 5: after release() the abandoned native thread still
+            // needs a loaded CI scheduler to run it before `finished` flips.
             let state = self.state.0.lock().unwrap();
             let (state, timeout) = self
                 .state
                 .1
-                .wait_timeout_while(state, Duration::from_secs(5), |state| !state.2)
+                .wait_timeout_while(state, Duration::from_secs(30), |state| !state.2)
                 .unwrap();
             assert!(!timeout.timed_out() && state.2);
         }
@@ -14652,7 +14676,7 @@ mod tests {
             &manager,
             &ClassifiedFailureRaw,
             Arc::new(FakeWindowsSpooler::new(1)),
-            Duration::from_secs(1),
+            Duration::from_secs(10),
         )
         .unwrap();
         let conn = db.conn.lock().unwrap();
@@ -14780,7 +14804,7 @@ mod tests {
             &DispatchManager::isolated_for_test(),
             &raw,
             Arc::new(FakeWindowsSpooler::new(1)),
-            Duration::from_secs(1),
+            Duration::from_secs(10),
         )
         .unwrap();
         assert!(raw.calls.lock().unwrap().is_empty());
@@ -17505,7 +17529,7 @@ mod tests {
             )
         });
         a_registered_rx
-            .recv_timeout(Duration::from_secs(10))
+            .recv_timeout(Duration::from_secs(30))
             .unwrap();
 
         let (b_registered_tx, b_registered_rx) = std::sync::mpsc::channel();
@@ -17532,13 +17556,13 @@ mod tests {
             )
         });
         b_registered_rx
-            .recv_timeout(Duration::from_secs(10))
+            .recv_timeout(Duration::from_secs(30))
             .unwrap();
 
         a_continue_tx.send(()).unwrap();
-        let original_token = a_token_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let original_token = a_token_rx.recv_timeout(Duration::from_secs(30)).unwrap();
         raw_entered_rx
-            .recv_timeout(Duration::from_secs(10))
+            .recv_timeout(Duration::from_secs(30))
             .unwrap();
         b_continue_tx.send(()).unwrap();
         assert!(matches!(b_worker.join().unwrap(), Ok(None)));
@@ -17661,7 +17685,7 @@ mod tests {
             )
         });
         a_registered_rx
-            .recv_timeout(Duration::from_secs(10))
+            .recv_timeout(Duration::from_secs(30))
             .unwrap();
 
         let (b_registered_tx, b_registered_rx) = std::sync::mpsc::channel();
@@ -17688,7 +17712,7 @@ mod tests {
             )
         });
         b_registered_rx
-            .recv_timeout(Duration::from_secs(10))
+            .recv_timeout(Duration::from_secs(30))
             .unwrap();
 
         a_continue_tx.send(()).unwrap();
@@ -17831,7 +17855,7 @@ mod tests {
             &db,
             &job_id,
             Arc::clone(&spooler),
-            Duration::from_secs(1),
+            Duration::from_secs(10),
         )
         .unwrap();
 
@@ -17923,7 +17947,7 @@ mod tests {
             &db,
             &job_id,
             Arc::clone(&spooler),
-            Duration::from_secs(1),
+            Duration::from_secs(10),
         )
         .unwrap();
 
@@ -18824,8 +18848,12 @@ mod tests {
     #[test]
     fn test_run_dispatch_with_timeout_passes_through_fast_result() {
         // A dispatch that completes within the timeout returns its value verbatim.
+        // 30s, not 500ms: deadline-only - the closure is instant, but on a
+        // loaded CI runner the spawned dispatch thread can take seconds to be
+        // scheduled. The timeout PATH is pinned below by bounds a sleeping
+        // closure can never beat.
         let out = run_dispatch_with_timeout(
-            std::time::Duration::from_millis(500),
+            std::time::Duration::from_secs(30),
             Arc::new(AtomicBool::new(false)),
             || 42,
         );

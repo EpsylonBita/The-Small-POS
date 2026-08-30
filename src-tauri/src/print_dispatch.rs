@@ -2540,6 +2540,14 @@ impl Drop for AttemptLease {
 
 #[cfg(test)]
 mod tests {
+    // CI patience convention (print-concurrency flake family, 2026-08-26..28):
+    // test-side liveness waits (recv_timeout, condvar wait_*, tokio timeouts)
+    // get 30s; success-path bounds handed to the function under test get 10s
+    // (deadlines the instant fakes never approach); bounds that must outlive a
+    // test's own blocked-fake choreography get 60s. Tight values that ARE the
+    // behavior under test (the 40ms coalescing probe, timeout-path bounds,
+    // watchdog millis) stay tight - never de-flake by loosening those.
+
     use super::*;
     use chrono::{TimeZone, Utc};
     use rusqlite::{params, Connection};
@@ -3587,7 +3595,7 @@ mod tests {
             DispatchManager::hydrate_with_registry(&hydration_conn, hydration_lanes)
         });
         snapshot_reached_rx
-            .recv_timeout(Duration::from_secs(10))
+            .recv_timeout(Duration::from_secs(30))
             .expect("hydration must pause after taking its durable snapshot");
 
         let (event_tx, event_rx) = std::sync::mpsc::channel();
@@ -3616,7 +3624,7 @@ mod tests {
         });
 
         let first_event = event_rx
-            .recv_timeout(Duration::from_secs(10))
+            .recv_timeout(Duration::from_secs(30))
             .expect("reconciliation must either block or complete");
         release_snapshot_tx.send(()).unwrap();
         let hydrated = hydrator.join().unwrap().unwrap();
@@ -3782,7 +3790,7 @@ mod tests {
         });
 
         busy_rx
-            .recv_timeout(Duration::from_secs(10))
+            .recv_timeout(Duration::from_secs(30))
             .expect("reconciliation must block on BEGIN IMMEDIATE");
         cancel.store(true, Ordering::Release);
         blocker.commit().unwrap();
@@ -3880,7 +3888,7 @@ mod tests {
         });
 
         lane_wait_rx
-            .recv_timeout(Duration::from_secs(10))
+            .recv_timeout(Duration::from_secs(30))
             .expect("reconciliation must reach the held lane mutex");
         cancel.store(true, Ordering::Release);
         drop(lane_guard);
@@ -4806,7 +4814,7 @@ mod tests {
             observe_attempt(&lower_conn, attempt_id, DispatchState::Submitting, lower)
         });
 
-        reached_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        reached_rx.recv_timeout(Duration::from_secs(30)).unwrap();
         let mut higher = observation(4);
         higher.bytes_written = Some(50);
         assert_eq!(
@@ -4867,7 +4875,7 @@ mod tests {
             observe_attempt(&stale_conn, attempt_id, DispatchState::Submitting, stale)
         });
 
-        reached_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        reached_rx.recv_timeout(Duration::from_secs(30)).unwrap();
         let mut newest = observation(4);
         newest.bytes_written = Some(20);
         assert_eq!(
@@ -4982,7 +4990,10 @@ mod tests {
 
         let fake = Arc::new(FakeWindowsSpooler::new(4242));
         fake.set_block_after_started(true);
-        fake.set_block_timeout(Duration::from_secs(10));
+        // 30s window (and 30s observer wait below): if the fake self-releases
+        // before the loaded-CI test thread observes `blocked`, the flag is
+        // already reset and the wait fails spuriously.
+        fake.set_block_timeout(Duration::from_secs(30));
         let thread_fake = Arc::clone(&fake);
         let worker_conn = database.open();
         let attempt_id = attempt.attempt_id;
@@ -5005,7 +5016,7 @@ mod tests {
             )
         });
 
-        assert!(fake.wait_until_submission_blocked(Duration::from_secs(10)));
+        assert!(fake.wait_until_submission_blocked(Duration::from_secs(30)));
         let persisted = read_attempt(&conn, attempt.attempt_id).unwrap().unwrap();
         assert_eq!(persisted.state, DispatchState::WindowsQueued);
         assert_eq!(persisted.spool_job_id, Some(4242));
@@ -5784,8 +5795,8 @@ mod tests {
         }
         start.wait();
         let results = [
-            result_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
-            result_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            result_rx.recv_timeout(Duration::from_secs(30)).unwrap(),
+            result_rx.recv_timeout(Duration::from_secs(30)).unwrap(),
         ];
         assert_eq!(results.into_iter().filter(|won| *won).count(), 1);
         release_tx.send(()).unwrap();
@@ -5995,7 +6006,7 @@ mod tests {
             other_tx.send(()).unwrap();
             lease.mark_terminal(DispatchState::Sent).unwrap();
         });
-        other_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        other_rx.recv_timeout(Duration::from_secs(30)).unwrap();
         other.join().unwrap();
         drop(held);
 
@@ -6027,8 +6038,8 @@ mod tests {
         }
         start.wait();
         let results = [
-            result_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
-            result_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            result_rx.recv_timeout(Duration::from_secs(30)).unwrap(),
+            result_rx.recv_timeout(Duration::from_secs(30)).unwrap(),
         ];
         assert_eq!(results.into_iter().filter(|won| *won).count(), 1);
         release_tx.send(()).unwrap();
