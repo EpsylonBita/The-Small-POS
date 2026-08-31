@@ -326,3 +326,20 @@ test('calculatePickupToDeliveryTotal keeps offer-reward lines free and overridde
   // Operator set 5.00; conversion must not re-inflate to the 7.00 tier.
   assert.equal(calculatePickupToDeliveryTotal(overriddenOrder, 2), 7);
 });
+
+test('MenuModal edit flow never renders platform bookkeeping keys as materials', () => {
+  // Platform order_items rows wrap materials as {modifiers:[...], external_sku,
+  // platform_source}. The edit-order flatten helper must (a) read the wrapped
+  // modifiers list and (b) bail out on the metadata-only wrapper before the
+  // legacy Object.values catch-all turns «1440683243»/«efood» into materials
+  // that a save would bake into the order.
+  assert.match(menuModalSource, /parsed\.modifiers/);
+  assert.match(
+    menuModalSource,
+    /'platform_source' in parsed \|\| 'external_sku' in parsed/,
+  );
+  assert.match(
+    menuModalSource,
+    /'platform_source' in parsed \|\| 'external_sku' in parsed[\s\S]{0,120}return \[\];/,
+  );
+});

@@ -883,23 +883,22 @@ fn resolve_immediate_order_status_sync_context(
 }
 
 fn spawn_immediate_order_status_patch(db: &db::DbState, body: Value) {
+    spawn_immediate_order_status_patches(db, vec![body]);
+}
+
+/// Send several status PATCHes from ONE spawned task, strictly in order. Two
+/// independent spawns give no wire ordering — a later status ("delivered")
+/// could overtake an earlier one ("ready"), leaving the server on the stale
+/// status and syncing the order back into the active grid. A failed PATCH
+/// aborts the remainder of the sequence: the sync queue holds the same
+/// statuses in order and replays them as the fallback.
+fn spawn_immediate_order_status_patches(db: &db::DbState, bodies: Vec<Value>) {
     let Some(context) = resolve_immediate_order_status_sync_context(db) else {
         tracing::debug!(
             "Skipping immediate kiosk status sync because terminal credentials are unavailable"
         );
         return;
     };
-
-    let status = body
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown")
-        .to_string();
-    let order_id = body
-        .get("id")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown")
-        .to_string();
 
     tauri::async_runtime::spawn(async move {
         let client = match reqwest::Client::builder()
@@ -919,41 +918,57 @@ fn spawn_immediate_order_status_patch(db: &db::DbState, body: Value) {
             "{}/api/pos/orders",
             crate::api::normalize_admin_url(&context.admin_url)
         );
-        let response = client
-            .patch(url)
-            .header("x-pos-api-key", context.api_key)
-            .header("x-terminal-id", context.terminal_id)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await;
 
-        match response {
-            Ok(response) if response.status().is_success() => {
-                tracing::info!(
-                    order_id = %order_id,
-                    status = %status,
-                    "Immediate kiosk status sync succeeded"
-                );
-            }
-            Ok(response) => {
-                let http_status = response.status().as_u16();
-                let body = response.text().await.unwrap_or_default();
-                tracing::warn!(
-                    order_id = %order_id,
-                    status = %status,
-                    http_status,
-                    response = %body.chars().take(500).collect::<String>(),
-                    "Immediate kiosk status sync failed; queued retry remains pending"
-                );
-            }
-            Err(error) => {
-                tracing::warn!(
-                    order_id = %order_id,
-                    status = %status,
-                    error = %error,
-                    "Immediate kiosk status sync failed; queued retry remains pending"
-                );
+        for body in bodies {
+            let status = body
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string();
+            let order_id = body
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string();
+
+            let response = client
+                .patch(&url)
+                .header("x-pos-api-key", context.api_key.clone())
+                .header("x-terminal-id", context.terminal_id.clone())
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+                .await;
+
+            match response {
+                Ok(response) if response.status().is_success() => {
+                    tracing::info!(
+                        order_id = %order_id,
+                        status = %status,
+                        "Immediate kiosk status sync succeeded"
+                    );
+                }
+                Ok(response) => {
+                    let http_status = response.status().as_u16();
+                    let body = response.text().await.unwrap_or_default();
+                    tracing::warn!(
+                        order_id = %order_id,
+                        status = %status,
+                        http_status,
+                        response = %body.chars().take(500).collect::<String>(),
+                        "Immediate kiosk status sync failed; queued retry remains pending"
+                    );
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        order_id = %order_id,
+                        status = %status,
+                        error = %error,
+                        "Immediate kiosk status sync failed; queued retry remains pending"
+                    );
+                    return;
+                }
             }
         }
     });
@@ -4546,20 +4561,109 @@ pub async fn order_notify_platform_ready(
         "status": "ready"
     });
     let _ = enqueue_order_sync_payload(&conn, &order_id, &sync_payload);
+    // Platform-fleet orders (efood riders): READY is the store's last touch —
+    // the platform never sends pickup/delivery events (their own written
+    // answer, 29/08), so the order would sit in the grid forever. The founder
+    // wants efood notified AND the card gone: ready relays to the platform
+    // below, and locally the order completes to delivered in the same action.
+    let mut platform_fleet_done = order_is_platform_fleet(&conn, &order_id);
+    if platform_fleet_done {
+        // THE-437: mirror the manual delivered path (order_update_status) —
+        // settle the platform-held money before completing, and refuse to
+        // hide an order that still has payment blockers. Prepaid/online and
+        // platform-rider COD orders get their bank-settlement row here;
+        // anything unsettleable stays at 'ready' so the operator resolves it
+        // instead of discovering a blocked Z at day close.
+        if let Err(error) = payments::auto_settle_platform_order(&conn, &order_id) {
+            tracing::warn!(
+                order_id = %order_id,
+                error = %error,
+                "Platform auto-settlement failed; leaving order at ready"
+            );
+        }
+        match payment_integrity::load_order_payment_blockers(&conn, &order_id) {
+            Ok(blockers) if blockers.is_empty() => {}
+            Ok(_) => {
+                tracing::info!(
+                    order_id = %order_id,
+                    "Platform-fleet order kept at ready: payment blockers remain"
+                );
+                platform_fleet_done = false;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    order_id = %order_id,
+                    error = %error,
+                    "Payment blocker check failed; leaving order at ready"
+                );
+                platform_fleet_done = false;
+            }
+        }
+    }
+    if platform_fleet_done {
+        conn.execute(
+            "UPDATE orders SET status = 'delivered', sync_status = 'pending', updated_at = ?1
+             WHERE id = ?2",
+            rusqlite::params![now, order_id],
+        )
+        .map_err(|e| format!("complete platform-fleet order: {e}"))?;
+        let _ = enqueue_order_sync_payload(
+            &conn,
+            &order_id,
+            &serde_json::json!({ "orderId": order_id, "status": "delivered" }),
+        );
+    }
     drop(conn);
-    let payload = serde_json::json!({ "orderId": order_id_raw, "status": "ready" });
+    let local_status = if platform_fleet_done {
+        "delivered"
+    } else {
+        "ready"
+    };
+    let payload = serde_json::json!({ "orderId": order_id_raw, "status": local_status });
     let _ = app.emit("order_status_updated", payload.clone());
     let _ = app.emit("order_realtime_update", payload);
     // Immediate server PATCH so the platform "ready" relay fires in seconds
     // instead of waiting for the 15s sync loop (the queue entry above stays as
     // the offline-replay fallback, matching order_approve/order_decline).
+    // Deliberately ONLY "ready": an immediate "delivered" would close the
+    // server order before the queued 'ready' fallback replays, turning that
+    // replay into a permanent invalid-transition failure on every online
+    // press. The queued 'delivered' row closes the server order on the next
+    // sync tick, after the queued 'ready' replays in order.
     if let Some(remote_order_id) = remote_order_id.as_deref() {
         spawn_immediate_order_status_patch(
             &db,
             build_order_status_patch_body(remote_order_id, "ready", None, None, None),
         );
     }
-    Ok(serde_json::json!({ "success": true }))
+    Ok(serde_json::json!({ "success": true, "status": local_status }))
+}
+
+/// True for platform orders carried by the platform's own fleet
+/// (`ghost_metadata.food_delivery.delivery_provider == "platform_delivery"`).
+/// Store-driven platform orders keep the normal ready → delivery flow.
+fn order_is_platform_fleet(conn: &rusqlite::Connection, order_id: &str) -> bool {
+    let metadata: Option<String> = conn
+        .query_row(
+            "SELECT ghost_metadata FROM orders WHERE id = ?1",
+            rusqlite::params![order_id],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
+    let Some(metadata) = metadata else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(&metadata)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("food_delivery")?
+                .get("delivery_provider")?
+                .as_str()
+                .map(|provider| provider == "platform_delivery")
+        })
+        .unwrap_or(false)
 }
 
 #[tauri::command]
@@ -5014,6 +5118,45 @@ mod dto_tests {
         assert_eq!(row.4, None);
         assert_eq!(row.5, "pending");
         assert_eq!(row.6, "2026-07-30T20:00:00Z");
+    }
+
+    fn platform_fleet_test_conn() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().expect("open platform fleet test db");
+        conn.execute_batch("CREATE TABLE orders (id TEXT PRIMARY KEY, ghost_metadata TEXT);")
+            .expect("create orders table");
+        conn
+    }
+
+    #[test]
+    fn platform_fleet_orders_are_detected_from_ghost_metadata() {
+        let conn = platform_fleet_test_conn();
+        conn.execute(
+            "INSERT INTO orders (id, ghost_metadata) VALUES
+                ('efood-rider', '{\"food_delivery\":{\"platform\":\"efood\",\"delivery_provider\":\"platform_delivery\"}}'),
+                ('efood-own-driver', '{\"food_delivery\":{\"platform\":\"efood\",\"delivery_provider\":\"vendor_delivery\"}}'),
+                ('walk-in', NULL),
+                ('corrupt', 'not json')",
+            [],
+        )
+        .expect("seed orders");
+
+        // Only the platform-fleet order auto-completes on Ready; store-driven
+        // and regular orders must keep the normal ready → delivery flow.
+        assert!(order_is_platform_fleet(&conn, "efood-rider"));
+        assert!(!order_is_platform_fleet(&conn, "efood-own-driver"));
+        assert!(!order_is_platform_fleet(&conn, "walk-in"));
+        assert!(!order_is_platform_fleet(&conn, "corrupt"));
+        assert!(!order_is_platform_fleet(&conn, "missing-order"));
+    }
+
+    #[test]
+    fn ready_to_delivered_is_a_legal_local_transition() {
+        // The auto-complete path rides ready → delivered; if the transition
+        // table ever forbids it, the platform-fleet flow silently breaks.
+        assert!(crate::core_helpers::can_transition_locally(
+            "ready",
+            "delivered"
+        ));
     }
 
     #[test]

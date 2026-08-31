@@ -15041,6 +15041,21 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_item_customizations_ignores_metadata_only_wrapper() {
+        // A platform item WITHOUT materials still carries the bookkeeping
+        // wrapper (live efood order 31/08, Κρέπα Snickers) — its values must
+        // never surface as materials («1440683243» / «efood») on the slip.
+        let item = serde_json::json!({
+            "customizations": {
+                "external_sku": "1440683243",
+                "platform_source": "efood"
+            }
+        });
+        let parsed = parse_item_customizations(&item);
+        assert!(parsed.is_empty());
+    }
+
+    #[test]
     fn test_parse_item_customizations_from_array() {
         let item = serde_json::json!({
             "customizations": [

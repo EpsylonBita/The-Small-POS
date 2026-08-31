@@ -7983,16 +7983,10 @@ fn platform_payment_line(info: &PlatformSlipInfo, doc: &OrderReceiptDoc, lang: &
     String::new()
 }
 
-fn platform_carrier_line(info: &PlatformSlipInfo, lang: &str) -> Option<&'static str> {
-    match info.delivery_provider.as_deref() {
-        Some("platform_delivery") => Some(receipt_label(lang, "Platform rider")),
-        // Store-driven deliveries print no carrier line — the store knows its
-        // own drivers, the label was just noise (founder, 28/08). Unknown or
-        // missing provider metadata prints nothing either: better no handoff
-        // instruction than a confidently wrong one.
-        _ => None,
-    }
-}
+// The slip prints NO carrier line at all — the founder removed «Δικός σας
+// διανομέας» on 28/08 and «Διανομέας πλατφόρμας» on 29/08 after the first
+// real production order: the store always knows who carries its orders, the
+// label was pure noise on the paper.
 
 /// The destination/contact block a driver fulfills with — present whenever
 /// the order carries delivery data, regardless of who carries it.
@@ -8253,9 +8247,6 @@ fn draw_platform_slip_ttf(
     let mut center_y = row_top;
     let time_style = bold_of(scaled(body, 1.5));
     center_y = canvas.draw_centered_wrapped_in(&time, center_x, center_w, time_style, center_y);
-    if let Some(carrier) = platform_carrier_line(info, lang) {
-        center_y = canvas.draw_centered_wrapped_in(carrier, center_x, center_w, small, center_y);
-    }
 
     // Tiny captions centered under their icons, below BOTH the icons and the
     // center block — the vertical separation is what makes overlap
@@ -8521,10 +8512,6 @@ fn emit_platform_slip_escpos(
             format_datetime_human(&doc.created_at)
         ))
         .lf();
-    if let Some(carrier) = platform_carrier_line(info, lang) {
-        builder.text(carrier).lf();
-    }
-
     let payment = platform_payment_line(info, doc, lang);
     if !payment.is_empty() {
         builder.text(&payment).lf();
@@ -11253,7 +11240,9 @@ mod tests {
                 short_code: Some("25".to_string()),
                 payment_method: Some("cash".to_string()),
                 prepaid: false,
-                delivery_provider: Some("vendor_delivery".to_string()),
+                // Production reality: efood fleet — and NO carrier line may
+                // print for it (founder, 29/08).
+                delivery_provider: Some("platform_delivery".to_string()),
                 is_test: true,
                 // Accepted with 25' prep: the headline is the promised time.
                 ready_at: Some("2026-08-28T09:58:00+00:00".to_string()),

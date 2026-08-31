@@ -233,6 +233,13 @@ function flattenOrderCustomizationInput(customizations: any): any[] {
     return [...groupedEntries, ...removedEntries];
   }
 
+  // A platform item without materials still carries the metadata-only wrapper
+  // ({platform_source, external_sku}) — the legacy catch-all below would
+  // render those values as «+ 1440683243» / «+ efood» lines, so bail out.
+  if ('platform_source' in parsed || 'external_sku' in parsed) {
+    return [];
+  }
+
   return Object.values(parsed).flatMap((entry) => flattenOrderCustomizationEntry(entry));
 }
 

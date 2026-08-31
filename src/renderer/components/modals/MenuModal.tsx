@@ -180,6 +180,10 @@ const flattenCustomizationInput = (customizations: any): any[] => {
     parsed.ingredients,
     parsed.items,
     parsed.groups,
+    // Platform orders mirror server rows where customizations is an object
+    // wrapping the actual list ({modifiers:[...], external_sku,
+    // platform_source}) — only the modifiers are materials.
+    parsed.modifiers,
   ]
     .filter(Array.isArray)
     .flatMap((entries) => flattenCustomizationEntry(entries));
@@ -190,6 +194,13 @@ const flattenCustomizationInput = (customizations: any): any[] => {
 
   if (groupedEntries.length > 0 || removedEntries.length > 0) {
     return [...groupedEntries, ...removedEntries];
+  }
+
+  // A platform item without materials still carries the metadata-only wrapper
+  // ({platform_source, external_sku}) — the legacy catch-all below would
+  // render (and on save, bake in) those values as materials, so bail out.
+  if ('platform_source' in parsed || 'external_sku' in parsed) {
+    return [];
   }
 
   return Object.values(parsed).flatMap((entry) => flattenCustomizationEntry(entry));

@@ -535,7 +535,9 @@ export const OrderCard = memo<OrderCardProps>(({
                 {/* Delivery address - bold, bigger text, centered (street only, no city/postal) */}
                   <div className="flex items-center gap-2 min-w-0">
                     {isExternal && (
-                      <PluginIcon plugin={orderPlugin} size={20} className="shrink-0" showTooltip={false} />
+                      // Platform orders must jump out of the grid at a glance
+                      // (founder, 31/08) — the logo is the recognition anchor.
+                      <PluginIcon plugin={orderPlugin} size={36} className="shrink-0" showTooltip={false} />
                     )}
                     <div className={`text-base sm:text-lg font-bold truncate min-w-0 ${resolvedTheme === 'light' ? 'text-gray-800' : 'text-white/90'}`}>
                       {(deliveryAddressNormalized || resolvedAddress)
@@ -576,7 +578,8 @@ export const OrderCard = memo<OrderCardProps>(({
                 {/* For non-delivery orders: Show customer name or order type */}
                   <div className="flex items-center gap-2 min-w-0">
                     {isExternal && (
-                      <PluginIcon plugin={orderPlugin} size={18} className="shrink-0" showTooltip={false} />
+                      // Same recognition anchor for pickup platform orders.
+                      <PluginIcon plugin={orderPlugin} size={32} className="shrink-0" showTooltip={false} />
                     )}
                     <div className={`text-sm sm:text-base font-bold truncate min-w-0 ${resolvedTheme === 'light' ? 'text-gray-800' : 'text-white/90'}`}>
                       {nonDeliveryTitle}

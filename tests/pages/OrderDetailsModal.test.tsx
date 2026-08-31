@@ -151,6 +151,20 @@ test('OrderDetailsModal resolves kiosk item categories and customization ingredi
   assert.match(source, /resolveItemName\(item\)/);
 });
 
+test('OrderDetailsModal never renders platform bookkeeping keys as materials', () => {
+  const source = readFileSync(orderDetailsModalPath, 'utf8');
+
+  // Platform items without materials carry a metadata-only customizations
+  // wrapper ({platform_source, external_sku}); the flatten helper must bail
+  // out before the legacy Object.values catch-all turns those values into
+  // «+ 1440683243» / «+ efood» lines under the item.
+  assert.match(source, /'platform_source' in parsed \|\| 'external_sku' in parsed/);
+  assert.match(
+    source,
+    /'platform_source' in parsed \|\| 'external_sku' in parsed[\s\S]{0,80}return \[\];/,
+  );
+});
+
 test('OrderDetailsModal keeps item totals and history labels visually clean', () => {
   const source = readFileSync(orderDetailsModalPath, 'utf8');
 
