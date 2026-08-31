@@ -4053,15 +4053,36 @@ pub async fn order_approve(
         rusqlite::params![estimated_time, now, order_id],
     )
     .map_err(|e| format!("approve order: {e}"))?;
-    let (order_type, is_ghost, plugin, external_order_id): (String, i64, String, String) = conn
+    let (order_type, is_ghost, plugin, external_order_id, ghost_metadata): (
+        String,
+        i64,
+        String,
+        String,
+        String,
+    ) = conn
         .query_row(
             "SELECT COALESCE(order_type, ''), COALESCE(is_ghost, 0),
-                    COALESCE(plugin, ''), COALESCE(external_plugin_order_id, '')
+                    COALESCE(plugin, ''), COALESCE(external_plugin_order_id, ''),
+                    COALESCE(ghost_metadata, '')
              FROM orders WHERE id = ?1",
             rusqlite::params![order_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )
-        .unwrap_or((String::new(), 0, String::new(), String::new()));
+        .unwrap_or((
+            String::new(),
+            0,
+            String::new(),
+            String::new(),
+            String::new(),
+        ));
 
     let payload = serde_json::json!({
         "orderId": order_id,
@@ -4084,8 +4105,16 @@ pub async fn order_approve(
     // reprint. Platform orders only: customer web/kiosk orders already
     // auto-print on arrival, so approving them must not queue a second copy.
     // Sandbox/test orders are skipped inside the enqueue path.
-    let is_platform_order =
-        crate::print::is_food_delivery_plugin(&plugin) || !external_order_id.trim().is_empty();
+    // Same three signals as payments::platform_settlement_kind — legacy rows
+    // can miss the plugin/external columns (pre-v75 schema, `platform` vs
+    // `plugin` broadcast field) but always carry the aggregator metadata.
+    let has_food_delivery_metadata = serde_json::from_str::<serde_json::Value>(&ghost_metadata)
+        .ok()
+        .and_then(|value| value.get("food_delivery").cloned())
+        .is_some();
+    let is_platform_order = crate::print::is_food_delivery_plugin(&plugin)
+        || !external_order_id.trim().is_empty()
+        || has_food_delivery_metadata;
     if is_ghost == 0
         && is_platform_order
         && crate::print::is_print_action_enabled(&db, "after_approve")

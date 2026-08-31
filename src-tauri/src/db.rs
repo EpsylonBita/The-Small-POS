@@ -47,7 +47,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-const CURRENT_SCHEMA_VERSION: i32 = 74;
+const CURRENT_SCHEMA_VERSION: i32 = 75;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -466,6 +466,9 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     }
     if current < 74 {
         run_migration_tx(conn, 74, migrate_v74)?;
+    }
+    if current < 75 {
+        run_migration_tx(conn, 75, migrate_v75)?;
     }
 
     Ok(())
@@ -5155,6 +5158,30 @@ fn migrate_v74(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+fn migrate_v75(conn: &Connection) -> Result<(), String> {
+    // THE-437 settle was dead on every terminal whose database predates the
+    // base-schema introduction of `external_plugin_order_id`: the column only
+    // ever existed in the fresh-install CREATE TABLE, no migration added it
+    // to upgraded databases, and platform_settlement_kind's SELECT errored —
+    // silently classifying every platform order as non-platform (live
+    // diagnosis at Το Μικρό Παρίσι, 31/08/2026: efood orders kept their
+    // balance open and blocked the Z). Additive and idempotent.
+    if !column_exists(conn, "orders", "external_plugin_order_id")? {
+        conn.execute(
+            "ALTER TABLE orders ADD COLUMN external_plugin_order_id TEXT",
+            [],
+        )
+        .map_err(|e| format!("migration v75 add external_plugin_order_id: {e}"))?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_version (version) VALUES (75)",
+        [],
+    )
+    .map_err(|e| format!("migration v75 record version: {e}"))?;
+    info!("Applied migration v75 (orders.external_plugin_order_id backfill column)");
+    Ok(())
+}
+
 /// Read the persisted `idempotency_key` from an entity table.
 ///
 /// Wave 4 architectural contract:
@@ -6787,6 +6814,34 @@ mod tests {
             trigger_count, 12,
             "migration must install one canonical trigger set"
         );
+    }
+
+    #[test]
+    fn migration_v75_adds_external_plugin_order_id_to_legacy_orders() {
+        // A database whose orders table predates the fresh-install CREATE
+        // TABLE never had external_plugin_order_id — the exact shape that
+        // silently killed THE-437 settlement classification on old terminals.
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE schema_version (
+                 version INTEGER PRIMARY KEY,
+                 applied_at TEXT DEFAULT (datetime('now'))
+             );
+             CREATE TABLE orders (id TEXT PRIMARY KEY, ghost_metadata TEXT);",
+        )
+        .expect("create legacy schema");
+
+        run_migration_tx(&conn, 75, migrate_v75).expect("apply v75 on legacy schema");
+        assert!(
+            column_exists(&conn, "orders", "external_plugin_order_id")
+                .expect("inspect orders columns"),
+            "v75 must add the column to legacy databases"
+        );
+
+        // Re-running against a modern schema is a no-op, not an error.
+        conn.execute("DELETE FROM schema_version WHERE version = 75", [])
+            .expect("rewind v75 marker");
+        run_migration_tx(&conn, 75, migrate_v75).expect("v75 is idempotent");
     }
 
     // --- receipt_number fiscal-entitlement migration scoping (v67/v68) --------

@@ -1495,7 +1495,7 @@ pub fn create_order(
     let delivery_fee = num_field(payload, "deliveryFee")
         .or_else(|| num_field(payload, "delivery_fee"))
         .unwrap_or(0.0);
-    let plugin = str_field(payload, "plugin");
+    let (plugin, external_plugin_order_id) = realtime_platform_identity(payload);
     let is_ghost = payload
         .get("is_ghost")
         .or_else(|| payload.get("isGhost"))
@@ -1583,7 +1583,8 @@ pub fn create_order(
             source_terminal_id, branch_id, organization_id, plugin, tax_rate,
             delivery_fee, client_request_id, is_ghost, ghost_source, ghost_metadata,
             delivery_address_id, delivery_latitude, delivery_longitude,
-            delivery_address_fingerprint, delivery_zone_id, receipt_number
+            delivery_address_fingerprint, delivery_zone_id, receipt_number,
+            external_plugin_order_id
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7,
             ?8, ?9, ?10, ?11, ?12,
@@ -1595,7 +1596,7 @@ pub fn create_order(
             ?34, ?35, 1, ?36, ?37,
             ?38, ?39, ?40, ?41, ?42,
             ?43, ?44, ?45, ?46, ?47,
-            ?48, ?49, ?50, ?51, ?52, ?53
+            ?48, ?49, ?50, ?51, ?52, ?53, ?54
         )",
         params![
             &order_id,
@@ -1651,6 +1652,7 @@ pub fn create_order(
             &delivery_address_fingerprint,
             &delivery_zone_id,
             &receipt_number,
+            &external_plugin_order_id,
         ],
     )
     .map_err(|e| {
@@ -18908,6 +18910,20 @@ fn str_field(v: &Value, key: &str) -> Option<String> {
     v.get(key).and_then(Value::as_str).map(String::from)
 }
 
+/// Platform identity of a broadcast/ingested order payload. The server
+/// broadcasts the orders row verbatim, whose channel column is `platform`
+/// (the plugin-naming rename migration never applied to prod), so reading
+/// only `plugin` left local platform orders anonymous — and THE-437
+/// settlement classification keys on exactly these fields.
+pub(crate) fn realtime_platform_identity(payload: &Value) -> (Option<String>, Option<String>) {
+    (
+        str_field(payload, "plugin").or_else(|| str_field(payload, "platform")),
+        str_field(payload, "external_plugin_order_id")
+            .or_else(|| str_field(payload, "externalPluginOrderId"))
+            .or_else(|| str_field(payload, "external_order_id")),
+    )
+}
+
 fn num_field(v: &Value, key: &str) -> Option<f64> {
     v.get(key).and_then(Value::as_f64)
 }
@@ -18937,6 +18953,35 @@ mod tests {
     use super::*;
     use crate::db;
     use rusqlite::{params, Connection};
+
+    #[test]
+    fn realtime_platform_identity_accepts_the_server_platform_field() {
+        // The server broadcasts the orders row verbatim: the channel column
+        // is `platform`, not `plugin` — reading only `plugin` left platform
+        // orders anonymous locally and THE-437 settlement never classified
+        // them (Το Μικρό Παρίσι, 31/08/2026).
+        let payload = serde_json::json!({
+            "platform": "efood",
+            "external_plugin_order_id": "692650434"
+        });
+        assert_eq!(
+            realtime_platform_identity(&payload),
+            (Some("efood".to_string()), Some("692650434".to_string()))
+        );
+
+        // A payload that already speaks `plugin` keeps working.
+        let legacy = serde_json::json!({
+            "plugin": "wolt",
+            "externalPluginOrderId": "w-1"
+        });
+        assert_eq!(
+            realtime_platform_identity(&legacy),
+            (Some("wolt".to_string()), Some("w-1".to_string()))
+        );
+
+        let plain = serde_json::json!({ "orderNumber": "00042" });
+        assert_eq!(realtime_platform_identity(&plain), (None, None));
+    }
 
     #[derive(Default)]
     struct CountingPrintQueueInvalidator(std::sync::atomic::AtomicUsize);

@@ -1679,16 +1679,25 @@ pub(crate) fn platform_settlement_kind(
         )
         .ok()?;
 
-    let is_platform_order =
-        crate::print::is_food_delivery_plugin(&plugin) || !external_order_id.trim().is_empty();
+    let food_delivery = serde_json::from_str::<Value>(&ghost_metadata)
+        .ok()
+        .and_then(|value| value.get("food_delivery").cloned());
+    // A platform order announces itself through any of: a recognized plugin
+    // id, a provider-side order id, or the aggregator metadata the ingest
+    // writes. Legacy local rows can miss the first two — the realtime ingest
+    // read the broadcast's `plugin` field while the server column is
+    // `platform`, and databases predating migrate_v75 had no
+    // external_plugin_order_id column at all — so the metadata alone must be
+    // sufficient (live diagnosis, Το Μικρό Παρίσι 31/08/2026: every efood
+    // order classified as non-platform and THE-437 never settled).
+    let is_platform_order = crate::print::is_food_delivery_plugin(&plugin)
+        || !external_order_id.trim().is_empty()
+        || food_delivery.is_some();
     if !is_platform_order {
         return None;
     }
 
-    let food_delivery = serde_json::from_str::<Value>(&ghost_metadata)
-        .ok()?
-        .get("food_delivery")
-        .cloned()?;
+    let food_delivery = food_delivery?;
     let prepaid = food_delivery.get("prepaid").and_then(Value::as_bool) == Some(true);
     let method = food_delivery
         .get("payment_method")
@@ -7110,6 +7119,44 @@ mod tests {
         )
         .unwrap();
         assert_eq!(platform_settlement_kind(&conn, "ord-local"), None);
+    }
+
+    #[test]
+    fn test_platform_settlement_kind_classifies_metadata_only_legacy_rows() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        // Legacy terminals: the realtime ingest read the broadcast's `plugin`
+        // field (the server sends `platform`) and pre-v75 databases had no
+        // external_plugin_order_id column — platform orders arrived with BOTH
+        // identity columns empty. The aggregator metadata alone must classify
+        // them, or THE-437 never settles (Το Μικρό Παρίσι, 31/08/2026).
+        conn.execute(
+            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, ghost_metadata, created_at, updated_at)
+             VALUES ('ord-anon-platform', '[]', 12.1, 1210, 'ready', 'pending',
+                     '{\"food_delivery\":{\"payment_method\":\"online\",\"prepaid\":true,\"delivery_provider\":\"platform_delivery\"}}',
+                     datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            platform_settlement_kind(&conn, "ord-anon-platform"),
+            Some(PlatformSettlementKind::PrepaidOnline)
+        );
+
+        // Same anonymity, platform-rider COD.
+        conn.execute(
+            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, ghost_metadata, created_at, updated_at)
+             VALUES ('ord-anon-cod', '[]', 8.7, 870, 'ready', 'pending',
+                     '{\"food_delivery\":{\"payment_method\":\"cash\",\"prepaid\":false,\"delivery_provider\":\"platform_delivery\"}}',
+                     datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            platform_settlement_kind(&conn, "ord-anon-cod"),
+            Some(PlatformSettlementKind::PlatformCollectedCod)
+        );
     }
 
     #[test]
