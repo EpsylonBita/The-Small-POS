@@ -183,6 +183,18 @@ requireContract(
     ),
   'UDP 5060 compatibility must authorize migration without narrowing Public-rule cleanup',
 )
+requireContract(
+  /function\s+Get-InstallerOwnedRules[\s\S]*?Get-NetFirewallRule\s+-Name\s+\$ruleName\s+-PolicyStore\s+PersistentStore\s+-ErrorAction\s+Stop/i.test(
+    firewallHelperSource,
+  ),
+  'owned-rule reads must be server-side name-filtered, never full-store scans',
+)
+requireContract(
+  /\$preexistingIssue\s+-eq\s+['"]none['"][\s\S]*?Get-LocalPublicAllowRulesForExecutable\s+-ActiveOnly[\s\S]*?already configured/i.test(
+    firewallHelperSource,
+  ),
+  'Install must exit without changes only after the full post-check AND a clean Public scan',
+)
 for (const filterCommand of [
   'Get-NetFirewallAddressFilter',
   'Get-NetFirewallInterfaceFilter',

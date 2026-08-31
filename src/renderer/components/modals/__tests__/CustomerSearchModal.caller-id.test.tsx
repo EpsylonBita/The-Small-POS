@@ -844,16 +844,25 @@ describe('CustomerSearchModal Caller ID lookup', () => {
       />,
     )
 
-    fireEvent.click(await screen.findByRole('button', { name: /Second Street 2/ }))
+    const secondAddress = await screen.findByRole('button', { name: /Second Street 2/ })
+    fireEvent.click(secondAddress)
+    // The pick must be applied (and survive any late customer re-set — the
+    // auto-select effect used to stomp it back to the default) before the
+    // Delivery action reads it.
+    await waitFor(() => {
+      expect(secondAddress).toHaveAttribute('aria-pressed', 'true')
+    })
     fireEvent.click(screen.getByRole('button', { name: 'Delivery' }))
 
-    expect(onContinueToOrderType).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'customer-addresses',
-        address: 'Second Street 2',
-        selected_address_id: 'address-2',
-      }),
-    )
+    await waitFor(() => {
+      expect(onContinueToOrderType).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: 'customer-addresses',
+          address: 'Second Street 2',
+          selected_address_id: 'address-2',
+        }),
+      )
+    })
   })
 
   it('remounts the glass modal for the next queued call after the first closes', async () => {

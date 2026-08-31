@@ -316,10 +316,25 @@ function Get-ActiveLocalPublicCallerIdAllows {
   )
 }
 
+function Get-InstallerOwnedRules {
+  # Server-side name filter: the unfiltered PersistentStore enumeration
+  # materialized EVERY firewall rule on the machine (hundreds on stock
+  # Windows 11, thousands under management) just to keep one — and the
+  # installer paid that scan up to three times per run. NetSecurity reports
+  # an absent name as an error, which for us simply means "no rule".
+  try {
+    @(Get-NetFirewallRule -Name $ruleName -PolicyStore PersistentStore -ErrorAction Stop)
+  } catch {
+    if ($_.FullyQualifiedErrorId -like 'CmdletizationQuery_NotFound*') {
+      return @()
+    }
+    throw
+  }
+}
+
 function Remove-InstallerOwnedRule {
   @(
-    Get-NetFirewallRule -PolicyStore PersistentStore -ErrorAction Stop |
-      Where-Object { $_.Name -eq $ruleName }
+    Get-InstallerOwnedRules
   ) | Remove-NetFirewallRule -ErrorAction Stop | Out-Null
 }
 
@@ -331,8 +346,7 @@ try {
 
   if ($Action -eq 'Status') {
     $ownedRules = @(
-      Get-NetFirewallRule -PolicyStore PersistentStore -ErrorAction Stop |
-        Where-Object { $_.Name -eq $ruleName }
+      Get-InstallerOwnedRules
     )
     $configurationIssue = Get-InstallerOwnedRuleConfigurationIssue `
       -Rules $ownedRules `
@@ -398,6 +412,30 @@ try {
     }
   }
 
+  if ($Action -eq 'Install') {
+    # Already-perfect fast path: re-installs and manual upgrades used to pay
+    # the full destroy-and-recreate sequence (plus two verification scans)
+    # for a rule that was already exactly right. When the owned rule passes
+    # the complete post-check AND no active local Public allow remains, the
+    # machine is in the precise end state this script exists to produce —
+    # exit without touching anything. Any deviation falls through to the
+    # unchanged destroy-and-recreate path below.
+    $failureExitCode = 20
+    $preexistingRules = @(
+      Get-InstallerOwnedRules
+    )
+    if ($preexistingRules.Count -eq 1) {
+      $preexistingIssue = Get-InstallerOwnedRuleConfigurationIssue `
+        -Rules $preexistingRules `
+        -ExpectedExecutablePath $ExecutablePath
+      if ($preexistingIssue -eq 'none' -and
+          @(Get-LocalPublicAllowRulesForExecutable -ActiveOnly).Count -eq 0) {
+        Write-Output 'Caller ID firewall already configured for Private local-network UDP 5060 only.'
+        exit 0
+      }
+    }
+  }
+
   # Preserve explicit Block and disabled rules. Once an active UDP-compatible
   # Allow proves prior consent, remove every active Public/Any Allow for this
   # exact executable before adding the narrower Private Caller ID rule.
@@ -426,8 +464,7 @@ try {
 
   $failureExitCode = 25
   $installedRules = @(
-    Get-NetFirewallRule -PolicyStore PersistentStore -ErrorAction Stop |
-      Where-Object { $_.Name -eq $ruleName }
+    Get-InstallerOwnedRules
   )
   $installedRuleIssue = Get-InstallerOwnedRuleConfigurationIssue `
     -Rules $installedRules `

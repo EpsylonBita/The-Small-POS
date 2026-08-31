@@ -271,11 +271,19 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
     searchRequestKey,
   ]);
 
-  // Auto-select default or first address when customer is found
+  // Auto-select default or first address when customer is found. The customer
+  // object can be re-set after the operator already picked an address (the
+  // lookup pipeline materializes/refreshes it), so a still-valid pick must
+  // survive — resetting to the default here silently lost the operator's
+  // choice (and made the caller-id address test flake on CI timing).
   useEffect(() => {
     if (customer) {
-      const defaultAddr = resolveSelectedCustomerAddress(customer);
-      setSelectedAddressId(defaultAddr?.id ?? null);
+      setSelectedAddressId((current) => {
+        if (current && customer.addresses?.some((addr) => addr.id === current)) {
+          return current;
+        }
+        return resolveSelectedCustomerAddress(customer)?.id ?? null;
+      });
     } else {
       setSelectedAddressId(null);
     }
