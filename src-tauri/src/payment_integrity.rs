@@ -251,6 +251,16 @@ fn order_blocker_row_select() -> String {
             WHERE op.order_id = o.id
               AND op.status = 'completed'
               AND LOWER(TRIM(COALESCE(op.method, ''))) NOT IN ('cash', 'card')
+              -- THE-437 platform settlements are method='other' BY DESIGN:
+              -- bank money the platform remits, never drawer cash and never
+              -- the card terminal. They must not read as 'unsupported' — the
+              -- first live settlements (01/09/2026, Το Μικρό Παρίσι) blocked
+              -- the shift checkout of a fully settled day. Recognized by the
+              -- same canonical markers the Z classifier keys on.
+              AND NOT (
+                LOWER(TRIM(COALESCE(op.method, ''))) = 'other'
+                AND COALESCE(op.transaction_ref, '') LIKE 'platform_settlement:%'
+              )
         ), 0)"
         .to_string()
 }
@@ -447,6 +457,88 @@ mod tests {
         assert_eq!(blockers.len(), 1);
         assert_eq!(blockers[0].reason_code, "missing_local_payment_row");
         assert_eq!(blockers[0].order_number, "ORD-1");
+    }
+
+    #[test]
+    fn platform_settlement_other_rows_do_not_block_checkout() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, order_number, branch_id, items, total_amount, total_amount_cents,
+                status, payment_status, created_at, updated_at
+            ) VALUES (
+                'ord-plat-settled', 'ORD-PS-1', 'branch-1', '[]', 8.0, 800,
+                'delivered', 'paid', '2026-03-26T16:53:37Z', '2026-03-26T17:19:54Z'
+            )",
+            [],
+        )
+        .unwrap();
+        // THE-437 bank settlement: method 'other' with the canonical marker.
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, amount_cents, status, transaction_ref,
+                sync_status, created_at, updated_at
+            ) VALUES (
+                'pay-plat-settled', 'ord-plat-settled', 'other', 8.0, 800, 'completed',
+                'platform_settlement:online:ord-plat-settled', 'pending',
+                datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+
+        let order_blockers =
+            load_order_payment_blockers(&conn, "ord-plat-settled").expect("order blockers");
+        assert!(
+            order_blockers.is_empty(),
+            "a fully settled platform order must not block: {order_blockers:?}"
+        );
+        let window_blockers = load_branch_window_payment_blockers(
+            &conn,
+            "branch-1",
+            "2026-03-26T00:00:00Z",
+            Some("2026-03-27T00:00:00Z"),
+            true,
+        )
+        .expect("window blockers");
+        assert!(
+            window_blockers.is_empty(),
+            "shift checkout must accept platform settlements: {window_blockers:?}"
+        );
+
+        // A generic 'other' row WITHOUT the settlement marker still blocks —
+        // the guard narrows only the THE-437 shape, nothing else.
+        conn.execute(
+            "INSERT INTO orders (
+                id, order_number, branch_id, items, total_amount, total_amount_cents,
+                status, payment_status, created_at, updated_at
+            ) VALUES (
+                'ord-generic-other', 'ORD-GO-1', 'branch-1', '[]', 5.0, 500,
+                'completed', 'paid', '2026-03-26T16:53:37Z', '2026-03-26T17:19:54Z'
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, amount_cents, status, transaction_ref,
+                sync_status, created_at, updated_at
+            ) VALUES (
+                'pay-generic-other', 'ord-generic-other', 'other', 5.0, 500, 'completed',
+                'MANUAL-REF-1', 'pending', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+
+        let generic_blockers =
+            load_order_payment_blockers(&conn, "ord-generic-other").expect("generic blockers");
+        assert_eq!(generic_blockers.len(), 1);
+        assert_eq!(
+            generic_blockers[0].reason_code,
+            "unsupported_payment_method"
+        );
     }
 
     #[test]
