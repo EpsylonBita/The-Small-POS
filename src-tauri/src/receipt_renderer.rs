@@ -444,6 +444,24 @@ pub struct ZReportStaffPaymentEntry {
     pub created_at: Option<String>,
 }
 
+/// Per-platform Z line (founder request 01/09/2026): orders the platform's
+/// own rider carried show count + amount (bank-settled money), orders the
+/// store's own driver carried split into the cash/card actually collected.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ZReportPlatformEntry {
+    pub platform: String,
+    #[serde(default)]
+    pub fleet_orders: i64,
+    #[serde(default)]
+    pub fleet_amount: f64,
+    #[serde(default)]
+    pub vendor_orders: i64,
+    #[serde(default)]
+    pub vendor_cash: f64,
+    #[serde(default)]
+    pub vendor_card: f64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ZReportDoc {
     pub report_id: String,
@@ -509,6 +527,8 @@ pub struct ZReportDoc {
     pub expense_lines: Vec<ZReportExpenseEntry>,
     #[serde(default)]
     pub staff_payment_lines: Vec<ZReportStaffPaymentEntry>,
+    #[serde(default)]
+    pub platform_lines: Vec<ZReportPlatformEntry>,
     #[serde(default)]
     pub staff_reports: Vec<ZReportStaffEntry>,
 }
@@ -699,6 +719,8 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "ORDER BREAKDOWN" => "ΑΝΑΛΥΣΗ ΠΑΡΑΓΓΕΛΙΩΝ",
             "EXPENSE ANALYSIS" => "ΑΝΑΛΥΣΗ ΕΞΟΔΩΝ",
             "EXPENSES" => "ΕΞΟΔΑ",
+            "PLATFORMS" => "ΠΛΑΤΦΟΡΜΕΣ",
+            "Platforms Total" => "Σύνολο Πλατφορμών",
             "Total Expenses" => "Σύνολο Εξόδων",
             "Dine-in" => "Επιτόπου",
             "Takeaway" => "Παραλαβή",
@@ -841,6 +863,8 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "ORDER BREAKDOWN" => "BESTELL-UEBERSICHT",
             "EXPENSE ANALYSIS" => "AUSGABENDETAILS",
             "EXPENSES" => "AUSGABEN",
+            "PLATFORMS" => "PLATTFORMEN",
+            "Platforms Total" => "Plattformen gesamt",
             "Total Expenses" => "Ausgaben gesamt",
             "Dine-in" => "Vor Ort",
             "Takeaway" => "Mitnahme",
@@ -983,6 +1007,8 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "ORDER BREAKDOWN" => "REPARTITION COMMANDES",
             "EXPENSE ANALYSIS" => "DETAIL DES DEPENSES",
             "EXPENSES" => "DEPENSES",
+            "PLATFORMS" => "PLATEFORMES",
+            "Platforms Total" => "Total plateformes",
             "Total Expenses" => "Total des depenses",
             "Dine-in" => "Sur place",
             "Takeaway" => "A emporter",
@@ -1125,6 +1151,8 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "ORDER BREAKDOWN" => "RIPARTIZIONE ORDINI",
             "EXPENSE ANALYSIS" => "DETTAGLIO SPESE",
             "EXPENSES" => "SPESE",
+            "PLATFORMS" => "PIATTAFORME",
+            "Platforms Total" => "Totale piattaforme",
             "Total Expenses" => "Totale spese",
             "Dine-in" => "Al tavolo",
             "Takeaway" => "Asporto",
@@ -1220,6 +1248,74 @@ fn z_report_staff_payment_detail_label(lang: &str, payment: &ZReportStaffPayment
 
 fn z_report_total_expenses_including_staff(doc: &ZReportDoc) -> f64 {
     doc.expenses_total + doc.staff_payments_total
+}
+
+struct ZPlatformRow {
+    label: String,
+    amount: f64,
+}
+
+/// Rows for the Z slip's ΠΛΑΤΦΟΡΜΕΣ section (founder request 01/09/2026):
+/// platform-fleet orders as count + bank-settled amount, own-driver orders
+/// split into the cash/card actually collected (those also keep appearing in
+/// the driver's own checkout section). Returns (rows, section total).
+fn z_report_platform_rows(doc: &ZReportDoc, lang: &str) -> (Vec<ZPlatformRow>, f64) {
+    let mut rows = Vec::new();
+    let mut total = 0.0_f64;
+    for entry in &doc.platform_lines {
+        let name = entry.platform.trim().to_uppercase();
+        if name.is_empty() {
+            continue;
+        }
+        // Platform-fleet orders: one line, count + bank-settled amount. No
+        // cash/card split — the platform remits everything by bank transfer,
+        // and a store never runs its own drivers for a platform-fleet
+        // platform, so no ownership wording is needed (founder, 01/09/2026).
+        if entry.fleet_orders > 0 || entry.fleet_amount != 0.0 {
+            rows.push(ZPlatformRow {
+                label: format!("{} ×{}", name, entry.fleet_orders),
+                amount: entry.fleet_amount,
+            });
+            total += entry.fleet_amount;
+        }
+        // Own-driver orders: cash/card split, because this money must
+        // reconcile with the drawer and the card terminal at close.
+        let has_vendor_money = entry.vendor_cash != 0.0 || entry.vendor_card != 0.0;
+        if entry.vendor_orders > 0 || has_vendor_money {
+            let mut count_shown = false;
+            if entry.vendor_cash != 0.0 || entry.vendor_card == 0.0 {
+                rows.push(ZPlatformRow {
+                    label: format!(
+                        "{} ×{} · {}",
+                        name,
+                        entry.vendor_orders,
+                        receipt_label(lang, "Cash")
+                    ),
+                    amount: entry.vendor_cash,
+                });
+                total += entry.vendor_cash;
+                count_shown = true;
+            }
+            if entry.vendor_card != 0.0 {
+                let label = if count_shown {
+                    format!("{} · {}", name, receipt_label(lang, "Card"))
+                } else {
+                    format!(
+                        "{} ×{} · {}",
+                        name,
+                        entry.vendor_orders,
+                        receipt_label(lang, "Card")
+                    )
+                };
+                rows.push(ZPlatformRow {
+                    label,
+                    amount: entry.vendor_card,
+                });
+                total += entry.vendor_card;
+            }
+        }
+    }
+    (rows, total)
 }
 
 fn non_empty_receipt_value(value: &str) -> Option<&str> {
@@ -4091,6 +4187,30 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                     esc(receipt_label(lang, "Total Expenses")),
                     money(z_report_total_expenses_including_staff(doc)),
                 ));
+            }
+
+            // Platforms (efood/wolt/...): platform-fleet count+amount, own-driver
+            // cash/card — mirrors the ΕΞΟΔΑ section shape.
+            {
+                let (platform_rows, platform_total) = z_report_platform_rows(doc, lang);
+                if !platform_rows.is_empty() {
+                    body.push_str(&format!(
+                        "<div class=\"section\"><div class=\"center\"><strong>{}</strong></div>",
+                        esc(receipt_label(lang, "PLATFORMS"))
+                    ));
+                    for row in &platform_rows {
+                        body.push_str(&format!(
+                            "<div class=\"line\"><span>{}</span><span>{}</span></div>",
+                            esc(&row.label),
+                            money(row.amount),
+                        ));
+                    }
+                    body.push_str(&format!(
+                        "<hr/><div class=\"line\"><strong>{}</strong><strong>{}</strong></div></div>",
+                        esc(receipt_label(lang, "Platforms Total")),
+                        money(platform_total),
+                    ));
+                }
             }
 
             // Cash drawer
@@ -7760,6 +7880,33 @@ fn render_classic_non_customer_raster_exact_ttf(
                 );
             }
 
+            // Platforms (efood/wolt/...): platform-fleet count+amount,
+            // own-driver cash/card — mirrors the ΕΞΟΔΑ section shape.
+            {
+                let (platform_rows, platform_total) = z_report_platform_rows(doc, lang);
+                if !platform_rows.is_empty() {
+                    canvas.draw_rule();
+                    canvas.draw_text_line(
+                        receipt_label(lang, "PLATFORMS"),
+                        BitmapAlign::Center,
+                        preset.section_style,
+                    );
+                    for row in &platform_rows {
+                        canvas.draw_pair(
+                            &format!("{}:", row.label),
+                            &money_with_currency_locale(row.amount, &cur, comma),
+                            preset.item_style,
+                        );
+                    }
+                    canvas.draw_rule();
+                    canvas.draw_pair(
+                        &format!("{}:", receipt_label(lang, "Platforms Total")),
+                        &money_with_currency_locale(platform_total, &cur, comma),
+                        z_report_expense_total_style(&preset),
+                    );
+                }
+            }
+
             // --- Cash drawer reconciliation (penultimate section) ---
             canvas.draw_rule();
             canvas.draw_text_line(
@@ -11255,6 +11402,125 @@ mod tests {
         assert!(image.height() > 400);
         let out = std::env::temp_dir().join("platform_slip_preview.png");
         image.save(&out).expect("save preview png");
+        eprintln!("preview saved: {}", out.display());
+    }
+
+    #[test]
+    fn z_report_platform_rows_split_fleet_and_own_driver() {
+        let doc = ZReportDoc {
+            platform_lines: vec![
+                ZReportPlatformEntry {
+                    platform: "efood".to_string(),
+                    fleet_orders: 15,
+                    fleet_amount: 134.30,
+                    vendor_orders: 3,
+                    vendor_cash: 15.30,
+                    vendor_card: 32.70,
+                },
+                ZReportPlatformEntry {
+                    platform: "wolt".to_string(),
+                    fleet_orders: 18,
+                    fleet_amount: 180.75,
+                    ..ZReportPlatformEntry::default()
+                },
+            ],
+            ..ZReportDoc::default()
+        };
+
+        let (rows, total) = z_report_platform_rows(&doc, "el");
+        let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "EFOOD ×15",
+                "EFOOD ×3 · Μετρητά",
+                "EFOOD · Κάρτα",
+                "WOLT ×18",
+            ]
+        );
+        assert!((total - (134.30 + 15.30 + 32.70 + 180.75)).abs() < 0.001);
+
+        // Card-only own-driver platform: the order count rides the card row.
+        let card_only = ZReportDoc {
+            platform_lines: vec![ZReportPlatformEntry {
+                platform: "box".to_string(),
+                vendor_orders: 2,
+                vendor_card: 21.00,
+                ..ZReportPlatformEntry::default()
+            }],
+            ..ZReportDoc::default()
+        };
+        let (rows, total) = z_report_platform_rows(&card_only, "el");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "BOX ×2 · Κάρτα");
+        assert!((total - 21.00).abs() < 0.001);
+    }
+
+    #[test]
+    fn z_report_platforms_preview_renders_the_new_section() {
+        // Rendered Z-slip preview with the new ΠΛΑΤΦΟΡΜΕΣ section — saved to
+        // disk so the founder can approve the layout before release
+        // (slip-visual rule: approve before commit).
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            language: "el".to_string(),
+            classic_customer_render_mode: ClassicCustomerRenderMode::RasterExact,
+            organization_name: "ΤΟ ΜΙΚΡΟ ΠΑΡΙΣΙ".to_string(),
+            decimal_comma: true,
+            ..LayoutConfig::default()
+        };
+        let doc = ZReportDoc {
+            report_id: "z-preview".to_string(),
+            report_date: "2026-09-01".to_string(),
+            total_orders: 117,
+            gross_sales: 1016.94,
+            net_sales: 1016.94,
+            cash_sales: 272.58,
+            card_sales: 755.06,
+            expenses_total: 130.0,
+            staff_payments_total: 129.0,
+            expense_lines: vec![
+                ZReportExpenseEntry {
+                    reason: "ΠΙΤΣΕΣ".to_string(),
+                    amount: 50.0,
+                    ..ZReportExpenseEntry::default()
+                },
+                ZReportExpenseEntry {
+                    reason: "ΓΑΛΑ".to_string(),
+                    amount: 27.50,
+                    ..ZReportExpenseEntry::default()
+                },
+            ],
+            staff_payment_lines: vec![ZReportStaffPaymentEntry {
+                staff_name: "Τάσος Μαλεζίδης".to_string(),
+                role: "driver".to_string(),
+                amount: 36.0,
+                ..ZReportStaffPaymentEntry::default()
+            }],
+            platform_lines: vec![
+                ZReportPlatformEntry {
+                    platform: "efood".to_string(),
+                    fleet_orders: 15,
+                    fleet_amount: 134.30,
+                    vendor_orders: 3,
+                    vendor_cash: 15.30,
+                    vendor_card: 32.70,
+                },
+                ZReportPlatformEntry {
+                    platform: "wolt".to_string(),
+                    fleet_orders: 18,
+                    fleet_amount: 180.75,
+                    ..ZReportPlatformEntry::default()
+                },
+            ],
+            ..ZReportDoc::default()
+        };
+        let image =
+            render_classic_non_customer_raster_exact_ttf(&ReceiptDocument::ZReport(doc), &cfg)
+                .expect("z report renders");
+        assert!(image.height() > 400);
+        let out = std::env::temp_dir().join("z_platforms_preview.png");
+        image.save(&out).expect("save z preview png");
         eprintln!("preview saved: {}", out.display());
     }
 

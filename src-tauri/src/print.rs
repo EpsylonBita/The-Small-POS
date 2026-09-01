@@ -6376,6 +6376,31 @@ fn text_from_paths(payload: &Value, paths: &[&str]) -> Option<String> {
     None
 }
 
+fn z_report_platform_entries(payload: &Value) -> Vec<receipt_renderer::ZReportPlatformEntry> {
+    payload
+        .pointer("/sales/platforms")
+        .or_else(|| payload.get("platforms"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|p| receipt_renderer::ZReportPlatformEntry {
+                    platform: p
+                        .get("platform")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                    fleet_orders: p.get("fleetOrders").and_then(Value::as_i64).unwrap_or(0),
+                    fleet_amount: p.get("fleetAmount").and_then(Value::as_f64).unwrap_or(0.0),
+                    vendor_orders: p.get("vendorOrders").and_then(Value::as_i64).unwrap_or(0),
+                    vendor_cash: p.get("vendorCash").and_then(Value::as_f64).unwrap_or(0.0),
+                    vendor_card: p.get("vendorCard").and_then(Value::as_f64).unwrap_or(0.0),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn z_report_expense_entries(payload: &Value) -> Vec<receipt_renderer::ZReportExpenseEntry> {
     payload
         .pointer("/expenses/items")
@@ -6753,6 +6778,7 @@ fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &st
         delivery_orders,
         delivery_sales,
         expense_lines: z_report_expense_entries(payload),
+        platform_lines: z_report_platform_entries(payload),
         staff_payment_lines,
         staff_reports: payload
             .get("staffReports")
@@ -6994,6 +7020,7 @@ fn build_z_report_doc(db: &DbState, z_report_id: &str) -> Result<ZReportDoc, Str
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0),
         expense_lines: z_report_expense_entries(&rj),
+        platform_lines: z_report_platform_entries(&rj),
         staff_payment_lines,
         staff_reports: rj
             .get("staffReports")

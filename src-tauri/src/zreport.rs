@@ -3770,6 +3770,133 @@ fn build_z_report_for_date(
         }
     }
 
+    // --- Per-platform breakdown (founder request 01/09/2026) ---
+    //
+    // The Z slip gets a ΠΛΑΤΦΟΡΜΕΣ section mirroring ΕΞΟΔΑ: per platform,
+    // orders carried by the platform's own rider show count + amount (bank
+    // money), while orders delivered by the store's own driver split into
+    // the cash/card actually collected (those also keep appearing inside the
+    // driver's own checkout section, unchanged).
+    #[derive(Default)]
+    struct PlatformDayAgg {
+        fleet_orders: i64,
+        fleet_amount: f64,
+        vendor_orders: i64,
+        vendor_amount: f64,
+        vendor_cash: f64,
+        vendor_card: f64,
+    }
+    let mut platform_aggs: std::collections::BTreeMap<String, PlatformDayAgg> =
+        std::collections::BTreeMap::new();
+    {
+        let platform_scope_expr = business_day::order_financial_timestamp_expr("o");
+        let platform_scope_predicate = lower_bound_mode.sql_predicate(&platform_scope_expr, "?1");
+        // instr() instead of LIKE: the marker contains `_`, which LIKE treats
+        // as a single-character wildcard.
+        let platform_orders_sql = format!(
+            "SELECT LOWER(TRIM(COALESCE(o.plugin, ''))) AS platform,
+                    CASE WHEN instr(COALESCE(o.ghost_metadata, ''),
+                                    '\"delivery_provider\":\"platform_delivery\"') > 0
+                         THEN 1 ELSE 0 END AS platform_fleet,
+                    COUNT(*) AS cnt,
+                    COALESCE(SUM(COALESCE(o.total_amount_cents,
+                                          CAST(ROUND(o.total_amount * 100) AS INTEGER), 0)), 0)
+             FROM orders o
+             WHERE {platform_scope_predicate}
+               AND (?2 IS NULL OR {platform_scope_expr} <= ?2)
+               AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
+               AND COALESCE(o.is_ghost, 0) = 0
+               AND COALESCE(o.is_test, 0) = 0
+               AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
+               AND TRIM(COALESCE(o.plugin, '')) != ''
+             GROUP BY platform, platform_fleet"
+        );
+        let mut platform_stmt = conn
+            .prepare(&platform_orders_sql)
+            .map_err(|e| format!("prepare platform breakdown query: {e}"))?;
+        let platform_rows = platform_stmt
+            .query_map(params![period_start, cutoff_param, branch_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    Cents::new(row.get::<_, i64>(3)?).to_f64_dp2(),
+                ))
+            })
+            .map_err(|e| format!("query platform breakdown: {e}"))?;
+        for row in platform_rows.flatten() {
+            let (platform, is_platform_fleet, count, total) = row;
+            let agg = platform_aggs.entry(platform).or_default();
+            if is_platform_fleet == 1 {
+                agg.fleet_orders += count;
+                agg.fleet_amount += total;
+            } else {
+                agg.vendor_orders += count;
+                agg.vendor_amount += total;
+            }
+        }
+
+        let vendor_payments_sql = format!(
+            "SELECT LOWER(TRIM(COALESCE(o.plugin, ''))) AS platform,
+                    op.method,
+                    COALESCE(SUM(COALESCE(op.amount_cents,
+                                          CAST(ROUND(op.amount * 100) AS INTEGER))), 0)
+             FROM order_payments op
+             JOIN orders o ON o.id = op.order_id
+             WHERE {platform_scope_predicate}
+               AND (?2 IS NULL OR {platform_scope_expr} <= ?2)
+               AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
+               AND op.status = 'completed'
+               AND op.method IN ('cash', 'card')
+               AND COALESCE(o.is_ghost, 0) = 0
+               AND COALESCE(o.is_test, 0) = 0
+               AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
+               AND TRIM(COALESCE(o.plugin, '')) != ''
+               AND instr(COALESCE(o.ghost_metadata, ''),
+                         '\"delivery_provider\":\"platform_delivery\"') = 0
+             GROUP BY platform, op.method"
+        );
+        let mut vendor_stmt = conn
+            .prepare(&vendor_payments_sql)
+            .map_err(|e| format!("prepare platform vendor payments query: {e}"))?;
+        let vendor_rows = vendor_stmt
+            .query_map(params![period_start, cutoff_param, branch_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    Cents::new(row.get::<_, i64>(2)?).to_f64_dp2(),
+                ))
+            })
+            .map_err(|e| format!("query platform vendor payments: {e}"))?;
+        for row in vendor_rows.flatten() {
+            let (platform, method, total) = row;
+            let agg = platform_aggs.entry(platform).or_default();
+            match method.as_str() {
+                "cash" => agg.vendor_cash += total,
+                "card" => agg.vendor_card += total,
+                _ => {}
+            }
+        }
+    }
+    let platform_breakdown: Vec<Value> = platform_aggs
+        .iter()
+        .map(|(platform, agg)| {
+            serde_json::json!({
+                "platform": platform,
+                "fleetOrders": agg.fleet_orders,
+                "fleetAmount": agg.fleet_amount,
+                "fleetAmount_cents": Cents::round_half_even(agg.fleet_amount).as_i64(),
+                "vendorOrders": agg.vendor_orders,
+                "vendorAmount": agg.vendor_amount,
+                "vendorAmount_cents": Cents::round_half_even(agg.vendor_amount).as_i64(),
+                "vendorCash": agg.vendor_cash,
+                "vendorCash_cents": Cents::round_half_even(agg.vendor_cash).as_i64(),
+                "vendorCard": agg.vendor_card,
+                "vendorCard_cents": Cents::round_half_even(agg.vendor_card).as_i64(),
+            })
+        })
+        .collect();
+
     // --- Adjustments: refunds and voids across all shifts ---
     let adjustment_scope_expr = business_day::order_financial_timestamp_expr("o");
     let adjustment_scope_predicate = lower_bound_mode.sql_predicate(&adjustment_scope_expr, "?1");
@@ -4221,6 +4348,7 @@ fn build_z_report_for_date(
             "platformOnlineSales_cents": Cents::round_half_even(platform_online_sales).as_i64(),
             "platformCodSales": platform_cod_sales,
             "platformCodSales_cents": Cents::round_half_even(platform_cod_sales).as_i64(),
+            "platforms": platform_breakdown,
             "dineInOrders": dine_in_orders,
             "dineInSales": dine_in_sales,
             "dineInSales_cents": Cents::round_half_even(dine_in_sales).as_i64(),
@@ -6323,6 +6451,55 @@ mod tests {
             )
             .unwrap();
         }
+    }
+
+    #[test]
+    fn test_date_z_report_breaks_platform_orders_down_by_fleet() {
+        let db = test_db();
+        let shift_id = seed_closed_shift(&db);
+        {
+            let conn = db.conn.lock().unwrap();
+            // efood, platform fleet: one count+amount line, no drawer money.
+            conn.execute(
+                "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents, status, order_type, payment_status, staff_shift_id, plugin, ghost_metadata, sync_status, created_at, updated_at)
+                 VALUES ('ord-efood-fleet', 'EF-1', '[]', 12.10, 1210, 'delivered', 'delivery', 'paid', ?1, 'efood', '{\"food_delivery\":{\"delivery_provider\":\"platform_delivery\",\"payment_method\":\"online\",\"prepaid\":true}}', 'pending', '2026-02-16T12:00:00Z', '2026-02-16T12:00:00Z')",
+                params![shift_id],
+            )
+            .unwrap();
+            // efood, own driver: cash 8 + card 5 across two orders — this
+            // money reconciles with the drawer/terminal, so the Z splits it.
+            for (id, num, total, cents, method) in [
+                ("ord-efood-vc", "EF-2", 8.0_f64, 800_i64, "cash"),
+                ("ord-efood-vk", "EF-3", 5.0, 500, "card"),
+            ] {
+                conn.execute(
+                    "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents, status, order_type, payment_status, staff_shift_id, plugin, ghost_metadata, sync_status, created_at, updated_at)
+                     VALUES (?1, ?2, '[]', ?3, ?4, 'delivered', 'delivery', 'paid', ?5, 'efood', '{\"food_delivery\":{\"delivery_provider\":\"vendor_delivery\",\"payment_method\":\"cash\"}}', 'pending', '2026-02-16T13:00:00Z', '2026-02-16T13:00:00Z')",
+                    params![id, num, total, cents, shift_id],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status, sync_status, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 'completed', 'pending', '2026-02-16T13:05:00Z', '2026-02-16T13:05:00Z')",
+                    params![format!("pay-{id}"), id, method, total, cents],
+                )
+                .unwrap();
+            }
+        }
+
+        let payload = serde_json::json!({ "branchId": "branch-1", "date": "2026-02-16" });
+        let result = generate_z_report_for_date(&db, &payload).expect("generate with platforms");
+        let platforms = result["report"]["reportJson"]["sales"]["platforms"]
+            .as_array()
+            .expect("platforms array");
+        assert_eq!(platforms.len(), 1, "one platform expected: {platforms:?}");
+        let efood = &platforms[0];
+        assert_eq!(efood["platform"], "efood");
+        assert_eq!(efood["fleetOrders"], 1);
+        assert_eq!(efood["fleetAmount"], 12.10);
+        assert_eq!(efood["vendorOrders"], 2);
+        assert_eq!(efood["vendorCash"], 8.0);
+        assert_eq!(efood["vendorCard"], 5.0);
     }
 
     #[test]
