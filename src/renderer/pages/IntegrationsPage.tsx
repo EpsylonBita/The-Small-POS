@@ -101,6 +101,7 @@ interface RemoteIntegrationPayload {
   is_active?: boolean;
   status?: string | null;
   requires_partner_credentials?: boolean;
+  read_only_admin_setup?: boolean;
   settings?: IntegrationWithStatus['settings'];
   last_sync_at?: string | null;
   onboarding_status?: string | null;
@@ -149,12 +150,11 @@ const ALL_INTEGRATIONS: Integration[] = [
   },
   {
     id: 'box',
-    name: 'Box',
-    description: 'Delivery platform for restaurants',
+    name: 'BOX',
+    description: 'BOX by COSMOTE — delivery orders at the till',
     icon: <Package className="w-6 h-6" />,
     category: 'delivery',
     requiredModule: MODULE_IDS.DELIVERY,
-    requiresPartnerCredentials: true,
   },
   {
     id: 'glovo',
@@ -427,10 +427,15 @@ const calculateStats = (integrations: IntegrationWithStatus[]): IntegrationStats
 const normalizeProviderId = (value: string) =>
   value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
 
-const ADMIN_DASHBOARD_SETUP_PLUGIN_IDS = new Set(['caller_id', 'efood']);
+// Plugins whose onboarding lives ONLY in the web Admin Dashboard: the till shows
+// status (and last error) but never collects credentials. The server marks the
+// same plugins with `read_only_admin_setup: true` (admin-dashboard-setup-plugins);
+// that flag wins when present and this local set is the offline/older-server
+// fallback, so a newly admin-managed plugin never opens the credential modal.
+const ADMIN_DASHBOARD_SETUP_PLUGIN_IDS = new Set(['caller_id', 'efood', 'box']);
 
-const usesAdminDashboardSetup = (pluginId: string): boolean =>
-  ADMIN_DASHBOARD_SETUP_PLUGIN_IDS.has(pluginId);
+const usesAdminDashboardSetup = (pluginId: string, readOnlyAdminSetup?: boolean): boolean =>
+  readOnlyAdminSetup === true || ADMIN_DASHBOARD_SETUP_PLUGIN_IDS.has(pluginId);
 
 const buildAdminDashboardPluginUrl = (
   pluginId: string,
@@ -493,7 +498,11 @@ const mapPurchasedIntegration = (remote: RemoteIntegrationPayload): IntegrationW
   if (!id) return null;
 
   const fallback = INTEGRATION_CATALOG_BY_ID.get(id);
-  const requiresPartnerCredentials = Boolean(
+  const readOnlyAdminSetup = usesAdminDashboardSetup(id, remote.read_only_admin_setup === true);
+  // An admin-managed plugin is never "locked behind partner credentials" on the
+  // till: the Admin Dashboard is its setup path, so the card must keep the
+  // "Open Admin Dashboard" affordance instead of the amber lock.
+  const requiresPartnerCredentials = !readOnlyAdminSetup && Boolean(
     remote.requires_partner_credentials ?? fallback?.requiresPartnerCredentials
   );
 
@@ -513,7 +522,7 @@ const mapPurchasedIntegration = (remote: RemoteIntegrationPayload): IntegrationW
     productionStatus: remote.production_status || undefined,
     diagnostics: remote.diagnostics || undefined,
     lastError: remote.last_error || null,
-    readOnlyAdminSetup: usesAdminDashboardSetup(id),
+    readOnlyAdminSetup,
   };
 };
 
@@ -636,7 +645,7 @@ const IntegrationCard = memo<IntegrationCardProps>(({
 
   const StatusIcon = isLocked ? AlertCircle : getStatusIcon(integration.status);
   const statusColor = isLocked ? '#f59e0b' : getStatusColor(integration.status);
-  const isAdminDashboardSetup = usesAdminDashboardSetup(integration.id);
+  const isAdminDashboardSetup = usesAdminDashboardSetup(integration.id, integration.readOnlyAdminSetup);
   const isToggleDisabled =
     isLocked ||
     integration.readOnlyAdminSetup === true ||
@@ -732,6 +741,19 @@ const IntegrationCard = memo<IntegrationCardProps>(({
               )}
             </p>
           )}
+          {isAdminDashboardSetup && integration.id !== 'efood' && integration.id !== 'caller_id' && integration.status === 'pending' && (
+            <p className={`mt-2 text-xs font-medium ${isDark ? 'text-amber-300' : 'text-amber-700'}`}>
+              {t(
+                'integrations.adminSetup.pendingFirstOrder',
+                'Set up in the Admin Dashboard. The connection becomes active with the first order received.'
+              )}
+            </p>
+          )}
+          {isAdminDashboardSetup && integration.id !== 'efood' && integration.lastError && (
+            <p className={`mt-2 text-xs ${isDark ? 'text-red-300' : 'text-red-600'}`}>
+              {t('integrations.efood.lastError', 'Last error')}: {integration.lastError}
+            </p>
+          )}
           {integration.id === 'efood' && (
             <div className={`mt-3 grid grid-cols-2 gap-1 rounded-xl p-2 text-[11px] ${
               isDark ? 'bg-white/5 text-gray-300' : 'bg-gray-50 text-gray-600'
@@ -776,7 +798,7 @@ const IntegrationCard = memo<IntegrationCardProps>(({
               }`}
               aria-label={t('integrations.configure', 'Configure')}
             >
-              {usesAdminDashboardSetup(integration.id) ? (
+              {isAdminDashboardSetup ? (
                 <>
                   <ExternalLink size={16} />
                   <span className="ml-1 hidden text-xs sm:inline">
@@ -1267,7 +1289,7 @@ export const IntegrationsPage: React.FC = () => {
     const integration = integrations.find(i => i.id === id);
     if (!integration) return;
 
-    if (usesAdminDashboardSetup(integration.id)) {
+    if (usesAdminDashboardSetup(integration.id, integration.readOnlyAdminSetup)) {
       await openPluginInAdminDashboard(integration.id);
       return;
     }
@@ -1342,7 +1364,7 @@ export const IntegrationsPage: React.FC = () => {
 
   // Handle configure
   const handleConfigure = useCallback((integration: IntegrationWithStatus) => {
-    if (usesAdminDashboardSetup(integration.id)) {
+    if (usesAdminDashboardSetup(integration.id, integration.readOnlyAdminSetup)) {
       void openPluginInAdminDashboard(integration.id);
       return;
     }

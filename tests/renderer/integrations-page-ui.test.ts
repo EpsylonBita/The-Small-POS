@@ -201,3 +201,55 @@ test('Plugin setup modals keep light-theme text and controls readable', () => {
     /html:not\(\.dark\) \.plugin-setup-modal \.liquid-glass-modal-secondary\s*\{[\s\S]*?color:\s*#27272a/,
   );
 });
+
+// BOX (BOX by COSMOTE) is onboarded by The Small through the web Admin Dashboard, like
+// efood: the till never collects BOX credentials. The card is read-only status + an
+// "Open Admin Dashboard" action, driven by the server's `read_only_admin_setup` flag with
+// the local id set as the fallback for older servers. Rendering behaviour is pinned in
+// src/renderer/pages/__tests__/IntegrationsPage.box-admin-setup.test.tsx (vitest); this
+// guard pins the source-level contract so the fallback set and the flag cannot drift.
+test('BOX is Admin-Dashboard-managed on the till (no credential form, data-driven flag)', () => {
+  // Local fallback set includes box next to efood.
+  assert.match(source, /const ADMIN_DASHBOARD_SETUP_PLUGIN_IDS = new Set\(\['caller_id', 'efood', 'box'\]\);/);
+
+  // The server flag wins when present; the set is only the fallback.
+  assert.match(source, /read_only_admin_setup\?: boolean;/);
+  assert.match(
+    source,
+    /const usesAdminDashboardSetup = \(pluginId: string, readOnlyAdminSetup\?: boolean\): boolean =>\s*readOnlyAdminSetup === true \|\| ADMIN_DASHBOARD_SETUP_PLUGIN_IDS\.has\(pluginId\);/,
+  );
+  assert.match(
+    source,
+    /const readOnlyAdminSetup = usesAdminDashboardSetup\(id, remote\.read_only_admin_setup === true\);/,
+  );
+  // Admin-managed plugins are never shown as "partner credentials required" locks.
+  assert.match(source, /const requiresPartnerCredentials = !readOnlyAdminSetup && Boolean\(/);
+
+  // Every routing decision (card, toggle, configure) consults the per-integration flag.
+  assert.match(source, /usesAdminDashboardSetup\(integration\.id, integration\.readOnlyAdminSetup\)/);
+  assert.doesNotMatch(source, /usesAdminDashboardSetup\(integration\.id\)/);
+
+  // The catalog entry is branded BOX and no longer carries the stale partner-credential lock.
+  const boxEntry = source.match(/\{\s*id: 'box',[\s\S]*?\n  \},/);
+  assert.ok(boxEntry, 'box catalog entry present');
+  assert.match(boxEntry[0], /name: 'BOX',/);
+  assert.match(boxEntry[0], /description: 'BOX by COSMOTE — delivery orders at the till',/);
+  assert.doesNotMatch(boxEntry[0], /requiresPartnerCredentials/);
+
+  // Read-only status surface for admin-managed delivery plugins: pending hint + last error.
+  assert.match(source, /t\(\s*'integrations\.adminSetup\.pendingFirstOrder',/);
+  assert.match(
+    source,
+    /isAdminDashboardSetup && integration\.id !== 'efood' && integration\.lastError && \(/,
+  );
+});
+
+test('BOX brand renders as "BOX" in shared plugin names and logo labels', () => {
+  const pluginIcons = readFileSync(
+    path.join(process.cwd(), 'src', 'renderer', 'utils', 'plugin-icons.tsx'),
+    'utf8',
+  );
+  assert.match(pluginIcons, /^\s+box: 'BOX',$/m);
+  assert.match(pluginIcons, /box: \{\s*url: boxLogo,\s*label: 'BOX',/);
+  assert.doesNotMatch(pluginIcons, /'Box'/);
+});

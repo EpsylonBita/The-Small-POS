@@ -7206,6 +7206,9 @@
       "setupInAdmin": "Set up Caller ID in Admin Dashboard",
       "manageInAdmin": "Manage Caller ID in Admin Dashboard"
     },
+    "adminSetup": {
+      "pendingFirstOrder": "Set up in the Admin Dashboard. The connection becomes active with the first order received."
+    },
     "plugins": {
       "efood": {
         "description": "Greece's leading food delivery platform"
@@ -7214,7 +7217,7 @@
         "description": "Food delivery and discovery platform"
       },
       "box": {
-        "description": "Delivery platform for restaurants"
+        "description": "BOX by COSMOTE — delivery orders at the till"
       },
       "booking": {
         "description": "World's leading hotel booking platform"

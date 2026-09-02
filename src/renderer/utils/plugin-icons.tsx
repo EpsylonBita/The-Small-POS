@@ -75,7 +75,7 @@ const PLUGIN_COLORS: Record<OrderPlugin, string> = {
 const PLUGIN_NAMES: Record<OrderPlugin, string> = {
   wolt: 'Wolt',
   efood: 'Efood',
-  box: 'Box',
+  box: 'BOX',
   glovo: 'Glovo',
   bolt_food: 'Bolt Food',
   uber_eats: 'Uber Eats',
@@ -128,7 +128,7 @@ const PLUGIN_LOGOS: Record<string, { url: string; label: string; kind: PluginLog
   },
   box: {
     url: boxLogo,
-    label: 'Box',
+    label: 'BOX',
     kind: 'mark',
   },
   uber_eats: {

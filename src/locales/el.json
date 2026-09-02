@@ -7558,6 +7558,9 @@
       "setupInAdmin": "Ρύθμιση Caller ID στο Admin Dashboard",
       "manageInAdmin": "Διαχείριση Caller ID στο Admin Dashboard"
     },
+    "adminSetup": {
+      "pendingFirstOrder": "Η ρύθμιση γίνεται από το Admin Dashboard. Η σύνδεση ενεργοποιείται με την πρώτη παραγγελία που θα φτάσει."
+    },
     "plugins": {
       "efood": {
         "description": "Η κορυφαία πλατφόρμα διανομής φαγητού στην Ελλάδα"
@@ -7566,7 +7569,7 @@
         "description": "Πλατφόρμα διανομής και ανακάλυψης φαγητού"
       },
       "box": {
-        "description": "Πλατφόρμα διανομής για εστιατόρια"
+        "description": "BOX by COSMOTE — παραγγελίες delivery στο ταμείο"
       },
       "booking": {
         "description": "Η κορυφαία πλατφόρμα κρατήσεων ξενοδοχείων"

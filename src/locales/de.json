@@ -7206,6 +7206,9 @@
       "setupInAdmin": "Anruferkennung im Admin Dashboard einrichten",
       "manageInAdmin": "Anruferkennung im Admin Dashboard verwalten"
     },
+    "adminSetup": {
+      "pendingFirstOrder": "[NEEDS TRANSLATION] Set up in the Admin Dashboard. The connection becomes active with the first order received."
+    },
     "plugins": {
       "efood": {
         "description": "Griechenlands führende Essenslieferplattform"
@@ -7214,7 +7217,7 @@
         "description": "Essenslieferung und Entdeckungsplattform"
       },
       "box": {
-        "description": "Lieferplattform für Restaurants"
+        "description": "[NEEDS TRANSLATION] BOX by COSMOTE — delivery orders at the till"
       },
       "booking": {
         "description": "Weltweit führende Hotelbuchungsplattform"

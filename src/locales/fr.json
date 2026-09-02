@@ -7206,6 +7206,9 @@
       "setupInAdmin": "Configurer l’identification de l’appelant dans l’Admin Dashboard",
       "manageInAdmin": "Gérer l’identification de l’appelant dans l’Admin Dashboard"
     },
+    "adminSetup": {
+      "pendingFirstOrder": "[NEEDS TRANSLATION] Set up in the Admin Dashboard. The connection becomes active with the first order received."
+    },
     "plugins": {
       "efood": {
         "description": "Principale plateforme de livraison de repas en Grèce"
@@ -7214,7 +7217,7 @@
         "description": "Plateforme de livraison et de découverte culinaire"
       },
       "box": {
-        "description": "Plateforme de livraison pour les restaurants"
+        "description": "[NEEDS TRANSLATION] BOX by COSMOTE — delivery orders at the till"
       },
       "booking": {
         "description": "Principale plateforme de réservation hôtelière au monde"
