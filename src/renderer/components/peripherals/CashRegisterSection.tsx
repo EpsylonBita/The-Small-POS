@@ -43,6 +43,8 @@ interface TaxRate {
   department: string
 }
 
+type CapFileEncoding = 'utf-8' | 'windows-1253'
+
 interface CapDriverSettings {
   capturePath: string
   outputPath: string
@@ -51,6 +53,12 @@ interface CapDriverSettings {
   cashPaymentCode: number
   cardPaymentCode: number
   eftPosIndex: number
+  /** The vendor service must be running; off only while rehearsing with the fake service. */
+  requireService: boolean
+  /** TCP-probe the cashier ERP port before connecting; off for UDP/serial links. */
+  probeDeviceTcp: boolean
+  /** Encoding of command files and of the service's Output/log files. */
+  fileEncoding: CapFileEncoding
 }
 
 interface ECRCashDevice {
@@ -115,6 +123,9 @@ const DEFAULT_CAP_DRIVER_SETTINGS: CapDriverSettings = {
   cashPaymentCode: 1,
   cardPaymentCode: 2,
   eftPosIndex: 1,
+  requireService: true,
+  probeDeviceTcp: false,
+  fileEncoding: 'utf-8',
 }
 
 const cloneTaxRates = (taxRates: TaxRate[]): TaxRate[] =>
@@ -172,6 +183,16 @@ const asRecord = (value: unknown): Record<string, any> => {
   return {}
 }
 
+const asCapFileEncoding = (value: unknown): CapFileEncoding => {
+  const normalized = String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/_/g, '-')
+  return ['windows-1253', 'cp1253', '1253', 'ansi', 'ansi-1253'].includes(normalized)
+    ? 'windows-1253'
+    : 'utf-8'
+}
+
 const asCapDriverSettings = (value: unknown): CapDriverSettings => {
   const settings = asRecord(value)
   return {
@@ -203,6 +224,9 @@ const asCapDriverSettings = (value: unknown): CapDriverSettings => {
       Number.isInteger(settings.eftPosIndex)
         ? settings.eftPosIndex
         : DEFAULT_CAP_DRIVER_SETTINGS.eftPosIndex,
+    requireService: settings.requireService !== false,
+    probeDeviceTcp: settings.probeDeviceTcp === true,
+    fileEncoding: asCapFileEncoding(settings.fileEncoding),
   }
 }
 
@@ -616,7 +640,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
       (!Number.isInteger(form.tcp_port) || Number(form.tcp_port) <= 0 || Number(form.tcp_port) > 65535)
     ) {
       toast.error(
-        t('settings.peripherals.cashRegister.tcpPortRequired', 'A valid vendor ERP TCP port is required')
+        t('settings.peripherals.cashRegister.tcpPortRequired', 'A valid vendor ERP port is required')
       )
       return
     }
@@ -1281,6 +1305,80 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
                   className="liquid-glass-modal-input"
                 />
               </div>
+            </div>
+            <div>
+              <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
+                {t('settings.peripherals.cashRegister.capFileEncoding', 'Command file encoding')}
+              </label>
+              <select
+                value={form.settings.fileEncoding}
+                onChange={(event) =>
+                  updateForm({
+                    settings: {
+                      ...form.settings,
+                      fileEncoding: asCapFileEncoding(event.target.value),
+                    },
+                  })
+                }
+                className="liquid-glass-modal-input"
+              >
+                <option value="utf-8">
+                  {t('settings.peripherals.cashRegister.capFileEncodingUtf8', 'UTF-8')}
+                </option>
+                <option value="windows-1253">
+                  {t('settings.peripherals.cashRegister.capFileEncodingAnsi', 'ANSI 1253 (Greek Windows)')}
+                </option>
+              </select>
+              <p className="mt-1 text-xs liquid-glass-modal-text-muted">
+                {t(
+                  'settings.peripherals.cashRegister.capFileEncodingHelp',
+                  'Must match the encoding set in the CAP Driver installer. RBS integration guides often use ANSI 1253.'
+                )}
+              </p>
+            </div>
+            <div className="space-y-2 md:col-span-2">
+              <label className="flex cursor-pointer items-start gap-2 text-sm liquid-glass-modal-text">
+                <input
+                  type="checkbox"
+                  className="mt-1 h-4 w-4"
+                  checked={form.settings.probeDeviceTcp}
+                  onChange={(event) =>
+                    updateForm({
+                      settings: { ...form.settings, probeDeviceTcp: event.target.checked },
+                    })
+                  }
+                />
+                <span>
+                  {t('settings.peripherals.cashRegister.capProbeTcp', 'Check the cashier TCP port before connecting')}
+                  <span className="block text-xs liquid-glass-modal-text-muted">
+                    {t(
+                      'settings.peripherals.cashRegister.capProbeTcpHelp',
+                      'Leave off when the service reaches the cashier over UDP or a serial link; the check would fail even though the service works.'
+                    )}
+                  </span>
+                </span>
+              </label>
+              <label className="flex cursor-pointer items-start gap-2 text-sm liquid-glass-modal-text">
+                <input
+                  type="checkbox"
+                  className="mt-1 h-4 w-4"
+                  checked={form.settings.requireService}
+                  onChange={(event) =>
+                    updateForm({
+                      settings: { ...form.settings, requireService: event.target.checked },
+                    })
+                  }
+                />
+                <span>
+                  {t('settings.peripherals.cashRegister.capRequireService', 'Require the Windows service to be running')}
+                  <span className="block text-xs liquid-glass-modal-text-muted">
+                    {t(
+                      'settings.peripherals.cashRegister.capRequireServiceHelp',
+                      'Turn off only while rehearsing with the fake CAP Driver script; a real cashier always needs the vendor service.'
+                    )}
+                  </span>
+                </span>
+              </label>
             </div>
           </div>
         </div>

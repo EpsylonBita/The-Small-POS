@@ -22,7 +22,7 @@ pub fn create_protocol(
         // RBS/MAT fiscal cashiers. It is one installed adapter in the generic
         // ECR architecture, not a claim that all fiscal devices use CAP.
         "cap_driver" | "rbs_cap_driver" | "mat_cap_driver" => Ok(Box::new(
-            cap_driver::CapDriverProtocol::new(transport, config, connection_details),
+            cap_driver::CapDriverProtocol::new(transport, config, connection_details)?,
         )),
         // `generic` is retained as the persisted compatibility key. It is one
         // legacy Datecs-style command profile, not a universal fiscal adapter.

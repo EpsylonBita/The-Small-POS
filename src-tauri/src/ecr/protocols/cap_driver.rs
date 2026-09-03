@@ -7,6 +7,7 @@
 //! the device socket and never stores the cashier serial number or unlock key.
 //! Those credentials remain in the vendor service configuration on the POS PC.
 
+use crate::ecr::codepage::{decode_cp1253, encode_cp1253};
 use crate::ecr::protocol::*;
 use crate::ecr::transport::EcrTransport;
 use chrono::Utc;
@@ -26,6 +27,54 @@ const DEFAULT_TRANSACTION_TIMEOUT_MS: u64 = 120_000;
 const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 3_000;
 const OUTPUT_SETTLE_MS: u64 = 500;
 const POLL_INTERVAL_MS: u64 = 100;
+
+/// Text encoding shared by the command files POS writes and the Output/log
+/// files the vendor service writes back. It must match the CAP Driver installer
+/// setting: the EMDI/Pegasus RBS integration guides configure the service for
+/// ANSI 1253, while a service set to UTF-8 needs UTF-8 files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileEncoding {
+    Utf8,
+    Windows1253,
+}
+
+impl FileEncoding {
+    fn parse(value: Option<String>) -> Result<Self, String> {
+        let Some(raw) = value else {
+            return Ok(Self::Utf8);
+        };
+        match raw.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+            "utf-8" | "utf8" => Ok(Self::Utf8),
+            "windows-1253" | "cp1253" | "1253" | "ansi" | "ansi-1253" | "greek" => {
+                Ok(Self::Windows1253)
+            }
+            other => Err(format!(
+                "Unsupported CAP file encoding '{other}'; use utf-8 or windows-1253"
+            )),
+        }
+    }
+
+    fn encode(self, text: &str) -> Vec<u8> {
+        match self {
+            Self::Utf8 => text.as_bytes().to_vec(),
+            Self::Windows1253 => encode_cp1253(text),
+        }
+    }
+
+    fn decode(self, bytes: &[u8]) -> String {
+        match self {
+            Self::Utf8 => String::from_utf8_lossy(bytes).into_owned(),
+            Self::Windows1253 => decode_cp1253(bytes),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Utf8 => "utf-8",
+            Self::Windows1253 => "windows-1253",
+        }
+    }
+}
 
 struct DriverCompletion {
     status: TransactionStatus,
@@ -49,6 +98,12 @@ pub struct CapDriverProtocol {
     card_payment_code: u8,
     eft_pos_index: u8,
     require_service: bool,
+    /// Probe the cashier ERP host/port over TCP during readiness. Off by
+    /// default: the service may reach an RBS ELIO over UDP or a serial link,
+    /// in which case a TCP probe fails while the vendor service works.
+    probe_device_tcp: bool,
+    /// Encoding of the command files and of the driver's Output/log files.
+    file_encoding: FileEncoding,
     initialized: bool,
 }
 
@@ -57,7 +112,7 @@ impl CapDriverProtocol {
         transport: Box<dyn EcrTransport>,
         config: &serde_json::Value,
         connection_details: &serde_json::Value,
-    ) -> Self {
+    ) -> Result<Self, String> {
         let capture_path = string_setting(config, &["capturePath", "capture_path"])
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(DEFAULT_CAPTURE_PATH));
@@ -70,8 +125,12 @@ impl CapDriverProtocol {
         let port = u64_setting(connection_details, &["port", "tcpPort", "tcp_port"])
             .and_then(|value| u16::try_from(value).ok())
             .filter(|value| *value > 0);
+        let probe_device_tcp =
+            bool_setting(config, &["probeDeviceTcp", "probe_device_tcp"]).unwrap_or(false);
+        let file_encoding =
+            FileEncoding::parse(string_setting(config, &["fileEncoding", "file_encoding"]))?;
 
-        Self {
+        Ok(Self {
             _transport: transport,
             capture_path,
             output_path,
@@ -104,8 +163,10 @@ impl CapDriverProtocol {
             eft_pos_index: bounded_u8_setting(config, &["eftPosIndex", "eft_pos_index"], 1, 1, 99),
             require_service: bool_setting(config, &["requireService", "require_service"])
                 .unwrap_or(true),
+            probe_device_tcp,
+            file_encoding,
             initialized: false,
-        }
+        })
     }
 
     fn check_readiness(&self) -> Result<(), String> {
@@ -128,6 +189,9 @@ impl CapDriverProtocol {
             ));
         }
 
+        if !self.probe_device_tcp {
+            return Ok(());
+        }
         if let (Some(host), Some(port)) = (&self.host, self.port) {
             let target = format!("{host}:{port}");
             let addresses = target
@@ -300,11 +364,13 @@ impl CapDriverProtocol {
         let log_path = self.capture_path.join("CapDriverSVC_log.txt");
         let log_offset = fs::metadata(&log_path).map(|meta| meta.len()).unwrap_or(0);
         let submitted_at = SystemTime::now();
-        let body = format!("{}\r\n", commands.join("\r\n"));
+        let body = self
+            .file_encoding
+            .encode(&format!("{}\r\n", commands.join("\r\n")));
 
         let mut file = File::create(&pending_path)
             .map_err(|error| format!("Create CAP command file: {error}"))?;
-        file.write_all(body.as_bytes())
+        file.write_all(&body)
             .map_err(|error| format!("Write CAP command file: {error}"))?;
         file.sync_all()
             .map_err(|error| format!("Flush CAP command file: {error}"))?;
@@ -317,8 +383,10 @@ impl CapDriverProtocol {
             if !command_path.exists() {
                 thread::sleep(Duration::from_millis(OUTPUT_SETTLE_MS));
                 let output = find_driver_output(&self.output_path, &file_name, submitted_at)
-                    .and_then(|path| fs::read_to_string(path).ok());
-                let log_delta = read_log_delta(&log_path, log_offset);
+                    .and_then(|path| fs::read(path).ok())
+                    .map(|bytes| self.file_encoding.decode(&bytes));
+                let log_delta = read_log_delta(&log_path, log_offset)
+                    .map(|bytes| self.file_encoding.decode(&bytes));
                 let combined = [output.as_deref(), log_delta.as_deref()]
                     .into_iter()
                     .flatten()
@@ -344,8 +412,10 @@ impl CapDriverProtocol {
         // commit on the cashier after the POS stops waiting.
         let consumed = !command_path.exists();
         let output = find_driver_output(&self.output_path, &file_name, submitted_at)
-            .and_then(|path| fs::read_to_string(path).ok());
-        let log_delta = read_log_delta(&log_path, log_offset);
+            .and_then(|path| fs::read(path).ok())
+            .map(|bytes| self.file_encoding.decode(&bytes));
+        let log_delta =
+            read_log_delta(&log_path, log_offset).map(|bytes| self.file_encoding.decode(&bytes));
         let combined = [output.as_deref(), log_delta.as_deref()]
             .into_iter()
             .flatten()
@@ -415,6 +485,8 @@ impl EcrProtocol for CapDriverProtocol {
         self.initialized = true;
         info!(
             capture_path = %self.capture_path.display(),
+            file_encoding = self.file_encoding.label(),
+            probe_device_tcp = self.probe_device_tcp,
             "CAP Driver fiscal adapter initialized"
         );
         Ok(())
@@ -694,7 +766,7 @@ fn find_driver_output(
         .map(|entry| entry.path())
 }
 
-fn read_log_delta(path: &Path, offset: u64) -> Option<String> {
+fn read_log_delta(path: &Path, offset: u64) -> Option<Vec<u8>> {
     let mut file = File::open(path).ok()?;
     let length = file.metadata().ok()?.len();
     if length <= offset {
@@ -704,7 +776,7 @@ fn read_log_delta(path: &Path, offset: u64) -> Option<String> {
     file.seek(std::io::SeekFrom::Start(offset)).ok()?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).ok()?;
-    Some(String::from_utf8_lossy(&bytes).into_owned())
+    Some(bytes)
 }
 
 fn classify_driver_error(text: &str) -> Option<String> {
@@ -774,6 +846,100 @@ mod tests {
             }),
             &json!({}),
         )
+        .expect("CAP adapter with default settings")
+    }
+
+    fn adapter_with(
+        config: serde_json::Value,
+        details: serde_json::Value,
+    ) -> Result<CapDriverProtocol, String> {
+        CapDriverProtocol::new(Box::new(NoopTransport), &config, &details)
+    }
+
+    struct TempDirs {
+        capture: PathBuf,
+        output: PathBuf,
+    }
+
+    impl TempDirs {
+        fn new(tag: &str) -> Self {
+            let capture =
+                std::env::temp_dir().join(format!("pos-tauri-cap-{tag}-{}", uuid::Uuid::new_v4()));
+            let output = capture.join("Output");
+            fs::create_dir_all(&output).expect("create temp CAP folders");
+            Self { capture, output }
+        }
+
+        fn config(&self, extra: serde_json::Value) -> serde_json::Value {
+            let mut config = json!({
+                "capturePath": self.capture.to_string_lossy(),
+                "outputPath": self.output.to_string_lossy(),
+                "requireService": false,
+                "cashPaymentCode": 1,
+                "cardPaymentCode": 2,
+                "eftPosIndex": 1,
+            });
+            if let (Some(base), Some(extra)) = (config.as_object_mut(), extra.as_object()) {
+                for (key, value) in extra {
+                    base.insert(key.clone(), value.clone());
+                }
+            }
+            config
+        }
+    }
+
+    impl Drop for TempDirs {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.capture);
+        }
+    }
+
+    /// Minimal in-process stand-in for CapDriverSVC: consumes the command
+    /// file, writes an Output file plus a log line in the configured code
+    /// page, then deletes the command exactly like the vendor service.
+    fn spawn_fake_service(
+        dirs: &TempDirs,
+        encoding: FileEncoding,
+        log_line: &'static str,
+    ) -> thread::JoinHandle<Vec<u8>> {
+        let capture = dirs.capture.clone();
+        let output = dirs.output.clone();
+        thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let command = fs::read_dir(&capture)
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path())
+                    .find(|path| {
+                        path.extension().is_some_and(|ext| ext == "txt")
+                            && path.file_name().is_some_and(|name| {
+                                name.to_string_lossy().starts_with("pos-tauri-")
+                            })
+                    });
+                if let Some(path) = command {
+                    let bytes = fs::read(&path).expect("read command file");
+                    let name = path.file_name().expect("command file name").to_owned();
+                    let line = encoding.encode(&format!("{log_line}\r\n"));
+                    fs::write(output.join(&name), &line).expect("write fake output");
+                    let mut log = fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(capture.join("CapDriverSVC_log.txt"))
+                        .expect("open fake log");
+                    log.write_all(&line).expect("append fake log");
+                    fs::remove_file(&path).expect("consume command file");
+                    return bytes;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "fake service never saw a command file"
+                );
+                thread::sleep(Duration::from_millis(20));
+            }
+        })
     }
 
     fn request(method: &str) -> TransactionRequest {
@@ -853,6 +1019,133 @@ mod tests {
         assert_eq!(
             classify_driver_error("(LR)Error 0x42: EFTPOS Payment Failed"),
             Some("CAP Driver reported device error 0x42".to_string())
+        );
+    }
+
+    #[test]
+    fn file_encoding_setting_accepts_utf8_and_windows_1253_only() {
+        assert_eq!(FileEncoding::parse(None).unwrap(), FileEncoding::Utf8);
+        assert_eq!(
+            FileEncoding::parse(Some("UTF-8".into())).unwrap(),
+            FileEncoding::Utf8
+        );
+        assert_eq!(
+            FileEncoding::parse(Some("windows-1253".into())).unwrap(),
+            FileEncoding::Windows1253
+        );
+        assert_eq!(
+            FileEncoding::parse(Some("cp1253".into())).unwrap(),
+            FileEncoding::Windows1253
+        );
+        assert!(FileEncoding::parse(Some("latin1".into()))
+            .unwrap_err()
+            .contains("Unsupported CAP file encoding"));
+        assert!(adapter_with(json!({ "fileEncoding": "latin1" }), json!({})).is_err());
+    }
+
+    #[test]
+    fn windows_1253_command_files_carry_ansi_greek_payment_lines() {
+        let adapter = adapter_with(
+            json!({ "fileEncoding": "windows-1253", "requireService": false }),
+            json!({}),
+        )
+        .unwrap();
+        let commands = adapter.build_receipt_commands(&request("card")).unwrap();
+        let bytes = adapter.file_encoding.encode(&commands.join("\r\n"));
+        // ΚΑΡΤΑ in Windows-1253 is CA C1 D1 D4 C1, never the UTF-8 CE 9A ... run.
+        assert!(bytes
+            .windows(5)
+            .any(|w| w == [0xCA, 0xC1, 0xD1, 0xD4, 0xC1]));
+        assert!(!bytes.windows(2).any(|w| w == [0xCE, 0x9A]));
+
+        let utf8 = adapter_with(json!({ "requireService": false }), json!({})).unwrap();
+        assert!(utf8
+            .file_encoding
+            .encode("ΚΑΡΤΑ")
+            .starts_with(&[0xCE, 0x9A]));
+    }
+
+    #[test]
+    fn readiness_skips_the_tcp_probe_unless_explicitly_enabled() {
+        let dirs = TempDirs::new("probe");
+        // Reserve a loopback port and release it so nothing listens there.
+        let closed_port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+            listener.local_addr().expect("loopback addr").port()
+        };
+        let details = json!({ "ip": "127.0.0.1", "port": closed_port });
+
+        let mut quiet = adapter_with(dirs.config(json!({})), details.clone()).unwrap();
+        assert_eq!(
+            quiet.initialize(),
+            Ok(()),
+            "probe off: a closed port must not block readiness"
+        );
+
+        let mut probing =
+            adapter_with(dirs.config(json!({ "probeDeviceTcp": true })), details).unwrap();
+        let error = probing.initialize().unwrap_err();
+        assert!(error.contains("not reachable"), "probe on: {error}");
+    }
+
+    #[test]
+    fn approved_completion_decodes_windows_1253_output_and_log() {
+        let dirs = TempDirs::new("approve");
+        let mut adapter = adapter_with(
+            dirs.config(json!({ "fileEncoding": "windows-1253" })),
+            json!({}),
+        )
+        .unwrap();
+        adapter.initialize().unwrap();
+        let service =
+            spawn_fake_service(&dirs, FileEncoding::Windows1253, "(LR)Error 0x00: OK ΚΑΡΤΑ");
+
+        let response = adapter.process_transaction(&request("card")).unwrap();
+        let consumed = service.join().unwrap();
+
+        assert_eq!(response.status, TransactionStatus::Approved);
+        assert!(
+            consumed
+                .windows(5)
+                .any(|w| w == [0xCA, 0xC1, 0xD1, 0xD4, 0xC1]),
+            "the service must receive ANSI 1253 bytes"
+        );
+        let output = response
+            .raw_response
+            .and_then(|raw| {
+                raw.get("output")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned)
+            })
+            .expect("driver output captured");
+        assert!(
+            output.contains("ΚΑΡΤΑ"),
+            "output must be decoded from Windows-1253, got {output:?}"
+        );
+    }
+
+    #[test]
+    fn driver_error_in_windows_1253_log_fails_the_transaction() {
+        let dirs = TempDirs::new("decline");
+        let mut adapter = adapter_with(
+            dirs.config(json!({ "fileEncoding": "windows-1253" })),
+            json!({}),
+        )
+        .unwrap();
+        adapter.initialize().unwrap();
+        let service = spawn_fake_service(
+            &dirs,
+            FileEncoding::Windows1253,
+            "(LR)Error 0x42: EFTPOS Payment Failed ΑΠΟΡΡΙΨΗ",
+        );
+
+        let response = adapter.process_transaction(&request("card")).unwrap();
+        service.join().unwrap();
+
+        assert_eq!(response.status, TransactionStatus::Error);
+        assert_eq!(
+            response.error_message.as_deref(),
+            Some("CAP Driver reported device error 0x42")
         );
     }
 }
