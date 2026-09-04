@@ -597,7 +597,7 @@ pub async fn refresh_staff_auth_directory(
         .conn
         .lock()
         .ok()
-        .map(|conn| business_day::resolve_period_start(&conn, &branch_id, None));
+        .map(|conn| business_day::resolve_period_start(&conn, branch_id, None));
 
     Ok(serde_json::json!({
         "success": true,

@@ -411,11 +411,7 @@ struct LevelOneJobFields<'a> {
 // through `enum_jobs`. See the note above `enum_jobs` below.
 #[allow(dead_code)]
 fn snapshot_from_level_one(fields: LevelOneJobFields<'_>) -> SpoolJobSnapshot {
-    let decode = |value: Option<&[u16]>| {
-        value
-            .map(String::from_utf16_lossy)
-            .unwrap_or_else(String::new)
-    };
+    let decode = |value: Option<&[u16]>| value.map(String::from_utf16_lossy).unwrap_or_default();
     SpoolJobSnapshot {
         job_id: fields.job_id,
         printer_name: decode(fields.printer_name),

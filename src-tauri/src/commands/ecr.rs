@@ -2435,7 +2435,7 @@ fn outstanding_approval_retry_response(
             "orphanedLocally": existing
                 .get("orphanedLocally")
                 .cloned()
-                .unwrap_or_else(|| serde_json::json!(false)),
+                .unwrap_or(serde_json::json!(false)),
             "transaction": existing,
         }),
         Err(error) => serde_json::json!({
