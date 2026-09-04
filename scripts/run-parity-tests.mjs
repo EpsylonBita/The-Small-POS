@@ -12,6 +12,7 @@ const testsRoot = path.join(projectRoot, 'tests');
 const outDir = path.join(projectRoot, 'node_modules', '.cache', 'parity-tests');
 
 const entryPoints = [
+  path.join(testsRoot, 'scripts', 'managed-credential-cleanup.test.ts'),
   path.join(testsRoot, 'services', 'RealtimeManager.test.ts'),
   path.join(testsRoot, 'services', 'SyncQueueBridge.test.ts'),
   path.join(testsRoot, 'services', 'ParitySyncCoordinator.test.ts'),

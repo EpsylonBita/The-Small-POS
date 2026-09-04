@@ -2,15 +2,23 @@
 ; Called by Tauri's auto-generated installer.nsi via !ifmacrodef checks.
 
 !define CALLER_ID_FIREWALL_RULE "The Small POS Caller ID (Private LAN)"
+!define EMERGENCY_RECOVERY_SHORTCUT "$SMPROGRAMS\The Small POS - Emergency Recovery.lnk"
+!include "${__FILEDIR__}\generated\managed-credential-targets.nsh"
 ; Capture this directory while the hook file itself is included. Evaluating
 ; __FILEDIR__ inside a hook macro would resolve to Tauri's generated installer.
 !define CALLER_ID_FIREWALL_HELPER "${__FILEDIR__}\caller-id-firewall.ps1"
+!define MANAGED_CREDENTIAL_DELETE_HELPER "${__FILEDIR__}\generated\delete-managed-credentials.ps1"
 
 ; Every interactive install or manual upgrade asks before changing firewall
 ; state. Silent/passive updater runs only narrow a compatible active Public app
 ; grant whose constraints prove the replacement is no broader; they never
 ; create a first-time inbound grant on an unrelated installation.
 !macro NSIS_HOOK_POSTINSTALL
+  ; Installer-owned break-glass entry point. Delete first so manual installs,
+  ; upgrades, and updater runs converge on one exact quoted shortcut.
+  Delete "${EMERGENCY_RECOVERY_SHORTCUT}"
+  CreateShortCut "${EMERGENCY_RECOVERY_SHORTCUT}" "$INSTDIR\${MAINBINARYNAME}.exe" "--emergency-recovery"
+
   InitPluginsDir
   File /oname=$PLUGINSDIR\caller-id-firewall.ps1 "${CALLER_ID_FIREWALL_HELPER}"
 
@@ -40,10 +48,13 @@ caller_id_firewall_done:
 ; have been removed. We use it to clean up Windows Credential Manager entries
 ; left behind by the keyring crate (service: "the-small-pos").
 ;
-; keyring v3 stores credentials with target = "{service}.{user}" on Windows,
-; so we enumerate and delete any credential whose target starts with
-; "the-small-pos." to ensure a clean uninstall.
+; keyring 3.6.3 stores credentials with target = "{user}.{service}" on Windows.
+; The generated include is derived from storage.rs::ALL_KEYS so Delete App
+; Data removes the exact production service targets without a stale duplicate
+; list in installer code.
 !macro NSIS_HOOK_POSTUNINSTALL
+  Delete "${EMERGENCY_RECOVERY_SHORTCUT}"
+
   ; A real uninstall removes the installer-owned network grant. Updater
   ; uninstall keeps it so an already-approved manual install remains working.
   ${If} $UpdateMode <> 1
@@ -55,8 +66,6 @@ caller_id_firewall_done:
   ; and we are NOT in update mode (updates should preserve credentials).
   ${If} $DeleteAppDataCheckboxState = 1
   ${AndIf} $UpdateMode <> 1
-    ; Use PowerShell to remove all Windows Credential Manager entries
-    ; whose target starts with "the-small-pos."
-    nsExec::ExecToLog 'powershell.exe -NoProfile -NonInteractive -Command "& { try { $targets = @(\"the-small-pos.admin_dashboard_url\", \"the-small-pos.terminal_id\", \"the-small-pos.pos_api_key\", \"the-small-pos.branch_id\", \"the-small-pos.organization_id\", \"the-small-pos.business_type\", \"the-small-pos.supabase_url\", \"the-small-pos.supabase_anon_key\", \"the-small-pos.ghost_mode_feature_enabled\"); foreach ($$t in $$targets) { cmdkey /delete:$$t 2>$$null } } catch {} }"'
+    !insertmacro THE_SMALL_POS_DELETE_MANAGED_CREDENTIALS
   ${EndIf}
 !macroend

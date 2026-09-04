@@ -78,10 +78,18 @@ pub fn redact(s: &str) -> String {
 }
 
 fn is_local_plain_http_url(url: &str) -> bool {
-    let lower = url.trim().to_ascii_lowercase();
-    lower.starts_with("http://localhost")
-        || lower.starts_with("http://127.0.0.1")
-        || lower.starts_with("http://[::1]")
+    let Ok(parsed) = url::Url::parse(url.trim()) else {
+        return false;
+    };
+    if parsed.scheme() != "http" {
+        return false;
+    }
+    match parsed.host() {
+        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    }
 }
 
 /// Timeout used specifically for the lightweight connectivity test.
@@ -219,11 +227,19 @@ fn extract_terminal_id_from_body(body: Option<&Value>) -> Option<String> {
 // Error mapping
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AdminFetchErrorKind {
+    Local,
+    Transport,
+    Http,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdminFetchError {
     message: String,
     status: Option<u16>,
     code: Option<String>,
+    kind: AdminFetchErrorKind,
 }
 
 impl AdminFetchError {
@@ -232,6 +248,16 @@ impl AdminFetchError {
             message: message.into(),
             status: None,
             code: None,
+            kind: AdminFetchErrorKind::Local,
+        }
+    }
+
+    pub fn transport(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            status: None,
+            code: None,
+            kind: AdminFetchErrorKind::Transport,
         }
     }
 
@@ -241,6 +267,7 @@ impl AdminFetchError {
             message: message.into(),
             status: Some(status),
             code: None,
+            kind: AdminFetchErrorKind::Http,
         }
     }
 
@@ -249,11 +276,37 @@ impl AdminFetchError {
             message: message.into(),
             status: Some(status),
             code,
+            kind: AdminFetchErrorKind::Http,
         }
     }
 
     pub fn status(&self) -> Option<u16> {
         self.status
+    }
+
+    pub fn is_transport_failure(&self) -> bool {
+        self.kind == AdminFetchErrorKind::Transport
+    }
+
+    /// Stable, bounded classification for local endpoint-resolution failures.
+    /// Callers must never branch on or expose the free-form Display message.
+    pub(crate) fn renderer_endpoint_error_code(&self) -> Option<&'static str> {
+        if self.kind != AdminFetchErrorKind::Local {
+            return None;
+        }
+        match self.message.as_str() {
+            "TERMINAL_CREDENTIAL_READ_FAILED" => Some("PARITY_CREDENTIAL_READ_FAILED"),
+            "TERMINAL_MANAGED_TUPLE_MISSING"
+            | "Terminal not configured: missing API key"
+            | "Terminal not configured: missing admin URL" => {
+                Some("PARITY_CREDENTIALS_UNAVAILABLE")
+            }
+            "TERMINAL_CONNECTION_TUPLE_INVALID" | "TERMINAL_CONNECTION_TUPLE_CONFLICT" => {
+                Some("PARITY_CREDENTIAL_TUPLE_CONFLICT")
+            }
+            "TERMINAL_REBIND_PENDING" => Some("TERMINAL_REBIND_PENDING"),
+            _ => None,
+        }
     }
 
     #[cfg(test)]
@@ -433,9 +486,22 @@ pub async fn test_connectivity(admin_url: &str, api_key: &str) -> ConnectivityRe
 /// Shared by [`fetch_from_admin_detailed`] and
 /// [`fetch_raw_from_admin_detailed`] so both transports enforce byte-identical
 /// transport-security rules.
-fn resolve_admin_base(admin_url: &str) -> Result<String, AdminFetchError> {
+pub(crate) fn resolve_admin_base(admin_url: &str) -> Result<String, AdminFetchError> {
     let base = normalize_admin_url(admin_url);
-    if base.starts_with("http://") && !is_local_plain_http_url(&base) {
+    let parsed = url::Url::parse(&base)
+        .map_err(|_| AdminFetchError::statusless("Invalid admin URL origin".to_string()))?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || parsed.path() != "/"
+    {
+        return Err(AdminFetchError::statusless(
+            "Invalid admin URL origin".to_string(),
+        ));
+    }
+    if parsed.scheme() == "http" && !is_local_plain_http_url(&base) {
         return Err(AdminFetchError::statusless(
             "Refusing non-local plain HTTP admin URL; use HTTPS or localhost for development"
                 .to_string(),
@@ -452,19 +518,17 @@ fn resolve_admin_base(admin_url: &str) -> Result<String, AdminFetchError> {
 /// Shared by both transports so a raw upload proves the same terminal identity
 /// as every JSON call.
 fn resolve_terminal_id(api_key: &str) -> Result<String, AdminFetchError> {
-    let mut terminal_id = crate::storage::get_credential("terminal_id").unwrap_or_default();
+    let terminal_id = crate::storage::get_credential_strict("terminal_id")
+        .map_err(|_| AdminFetchError::statusless("TERMINAL_CREDENTIAL_READ_FAILED"))?
+        .map(|value| value.to_string())
+        .unwrap_or_default();
     if let Some(decoded_tid) = extract_terminal_id_from_connection_string(api_key) {
         let existing = terminal_id.trim();
         if existing.is_empty() || existing != decoded_tid {
-            if !existing.is_empty() && existing != decoded_tid {
-                warn!(
-                    stored_terminal_id = %redact(existing),
-                    decoded_terminal_id = %redact(&decoded_tid),
-                    "terminal_id mismatch detected, preferring decoded terminal id from connection string"
-                );
-            }
-            terminal_id = decoded_tid.clone();
-            let _ = crate::storage::set_credential("terminal_id", &decoded_tid);
+            warn!("terminal identity tuple conflict detected");
+            return Err(AdminFetchError::statusless(
+                "TERMINAL_CONNECTION_TUPLE_CONFLICT",
+            ));
         }
     }
     if terminal_id.trim().is_empty() {
@@ -508,10 +572,9 @@ async fn read_capped_error_body(resp: &mut reqwest::Response) -> String {
 /// indistinguishable from a genuine 204. The caller had no way to
 /// tell the two apart.
 async fn read_success_json(resp: reqwest::Response) -> Result<Value, AdminFetchError> {
-    let body_text = resp
-        .text()
-        .await
-        .map_err(|e| format!("Failed to read admin response body: {e}"))?;
+    let body_text = resp.text().await.map_err(|e| {
+        AdminFetchError::transport(format!("Failed to read admin response body: {e}"))
+    })?;
     if body_text.is_empty() {
         return Ok(Value::Null);
     }
@@ -563,6 +626,24 @@ pub async fn fetch_from_admin_detailed_with_timeout(
     body: Option<Value>,
     timeout: Duration,
 ) -> Result<Value, AdminFetchError> {
+    fetch_from_admin_detailed_with_staff_session(
+        admin_url, api_key, path, method, body, None, timeout,
+    )
+    .await
+}
+
+/// Customer Messaging transport variant. The only renderer-derived header is
+/// a native-validated staff-session UUID; terminal identity and API key remain
+/// resolved from the native managed credential tuple.
+pub async fn fetch_from_admin_detailed_with_staff_session(
+    admin_url: &str,
+    api_key: &str,
+    path: &str,
+    method: &str,
+    body: Option<Value>,
+    staff_session_id: Option<&str>,
+    timeout: Duration,
+) -> Result<Value, AdminFetchError> {
     let base = resolve_admin_base(admin_url)?;
     let resolved_api_key =
         extract_api_key_from_connection_string(api_key).unwrap_or_else(|| api_key.to_string());
@@ -586,6 +667,10 @@ pub async fn fetch_from_admin_detailed_with_timeout(
         .header("x-terminal-id", &terminal_id)
         .header("Content-Type", "application/json");
 
+    if let Some(staff_session_id) = staff_session_id {
+        req = req.header("x-staff-session-id", staff_session_id);
+    }
+
     if let Some(b) = body {
         // If the JavaScript frontend pre-serialized the body via JSON.stringify(),
         // it arrives as Value::String containing JSON. Parse it back to avoid
@@ -601,7 +686,7 @@ pub async fn fetch_from_admin_detailed_with_timeout(
     let mut resp = req
         .send()
         .await
-        .map_err(|e| AdminFetchError::statusless(friendly_error(&base, &e)))?;
+        .map_err(|e| AdminFetchError::transport(friendly_error(&base, &e)))?;
     let status = resp.status();
 
     if !status.is_success() {
@@ -722,7 +807,7 @@ pub async fn fetch_raw_from_admin_detailed(
         .body(body)
         .send()
         .await
-        .map_err(|e| AdminFetchError::statusless(friendly_error(&base, &e)))?;
+        .map_err(|e| AdminFetchError::transport(friendly_error(&base, &e)))?;
     let status = resp.status();
 
     if !status.is_success() {
@@ -769,6 +854,36 @@ mod tests {
     }
 
     #[test]
+    fn admin_origin_policy_allows_only_https_or_exact_loopback_http_origins() {
+        for allowed in [
+            "https://admin.example.com",
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://[::1]:3000",
+        ] {
+            assert!(
+                resolve_admin_base(allowed).is_ok(),
+                "expected safe admin origin: {allowed}"
+            );
+        }
+
+        for rejected in [
+            "http://example.com",
+            "http://localhost.attacker.example",
+            "http://127.0.0.1.attacker.example",
+            "https://user:password@admin.example.com",
+            "https://admin.example.com?redirect=http://localhost",
+            "https://admin.example.com#fragment",
+            "https://admin.example.com/untrusted-base-path",
+        ] {
+            assert!(
+                resolve_admin_base(rejected).is_err(),
+                "expected unsafe admin origin rejection: {rejected}"
+            );
+        }
+    }
+
+    #[test]
     fn extract_terminal_id_from_body_reads_object_payloads() {
         assert_eq!(
             extract_terminal_id_from_body(Some(&json!({ "terminal_id": "terminal-123" }))),
@@ -812,11 +927,14 @@ mod tests {
             StatusCode::FORBIDDEN,
             r#"{"error":"Terminal not authorized"}"#,
         );
-        let network = AdminFetchError::statusless("Network unavailable");
+        let network = AdminFetchError::transport("Network unavailable");
+        let local = AdminFetchError::statusless("Network appears in local validation text");
 
         assert_eq!(unauthorized.status(), Some(401));
         assert_eq!(forbidden.status(), Some(403));
         assert_eq!(network.status(), None);
+        assert!(network.is_transport_failure());
+        assert!(!local.is_transport_failure());
     }
 
     #[test]

@@ -33,6 +33,13 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::money::Cents;
+use crate::repair_transport::{
+    classify_repair_http_response, prepare_repair_attachment_request,
+    prepare_repair_command_request, read_bounded_repair_response, send_repair_raw_attachment,
+    ParityTerminalAuthCode, ParityTerminalAuthFailure, RepairAttachmentDisposition,
+    RepairHookError, RepairHookErrorKind, RepairQueueHooks, RepairSyncDisposition,
+    UnavailableRepairQueueHooks,
+};
 use crate::{can_transition_locally, normalize_status_for_storage};
 use crate::{db, storage, sync};
 
@@ -101,17 +108,44 @@ const JITTER_CAP_MS: i64 = 1000;
 
 /// Entity/module types treated as monetary for the purpose of retry caps.
 fn is_monetary_module(module_type: &str) -> bool {
-    matches!(
-        module_type,
-        "payment"
-            | "payment_adjustment"
-            | "z_report"
-            | "staff_shift"
-            | "shift_expense"
-            | "staff_payment"
-            | "driver_earning"
-            | "driver_earnings"
-    )
+    monetary_dead_letter_category(module_type).is_some()
+}
+
+fn bounded_module_category(module_type: &str) -> &'static str {
+    match module_type.trim().to_ascii_lowercase().as_str() {
+        "orders" => "orders",
+        "customers" => "customers",
+        "shifts" => "shifts",
+        "financial" => "financial",
+        "z_report" => "z_report",
+        "loyalty" => "loyalty",
+        "fiscal" => "fiscal",
+        "payment" => "payment",
+        "payment_adjustment" => "payment_adjustment",
+        "staff_shift" => "staff_shift",
+        "shift_expense" => "shift_expense",
+        "staff_payment" => "staff_payment",
+        "driver_earning" | "driver_earnings" => "driver_earning",
+        "operations" => "operations",
+        "catalog" => "catalog",
+        "settings" => "settings",
+        "table_service" => "table_service",
+        "repairs" => "repairs",
+        _ => "other",
+    }
+}
+
+fn monetary_dead_letter_category(module_type: &str) -> Option<MonetaryDeadLetterCategory> {
+    match module_type {
+        "payment" => Some(MonetaryDeadLetterCategory::Payment),
+        "payment_adjustment" => Some(MonetaryDeadLetterCategory::PaymentAdjustment),
+        "z_report" => Some(MonetaryDeadLetterCategory::ZReport),
+        "staff_shift" => Some(MonetaryDeadLetterCategory::StaffShift),
+        "shift_expense" => Some(MonetaryDeadLetterCategory::ShiftExpense),
+        "staff_payment" => Some(MonetaryDeadLetterCategory::StaffPayment),
+        "driver_earning" | "driver_earnings" => Some(MonetaryDeadLetterCategory::DriverEarning),
+        _ => None,
+    }
 }
 
 /// Compute the next retry delay given the current `retry_delay_ms` base
@@ -227,6 +261,10 @@ pub struct SyncResult {
     pub processed: i64,
     pub failed: i64,
     pub conflicts: i64,
+    /// Rows newly quarantined during this processing batch.
+    pub quarantined: i64,
+    /// Rows that newly crossed into terminal failure during this batch.
+    pub dead_lettered: i64,
     pub errors: Vec<SyncError>,
     /// Wave 4 H: items that exhausted `MAX_RETRY_ATTEMPTS` during this
     /// batch for entity types classified as monetary. The Tauri
@@ -235,6 +273,10 @@ pub struct SyncResult {
     /// when no monetary items dead-lettered this cycle.
     #[serde(default)]
     pub monetary_dead_letters: Vec<MonetaryDeadLetter>,
+    #[serde(default)]
+    pub(crate) auth_outcome: Option<ParityAuthOutcome>,
+    #[serde(default)]
+    pub(crate) batch_block: Option<ParityClaimGateBlock>,
     /// Aggregate-only telemetry for the just-finished replay batch. This is
     /// safe to persist in diagnostics because it never includes queued payload
     /// JSON, response bodies, API keys, or customer data.
@@ -244,13 +286,112 @@ pub struct SyncResult {
 /// A monetary sync item that crossed the max-retry threshold and was
 /// flagged `failed`. The operator UI surfaces these so silent
 /// dead-letters cannot happen.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MonetaryDeadLetterCategory {
+    Payment,
+    PaymentAdjustment,
+    ZReport,
+    StaffShift,
+    ShiftExpense,
+    StaffPayment,
+    DriverEarning,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct MonetaryDeadLetter {
-    pub item_id: String,
-    pub entity_type: String,
-    pub entity_id: String,
-    pub error_message: String,
+    pub(crate) category: MonetaryDeadLetterCategory,
+}
+
+/// Authoritative outcome of one generation-fenced failure acknowledgement.
+///
+/// Callers must derive batch counters and operator events from this result,
+/// never from the stale `attempts` snapshot carried by a dequeued item.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MarkFailureOutcome {
+    pub(crate) applied: bool,
+    pub(crate) transitioned_to_dead_letter: bool,
+    pub(crate) monetary_notice: Option<MonetaryDeadLetter>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub(crate) enum ParityAuthOutcome {
+    StaffSessionRequired,
+    SoftTerminalAuth {
+        code: ParityTerminalAuthCode,
+        terminal_active: Option<bool>,
+    },
+    HardTerminalAuth {
+        code: ParityTerminalAuthCode,
+        terminal_active: Option<bool>,
+    },
+}
+
+impl ParityAuthOutcome {
+    fn terminal(failure: ParityTerminalAuthFailure) -> Self {
+        if failure.code.is_hard() {
+            Self::HardTerminalAuth {
+                code: failure.code,
+                terminal_active: failure.terminal_active,
+            }
+        } else {
+            Self::SoftTerminalAuth {
+                code: failure.code,
+                terminal_active: failure.terminal_active,
+            }
+        }
+    }
+
+    fn precedence(self) -> u8 {
+        match self {
+            Self::StaffSessionRequired => 1,
+            Self::SoftTerminalAuth { .. } => 2,
+            Self::HardTerminalAuth { .. } => 3,
+        }
+    }
+}
+
+fn merge_auth_outcome(current: &mut Option<ParityAuthOutcome>, candidate: ParityAuthOutcome) {
+    if current.as_ref().map_or(true, |existing| {
+        candidate.precedence() > existing.precedence()
+    }) {
+        *current = Some(candidate);
+    }
+}
+
+fn parse_parity_terminal_auth_failure(
+    status: u16,
+    response_body: &str,
+) -> Option<ParityTerminalAuthFailure> {
+    if !matches!(status, 401 | 403) || response_body.len() > 16 * 1024 {
+        return None;
+    }
+    let payload = serde_json::from_str::<Value>(response_body).ok()?;
+    let code = payload.get("code")?.as_str()?.trim().to_ascii_lowercase();
+    let code = ParityTerminalAuthCode::from_wire(&code)?;
+    let terminal_active = payload
+        .get("terminalActive")
+        .or_else(|| payload.get("terminal_active"))
+        .and_then(Value::as_bool);
+    Some(ParityTerminalAuthFailure {
+        code,
+        terminal_active,
+    })
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ParityClaimGateBlock {
+    RemoteAuthPaused,
+    Cancelled,
+    RebindPending,
+    ResetPending,
 }
 
 /// Individual error from queue processing.
@@ -264,14 +405,58 @@ pub struct SyncError {
     pub http_status: Option<u16>,
 }
 
+fn bounded_sync_error_code(error: &str, http_status: Option<u16>) -> String {
+    if error == "Parity sync request is missing terminal_id context" {
+        return error.to_string();
+    }
+    if error.contains("requiring review") {
+        return "Conflict requiring review".to_string();
+    }
+    if error.len() <= 96
+        && !error.is_empty()
+        && error
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        return error.to_string();
+    }
+    match http_status {
+        Some(429) => "HTTP_429_RATE_LIMITED".to_string(),
+        Some(status) if (400..500).contains(&status) => "PARITY_CLIENT_ERROR".to_string(),
+        Some(status) if status >= 500 => "PARITY_SERVER_ERROR".to_string(),
+        _ => "PARITY_PROCESSING_ERROR".to_string(),
+    }
+}
+
+fn safe_sync_error(item: &SyncQueueItem, error_code: &str, http_status: Option<u16>) -> SyncError {
+    let table_name = match item.table_name.as_str() {
+        "repairs" => "repairs",
+        "repair_attachments" => "repair_attachments",
+        _ => "parity",
+    };
+    SyncError {
+        item_id: String::new(),
+        table_name: table_name.to_string(),
+        record_id: String::new(),
+        error: bounded_sync_error_code(error_code, http_status),
+        http_status,
+    }
+}
+
 /// Summary status of the queue.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueueStatus {
     pub total: i64,
     pub pending: i64,
+    #[serde(default)]
+    pub in_progress: i64,
     pub failed: i64,
     pub conflicts: i64,
+    #[serde(default)]
+    pub quarantined: i64,
+    #[serde(default)]
+    pub dead_lettered: i64,
     pub oldest_item_age: Option<i64>,
 }
 
@@ -348,6 +533,315 @@ struct SyncTelemetryBuilder {
     outcomes: BTreeMap<(String, String, String), i64>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum QueueProcessVisibility {
+    InternalAll,
+    RendererNonRepair,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum QueueProcessSelection<'a> {
+    All,
+    ExactRendererItem(&'a str),
+}
+
+const REPAIR_NATIVE_PRODUCER_REQUIRED: &str = "REPAIR_NATIVE_PRODUCER_REQUIRED";
+const REPAIR_RESERVED_OWNER_QUARANTINED: &str = "REPAIR_RESERVED_OWNER_QUARANTINED";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RepairQueueOwnership {
+    Generic,
+    TrustedCanonical,
+    ReservedLookalike,
+}
+
+fn is_semantic_repair_module(value: &str) -> bool {
+    value.trim().eq_ignore_ascii_case("repairs")
+}
+
+fn is_semantic_repair_table(value: &str) -> bool {
+    let value = value.trim();
+    value.eq_ignore_ascii_case("repairs") || value.eq_ignore_ascii_case("repair_attachments")
+}
+
+fn classify_repair_queue_ownership(
+    module_type: Option<&str>,
+    table_name: &str,
+) -> RepairQueueOwnership {
+    let semantic_reserved =
+        module_type.is_some_and(is_semantic_repair_module) || is_semantic_repair_table(table_name);
+    if !semantic_reserved {
+        return RepairQueueOwnership::Generic;
+    }
+    if module_type == Some("repairs") && matches!(table_name, "repairs" | "repair_attachments") {
+        RepairQueueOwnership::TrustedCanonical
+    } else {
+        RepairQueueOwnership::ReservedLookalike
+    }
+}
+
+// SQLite's one-argument trim() only strips U+0020. This character set mirrors
+// Rust `str::trim()`/`char::is_whitespace`, so renderer SQL and the native
+// classifier cannot disagree on ASCII or Unicode edge whitespace.
+const SQLITE_RUST_WHITESPACE_CODEPOINTS: &str =
+    "9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288";
+
+fn semantic_sql_value(expression: &str) -> String {
+    format!("lower(trim(COALESCE({expression}, ''), char({SQLITE_RUST_WHITESPACE_CODEPOINTS})))")
+}
+
+fn semantic_reserved_repair_owner_predicate(alias: &str) -> String {
+    let module = semantic_sql_value(&format!("{alias}.module_type"));
+    let table = semantic_sql_value(&format!("{alias}.table_name"));
+    format!("({module} = 'repairs' OR {table} IN ('repairs', 'repair_attachments'))")
+}
+
+fn canonical_repair_owner_predicate(alias: &str) -> String {
+    format!(
+        "(COALESCE({alias}.module_type, '') = 'repairs' AND {alias}.table_name IN ('repairs', 'repair_attachments'))"
+    )
+}
+
+fn reserved_repair_lookalike_predicate(alias: &str) -> String {
+    let semantic = semantic_reserved_repair_owner_predicate(alias);
+    let canonical = canonical_repair_owner_predicate(alias);
+    format!("({semantic} AND NOT {canonical})")
+}
+
+fn renderer_generic_owner_predicate(alias: &str) -> String {
+    format!("NOT ({})", semantic_reserved_repair_owner_predicate(alias))
+}
+
+fn semantic_repair_financial_queue_owner_predicate(alias: &str) -> String {
+    let order_context = semantic_sql_value("repair_owner.order_context");
+    let table = semantic_sql_value(&format!("{alias}.table_name"));
+    format!(
+        "EXISTS (
+             SELECT 1
+             FROM orders repair_owner
+             WHERE {order_context} = 'repair_settlement'
+               AND (
+                    ({table} = 'orders'
+                     AND (repair_owner.id = {alias}.record_id
+                          OR repair_owner.supabase_id = {alias}.record_id))
+                    OR ({table} IN ('payments', 'order_payments')
+                        AND EXISTS (
+                            SELECT 1 FROM order_payments repair_payment
+                            WHERE repair_payment.id = {alias}.record_id
+                              AND repair_payment.order_id = repair_owner.id
+                        ))
+                    OR ({table} = 'payment_adjustments'
+                        AND EXISTS (
+                            SELECT 1
+                            FROM payment_adjustments repair_adjustment
+                            LEFT JOIN order_payments repair_adjustment_payment
+                              ON repair_adjustment_payment.id = repair_adjustment.payment_id
+                            WHERE repair_adjustment.id = {alias}.record_id
+                              AND COALESCE(
+                                    NULLIF(repair_adjustment.order_id, ''),
+                                    repair_adjustment_payment.order_id
+                                  ) = repair_owner.id
+                        ))
+               )
+         )"
+    )
+}
+
+fn semantic_generic_nonfinancial_owner_predicate(alias: &str) -> String {
+    let generic = renderer_generic_owner_predicate(alias);
+    let financial = semantic_repair_financial_queue_owner_predicate(alias);
+    format!("({generic} AND NOT ({financial}))")
+}
+
+fn semantic_repair_audit_owner_predicate(alias: &str) -> String {
+    let entity_type = semantic_sql_value(&format!("{alias}.entity_type"));
+    format!("{entity_type} IN ('repairs', 'repair_attachments')")
+}
+
+fn semantic_repair_financial_audit_owner_predicate(alias: &str) -> String {
+    let order_context = semantic_sql_value("repair_owner.order_context");
+    let entity_type = semantic_sql_value(&format!("{alias}.entity_type"));
+    format!(
+        "EXISTS (
+             SELECT 1
+             FROM orders repair_owner
+             WHERE {order_context} = 'repair_settlement'
+               AND (
+                    ({entity_type} IN ('order', 'orders')
+                     AND (repair_owner.id = {alias}.entity_id
+                          OR repair_owner.supabase_id = {alias}.entity_id))
+                    OR ({entity_type} IN ('payment', 'payments', 'order_payments')
+                        AND EXISTS (
+                            SELECT 1
+                            FROM order_payments repair_payment
+                            WHERE repair_payment.id = {alias}.entity_id
+                              AND repair_payment.order_id = repair_owner.id
+                        ))
+                    OR ({entity_type} IN ('payment_adjustment', 'payment_adjustments')
+                        AND EXISTS (
+                            SELECT 1
+                            FROM payment_adjustments repair_adjustment
+                            LEFT JOIN order_payments repair_adjustment_payment
+                              ON repair_adjustment_payment.id = repair_adjustment.payment_id
+                            WHERE repair_adjustment.id = {alias}.entity_id
+                              AND COALESCE(
+                                    NULLIF(repair_adjustment.order_id, ''),
+                                    repair_adjustment_payment.order_id
+                                  ) = repair_owner.id
+                        ))
+               )
+         )"
+    )
+}
+
+/// Deletes repair-owned queue/audit rows and, for an operational identity
+/// purge, the linked local settlement ledger. The caller owns the surrounding
+/// transaction so identity publication and every SQLite purge effect can be
+/// committed or rolled back together.
+pub(crate) fn purge_repair_owned_sync_state(
+    connection: &Connection,
+    include_financial: bool,
+) -> Result<(), String> {
+    let direct_queue = semantic_reserved_repair_owner_predicate("parity_sync_queue");
+    let financial_queue = semantic_repair_financial_queue_owner_predicate("parity_sync_queue");
+    let direct_audit = semantic_repair_audit_owner_predicate("conflict_audit_log");
+    let financial_audit = semantic_repair_financial_audit_owner_predicate("conflict_audit_log");
+    let order_context = semantic_sql_value("order_context");
+
+    let queue_predicate = if include_financial {
+        format!("({direct_queue}) OR ({financial_queue})")
+    } else {
+        direct_queue
+    };
+    connection
+        .execute(
+            &format!("DELETE FROM parity_sync_queue WHERE {queue_predicate}"),
+            [],
+        )
+        .map_err(|_| "REPAIR_SCOPE_PURGE_FAILED".to_string())?;
+
+    if include_financial {
+        connection
+            .execute(
+                &format!(
+                    "DELETE FROM conflict_audit_log
+                      WHERE ({direct_audit}) OR ({financial_audit})"
+                ),
+                [],
+            )
+            .map_err(|_| "REPAIR_OPERATIONAL_PURGE_FAILED".to_string())?;
+        connection
+            .execute(
+                &format!(
+                    "DELETE FROM payment_adjustments
+                      WHERE order_id IN (
+                          SELECT id FROM orders WHERE {order_context} = 'repair_settlement'
+                      )
+                         OR payment_id IN (
+                          SELECT payment.id
+                            FROM order_payments payment
+                            JOIN orders repair_order ON repair_order.id = payment.order_id
+                           WHERE {} = 'repair_settlement'
+                      )",
+                    semantic_sql_value("repair_order.order_context")
+                ),
+                [],
+            )
+            .map_err(|_| "REPAIR_OPERATIONAL_PURGE_FAILED".to_string())?;
+        connection
+            .execute(
+                &format!(
+                    "DELETE FROM order_payments
+                      WHERE order_id IN (
+                          SELECT id FROM orders WHERE {order_context} = 'repair_settlement'
+                      )"
+                ),
+                [],
+            )
+            .map_err(|_| "REPAIR_OPERATIONAL_PURGE_FAILED".to_string())?;
+        connection
+            .execute(
+                &format!("DELETE FROM orders WHERE {order_context} = 'repair_settlement'"),
+                [],
+            )
+            .map_err(|_| "REPAIR_OPERATIONAL_PURGE_FAILED".to_string())?;
+    }
+    Ok(())
+}
+
+/// Terminally parks non-canonical semantic repair owners without inspecting
+/// their renderer-supplied payload. The single UPDATE is atomic and the final
+/// guard makes repeated startup/runtime passes byte-for-byte idempotent.
+pub(crate) fn quarantine_reserved_repair_lookalikes(conn: &Connection) -> Result<i64, String> {
+    let poison = reserved_repair_lookalike_predicate("parity_sync_queue");
+    let sql = format!(
+        "UPDATE parity_sync_queue
+            SET status = 'failed',
+                error_message = '{REPAIR_RESERVED_OWNER_QUARANTINED}',
+                next_retry_at = NULL,
+                claim_generation = claim_generation
+                    + CASE WHEN status = 'processing' THEN 1 ELSE 0 END
+          WHERE status IN ('pending', 'processing', 'failed', 'conflict')
+            AND {poison}
+            AND NOT (
+                status = 'failed'
+                AND error_message = '{REPAIR_RESERVED_OWNER_QUARANTINED}'
+                AND next_retry_at IS NULL
+            )"
+    );
+    conn.execute(&sql, [])
+        .map(|affected| affected as i64)
+        .map_err(|error| format!("sync_queue reserved-owner quarantine: {error}"))
+}
+
+fn renderer_non_repair_owned_predicate(alias: &str) -> String {
+    format!(
+        "NOT ({})",
+        semantic_repair_financial_queue_owner_predicate(alias)
+    )
+}
+
+fn renderer_non_repair_conflict_owner_predicate(alias: &str) -> String {
+    let direct = semantic_repair_audit_owner_predicate(alias);
+    let financial = semantic_repair_financial_audit_owner_predicate(alias);
+    format!("NOT ({direct}) AND NOT ({financial})")
+}
+
+const REPAIR_AUDIT_PAYLOAD_REDACTED: &str = "REPAIR_AUDIT_PAYLOAD_REDACTED";
+const MAX_REPAIR_AUDIT_REDACTIONS_PER_PASS: i64 = 500;
+
+/// Payload-blind forward maintenance for legacy audit rows that can be
+/// positively attributed to the native repair domain. Unclassifiable history
+/// is retained unchanged; renderer filtering remains the fail-closed boundary.
+pub(crate) fn redact_identifiable_legacy_repair_audit_payloads(
+    conn: &Connection,
+) -> Result<i64, String> {
+    let direct = semantic_repair_audit_owner_predicate("candidate");
+    let financial = semantic_repair_financial_audit_owner_predicate("candidate");
+    let sql = format!(
+        "UPDATE conflict_audit_log
+            SET discarded_payload = ?1
+          WHERE id IN (
+                SELECT candidate.id
+                  FROM conflict_audit_log candidate
+                 WHERE candidate.discarded_payload <> ?1
+                   AND ({direct} OR {financial})
+                 ORDER BY candidate.timestamp ASC, candidate.id ASC
+                 LIMIT ?2
+          )
+            AND discarded_payload <> ?1"
+    );
+    conn.execute(
+        &sql,
+        params![
+            REPAIR_AUDIT_PAYLOAD_REDACTED,
+            MAX_REPAIR_AUDIT_REDACTIONS_PER_PASS
+        ],
+    )
+    .map(|affected| affected as i64)
+    .map_err(|error| format!("sync_queue repair audit redaction: {error}"))
+}
+
 impl SyncTelemetryBuilder {
     fn new(started_at: String, queue_depth_before: i64) -> Self {
         Self {
@@ -389,7 +883,7 @@ impl SyncTelemetryBuilder {
 
     fn record_outcome(&mut self, item: &SyncQueueItem, status: &str, error_class: &str) {
         let key = (
-            item.module_type.clone(),
+            bounded_module_category(&item.module_type).to_string(),
             status.to_string(),
             error_class.to_string(),
         );
@@ -402,8 +896,12 @@ impl SyncTelemetryBuilder {
         processed: i64,
         failed: i64,
         conflicts: i64,
+        visibility: QueueProcessVisibility,
     ) -> Result<SyncTelemetrySnapshot, String> {
-        let queue_status = get_status(conn)?;
+        let queue_status = match visibility {
+            QueueProcessVisibility::InternalAll => get_status(conn)?,
+            QueueProcessVisibility::RendererNonRepair => renderer_get_status(conn)?,
+        };
         let queue_depth_after = queue_status.total;
         Ok(SyncTelemetrySnapshot {
             started_at: self.started_at,
@@ -472,6 +970,7 @@ enum RequestPreparation {
     Consumed { reason: String },
     Deferred { reason: String },
     Failed { reason: String },
+    ManualResolution { reason_code: String },
 }
 
 #[derive(Debug, Clone)]
@@ -514,6 +1013,9 @@ pub fn create_tables(conn: &Connection) -> Result<(), String> {
             module_type     TEXT NOT NULL DEFAULT 'orders',
             conflict_strategy TEXT NOT NULL DEFAULT 'server-wins',
             version         INTEGER NOT NULL DEFAULT 1,
+            -- Task 9C: native repair commands and attachments share one
+            -- ordered aggregate stream. Generic parity rows remain NULL.
+            repair_aggregate_id TEXT,
             -- Wave 10 H8: per-claim generation counter. Incremented on
             -- every claim (`dequeue`) and on every stale-reclaim
             -- (`recover_stale_processing_items`). `mark_success` only
@@ -601,6 +1103,37 @@ pub fn capacity_usage(conn: &Connection) -> Result<QueueCapacityUsage, String> {
     Ok(usage)
 }
 
+/// Read-only wake predicate for the existing native background scheduler.
+/// Pending work observes per-row backoff; abandoned processing work becomes
+/// actionable only after the same lease used by stale-claim recovery.
+pub(crate) fn has_actionable_internal_work(conn: &Connection) -> Result<bool, String> {
+    let lease_modifier = format!("-{} seconds", PROCESSING_LEASE_SECS);
+    let generic = semantic_generic_nonfinancial_owner_predicate("parity_sync_queue");
+    let reserved = semantic_reserved_repair_owner_predicate("parity_sync_queue");
+    let actionable_owner = format!("({generic} OR {reserved})");
+    let sql = format!(
+        "SELECT EXISTS(
+             SELECT 1
+             FROM parity_sync_queue
+             WHERE {actionable_owner}
+               AND (
+                    status = 'pending'
+                    AND (
+                        next_retry_at IS NULL
+                        OR julianday(next_retry_at) <= julianday('now')
+                    )
+                OR (
+                    status = 'processing'
+                    AND julianday(COALESCE(last_attempt, created_at))
+                        <= julianday('now', ?1)
+                )
+              )
+         )"
+    );
+    conn.query_row(&sql, params![lease_modifier], |row| row.get(0))
+        .map_err(|error| format!("sync_queue inspect actionable parity work: {error}"))
+}
+
 /// Returns a warning payload when either capacity dimension sits at or
 /// above `CAPACITY_WARNING_PERCENT` of its ceiling, `None` while
 /// comfortably below.
@@ -632,6 +1165,17 @@ pub fn capacity_warning(conn: &Connection) -> Result<Option<QueueCapacityWarning
 /// Rejects (fail-closed) if replayable rows have reached `MAX_QUEUE_SIZE`
 /// or conflict rows have reached `MAX_CONFLICT_ROWS`.
 pub fn enqueue(conn: &Connection, input: &EnqueueInput) -> Result<String, String> {
+    if classify_repair_queue_ownership(input.module_type.as_deref(), &input.table_name)
+        != RepairQueueOwnership::Generic
+    {
+        return Err(REPAIR_NATIVE_PRODUCER_REQUIRED.to_string());
+    }
+
+    // A rejected reserved input returns above without touching SQLite. For a
+    // genuinely generic producer, recover historical poison before capacity
+    // accounting so it cannot permanently consume replayable headroom.
+    quarantine_reserved_repair_lookalikes(conn)?;
+
     // Wave 6 narrowed the capacity COUNT from a full-table COUNT(*) to
     // ACTIVE rows only, so permanently-failed dead-letters stopped
     // tripping the guard. Founder decision 2026-06-10 narrows it again:
@@ -710,6 +1254,113 @@ pub fn enqueue(conn: &Connection, input: &EnqueueInput) -> Result<String, String
     );
 
     Ok(id)
+}
+
+/// Native-only repair producer seam. The queue primary key is the command's
+/// canonical operation id so retries cannot mint a second server operation.
+/// Callers are expected to invoke this inside the same SQLite transaction as
+/// the optimistic repair cache/alias mutation; any INSERT failure therefore
+/// rolls the whole producer transaction back.
+pub(crate) fn enqueue_repair_with_fixed_id(
+    conn: &Connection,
+    operation_id: &str,
+    repair_aggregate_id: &str,
+    input: &EnqueueInput,
+) -> Result<String, String> {
+    let canonical_id = Uuid::parse_str(operation_id)
+        .map_err(|_| "REPAIR_OPERATION_ID_INVALID".to_string())?
+        .to_string();
+    if canonical_id != operation_id {
+        return Err("REPAIR_OPERATION_ID_INVALID".to_string());
+    }
+    let canonical_org = Uuid::parse_str(input.organization_id.as_str())
+        .map_err(|_| "REPAIR_QUEUE_ENVELOPE_INVALID".to_string())?
+        .to_string();
+    let canonical_record = Uuid::parse_str(input.record_id.as_str())
+        .map_err(|_| "REPAIR_QUEUE_ENVELOPE_INVALID".to_string())?
+        .to_string();
+    let canonical_aggregate = Uuid::parse_str(repair_aggregate_id)
+        .map_err(|_| "REPAIR_QUEUE_AGGREGATE_BINDING_INVALID".to_string())?
+        .to_string();
+    if canonical_aggregate != repair_aggregate_id
+        || (input.table_name == "repairs" && input.record_id != repair_aggregate_id)
+    {
+        return Err("REPAIR_QUEUE_AGGREGATE_BINDING_INVALID".to_string());
+    }
+    if classify_repair_queue_ownership(input.module_type.as_deref(), &input.table_name)
+        != RepairQueueOwnership::TrustedCanonical
+        || input.conflict_strategy.as_deref() != Some("manual")
+        || input.operation != "INSERT"
+        || canonical_org != input.organization_id
+        || canonical_record != input.record_id
+    {
+        return Err("REPAIR_QUEUE_ENVELOPE_INVALID".to_string());
+    }
+    if input.table_name == "repair_attachments" {
+        let (candidate_count, binding_count) = conn
+            .query_row(
+                "SELECT COUNT(*),
+                        COALESCE(SUM(CASE WHEN repair_id = ?5 THEN 1 ELSE 0 END), 0)
+                   FROM repair_attachment_staging
+                  WHERE organization_id = ?1
+                    AND attachment_id = ?2
+                    AND operation_id = ?3
+                    AND queue_id = ?3
+                    AND expected_version = ?4",
+                params![
+                    input.organization_id,
+                    input.record_id,
+                    operation_id,
+                    input.version.unwrap_or(0),
+                    repair_aggregate_id,
+                ],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .map_err(|_| "REPAIR_QUEUE_AGGREGATE_BINDING_INVALID".to_string())?;
+        if candidate_count != 1 || binding_count != 1 {
+            return Err("REPAIR_QUEUE_AGGREGATE_BINDING_INVALID".to_string());
+        }
+    }
+
+    quarantine_reserved_repair_lookalikes(conn)?;
+
+    let QueueCapacityUsage {
+        replayable,
+        conflicts,
+    } = capacity_usage(conn)?;
+    if conflicts >= MAX_CONFLICT_ROWS || replayable >= MAX_QUEUE_SIZE {
+        return Err("REPAIR_QUEUE_CAPACITY_EXHAUSTED".to_string());
+    }
+
+    let version = input.version.unwrap_or(0);
+    if !(0..=9_007_199_254_740_991).contains(&version) {
+        return Err("REPAIR_QUEUE_VERSION_INVALID".to_string());
+    }
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO parity_sync_queue
+            (id, table_name, record_id, operation, data, organization_id,
+             created_at, attempts, retry_delay_ms, priority, module_type,
+             conflict_strategy, version, repair_aggregate_id, status)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9, 'repairs',
+                 'manual', ?10, ?11, 'pending')",
+        params![
+            operation_id,
+            input.table_name,
+            input.record_id,
+            "INSERT",
+            input.data,
+            input.organization_id,
+            now,
+            DEFAULT_INITIAL_RETRY_DELAY_MS,
+            input.priority.unwrap_or(0),
+            version,
+            repair_aggregate_id,
+        ],
+    )
+    .map_err(|_| "REPAIR_QUEUE_INSERT_FAILED".to_string())?;
+
+    Ok(operation_id.to_string())
 }
 
 fn string_field(payload: &Value, keys: &[&str]) -> Option<String> {
@@ -2349,6 +3000,46 @@ fn resolve_payment_total_conflict_parity_row_with_conn(
     error_message: &str,
     resolved_at: &str,
 ) -> Result<bool, String> {
+    retry_transaction(conn, |conn| {
+        resolve_payment_total_conflict_parity_row_in_transaction(
+            conn,
+            queue_id,
+            payment_id,
+            payload_raw,
+            error_message,
+            resolved_at,
+        )
+    })
+}
+
+fn resolve_payment_total_conflict_parity_row_in_transaction(
+    conn: &Connection,
+    queue_id: &str,
+    payment_id: &str,
+    payload_raw: &str,
+    error_message: &str,
+    resolved_at: &str,
+) -> Result<bool, String> {
+    let generic_owner = semantic_generic_nonfinancial_owner_predicate("parity_sync_queue");
+    let ownership_sql = format!(
+        "SELECT EXISTS(
+             SELECT 1 FROM parity_sync_queue
+             WHERE id = ?1
+               AND table_name = 'payments'
+               AND operation = 'INSERT'
+               AND status = 'failed'
+               AND {generic_owner}
+         )"
+    );
+    let generic_payment_row = conn
+        .query_row(&ownership_sql, params![queue_id], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(|e| format!("sync_queue verify generic payment conflict ownership: {e}"))?;
+    if generic_payment_row != 1 {
+        return Ok(false);
+    }
+
     if !is_payment_total_conflict_error(error_message) {
         return Ok(false);
     }
@@ -2417,6 +3108,52 @@ fn resolve_payment_total_conflict_parity_row_with_conn(
     Ok(true)
 }
 
+/// Live-worker variant of payment-total recovery. Unlike the historical
+/// failed-row prepass above, this path never reads/adopts a newer generation:
+/// its caller holds `with_live_generic_claim`, and success is acknowledged
+/// only with the generation captured by the original dequeue.
+fn resolve_live_payment_total_conflict_with_conn(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    error_message: &str,
+    resolved_at: &str,
+) -> Result<bool, String> {
+    if item.table_name != "payments" || !is_payment_total_conflict_error(error_message) {
+        return Ok(false);
+    }
+
+    if sync::resolve_payment_total_conflict_with_server_hint_with_conn(
+        conn,
+        item.record_id.as_str(),
+        error_message,
+        resolved_at,
+    )?
+    .is_some()
+    {
+        mark_success(conn, &item.id, item.claim_generation)?;
+        return Ok(true);
+    }
+
+    let Some(server_hint) = parse_payment_total_conflict_server_hint(error_message) else {
+        return Ok(false);
+    };
+    if server_hint.existing_completed + 0.01 < server_hint.order_total {
+        return Ok(false);
+    }
+    let payload =
+        serde_json::from_str::<Value>(&item.data).unwrap_or_else(|_| Value::Object(Map::new()));
+    let Some(payload_amount) = extract_payment_payload_amount(&payload) else {
+        return Ok(false);
+    };
+    if (payload_amount - server_hint.payment_amount).abs() > 0.02 {
+        return Ok(false);
+    }
+
+    mark_success(conn, &item.id, item.claim_generation)?;
+    info!("Resolved live parity payment conflict from bounded server totals");
+    Ok(true)
+}
+
 fn is_customer_address_not_found_error(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
     lower.contains("http 404") && lower.contains("address not found")
@@ -2434,18 +3171,24 @@ fn requeue_failed_items(
     log_message: &str,
 ) -> Result<RetryItemsResult, String> {
     let mut retried = 0_i64;
+    let generic_owner = semantic_generic_nonfinancial_owner_predicate("parity_sync_queue");
+    let update_sql = format!(
+        "UPDATE parity_sync_queue
+         SET status = 'pending',
+             attempts = 0,
+             error_message = NULL,
+             next_retry_at = NULL,
+             last_attempt = NULL,
+             retry_delay_ms = ?1
+         WHERE id = ?2
+           AND status = 'failed'
+           AND {generic_owner}"
+    );
 
     for queue_id in queue_ids {
         retried += conn
             .execute(
-                "UPDATE parity_sync_queue
-                 SET status = 'pending',
-                     attempts = 0,
-                     error_message = NULL,
-                     next_retry_at = NULL,
-                     last_attempt = NULL,
-                     retry_delay_ms = ?1
-                 WHERE id = ?2",
+                &update_sql,
                 params![DEFAULT_INITIAL_RETRY_DELAY_MS, queue_id],
             )
             .map_err(|e| format!("sync_queue requeue_failed_items update: {e}"))?
@@ -2471,11 +3214,12 @@ fn retry_failed_terminal_context_items_limited(
         return Ok(RetryItemsResult { retried: 0 });
     }
 
-    let mut stmt = conn
-        .prepare(
-            "SELECT id
+    let generic_owner = semantic_generic_nonfinancial_owner_predicate("parity_sync_queue");
+    let select_sql = format!(
+        "SELECT id
              FROM parity_sync_queue
              WHERE status = 'failed'
+               AND {generic_owner}
                AND error_message IS NOT NULL
                AND (
                    lower(error_message) LIKE '%missing terminal_id%'
@@ -2484,8 +3228,10 @@ fn retry_failed_terminal_context_items_limited(
                    OR lower(error_message) LIKE '%terminal_id context%'
                )
              ORDER BY created_at ASC
-             LIMIT ?1",
-        )
+             LIMIT ?1"
+    );
+    let mut stmt = conn
+        .prepare(&select_sql)
         .map_err(|e| format!("sync_queue retry_failed_terminal_context_items prepare: {e}"))?;
 
     let queue_ids: Vec<String> = stmt
@@ -2513,14 +3259,17 @@ fn retry_failed_rate_limited_items_limited(
         return Ok(RetryItemsResult { retried: 0 });
     }
 
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, error_message
+    let generic_owner = semantic_generic_nonfinancial_owner_predicate("parity_sync_queue");
+    let select_sql = format!(
+        "SELECT id, error_message
              FROM parity_sync_queue
              WHERE status = 'failed'
+               AND {generic_owner}
                AND error_message IS NOT NULL
-             ORDER BY created_at ASC",
-        )
+             ORDER BY created_at ASC"
+    );
+    let mut stmt = conn
+        .prepare(&select_sql)
         .map_err(|e| format!("sync_queue retry_failed_rate_limited_items prepare: {e}"))?;
 
     let queue_ids: Vec<String> = stmt
@@ -2553,14 +3302,17 @@ fn retry_failed_legacy_order_insert_items_limited(
         return Ok(RetryItemsResult { retried: 0 });
     }
 
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, record_id, operation, data, error_message
+    let generic_owner = semantic_generic_nonfinancial_owner_predicate("parity_sync_queue");
+    let select_sql = format!(
+        "SELECT id, record_id, operation, data, error_message
              FROM parity_sync_queue
              WHERE table_name = 'orders'
+               AND {generic_owner}
                AND status = 'failed'
-               AND error_message IS NOT NULL",
-        )
+               AND error_message IS NOT NULL"
+    );
+    let mut stmt = conn
+        .prepare(&select_sql)
         .map_err(|e| format!("sync_queue retry_failed_legacy_order_insert_items prepare: {e}"))?;
     let candidates: Vec<(String, String, String, String, String)> = stmt
         .query_map([], |row| {
@@ -2614,19 +3366,20 @@ fn resolve_failed_payment_total_conflict_items_limited(
         return Ok(RetryItemsResult { retried: 0 });
     }
 
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, record_id, data, error_message
+    let generic_owner = semantic_generic_nonfinancial_owner_predicate("parity_sync_queue");
+    let select_sql = format!(
+        "SELECT id, record_id, data, error_message
              FROM parity_sync_queue
              WHERE table_name = 'payments'
+               AND {generic_owner}
                AND operation = 'INSERT'
                AND status = 'failed'
                AND error_message IS NOT NULL
-             ORDER BY created_at ASC",
-        )
-        .map_err(|e| {
-            format!("sync_queue resolve_failed_payment_total_conflict_items prepare: {e}")
-        })?;
+             ORDER BY created_at ASC"
+    );
+    let mut stmt = conn.prepare(&select_sql).map_err(|e| {
+        format!("sync_queue resolve_failed_payment_total_conflict_items prepare: {e}")
+    })?;
 
     let candidates: Vec<(String, String, String, String)> = stmt
         .query_map([], |row| {
@@ -2677,19 +3430,20 @@ fn retry_failed_customer_address_not_found_items_limited(
         return Ok(RetryItemsResult { retried: 0 });
     }
 
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, record_id, data, error_message
+    let generic_owner = semantic_generic_nonfinancial_owner_predicate("parity_sync_queue");
+    let select_sql = format!(
+        "SELECT id, record_id, data, error_message
              FROM parity_sync_queue
              WHERE table_name = 'customer_addresses'
+               AND {generic_owner}
                AND operation = 'UPDATE'
                AND status = 'failed'
                AND error_message IS NOT NULL
-             ORDER BY created_at ASC",
-        )
-        .map_err(|e| {
-            format!("sync_queue retry_failed_customer_address_not_found_items prepare: {e}")
-        })?;
+             ORDER BY created_at ASC"
+    );
+    let mut stmt = conn.prepare(&select_sql).map_err(|e| {
+        format!("sync_queue retry_failed_customer_address_not_found_items prepare: {e}")
+    })?;
 
     let candidates: Vec<(String, String, String, String)> = stmt
         .query_map([], |row| {
@@ -2735,10 +3489,16 @@ fn retry_failed_customer_address_not_found_items_limited(
             continue;
         }
 
-        conn.execute(
+        let update_sql = format!(
             "UPDATE parity_sync_queue
              SET data = ?1
-             WHERE id = ?2",
+             WHERE id = ?2
+               AND status = 'failed'
+               AND table_name = 'customer_addresses'
+               AND {generic_owner}"
+        );
+        conn.execute(
+            &update_sql,
             params![hydrated_payload.to_string(), queue_id.as_str()],
         )
         .map_err(|e| {
@@ -2781,18 +3541,19 @@ fn retry_failed_table_session_local_placeholder_items_limited(
         return Ok(RetryItemsResult { retried: 0 });
     }
 
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, record_id, operation, error_message
+    let generic_owner = semantic_generic_nonfinancial_owner_predicate("parity_sync_queue");
+    let select_sql = format!(
+        "SELECT id, record_id, operation, error_message
              FROM parity_sync_queue
              WHERE table_name = 'restaurant_table_sessions'
+               AND {generic_owner}
                AND status = 'failed'
                AND error_message IS NOT NULL
-             ORDER BY created_at ASC",
-        )
-        .map_err(|e| {
-            format!("sync_queue retry_failed_table_session_local_placeholder_items prepare: {e}")
-        })?;
+             ORDER BY created_at ASC"
+    );
+    let mut stmt = conn.prepare(&select_sql).map_err(|e| {
+        format!("sync_queue retry_failed_table_session_local_placeholder_items prepare: {e}")
+    })?;
 
     let candidates: Vec<(String, String, String, String)> = stmt
         .query_map([], |row| {
@@ -2872,18 +3633,19 @@ fn retry_failed_invalid_fiscal_issued_at_items_limited(
         return Ok(RetryItemsResult { retried: 0 });
     }
 
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, data, error_message
+    let generic_owner = semantic_generic_nonfinancial_owner_predicate("parity_sync_queue");
+    let select_sql = format!(
+        "SELECT id, data, error_message
              FROM parity_sync_queue
              WHERE module_type = 'fiscal'
+               AND {generic_owner}
                AND status = 'failed'
                AND error_message IS NOT NULL
-             ORDER BY created_at ASC",
-        )
-        .map_err(|e| {
-            format!("sync_queue retry_failed_invalid_fiscal_issued_at_items prepare: {e}")
-        })?;
+             ORDER BY created_at ASC"
+    );
+    let mut stmt = conn.prepare(&select_sql).map_err(|e| {
+        format!("sync_queue retry_failed_invalid_fiscal_issued_at_items prepare: {e}")
+    })?;
 
     let candidates: Vec<(String, String, String)> = stmt
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
@@ -2904,10 +3666,16 @@ fn retry_failed_invalid_fiscal_issued_at_items_limited(
             continue;
         };
         let normalized_payload = normalize_fiscal_request_payload(&payload);
-        conn.execute(
+        let update_sql = format!(
             "UPDATE parity_sync_queue
              SET data = ?1
-             WHERE id = ?2",
+             WHERE id = ?2
+               AND status = 'failed'
+               AND module_type = 'fiscal'
+               AND {generic_owner}"
+        );
+        conn.execute(
+            &update_sql,
             params![normalized_payload.to_string(), queue_id.as_str()],
         )
         .map_err(|e| {
@@ -2957,136 +3725,458 @@ pub fn clear_unsynced_items(
     table_name: &str,
     record_id: &str,
 ) -> Result<usize, String> {
-    conn.execute(
+    let generic_owner = semantic_generic_nonfinancial_owner_predicate("parity_sync_queue");
+    let sql = format!(
         "DELETE FROM parity_sync_queue
          WHERE table_name = ?1
            AND record_id = ?2
-           AND status IN ('pending', 'failed', 'conflict')",
-        params![table_name, record_id],
-    )
-    .map_err(|e| format!("sync_queue clear_unsynced_items: {e}"))
+           AND {generic_owner}
+           AND status IN ('pending', 'failed', 'conflict')"
+    );
+    conn.execute(&sql, params![table_name, record_id])
+        .map_err(|e| format!("sync_queue clear_unsynced_items: {e}"))
 }
 
 /// Dequeue the next item to process (highest priority first, then oldest).
 ///
 /// Returns `None` if the queue is empty or all items are scheduled for later.
 /// Only considers items with status `pending` whose `next_retry_at` has passed.
-pub fn dequeue(conn: &Connection) -> Result<Option<SyncQueueItem>, String> {
-    let now = Utc::now().to_rfc3339();
+fn map_internal_queue_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncQueueItem> {
+    Ok(SyncQueueItem {
+        id: row.get(0)?,
+        table_name: row.get(1)?,
+        record_id: row.get(2)?,
+        operation: row.get(3)?,
+        data: row.get(4)?,
+        organization_id: row.get(5)?,
+        created_at: row.get(6)?,
+        attempts: row.get(7)?,
+        last_attempt: row.get(8)?,
+        error_message: row.get(9)?,
+        next_retry_at: row.get(10)?,
+        retry_delay_ms: row.get(11)?,
+        priority: row.get(12)?,
+        module_type: row.get(13)?,
+        conflict_strategy: row.get(14)?,
+        version: row.get(15)?,
+        claim_generation: row.get(16)?,
+        status: row.get(17)?,
+    })
+}
 
-    let item = conn
-        .query_row(
-            "SELECT id, table_name, record_id, operation, data, organization_id,
-                    created_at, attempts, last_attempt, error_message, next_retry_at,
-                    retry_delay_ms, priority, module_type, conflict_strategy, version,
-                    claim_generation, status
-             FROM parity_sync_queue
-             WHERE status = 'pending'
-               AND (next_retry_at IS NULL OR next_retry_at <= ?1)
-             ORDER BY priority DESC, created_at ASC
-             LIMIT 1",
-            params![now],
-            |row| {
-                Ok(SyncQueueItem {
-                    id: row.get(0)?,
-                    table_name: row.get(1)?,
-                    record_id: row.get(2)?,
-                    operation: row.get(3)?,
-                    data: row.get(4)?,
-                    organization_id: row.get(5)?,
-                    created_at: row.get(6)?,
-                    attempts: row.get(7)?,
-                    last_attempt: row.get(8)?,
-                    error_message: row.get(9)?,
-                    next_retry_at: row.get(10)?,
-                    retry_delay_ms: row.get(11)?,
-                    priority: row.get(12)?,
-                    module_type: row.get(13)?,
-                    conflict_strategy: row.get(14)?,
-                    version: row.get(15)?,
-                    claim_generation: row.get(16)?,
-                    status: row.get(17)?,
-                })
-            },
+pub fn dequeue(conn: &Connection) -> Result<Option<SyncQueueItem>, String> {
+    dequeue_with_quarantine_count(conn).map(|(item, _)| item)
+}
+
+/// Atomically quarantine semantic repair-owner lookalikes and claim the next
+/// safe item. `BEGIN IMMEDIATE` closes the former two-statement insertion gap:
+/// another SQLite writer can insert only before this transaction starts or
+/// after its claim commits. The affected-row count is returned so the batch
+/// result cannot report success after silently parking newly discovered work.
+fn dequeue_with_quarantine_count(
+    conn: &Connection,
+) -> Result<(Option<SyncQueueItem>, i64), String> {
+    retry_transaction(conn, |conn| {
+        let quarantined = quarantine_reserved_repair_lookalikes(conn)?;
+        claim_next_internal_item(conn).map(|item| (item, quarantined))
+    })
+}
+
+fn claim_next_internal_item(conn: &Connection) -> Result<Option<SyncQueueItem>, String> {
+    let now = Utc::now().to_rfc3339();
+    let candidate_generic = semantic_generic_nonfinancial_owner_predicate("candidate");
+    let claim_generic = semantic_generic_nonfinancial_owner_predicate("parity_sync_queue");
+    let claim_canonical = canonical_repair_owner_predicate("parity_sync_queue");
+    let unsafe_reserved = semantic_reserved_repair_owner_predicate("unsafe_repair");
+    let unsafe_canonical = canonical_repair_owner_predicate("unsafe_repair");
+    let sql = format!(
+        "UPDATE parity_sync_queue
+            SET status = 'processing',
+                last_attempt = ?1,
+                claim_generation = claim_generation + 1
+          WHERE id = (
+                SELECT candidate.id
+                 FROM parity_sync_queue AS candidate
+                 WHERE candidate.status = 'pending'
+                   AND (
+                        candidate.next_retry_at IS NULL
+                        OR julianday(candidate.next_retry_at) <= julianday('now')
+                   )
+                   AND (
+                        {candidate_generic}
+                        OR (
+                            COALESCE(candidate.module_type, '') = 'repairs'
+                            AND candidate.table_name IN ('repairs', 'repair_attachments')
+                            AND
+                            candidate.repair_aggregate_id IS NOT NULL
+                            AND length(candidate.repair_aggregate_id) = 36
+                            AND substr(candidate.repair_aggregate_id, 9, 1) = '-'
+                            AND substr(candidate.repair_aggregate_id, 14, 1) = '-'
+                            AND substr(candidate.repair_aggregate_id, 19, 1) = '-'
+                            AND substr(candidate.repair_aggregate_id, 24, 1) = '-'
+                            AND length(replace(candidate.repair_aggregate_id, '-', '')) = 32
+                            AND replace(candidate.repair_aggregate_id, '-', '')
+                                NOT GLOB '*[^0-9a-f]*'
+                            AND lower(candidate.repair_aggregate_id)
+                                = candidate.repair_aggregate_id
+                            AND candidate.operation = 'INSERT'
+                            AND candidate.conflict_strategy = 'manual'
+                            AND candidate.version BETWEEN 0 AND 9007199254740991
+                            AND length(candidate.organization_id) = 36
+                            AND substr(candidate.organization_id, 9, 1) = '-'
+                            AND substr(candidate.organization_id, 14, 1) = '-'
+                            AND substr(candidate.organization_id, 19, 1) = '-'
+                            AND substr(candidate.organization_id, 24, 1) = '-'
+                            AND length(replace(candidate.organization_id, '-', '')) = 32
+                            AND replace(candidate.organization_id, '-', '')
+                                NOT GLOB '*[^0-9a-f]*'
+                            AND lower(candidate.organization_id) = candidate.organization_id
+                            AND length(candidate.record_id) = 36
+                            AND substr(candidate.record_id, 9, 1) = '-'
+                            AND substr(candidate.record_id, 14, 1) = '-'
+                            AND substr(candidate.record_id, 19, 1) = '-'
+                            AND substr(candidate.record_id, 24, 1) = '-'
+                            AND length(replace(candidate.record_id, '-', '')) = 32
+                            AND replace(candidate.record_id, '-', '')
+                                NOT GLOB '*[^0-9a-f]*'
+                            AND lower(candidate.record_id) = candidate.record_id
+                            AND (
+                                (candidate.table_name = 'repairs'
+                                 AND candidate.record_id = candidate.repair_aggregate_id)
+                                OR (
+                                    candidate.table_name = 'repair_attachments'
+                                    AND (
+                                        SELECT COUNT(*)
+                                          FROM repair_attachment_staging AS staging
+                                         WHERE staging.organization_id = candidate.organization_id
+                                           AND staging.attachment_id = candidate.record_id
+                                           AND staging.operation_id = candidate.id
+                                           AND staging.queue_id = candidate.id
+                                           AND staging.expected_version = candidate.version
+                                           AND staging.repair_id = candidate.repair_aggregate_id
+                                           AND staging.state = 'queued'
+                                    ) = 1
+                                )
+                            )
+                            AND NOT EXISTS (
+                                SELECT 1
+                                  FROM parity_sync_queue AS unsafe_repair
+                                 WHERE unsafe_repair.organization_id = candidate.organization_id
+                                   AND unsafe_repair.id <> candidate.id
+                                   AND unsafe_repair.status IN (
+                                        'pending', 'processing', 'failed', 'conflict'
+                                   )
+                                   AND {unsafe_reserved}
+                                   AND NOT (
+                                        {unsafe_canonical}
+                                        AND unsafe_repair.repair_aggregate_id IS NOT NULL
+                                        AND length(unsafe_repair.repair_aggregate_id) = 36
+                                        AND substr(unsafe_repair.repair_aggregate_id, 9, 1) = '-'
+                                        AND substr(unsafe_repair.repair_aggregate_id, 14, 1) = '-'
+                                        AND substr(unsafe_repair.repair_aggregate_id, 19, 1) = '-'
+                                        AND substr(unsafe_repair.repair_aggregate_id, 24, 1) = '-'
+                                        AND length(replace(
+                                            unsafe_repair.repair_aggregate_id, '-', ''
+                                        )) = 32
+                                        AND replace(
+                                            unsafe_repair.repair_aggregate_id, '-', ''
+                                        ) NOT GLOB '*[^0-9a-f]*'
+                                        AND lower(unsafe_repair.repair_aggregate_id)
+                                            = unsafe_repair.repair_aggregate_id
+                                   )
+                            )
+                            AND NOT EXISTS (
+                                SELECT 1
+                                  FROM parity_sync_queue AS blocker
+                                 WHERE blocker.organization_id = candidate.organization_id
+                                   AND blocker.repair_aggregate_id = candidate.repair_aggregate_id
+                                   AND blocker.id <> candidate.id
+                                   AND COALESCE(blocker.module_type, '') = 'repairs'
+                                   AND blocker.table_name IN ('repairs', 'repair_attachments')
+                                   AND (
+                                        blocker.status IN ('processing', 'conflict')
+                                        OR (
+                                            blocker.status IN ('pending', 'failed')
+                                            AND (
+                                                blocker.version < candidate.version
+                                                OR (blocker.version = candidate.version
+                                                    AND blocker.created_at < candidate.created_at)
+                                                OR (blocker.version = candidate.version
+                                                    AND blocker.created_at = candidate.created_at
+                                                    AND blocker.id < candidate.id)
+                                            )
+                                        )
+                                   )
+                            )
+                        )
+                   )
+                 ORDER BY candidate.priority DESC, candidate.created_at ASC, candidate.id ASC
+                 LIMIT 1
+          )
+            AND status = 'pending'
+            AND ({claim_generic} OR {claim_canonical})
+            AND (
+                next_retry_at IS NULL
+                OR julianday(next_retry_at) <= julianday('now')
+            )
+        RETURNING id, table_name, record_id, operation, data, organization_id,
+                  created_at, attempts, last_attempt, error_message, next_retry_at,
+                  retry_delay_ms, priority, COALESCE(module_type, 'orders'),
+                  conflict_strategy, version, claim_generation, status"
+    );
+    conn.query_row(&sql, params![now], map_internal_queue_item)
+        .optional()
+        .map_err(|e| format!("sync_queue dequeue: {e}"))
+}
+
+/// Renderer-facing dequeue. Repair payloads are native-only and must never be
+/// returned across the generic IPC boundary, even when they have the highest
+/// queue priority.
+pub(crate) fn renderer_dequeue(conn: &Connection) -> Result<Option<SyncQueueItem>, String> {
+    let now = Utc::now().to_rfc3339();
+    let candidate_generic = renderer_generic_owner_predicate("candidate");
+    let claim_generic = renderer_generic_owner_predicate("parity_sync_queue");
+    let candidate_exclusion = renderer_non_repair_owned_predicate("candidate");
+    let claim_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
+    let sql = format!(
+        "UPDATE parity_sync_queue
+         SET status = 'processing', last_attempt = ?1,
+             claim_generation = claim_generation + 1
+         WHERE id = (
+             SELECT candidate.id
+             FROM parity_sync_queue candidate
+             WHERE candidate.status = 'pending'
+               AND {candidate_generic}
+               AND (
+                    candidate.next_retry_at IS NULL
+                    OR julianday(candidate.next_retry_at) <= julianday('now')
+               )
+               AND {candidate_exclusion}
+             ORDER BY candidate.priority DESC, candidate.created_at ASC, candidate.id ASC
+             LIMIT 1
+         )
+           AND status = 'pending'
+           AND {claim_generic}
+           AND (
+                next_retry_at IS NULL
+                OR julianday(next_retry_at) <= julianday('now')
+           )
+           AND {claim_exclusion}
+         RETURNING id, table_name, record_id, operation, data, organization_id,
+                   created_at, attempts, last_attempt, error_message, next_retry_at,
+                   retry_delay_ms, priority, COALESCE(module_type, 'orders'),
+                   conflict_strategy, version, claim_generation, status"
+    );
+    conn.query_row(&sql, params![now], |row| {
+        Ok(SyncQueueItem {
+            id: row.get(0)?,
+            table_name: row.get(1)?,
+            record_id: row.get(2)?,
+            operation: row.get(3)?,
+            data: row.get(4)?,
+            organization_id: row.get(5)?,
+            created_at: row.get(6)?,
+            attempts: row.get(7)?,
+            last_attempt: row.get(8)?,
+            error_message: row.get(9)?,
+            next_retry_at: row.get(10)?,
+            retry_delay_ms: row.get(11)?,
+            priority: row.get(12)?,
+            module_type: row.get(13)?,
+            conflict_strategy: row.get(14)?,
+            version: row.get(15)?,
+            claim_generation: row.get(16)?,
+            status: row.get(17)?,
+        })
+    })
+    .optional()
+    .map_err(|e| format!("sync_queue renderer_dequeue: {e}"))
+}
+
+/// Atomically resets and claims one renderer-safe row for a manual retry.
+///
+/// This deliberately does not fall back to the next FIFO row. The caller must
+/// hold its terminal-binding gate for the entire transaction, remote request,
+/// and acknowledgement window.
+fn renderer_retry_and_dequeue_exact(
+    conn: &Connection,
+    item_id: &str,
+) -> Result<Option<SyncQueueItem>, String> {
+    if item_id.trim().is_empty() {
+        return Err("PARITY_ITEM_ID_INVALID".to_string());
+    }
+    retry_transaction(conn, |conn| {
+        let semantic_reserved = semantic_reserved_repair_owner_predicate("parity_sync_queue");
+        let ownership_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
+        let ownership_sql = format!(
+            "SELECT ({semantic_reserved}), NOT ({ownership_exclusion})
+               FROM parity_sync_queue
+              WHERE id = ?1"
+        );
+        let ownership = conn
+            .query_row(&ownership_sql, [item_id], |row| {
+                Ok((row.get::<_, bool>(0)?, row.get::<_, bool>(1)?))
+            })
+            .optional()
+            .map_err(|error| format!("sync_queue exact renderer retry guard: {error}"))?;
+        match ownership {
+            Some((true, _)) => return Err("REPAIR_TYPED_CONFLICT_REQUIRED".to_string()),
+            Some((false, true)) => return Err("REPAIR_SETTLEMENT_ROUTE_REQUIRED".to_string()),
+            _ => {}
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let generic_owner = renderer_generic_owner_predicate("parity_sync_queue");
+        let sql = format!(
+            "UPDATE parity_sync_queue
+                SET status = 'processing', attempts = 0, error_message = NULL,
+                    next_retry_at = NULL, last_attempt = ?1,
+                    retry_delay_ms = ?2, claim_generation = claim_generation + 1
+              WHERE id = ?3
+                AND status IN ('pending', 'failed', 'conflict')
+                AND {generic_owner}
+                AND {ownership_exclusion}
+             RETURNING id, table_name, record_id, operation, data, organization_id,
+                       created_at, attempts, last_attempt, error_message, next_retry_at,
+                       retry_delay_ms, priority, COALESCE(module_type, 'orders'),
+                       conflict_strategy, version, claim_generation, status"
+        );
+        conn.query_row(
+            &sql,
+            params![now, DEFAULT_INITIAL_RETRY_DELAY_MS, item_id],
+            map_internal_queue_item,
         )
         .optional()
-        .map_err(|e| format!("sync_queue dequeue: {e}"))?;
-
-    if let Some(mut item) = item {
-        // Wave 10 H8: bump claim_generation on every claim. The
-        // generation we read above is now stale; the row's authoritative
-        // generation is the post-bump value. Use UPDATE … RETURNING so
-        // the read-then-write pair is one statement.
-        let new_generation: i64 = conn
-            .query_row(
-                "UPDATE parity_sync_queue
-                 SET status = 'processing',
-                     last_attempt = ?1,
-                     claim_generation = claim_generation + 1
-                 WHERE id = ?2
-                 RETURNING claim_generation",
-                params![now, item.id],
-                |row| row.get(0),
-            )
-            .map_err(|e| format!("sync_queue mark processing: {e}"))?;
-        item.claim_generation = new_generation;
-        return Ok(Some(item));
-    }
-
-    Ok(item)
+        .map_err(|error| format!("sync_queue exact renderer retry claim: {error}"))
+    })
 }
 
 fn recover_stale_processing_items(conn: &Connection) -> Result<i64, String> {
-    // Wave 4 H: collapse the SELECT+UPDATE pair into a single
-    // `UPDATE ... RETURNING` statement. On HEAD the SELECT ran first
-    // (gathering a list of stale rows to log) and then the UPDATE used
-    // the SAME `julianday(...)` predicate — which could match a
-    // different set of rows in the intervening moment if another
-    // writer moved rows in or out of `processing` between the two
-    // statements. `RETURNING` gives us the rows we actually mutated,
-    // atomically, so the audit log cannot drift from reality.
+    let generic_recovered = recover_stale_non_repair_processing_items(conn)?;
     let lease_modifier = format!("-{} seconds", PROCESSING_LEASE_SECS);
-    // Wave 10 H8: bump claim_generation atomically with the recovery.
-    // The in-flight worker that owned the prior generation will fail
-    // the WHERE-claim_generation guard in `mark_success` when its late
-    // ack lands. attempts is INTENTIONALLY not bumped — a stale claim
-    // does not consume a retry slot.
-    let mut stmt = conn
-        .prepare(
+    // Native recovery is deliberately exact-shape only. Semantic lookalikes are
+    // excluded here and remain available for the caller's counted quarantine;
+    // malformed exact native envelopes stay parked for typed repair recovery.
+    let native_recovered = conn
+        .execute(
             "UPDATE parity_sync_queue
-             SET status = 'pending',
-                 next_retry_at = NULL,
+             SET status = 'pending', next_retry_at = NULL,
                  claim_generation = claim_generation + 1
              WHERE status = 'processing'
+               AND COALESCE(module_type, '') = 'repairs'
+               AND table_name IN ('repairs', 'repair_attachments')
+               AND operation = 'INSERT'
+               AND conflict_strategy = 'manual'
+               AND version BETWEEN 0 AND 9007199254740991
+               AND length(id) = 36
+               AND substr(id, 9, 1) = '-'
+               AND substr(id, 14, 1) = '-'
+               AND substr(id, 19, 1) = '-'
+               AND substr(id, 24, 1) = '-'
+               AND length(replace(id, '-', '')) = 32
+               AND replace(id, '-', '') NOT GLOB '*[^0-9a-f]*'
+               AND lower(id) = id
+               AND length(organization_id) = 36
+               AND substr(organization_id, 9, 1) = '-'
+               AND substr(organization_id, 14, 1) = '-'
+               AND substr(organization_id, 19, 1) = '-'
+               AND substr(organization_id, 24, 1) = '-'
+               AND length(replace(organization_id, '-', '')) = 32
+               AND replace(organization_id, '-', '') NOT GLOB '*[^0-9a-f]*'
+               AND lower(organization_id) = organization_id
+               AND length(record_id) = 36
+               AND substr(record_id, 9, 1) = '-'
+               AND substr(record_id, 14, 1) = '-'
+               AND substr(record_id, 19, 1) = '-'
+               AND substr(record_id, 24, 1) = '-'
+               AND length(replace(record_id, '-', '')) = 32
+               AND replace(record_id, '-', '') NOT GLOB '*[^0-9a-f]*'
+               AND lower(record_id) = record_id
+               AND repair_aggregate_id IS NOT NULL
+               AND length(repair_aggregate_id) = 36
+               AND substr(repair_aggregate_id, 9, 1) = '-'
+               AND substr(repair_aggregate_id, 14, 1) = '-'
+               AND substr(repair_aggregate_id, 19, 1) = '-'
+               AND substr(repair_aggregate_id, 24, 1) = '-'
+               AND length(replace(repair_aggregate_id, '-', '')) = 32
+               AND replace(repair_aggregate_id, '-', '') NOT GLOB '*[^0-9a-f]*'
+               AND lower(repair_aggregate_id) = repair_aggregate_id
+               AND (
+                    (table_name = 'repairs' AND record_id = repair_aggregate_id)
+                    OR (
+                        table_name = 'repair_attachments'
+                        AND (
+                            SELECT COUNT(*)
+                              FROM repair_attachment_staging AS staging
+                             WHERE staging.organization_id = parity_sync_queue.organization_id
+                               AND staging.attachment_id = parity_sync_queue.record_id
+                               AND staging.operation_id = parity_sync_queue.id
+                               AND staging.queue_id = parity_sync_queue.id
+                               AND staging.expected_version = parity_sync_queue.version
+                               AND staging.repair_id = parity_sync_queue.repair_aggregate_id
+                               AND staging.state = 'queued'
+                        ) = 1
+                    )
+               )
                AND julianday(COALESCE(last_attempt, created_at))
-                   <= julianday('now', ?1)
-             RETURNING id, table_name, record_id",
+                   <= julianday('now', ?1)",
+            params![lease_modifier.as_str()],
         )
-        .map_err(|e| format!("sync_queue recover_stale_processing_items prepare: {e}"))?;
+        .map_err(|e| format!("sync_queue recover native stale processing items: {e}"))?
+        as i64;
 
-    let recovered_rows: Vec<(String, String, String)> = stmt
-        .query_map(params![lease_modifier.as_str()], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })
-        .map_err(|e| format!("sync_queue recover_stale_processing_items update: {e}"))?
-        .filter_map(|row| row.ok())
-        .collect();
-
-    let recovered = recovered_rows.len() as i64;
-
-    for (_, table_name, record_id) in recovered_rows.into_iter().take(5) {
+    if generic_recovered > 0 {
         warn!(
-            table_name = %table_name,
-            record_id = %record_id,
+            recovered = generic_recovered,
             lease_secs = PROCESSING_LEASE_SECS,
-            "Recovered stale parity processing row"
+            "Recovered stale generic parity processing rows"
+        );
+    }
+    if native_recovered > 0 {
+        warn!(
+            recovered = native_recovered,
+            lease_secs = PROCESSING_LEASE_SECS,
+            "Recovered stale native repair processing rows"
         );
     }
 
-    Ok(recovered)
+    Ok(generic_recovered + native_recovered)
+}
+
+fn recover_stale_non_repair_processing_items(conn: &Connection) -> Result<i64, String> {
+    let lease_modifier = format!("-{} seconds", PROCESSING_LEASE_SECS);
+    let generic_owner = renderer_generic_owner_predicate("parity_sync_queue");
+    let ownership_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
+    let sql = format!(
+        "UPDATE parity_sync_queue
+         SET status = 'pending', next_retry_at = NULL,
+             claim_generation = claim_generation + 1
+         WHERE status = 'processing'
+           AND {generic_owner}
+           AND {ownership_exclusion}
+           AND julianday(COALESCE(last_attempt, created_at))
+               <= julianday('now', ?1)"
+    );
+    let recovered = conn
+        .execute(&sql, params![lease_modifier])
+        .map_err(|e| format!("sync_queue generic stale recovery: {e}"))?;
+    Ok(recovered as i64)
+}
+
+fn recover_stale_processing_items_renderer_safe(conn: &Connection) -> Result<i64, String> {
+    recover_stale_non_repair_processing_items(conn)
 }
 
 fn cleanup_superseded_synced_order_status_updates(conn: &Connection) -> Result<usize, String> {
+    retry_transaction(
+        conn,
+        cleanup_superseded_synced_order_status_updates_in_transaction,
+    )
+}
+
+fn cleanup_superseded_synced_order_status_updates_in_transaction(
+    conn: &Connection,
+) -> Result<usize, String> {
     let rows: Vec<(
         String,
         String,
@@ -3096,15 +4186,20 @@ fn cleanup_superseded_synced_order_status_updates(conn: &Connection) -> Result<u
         Option<String>,
         String,
     )> = {
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, record_id, operation, data, status, error_message, conflict_strategy
+        let generic_owner = renderer_generic_owner_predicate("parity_sync_queue");
+        let ownership_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
+        let sql = format!(
+            "SELECT id, record_id, operation, data, status, error_message, conflict_strategy
                  FROM parity_sync_queue
                  WHERE table_name = 'orders'
                    AND operation = 'UPDATE'
                    AND status IN ('pending', 'processing', 'failed', 'conflict')
-                ORDER BY created_at ASC, id ASC",
-            )
+                   AND {generic_owner}
+                   AND {ownership_exclusion}
+                ORDER BY created_at ASC, id ASC"
+        );
+        let mut stmt = conn
+            .prepare(&sql)
             .map_err(|e| format!("sync_queue superseded order cleanup prepare: {e}"))?;
         let mapped = stmt
             .query_map([], |row| {
@@ -3135,14 +4230,18 @@ fn cleanup_superseded_synced_order_status_updates(conn: &Connection) -> Result<u
             operation.as_str(),
             &payload,
         )? {
-            let affected = conn
-                .execute(
-                    "DELETE FROM parity_sync_queue
+            let generic_owner = renderer_generic_owner_predicate("parity_sync_queue");
+            let ownership_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
+            let delete_sql = format!(
+                "DELETE FROM parity_sync_queue
                      WHERE id = ?1
                        AND table_name = 'orders'
-                       AND operation = 'UPDATE'",
-                    params![queue_id.as_str()],
-                )
+                       AND operation = 'UPDATE'
+                       AND {generic_owner}
+                       AND {ownership_exclusion}"
+            );
+            let affected = conn
+                .execute(&delete_sql, params![queue_id.as_str()])
                 .map_err(|e| format!("sync_queue superseded order cleanup delete: {e}"))?;
 
             if affected > 0 {
@@ -3193,9 +4292,10 @@ fn cleanup_superseded_synced_order_status_updates(conn: &Connection) -> Result<u
 
         // Requeue this recovery only once. If the rebased request is rejected
         // too, the marker above leaves it failed for operator review.
-        let affected = conn
-            .execute(
-                "UPDATE parity_sync_queue
+        let generic_owner = renderer_generic_owner_predicate("parity_sync_queue");
+        let ownership_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
+        let update_sql = format!(
+            "UPDATE parity_sync_queue
                  SET data = ?1,
                      status = 'pending',
                      attempts = 0,
@@ -3205,9 +4305,12 @@ fn cleanup_superseded_synced_order_status_updates(conn: &Connection) -> Result<u
                      retry_delay_ms = 1000
                  WHERE id = ?2
                    AND status = 'failed'
-                   AND conflict_strategy = 'server-wins'",
-                params![payload.to_string(), queue_id.as_str()],
-            )
+                   AND conflict_strategy = 'server-wins'
+                   AND {generic_owner}
+                   AND {ownership_exclusion}"
+        );
+        let affected = conn
+            .execute(&update_sql, params![payload.to_string(), queue_id.as_str()])
             .map_err(|e| format!("sync_queue superseded order metadata rebase: {e}"))?;
 
         if affected > 0 {
@@ -3227,44 +4330,182 @@ fn cleanup_superseded_synced_order_status_updates(conn: &Connection) -> Result<u
 
 /// Peek at the next item without removing or marking it.
 pub fn peek(conn: &Connection) -> Result<Option<SyncQueueItem>, String> {
-    let now = Utc::now().to_rfc3339();
+    quarantine_reserved_repair_lookalikes(conn)?;
+    let candidate_generic = semantic_generic_nonfinancial_owner_predicate("candidate");
+    let unsafe_reserved = semantic_reserved_repair_owner_predicate("unsafe_repair");
+    let unsafe_canonical = canonical_repair_owner_predicate("unsafe_repair");
+    let sql = format!(
+        "SELECT candidate.id, candidate.table_name, candidate.record_id,
+                candidate.operation, candidate.data, candidate.organization_id,
+                candidate.created_at, candidate.attempts, candidate.last_attempt,
+                candidate.error_message, candidate.next_retry_at,
+                candidate.retry_delay_ms, candidate.priority,
+                COALESCE(candidate.module_type, 'orders'), candidate.conflict_strategy,
+                candidate.version, candidate.claim_generation, candidate.status
+           FROM parity_sync_queue AS candidate
+          WHERE candidate.status = 'pending'
+            AND (
+                candidate.next_retry_at IS NULL
+                OR julianday(candidate.next_retry_at) <= julianday('now')
+            )
+            AND (
+                 {candidate_generic}
+                 OR (
+                    COALESCE(candidate.module_type, '') = 'repairs'
+                    AND candidate.table_name IN ('repairs', 'repair_attachments')
+                    AND
+                    candidate.repair_aggregate_id IS NOT NULL
+                    AND length(candidate.repair_aggregate_id) = 36
+                    AND substr(candidate.repair_aggregate_id, 9, 1) = '-'
+                    AND substr(candidate.repair_aggregate_id, 14, 1) = '-'
+                    AND substr(candidate.repair_aggregate_id, 19, 1) = '-'
+                    AND substr(candidate.repair_aggregate_id, 24, 1) = '-'
+                    AND length(replace(candidate.repair_aggregate_id, '-', '')) = 32
+                    AND replace(candidate.repair_aggregate_id, '-', '')
+                        NOT GLOB '*[^0-9a-f]*'
+                    AND lower(candidate.repair_aggregate_id) = candidate.repair_aggregate_id
+                    AND candidate.operation = 'INSERT'
+                    AND candidate.conflict_strategy = 'manual'
+                    AND candidate.version BETWEEN 0 AND 9007199254740991
+                    AND length(candidate.organization_id) = 36
+                    AND substr(candidate.organization_id, 9, 1) = '-'
+                    AND substr(candidate.organization_id, 14, 1) = '-'
+                    AND substr(candidate.organization_id, 19, 1) = '-'
+                    AND substr(candidate.organization_id, 24, 1) = '-'
+                    AND length(replace(candidate.organization_id, '-', '')) = 32
+                    AND replace(candidate.organization_id, '-', '')
+                        NOT GLOB '*[^0-9a-f]*'
+                    AND lower(candidate.organization_id) = candidate.organization_id
+                    AND length(candidate.record_id) = 36
+                    AND substr(candidate.record_id, 9, 1) = '-'
+                    AND substr(candidate.record_id, 14, 1) = '-'
+                    AND substr(candidate.record_id, 19, 1) = '-'
+                    AND substr(candidate.record_id, 24, 1) = '-'
+                    AND length(replace(candidate.record_id, '-', '')) = 32
+                    AND replace(candidate.record_id, '-', '')
+                        NOT GLOB '*[^0-9a-f]*'
+                    AND lower(candidate.record_id) = candidate.record_id
+                    AND (
+                        (candidate.table_name = 'repairs'
+                         AND candidate.record_id = candidate.repair_aggregate_id)
+                        OR (
+                            candidate.table_name = 'repair_attachments'
+                            AND (
+                                SELECT COUNT(*)
+                                  FROM repair_attachment_staging AS staging
+                                 WHERE staging.organization_id = candidate.organization_id
+                                   AND staging.attachment_id = candidate.record_id
+                                   AND staging.operation_id = candidate.id
+                                   AND staging.queue_id = candidate.id
+                                   AND staging.expected_version = candidate.version
+                                   AND staging.repair_id = candidate.repair_aggregate_id
+                                   AND staging.state = 'queued'
+                            ) = 1
+                        )
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1
+                          FROM parity_sync_queue AS unsafe_repair
+                         WHERE unsafe_repair.organization_id = candidate.organization_id
+                           AND unsafe_repair.id <> candidate.id
+                           AND unsafe_repair.status IN (
+                                'pending', 'processing', 'failed', 'conflict'
+                           )
+                           AND {unsafe_reserved}
+                           AND NOT (
+                                {unsafe_canonical}
+                                AND unsafe_repair.repair_aggregate_id IS NOT NULL
+                                AND length(unsafe_repair.repair_aggregate_id) = 36
+                                AND substr(unsafe_repair.repair_aggregate_id, 9, 1) = '-'
+                                AND substr(unsafe_repair.repair_aggregate_id, 14, 1) = '-'
+                                AND substr(unsafe_repair.repair_aggregate_id, 19, 1) = '-'
+                                AND substr(unsafe_repair.repair_aggregate_id, 24, 1) = '-'
+                                AND length(replace(
+                                    unsafe_repair.repair_aggregate_id, '-', ''
+                                )) = 32
+                                AND replace(
+                                    unsafe_repair.repair_aggregate_id, '-', ''
+                                ) NOT GLOB '*[^0-9a-f]*'
+                                AND lower(unsafe_repair.repair_aggregate_id)
+                                    = unsafe_repair.repair_aggregate_id
+                           )
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1
+                          FROM parity_sync_queue AS blocker
+                         WHERE blocker.organization_id = candidate.organization_id
+                           AND blocker.repair_aggregate_id = candidate.repair_aggregate_id
+                           AND blocker.id <> candidate.id
+                           AND COALESCE(blocker.module_type, '') = 'repairs'
+                           AND blocker.table_name IN ('repairs', 'repair_attachments')
+                           AND (
+                                blocker.status IN ('processing', 'conflict')
+                                OR (
+                                    blocker.status IN ('pending', 'failed')
+                                    AND (
+                                        blocker.version < candidate.version
+                                        OR (blocker.version = candidate.version
+                                            AND blocker.created_at < candidate.created_at)
+                                        OR (blocker.version = candidate.version
+                                            AND blocker.created_at = candidate.created_at
+                                            AND blocker.id < candidate.id)
+                                    )
+                                )
+                           )
+                    )
+                 )
+            )
+          ORDER BY candidate.priority DESC, candidate.created_at ASC, candidate.id ASC
+         LIMIT 1"
+    );
+    conn.query_row(&sql, [], map_internal_queue_item)
+        .optional()
+        .map_err(|e| format!("sync_queue peek: {e}"))
+}
 
-    conn.query_row(
+pub(crate) fn renderer_peek(conn: &Connection) -> Result<Option<SyncQueueItem>, String> {
+    let generic_owner = renderer_generic_owner_predicate("parity_sync_queue");
+    let ownership_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
+    let sql = format!(
         "SELECT id, table_name, record_id, operation, data, organization_id,
                 created_at, attempts, last_attempt, error_message, next_retry_at,
-                retry_delay_ms, priority, module_type, conflict_strategy, version,
+                retry_delay_ms, priority, COALESCE(module_type, 'orders'), conflict_strategy, version,
                 claim_generation, status
          FROM parity_sync_queue
          WHERE status = 'pending'
-           AND (next_retry_at IS NULL OR next_retry_at <= ?1)
+           AND {generic_owner}
+           AND {ownership_exclusion}
+           AND (
+                next_retry_at IS NULL
+                OR julianday(next_retry_at) <= julianday('now')
+           )
          ORDER BY priority DESC, created_at ASC
-         LIMIT 1",
-        params![now],
-        |row| {
-            Ok(SyncQueueItem {
-                id: row.get(0)?,
-                table_name: row.get(1)?,
-                record_id: row.get(2)?,
-                operation: row.get(3)?,
-                data: row.get(4)?,
-                organization_id: row.get(5)?,
-                created_at: row.get(6)?,
-                attempts: row.get(7)?,
-                last_attempt: row.get(8)?,
-                error_message: row.get(9)?,
-                next_retry_at: row.get(10)?,
-                retry_delay_ms: row.get(11)?,
-                priority: row.get(12)?,
-                module_type: row.get(13)?,
-                conflict_strategy: row.get(14)?,
-                version: row.get(15)?,
-                claim_generation: row.get(16)?,
-                status: row.get(17)?,
-            })
-        },
-    )
+         LIMIT 1"
+    );
+    conn.query_row(&sql, [], |row| {
+        Ok(SyncQueueItem {
+            id: row.get(0)?,
+            table_name: row.get(1)?,
+            record_id: row.get(2)?,
+            operation: row.get(3)?,
+            data: row.get(4)?,
+            organization_id: row.get(5)?,
+            created_at: row.get(6)?,
+            attempts: row.get(7)?,
+            last_attempt: row.get(8)?,
+            error_message: row.get(9)?,
+            next_retry_at: row.get(10)?,
+            retry_delay_ms: row.get(11)?,
+            priority: row.get(12)?,
+            module_type: row.get(13)?,
+            conflict_strategy: row.get(14)?,
+            version: row.get(15)?,
+            claim_generation: row.get(16)?,
+            status: row.get(17)?,
+        })
+    })
     .optional()
-    .map_err(|e| format!("sync_queue peek: {e}"))
+    .map_err(|e| format!("sync_queue renderer_peek: {e}"))
 }
 
 /// Clear all items from the queue.
@@ -3277,12 +4518,58 @@ pub fn clear(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+pub(crate) fn renderer_clear(conn: &Connection) -> Result<(), String> {
+    let generic_owner = renderer_generic_owner_predicate("parity_sync_queue");
+    let ownership_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
+    let sql = format!(
+        "DELETE FROM parity_sync_queue
+         WHERE {generic_owner}
+           AND {ownership_exclusion}"
+    );
+    conn.execute(&sql, [])
+        .map_err(|e| format!("sync_queue renderer_clear: {e}"))?;
+    Ok(())
+}
+
 /// Get the current number of items in the queue.
 pub fn get_length(conn: &Connection) -> Result<i64, String> {
     conn.query_row("SELECT COUNT(*) FROM parity_sync_queue", [], |row| {
         row.get(0)
     })
     .map_err(|e| format!("sync_queue length: {e}"))
+}
+
+pub(crate) fn renderer_get_length(conn: &Connection) -> Result<i64, String> {
+    let generic_owner = renderer_generic_owner_predicate("parity_sync_queue");
+    let ownership_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
+    let sql = format!(
+        "SELECT COUNT(*) FROM parity_sync_queue
+         WHERE {generic_owner}
+           AND {ownership_exclusion}"
+    );
+    conn.query_row(&sql, [], |row| row.get(0))
+        .map_err(|e| format!("sync_queue renderer length: {e}"))
+}
+
+fn oldest_queue_item_age_ms(
+    conn: &Connection,
+    predicate: Option<&str>,
+) -> Result<Option<i64>, String> {
+    let where_clause = predicate
+        .map(|value| format!(" WHERE {value}"))
+        .unwrap_or_default();
+    let sql = format!(
+        "SELECT CASE
+             WHEN MIN(julianday(created_at)) IS NULL THEN NULL
+             ELSE CAST(MAX(
+                 0,
+                 (julianday('now') - MIN(julianday(created_at))) * 86400000
+             ) AS INTEGER)
+         END
+         FROM parity_sync_queue{where_clause}"
+    );
+    conn.query_row(&sql, [], |row| row.get(0))
+        .map_err(|e| format!("sync_queue status oldest: {e}"))
 }
 
 /// Get detailed queue status including counts by status and oldest item age.
@@ -3301,6 +4588,14 @@ pub fn get_status(conn: &Connection) -> Result<QueueStatus, String> {
         )
         .map_err(|e| format!("sync_queue status pending: {e}"))?;
 
+    let in_progress: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM parity_sync_queue WHERE status = 'processing'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("sync_queue status in_progress: {e}"))?;
+
     let failed: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM parity_sync_queue WHERE status = 'failed'",
@@ -3317,24 +4612,93 @@ pub fn get_status(conn: &Connection) -> Result<QueueStatus, String> {
         )
         .map_err(|e| format!("sync_queue status conflicts: {e}"))?;
 
-    // Calculate oldest item age in milliseconds
-    let oldest_created: Option<String> = conn
-        .query_row("SELECT MIN(created_at) FROM parity_sync_queue", [], |row| {
-            row.get(0)
-        })
-        .map_err(|e| format!("sync_queue status oldest: {e}"))?;
+    let quarantined: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM parity_sync_queue
+             WHERE status = 'failed' AND error_message = ?1",
+            [REPAIR_RESERVED_OWNER_QUARANTINED],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("sync_queue status quarantined: {e}"))?;
 
-    let oldest_item_age = oldest_created.and_then(|ts| {
-        chrono::DateTime::parse_from_rfc3339(&ts)
-            .ok()
-            .map(|dt| Utc::now().signed_duration_since(dt).num_milliseconds())
-    });
+    let dead_lettered: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM parity_sync_queue
+             WHERE status = 'failed'
+               AND attempts >= ?1
+               AND COALESCE(error_message, '') <> ?2",
+            params![MAX_RETRY_ATTEMPTS, REPAIR_RESERVED_OWNER_QUARANTINED],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("sync_queue status dead_lettered: {e}"))?;
+
+    let oldest_item_age = oldest_queue_item_age_ms(conn, None)?;
 
     Ok(QueueStatus {
         total,
         pending,
+        in_progress,
         failed,
         conflicts,
+        quarantined,
+        dead_lettered,
+        oldest_item_age,
+    })
+}
+
+pub(crate) fn renderer_get_status(conn: &Connection) -> Result<QueueStatus, String> {
+    let generic_owner = renderer_generic_owner_predicate("parity_sync_queue");
+    let ownership_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
+    let predicate = format!(
+        "{generic_owner}
+         AND {ownership_exclusion}"
+    );
+    let count = |status: Option<&str>| -> Result<i64, String> {
+        let sql = match status {
+            Some(_) => {
+                format!("SELECT COUNT(*) FROM parity_sync_queue WHERE {predicate} AND status = ?1")
+            }
+            None => format!("SELECT COUNT(*) FROM parity_sync_queue WHERE {predicate}"),
+        };
+        if let Some(status) = status {
+            conn.query_row(&sql, [status], |row| row.get(0))
+        } else {
+            conn.query_row(&sql, [], |row| row.get(0))
+        }
+        .map_err(|e| format!("sync_queue renderer status count: {e}"))
+    };
+    let oldest_item_age = oldest_queue_item_age_ms(conn, Some(&predicate))?;
+    Ok(QueueStatus {
+        total: count(None)?,
+        pending: count(Some("pending"))?,
+        in_progress: count(Some("processing"))?,
+        failed: count(Some("failed"))?,
+        conflicts: count(Some("conflict"))?,
+        quarantined: {
+            let sql = format!(
+                "SELECT COUNT(*) FROM parity_sync_queue
+                 WHERE {predicate}
+                   AND status = 'failed'
+                   AND error_message = ?1"
+            );
+            conn.query_row(&sql, [REPAIR_RESERVED_OWNER_QUARANTINED], |row| row.get(0))
+                .map_err(|e| format!("sync_queue renderer status quarantined: {e}"))?
+        },
+        dead_lettered: {
+            let sql = format!(
+                "SELECT COUNT(*) FROM parity_sync_queue
+                 WHERE {predicate}
+                   AND status = 'failed'
+                   AND attempts >= ?1
+                   AND COALESCE(error_message, '') <> ?2"
+            );
+            conn.query_row(
+                &sql,
+                params![MAX_RETRY_ATTEMPTS, REPAIR_RESERVED_OWNER_QUARANTINED],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("sync_queue renderer status dead_lettered: {e}"))?
+        },
         oldest_item_age,
     })
 }
@@ -3488,29 +4852,276 @@ pub fn list_actionable_items(
     Ok(rows.filter_map(Result::ok).collect())
 }
 
-pub fn retry_item(conn: &Connection, item_id: &str) -> Result<(), String> {
-    conn.execute(
-        "UPDATE parity_sync_queue
-         SET status = 'pending',
-             attempts = 0,
-             error_message = NULL,
-             next_retry_at = NULL,
-             last_attempt = NULL,
-             retry_delay_ms = ?1
-         WHERE id = ?2",
-        params![DEFAULT_INITIAL_RETRY_DELAY_MS, item_id],
-    )
-    .map_err(|e| format!("sync_queue retry_item: {e}"))?;
+pub(crate) fn renderer_list_actionable_items(
+    conn: &Connection,
+    query: &QueueListQuery,
+) -> Result<Vec<SyncQueueItem>, String> {
+    let limit = query.limit.unwrap_or(200).clamp(1, 500);
+    let has_module = query
+        .module_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if has_module.is_some_and(|module_type| module_type.eq_ignore_ascii_case("repairs")) {
+        return Ok(Vec::new());
+    }
+    let generic_owner = renderer_generic_owner_predicate("parity_sync_queue");
+    let ownership_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
+    let sql = if has_module.is_some() {
+        format!(
+            "SELECT id, table_name, record_id, operation, data, organization_id,
+                created_at, attempts, last_attempt, error_message, next_retry_at,
+                retry_delay_ms, priority, COALESCE(module_type, 'orders'), conflict_strategy, version,
+                claim_generation, status
+         FROM parity_sync_queue
+         WHERE status IN ('pending', 'processing', 'failed', 'conflict')
+           AND {generic_owner}
+           AND {ownership_exclusion}
+           AND module_type = ?1
+         ORDER BY CASE status WHEN 'conflict' THEN 0 WHEN 'failed' THEN 1
+                              WHEN 'pending' THEN 2 ELSE 3 END,
+                  priority DESC, created_at ASC
+         LIMIT ?2"
+        )
+    } else {
+        format!(
+            "SELECT id, table_name, record_id, operation, data, organization_id,
+                created_at, attempts, last_attempt, error_message, next_retry_at,
+                retry_delay_ms, priority, COALESCE(module_type, 'orders'), conflict_strategy, version,
+                claim_generation, status
+         FROM parity_sync_queue
+         WHERE status IN ('pending', 'processing', 'failed', 'conflict')
+           AND {generic_owner}
+           AND {ownership_exclusion}
+         ORDER BY CASE status WHEN 'conflict' THEN 0 WHEN 'failed' THEN 1
+                              WHEN 'pending' THEN 2 ELSE 3 END,
+                  priority DESC, created_at ASC
+         LIMIT ?1"
+        )
+    };
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("sync_queue renderer list prepare: {e}"))?;
+    let map = |row: &rusqlite::Row<'_>| -> rusqlite::Result<SyncQueueItem> {
+        Ok(SyncQueueItem {
+            id: row.get(0)?,
+            table_name: row.get(1)?,
+            record_id: row.get(2)?,
+            operation: row.get(3)?,
+            data: row.get(4)?,
+            organization_id: row.get(5)?,
+            created_at: row.get(6)?,
+            attempts: row.get(7)?,
+            last_attempt: row.get(8)?,
+            error_message: row.get(9)?,
+            next_retry_at: row.get(10)?,
+            retry_delay_ms: row.get(11)?,
+            priority: row.get(12)?,
+            module_type: row.get(13)?,
+            conflict_strategy: row.get(14)?,
+            version: row.get(15)?,
+            claim_generation: row.get(16)?,
+            status: row.get(17)?,
+        })
+    };
+    let rows = if let Some(module_type) = has_module {
+        stmt.query_map(params![module_type, limit], map)
+            .map_err(|e| format!("sync_queue renderer list query: {e}"))?
+    } else {
+        stmt.query_map(params![limit], map)
+            .map_err(|e| format!("sync_queue renderer list query: {e}"))?
+    };
+    Ok(rows.filter_map(Result::ok).collect())
+}
 
-    Ok(())
+fn retry_transaction<T>(
+    conn: &Connection,
+    operation: impl FnOnce(&Connection) -> Result<T, String>,
+) -> Result<T, String> {
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|error| format!("sync_queue retry begin: {error}"))?;
+    match operation(conn) {
+        Ok(value) => match conn.execute_batch("COMMIT") {
+            Ok(()) => Ok(value),
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(format!("sync_queue retry commit: {error}"))
+            }
+        },
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
+fn live_generic_claim_predicate(alias: &str) -> String {
+    let generic_owner = semantic_generic_nonfinancial_owner_predicate(alias);
+    format!(
+        "{alias}.id = ?1
+         AND {alias}.status = 'processing'
+         AND {alias}.claim_generation = ?2
+         AND {generic_owner}"
+    )
+}
+
+fn is_live_generic_claim(conn: &Connection, item: &SyncQueueItem) -> Result<bool, String> {
+    let live_claim = live_generic_claim_predicate("parity_sync_queue");
+    let sql = format!(
+        "SELECT EXISTS(
+             SELECT 1
+               FROM parity_sync_queue
+              WHERE {live_claim}
+         )"
+    );
+    conn.query_row(&sql, params![item.id, item.claim_generation], |row| {
+        row.get::<_, bool>(0)
+    })
+    .map_err(|error| format!("sync_queue inspect live generic claim: {error}"))
+}
+
+/// Execute a local post-response effect only while the original generic
+/// claimant still owns the exact semantic row/generation. `BEGIN IMMEDIATE`
+/// makes the ownership recheck and mutation one atomic SQLite writer action.
+fn with_live_generic_claim<T>(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    operation: impl FnOnce(&Connection) -> Result<T, String>,
+) -> Result<Option<T>, String> {
+    retry_transaction(conn, |conn| {
+        if !is_live_generic_claim(conn, item)? {
+            return Ok(None);
+        }
+        operation(conn).map(Some)
+    })
+}
+
+pub fn retry_item(conn: &Connection, item_id: &str) -> Result<(), String> {
+    retry_transaction(conn, |conn| {
+        let semantic_reserved = semantic_reserved_repair_owner_predicate("parity_sync_queue");
+        let financial = semantic_repair_financial_queue_owner_predicate("parity_sync_queue");
+        let ownership = conn
+            .query_row(
+                &format!(
+                    "SELECT ({semantic_reserved}), ({financial})
+                       FROM parity_sync_queue
+                      WHERE id = ?1"
+                ),
+                [item_id],
+                |row| Ok((row.get::<_, bool>(0)?, row.get::<_, bool>(1)?)),
+            )
+            .optional()
+            .map_err(|error| format!("sync_queue retry repair guard: {error}"))?;
+        match ownership {
+            Some((true, _)) => return Err("REPAIR_TYPED_CONFLICT_REQUIRED".to_string()),
+            Some((false, true)) => return Err("REPAIR_SETTLEMENT_ROUTE_REQUIRED".to_string()),
+            _ => {}
+        }
+        let generic_owner = semantic_generic_nonfinancial_owner_predicate("parity_sync_queue");
+        let update_sql = format!(
+            "UPDATE parity_sync_queue
+             SET status = 'pending',
+                 attempts = 0,
+                 error_message = NULL,
+                 next_retry_at = NULL,
+                 last_attempt = NULL,
+                 retry_delay_ms = ?1
+             WHERE id = ?2
+               AND {generic_owner}"
+        );
+        conn.execute(
+            &update_sql,
+            params![DEFAULT_INITIAL_RETRY_DELAY_MS, item_id],
+        )
+        .map_err(|e| format!("sync_queue retry_item: {e}"))?;
+        Ok(())
+    })
+}
+
+pub(crate) fn renderer_retry_item(conn: &Connection, item_id: &str) -> Result<(), String> {
+    retry_transaction(conn, |conn| {
+        let semantic_reserved = semantic_reserved_repair_owner_predicate("parity_sync_queue");
+        let generic_owner = renderer_generic_owner_predicate("parity_sync_queue");
+        let ownership_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
+        let ownership_sql = format!(
+            "SELECT
+                 ({semantic_reserved}),
+                 NOT ({ownership_exclusion})
+             FROM parity_sync_queue
+             WHERE id = ?1"
+        );
+        let ownership = conn
+            .query_row(&ownership_sql, [item_id], |row| {
+                Ok((row.get::<_, bool>(0)?, row.get::<_, bool>(1)?))
+            })
+            .optional()
+            .map_err(|e| format!("sync_queue renderer retry guard: {e}"))?;
+        match ownership {
+            Some((true, _)) => return Err("REPAIR_TYPED_CONFLICT_REQUIRED".to_string()),
+            Some((false, true)) => return Err("REPAIR_SETTLEMENT_ROUTE_REQUIRED".to_string()),
+            _ => {}
+        }
+        let update_sql = format!(
+            "UPDATE parity_sync_queue
+             SET status = 'pending', attempts = 0, error_message = NULL,
+                 next_retry_at = NULL, last_attempt = NULL, retry_delay_ms = ?1
+             WHERE id = ?2
+               AND {generic_owner}
+               AND {ownership_exclusion}"
+        );
+        conn.execute(
+            &update_sql,
+            params![DEFAULT_INITIAL_RETRY_DELAY_MS, item_id],
+        )
+        .map_err(|e| format!("sync_queue renderer retry_item: {e}"))?;
+        Ok(())
+    })
 }
 
 pub fn retry_items_by_module(
     conn: &Connection,
     module_type: &str,
 ) -> Result<RetryItemsResult, String> {
-    let retried = conn
-        .execute(
+    retry_transaction(conn, |conn| {
+        let semantic_reserved = semantic_reserved_repair_owner_predicate("parity_sync_queue");
+        let financial = semantic_repair_financial_queue_owner_predicate("parity_sync_queue");
+        let includes_repair = if module_type.trim().eq_ignore_ascii_case("repairs") {
+            true
+        } else {
+            conn.query_row(
+                &format!(
+                    "SELECT EXISTS(
+                     SELECT 1 FROM parity_sync_queue
+                      WHERE module_type = ?1
+                        AND {semantic_reserved}
+                 )"
+                ),
+                [module_type],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|error| format!("sync_queue retry module repair guard: {error}"))?
+        };
+        if includes_repair {
+            return Err("REPAIR_TYPED_CONFLICT_REQUIRED".to_string());
+        }
+        let includes_repair_financial = conn
+            .query_row(
+                &format!(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM parity_sync_queue
+                          WHERE module_type = ?1
+                            AND {financial}
+                     )"
+                ),
+                [module_type],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|error| format!("sync_queue retry module financial guard: {error}"))?;
+        if includes_repair_financial {
+            return Err("REPAIR_SETTLEMENT_ROUTE_REQUIRED".to_string());
+        }
+        let generic_owner = semantic_generic_nonfinancial_owner_predicate("parity_sync_queue");
+        let update_sql = format!(
             "UPDATE parity_sync_queue
              SET status = 'pending',
                  attempts = 0,
@@ -3519,14 +5130,83 @@ pub fn retry_items_by_module(
                  last_attempt = NULL,
                  retry_delay_ms = ?1
              WHERE module_type = ?2
-               AND status IN ('pending', 'failed', 'conflict')",
-            params![DEFAULT_INITIAL_RETRY_DELAY_MS, module_type],
-        )
-        .map_err(|e| format!("sync_queue retry_items_by_module: {e}"))?;
+               AND status IN ('pending', 'failed', 'conflict')
+               AND {generic_owner}"
+        );
+        let retried = conn
+            .execute(
+                &update_sql,
+                params![DEFAULT_INITIAL_RETRY_DELAY_MS, module_type],
+            )
+            .map_err(|e| format!("sync_queue retry_items_by_module: {e}"))?;
 
+        Ok(RetryItemsResult {
+            retried: retried as i64,
+        })
+    })
+}
+
+pub(crate) fn renderer_retry_items_by_module(
+    conn: &Connection,
+    module_type: &str,
+) -> Result<RetryItemsResult, String> {
+    if module_type.trim().eq_ignore_ascii_case("repairs") {
+        return Err("REPAIR_TYPED_CONFLICT_REQUIRED".to_string());
+    }
+    let generic_owner = renderer_generic_owner_predicate("parity_sync_queue");
+    let ownership_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
+    let sql = format!(
+        "UPDATE parity_sync_queue
+         SET status = 'pending', attempts = 0, error_message = NULL,
+             next_retry_at = NULL, last_attempt = NULL, retry_delay_ms = ?1
+         WHERE module_type = ?2
+           AND {generic_owner}
+           AND {ownership_exclusion}
+           AND status IN ('pending', 'failed', 'conflict')"
+    );
+    let retried = conn
+        .execute(&sql, params![DEFAULT_INITIAL_RETRY_DELAY_MS, module_type])
+        .map_err(|e| format!("sync_queue renderer retry module: {e}"))?;
     Ok(RetryItemsResult {
         retried: retried as i64,
     })
+}
+
+pub(crate) fn renderer_retryable_item_ids_by_module(
+    conn: &Connection,
+    module_type: &str,
+    limit: usize,
+) -> Result<Vec<String>, String> {
+    let module_type = module_type.trim();
+    if module_type.is_empty() {
+        return Err("PARITY_MODULE_REQUIRED".to_string());
+    }
+    if module_type.eq_ignore_ascii_case("repairs") {
+        return Err("REPAIR_TYPED_CONFLICT_REQUIRED".to_string());
+    }
+    let generic_owner = renderer_generic_owner_predicate("parity_sync_queue");
+    let ownership_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
+    let sql = format!(
+        "SELECT id
+           FROM parity_sync_queue
+          WHERE module_type = ?1
+            AND status IN ('pending', 'failed', 'conflict')
+            AND {generic_owner}
+            AND {ownership_exclusion}
+          ORDER BY priority DESC, created_at ASC, id ASC
+          LIMIT ?2"
+    );
+    let bounded_limit = limit.clamp(1, 500) as i64;
+    let mut statement = conn
+        .prepare(&sql)
+        .map_err(|error| format!("sync_queue renderer module list prepare: {error}"))?;
+    let rows = statement
+        .query_map(params![module_type, bounded_limit], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|error| format!("sync_queue renderer module list query: {error}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("sync_queue renderer module list row: {error}"))
 }
 
 pub fn list_conflict_audit_entries(
@@ -3562,6 +5242,48 @@ pub fn list_conflict_audit_entries(
         })
         .map_err(|e| format!("sync_queue list_conflict_audit_entries query: {e}"))?;
 
+    Ok(rows.filter_map(Result::ok).collect())
+}
+
+pub(crate) fn renderer_list_conflict_audit_entries(
+    conn: &Connection,
+    limit: i64,
+) -> Result<Vec<ConflictAuditEntry>, String> {
+    let direct_exclusion = format!(
+        "NOT ({})",
+        semantic_repair_audit_owner_predicate("conflict_audit_log")
+    );
+    let ownership_exclusion = renderer_non_repair_conflict_owner_predicate("conflict_audit_log");
+    let sql = format!(
+        "SELECT id, operation_type, entity_id, entity_type, local_version,
+                server_version, timestamp, discarded_payload, resolution,
+                is_monetary, reviewed_by_operator
+         FROM conflict_audit_log
+         WHERE {direct_exclusion}
+           AND {ownership_exclusion}
+         ORDER BY timestamp DESC
+         LIMIT ?1"
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("sync_queue renderer conflict list prepare: {e}"))?;
+    let rows = stmt
+        .query_map(params![limit.clamp(1, 500)], |row| {
+            Ok(ConflictAuditEntry {
+                id: row.get(0)?,
+                operation_type: row.get(1)?,
+                entity_id: row.get(2)?,
+                entity_type: row.get(3)?,
+                local_version: row.get(4)?,
+                server_version: row.get(5)?,
+                timestamp: row.get(6)?,
+                discarded_payload: row.get(7)?,
+                resolution: row.get(8)?,
+                is_monetary: row.get::<_, i64>(9)? != 0,
+                reviewed_by_operator: row.get::<_, i64>(10)? != 0,
+            })
+        })
+        .map_err(|e| format!("sync_queue renderer conflict list query: {e}"))?;
     Ok(rows.filter_map(Result::ok).collect())
 }
 
@@ -3609,29 +5331,51 @@ pub fn mark_success(
 ///
 /// If max retries are exhausted, the item status changes to `failed`.
 ///
-/// Wave 4 H: returns `Some(MonetaryDeadLetter)` when the transition to
-/// permanent-failure just happened AND the item's module is classified
-/// as monetary. The caller is expected to collect these so the Tauri
-/// command layer can emit a `sync:dead-letter:monetary` event for
-/// operator-visible alarming. Returns `None` in every other case
-/// (still retrying, or non-monetary dead-letter).
+/// Returns an authoritative, generation-fenced mutation outcome. The
+/// transition bit is true exactly when this call changed a live processing
+/// row into a max-attempt terminal failure; the optional monetary notice is
+/// produced by that same transition and is therefore exactly-once.
 pub fn mark_failure(
     conn: &Connection,
     item_id: &str,
     error_message: &str,
     expected_generation: i64,
-) -> Result<Option<MonetaryDeadLetter>, String> {
+) -> Result<MarkFailureOutcome, String> {
+    retry_transaction(conn, |conn| {
+        mark_failure_in_transaction(conn, item_id, error_message, expected_generation)
+    })
+}
+
+fn mark_failure_in_transaction(
+    conn: &Connection,
+    item_id: &str,
+    error_message: &str,
+    expected_generation: i64,
+) -> Result<MarkFailureOutcome, String> {
     let now = Utc::now().to_rfc3339();
+    let generic_owner = semantic_generic_nonfinancial_owner_predicate("parity_sync_queue");
+    let canonical_repair = canonical_repair_owner_predicate("parity_sync_queue");
+    let live_owner = format!("({generic_owner} OR {canonical_repair})");
 
     // Get current attempts, retry delay, and module type. The module
     // type drives the per-class retry cap below (Wave 2a).
-    let (attempts, retry_delay_ms, module_type): (i64, i64, String) = conn
-        .query_row(
-            "SELECT attempts, retry_delay_ms, module_type FROM parity_sync_queue WHERE id = ?1",
-            params![item_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .map_err(|e| format!("sync_queue mark_failure read: {e}"))?;
+    let read_sql = format!(
+        "SELECT attempts, retry_delay_ms, module_type
+           FROM parity_sync_queue
+          WHERE id = ?1
+            AND status = 'processing'
+            AND claim_generation = ?2
+            AND {live_owner}"
+    );
+    let Some((attempts, retry_delay_ms, module_type)): Option<(i64, i64, String)> = conn
+        .query_row(&read_sql, params![item_id, expected_generation], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .optional()
+        .map_err(|e| format!("sync_queue mark_failure read: {e}"))?
+    else {
+        return Ok(MarkFailureOutcome::default());
+    };
 
     let new_attempts = attempts + 1;
 
@@ -3643,12 +5387,18 @@ pub fn mark_failure(
         // the UPDATE affects 0 rows, we skip the dead-letter path
         // entirely, and return Ok(None) — the fresh claimer's own
         // ack determines the row's terminal state.
-        let rows_affected = conn
-            .execute(
-                "UPDATE parity_sync_queue
+        let terminal_sql = format!(
+            "UPDATE parity_sync_queue
                  SET status = 'failed', attempts = ?1, last_attempt = ?2,
                      error_message = ?3
-                 WHERE id = ?4 AND claim_generation = ?5",
+                 WHERE id = ?4
+                   AND status = 'processing'
+                   AND claim_generation = ?5
+                   AND {live_owner}"
+        );
+        let rows_affected = conn
+            .execute(
+                &terminal_sql,
                 params![
                     new_attempts,
                     now,
@@ -3660,52 +5410,33 @@ pub fn mark_failure(
             .map_err(|e| format!("sync_queue mark_failed: {e}"))?;
         if rows_affected == 0 {
             debug!(
-                item_id = %item_id,
                 expected_generation,
                 "Wave 10 H8: mark_failure (terminal) no-op — claim_generation mismatch"
             );
-            return Ok(None);
+            return Ok(MarkFailureOutcome::default());
         }
 
         // Wave 4 H: log at ERROR for monetary items so the audit log
         // has a specific searchable marker. Non-monetary items stay at
         // WARN.
-        let is_monetary = is_monetary_module(&module_type);
-        if is_monetary {
+        let monetary_category = monetary_dead_letter_category(&module_type);
+        if let Some(category) = monetary_category {
             tracing::error!(
-                id = %item_id,
-                module_type = %module_type,
+                category = ?category,
                 attempts = new_attempts,
-                error_message,
                 "MONETARY sync_queue item dead-lettered (operator intervention required)"
             );
         } else {
             warn!(
-                id = %item_id,
                 attempts = new_attempts,
                 "Sync queue item exhausted max retries, marked as failed"
             );
         }
-
-        if is_monetary {
-            // Look up entity_type / entity_id for the alarm payload. A
-            // read-failure here is non-fatal: we have the item_id and
-            // the log, the alarm just lacks detail.
-            let (entity_type, entity_id): (String, String) = conn
-                .query_row(
-                    "SELECT module_type, record_id FROM parity_sync_queue WHERE id = ?1",
-                    params![item_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .unwrap_or_else(|_| (module_type.clone(), String::new()));
-            return Ok(Some(MonetaryDeadLetter {
-                item_id: item_id.to_string(),
-                entity_type,
-                entity_id,
-                error_message: error_message.to_string(),
-            }));
-        }
-        return Ok(None);
+        return Ok(MarkFailureOutcome {
+            applied: true,
+            transitioned_to_dead_letter: true,
+            monetary_notice: monetary_category.map(|category| MonetaryDeadLetter { category }),
+        });
     } else {
         // Wave 2a: jittered exponential backoff with per-class caps.
         // Without jitter, a whole fleet of terminals recovering from
@@ -3722,13 +5453,19 @@ pub fn mark_failure(
         // generation, the UPDATE affects 0 rows and we drop the
         // attempts bump silently — the fresh claimer's `attempts`
         // counter is preserved.
-        let rows_affected = conn
-            .execute(
-                "UPDATE parity_sync_queue
+        let retry_sql = format!(
+            "UPDATE parity_sync_queue
                  SET status = 'pending', attempts = ?1, last_attempt = ?2,
                      error_message = ?3, retry_delay_ms = ?4,
                      next_retry_at = ?5
-                 WHERE id = ?6 AND claim_generation = ?7",
+                 WHERE id = ?6
+                   AND status = 'processing'
+                   AND claim_generation = ?7
+                   AND {live_owner}"
+        );
+        let rows_affected = conn
+            .execute(
+                &retry_sql,
                 params![
                     new_attempts,
                     now,
@@ -3742,14 +5479,18 @@ pub fn mark_failure(
             .map_err(|e| format!("sync_queue schedule_retry: {e}"))?;
         if rows_affected == 0 {
             debug!(
-                item_id = %item_id,
                 expected_generation,
                 "Wave 10 H8: mark_failure (schedule-retry) no-op — claim_generation mismatch"
             );
+            return Ok(MarkFailureOutcome::default());
         }
     }
 
-    Ok(None)
+    Ok(MarkFailureOutcome {
+        applied: true,
+        transitioned_to_dead_letter: false,
+        monetary_notice: None,
+    })
 }
 
 pub fn mark_rate_limited(
@@ -3930,6 +5671,63 @@ pub fn mark_module_required(
     Ok(())
 }
 
+/// Park a repair row that needs a fresh staff sign-in or a later cache hook.
+/// This is an environmental prerequisite rather than a bad command, so it
+/// intentionally leaves `attempts` unchanged and avoids a hot same-batch loop.
+fn mark_repair_prerequisite(
+    conn: &Connection,
+    item_id: &str,
+    reason_code: &str,
+    expected_generation: i64,
+) -> Result<(), String> {
+    let next_retry = Utc::now() + ChronoDuration::seconds(MODULE_REQUIRED_RETRY_SECS);
+    conn.execute(
+        "UPDATE parity_sync_queue
+         SET status = 'pending',
+             error_message = ?1,
+             next_retry_at = ?2
+         WHERE id = ?3 AND claim_generation = ?4",
+        params![
+            reason_code,
+            next_retry.to_rfc3339(),
+            item_id,
+            expected_generation,
+        ],
+    )
+    .map_err(|error| format!("sync_queue mark_repair_prerequisite: {error}"))?;
+    Ok(())
+}
+
+fn mark_terminal_auth_pending(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    failure: ParityTerminalAuthFailure,
+) -> Result<(), String> {
+    let next_retry = Utc::now() + ChronoDuration::seconds(MODULE_REQUIRED_RETRY_SECS);
+    let bounded_code = failure.code.as_str();
+    let rows_affected = conn
+        .execute(
+            "UPDATE parity_sync_queue
+             SET status = 'pending',
+                 error_message = ?1,
+                 next_retry_at = ?2
+             WHERE id = ?3
+               AND status = 'processing'
+               AND claim_generation = ?4",
+            params![
+                bounded_code,
+                next_retry.to_rfc3339(),
+                item.id,
+                item.claim_generation,
+            ],
+        )
+        .map_err(|error| format!("sync_queue park bounded terminal auth: {error}"))?;
+    if rows_affected != 1 {
+        return Err("sync_queue terminal-auth claim no longer live".to_string());
+    }
+    Ok(())
+}
+
 /// Mark an item as having a conflict.
 pub fn mark_conflict(
     conn: &Connection,
@@ -3955,6 +5753,34 @@ pub fn mark_conflict(
         );
     }
 
+    Ok(())
+}
+
+/// Park a legacy customer replay that cannot be interpreted without an ISO
+/// country context. The reason is a stable non-PII code, attempts are not
+/// consumed, and `conflict` keeps the row out of future dequeue passes after
+/// process restart.
+fn park_customer_phone_country_resolution(
+    conn: &Connection,
+    item_id: &str,
+    expected_generation: i64,
+    reason_code: &str,
+) -> Result<(), String> {
+    let rows_affected = conn
+        .execute(
+            "UPDATE parity_sync_queue
+             SET status = 'conflict', error_message = ?1, next_retry_at = NULL
+             WHERE id = ?2 AND claim_generation = ?3",
+            params![reason_code, item_id, expected_generation],
+        )
+        .map_err(|e| format!("sync_queue park customer country resolution: {e}"))?;
+    if rows_affected == 0 {
+        debug!(
+            item_id = %item_id,
+            expected_generation,
+            "Customer country manual-resolution park ignored for stale claim"
+        );
+    }
     Ok(())
 }
 
@@ -4040,15 +5866,10 @@ pub fn check_age_warnings(conn: &Connection) -> Result<Vec<String>, String> {
     // runs at the top of every processing cycle. A summary line keeps the
     // signal without flooding the log. The returned Vec is intentionally
     // complete -- only the logging is capped.
-    const MAX_LOGGED_AGE_WARNINGS: usize = 5;
-    for warning in warnings.iter().take(MAX_LOGGED_AGE_WARNINGS) {
-        warn!("{}", warning);
-    }
-    if warnings.len() > MAX_LOGGED_AGE_WARNINGS {
+    if !warnings.is_empty() {
         warn!(
             total = warnings.len(),
-            shown = MAX_LOGGED_AGE_WARNINGS,
-            "Additional sync queue items exceed the age threshold"
+            "Sync queue items exceed the age threshold"
         );
     }
 
@@ -4101,6 +5922,7 @@ fn prepare_request(conn: &Connection, item: &SyncQueueItem) -> Result<RequestPre
         "customer_addresses" => {
             prepare_customer_address_request(conn, item, &payload, terminal_id.as_str())
         }
+        "customers" => prepare_customer_request(item, &payload, terminal_id.as_str()),
         _ => Ok(RequestPreparation::Ready(RequestSpec {
             endpoint: resolve_endpoint(item),
             method: resolve_http_method(item),
@@ -4112,6 +5934,90 @@ fn prepare_request(conn: &Connection, item: &SyncQueueItem) -> Result<RequestPre
             terminal_id,
         })),
     }
+}
+
+const CUSTOMER_PHONE_COUNTRY_CONTEXT_REQUIRED: &str = "CUSTOMER_PHONE_COUNTRY_CONTEXT_REQUIRED";
+const CUSTOMER_PHONE_COUNTRY_CONTEXT_INVALID: &str = "CUSTOMER_PHONE_COUNTRY_CONTEXT_INVALID";
+// Kept in parity with libphonenumber-js' supported calling-code metadata used
+// by the renderer and Android customer flows.  ISO-looking placeholders such
+// as ZZ must never be sent to the strict server parser.
+const SUPPORTED_CUSTOMER_PHONE_COUNTRIES: &str =
+    "AC AD AE AF AG AI AL AM AO AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GT GU GW GY HK HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PR PS PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ TA TC TD TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG US UY UZ VA VC VE VG VI VN VU WF WS XK YE YT ZA ZM ZW";
+
+fn normalize_supported_customer_phone_country(value: &str) -> Option<String> {
+    let normalized = value.trim().to_ascii_uppercase();
+    if normalized.len() != 2 || !normalized.chars().all(|ch| ch.is_ascii_alphabetic()) {
+        return None;
+    }
+    SUPPORTED_CUSTOMER_PHONE_COUNTRIES
+        .split_ascii_whitespace()
+        .any(|supported| supported == normalized)
+        .then_some(normalized)
+}
+
+fn prepare_customer_request(
+    item: &SyncQueueItem,
+    payload: &Value,
+    terminal_id: &str,
+) -> Result<RequestPreparation, String> {
+    let mut body = payload.clone();
+    let Some(object) = body.as_object_mut() else {
+        return Ok(RequestPreparation::Failed {
+            reason: "Customer replay payload must be a JSON object".to_string(),
+        });
+    };
+
+    let submitted_phone = object.get("phone").and_then(Value::as_str);
+    if let Some(phone) = submitted_phone {
+        let trimmed_phone = phone.trim();
+        let country_value = object
+            .get("phone_country_code")
+            .or_else(|| object.get("phoneCountryCode"));
+        let submitted_country = country_value
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let normalized_country =
+            submitted_country.and_then(normalize_supported_customer_phone_country);
+
+        if submitted_country.is_some() && normalized_country.is_none() {
+            return Ok(RequestPreparation::ManualResolution {
+                reason_code: CUSTOMER_PHONE_COUNTRY_CONTEXT_INVALID.to_string(),
+            });
+        }
+
+        let international = trimmed_phone.starts_with('+') || trimmed_phone.starts_with("00");
+        if !trimmed_phone.is_empty() && !international && normalized_country.is_none() {
+            return Ok(RequestPreparation::ManualResolution {
+                reason_code: CUSTOMER_PHONE_COUNTRY_CONTEXT_REQUIRED.to_string(),
+            });
+        }
+
+        if let Some(country) = normalized_country {
+            object.insert("phone_country_code".to_string(), Value::String(country));
+            object.remove("phoneCountryCode");
+        } else if international {
+            // Upgrade pre-country-context rows into the current explicit
+            // payload contract. The international prefix is self-contained,
+            // so no country guess is needed or permitted.
+            object.insert("phone_country_code".to_string(), Value::Null);
+            object.remove("phoneCountryCode");
+        }
+    } else if object.get("phone").is_some_and(Value::is_null) {
+        object.insert("phone_country_code".to_string(), Value::Null);
+        object.remove("phoneCountryCode");
+    }
+
+    Ok(RequestPreparation::Ready(RequestSpec {
+        endpoint: resolve_customers_endpoint(item),
+        method: resolve_http_method(item),
+        body: if resolve_http_method(item) == Method::DELETE {
+            None
+        } else {
+            Some(body.to_string())
+        },
+        terminal_id: terminal_id.to_string(),
+    }))
 }
 
 fn shift_event_type(item: &SyncQueueItem, payload: &Value) -> &'static str {
@@ -4504,20 +6410,23 @@ fn next_queued_cancellation_status(
     item: &SyncQueueItem,
     queued_status: &str,
 ) -> Result<Option<String>, String> {
+    let generic_owner = semantic_generic_nonfinancial_owner_predicate("parity_sync_queue");
+    let sql = format!(
+        "SELECT data
+         FROM parity_sync_queue
+         WHERE table_name = 'orders'
+           AND record_id = ?1
+           AND operation = 'UPDATE'
+           AND status IN ('pending', 'processing')
+           AND {generic_owner}
+           AND (
+                created_at > ?2
+                OR (created_at = ?2 AND id > ?3)
+           )
+         ORDER BY created_at ASC, id ASC"
+    );
     let mut stmt = conn
-        .prepare(
-            "SELECT data
-             FROM parity_sync_queue
-             WHERE table_name = 'orders'
-               AND record_id = ?1
-               AND operation = 'UPDATE'
-               AND status IN ('pending', 'processing')
-               AND (
-                    created_at > ?2
-                    OR (created_at = ?2 AND id > ?3)
-               )
-             ORDER BY created_at ASC, id ASC",
-        )
+        .prepare(&sql)
         .map_err(|e| format!("sync_queue newer order cancellation prepare: {e}"))?;
     let rows = stmt
         .query_map(
@@ -6504,6 +8413,418 @@ pub(crate) fn parse_module_required_response(status: u16, response_body: &str) -
     Some(missing)
 }
 
+#[derive(Debug)]
+enum RepairQueueProcessOutcome {
+    Processed,
+    Conflict,
+    Deferred(String),
+    StaffSessionRequired(String),
+    TerminalAuth(ParityTerminalAuthFailure),
+    Failed { code: String, dead_lettered: bool },
+    RateLimited(String),
+    Stale,
+}
+
+fn repair_claim_generation_matches(conn: &Connection, item: &SyncQueueItem) -> bool {
+    conn.query_row(
+        "SELECT claim_generation = ?2
+         FROM parity_sync_queue
+         WHERE id = ?1",
+        params![item.id.as_str(), item.claim_generation],
+        |row| row.get::<_, bool>(0),
+    )
+    .unwrap_or(false)
+}
+
+fn force_repair_permanent_failure(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    reason_code: &str,
+) -> Result<MarkFailureOutcome, String> {
+    retry_transaction(conn, |conn| {
+        let outcome =
+            mark_failure_in_transaction(conn, &item.id, reason_code, item.claim_generation)?;
+        if !outcome.applied {
+            return Ok(outcome);
+        }
+        let canonical = canonical_repair_owner_predicate("parity_sync_queue");
+        let sql = format!(
+            "UPDATE parity_sync_queue
+                SET status = 'failed'
+              WHERE id = ?1
+                AND claim_generation = ?2
+                AND {canonical}"
+        );
+        let affected = conn
+            .execute(&sql, params![item.id, item.claim_generation])
+            .map_err(|error| format!("mark repair item permanently failed: {error}"))?;
+        if affected != 1 {
+            return Err("mark repair item permanently failed: live owner changed".to_string());
+        }
+        Ok(outcome)
+    })
+}
+
+fn apply_repair_hook_failure(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    error: RepairHookError,
+) -> Result<RepairQueueProcessOutcome, String> {
+    if !repair_claim_generation_matches(conn, item) {
+        return Ok(RepairQueueProcessOutcome::Stale);
+    }
+    let code = error.code().to_string();
+    match error.kind() {
+        RepairHookErrorKind::SignInRequired | RepairHookErrorKind::Unavailable => {
+            mark_repair_prerequisite(conn, &item.id, &code, item.claim_generation)?;
+            Ok(RepairQueueProcessOutcome::Deferred(code))
+        }
+        RepairHookErrorKind::Retryable => {
+            let outcome = mark_failure(conn, &item.id, &code, item.claim_generation)?;
+            if !outcome.applied {
+                return Ok(RepairQueueProcessOutcome::Stale);
+            }
+            Ok(RepairQueueProcessOutcome::Failed {
+                code,
+                dead_lettered: outcome.transitioned_to_dead_letter,
+            })
+        }
+        RepairHookErrorKind::Permanent => {
+            let outcome = force_repair_permanent_failure(conn, item, &code)?;
+            if !outcome.applied {
+                return Ok(RepairQueueProcessOutcome::Stale);
+            }
+            Ok(RepairQueueProcessOutcome::Failed {
+                code,
+                dead_lettered: outcome.transitioned_to_dead_letter,
+            })
+        }
+    }
+}
+
+async fn process_repair_command_item(
+    conn: &std::sync::Mutex<Connection>,
+    client: &reqwest::Client,
+    api_base_url: &str,
+    api_key: &str,
+    item: &SyncQueueItem,
+    hooks: &dyn RepairQueueHooks,
+) -> Result<RepairQueueProcessOutcome, String> {
+    let _lifecycle_lease = match crate::repairs::acquire_transport_lease() {
+        Ok(lease) => lease,
+        Err(error) => {
+            let db = conn
+                .lock()
+                .map_err(|lock_error| format!("lock: {lock_error}"))?;
+            return apply_repair_hook_failure(&db, item, error);
+        }
+    };
+    let safe_base = match crate::api::resolve_admin_base(api_base_url) {
+        Ok(base) => base,
+        Err(_) => {
+            let db = conn.lock().map_err(|error| format!("lock: {error}"))?;
+            return apply_repair_hook_failure(
+                &db,
+                item,
+                RepairHookError::unavailable("REPAIR_API_ORIGIN_INVALID"),
+            );
+        }
+    };
+    let mut prepared = {
+        let db = conn.lock().map_err(|error| format!("lock: {error}"))?;
+        match prepare_repair_command_request(&db, item, hooks) {
+            Ok(prepared) => prepared,
+            Err(error) => return apply_repair_hook_failure(&db, item, error),
+        }
+    };
+
+    let url = format!("{}/api/pos/repairs/sync", safe_base.trim_end_matches('/'));
+    let request_body = std::mem::take(&mut *prepared.body);
+    let response = client
+        .post(url)
+        .header("x-pos-api-key", api_key)
+        .header("x-terminal-id", &prepared.terminal_id)
+        .header("x-staff-session-id", &prepared.staff_session_id)
+        .header("x-pos-client-version", env!("CARGO_PKG_VERSION"))
+        .header("content-type", "application/json")
+        .body(request_body)
+        .send()
+        .await;
+
+    let response = match response {
+        Ok(response) => match read_bounded_repair_response(response).await {
+            Ok(response) => response,
+            Err(error) => {
+                let db = conn
+                    .lock()
+                    .map_err(|lock_error| format!("lock: {lock_error}"))?;
+                return apply_repair_hook_failure(&db, item, error);
+            }
+        },
+        Err(_) => {
+            let db = conn.lock().map_err(|error| format!("lock: {error}"))?;
+            if !repair_claim_generation_matches(&db, item) {
+                return Ok(RepairQueueProcessOutcome::Stale);
+            }
+            let outcome =
+                mark_failure(&db, &item.id, "REPAIR_NETWORK_ERROR", item.claim_generation)?;
+            if !outcome.applied {
+                return Ok(RepairQueueProcessOutcome::Stale);
+            }
+            return Ok(RepairQueueProcessOutcome::Failed {
+                code: "REPAIR_NETWORK_ERROR".to_string(),
+                dead_lettered: outcome.transitioned_to_dead_letter,
+            });
+        }
+    };
+
+    let disposition = if response.exceeded_limit {
+        RepairSyncDisposition::MalformedResponse
+    } else {
+        classify_repair_http_response(
+            response.status,
+            &response.body,
+            response.retry_after.as_deref(),
+            &prepared.expected_identity,
+        )
+    };
+
+    let db = conn.lock().map_err(|error| format!("lock: {error}"))?;
+    if !repair_claim_generation_matches(&db, item) {
+        return Ok(RepairQueueProcessOutcome::Stale);
+    }
+    match disposition {
+        RepairSyncDisposition::Success(signal) => {
+            if let Err(error) = hooks.reconcile_success(&db, &prepared.context, &signal) {
+                return apply_repair_hook_failure(&db, item, error);
+            }
+            mark_success(&db, &item.id, item.claim_generation)?;
+            Ok(RepairQueueProcessOutcome::Processed)
+        }
+        RepairSyncDisposition::Conflict(conflict) => {
+            if let Err(error) = hooks.park_conflict(&db, &prepared.context, &conflict) {
+                return apply_repair_hook_failure(&db, item, error);
+            }
+            if log_conflict(
+                &db,
+                &item.operation,
+                &item.record_id,
+                &item.table_name,
+                item.version,
+                i64::try_from(conflict.current_version).unwrap_or(i64::MAX),
+                "[repair local envelope retained by encrypted conflict store]",
+                "manual",
+                false,
+                false,
+            )
+            .is_err()
+            {
+                warn!("repair conflict audit telemetry write failed after durable native park");
+            }
+            mark_conflict(&db, &item.id, item.claim_generation)?;
+            Ok(RepairQueueProcessOutcome::Conflict)
+        }
+        RepairSyncDisposition::SessionRequired(error) => {
+            mark_repair_prerequisite(&db, &item.id, &error.code, item.claim_generation)?;
+            Ok(RepairQueueProcessOutcome::StaffSessionRequired(error.code))
+        }
+        RepairSyncDisposition::TerminalAuth(failure) => {
+            mark_terminal_auth_pending(&db, item, failure)?;
+            Ok(RepairQueueProcessOutcome::TerminalAuth(failure))
+        }
+        RepairSyncDisposition::ModuleRequired(error) => {
+            mark_module_required(&db, &item.id, &error.code, item.claim_generation)?;
+            Ok(RepairQueueProcessOutcome::Deferred(error.code))
+        }
+        RepairSyncDisposition::RateLimited {
+            retry_after_seconds,
+        } => {
+            let code = "REPAIR_RATE_LIMITED";
+            mark_rate_limited(
+                &db,
+                &item.id,
+                code,
+                retry_after_seconds,
+                item.claim_generation,
+            )?;
+            Ok(RepairQueueProcessOutcome::RateLimited(code.to_string()))
+        }
+        RepairSyncDisposition::PermanentFailure(error) => {
+            let outcome = force_repair_permanent_failure(&db, item, &error.code)?;
+            if !outcome.applied {
+                return Ok(RepairQueueProcessOutcome::Stale);
+            }
+            Ok(RepairQueueProcessOutcome::Failed {
+                code: error.code,
+                dead_lettered: outcome.transitioned_to_dead_letter,
+            })
+        }
+        RepairSyncDisposition::RetryableFailure(error) => {
+            let outcome = mark_failure(&db, &item.id, &error.code, item.claim_generation)?;
+            if !outcome.applied {
+                return Ok(RepairQueueProcessOutcome::Stale);
+            }
+            Ok(RepairQueueProcessOutcome::Failed {
+                code: error.code,
+                dead_lettered: outcome.transitioned_to_dead_letter,
+            })
+        }
+        RepairSyncDisposition::MalformedResponse => {
+            let code = "REPAIR_RESPONSE_MALFORMED";
+            let outcome = mark_failure(&db, &item.id, code, item.claim_generation)?;
+            if !outcome.applied {
+                return Ok(RepairQueueProcessOutcome::Stale);
+            }
+            Ok(RepairQueueProcessOutcome::Failed {
+                code: code.to_string(),
+                dead_lettered: outcome.transitioned_to_dead_letter,
+            })
+        }
+    }
+}
+
+async fn process_repair_attachment_item(
+    conn: &std::sync::Mutex<Connection>,
+    api_base_url: &str,
+    api_key: &str,
+    item: &SyncQueueItem,
+    hooks: &dyn RepairQueueHooks,
+) -> Result<RepairQueueProcessOutcome, String> {
+    let _lifecycle_lease = match crate::repairs::acquire_transport_lease() {
+        Ok(lease) => lease,
+        Err(error) => {
+            let db = conn
+                .lock()
+                .map_err(|lock_error| format!("lock: {lock_error}"))?;
+            return apply_repair_hook_failure(&db, item, error);
+        }
+    };
+    if crate::api::resolve_admin_base(api_base_url).is_err() {
+        let db = conn.lock().map_err(|error| format!("lock: {error}"))?;
+        return apply_repair_hook_failure(
+            &db,
+            item,
+            RepairHookError::unavailable("REPAIR_API_ORIGIN_INVALID"),
+        );
+    }
+    let prepared = {
+        let db = conn.lock().map_err(|error| format!("lock: {error}"))?;
+        match prepare_repair_attachment_request(&db, item, hooks) {
+            Ok(prepared) => prepared,
+            Err(error) => return apply_repair_hook_failure(&db, item, error),
+        }
+    };
+
+    let crate::repair_transport::PreparedRepairAttachmentRequest {
+        context,
+        session,
+        upload,
+    } = prepared;
+    let disposition =
+        match send_repair_raw_attachment(api_base_url, api_key, &session, upload).await {
+            Ok(disposition) => disposition,
+            Err(error) => {
+                let db = conn
+                    .lock()
+                    .map_err(|lock_error| format!("lock: {lock_error}"))?;
+                return apply_repair_hook_failure(&db, item, error);
+            }
+        };
+
+    let db = conn.lock().map_err(|error| format!("lock: {error}"))?;
+    if !repair_claim_generation_matches(&db, item) {
+        return Ok(RepairQueueProcessOutcome::Stale);
+    }
+    match disposition {
+        RepairAttachmentDisposition::Uploaded(result) => {
+            if let Err(error) = hooks.reconcile_attachment_success(&db, &context, &result) {
+                return apply_repair_hook_failure(&db, item, error);
+            }
+            mark_success(&db, &item.id, item.claim_generation)?;
+            Ok(RepairQueueProcessOutcome::Processed)
+        }
+        RepairAttachmentDisposition::Conflict(conflict) => {
+            if let Err(error) = hooks.park_conflict(&db, &context, &conflict) {
+                return apply_repair_hook_failure(&db, item, error);
+            }
+            if log_conflict(
+                &db,
+                &item.operation,
+                &item.record_id,
+                &item.table_name,
+                item.version,
+                i64::try_from(conflict.current_version).unwrap_or(i64::MAX),
+                "[repair attachment ciphertext retained by encrypted conflict store]",
+                "manual",
+                false,
+                false,
+            )
+            .is_err()
+            {
+                warn!("repair attachment conflict audit telemetry write failed after durable native park");
+            }
+            mark_conflict(&db, &item.id, item.claim_generation)?;
+            Ok(RepairQueueProcessOutcome::Conflict)
+        }
+        RepairAttachmentDisposition::SessionRequired(error) => {
+            mark_repair_prerequisite(&db, &item.id, &error.code, item.claim_generation)?;
+            Ok(RepairQueueProcessOutcome::StaffSessionRequired(error.code))
+        }
+        RepairAttachmentDisposition::TerminalAuth(failure) => {
+            mark_terminal_auth_pending(&db, item, failure)?;
+            Ok(RepairQueueProcessOutcome::TerminalAuth(failure))
+        }
+        RepairAttachmentDisposition::ModuleRequired(error) => {
+            mark_module_required(&db, &item.id, &error.code, item.claim_generation)?;
+            Ok(RepairQueueProcessOutcome::Deferred(error.code))
+        }
+        RepairAttachmentDisposition::RateLimited {
+            retry_after_seconds,
+        } => {
+            let code = "REPAIR_RATE_LIMITED";
+            mark_rate_limited(
+                &db,
+                &item.id,
+                code,
+                retry_after_seconds,
+                item.claim_generation,
+            )?;
+            Ok(RepairQueueProcessOutcome::RateLimited(code.to_string()))
+        }
+        RepairAttachmentDisposition::PermanentFailure(error) => {
+            let outcome = force_repair_permanent_failure(&db, item, &error.code)?;
+            if !outcome.applied {
+                return Ok(RepairQueueProcessOutcome::Stale);
+            }
+            Ok(RepairQueueProcessOutcome::Failed {
+                code: error.code,
+                dead_lettered: outcome.transitioned_to_dead_letter,
+            })
+        }
+        RepairAttachmentDisposition::RetryableFailure(error) => {
+            let outcome = mark_failure(&db, &item.id, &error.code, item.claim_generation)?;
+            if !outcome.applied {
+                return Ok(RepairQueueProcessOutcome::Stale);
+            }
+            Ok(RepairQueueProcessOutcome::Failed {
+                code: error.code,
+                dead_lettered: outcome.transitioned_to_dead_letter,
+            })
+        }
+        RepairAttachmentDisposition::MalformedResponse => {
+            let code = "REPAIR_RESPONSE_MALFORMED";
+            let outcome = mark_failure(&db, &item.id, code, item.claim_generation)?;
+            if !outcome.applied {
+                return Ok(RepairQueueProcessOutcome::Stale);
+            }
+            Ok(RepairQueueProcessOutcome::Failed {
+                code: code.to_string(),
+                dead_lettered: outcome.transitioned_to_dead_letter,
+            })
+        }
+    }
+}
+
 /// Process all pending items in the queue by sending them to the admin API.
 ///
 /// Items are processed FIFO within priority bands. On success, items are
@@ -6516,72 +8837,321 @@ pub async fn process_queue(
     api_base_url: &str,
     api_key: &str,
 ) -> Result<SyncResult, String> {
+    process_queue_with_claim_gate(conn, api_base_url, api_key, || Ok(())).await
+}
+
+pub(crate) async fn process_queue_with_claim_gate<Acquire, Lease>(
+    conn: &std::sync::Mutex<Connection>,
+    api_base_url: &str,
+    api_key: &str,
+    acquire_claim_gate: Acquire,
+) -> Result<SyncResult, String>
+where
+    Acquire: FnMut() -> Result<Lease, ParityClaimGateBlock> + Send,
+    Lease: Send,
+{
+    process_queue_with_visibility(
+        conn,
+        api_base_url,
+        api_key,
+        &crate::repairs::NATIVE_REPAIR_QUEUE_HOOKS,
+        QueueProcessVisibility::InternalAll,
+        QueueProcessSelection::All,
+        acquire_claim_gate,
+    )
+    .await
+}
+
+/// Generic renderer trigger. It can process legacy parity work but cannot
+/// claim, recover, count, return or otherwise mutate native repair rows.
+#[cfg(test)]
+pub(crate) async fn process_queue_renderer_safe(
+    conn: &std::sync::Mutex<Connection>,
+    api_base_url: &str,
+    api_key: &str,
+) -> Result<SyncResult, String> {
+    process_queue_renderer_safe_with_claim_gate(conn, api_base_url, api_key, || Ok(())).await
+}
+
+/// Renderer-visible generic replay with the same lifecycle fence as the
+/// background native processor. Production callers must supply the live
+/// terminal-binding gate; the no-op wrapper above exists only for isolated
+/// queue tests.
+pub(crate) async fn process_queue_renderer_safe_with_claim_gate<Acquire, Lease>(
+    conn: &std::sync::Mutex<Connection>,
+    api_base_url: &str,
+    api_key: &str,
+    acquire_claim_gate: Acquire,
+) -> Result<SyncResult, String>
+where
+    Acquire: FnMut() -> Result<Lease, ParityClaimGateBlock> + Send,
+    Lease: Send,
+{
+    process_queue_with_visibility(
+        conn,
+        api_base_url,
+        api_key,
+        &UnavailableRepairQueueHooks,
+        QueueProcessVisibility::RendererNonRepair,
+        QueueProcessSelection::All,
+        acquire_claim_gate,
+    )
+    .await
+}
+
+pub(crate) async fn process_queue_renderer_safe_item_with_claim_gate<Acquire, Lease>(
+    conn: &std::sync::Mutex<Connection>,
+    api_base_url: &str,
+    api_key: &str,
+    item_id: &str,
+    acquire_claim_gate: Acquire,
+) -> Result<SyncResult, String>
+where
+    Acquire: FnMut() -> Result<Lease, ParityClaimGateBlock> + Send,
+    Lease: Send,
+{
+    process_queue_with_visibility(
+        conn,
+        api_base_url,
+        api_key,
+        &UnavailableRepairQueueHooks,
+        QueueProcessVisibility::RendererNonRepair,
+        QueueProcessSelection::ExactRendererItem(item_id),
+        acquire_claim_gate,
+    )
+    .await
+}
+
+#[cfg(test)]
+pub(crate) async fn process_queue_with_repair_hooks(
+    conn: &std::sync::Mutex<Connection>,
+    api_base_url: &str,
+    api_key: &str,
+    repair_hooks: &dyn RepairQueueHooks,
+) -> Result<SyncResult, String> {
+    process_queue_with_visibility(
+        conn,
+        api_base_url,
+        api_key,
+        repair_hooks,
+        QueueProcessVisibility::InternalAll,
+        QueueProcessSelection::All,
+        || Ok(()),
+    )
+    .await
+}
+
+async fn process_queue_with_visibility<Acquire, Lease>(
+    conn: &std::sync::Mutex<Connection>,
+    api_base_url: &str,
+    api_key: &str,
+    repair_hooks: &dyn RepairQueueHooks,
+    visibility: QueueProcessVisibility,
+    selection: QueueProcessSelection<'_>,
+    mut acquire_claim_gate: Acquire,
+) -> Result<SyncResult, String>
+where
+    Acquire: FnMut() -> Result<Lease, ParityClaimGateBlock> + Send,
+    Lease: Send,
+{
     let started_at = Utc::now().to_rfc3339();
+    let exact_renderer_item = matches!(selection, QueueProcessSelection::ExactRendererItem(_));
     let queue_depth_before: i64;
-    // Check for age warnings before processing
-    {
-        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
-        let _ = check_age_warnings(&db);
-        let _ = recover_stale_processing_items(&db)?;
-        let _ = cleanup_superseded_synced_order_status_updates(&db)?;
-        let mut remaining_requeue_budget = MAX_AUTO_REQUEUE_ITEMS_PER_CYCLE;
+    let mut quarantined = 0_i64;
+    let mut exact_item = None;
+    // Exact manual retry uses one lease from before its atomic retry+claim
+    // through the sole HTTP request and acknowledgement. It intentionally
+    // skips every queue-wide maintenance prepass.
+    let _exact_gate_lease = if let QueueProcessSelection::ExactRendererItem(item_id) = selection {
+        let lease = match acquire_claim_gate() {
+            Ok(lease) => lease,
+            Err(block) => {
+                let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                let queue_depth = renderer_get_length(&db)?;
+                let telemetry = SyncTelemetryBuilder::new(started_at, queue_depth)
+                    .finish(&db, 0, 0, 0, visibility)?;
+                return Ok(SyncResult {
+                    success: false,
+                    processed: 0,
+                    failed: 0,
+                    conflicts: 0,
+                    quarantined: 0,
+                    dead_lettered: 0,
+                    errors: Vec::new(),
+                    monetary_dead_letters: Vec::new(),
+                    auth_outcome: None,
+                    batch_block: Some(block),
+                    telemetry,
+                });
+            }
+        };
+        {
+            let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+            exact_item = renderer_retry_and_dequeue_exact(&db, item_id)?;
+            queue_depth_before = renderer_get_length(&db)?;
+        }
+        Some(lease)
+    } else {
+        // Lifecycle fencing covers every mutation-heavy prepass, not only the
+        // later per-item claim. A reset/rebind/pause that began after credential
+        // resolution must leave queue and local domain rows byte-for-byte intact.
+        let prepass_gate_lease = match acquire_claim_gate() {
+            Ok(lease) => lease,
+            Err(block) => {
+                let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                let queue_depth = match visibility {
+                    QueueProcessVisibility::InternalAll => get_length(&db)?,
+                    QueueProcessVisibility::RendererNonRepair => renderer_get_length(&db)?,
+                };
+                let telemetry = SyncTelemetryBuilder::new(started_at, queue_depth)
+                    .finish(&db, 0, 0, 0, visibility)?;
+                return Ok(SyncResult {
+                    success: false,
+                    processed: 0,
+                    failed: 0,
+                    conflicts: 0,
+                    quarantined: 0,
+                    dead_lettered: 0,
+                    errors: Vec::new(),
+                    monetary_dead_letters: Vec::new(),
+                    auth_outcome: None,
+                    batch_block: Some(block),
+                    telemetry,
+                });
+            }
+        };
+        // Check for age warnings and perform bounded maintenance before processing.
+        {
+            let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+            if visibility == QueueProcessVisibility::InternalAll {
+                quarantined += quarantine_reserved_repair_lookalikes(&db)?;
+                let _ = redact_identifiable_legacy_repair_audit_payloads(&db)?;
+                let _ = check_age_warnings(&db);
+            }
+            match visibility {
+                QueueProcessVisibility::InternalAll => {
+                    let _ = recover_stale_processing_items(&db)?;
+                }
+                QueueProcessVisibility::RendererNonRepair => {
+                    let _ = recover_stale_processing_items_renderer_safe(&db)?;
+                }
+            }
+            let _ = cleanup_superseded_synced_order_status_updates(&db)?;
+            if visibility == QueueProcessVisibility::InternalAll {
+                let mut remaining_requeue_budget = MAX_AUTO_REQUEUE_ITEMS_PER_CYCLE;
 
-        let terminal_context_retries =
-            retry_failed_terminal_context_items_limited(&db, remaining_requeue_budget)?;
-        remaining_requeue_budget =
-            remaining_requeue_budget.saturating_sub(terminal_context_retries.retried as usize);
+                let terminal_context_retries =
+                    retry_failed_terminal_context_items_limited(&db, remaining_requeue_budget)?;
+                remaining_requeue_budget = remaining_requeue_budget
+                    .saturating_sub(terminal_context_retries.retried as usize);
 
-        let rate_limited_retries =
-            retry_failed_rate_limited_items_limited(&db, remaining_requeue_budget)?;
-        remaining_requeue_budget =
-            remaining_requeue_budget.saturating_sub(rate_limited_retries.retried as usize);
+                let rate_limited_retries =
+                    retry_failed_rate_limited_items_limited(&db, remaining_requeue_budget)?;
+                remaining_requeue_budget =
+                    remaining_requeue_budget.saturating_sub(rate_limited_retries.retried as usize);
 
-        let fiscal_issued_at_retries =
-            retry_failed_invalid_fiscal_issued_at_items_limited(&db, remaining_requeue_budget)?;
-        remaining_requeue_budget =
-            remaining_requeue_budget.saturating_sub(fiscal_issued_at_retries.retried as usize);
+                let fiscal_issued_at_retries = retry_failed_invalid_fiscal_issued_at_items_limited(
+                    &db,
+                    remaining_requeue_budget,
+                )?;
+                remaining_requeue_budget = remaining_requeue_budget
+                    .saturating_sub(fiscal_issued_at_retries.retried as usize);
 
-        let legacy_order_retries =
-            retry_failed_legacy_order_insert_items_limited(&db, remaining_requeue_budget)?;
-        remaining_requeue_budget =
-            remaining_requeue_budget.saturating_sub(legacy_order_retries.retried as usize);
+                let legacy_order_retries =
+                    retry_failed_legacy_order_insert_items_limited(&db, remaining_requeue_budget)?;
+                remaining_requeue_budget =
+                    remaining_requeue_budget.saturating_sub(legacy_order_retries.retried as usize);
 
-        let payment_conflict_resolutions =
-            resolve_failed_payment_total_conflict_items_limited(&db, remaining_requeue_budget)?;
-        remaining_requeue_budget =
-            remaining_requeue_budget.saturating_sub(payment_conflict_resolutions.retried as usize);
+                let payment_conflict_resolutions =
+                    resolve_failed_payment_total_conflict_items_limited(
+                        &db,
+                        remaining_requeue_budget,
+                    )?;
+                remaining_requeue_budget = remaining_requeue_budget
+                    .saturating_sub(payment_conflict_resolutions.retried as usize);
 
-        let customer_address_retries =
-            retry_failed_customer_address_not_found_items_limited(&db, remaining_requeue_budget)?;
-        remaining_requeue_budget =
-            remaining_requeue_budget.saturating_sub(customer_address_retries.retried as usize);
+                let customer_address_retries =
+                    retry_failed_customer_address_not_found_items_limited(
+                        &db,
+                        remaining_requeue_budget,
+                    )?;
+                remaining_requeue_budget = remaining_requeue_budget
+                    .saturating_sub(customer_address_retries.retried as usize);
 
-        let _ = retry_failed_table_session_local_placeholder_items_limited(
-            &db,
-            remaining_requeue_budget,
-        )?;
+                let _ = retry_failed_table_session_local_placeholder_items_limited(
+                    &db,
+                    remaining_requeue_budget,
+                )?;
+            }
 
-        queue_depth_before = get_length(&db)?;
-    }
+            queue_depth_before = match visibility {
+                QueueProcessVisibility::InternalAll => get_length(&db)?,
+                QueueProcessVisibility::RendererNonRepair => renderer_get_length(&db)?,
+            };
+        }
+        drop(prepass_gate_lease);
+        None
+    };
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
         .build()
         .map_err(|e| format!("sync_queue client build: {e}"))?;
+    // Repair requests carry a live staff-session claim in addition to the
+    // terminal API key. Never follow redirects: even reqwest's same-client
+    // redirect handling could forward those native credentials to another
+    // origin before the response classifier sees the 3xx status.
+    let repair_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| format!("repair sync client build: {e}"))?;
     let mut processed: i64 = 0;
     let mut failed: i64 = 0;
     let mut conflicts: i64 = 0;
+    let mut dead_lettered: i64 = 0;
+    let mut auth_outcome: Option<ParityAuthOutcome> = None;
+    let mut batch_block: Option<ParityClaimGateBlock> = None;
     let mut errors: Vec<SyncError> = Vec::new();
     // Wave 4 H: collect monetary dead-letters so the caller can emit
     // `sync:dead-letter:monetary` events in the Tauri command layer.
     let mut monetary_dead_letters: Vec<MonetaryDeadLetter> = Vec::new();
     let mut telemetry = SyncTelemetryBuilder::new(started_at, queue_depth_before);
+    let mut exact_claim_consumed = false;
 
     loop {
+        if selection != QueueProcessSelection::All && exact_claim_consumed {
+            break;
+        }
+        // The lifecycle gate is acquired before any queue candidate is read or
+        // claimed and remains alive through HTTP plus authoritative local ack.
+        let _claim_gate_lease = match selection {
+            QueueProcessSelection::All => match acquire_claim_gate() {
+                Ok(lease) => Some(lease),
+                Err(block) => {
+                    batch_block = Some(block);
+                    break;
+                }
+            },
+            QueueProcessSelection::ExactRendererItem(_) => None,
+        };
         // Dequeue next item under lock, then release lock before HTTP call
-        let item = {
-            let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
-            dequeue(&db)?
+        let item = match selection {
+            QueueProcessSelection::ExactRendererItem(_) => {
+                exact_claim_consumed = true;
+                exact_item.take()
+            }
+            QueueProcessSelection::All => {
+                let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                match visibility {
+                    QueueProcessVisibility::InternalAll => {
+                        let (item, newly_quarantined) = dequeue_with_quarantine_count(&db)?;
+                        quarantined += newly_quarantined;
+                        item
+                    }
+                    QueueProcessVisibility::RendererNonRepair => renderer_dequeue(&db)?,
+                }
+            }
         };
 
         let item = match item {
@@ -6590,54 +9160,200 @@ pub async fn process_queue(
         };
         telemetry.record_attempt();
 
+        if item.table_name == "repairs" {
+            let outcome = process_repair_command_item(
+                conn,
+                &repair_client,
+                api_base_url,
+                api_key,
+                &item,
+                repair_hooks,
+            )
+            .await?;
+            match outcome {
+                RepairQueueProcessOutcome::Processed => {
+                    processed += 1;
+                    telemetry.record_success(&item);
+                }
+                RepairQueueProcessOutcome::Conflict => {
+                    conflicts += 1;
+                    telemetry.record_error(&item, "conflict", "REPAIR_VERSION_CONFLICT", Some(409));
+                    errors.push(safe_sync_error(&item, "REPAIR_VERSION_CONFLICT", Some(409)));
+                }
+                RepairQueueProcessOutcome::Deferred(code) => {
+                    telemetry.record_deferred(&item, &code);
+                }
+                RepairQueueProcessOutcome::StaffSessionRequired(code) => {
+                    merge_auth_outcome(&mut auth_outcome, ParityAuthOutcome::StaffSessionRequired);
+                    telemetry.record_deferred(&item, &code);
+                }
+                RepairQueueProcessOutcome::TerminalAuth(failure) => {
+                    merge_auth_outcome(&mut auth_outcome, ParityAuthOutcome::terminal(failure));
+                    telemetry.record_error(&item, "pending", "terminal_auth", None);
+                    break;
+                }
+                RepairQueueProcessOutcome::Failed {
+                    code,
+                    dead_lettered: transitioned_to_dead_letter,
+                } => {
+                    if transitioned_to_dead_letter {
+                        dead_lettered += 1;
+                    }
+                    failed += 1;
+                    telemetry.record_error(&item, "failed", &code, None);
+                    errors.push(safe_sync_error(&item, &code, None));
+                }
+                RepairQueueProcessOutcome::RateLimited(code) => {
+                    failed += 1;
+                    telemetry.record_error(&item, "pending", &code, Some(429));
+                    errors.push(safe_sync_error(&item, &code, Some(429)));
+                    break;
+                }
+                RepairQueueProcessOutcome::Stale => {}
+            }
+            continue;
+        }
+
+        if item.table_name == "repair_attachments" {
+            let outcome =
+                process_repair_attachment_item(conn, api_base_url, api_key, &item, repair_hooks)
+                    .await?;
+            match outcome {
+                RepairQueueProcessOutcome::Processed => {
+                    processed += 1;
+                    telemetry.record_success(&item);
+                }
+                RepairQueueProcessOutcome::Conflict => {
+                    conflicts += 1;
+                    telemetry.record_error(&item, "conflict", "REPAIR_VERSION_CONFLICT", Some(409));
+                    errors.push(safe_sync_error(&item, "REPAIR_VERSION_CONFLICT", Some(409)));
+                }
+                RepairQueueProcessOutcome::Deferred(code) => {
+                    telemetry.record_deferred(&item, &code);
+                }
+                RepairQueueProcessOutcome::StaffSessionRequired(code) => {
+                    merge_auth_outcome(&mut auth_outcome, ParityAuthOutcome::StaffSessionRequired);
+                    telemetry.record_deferred(&item, &code);
+                }
+                RepairQueueProcessOutcome::TerminalAuth(failure) => {
+                    merge_auth_outcome(&mut auth_outcome, ParityAuthOutcome::terminal(failure));
+                    telemetry.record_error(&item, "pending", "terminal_auth", None);
+                    break;
+                }
+                RepairQueueProcessOutcome::Failed {
+                    code,
+                    dead_lettered: transitioned_to_dead_letter,
+                } => {
+                    if transitioned_to_dead_letter {
+                        dead_lettered += 1;
+                    }
+                    failed += 1;
+                    telemetry.record_error(&item, "failed", &code, None);
+                    errors.push(safe_sync_error(&item, &code, None));
+                }
+                RepairQueueProcessOutcome::RateLimited(code) => {
+                    failed += 1;
+                    telemetry.record_error(&item, "pending", &code, Some(429));
+                    errors.push(safe_sync_error(&item, &code, Some(429)));
+                    break;
+                }
+                RepairQueueProcessOutcome::Stale => {}
+            }
+            continue;
+        }
+
         let request_spec = {
             let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
-            prepare_request(&db, &item)?
+            with_live_generic_claim(&db, &item, |db| prepare_request(db, &item))?
+        };
+        let Some(request_spec) = request_spec else {
+            continue;
         };
 
         let request_spec = match request_spec {
             RequestPreparation::Ready(spec) => spec,
             RequestPreparation::Consumed { reason } => {
-                let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
-                mark_success(&db, &item.id, item.claim_generation)?;
-                processed += 1;
-                telemetry.record_success(&item);
-                info!(
-                    item_id = %item.id,
-                    table_name = %item.table_name,
-                    record_id = %item.record_id,
-                    reason = %reason,
-                    "Parity item consumed locally"
-                );
+                let applied = {
+                    let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                    with_live_generic_claim(&db, &item, |db| {
+                        mark_success(db, &item.id, item.claim_generation)
+                    })?
+                };
+                if applied.is_some() {
+                    processed += 1;
+                    telemetry.record_success(&item);
+                    info!(reason = %reason, "Parity item consumed locally");
+                }
                 continue;
             }
             RequestPreparation::Deferred { reason } => {
-                let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
-                mark_deferred(&db, &item.id, &reason, item.claim_generation)?;
-                telemetry.record_deferred(&item, &reason);
+                let applied = {
+                    let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                    with_live_generic_claim(&db, &item, |db| {
+                        mark_deferred(db, &item.id, &reason, item.claim_generation)
+                    })?
+                };
+                if applied.is_some() {
+                    telemetry.record_deferred(&item, &reason);
+                }
+                continue;
+            }
+            RequestPreparation::ManualResolution { reason_code } => {
+                let applied = {
+                    let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                    with_live_generic_claim(&db, &item, |db| {
+                        park_customer_phone_country_resolution(
+                            db,
+                            &item.id,
+                            item.claim_generation,
+                            &reason_code,
+                        )
+                    })?
+                };
+                if applied.is_some() {
+                    conflicts += 1;
+                    telemetry.record_error(&item, "conflict", &reason_code, None);
+                    errors.push(safe_sync_error(&item, &reason_code, None));
+                }
                 continue;
             }
             RequestPreparation::Failed { reason } => {
-                let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
-                if let Some(dl) = mark_failure(&db, &item.id, &reason, item.claim_generation)? {
-                    monetary_dead_letters.push(dl);
+                let applied = {
+                    let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                    with_live_generic_claim(&db, &item, |db| {
+                        let outcome = mark_failure_in_transaction(
+                            db,
+                            &item.id,
+                            &reason,
+                            item.claim_generation,
+                        )?;
+                        if !outcome.applied {
+                            return Ok(outcome);
+                        }
+                        db.execute(
+                            "UPDATE parity_sync_queue
+                             SET status = 'failed'
+                             WHERE id = ?1 AND claim_generation = ?2",
+                            params![item.id, item.claim_generation],
+                        )
+                        .map_err(|e| format!("mark parity item permanently failed: {e}"))?;
+                        Ok(outcome)
+                    })?
+                };
+                if let Some(outcome) = applied {
+                    if !outcome.applied {
+                        continue;
+                    }
+                    if let Some(dl) = outcome.monetary_notice {
+                        monetary_dead_letters.push(dl);
+                    }
+                    if outcome.transitioned_to_dead_letter {
+                        dead_lettered += 1;
+                    }
+                    failed += 1;
+                    telemetry.record_error(&item, "failed", &reason, None);
+                    errors.push(safe_sync_error(&item, &reason, None));
                 }
-                db.execute(
-                    "UPDATE parity_sync_queue
-                     SET status = 'failed'
-                     WHERE id = ?1 AND claim_generation = ?2",
-                    params![item.id, item.claim_generation],
-                )
-                .map_err(|e| format!("mark parity item permanently failed: {e}"))?;
-                failed += 1;
-                telemetry.record_error(&item, "failed", &reason, None);
-                errors.push(SyncError {
-                    item_id: item.id.clone(),
-                    table_name: item.table_name.clone(),
-                    record_id: item.record_id.clone(),
-                    error: reason,
-                    http_status: None,
-                });
                 continue;
             }
         };
@@ -6680,44 +9396,66 @@ pub async fn process_queue(
                     .unwrap_or(DEFAULT_RATE_LIMIT_RETRY_SECS);
                 let response_body = resp.text().await.unwrap_or_default();
                 let response_json = serde_json::from_str::<Value>(&response_body).ok();
+                {
+                    let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                    if !is_live_generic_claim(&db, &item)? {
+                        continue;
+                    }
+                }
+
+                if let Some(failure) = parse_parity_terminal_auth_failure(status, &response_body) {
+                    let parked = {
+                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        with_live_generic_claim(&db, &item, |db| {
+                            mark_terminal_auth_pending(db, &item, failure)
+                        })?
+                    };
+                    if parked.is_some() {
+                        merge_auth_outcome(&mut auth_outcome, ParityAuthOutcome::terminal(failure));
+                        telemetry.record_error(&item, "pending", "terminal_auth", Some(status));
+                        break;
+                    }
+                    continue;
+                }
                 if is_success {
                     // Success -- remove from queue
-                    let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
-                    let generation_matches = db
-                        .query_row(
-                            "SELECT claim_generation = ?2
-                             FROM parity_sync_queue
-                             WHERE id = ?1",
-                            params![item.id.as_str(), item.claim_generation],
-                            |row| row.get::<_, bool>(0),
-                        )
-                        .unwrap_or(false);
-                    if generation_matches {
-                        apply_success(&db, &item, response_json.as_ref())?;
-                        mark_success(&db, &item.id, item.claim_generation)?;
+                    let applied = {
+                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        with_live_generic_claim(&db, &item, |db| {
+                            apply_success(db, &item, response_json.as_ref())?;
+                            mark_success(db, &item.id, item.claim_generation)
+                        })?
+                    };
+                    if applied.is_some() {
                         processed += 1;
                         telemetry.record_success(&item);
-                    } else {
-                        debug!(
-                            item_id = %item.id,
-                            expected_generation = item.claim_generation,
-                            "Skipping stale parity success ack before local apply"
-                        );
                     }
                 } else if is_parent_order_wait_response(status, &response_body) {
-                    let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
                     let reason = "Waiting for parent order sync";
-                    mark_deferred(&db, &item.id, reason, item.claim_generation)?;
-                    telemetry.record_deferred(&item, reason);
+                    let marked = {
+                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        with_live_generic_claim(&db, &item, |db| {
+                            mark_deferred(db, &item.id, reason, item.claim_generation)
+                        })?
+                    };
+                    if marked.is_some() {
+                        telemetry.record_deferred(&item, reason);
+                    }
                 } else if is_table_session_close_waiting_payment_response(
                     status,
                     &response_body,
                     &item,
                 ) {
-                    let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
                     let reason = "Waiting for table payment sync";
-                    mark_deferred(&db, &item.id, reason, item.claim_generation)?;
-                    telemetry.record_deferred(&item, reason);
+                    let marked = {
+                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        with_live_generic_claim(&db, &item, |db| {
+                            mark_deferred(db, &item.id, reason, item.claim_generation)
+                        })?
+                    };
+                    if marked.is_some() {
+                        telemetry.record_deferred(&item, reason);
+                    }
                 } else if let Some(missing_modules) =
                     parse_module_required_response(status, &response_body)
                 {
@@ -6734,25 +9472,45 @@ pub async fn process_queue(
                             "MODULE_REQUIRED: organization is missing module(s): {missing_modules}"
                         )
                     };
-                    let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
-                    mark_module_required(&db, &item.id, &reason, item.claim_generation)?;
-                    telemetry.record_deferred(&item, "module_required");
-                    warn!(
-                        item_id = %item.id,
-                        table_name = %item.table_name,
-                        record_id = %item.record_id,
-                        missing_modules = %missing_modules,
-                        "Parity item parked pending module acquisition"
-                    );
+                    let marked = {
+                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        with_live_generic_claim(&db, &item, |db| {
+                            mark_module_required(db, &item.id, &reason, item.claim_generation)
+                        })?
+                    };
+                    if marked.is_some() {
+                        telemetry.record_deferred(&item, "module_required");
+                        warn!(
+                            module_count = missing_modules
+                                .split(',')
+                                .filter(|part| !part.trim().is_empty())
+                                .count(),
+                            "Parity item parked pending module acquisition"
+                        );
+                    }
                 } else if is_replay_conflict_response(status, &response_body, &item) {
-                    let server_record = fetch_server_record(
-                        &client,
-                        api_base_url,
-                        api_key,
-                        request_spec.terminal_id.as_str(),
-                        &item,
-                    )
-                    .await;
+                    {
+                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        if !is_live_generic_claim(&db, &item)? {
+                            continue;
+                        }
+                    }
+                    // A renderer exact-item retry is a single-request
+                    // operation. Its authoritative conflict response is
+                    // sufficient to park/classify the selected row; a lookup
+                    // would violate the one-item/one-request recovery fence.
+                    let server_record = if exact_renderer_item {
+                        None
+                    } else {
+                        fetch_server_record(
+                            &client,
+                            api_base_url,
+                            api_key,
+                            request_spec.terminal_id.as_str(),
+                            &item,
+                        )
+                        .await
+                    };
                     let server_version =
                         derive_server_version(server_record.as_ref(), &response_body, item.version);
                     let is_monetary = is_monetary_item(&item);
@@ -6765,118 +9523,151 @@ pub async fn process_queue(
                     let requires_operator_review =
                         resolution == "manual" || resolution == "client-wins" || is_monetary;
 
-                    let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
-                    log_conflict(
-                        &db,
-                        &item.operation,
-                        &item.record_id,
-                        &item.table_name,
-                        item.version,
-                        server_version,
-                        &item.data,
-                        resolution,
-                        is_monetary,
-                        false,
-                    )?;
+                    let applied = {
+                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        with_live_generic_claim(&db, &item, |db| {
+                            log_conflict(
+                                db,
+                                &item.operation,
+                                &item.record_id,
+                                &item.table_name,
+                                item.version,
+                                server_version,
+                                &item.data,
+                                resolution,
+                                is_monetary,
+                                false,
+                            )?;
+                            if requires_operator_review {
+                                mark_conflict(db, &item.id, item.claim_generation)
+                            } else {
+                                mark_success(db, &item.id, item.claim_generation)
+                            }
+                        })?
+                    };
+                    if applied.is_none() {
+                        continue;
+                    }
 
                     if requires_operator_review {
-                        mark_conflict(&db, &item.id, item.claim_generation)?;
                         conflicts += 1;
                         let error_message = format!(
                             "Conflict detected (HTTP {status}) requiring review: {}",
                             resolution
                         );
                         telemetry.record_error(&item, "conflict", &error_message, Some(status));
-                        errors.push(SyncError {
-                            item_id: item.id.clone(),
-                            table_name: item.table_name.clone(),
-                            record_id: item.record_id.clone(),
-                            error: error_message,
-                            http_status: Some(status),
-                        });
+                        errors.push(safe_sync_error(&item, &error_message, Some(status)));
                     } else {
-                        mark_success(&db, &item.id, item.claim_generation)?;
                         processed += 1;
                         telemetry.record_outcome(&item, "processed", "conflict_auto_resolved");
                     }
                 } else if status == 429 {
-                    let error_message = format!("HTTP {status}: {response_body}");
-                    let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
-                    mark_rate_limited(
-                        &db,
-                        &item.id,
-                        &error_message,
-                        retry_after_secs,
-                        item.claim_generation,
-                    )?;
-                    failed += 1;
-                    telemetry.record_error(&item, "pending", &error_message, Some(status));
-                    errors.push(SyncError {
-                        item_id: item.id.clone(),
-                        table_name: item.table_name.clone(),
-                        record_id: item.record_id.clone(),
-                        error: error_message,
-                        http_status: Some(status),
-                    });
-                    warn!(
-                        item_id = %item.id,
-                        table_name = %item.table_name,
-                        record_id = %item.record_id,
-                        retry_after_secs = retry_after_secs,
-                        "Parity sync hit admin rate limiting; pausing the batch"
-                    );
-                    break;
+                    let error_message = "HTTP_429_RATE_LIMITED".to_string();
+                    let marked = {
+                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        with_live_generic_claim(&db, &item, |db| {
+                            mark_rate_limited(
+                                db,
+                                &item.id,
+                                &error_message,
+                                retry_after_secs,
+                                item.claim_generation,
+                            )
+                        })?
+                    };
+                    if marked.is_some() {
+                        failed += 1;
+                        telemetry.record_error(&item, "pending", &error_message, Some(status));
+                        errors.push(safe_sync_error(&item, &error_message, Some(status)));
+                        warn!(
+                            retry_after_secs = retry_after_secs,
+                            "Parity sync hit admin rate limiting; pausing the batch"
+                        );
+                        break;
+                    }
                 } else if (400..500).contains(&status) {
                     // Client error (not retriable)
-                    let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
-                    let error_message = format!("HTTP {status}: {response_body}");
+                    let detailed_error = format!("HTTP {status}: {response_body}");
+                    let error_code = format!("HTTP_{status}_CLIENT_ERROR");
                     let resolved_at = Utc::now().to_rfc3339();
-                    if item.table_name == "payments"
-                        && resolve_payment_total_conflict_parity_row_with_conn(
-                            &db,
-                            item.id.as_str(),
-                            item.record_id.as_str(),
-                            item.data.as_str(),
-                            error_message.as_str(),
-                            resolved_at.as_str(),
-                        )?
-                    {
+                    let outcome = {
+                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        with_live_generic_claim(&db, &item, |db| {
+                            if resolve_live_payment_total_conflict_with_conn(
+                                db,
+                                &item,
+                                detailed_error.as_str(),
+                                resolved_at.as_str(),
+                            )? {
+                                return Ok((true, None));
+                            }
+                            let failure = mark_failure_in_transaction(
+                                db,
+                                &item.id,
+                                &error_code,
+                                item.claim_generation,
+                            )?;
+                            if !failure.applied {
+                                return Ok((false, Some(failure)));
+                            }
+                            db.execute(
+                                "UPDATE parity_sync_queue
+                                 SET status = 'failed'
+                                 WHERE id = ?1 AND claim_generation = ?2",
+                                params![item.id, item.claim_generation],
+                            )
+                            .map_err(|e| format!("mark client error failed: {e}"))?;
+                            Ok((false, Some(failure)))
+                        })?
+                    };
+                    let Some((resolved, failure)) = outcome else {
+                        continue;
+                    };
+                    if resolved {
                         processed += 1;
                         telemetry.record_outcome(&item, "processed", "payment_total_auto_repaired");
                         continue;
                     }
-                    if let Some(dl) =
-                        mark_failure(&db, &item.id, &error_message, item.claim_generation)?
-                    {
+                    let Some(failure) = failure else {
+                        continue;
+                    };
+                    if !failure.applied {
+                        continue;
+                    }
+                    if let Some(dl) = failure.monetary_notice {
                         monetary_dead_letters.push(dl);
                     }
-                    // Force to failed status since client errors won't recover
-                    db.execute(
-                        "UPDATE parity_sync_queue
-                         SET status = 'failed'
-                         WHERE id = ?1 AND claim_generation = ?2",
-                        params![item.id, item.claim_generation],
-                    )
-                    .map_err(|e| format!("mark client error failed: {e}"))?;
+                    if failure.transitioned_to_dead_letter {
+                        dead_lettered += 1;
+                    }
                     failed += 1;
-                    telemetry.record_error(&item, "failed", &error_message, Some(status));
-                    errors.push(SyncError {
-                        item_id: item.id.clone(),
-                        table_name: item.table_name.clone(),
-                        record_id: item.record_id.clone(),
-                        error: error_message,
-                        http_status: Some(status),
-                    });
+                    telemetry.record_error(&item, "failed", &error_code, Some(status));
+                    errors.push(safe_sync_error(&item, &error_code, Some(status)));
                 } else {
                     // Server error (retriable)
-                    let fallback_specs = legacy_order_update_retry_specs(
-                        &item,
-                        &request_spec,
-                        status,
-                        &response_body,
-                    );
+                    // Legacy fallbacks intentionally remain available to the
+                    // full/background drain, but an exact renderer retry may
+                    // issue only its one selected request.
+                    let fallback_specs = if exact_renderer_item {
+                        Vec::new()
+                    } else {
+                        legacy_order_update_retry_specs(
+                            &item,
+                            &request_spec,
+                            status,
+                            &response_body,
+                        )
+                    };
                     let mut fallback_processed = false;
+                    let mut stale_fallback_claim = false;
                     for (fallback_outcome, fallback_spec) in fallback_specs {
+                        {
+                            let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                            if !is_live_generic_claim(&db, &item)? {
+                                stale_fallback_claim = true;
+                                break;
+                            }
+                        }
                         let fallback_url = format!(
                             "{}{}",
                             api_base_url.trim_end_matches('/'),
@@ -6901,53 +9692,37 @@ pub async fn process_queue(
                                     serde_json::from_str::<Value>(&fallback_body).ok();
 
                                 if fallback_is_success {
-                                    let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
-                                    let generation_matches = db
-                                        .query_row(
-                                            "SELECT claim_generation = ?2
-                                             FROM parity_sync_queue
-                                             WHERE id = ?1",
-                                            params![item.id.as_str(), item.claim_generation],
-                                            |row| row.get::<_, bool>(0),
-                                        )
-                                        .unwrap_or(false);
-                                    if generation_matches {
-                                        apply_success(&db, &item, fallback_json.as_ref())?;
-                                        mark_success(&db, &item.id, item.claim_generation)?;
+                                    let applied = {
+                                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                                        with_live_generic_claim(&db, &item, |db| {
+                                            apply_success(db, &item, fallback_json.as_ref())?;
+                                            mark_success(db, &item.id, item.claim_generation)
+                                        })?
+                                    };
+                                    if applied.is_some() {
                                         processed += 1;
                                         telemetry.record_outcome(
                                             &item,
                                             "processed",
                                             fallback_outcome,
                                         );
+                                        fallback_processed = true;
                                     } else {
-                                        debug!(
-                                            item_id = %item.id,
-                                            expected_generation = item.claim_generation,
-                                            "Skipping stale parity fallback success ack before local apply"
-                                        );
+                                        stale_fallback_claim = true;
                                     }
-                                    fallback_processed = true;
                                     break;
                                 }
 
                                 warn!(
-                                    item_id = %item.id,
-                                    table_name = %item.table_name,
-                                    record_id = %item.record_id,
                                     first_status = status,
                                     fallback_status = fallback_status,
-                                    fallback_body = %fallback_body,
                                     fallback_outcome = fallback_outcome,
                                     "Legacy order update fallback did not succeed"
                                 );
                             }
-                            Err(e) => {
+                            Err(_) => {
                                 warn!(
-                                    item_id = %item.id,
-                                    table_name = %item.table_name,
-                                    record_id = %item.record_id,
-                                    error = %e,
+                                    error_class = "network",
                                     fallback_outcome = fallback_outcome,
                                     "Legacy order update fallback hit a network error"
                                 );
@@ -6957,54 +9732,81 @@ pub async fn process_queue(
                     if fallback_processed {
                         continue;
                     }
+                    if stale_fallback_claim {
+                        continue;
+                    }
 
-                    let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
-                    if let Some(dl) = mark_failure(
-                        &db,
-                        &item.id,
-                        &format!("HTTP {status}: {response_body}"),
-                        item.claim_generation,
-                    )? {
+                    let error_code = format!("HTTP_{status}_SERVER_ERROR");
+                    let failure = {
+                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        with_live_generic_claim(&db, &item, |db| {
+                            mark_failure_in_transaction(
+                                db,
+                                &item.id,
+                                &error_code,
+                                item.claim_generation,
+                            )
+                        })?
+                    };
+                    let Some(failure) = failure else {
+                        continue;
+                    };
+                    if !failure.applied {
+                        continue;
+                    }
+                    if let Some(dl) = failure.monetary_notice {
                         monetary_dead_letters.push(dl);
                     }
-                    let error_message = format!("HTTP {status}: {response_body}");
+                    if failure.transitioned_to_dead_letter {
+                        dead_lettered += 1;
+                    }
                     failed += 1;
-                    telemetry.record_error(&item, "failed", &error_message, Some(status));
-                    errors.push(SyncError {
-                        item_id: item.id.clone(),
-                        table_name: item.table_name.clone(),
-                        record_id: item.record_id.clone(),
-                        error: error_message,
-                        http_status: Some(status),
-                    });
+                    telemetry.record_error(&item, "failed", &error_code, Some(status));
+                    errors.push(safe_sync_error(&item, &error_code, Some(status)));
                 }
             }
-            Err(e) => {
+            Err(_) => {
                 // Network error (retriable)
-                let error_message = format!("Network error: {e}");
-                let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
-                if let Some(dl) =
-                    mark_failure(&db, &item.id, &error_message, item.claim_generation)?
-                {
+                let error_code = "NETWORK_ERROR".to_string();
+                let failure = {
+                    let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                    with_live_generic_claim(&db, &item, |db| {
+                        mark_failure_in_transaction(
+                            db,
+                            &item.id,
+                            &error_code,
+                            item.claim_generation,
+                        )
+                    })?
+                };
+                let Some(failure) = failure else {
+                    continue;
+                };
+                if !failure.applied {
+                    continue;
+                }
+                if let Some(dl) = failure.monetary_notice {
                     monetary_dead_letters.push(dl);
                 }
+                if failure.transitioned_to_dead_letter {
+                    dead_lettered += 1;
+                }
                 failed += 1;
-                telemetry.record_error(&item, "failed", &error_message, None);
-                errors.push(SyncError {
-                    item_id: item.id.clone(),
-                    table_name: item.table_name.clone(),
-                    record_id: item.record_id.clone(),
-                    error: error_message,
-                    http_status: None,
-                });
+                telemetry.record_error(&item, "failed", &error_code, None);
+                errors.push(safe_sync_error(&item, &error_code, None));
             }
         }
     }
 
-    let success = failed == 0 && conflicts == 0;
+    let success = failed == 0
+        && conflicts == 0
+        && quarantined == 0
+        && dead_lettered == 0
+        && auth_outcome.is_none()
+        && batch_block.is_none();
     let telemetry = {
         let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
-        telemetry.finish(&db, processed, failed, conflicts)?
+        telemetry.finish(&db, processed, failed, conflicts, visibility)?
     };
 
     Ok(SyncResult {
@@ -7012,8 +9814,12 @@ pub async fn process_queue(
         processed,
         failed,
         conflicts,
+        quarantined,
+        dead_lettered,
         errors,
         monetary_dead_letters,
+        auth_outcome,
+        batch_block,
         telemetry,
     })
 }
@@ -7446,7 +10252,7 @@ mod tests {
         }
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     struct CapturedRequest {
         request_line: String,
         headers: HashMap<String, String>,
@@ -7475,6 +10281,336 @@ mod tests {
         crate::db::set_setting(&conn, "terminal", "__ignore_keyring", "1")
             .expect("disable keyring reads for sync_queue tests");
         conn
+    }
+
+    static RENDERER_RACE_WAITING_ON_WRITE: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    fn renderer_race_busy_handler(_attempt: i32) -> bool {
+        RENDERER_RACE_WAITING_ON_WRITE.store(true, std::sync::atomic::Ordering::SeqCst);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        true
+    }
+
+    struct FileBackedTestDb {
+        path: std::path::PathBuf,
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturedLogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    struct CapturedLogGuard(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLogGuard {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("lock captured log buffer")
+                .extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedLogWriter {
+        type Writer = CapturedLogGuard;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            CapturedLogGuard(self.0.clone())
+        }
+    }
+
+    impl CapturedLogWriter {
+        fn contents(&self) -> String {
+            String::from_utf8(self.0.lock().expect("lock captured log contents").clone())
+                .expect("captured logs are UTF-8")
+        }
+    }
+
+    impl FileBackedTestDb {
+        fn new(label: &str) -> (Self, Connection) {
+            let path = std::env::temp_dir().join(format!(
+                "the-small-sync-queue-{label}-{}.sqlite",
+                Uuid::new_v4()
+            ));
+            let conn = Connection::open(&path).expect("open file-backed test db");
+            crate::db::run_migrations_for_test(&conn);
+            create_tables(&conn).expect("create sync queue tables");
+            conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")
+                .expect("enable WAL for deterministic writer race");
+            (Self { path }, conn)
+        }
+
+        fn open_race_connection(&self) -> Connection {
+            let conn = Connection::open(&self.path).expect("open race connection");
+            conn.busy_handler(Some(renderer_race_busy_handler))
+                .expect("install race busy handler");
+            conn
+        }
+    }
+
+    impl Drop for FileBackedTestDb {
+        fn drop(&mut self) {
+            for path in [
+                self.path.clone(),
+                std::path::PathBuf::from(format!("{}-wal", self.path.display())),
+                std::path::PathBuf::from(format!("{}-shm", self.path.display())),
+            ] {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+
+    fn wait_until_renderer_write_is_blocked() {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !RENDERER_RACE_WAITING_ON_WRITE.load(std::sync::atomic::Ordering::SeqCst) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "renderer queue operation never reached its write boundary"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    fn full_queue_row_fingerprint(conn: &Connection, item_id: &str) -> Option<String> {
+        conn.query_row(
+            "SELECT json_object(
+                 'id', id,
+                 'table_name', table_name,
+                 'record_id', record_id,
+                 'operation', operation,
+                 'data', data,
+                 'organization_id', organization_id,
+                 'created_at', created_at,
+                 'attempts', attempts,
+                 'last_attempt', last_attempt,
+                 'error_message', error_message,
+                 'next_retry_at', next_retry_at,
+                 'retry_delay_ms', retry_delay_ms,
+                 'priority', priority,
+                 'module_type', module_type,
+                 'conflict_strategy', conflict_strategy,
+                 'version', version,
+                 'repair_aggregate_id', repair_aggregate_id,
+                 'claim_generation', claim_generation,
+                 'status', status
+             )
+             FROM parity_sync_queue
+             WHERE id = ?1",
+            params![item_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .expect("fingerprint queue row")
+    }
+
+    fn full_order_payment_row_fingerprint(conn: &Connection, payment_id: &str) -> Option<String> {
+        let columns = {
+            let mut stmt = conn
+                .prepare("PRAGMA table_info(order_payments)")
+                .expect("prepare order_payments columns");
+            stmt.query_map([], |row| row.get::<_, String>(1))
+                .expect("query order_payments columns")
+                .map(|row| row.expect("read order_payments column"))
+                .collect::<Vec<_>>()
+        };
+        let quoted_columns = columns
+            .iter()
+            .map(|column| format!("\"{}\"", column.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        conn.query_row(
+            &format!("SELECT {quoted_columns} FROM order_payments WHERE id = ?1"),
+            params![payment_id],
+            |row| {
+                let mut fingerprint = Vec::with_capacity(columns.len());
+                for (index, column) in columns.iter().enumerate() {
+                    let value = match row.get_ref(index)? {
+                        rusqlite::types::ValueRef::Null => "null".to_string(),
+                        rusqlite::types::ValueRef::Integer(value) => format!("i:{value}"),
+                        rusqlite::types::ValueRef::Real(value) => {
+                            format!("r:{:016x}", value.to_bits())
+                        }
+                        rusqlite::types::ValueRef::Text(value) => {
+                            format!("t:{}", String::from_utf8_lossy(value))
+                        }
+                        rusqlite::types::ValueRef::Blob(value) => format!(
+                            "b:{}",
+                            value
+                                .iter()
+                                .map(|byte| format!("{byte:02x}"))
+                                .collect::<String>()
+                        ),
+                    };
+                    fingerprint.push(format!("{column}={value}"));
+                }
+                Ok(fingerprint.join("|"))
+            },
+        )
+        .optional()
+        .expect("fingerprint order payment row")
+    }
+
+    fn full_table_rows_fingerprint(
+        conn: &Connection,
+        table_name: &str,
+        id_prefix: &str,
+    ) -> Vec<String> {
+        assert!(
+            matches!(
+                table_name,
+                "orders" | "order_payments" | "payment_adjustments" | "conflict_audit_log"
+            ),
+            "test helper table must be allowlisted"
+        );
+        let columns = {
+            let mut stmt = conn
+                .prepare(&format!("PRAGMA table_info(\"{table_name}\")"))
+                .expect("prepare table fingerprint columns");
+            stmt.query_map([], |row| row.get::<_, String>(1))
+                .expect("query table fingerprint columns")
+                .map(|row| row.expect("read table fingerprint column"))
+                .collect::<Vec<_>>()
+        };
+        let quoted_columns = columns
+            .iter()
+            .map(|column| format!("\"{}\"", column.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT {quoted_columns} FROM \"{table_name}\"
+                 WHERE id LIKE ?1 ORDER BY id"
+            ))
+            .expect("prepare full table fingerprint");
+        stmt.query_map([format!("{id_prefix}%")], |row| {
+            let mut fingerprint = Vec::with_capacity(columns.len());
+            for (index, column) in columns.iter().enumerate() {
+                let value = match row.get_ref(index)? {
+                    rusqlite::types::ValueRef::Null => "null".to_string(),
+                    rusqlite::types::ValueRef::Integer(value) => format!("i:{value}"),
+                    rusqlite::types::ValueRef::Real(value) => {
+                        format!("r:{:016x}", value.to_bits())
+                    }
+                    rusqlite::types::ValueRef::Text(value) => {
+                        format!("t:{}", String::from_utf8_lossy(value))
+                    }
+                    rusqlite::types::ValueRef::Blob(value) => format!(
+                        "b:{}",
+                        value
+                            .iter()
+                            .map(|byte| format!("{byte:02x}"))
+                            .collect::<String>()
+                    ),
+                };
+                fingerprint.push(format!("{column}={value}"));
+            }
+            Ok(fingerprint.join("|"))
+        })
+        .expect("query full table fingerprint")
+        .map(|row| row.expect("read full table fingerprint row"))
+        .collect()
+    }
+
+    #[derive(Debug)]
+    struct SemanticMatrixGraph {
+        order_remote_id: String,
+        payment_id: String,
+        adjustment_id: String,
+    }
+
+    fn seed_semantic_matrix_graph(
+        conn: &Connection,
+        prefix: &str,
+        order_context: &str,
+    ) -> SemanticMatrixGraph {
+        let order_id = format!("{prefix}-order");
+        let order_remote_id = format!("{prefix}-order-remote");
+        let payment_id = format!("{prefix}-payment");
+        let adjustment_id = format!("{prefix}-adjustment");
+        conn.execute(
+            "INSERT INTO orders (
+                 id, supabase_id, items, total_amount, status, sync_status,
+                 order_context, created_at, updated_at
+             ) VALUES (?1, ?2, '[]', 9.50, 'ready', 'synced', ?3,
+                       '2026-08-26T07:00:00Z', '2026-08-26T07:00:00Z')",
+            params![order_id, order_remote_id, order_context],
+        )
+        .expect("seed semantic matrix order");
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, amount_cents, currency, status,
+                 sync_status, sync_state, created_at, updated_at
+             ) VALUES (?1, ?2, 'cash', 9.50, 950, 'EUR', 'completed',
+                       'failed', 'failed', '2026-08-26T07:00:00Z',
+                       '2026-08-26T07:00:00Z')",
+            params![payment_id, order_id],
+        )
+        .expect("seed semantic matrix payment");
+        conn.execute(
+            "INSERT INTO payment_adjustments (
+                 id, payment_id, order_id, adjustment_type, amount, reason,
+                 sync_state, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, 'refund', 1.00,
+                       'semantic matrix private adjustment', 'failed',
+                       '2026-08-26T07:00:00Z', '2026-08-26T07:00:00Z')",
+            params![adjustment_id, payment_id, order_id],
+        )
+        .expect("seed semantic matrix adjustment");
+        SemanticMatrixGraph {
+            order_remote_id,
+            payment_id,
+            adjustment_id,
+        }
+    }
+
+    fn semantic_matrix_record_id<'a>(family: &str, graph: &'a SemanticMatrixGraph) -> &'a str {
+        match family {
+            "orders" => graph.order_remote_id.as_str(),
+            "payments" | "order_payments" => graph.payment_id.as_str(),
+            "payment_adjustments" => graph.adjustment_id.as_str(),
+            _ => panic!("unsupported semantic matrix family: {family}"),
+        }
+    }
+
+    fn seed_semantic_matrix_queue_row(
+        conn: &Connection,
+        queue_id: &str,
+        table_name: &str,
+        record_id: &str,
+    ) {
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, last_attempt, error_message, retry_delay_ms,
+                 priority, module_type, conflict_strategy, version,
+                 claim_generation, status
+             ) VALUES (?1, ?2, ?3, 'INSERT', ?4, 'semantic-matrix-org',
+                       '2000-01-01T00:00:00Z', 3, '2000-01-01T00:00:00Z',
+                       'semantic matrix private error', 64000, 100,
+                       'semantic-matrix', 'manual', 7, 4, 'failed')",
+            params![
+                queue_id,
+                table_name,
+                record_id,
+                format!("semantic-matrix-private-payload-{queue_id}")
+            ],
+        )
+        .expect("seed semantic matrix queue row");
+    }
+
+    fn semantic_matrix_variants(value: &str) -> Vec<(&'static str, String)> {
+        vec![
+            ("exact", value.to_string()),
+            ("uppercase", value.to_ascii_uppercase()),
+            ("ascii-space", format!(" {value} ")),
+            ("tab", format!("\t{value}\t")),
+            ("nbsp", format!("\u{00a0}{value}\u{00a0}")),
+            ("em-space", format!("\u{2003}{value}\u{2003}")),
+        ]
     }
 
     fn enqueue_test_item(
@@ -7644,6 +10780,83 @@ mod tests {
         assert_eq!(warning.replayable, 0);
     }
 
+    #[test]
+    fn generic_enqueue_rejects_every_semantic_reserved_repair_owner_without_mutation() {
+        let conn = test_connection();
+        let before_usage = capacity_usage(&conn).expect("read empty queue capacity");
+        let variants = [
+            (Some("REPAIRS"), "orders"),
+            (Some(" repairs "), "orders"),
+            (Some("\trepairs\r\n"), "orders"),
+            (Some("\u{2003}repairs\u{2003}"), "orders"),
+            (Some("orders"), "REPAIRS"),
+            (Some("orders"), " repairs "),
+            (Some("orders"), "\trepair_attachments\n"),
+            (Some("orders"), "\u{2003}repair_attachments\u{2003}"),
+        ];
+
+        for (index, (module_type, table_name)) in variants.into_iter().enumerate() {
+            let sentinel = format!("private-repair-like-payload-{index}");
+            let error = enqueue(
+                &conn,
+                &EnqueueInput {
+                    table_name: table_name.to_string(),
+                    record_id: format!("reserved-owner-{index}"),
+                    operation: "INSERT".to_string(),
+                    data: sentinel.clone(),
+                    organization_id: "reserved-owner-org".to_string(),
+                    priority: Some(1),
+                    module_type: module_type.map(str::to_string),
+                    conflict_strategy: Some("server-wins".to_string()),
+                    version: Some(1),
+                },
+            )
+            .expect_err("semantic repair owner must require the native producer");
+            assert_eq!(error, "REPAIR_NATIVE_PRODUCER_REQUIRED");
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM parity_sync_queue WHERE data = ?1",
+                    [sentinel],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("count rejected payload rows"),
+                0,
+                "rejected variant {index} mutated SQLite"
+            );
+            let after_usage = capacity_usage(&conn).expect("read capacity after rejection");
+            assert_eq!(
+                (after_usage.replayable, after_usage.conflicts),
+                (before_usage.replayable, before_usage.conflicts),
+                "rejected variant {index} consumed queue capacity"
+            );
+        }
+
+        let generic_id = enqueue(
+            &conn,
+            &EnqueueInput {
+                table_name: " CuStOmErS ".to_string(),
+                record_id: "mixed-case-generic-control".to_string(),
+                operation: "INSERT".to_string(),
+                data: "{\"control\":true}".to_string(),
+                organization_id: "mixed-case-generic-org".to_string(),
+                priority: Some(1),
+                module_type: Some(" OrDeRs ".to_string()),
+                conflict_strategy: Some("server-wins".to_string()),
+                version: Some(1),
+            },
+        )
+        .expect("unrelated mixed-case identifiers preserve generic behavior");
+        assert_eq!(
+            conn.query_row(
+                "SELECT table_name, module_type FROM parity_sync_queue WHERE id = ?1",
+                [generic_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .expect("read generic control row"),
+            (" CuStOmErS ".to_string(), " OrDeRs ".to_string())
+        );
+    }
+
     async fn spawn_mock_http_server(
         responses: Vec<MockResponse>,
     ) -> (
@@ -7668,6 +10881,55 @@ mod tests {
         });
 
         (format!("http://{}", address), rx, handle)
+    }
+
+    async fn spawn_blocked_first_response_server(
+        first_response: MockResponse,
+    ) -> (
+        String,
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<Vec<CapturedRequest>>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind blocked-response server");
+        let address = listener
+            .local_addr()
+            .expect("blocked-response server address");
+        let (observed_tx, observed_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let (mut first_stream, _) = listener.accept().await.expect("accept first request");
+            let first = read_http_request(&mut first_stream).await;
+            observed_tx
+                .send(())
+                .expect("signal blocked first response observed");
+            release_rx.await.expect("release blocked first response");
+            write_http_response(&mut first_stream, &first_response)
+                .await
+                .expect("write blocked first response");
+
+            let mut requests = vec![first];
+            if let Ok(Ok((mut extra_stream, _))) =
+                tokio::time::timeout(Duration::from_millis(500), listener.accept()).await
+            {
+                let extra = read_http_request(&mut extra_stream).await;
+                write_http_response(
+                    &mut extra_stream,
+                    &MockResponse::json(
+                        200,
+                        r#"{"success":true,"data":{"id":"unexpected-follow-up"},"version":2}"#,
+                    ),
+                )
+                .await
+                .expect("write unexpected follow-up response");
+                requests.push(extra);
+            }
+            requests
+        });
+
+        (format!("http://{address}"), observed_rx, release_tx, handle)
     }
 
     async fn read_http_request(stream: &mut tokio::net::TcpStream) -> CapturedRequest {
@@ -7822,6 +11084,202 @@ mod tests {
             resolve_endpoint(&address_item),
             "/api/pos/sync/customer_addresses/addr-1"
         );
+    }
+
+    #[test]
+    fn prepare_customer_replay_preserves_explicit_non_greek_country_context() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        let item = queue_item(
+            "customers",
+            "INSERT",
+            "customer-de",
+            json!({
+                "name": "Berlin",
+                "phone": "030 901820",
+                "phone_country_code": "DE"
+            }),
+        );
+
+        let RequestPreparation::Ready(spec) =
+            prepare_request(&conn, &item).expect("prepare explicit country replay")
+        else {
+            panic!("explicit country replay must be ready")
+        };
+        let body: Value =
+            serde_json::from_str(spec.body.as_deref().expect("body")).expect("parse body");
+        assert_eq!(body["phone"], "030 901820");
+        assert_eq!(body["phone_country_code"], "DE");
+    }
+
+    #[test]
+    fn prepare_customer_replay_upgrades_legacy_international_without_country_guess() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        let item = queue_item(
+            "customers",
+            "INSERT",
+            "customer-intl",
+            json!({ "name": "Berlin", "phone": "+49 30 901820" }),
+        );
+
+        let RequestPreparation::Ready(spec) =
+            prepare_request(&conn, &item).expect("prepare legacy international replay")
+        else {
+            panic!("international replay must be ready")
+        };
+        let body: Value =
+            serde_json::from_str(spec.body.as_deref().expect("body")).expect("parse body");
+        assert_eq!(body["phone"], "+49 30 901820");
+        assert_eq!(body.get("phone_country_code"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn prepare_customer_replay_parks_legacy_national_without_country() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        let item = queue_item(
+            "customers",
+            "UPDATE",
+            "customer-gb",
+            json!({ "phone": "020 7946 0018", "version": 4 }),
+        );
+
+        match prepare_request(&conn, &item).expect("classify legacy national replay") {
+            RequestPreparation::ManualResolution { reason_code } => {
+                assert_eq!(reason_code, "CUSTOMER_PHONE_COUNTRY_CONTEXT_REQUIRED")
+            }
+            other => panic!("expected manual resolution, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prepare_customer_replay_parks_unsupported_country_for_insert_and_update() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        for operation in ["INSERT", "UPDATE"] {
+            let item = queue_item(
+                "customers",
+                operation,
+                &format!("customer-zz-{operation}"),
+                json!({
+                    "name": "Unsupported context",
+                    "phone": "020 7946 0018",
+                    "phone_country_code": "ZZ"
+                }),
+            );
+
+            match prepare_request(&conn, &item).expect("classify unsupported country replay") {
+                RequestPreparation::ManualResolution { reason_code } => {
+                    assert_eq!(reason_code, "CUSTOMER_PHONE_COUNTRY_CONTEXT_INVALID")
+                }
+                other => panic!("expected manual resolution, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn customer_manual_resolution_parking_survives_reopen_and_is_not_requeued() {
+        let path = std::env::temp_dir().join(format!(
+            "the-small-customer-country-{}.sqlite",
+            Uuid::new_v4()
+        ));
+        let item_id = {
+            let conn = Connection::open(&path).expect("open queue database");
+            crate::db::run_migrations_for_test(&conn);
+            create_tables(&conn).expect("create queue tables");
+            let id = enqueue_test_item(
+                &conn,
+                "customers",
+                "INSERT",
+                "legacy-national",
+                json!({ "name": "Legacy", "phone": "020 7946 0018" }),
+            );
+            let claimed = dequeue(&conn).expect("dequeue").expect("claimed row");
+            park_customer_phone_country_resolution(
+                &conn,
+                &claimed.id,
+                claimed.claim_generation,
+                "CUSTOMER_PHONE_COUNTRY_CONTEXT_REQUIRED",
+            )
+            .expect("park manual resolution");
+            id
+        };
+
+        {
+            let reopened = Connection::open(&path).expect("reopen queue database");
+            assert!(dequeue(&reopened).expect("dequeue after restart").is_none());
+            let (status, attempts, error): (String, i64, String) = reopened
+                .query_row(
+                    "SELECT status, attempts, error_message FROM parity_sync_queue WHERE id = ?1",
+                    params![item_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .expect("read parked row");
+            assert_eq!(status, "conflict");
+            assert_eq!(attempts, 0);
+            assert_eq!(error, "CUSTOMER_PHONE_COUNTRY_CONTEXT_REQUIRED");
+            assert!(!error.contains("020"));
+        }
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn unsupported_customer_country_parking_survives_reopen_without_pii() {
+        let path = std::env::temp_dir().join(format!(
+            "the-small-customer-unsupported-country-{}.sqlite",
+            Uuid::new_v4()
+        ));
+        let item_id = {
+            let conn = Connection::open(&path).expect("open queue database");
+            crate::db::run_migrations_for_test(&conn);
+            create_tables(&conn).expect("create queue tables");
+            let id = enqueue_test_item(
+                &conn,
+                "customers",
+                "UPDATE",
+                "legacy-unsupported",
+                json!({
+                    "phone": "020 7946 0018",
+                    "phone_country_code": "ZZ",
+                    "version": 4
+                }),
+            );
+            let claimed = dequeue(&conn).expect("dequeue").expect("claimed row");
+            let RequestPreparation::ManualResolution { reason_code } =
+                prepare_request(&conn, &claimed).expect("classify unsupported context")
+            else {
+                panic!("unsupported country must require manual resolution")
+            };
+            park_customer_phone_country_resolution(
+                &conn,
+                &claimed.id,
+                claimed.claim_generation,
+                &reason_code,
+            )
+            .expect("park manual resolution");
+            id
+        };
+
+        {
+            let reopened = Connection::open(&path).expect("reopen queue database");
+            assert!(dequeue(&reopened).expect("dequeue after restart").is_none());
+            let (status, attempts, error): (String, i64, String) = reopened
+                .query_row(
+                    "SELECT status, attempts, error_message FROM parity_sync_queue WHERE id = ?1",
+                    params![item_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .expect("read parked row");
+            assert_eq!(status, "conflict");
+            assert_eq!(attempts, 0);
+            assert_eq!(error, "CUSTOMER_PHONE_COUNTRY_CONTEXT_INVALID");
+            assert!(!error.contains("020"));
+            assert!(!error.contains("ZZ"));
+        }
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -9896,6 +13354,1215 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
+    fn renderer_claim_atomically_rechecks_repair_settlement_ownership_after_writer_commit() {
+        let (fixture, setup) = FileBackedTestDb::new("renderer-claim-owner-race");
+        setup
+            .execute_batch(
+                "INSERT INTO orders (
+                     id, supabase_id, items, total_amount, status, sync_status,
+                     order_context, created_at, updated_at
+                 ) VALUES (
+                     'race-repair-order', 'race-repair-remote', '[]', 9.50,
+                     'pending', 'pending', NULL, datetime('now'), datetime('now')
+                 ), (
+                     'race-normal-order', 'race-normal-remote', '[]', 4.79,
+                     'pending', 'pending', NULL, datetime('now'), datetime('now')
+                 );
+
+                 INSERT INTO parity_sync_queue (
+                     id, table_name, record_id, operation, data, organization_id,
+                     created_at, attempts, retry_delay_ms, priority, module_type,
+                     conflict_strategy, version, claim_generation, status
+                 ) VALUES (
+                     'race-repair-queue', ' Orders ', 'race-repair-remote', 'UPDATE',
+                     '{\"status\":\"ready\"}', 'org-race', '2026-08-26T07:00:00Z',
+                     0, 1000, 100, ' Orders ', 'server-wins', 1, 0, 'pending'
+                 ), (
+                     'race-normal-queue', 'orders', 'race-normal-order', 'UPDATE',
+                     '{\"status\":\"ready\"}', 'org-race', '2026-08-26T07:00:01Z',
+                     0, 1000, 1, 'orders', 'server-wins', 1, 0, 'pending'
+                 );",
+            )
+            .expect("seed claim race");
+        let repair_before = full_queue_row_fingerprint(&setup, "race-repair-queue");
+
+        let mut writer = fixture.open_race_connection();
+        let worker = fixture.open_race_connection();
+        let transaction = writer
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .expect("begin competing owner update");
+        transaction
+            .execute(
+                "UPDATE orders
+                 SET order_context = '  RePaIr_SeTtLeMeNt  '
+                 WHERE id = 'race-repair-order'",
+                [],
+            )
+            .expect("stage repair settlement ownership");
+
+        RENDERER_RACE_WAITING_ON_WRITE.store(false, std::sync::atomic::Ordering::SeqCst);
+        let claim = std::thread::spawn(move || renderer_dequeue(&worker));
+        wait_until_renderer_write_is_blocked();
+        transaction
+            .commit()
+            .expect("commit repair settlement owner");
+
+        let claimed = claim
+            .join()
+            .expect("join renderer claimant")
+            .expect("claim queue row")
+            .expect("normal row remains claimable");
+        assert_eq!(claimed.id, "race-normal-queue");
+        assert_eq!(claimed.status, "processing");
+        assert_eq!(claimed.claim_generation, 1);
+        assert_eq!(
+            full_queue_row_fingerprint(&setup, "race-repair-queue"),
+            repair_before,
+            "claim-time ownership change must leave the settlement queue row byte-for-byte unchanged"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn superseded_cleanup_rechecks_repair_settlement_ownership_at_delete_boundary() {
+        let (fixture, setup) = FileBackedTestDb::new("renderer-cleanup-owner-race");
+        setup
+            .execute_batch(
+                "INSERT INTO orders (
+                     id, supabase_id, items, total_amount, status, sync_status,
+                     order_context, created_at, updated_at
+                 ) VALUES (
+                     'cleanup-race-order', 'cleanup-race-remote', '[]', 9.50,
+                     'completed', 'synced', NULL, datetime('now'), datetime('now')
+                 );
+
+                 INSERT INTO parity_sync_queue (
+                     id, table_name, record_id, operation, data, organization_id,
+                     created_at, attempts, last_attempt, error_message, retry_delay_ms,
+                     priority, module_type, conflict_strategy, version, claim_generation, status
+                 ) VALUES (
+                     'cleanup-race-queue', 'orders', 'cleanup-race-order', 'UPDATE',
+                     '{\"orderId\":\"cleanup-race-order\",\"status\":\"pending\"}',
+                     'org-race', '2026-08-26T07:00:00Z', 1,
+                     '2026-08-26T07:01:00Z', 'HTTP 400: Invalid status transition',
+                     1000, 1, 'orders', 'server-wins', 1, 0, 'failed'
+                 );",
+            )
+            .expect("seed cleanup race");
+        let queue_before = full_queue_row_fingerprint(&setup, "cleanup-race-queue");
+
+        let mut writer = fixture.open_race_connection();
+        let worker = fixture.open_race_connection();
+        let transaction = writer
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .expect("begin competing cleanup owner update");
+        transaction
+            .execute(
+                "UPDATE orders
+                 SET order_context = '  REPAIR_SETTLEMENT  '
+                 WHERE id = 'cleanup-race-order'",
+                [],
+            )
+            .expect("stage cleanup repair ownership");
+
+        RENDERER_RACE_WAITING_ON_WRITE.store(false, std::sync::atomic::Ordering::SeqCst);
+        let cleanup =
+            std::thread::spawn(move || cleanup_superseded_synced_order_status_updates(&worker));
+        wait_until_renderer_write_is_blocked();
+        transaction.commit().expect("commit cleanup repair owner");
+
+        assert_eq!(
+            cleanup
+                .join()
+                .expect("join cleanup worker")
+                .expect("run superseded cleanup"),
+            0
+        );
+        assert_eq!(
+            full_queue_row_fingerprint(&setup, "cleanup-race-queue"),
+            queue_before,
+            "cleanup mutation must revalidate ownership after waiting for the writer"
+        );
+    }
+
+    #[test]
+    fn renderer_surfaces_and_mutators_exclude_normalized_repair_financial_owners() {
+        let conn = test_connection();
+        conn.execute_batch(
+            "INSERT INTO orders (
+                 id, supabase_id, items, total_amount, status, sync_status,
+                 order_context, created_at, updated_at
+             ) VALUES (
+                 'renderer-owner-repair', 'renderer-owner-repair-remote', '[]', 9.50,
+                 'ready', 'synced', '  RePaIr_SeTtLeMeNt  ', datetime('now'), datetime('now')
+             ), (
+                 'renderer-owner-normal', 'renderer-owner-normal-remote', '[]', 4.79,
+                 'pending', 'pending', NULL, datetime('now'), datetime('now')
+             );
+
+             INSERT INTO order_payments (
+                 id, order_id, method, amount, amount_cents, currency, status,
+                 sync_status, sync_state, created_at, updated_at
+             ) VALUES (
+                 'renderer-owner-repair-payment', 'renderer-owner-repair', 'cash',
+                 9.50, 950, 'EUR', 'completed', 'failed', 'failed',
+                 datetime('now'), datetime('now')
+             ), (
+                 'renderer-owner-normal-payment', 'renderer-owner-normal', 'cash',
+                 4.79, 479, 'EUR', 'completed', 'failed', 'failed',
+                 datetime('now'), datetime('now')
+             );
+
+             INSERT INTO payment_adjustments (
+                 id, payment_id, order_id, adjustment_type, amount, reason,
+                 sync_state, created_at, updated_at
+             ) VALUES (
+                 'renderer-owner-repair-adjustment', 'renderer-owner-repair-payment',
+                 'renderer-owner-repair', 'refund', 1.00, 'repair adjustment sentinel',
+                 'failed', datetime('now'), datetime('now')
+             );",
+        )
+        .expect("seed renderer ownership graph");
+
+        for (id, table_name, record_id, status, priority, module_type) in [
+            (
+                "renderer-case-module-repair",
+                " Orders ",
+                "renderer-owner-repair-remote",
+                "pending",
+                100,
+                " Repairs ",
+            ),
+            (
+                "renderer-owned-order",
+                " Orders ",
+                "renderer-owner-repair-remote",
+                "pending",
+                90,
+                " Orders ",
+            ),
+            (
+                "renderer-owned-payment",
+                " Payments ",
+                "renderer-owner-repair-payment",
+                "failed",
+                80,
+                "payments",
+            ),
+            (
+                "renderer-owned-order-payment",
+                " order_payments ",
+                "renderer-owner-repair-payment",
+                "conflict",
+                70,
+                "payments",
+            ),
+            (
+                "renderer-owned-adjustment",
+                " Payment_Adjustments ",
+                "renderer-owner-repair-adjustment",
+                "failed",
+                60,
+                "payments",
+            ),
+            (
+                "renderer-normal-order",
+                "orders",
+                "renderer-owner-normal",
+                "pending",
+                2,
+                "orders",
+            ),
+            (
+                "renderer-normal-payment",
+                "payments",
+                "renderer-owner-normal-payment",
+                "failed",
+                1,
+                "payments",
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO parity_sync_queue (
+                     id, table_name, record_id, operation, data, organization_id,
+                     created_at, attempts, last_attempt, error_message, next_retry_at,
+                     retry_delay_ms, priority, module_type, conflict_strategy, version,
+                     claim_generation, status
+                 ) VALUES (
+                     ?1, ?2, ?3, 'UPDATE', '{\"sentinel\":true}', 'renderer-owner-org',
+                     '2026-08-26T07:00:00Z', 5, '2026-08-26T07:01:00Z',
+                     'renderer owner error sentinel', NULL,
+                     64000, ?5, ?6, 'manual', 7, 4, ?4
+                 )",
+                params![id, table_name, record_id, status, priority, module_type],
+            )
+            .expect("seed renderer queue ownership row");
+        }
+
+        let repair_queue_ids = [
+            "renderer-case-module-repair",
+            "renderer-owned-order",
+            "renderer-owned-payment",
+            "renderer-owned-order-payment",
+            "renderer-owned-adjustment",
+        ];
+        let repair_queue_before = repair_queue_ids
+            .iter()
+            .map(|id| full_queue_row_fingerprint(&conn, id))
+            .collect::<Vec<_>>();
+        let payment_before =
+            full_order_payment_row_fingerprint(&conn, "renderer-owner-repair-payment");
+        let adjustment_before: (String, String, String, String, f64, String) = conn
+            .query_row(
+                "SELECT id, payment_id, order_id, adjustment_type, amount, reason
+                 FROM payment_adjustments
+                 WHERE id = 'renderer-owner-repair-adjustment'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .expect("fingerprint repair adjustment");
+
+        assert_eq!(
+            renderer_peek(&conn)
+                .expect("peek renderer queue")
+                .map(|item| item.id),
+            Some("renderer-normal-order".to_string())
+        );
+        assert_eq!(
+            renderer_get_length(&conn).expect("renderer queue length"),
+            2
+        );
+        let status = renderer_get_status(&conn).expect("renderer queue status");
+        assert_eq!(
+            (
+                status.total,
+                status.pending,
+                status.failed,
+                status.conflicts
+            ),
+            (2, 1, 1, 0)
+        );
+        let actionable = renderer_list_actionable_items(
+            &conn,
+            &QueueListQuery {
+                module_type: None,
+                limit: Some(50),
+            },
+        )
+        .expect("list renderer queue")
+        .into_iter()
+        .map(|item| item.id)
+        .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            actionable,
+            [
+                "renderer-normal-order".to_string(),
+                "renderer-normal-payment".to_string()
+            ]
+            .into_iter()
+            .collect()
+        );
+
+        assert_eq!(
+            renderer_retry_item(&conn, "renderer-case-module-repair").unwrap_err(),
+            "REPAIR_TYPED_CONFLICT_REQUIRED"
+        );
+        for item_id in [
+            "renderer-owned-order",
+            "renderer-owned-payment",
+            "renderer-owned-order-payment",
+            "renderer-owned-adjustment",
+        ] {
+            assert_eq!(
+                renderer_retry_item(&conn, item_id).unwrap_err(),
+                "REPAIR_SETTLEMENT_ROUTE_REQUIRED"
+            );
+        }
+        assert_eq!(
+            renderer_retry_items_by_module(&conn, "payments")
+                .expect("retry normal payment module")
+                .retried,
+            1
+        );
+
+        for (entity_type, entity_id) in [
+            ("orders", "renderer-owner-repair-remote"),
+            ("payments", "renderer-owner-repair-payment"),
+            ("payment_adjustments", "renderer-owner-repair-adjustment"),
+            ("orders", "renderer-owner-normal"),
+        ] {
+            log_conflict(
+                &conn,
+                "UPDATE",
+                entity_id,
+                entity_type,
+                1,
+                2,
+                "conflict payload sentinel",
+                "manual",
+                true,
+                false,
+            )
+            .expect("seed conflict audit entry");
+        }
+        let renderer_conflicts =
+            renderer_list_conflict_audit_entries(&conn, 50).expect("list renderer conflict audit");
+        assert_eq!(renderer_conflicts.len(), 1);
+        assert_eq!(renderer_conflicts[0].entity_id, "renderer-owner-normal");
+
+        renderer_clear(&conn).expect("clear renderer-owned generic rows");
+        let repair_queue_after = repair_queue_ids
+            .iter()
+            .map(|id| full_queue_row_fingerprint(&conn, id))
+            .collect::<Vec<_>>();
+        assert_eq!(repair_queue_after, repair_queue_before);
+        assert_eq!(
+            renderer_get_length(&conn).expect("renderer length after clear"),
+            0
+        );
+        assert_eq!(
+            full_order_payment_row_fingerprint(&conn, "renderer-owner-repair-payment"),
+            payment_before
+        );
+        let adjustment_after: (String, String, String, String, f64, String) = conn
+            .query_row(
+                "SELECT id, payment_id, order_id, adjustment_type, amount, reason
+                 FROM payment_adjustments
+                 WHERE id = 'renderer-owner-repair-adjustment'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .expect("read repair adjustment after renderer operations");
+        assert_eq!(adjustment_after, adjustment_before);
+    }
+
+    #[test]
+    fn poison_inserted_after_outer_quarantine_is_counted_only_at_atomic_claim() {
+        let conn = test_connection();
+        let mut quarantined =
+            quarantine_reserved_repair_lookalikes(&conn).expect("empty outer quarantine");
+        assert_eq!(quarantined, 0);
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, last_attempt, retry_delay_ms, priority,
+                 module_type, conflict_strategy, version, claim_generation, status
+             ) VALUES (
+                 'outer-recovery-gap-poison', '\u{2003}repairs\u{2003}',
+                 'outer-recovery-gap-private-record', 'UPDATE',
+                 'outer-recovery-gap-private-payload', 'outer-recovery-gap-org',
+                 '2000-01-01T00:00:00Z', 2, '2000-01-01T00:00:00Z', 1000,
+                 100, '\u{2003}orders\u{2003}', 'manual', 1, 6, 'processing'
+             )",
+            [],
+        )
+        .expect("insert poison between outer quarantine and recovery");
+        let before_recovery = full_queue_row_fingerprint(&conn, "outer-recovery-gap-poison");
+        assert_eq!(
+            recover_stale_processing_items(&conn).expect("run semantically fenced recovery"),
+            0
+        );
+        assert_eq!(
+            full_queue_row_fingerprint(&conn, "outer-recovery-gap-poison"),
+            before_recovery,
+            "recovery must not hide an uncounted quarantine transition"
+        );
+        let (item, claim_quarantined) =
+            dequeue_with_quarantine_count(&conn).expect("run counted atomic claim");
+        quarantined += claim_quarantined;
+        assert!(item.is_none());
+        assert_eq!(quarantined, 1);
+        assert_eq!(
+            conn.query_row(
+                "SELECT status, claim_generation FROM parity_sync_queue
+                 WHERE id = 'outer-recovery-gap-poison'",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .expect("read recovery-gap quarantine"),
+            ("failed".to_string(), 7)
+        );
+    }
+
+    #[test]
+    fn terminal_auth_classifier_accepts_only_bounded_canonical_codes() {
+        assert!(parse_parity_terminal_auth_failure(
+            401,
+            r#"{"success":false,"code":"terminal_inactive","terminalActive":false}"#,
+        )
+        .is_some());
+        for (status, body) in [
+            (
+                401,
+                r#"{"success":false,"error":"private auth sentinel"}"#.to_string(),
+            ),
+            (
+                403,
+                r#"{"success":false,"code":"private_provider_code"}"#.to_string(),
+            ),
+            (
+                500,
+                r#"{"success":false,"code":"terminal_inactive"}"#.to_string(),
+            ),
+            (
+                401,
+                format!(
+                    r#"{{"success":false,"code":"terminal_inactive","padding":"{}"}}"#,
+                    "x".repeat(17 * 1024)
+                ),
+            ),
+        ] {
+            assert!(
+                parse_parity_terminal_auth_failure(status, &body).is_none(),
+                "unbounded/noncanonical auth payload was classified"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn renderer_safe_preserves_repair_rows_while_internal_prepass_quarantines_lookalikes() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        conn.execute(
+            "INSERT INTO orders (
+                 id, supabase_id, items, total_amount, status, sync_status,
+                 created_at, updated_at
+             ) VALUES (
+                 'order-renderer-repair-cleanup', 'remote-renderer-repair-cleanup',
+                 '[]', 27.0, 'cancelled', 'synced', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed synced order that activates superseded cleanup");
+
+        for (id, table_name, record_id, module_type, data) in [
+            (
+                "repair-module-half-cleanup",
+                "orders",
+                "order-renderer-repair-cleanup",
+                "repairs",
+                json!({
+                    "orderId": "order-renderer-repair-cleanup",
+                    "orderType": "delivery",
+                    "status": "delivered",
+                    "driverName": "repair-module-half-driver-sentinel",
+                    "ciphertext": "repair-module-half-ciphertext-sentinel"
+                })
+                .to_string(),
+            ),
+            (
+                "repair-exact-cleanup-control",
+                "repairs",
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "repairs",
+                json!({"ciphertext": "repair-exact-ciphertext-sentinel"}).to_string(),
+            ),
+            (
+                "repair-table-half-cleanup-control",
+                "repair_attachments",
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "orders",
+                json!({"ciphertext": "repair-table-half-ciphertext-sentinel"}).to_string(),
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO parity_sync_queue (
+                     id, table_name, record_id, operation, data, organization_id,
+                     created_at, attempts, last_attempt, error_message, next_retry_at,
+                     retry_delay_ms, priority, module_type, conflict_strategy, version,
+                     repair_aggregate_id, claim_generation, status
+                 ) VALUES (
+                     ?1, ?2, ?3, 'UPDATE', ?4, 'repair-renderer-private-org',
+                     '2026-08-26T07:00:00Z', 7, '2026-08-26T07:01:00Z',
+                     'HTTP 400: Invalid status transition: repair-renderer-private-error',
+                     '2026-08-27T07:00:00Z',
+                     64000, 9, ?5, 'server-wins', 11,
+                     'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 5, 'failed'
+                 )",
+                params![id, table_name, record_id, data, module_type],
+            )
+            .expect("seed repair-shaped queue row");
+        }
+
+        let item_ids = [
+            "repair-module-half-cleanup",
+            "repair-exact-cleanup-control",
+            "repair-table-half-cleanup-control",
+        ];
+        let before = item_ids
+            .iter()
+            .map(|item_id| full_queue_row_fingerprint(&conn, item_id))
+            .collect::<Vec<_>>();
+        let db = std::sync::Mutex::new(conn);
+
+        let result = process_queue_renderer_safe(&db, "http://127.0.0.1:9", "test-api-key")
+            .await
+            .expect("renderer-safe process must not require repair transport");
+        assert_eq!(result.processed, 0);
+
+        let conn = db.lock().expect("lock queue after renderer-safe process");
+        let after = item_ids
+            .iter()
+            .map(|item_id| full_queue_row_fingerprint(&conn, item_id))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            after, before,
+            "renderer-safe pre-dequeue path mutated repair data"
+        );
+        drop(conn);
+
+        let result = process_queue(&db, "http://127.0.0.1:9", "test-api-key")
+            .await
+            .expect("internal process must quarantine rather than rewrite malformed repair rows");
+        assert_eq!(result.processed, 0);
+        let conn = db.lock().expect("lock queue after internal process");
+        assert_eq!(
+            full_queue_row_fingerprint(&conn, "repair-exact-cleanup-control"),
+            before[1],
+            "internal prepass must preserve canonical native repair state"
+        );
+        for (id, expected_payload) in [
+            (
+                "repair-module-half-cleanup",
+                json!({
+                    "orderId": "order-renderer-repair-cleanup",
+                    "orderType": "delivery",
+                    "status": "delivered",
+                    "driverName": "repair-module-half-driver-sentinel",
+                    "ciphertext": "repair-module-half-ciphertext-sentinel"
+                })
+                .to_string(),
+            ),
+            (
+                "repair-table-half-cleanup-control",
+                json!({"ciphertext": "repair-table-half-ciphertext-sentinel"}).to_string(),
+            ),
+        ] {
+            let (status, error, next_retry_at, payload, generation): (
+                String,
+                Option<String>,
+                Option<String>,
+                String,
+                i64,
+            ) = conn
+                .query_row(
+                    "SELECT status, error_message, next_retry_at, data, claim_generation
+                       FROM parity_sync_queue WHERE id = ?1",
+                    [id],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    },
+                )
+                .expect("read internally quarantined lookalike");
+            assert_eq!(status, "failed");
+            assert_eq!(error.as_deref(), Some(REPAIR_RESERVED_OWNER_QUARANTINED));
+            assert!(next_retry_at.is_none());
+            assert_eq!(
+                payload, expected_payload,
+                "quarantine rewrote private payload"
+            );
+            assert_eq!(generation, 5, "an inactive failed row needs no claim fence");
+        }
+    }
+
+    #[test]
+    fn clear_unsynced_items_deletes_only_generic_owned_rows() {
+        let conn = test_connection();
+        const REPAIR_ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        for (id, table_name, module_type) in [
+            ("clear-generic", "payments", "orders"),
+            ("clear-module-half", "payments", "repairs"),
+            ("clear-exact-repair", "repairs", "repairs"),
+            ("clear-table-half", "repair_attachments", "orders"),
+        ] {
+            conn.execute(
+                "INSERT INTO parity_sync_queue (
+                     id, table_name, record_id, operation, data, organization_id,
+                     created_at, attempts, retry_delay_ms, priority, module_type,
+                     conflict_strategy, version, repair_aggregate_id, status
+                 ) VALUES (
+                     ?1, ?2, 'co-keyed-payment', 'INSERT', '{\"sentinel\":true}',
+                     'repair-clear-org', '2026-08-26T07:00:00Z', 3, 1000, 1,
+                     ?3, 'manual', 4, ?4, 'failed'
+                 )",
+                params![id, table_name, module_type, REPAIR_ID],
+            )
+            .expect("seed clear ownership row");
+        }
+        let module_half_before =
+            full_queue_row_fingerprint(&conn, "clear-module-half").expect("module-half row");
+        let exact_before =
+            full_queue_row_fingerprint(&conn, "clear-exact-repair").expect("exact row");
+        let table_half_before =
+            full_queue_row_fingerprint(&conn, "clear-table-half").expect("table-half row");
+
+        assert_eq!(
+            clear_unsynced_items(&conn, "payments", "co-keyed-payment")
+                .expect("clear generic payment rows"),
+            1
+        );
+        assert!(full_queue_row_fingerprint(&conn, "clear-generic").is_none());
+        assert_eq!(
+            full_queue_row_fingerprint(&conn, "clear-module-half").as_deref(),
+            Some(module_half_before.as_str())
+        );
+
+        assert_eq!(
+            clear_unsynced_items(&conn, "repairs", "co-keyed-payment")
+                .expect("attempt exact repair clear"),
+            0
+        );
+        assert_eq!(
+            clear_unsynced_items(&conn, "repair_attachments", "co-keyed-payment")
+                .expect("attempt table-half clear"),
+            0
+        );
+        assert_eq!(
+            full_queue_row_fingerprint(&conn, "clear-exact-repair").as_deref(),
+            Some(exact_before.as_str())
+        );
+        assert_eq!(
+            full_queue_row_fingerprint(&conn, "clear-table-half").as_deref(),
+            Some(table_half_before.as_str())
+        );
+    }
+
+    #[test]
+    fn generic_failed_requeue_preserves_all_repair_owned_shapes() {
+        let conn = test_connection();
+        const REPAIR_ID: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+        for (id, table_name, module_type) in [
+            ("requeue-generic", "orders", "orders"),
+            ("requeue-module-half", "payments", "repairs"),
+            ("requeue-exact", "repairs", "repairs"),
+            ("requeue-table-half", "repair_attachments", "orders"),
+        ] {
+            conn.execute(
+                "INSERT INTO parity_sync_queue (
+                     id, table_name, record_id, operation, data, organization_id,
+                     created_at, attempts, last_attempt, error_message, next_retry_at,
+                     retry_delay_ms, priority, module_type, conflict_strategy, version,
+                     repair_aggregate_id, claim_generation, status
+                 ) VALUES (
+                     ?1, ?2, ?1, 'UPDATE', '{\"ciphertext\":\"private\"}',
+                     'repair-requeue-org', '2026-08-26T07:00:00Z', 8,
+                     '2026-08-26T07:01:00Z', 'HTTP 429 rate limit exceeded',
+                     '2026-08-27T07:00:00Z', 64000, 5, ?3, 'manual', 9,
+                     ?4, 6, 'failed'
+                 )",
+                params![id, table_name, module_type, REPAIR_ID],
+            )
+            .expect("seed failed ownership row");
+        }
+        let repair_ids = ["requeue-module-half", "requeue-exact", "requeue-table-half"];
+        let repair_before = repair_ids
+            .iter()
+            .map(|id| full_queue_row_fingerprint(&conn, id))
+            .collect::<Vec<_>>();
+        let queue_ids = [
+            "requeue-generic".to_string(),
+            "requeue-module-half".to_string(),
+            "requeue-exact".to_string(),
+            "requeue-table-half".to_string(),
+        ];
+
+        let result = requeue_failed_items(&conn, &queue_ids, "test generic recovery")
+            .expect("requeue generic rows");
+        assert_eq!(result.retried, 1);
+        let generic_status: String = conn
+            .query_row(
+                "SELECT status FROM parity_sync_queue WHERE id = 'requeue-generic'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("generic status");
+        assert_eq!(generic_status, "pending");
+        let repair_after = repair_ids
+            .iter()
+            .map(|id| full_queue_row_fingerprint(&conn, id))
+            .collect::<Vec<_>>();
+        assert_eq!(repair_after, repair_before);
+    }
+
+    #[test]
+    fn stale_recovery_splits_generic_and_exact_native_from_unsafe_repair_shapes() {
+        let conn = test_connection();
+        const ORG_ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        const REPAIR_ID: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+        const EXACT_ID: &str = "11111111-1111-4111-8111-111111111111";
+        const MALFORMED_ID: &str = "22222222-2222-4222-8222-222222222222";
+        for (id, table_name, module_type, record_id, operation, organization_id) in [
+            (
+                "stale-generic",
+                "orders",
+                "orders",
+                "stale-generic",
+                "UPDATE",
+                "generic-stale-org",
+            ),
+            (EXACT_ID, "repairs", "repairs", REPAIR_ID, "INSERT", ORG_ID),
+            (
+                MALFORMED_ID,
+                "repairs",
+                "repairs",
+                REPAIR_ID,
+                "UPDATE",
+                ORG_ID,
+            ),
+            (
+                "stale-module-half",
+                "payments",
+                "repairs",
+                "stale-module-half",
+                "UPDATE",
+                "repair-stale-org",
+            ),
+            (
+                "stale-table-half",
+                "repair_attachments",
+                "orders",
+                "stale-table-half",
+                "UPDATE",
+                "repair-stale-org",
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO parity_sync_queue (
+                     id, table_name, record_id, operation, data, organization_id,
+                     created_at, attempts, last_attempt, retry_delay_ms, priority,
+                     module_type, conflict_strategy, version, repair_aggregate_id,
+                     claim_generation, status
+                 ) VALUES (
+                     ?1, ?2, ?4, ?5, '{\"ciphertext\":\"stale-private\"}',
+                     ?6, '2026-08-20T07:00:00Z', 2,
+                     '2026-08-20T07:01:00Z', 1000, 1, ?3, 'manual', 3,
+                     ?7, 7, 'processing'
+                 )",
+                params![
+                    id,
+                    table_name,
+                    module_type,
+                    record_id,
+                    operation,
+                    organization_id,
+                    REPAIR_ID
+                ],
+            )
+            .expect("seed stale ownership row");
+        }
+        let malformed_before = full_queue_row_fingerprint(&conn, MALFORMED_ID);
+        assert_eq!(
+            quarantine_reserved_repair_lookalikes(&conn).expect("quarantine stale semantic owners"),
+            2
+        );
+        assert_eq!(
+            recover_stale_processing_items(&conn).expect("recover stale rows"),
+            2
+        );
+        for id in ["stale-generic", EXACT_ID] {
+            let (status, generation): (String, i64) = conn
+                .query_row(
+                    "SELECT status, claim_generation FROM parity_sync_queue WHERE id = ?1",
+                    params![id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("read recovered row");
+            assert_eq!(status, "pending");
+            assert_eq!(generation, 8);
+        }
+        assert_eq!(
+            full_queue_row_fingerprint(&conn, MALFORMED_ID),
+            malformed_before
+        );
+        for id in ["stale-module-half", "stale-table-half"] {
+            let (status, generation, error, payload): (String, i64, Option<String>, String) = conn
+                .query_row(
+                    "SELECT status, claim_generation, error_message, data
+                       FROM parity_sync_queue WHERE id = ?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .expect("read quarantined stale lookalike");
+            assert_eq!(status, "failed");
+            assert_eq!(generation, 8, "stale processing claimant was not fenced");
+            assert_eq!(error.as_deref(), Some(REPAIR_RESERVED_OWNER_QUARANTINED));
+            assert_eq!(payload, "{\"ciphertext\":\"stale-private\"}");
+        }
+    }
+
+    #[test]
+    fn internal_claim_quarantines_semantic_repair_lookalikes_and_fences_old_claims() {
+        let conn = test_connection();
+        let poison_rows = [
+            (
+                "poison-pending",
+                "orders",
+                " Repairs ",
+                "pending",
+                0_i64,
+                100_i64,
+            ),
+            (
+                "poison-processing",
+                " REPAIRS ",
+                "orders",
+                "processing",
+                7,
+                90,
+            ),
+            (
+                "poison-failed",
+                "orders",
+                "\u{2003}repairs\u{2003}",
+                "failed",
+                2,
+                80,
+            ),
+            (
+                "poison-conflict",
+                "\trepair_attachments\n",
+                "orders",
+                "conflict",
+                4,
+                70,
+            ),
+        ];
+        for (id, table_name, module_type, status, generation, priority) in poison_rows {
+            conn.execute(
+                "INSERT INTO parity_sync_queue (
+                     id, table_name, record_id, operation, data, organization_id,
+                     created_at, attempts, last_attempt, error_message, next_retry_at,
+                     retry_delay_ms, priority, module_type, conflict_strategy, version,
+                     repair_aggregate_id, claim_generation, status
+                 ) VALUES (
+                     ?1, ?2, ?1, 'INSERT', 'PRIVATE_REPAIR_LOOKALIKE_SENTINEL',
+                     'poison-org', '2000-01-01T00:00:00Z', 3,
+                     '2000-01-01T00:01:00Z', 'legacy error', NULL,
+                     1000, ?6, ?3, 'server-wins', 1, NULL, ?5, ?4
+                 )",
+                params![id, table_name, module_type, status, generation, priority],
+            )
+            .expect("seed semantic repair lookalike");
+        }
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status
+             ) VALUES (
+                 'generic-control', ' CuStOmErS ', 'generic-control', 'INSERT',
+                 '{\"terminal_id\":\"terminal-test\"}', 'generic-org',
+                 '2026-08-27T00:00:00Z', 0, 1000, 1, ' OrDeRs ',
+                 'server-wins', 1, 'pending'
+             )",
+            [],
+        )
+        .expect("seed unrelated generic control");
+
+        let usage_before = capacity_usage(&conn).expect("capacity before quarantine");
+        assert_eq!((usage_before.replayable, usage_before.conflicts), (3, 1));
+        let claimed = dequeue(&conn)
+            .expect("internal claim with quarantine preflight")
+            .expect("generic control remains claimable");
+        assert_eq!(claimed.id, "generic-control");
+
+        for (id, _, _, _, old_generation, _) in poison_rows {
+            let (status, generation, error): (String, i64, Option<String>) = conn
+                .query_row(
+                    "SELECT status, claim_generation, error_message
+                       FROM parity_sync_queue WHERE id = ?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .expect("read quarantined lookalike");
+            assert_eq!(status, "failed", "{id} was not terminally quarantined");
+            assert_eq!(
+                generation,
+                old_generation + if id == "poison-processing" { 1 } else { 0 },
+                "only an active old claim needs generation fencing for {id}"
+            );
+            assert_eq!(error.as_deref(), Some("REPAIR_RESERVED_OWNER_QUARANTINED"));
+            assert!(
+                !error
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("PRIVATE_REPAIR_LOOKALIKE_SENTINEL"),
+                "quarantine error copied private payload for {id}"
+            );
+        }
+        mark_success(&conn, "poison-processing", 7).expect("late old claimant is fenced");
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE id = 'poison-processing'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("old claimant must not delete quarantine"),
+            1
+        );
+        let usage_after = capacity_usage(&conn).expect("capacity after quarantine");
+        assert_eq!((usage_after.replayable, usage_after.conflicts), (1, 0));
+
+        let poison_before_retry = poison_rows
+            .iter()
+            .map(|(id, ..)| full_queue_row_fingerprint(&conn, id))
+            .collect::<Vec<_>>();
+        let renderer_items = renderer_list_actionable_items(
+            &conn,
+            &QueueListQuery {
+                module_type: None,
+                limit: Some(50),
+            },
+        )
+        .expect("renderer list after quarantine");
+        assert_eq!(
+            renderer_items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["generic-control"]
+        );
+        assert_eq!(
+            renderer_get_status(&conn).expect("renderer status").total,
+            1
+        );
+        for (id, ..) in poison_rows {
+            assert_eq!(
+                renderer_retry_item(&conn, id)
+                    .expect_err("renderer cannot retry reserved-owner quarantine"),
+                "REPAIR_TYPED_CONFLICT_REQUIRED"
+            );
+        }
+        assert!(
+            dequeue(&conn)
+                .expect("idempotent quarantine pass")
+                .is_none(),
+            "quarantined poison became claimable on a second pass"
+        );
+        assert_eq!(
+            poison_rows
+                .iter()
+                .map(|(id, ..)| full_queue_row_fingerprint(&conn, id))
+                .collect::<Vec<_>>(),
+            poison_before_retry,
+            "quarantine/retry preflights must be idempotent"
+        );
+        renderer_clear(&conn).expect("clear renderer-owned generic row");
+        assert_eq!(get_length(&conn).expect("internal queue length"), 4);
+    }
+
+    #[tokio::test]
+    async fn renderer_safe_processor_preserves_unicode_whitespace_repair_lookalike_without_http() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status
+             ) VALUES (
+                 'unicode-renderer-poison', '\u{2003}repairs\u{2003}',
+                 'unicode-renderer-poison', 'INSERT',
+                 '{\"terminal_id\":\"terminal-test\",\"private\":\"sentinel\"}',
+                 'unicode-renderer-org', '2026-08-27T00:00:00Z', 0, 1000, 50,
+                 'orders', 'server-wins', 1, 'pending'
+             )",
+            [],
+        )
+        .expect("seed Unicode-whitespace repair lookalike");
+        let before = full_queue_row_fingerprint(&conn, "unicode-renderer-poison");
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind no-request server");
+        let address = listener.local_addr().expect("no-request server address");
+        let request_probe = tokio::spawn(async move {
+            tokio::time::timeout(std::time::Duration::from_millis(250), listener.accept())
+                .await
+                .is_ok()
+        });
+        let db = std::sync::Mutex::new(conn);
+
+        let result =
+            process_queue_renderer_safe(&db, &format!("http://{address}"), "renderer-api-key")
+                .await
+                .expect("renderer-safe processor must ignore reserved owner");
+        assert_eq!(result.processed, 0);
+        assert_eq!(result.failed, 0);
+        assert!(
+            !request_probe.await.expect("join request probe"),
+            "renderer-safe processing dispatched a repair lookalike"
+        );
+        let conn = db.lock().expect("lock queue after renderer-safe process");
+        assert_eq!(
+            full_queue_row_fingerprint(&conn, "unicode-renderer-poison"),
+            before,
+            "renderer-safe processing changed a reserved-owner row"
+        );
+    }
+
+    #[tokio::test]
+    async fn internal_processor_quarantines_reserved_lookalike_before_http_dispatch() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, claim_generation, status
+             ) VALUES (
+                 'internal-dispatch-poison', '\trepairs\n',
+                 'internal-dispatch-poison', 'INSERT',
+                 '{\"terminal_id\":\"terminal-test\",\"private\":\"dispatch-sentinel\"}',
+                 'internal-dispatch-org', '2026-08-27T00:00:00Z', 0, 1000, 50,
+                 'orders', 'server-wins', 1, 0, 'pending'
+             )",
+            [],
+        )
+        .expect("seed reserved lookalike for internal processor");
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind no-request server");
+        let address = listener.local_addr().expect("no-request server address");
+        let request_probe = tokio::spawn(async move {
+            tokio::time::timeout(std::time::Duration::from_millis(250), listener.accept())
+                .await
+                .is_ok()
+        });
+        let db = std::sync::Mutex::new(conn);
+
+        let result = process_queue(&db, &format!("http://{address}"), "native-api-key")
+            .await
+            .expect("internal processor quarantines poison without transport");
+        assert_eq!(result.processed, 0);
+        assert_eq!(result.failed, 0);
+        assert!(
+            !request_probe.await.expect("join request probe"),
+            "internal processing dispatched an untrusted repair lookalike"
+        );
+        let conn = db.lock().expect("lock queue after internal process");
+        let (status, error): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, error_message FROM parity_sync_queue
+                  WHERE id = 'internal-dispatch-poison'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read quarantined internal poison");
+        assert_eq!(status, "failed");
+        assert_eq!(error.as_deref(), Some("REPAIR_RESERVED_OWNER_QUARANTINED"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn internal_prepass_preserves_module_half_payment_and_local_financial_row() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        conn.execute(
+            "INSERT INTO orders (
+                 id, items, total_amount, total_amount_cents, status, payment_status,
+                 payment_transaction_id, sync_status, created_at, updated_at
+             ) VALUES (
+                 'repair-prepass-order', '[]', 9.50, 950, 'completed', 'paid',
+                 'repair-prepass-valid', 'synced', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed prepass order");
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, amount_cents, currency, status,
+                 sync_status, sync_state, created_at, updated_at
+             ) VALUES (
+                 'repair-prepass-stale', 'repair-prepass-order', 'cash', 0.55, 55,
+                 'EUR', 'completed', 'failed', 'failed', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed repair-owned payment");
+        let queue_id = enqueue_test_item(
+            &conn,
+            "payments",
+            "INSERT",
+            "repair-prepass-stale",
+            json!({
+                "paymentId": "repair-prepass-stale",
+                "orderId": "repair-prepass-order",
+                "amount": 0.55
+            }),
+        );
+        conn.execute(
+            "UPDATE parity_sync_queue
+             SET status = 'failed', module_type = 'repairs',
+                 repair_aggregate_id = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+                 attempts = 6,
+                 error_message = ?1
+             WHERE id = ?2",
+            params![
+                "HTTP 422: {\"success\":false,\"error\":\"Payment exceeds order total\",\"details\":\"Order total: 4.79, tip: 0, existing completed: 4.79, payment: 0.55\"}",
+                queue_id.as_str()
+            ],
+        )
+        .expect("mark module-half payment conflict");
+        let payment_before = full_order_payment_row_fingerprint(&conn, "repair-prepass-stale");
+        let db = std::sync::Mutex::new(conn);
+
+        let result = process_queue(&db, "http://127.0.0.1:9", "test-api-key")
+            .await
+            .expect("run internal prepass");
+        assert_eq!(result.processed, 0);
+        let conn = db.lock().expect("lock after internal prepass");
+        let (status, error, payload): (String, Option<String>, String) = conn
+            .query_row(
+                "SELECT status, error_message, data FROM parity_sync_queue WHERE id = ?1",
+                [queue_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read quarantined module-half payment row");
+        assert_eq!(status, "failed");
+        assert_eq!(error.as_deref(), Some(REPAIR_RESERVED_OWNER_QUARANTINED));
+        assert_eq!(
+            payload,
+            json!({
+                "paymentId": "repair-prepass-stale",
+                "orderId": "repair-prepass-order",
+                "amount": 0.55
+            })
+            .to_string(),
+            "quarantine rewrote a private payment payload"
+        );
+        assert_eq!(
+            full_order_payment_row_fingerprint(&conn, "repair-prepass-stale"),
+            payment_before
+        );
+    }
+
+    #[test]
     fn prepare_order_request_consumes_superseded_synced_status_only_update() {
         let conn = test_connection();
         conn.execute(
@@ -11606,6 +16273,909 @@ mod tests {
         assert_eq!(remaining, 0);
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn seed_repair_aggregate_queue_row(
+        conn: &Connection,
+        id: &str,
+        organization_id: &str,
+        repair_id: &str,
+        record_id: &str,
+        version: i64,
+        created_at: &str,
+        priority: i64,
+        status: &str,
+        next_retry_at: Option<&str>,
+        last_attempt: Option<&str>,
+        claim_generation: i64,
+    ) {
+        let table_name = if record_id == repair_id {
+            "repairs"
+        } else {
+            "repair_attachments"
+        };
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, last_attempt, error_message, next_retry_at,
+                 retry_delay_ms, priority, module_type, conflict_strategy, version,
+                 repair_aggregate_id, claim_generation, status
+             ) VALUES (?1, ?2, ?3, 'INSERT', 'opaque', ?4, ?5, 0, ?6, NULL, ?7,
+                       1000, ?8, 'repairs', 'manual', ?9, ?10, ?11, ?12)",
+            params![
+                id,
+                table_name,
+                record_id,
+                organization_id,
+                created_at,
+                last_attempt,
+                next_retry_at,
+                priority,
+                version,
+                repair_id,
+                claim_generation,
+                status,
+            ],
+        )
+        .expect("seed repair aggregate queue row");
+        if table_name == "repair_attachments" {
+            conn.execute(
+                "INSERT INTO repair_attachment_staging (
+                     organization_id, branch_id, terminal_id, attachment_id, repair_id,
+                     operation_id, queue_id, expected_version, scope_generation, file_key,
+                     metadata_nonce, metadata_ciphertext, sha256_hex, mime_type, size_bytes,
+                     state, created_at, updated_at
+                 ) VALUES (
+                     ?1, 'branch-test', 'terminal-test', ?2, ?3, ?4, ?4, ?5, 1,
+                     'test-cipher.part', zeroblob(12), zeroblob(16),
+                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                     'image/jpeg', 1, 'queued', ?6, ?6
+                 )",
+                params![
+                    organization_id,
+                    record_id,
+                    repair_id,
+                    id,
+                    version,
+                    created_at
+                ],
+            )
+            .expect("seed repair attachment staging binding");
+        }
+    }
+
+    fn seed_generic_ordering_row(
+        conn: &Connection,
+        id: &str,
+        organization_id: &str,
+        created_at: &str,
+        priority: i64,
+    ) {
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, repair_aggregate_id, status
+             ) VALUES (?1, 'orders', ?2, 'UPDATE', '{}', ?3, ?4, 1000, ?5,
+                       'orders', 'server-wins', 1, NULL, 'pending')",
+            params![
+                id,
+                format!("record-{id}"),
+                organization_id,
+                created_at,
+                priority
+            ],
+        )
+        .expect("seed generic ordering row");
+    }
+
+    #[test]
+    fn repair_aggregate_peek_and_dequeue_use_lexicographic_head_before_priority() {
+        const ORG: &str = "11111111-1111-4111-8111-111111111111";
+        const REPAIR: &str = "22222222-2222-4222-8222-222222222222";
+        const ATTACHMENT: &str = "33333333-3333-4333-8333-333333333333";
+        const ATTACHMENT_OP: &str = "44444444-4444-4444-8444-444444444444";
+        const COMMAND_OP: &str = "55555555-5555-4555-8555-555555555555";
+        let conn = test_connection();
+        seed_repair_aggregate_queue_row(
+            &conn,
+            ATTACHMENT_OP,
+            ORG,
+            REPAIR,
+            ATTACHMENT,
+            1,
+            "2026-08-26T10:01:00Z",
+            90,
+            "pending",
+            None,
+            None,
+            0,
+        );
+        seed_repair_aggregate_queue_row(
+            &conn,
+            COMMAND_OP,
+            ORG,
+            REPAIR,
+            REPAIR,
+            2,
+            "2026-08-26T09:00:00Z",
+            100,
+            "pending",
+            None,
+            None,
+            0,
+        );
+
+        assert_eq!(
+            peek(&conn).unwrap().expect("aggregate head").id,
+            ATTACHMENT_OP,
+            "lower expected version must win within an aggregate despite global priority/time"
+        );
+        let first = dequeue(&conn).unwrap().expect("claim aggregate head");
+        assert_eq!(first.id, ATTACHMENT_OP);
+        assert!(
+            peek(&conn).unwrap().is_none(),
+            "an in-flight row must freeze every successor in the same aggregate"
+        );
+        mark_success(&conn, ATTACHMENT_OP, first.claim_generation).unwrap();
+        assert_eq!(
+            peek(&conn).unwrap().expect("successor unlocked").id,
+            COMMAND_OP
+        );
+    }
+
+    #[test]
+    fn repair_aggregate_equal_version_orders_by_created_at_then_id() {
+        const ORG: &str = "11111111-1111-4111-8111-111111111111";
+        const REPAIR: &str = "22222222-2222-4222-8222-222222222222";
+        const EARLY_ID: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+        const TIE_LOW_ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        const TIE_HIGH_ID: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+        let conn = test_connection();
+        for (id, created_at, priority) in [
+            (EARLY_ID, "2026-08-26T09:59:00Z", 1),
+            (TIE_HIGH_ID, "2026-08-26T10:00:00Z", 200),
+            (TIE_LOW_ID, "2026-08-26T10:00:00Z", 100),
+        ] {
+            seed_repair_aggregate_queue_row(
+                &conn, id, ORG, REPAIR, REPAIR, 7, created_at, priority, "pending", None, None, 0,
+            );
+        }
+        assert_eq!(
+            peek(&conn).unwrap().expect("earliest equal-version row").id,
+            EARLY_ID,
+            "created_at precedes id and global priority inside an aggregate"
+        );
+        conn.execute("DELETE FROM parity_sync_queue WHERE id = ?1", [EARLY_ID])
+            .unwrap();
+        assert_eq!(
+            peek(&conn).unwrap().expect("id tie-break row").id,
+            TIE_LOW_ID,
+            "id is the deterministic final predecessor key when version/time tie"
+        );
+    }
+
+    #[test]
+    fn repair_aggregate_unresolved_rows_and_later_conflict_block_only_their_stream() {
+        const ORG: &str = "11111111-1111-4111-8111-111111111111";
+        const BLOCKED_REPAIR: &str = "22222222-2222-4222-8222-222222222222";
+        const OTHER_REPAIR: &str = "33333333-3333-4333-8333-333333333333";
+        for (case, blocker_status, blocker_version, candidate_version, next_retry, last_attempt) in [
+            (
+                "pending_future_predecessor",
+                "pending",
+                1,
+                2,
+                Some("2099-01-01T00:00:00Z"),
+                None,
+            ),
+            ("failed_predecessor", "failed", 1, 2, None, None),
+            (
+                "processing_later",
+                "processing",
+                2,
+                1,
+                None,
+                Some("2026-08-26T10:00:00Z"),
+            ),
+            ("conflict_later", "conflict", 2, 1, None, None),
+        ] {
+            let conn = test_connection();
+            let blocker_id = format!("{case}-blocker");
+            let candidate_id = format!("{case}-candidate");
+            let other_id = format!("{case}-other");
+            seed_repair_aggregate_queue_row(
+                &conn,
+                &blocker_id,
+                ORG,
+                BLOCKED_REPAIR,
+                BLOCKED_REPAIR,
+                blocker_version,
+                "2026-08-26T10:00:00Z",
+                1,
+                blocker_status,
+                next_retry,
+                last_attempt,
+                3,
+            );
+            seed_repair_aggregate_queue_row(
+                &conn,
+                &candidate_id,
+                ORG,
+                BLOCKED_REPAIR,
+                BLOCKED_REPAIR,
+                candidate_version,
+                "2026-08-26T10:01:00Z",
+                100,
+                "pending",
+                None,
+                None,
+                0,
+            );
+            seed_repair_aggregate_queue_row(
+                &conn,
+                &other_id,
+                ORG,
+                OTHER_REPAIR,
+                OTHER_REPAIR,
+                0,
+                "2026-08-26T10:02:00Z",
+                1,
+                "pending",
+                None,
+                None,
+                0,
+            );
+            assert_eq!(
+                peek(&conn).unwrap().expect("unblocked repair").id,
+                other_id,
+                "{case} must freeze only its own aggregate"
+            );
+        }
+    }
+
+    #[test]
+    fn repair_aggregate_ordering_is_org_scoped_and_preserves_generic_global_priority() {
+        const ORG_A: &str = "11111111-1111-4111-8111-111111111111";
+        const ORG_B: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        const REPAIR_A: &str = "22222222-2222-4222-8222-222222222222";
+        const REPAIR_B: &str = "33333333-3333-4333-8333-333333333333";
+        let conn = test_connection();
+        seed_repair_aggregate_queue_row(
+            &conn,
+            "org-b-conflict",
+            ORG_B,
+            REPAIR_A,
+            REPAIR_A,
+            9,
+            "2026-08-26T09:00:00Z",
+            1,
+            "conflict",
+            None,
+            None,
+            0,
+        );
+        seed_repair_aggregate_queue_row(
+            &conn,
+            "org-a-repair-a",
+            ORG_A,
+            REPAIR_A,
+            REPAIR_A,
+            0,
+            "2026-08-26T10:00:00Z",
+            50,
+            "pending",
+            None,
+            None,
+            0,
+        );
+        seed_repair_aggregate_queue_row(
+            &conn,
+            "org-a-repair-b",
+            ORG_A,
+            REPAIR_B,
+            REPAIR_B,
+            0,
+            "2026-08-26T10:01:00Z",
+            60,
+            "pending",
+            None,
+            None,
+            0,
+        );
+        seed_generic_ordering_row(
+            &conn,
+            "generic-high-priority",
+            ORG_A,
+            "2026-08-26T10:02:00Z",
+            200,
+        );
+
+        assert_eq!(dequeue(&conn).unwrap().unwrap().id, "generic-high-priority");
+        assert_eq!(
+            peek(&conn).unwrap().unwrap().id,
+            "org-a-repair-b",
+            "priority remains global across unrelated eligible aggregates"
+        );
+        conn.execute(
+            "DELETE FROM parity_sync_queue WHERE id = 'org-a-repair-b'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            peek(&conn).unwrap().unwrap().id,
+            "org-a-repair-a",
+            "same aggregate id in another organization must not freeze this tenant"
+        );
+    }
+
+    #[test]
+    fn repair_aggregate_reserved_owner_lookalikes_are_quarantined_before_claim() {
+        const ORG: &str = "11111111-1111-4111-8111-111111111111";
+        const REPAIR_A: &str = "22222222-2222-4222-8222-222222222222";
+        const REPAIR_B: &str = "33333333-3333-4333-8333-333333333333";
+        let conn = test_connection();
+        seed_repair_aggregate_queue_row(
+            &conn,
+            "malformed-repair-module",
+            ORG,
+            REPAIR_A,
+            REPAIR_A,
+            0,
+            "2026-08-26T10:00:00Z",
+            200,
+            "pending",
+            None,
+            None,
+            0,
+        );
+        conn.execute(
+            "UPDATE parity_sync_queue SET table_name = 'orders'
+              WHERE id = 'malformed-repair-module'",
+            [],
+        )
+        .unwrap();
+        seed_repair_aggregate_queue_row(
+            &conn,
+            "malformed-repair-table",
+            ORG,
+            REPAIR_B,
+            REPAIR_B,
+            0,
+            "2026-08-26T10:01:00Z",
+            190,
+            "pending",
+            None,
+            None,
+            0,
+        );
+        conn.execute(
+            "UPDATE parity_sync_queue SET module_type = 'orders'
+              WHERE id = 'malformed-repair-table'",
+            [],
+        )
+        .unwrap();
+        seed_generic_ordering_row(
+            &conn,
+            "valid-generic-after-malformed",
+            ORG,
+            "2026-08-26T10:02:00Z",
+            1,
+        );
+
+        assert_eq!(
+            peek(&conn).unwrap().expect("valid generic candidate").id,
+            "valid-generic-after-malformed"
+        );
+        assert_eq!(
+            dequeue(&conn)
+                .unwrap()
+                .expect("claim valid generic only")
+                .id,
+            "valid-generic-after-malformed"
+        );
+        for id in ["malformed-repair-module", "malformed-repair-table"] {
+            let (status, error): (String, Option<String>) = conn
+                .query_row(
+                    "SELECT status, error_message FROM parity_sync_queue WHERE id = ?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(status, "failed");
+            assert_eq!(error.as_deref(), Some(REPAIR_RESERVED_OWNER_QUARANTINED));
+        }
+    }
+
+    #[test]
+    fn repair_aggregate_semantically_malformed_native_rows_are_never_claimable() {
+        const ORG: &str = "11111111-1111-4111-8111-111111111111";
+        const REPAIR: &str = "22222222-2222-4222-8222-222222222222";
+        const ATTACHMENT: &str = "33333333-3333-4333-8333-333333333333";
+        const INVALID_COMMAND: &str = "44444444-4444-4444-8444-444444444444";
+        const UNBOUND_ATTACHMENT: &str = "55555555-5555-4555-8555-555555555555";
+        let conn = test_connection();
+        seed_repair_aggregate_queue_row(
+            &conn,
+            INVALID_COMMAND,
+            ORG,
+            REPAIR,
+            REPAIR,
+            0,
+            "2026-08-26T10:00:00Z",
+            200,
+            "pending",
+            None,
+            None,
+            0,
+        );
+        conn.execute(
+            "UPDATE parity_sync_queue SET operation = 'UPDATE' WHERE id = ?1",
+            [INVALID_COMMAND],
+        )
+        .expect("malform repair command operation");
+        seed_repair_aggregate_queue_row(
+            &conn,
+            UNBOUND_ATTACHMENT,
+            ORG,
+            REPAIR,
+            ATTACHMENT,
+            1,
+            "2026-08-26T10:01:00Z",
+            190,
+            "pending",
+            None,
+            None,
+            0,
+        );
+        conn.execute(
+            "DELETE FROM repair_attachment_staging WHERE operation_id = ?1",
+            [UNBOUND_ATTACHMENT],
+        )
+        .expect("remove attachment binding");
+        seed_generic_ordering_row(
+            &conn,
+            "valid-generic-after-semantic-malformation",
+            ORG,
+            "2026-08-26T10:02:00Z",
+            1,
+        );
+
+        assert_eq!(
+            dequeue(&conn).unwrap().expect("claim generic row only").id,
+            "valid-generic-after-semantic-malformation"
+        );
+        assert!(peek(&conn).unwrap().is_none());
+        for id in [INVALID_COMMAND, UNBOUND_ATTACHMENT] {
+            assert_eq!(
+                conn.query_row(
+                    "SELECT status FROM parity_sync_queue WHERE id = ?1",
+                    [id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+                "pending"
+            );
+        }
+    }
+
+    #[test]
+    fn unbound_repair_quarantine_freezes_only_repairs_in_its_organization() {
+        const ORG_A: &str = "11111111-1111-4111-8111-111111111111";
+        const ORG_B: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        const REPAIR_A: &str = "22222222-2222-4222-8222-222222222222";
+        const REPAIR_B: &str = "33333333-3333-4333-8333-333333333333";
+        let conn = test_connection();
+        seed_repair_aggregate_queue_row(
+            &conn,
+            "org-a-unknown-aggregate",
+            ORG_A,
+            REPAIR_A,
+            REPAIR_A,
+            0,
+            "2026-08-26T09:00:00Z",
+            1,
+            "conflict",
+            None,
+            None,
+            0,
+        );
+        conn.execute(
+            "UPDATE parity_sync_queue
+                SET repair_aggregate_id = NULL,
+                    error_message = 'REPAIR_AGGREGATE_ID_MISSING'
+              WHERE id = 'org-a-unknown-aggregate'",
+            [],
+        )
+        .unwrap();
+        seed_repair_aggregate_queue_row(
+            &conn,
+            "org-a-valid-repair",
+            ORG_A,
+            REPAIR_A,
+            REPAIR_A,
+            1,
+            "2026-08-26T10:00:00Z",
+            200,
+            "pending",
+            None,
+            None,
+            0,
+        );
+        seed_repair_aggregate_queue_row(
+            &conn,
+            "org-b-valid-repair",
+            ORG_B,
+            REPAIR_B,
+            REPAIR_B,
+            0,
+            "2026-08-26T10:01:00Z",
+            50,
+            "pending",
+            None,
+            None,
+            0,
+        );
+        seed_generic_ordering_row(
+            &conn,
+            "org-a-valid-generic",
+            ORG_A,
+            "2026-08-26T10:02:00Z",
+            100,
+        );
+
+        assert_eq!(dequeue(&conn).unwrap().unwrap().id, "org-a-valid-generic");
+        assert_eq!(
+            peek(&conn)
+                .unwrap()
+                .expect("other organization remains eligible")
+                .id,
+            "org-b-valid-repair"
+        );
+        conn.execute(
+            "UPDATE parity_sync_queue
+                SET repair_aggregate_id = 'not-a-canonical-uuid'
+              WHERE id = 'org-a-unknown-aggregate'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            peek(&conn)
+                .unwrap()
+                .expect("noncanonical binding still freezes org-A")
+                .id,
+            "org-b-valid-repair"
+        );
+        conn.execute(
+            "DELETE FROM parity_sync_queue WHERE id = 'org-a-unknown-aggregate'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            peek(&conn).unwrap().expect("org-A repair unlocked").id,
+            "org-a-valid-repair"
+        );
+    }
+
+    #[test]
+    fn repair_aggregate_stale_reclaim_restores_head_and_fences_late_ack() {
+        const ORG: &str = "11111111-1111-4111-8111-111111111111";
+        const REPAIR: &str = "22222222-2222-4222-8222-222222222222";
+        const STALE_HEAD: &str = "66666666-6666-4666-8666-666666666666";
+        const STALE_SUCCESSOR: &str = "77777777-7777-4777-8777-777777777777";
+        let conn = test_connection();
+        seed_repair_aggregate_queue_row(
+            &conn,
+            STALE_HEAD,
+            ORG,
+            REPAIR,
+            REPAIR,
+            1,
+            "2000-01-01T00:00:00Z",
+            1,
+            "processing",
+            None,
+            Some("2000-01-01T00:00:00Z"),
+            3,
+        );
+        seed_repair_aggregate_queue_row(
+            &conn,
+            STALE_SUCCESSOR,
+            ORG,
+            REPAIR,
+            REPAIR,
+            2,
+            "2026-08-26T10:01:00Z",
+            100,
+            "pending",
+            None,
+            None,
+            0,
+        );
+
+        assert_eq!(recover_stale_processing_items(&conn).unwrap(), 1);
+        mark_success(&conn, STALE_HEAD, 3).expect("late ack is a fenced no-op");
+        assert_eq!(
+            peek(&conn).unwrap().expect("reclaimed aggregate head").id,
+            STALE_HEAD
+        );
+        let claimed = dequeue(&conn).unwrap().expect("claim reclaimed head");
+        assert_eq!(claimed.id, STALE_HEAD);
+        assert_eq!(claimed.claim_generation, 5);
+        assert_eq!(
+            conn.query_row(
+                "SELECT status FROM parity_sync_queue WHERE id = ?1",
+                [STALE_SUCCESSOR],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "pending"
+        );
+    }
+
+    static SEMANTIC_GAP_CLAIM_TRACE_ENABLED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    static SEMANTIC_GAP_CLAIM_BARRIERS: std::sync::OnceLock<(
+        std::sync::Barrier,
+        std::sync::Barrier,
+    )> = std::sync::OnceLock::new();
+    static SEMANTIC_GAP_PEEK_TRACE_ENABLED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    static SEMANTIC_GAP_PEEK_BARRIERS: std::sync::OnceLock<(
+        std::sync::Barrier,
+        std::sync::Barrier,
+    )> = std::sync::OnceLock::new();
+
+    fn pause_internal_claim_after_quarantine(sql: &str) {
+        if SEMANTIC_GAP_CLAIM_TRACE_ENABLED.load(std::sync::atomic::Ordering::SeqCst)
+            && sql.contains("UPDATE parity_sync_queue")
+            && sql.contains("SET status = 'processing'")
+        {
+            let barriers = SEMANTIC_GAP_CLAIM_BARRIERS
+                .get_or_init(|| (std::sync::Barrier::new(2), std::sync::Barrier::new(2)));
+            barriers.0.wait();
+            barriers.1.wait();
+        }
+    }
+
+    fn pause_internal_peek_after_quarantine(sql: &str) {
+        if SEMANTIC_GAP_PEEK_TRACE_ENABLED.load(std::sync::atomic::Ordering::SeqCst)
+            && sql.contains("SELECT candidate.id")
+            && sql.contains("ORDER BY candidate.priority DESC")
+            && !sql.contains("UPDATE parity_sync_queue")
+        {
+            let barriers = SEMANTIC_GAP_PEEK_BARRIERS
+                .get_or_init(|| (std::sync::Barrier::new(2), std::sync::Barrier::new(2)));
+            barriers.0.wait();
+            barriers.1.wait();
+        }
+    }
+
+    fn seed_gap_generic_control(conn: &Connection, item_id: &str) {
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, claim_generation, status
+             ) VALUES (?1, 'customers', ?2, 'UPDATE', '{\"safe\":true}',
+                       'semantic-gap-org', '2026-08-26T07:00:01Z', 0, 1000, 1,
+                       'customers', 'manual', 1, 0, 'pending')",
+            params![item_id, format!("{item_id}-record")],
+        )
+        .expect("seed semantic-gap generic control");
+    }
+
+    fn insert_gap_semantic_poison(conn: &Connection, prefix: &str) {
+        for (suffix, status, generation) in [
+            ("pending", "pending", 0_i64),
+            ("processing", "processing", 7_i64),
+        ] {
+            conn.execute(
+                "INSERT INTO parity_sync_queue (
+                     id, table_name, record_id, operation, data, organization_id,
+                     created_at, attempts, retry_delay_ms, priority, module_type,
+                     conflict_strategy, version, claim_generation, status
+                 ) VALUES (?1, ?2, ?3, 'UPDATE', ?4, 'semantic-gap-org',
+                           '2026-08-26T07:00:00Z', 0, 1000, 100, ?5,
+                           'manual', 1, ?6, ?7)",
+                params![
+                    format!("{prefix}-{suffix}"),
+                    "\u{2003}repairs\u{2003}",
+                    format!("{prefix}-{suffix}-record"),
+                    format!("private-gap-payload-{prefix}-{suffix}"),
+                    "\u{2003}orders\u{2003}",
+                    generation,
+                    status
+                ],
+            )
+            .expect("insert semantic-gap poison");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn internal_claim_and_peek_fence_unicode_poison_inserted_after_quarantine() {
+        let (claim_fixture, claim_setup) = FileBackedTestDb::new("semantic-gap-claim");
+        seed_gap_generic_control(&claim_setup, "semantic-gap-claim-control");
+        let mut claim_worker = claim_fixture.open_race_connection();
+        claim_worker.trace(Some(pause_internal_claim_after_quarantine));
+        SEMANTIC_GAP_CLAIM_TRACE_ENABLED.store(true, std::sync::atomic::Ordering::SeqCst);
+        let claim_thread = std::thread::spawn(move || dequeue(&claim_worker));
+        let claim_barriers = SEMANTIC_GAP_CLAIM_BARRIERS
+            .get_or_init(|| (std::sync::Barrier::new(2), std::sync::Barrier::new(2)));
+        claim_barriers.0.wait();
+        let blocked_insert = claim_setup.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, claim_generation, status
+             ) VALUES (
+                 'semantic-gap-claim-blocked', '\u{2003}repairs\u{2003}',
+                 'semantic-gap-claim-blocked-record', 'UPDATE',
+                 'private-gap-payload-blocked', 'semantic-gap-org',
+                 '2026-08-26T07:00:00Z', 0, 1000, 100,
+                 '\u{2003}orders\u{2003}', 'manual', 1, 0, 'pending'
+             )",
+            [],
+        );
+        assert!(
+            matches!(
+                &blocked_insert,
+                Err(rusqlite::Error::SqliteFailure(code, _))
+                    if code.code == rusqlite::ErrorCode::DatabaseBusy
+                        || code.code == rusqlite::ErrorCode::DatabaseLocked
+            ),
+            "BEGIN IMMEDIATE must fence insertion between quarantine and claim: {blocked_insert:?}"
+        );
+        claim_barriers.1.wait();
+        let claimed = claim_thread
+            .join()
+            .expect("join semantic-gap claimant")
+            .expect("semantic-gap dequeue")
+            .expect("generic control remains claimable");
+        SEMANTIC_GAP_CLAIM_TRACE_ENABLED.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(claimed.id, "semantic-gap-claim-control");
+        insert_gap_semantic_poison(&claim_setup, "semantic-gap-claim-poison");
+        let (next_item, newly_quarantined) =
+            dequeue_with_quarantine_count(&claim_setup).expect("next atomic quarantine/claim pass");
+        assert!(next_item.is_none());
+        assert_eq!(
+            newly_quarantined, 2,
+            "the next atomic pass must authoritatively report both parked rows"
+        );
+        assert_eq!(
+            claim_setup
+                .query_row(
+                    "SELECT status, claim_generation FROM parity_sync_queue
+                     WHERE id = 'semantic-gap-claim-poison-processing'",
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .expect("read quarantined processing poison"),
+            ("failed".to_string(), 8)
+        );
+
+        let (peek_fixture, peek_setup) = FileBackedTestDb::new("semantic-gap-peek");
+        seed_gap_generic_control(&peek_setup, "semantic-gap-peek-control");
+        let mut peek_worker = peek_fixture.open_race_connection();
+        peek_worker.trace(Some(pause_internal_peek_after_quarantine));
+        SEMANTIC_GAP_PEEK_TRACE_ENABLED.store(true, std::sync::atomic::Ordering::SeqCst);
+        let peek_thread = std::thread::spawn(move || peek(&peek_worker));
+        let peek_barriers = SEMANTIC_GAP_PEEK_BARRIERS
+            .get_or_init(|| (std::sync::Barrier::new(2), std::sync::Barrier::new(2)));
+        peek_barriers.0.wait();
+        insert_gap_semantic_poison(&peek_setup, "semantic-gap-peek-poison");
+        let peek_pending_before =
+            full_queue_row_fingerprint(&peek_setup, "semantic-gap-peek-poison-pending");
+        let peek_processing_before =
+            full_queue_row_fingerprint(&peek_setup, "semantic-gap-peek-poison-processing");
+        peek_barriers.1.wait();
+        let peeked = peek_thread
+            .join()
+            .expect("join semantic-gap peeker")
+            .expect("semantic-gap peek")
+            .expect("generic control remains visible internally");
+        SEMANTIC_GAP_PEEK_TRACE_ENABLED.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(peeked.id, "semantic-gap-peek-control");
+        assert_eq!(
+            full_queue_row_fingerprint(&peek_setup, "semantic-gap-peek-poison-pending"),
+            peek_pending_before,
+            "the statement-local peek predicate must not deserialize the gap poison"
+        );
+        assert_eq!(
+            full_queue_row_fingerprint(&peek_setup, "semantic-gap-peek-poison-processing"),
+            peek_processing_before
+        );
+        assert_eq!(
+            quarantine_reserved_repair_lookalikes(&peek_setup).expect("quarantine peek-gap poison"),
+            2
+        );
+        assert_eq!(
+            peek_setup
+                .query_row(
+                    "SELECT status, claim_generation FROM parity_sync_queue
+                     WHERE id = 'semantic-gap-peek-poison-processing'",
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .expect("read quarantined peek processing poison"),
+            ("failed".to_string(), 8)
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn repair_dequeue_claim_is_atomic_across_two_connections() {
+        const ORG: &str = "11111111-1111-4111-8111-111111111111";
+        const REPAIR: &str = "22222222-2222-4222-8222-222222222222";
+        let directory = crate::tests::harness::TempDir::new();
+        let state = crate::db::init(directory.path()).expect("create file-backed queue database");
+        {
+            let connection = state.conn.lock().expect("lock seed connection");
+            seed_repair_aggregate_queue_row(
+                &connection,
+                "atomic-repair-head",
+                ORG,
+                REPAIR,
+                REPAIR,
+                0,
+                "2026-08-26T10:00:00Z",
+                100,
+                "pending",
+                None,
+                None,
+                0,
+            );
+        }
+        let database_path = state.db_path.clone();
+        drop(state);
+        let start = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let workers = (0..2)
+            .map(|_| {
+                let path = database_path.clone();
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    let connection = Connection::open(path).expect("open worker connection");
+                    connection
+                        .execute_batch("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;")
+                        .expect("configure worker connection");
+                    start.wait();
+                    dequeue(&connection)
+                })
+            })
+            .collect::<Vec<_>>();
+        start.wait();
+        let results = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("join claim worker"))
+            .collect::<Vec<_>>();
+        let claimed = results
+            .iter()
+            .filter_map(|result| result.as_ref().ok().and_then(Option::as_ref))
+            .collect::<Vec<_>>();
+        assert!(
+            results.iter().all(Result::is_ok),
+            "both concurrent dequeue calls must complete: {results:?}"
+        );
+        assert_eq!(
+            claimed.len(),
+            1,
+            "only one worker may claim the aggregate head"
+        );
+        assert_eq!(claimed[0].id, "atomic-repair-head");
+        let verification = Connection::open(database_path).expect("open verification connection");
+        assert_eq!(
+            verification
+                .query_row(
+                    "SELECT status, claim_generation FROM parity_sync_queue
+                      WHERE id = 'atomic-repair-head'",
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .unwrap(),
+            ("processing".to_string(), 1)
+        );
+    }
+
     #[test]
     fn dequeue_marks_item_processing_and_records_last_attempt() {
         let conn = test_connection();
@@ -11748,6 +17318,315 @@ mod tests {
         });
 
         (format!("http://{}", address), rx, handle)
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn renderer_exact_retry_processes_only_the_selected_row_under_one_gate() {
+        clear_terminal_identity();
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        let earlier_id = enqueue_test_item(
+            &conn,
+            "customers",
+            "INSERT",
+            "cust-earlier",
+            json!({ "name": "Earlier Customer" }),
+        );
+        let target_id = enqueue_test_item(
+            &conn,
+            "customers",
+            "INSERT",
+            "cust-target",
+            json!({ "name": "Target Customer" }),
+        );
+        conn.execute(
+            "UPDATE parity_sync_queue
+                SET priority = CASE id WHEN ?1 THEN 100 ELSE 1 END,
+                    status = CASE id WHEN ?2 THEN 'failed' ELSE status END,
+                    attempts = CASE id WHEN ?2 THEN 7 ELSE attempts END,
+                    error_message = CASE id WHEN ?2 THEN 'manual retry sentinel' ELSE error_message END
+              WHERE id IN (?1, ?2)",
+            params![earlier_id, target_id],
+        )
+        .expect("arrange exact renderer retry order");
+        let earlier_before = full_queue_row_fingerprint(&conn, &earlier_id);
+        let conn = std::sync::Mutex::new(conn);
+        let (base_url, mut requests, server) =
+            spawn_mock_http_server(vec![MockResponse::json(200, r#"{"success":true}"#)]).await;
+        let gate_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let gate_counter = gate_calls.clone();
+
+        let result = process_queue_renderer_safe_item_with_claim_gate(
+            &conn,
+            &base_url,
+            "api-key",
+            &target_id,
+            move || {
+                gate_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await
+        .expect("process exact renderer item");
+
+        assert_eq!(result.processed, 1);
+        assert_eq!(result.failed, 0);
+        assert_eq!(gate_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let request = requests.recv().await.expect("selected request");
+        assert!(request.body.contains("Target Customer"));
+        let connection = conn.lock().expect("inspect exact renderer retry");
+        assert_eq!(
+            full_queue_row_fingerprint(&connection, &earlier_id),
+            earlier_before,
+            "the higher-priority FIFO row was changed by an exact-ID retry"
+        );
+        assert!(full_queue_row_fingerprint(&connection, &target_id).is_none());
+        drop(connection);
+        server.await.expect("mock exact renderer server");
+    }
+
+    #[tokio::test]
+    async fn renderer_exact_retry_blocked_gate_is_byte_for_byte_zero_mutation() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        let item_id = enqueue_test_item(
+            &conn,
+            "customers",
+            "INSERT",
+            "cust-blocked",
+            json!({ "name": "Blocked Customer" }),
+        );
+        conn.execute(
+            "UPDATE parity_sync_queue
+                SET status = 'failed', attempts = 5, error_message = 'blocked sentinel'
+              WHERE id = ?1",
+            [&item_id],
+        )
+        .expect("arrange blocked exact retry");
+        let before = full_queue_row_fingerprint(&conn, &item_id);
+        let conn = std::sync::Mutex::new(conn);
+
+        let result = process_queue_renderer_safe_item_with_claim_gate(
+            &conn,
+            "http://127.0.0.1:9",
+            "unused-api-key",
+            &item_id,
+            || Err::<(), _>(ParityClaimGateBlock::Cancelled),
+        )
+        .await
+        .expect("blocked exact retry returns bounded result");
+
+        assert_eq!(result.batch_block, Some(ParityClaimGateBlock::Cancelled));
+        assert_eq!(result.processed + result.failed + result.conflicts, 0);
+        let connection = conn.lock().expect("inspect blocked exact retry");
+        assert_eq!(full_queue_row_fingerprint(&connection, &item_id), before);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn renderer_exact_generic_409_is_one_request_conflict_and_preserves_unrelated_row() {
+        clear_terminal_identity();
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        let target_id = enqueue_test_item(
+            &conn,
+            "customers",
+            "UPDATE",
+            "customer-exact-409",
+            json!({ "name": "PRIVATE TARGET 409 PAYLOAD" }),
+        );
+        let unrelated_id = enqueue_test_item(
+            &conn,
+            "customers",
+            "UPDATE",
+            "customer-unrelated-409",
+            json!({ "name": "PRIVATE UNRELATED 409 PAYLOAD" }),
+        );
+        conn.execute(
+            "UPDATE parity_sync_queue
+                SET status = 'failed', attempts = 2,
+                    conflict_strategy = 'manual', error_message = 'retry sentinel'
+              WHERE id IN (?1, ?2)",
+            params![target_id, unrelated_id],
+        )
+        .expect("arrange exact 409 retry rows");
+        let unrelated_before = full_queue_row_fingerprint(&conn, &unrelated_id);
+        let conn = std::sync::Mutex::new(conn);
+        let (base_url, observed, release, server) =
+            spawn_blocked_first_response_server(MockResponse::json(
+                409,
+                r#"{"success":false,"error":"version conflict","private":"PRIVATE 409 RESPONSE"}"#,
+            ))
+            .await;
+
+        let processor = process_queue_renderer_safe_item_with_claim_gate(
+            &conn,
+            &base_url,
+            "api-key",
+            &target_id,
+            || Ok(()),
+        );
+        tokio::pin!(processor);
+        tokio::select! {
+            _ = observed => release.send(()).expect("release exact 409 response"),
+            _ = &mut processor => panic!("exact 409 processor finished before sending its request"),
+        }
+        let result = processor.await.expect("classify exact generic 409");
+        let requests = server.await.expect("join exact 409 server");
+
+        assert_eq!(requests.len(), 1, "exact 409 retry made follow-up HTTP");
+        assert_eq!(result.processed, 0);
+        assert_eq!(result.failed, 0);
+        assert_eq!(result.conflicts, 1);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].http_status, Some(409));
+        let exposed = serde_json::to_string(&result).expect("serialize bounded exact 409 result");
+        assert!(!exposed.contains("PRIVATE TARGET 409 PAYLOAD"));
+        assert!(!exposed.contains("PRIVATE UNRELATED 409 PAYLOAD"));
+        assert!(!exposed.contains("PRIVATE 409 RESPONSE"));
+        let connection = conn.lock().expect("inspect exact 409 rows");
+        assert_eq!(
+            full_queue_row_fingerprint(&connection, &unrelated_id),
+            unrelated_before,
+            "exact 409 retry changed an unrelated actionable row"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn renderer_exact_generic_500_is_one_request_bounded_retry_and_preserves_unrelated_row() {
+        clear_terminal_identity();
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        conn.execute(
+            "INSERT INTO orders (
+                 id, supabase_id, items, total_amount, total_amount_cents, status,
+                 payment_status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'order-exact-500', 'remote-order-exact-500', '[]', 29.4, 2940,
+                 'pending', 'paid', 'pending', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed fallback-prone exact order update");
+        let target_id = enqueue_test_item(
+            &conn,
+            "orders",
+            "UPDATE",
+            "order-exact-500",
+            json!({
+                "orderId": "order-exact-500",
+                "status": "pending",
+                "paymentStatus": "paid",
+                "totalAmount": 29.4,
+                "items": [{
+                    "menu_item_id": TEST_MENU_ITEM_ID,
+                    "name": "PRIVATE TARGET 500 PAYLOAD",
+                    "quantity": 1,
+                    "unit_price": 29.4
+                }]
+            }),
+        );
+        let unrelated_id = enqueue_test_item(
+            &conn,
+            "customers",
+            "UPDATE",
+            "customer-unrelated-500",
+            json!({ "name": "PRIVATE UNRELATED 500 PAYLOAD" }),
+        );
+        conn.execute(
+            "UPDATE parity_sync_queue
+                SET status = 'failed', attempts = 2, error_message = 'retry sentinel'
+              WHERE id IN (?1, ?2)",
+            params![target_id, unrelated_id],
+        )
+        .expect("arrange exact 500 retry rows");
+        let unrelated_before = full_queue_row_fingerprint(&conn, &unrelated_id);
+        let conn = std::sync::Mutex::new(conn);
+        let (base_url, observed, release, server) =
+            spawn_blocked_first_response_server(MockResponse::json(
+                500,
+                r#"{"success":false,"error":"Failed to update order","private":"PRIVATE 500 RESPONSE"}"#,
+            ))
+            .await;
+
+        let processor = process_queue_renderer_safe_item_with_claim_gate(
+            &conn,
+            &base_url,
+            "api-key",
+            &target_id,
+            || Ok(()),
+        );
+        tokio::pin!(processor);
+        tokio::select! {
+            _ = observed => release.send(()).expect("release exact 500 response"),
+            _ = &mut processor => panic!("exact 500 processor finished before sending its request"),
+        }
+        let result = processor.await.expect("classify exact generic 500");
+        let requests = server.await.expect("join exact 500 server");
+
+        assert_eq!(requests.len(), 1, "exact 500 retry made follow-up HTTP");
+        assert_eq!(result.processed, 0);
+        assert_eq!(result.failed, 1);
+        assert_eq!(result.conflicts, 0);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].http_status, Some(500));
+        assert_eq!(result.errors[0].error, "HTTP_500_SERVER_ERROR");
+        let exposed = serde_json::to_string(&result).expect("serialize bounded exact 500 result");
+        assert!(!exposed.contains("PRIVATE TARGET 500 PAYLOAD"));
+        assert!(!exposed.contains("PRIVATE UNRELATED 500 PAYLOAD"));
+        assert!(!exposed.contains("PRIVATE 500 RESPONSE"));
+        let connection = conn.lock().expect("inspect exact 500 rows");
+        assert_eq!(
+            full_queue_row_fingerprint(&connection, &unrelated_id),
+            unrelated_before,
+            "exact 500 retry changed an unrelated actionable row"
+        );
+        let target_after = full_queue_row_fingerprint(&connection, &target_id)
+            .expect("500 target remains retryable");
+        assert!(target_after.contains("HTTP_500_SERVER_ERROR"));
+        assert!(!target_after.contains("PRIVATE 500 RESPONSE"));
+    }
+
+    #[test]
+    fn renderer_module_retry_inventory_is_read_only_bounded_and_deterministic() {
+        let conn = test_connection();
+        let first = enqueue_test_item(&conn, "customers", "INSERT", "module-first", json!({}));
+        let second = enqueue_test_item(&conn, "customers", "INSERT", "module-second", json!({}));
+        let third = enqueue_test_item(&conn, "customers", "INSERT", "module-third", json!({}));
+        conn.execute(
+            "UPDATE parity_sync_queue
+                SET priority = CASE id WHEN ?1 THEN 30 WHEN ?2 THEN 20 ELSE 10 END,
+                    status = CASE id WHEN ?2 THEN 'failed' WHEN ?3 THEN 'conflict' ELSE status END
+              WHERE id IN (?1, ?2, ?3)",
+            params![first, second, third],
+        )
+        .expect("arrange module inventory ordering");
+        let before = [
+            full_queue_row_fingerprint(&conn, &first),
+            full_queue_row_fingerprint(&conn, &second),
+            full_queue_row_fingerprint(&conn, &third),
+        ];
+
+        assert_eq!(
+            renderer_retryable_item_ids_by_module(&conn, "customers", 2)
+                .expect("list bounded renderer module IDs"),
+            vec![first.clone(), second.clone()]
+        );
+        assert_eq!(
+            renderer_retryable_item_ids_by_module(&conn, "repairs", 10),
+            Err("REPAIR_TYPED_CONFLICT_REQUIRED".to_string())
+        );
+        assert_eq!(
+            [
+                full_queue_row_fingerprint(&conn, &first),
+                full_queue_row_fingerprint(&conn, &second),
+                full_queue_row_fingerprint(&conn, &third),
+            ],
+            before,
+            "read-only module enumeration changed queue rows"
+        );
     }
 
     #[tokio::test]
@@ -12300,13 +18179,10 @@ mod tests {
             .expect("read first row");
         assert_eq!(first_row.0, "pending");
         assert_eq!(first_row.1, 0);
-        assert!(
-            first_row
-                .2
-                .as_deref()
-                .unwrap_or_default()
-                .contains("Rate limit exceeded"),
-            "first row should preserve the rate-limit error"
+        assert_eq!(
+            first_row.2.as_deref(),
+            Some("HTTP_429_RATE_LIMITED"),
+            "first row should preserve only the bounded rate-limit code"
         );
         assert!(
             first_row.3.is_some(),
@@ -13161,10 +19037,10 @@ mod tests {
             result.is_ok(),
             "mark_failure with stale generation must be a silent no-op (matches mark_success pattern); got {result:?}"
         );
-        assert!(
-            result.unwrap().is_none(),
-            "stale-generation mark_failure must NOT emit a MonetaryDeadLetter"
-        );
+        let outcome = result.unwrap();
+        assert!(!outcome.applied);
+        assert!(!outcome.transitioned_to_dead_letter);
+        assert!(outcome.monetary_notice.is_none());
 
         let (status, attempts, generation) = read_h8_state(&conn, "h8-mf");
         assert_eq!(
@@ -14508,5 +20384,1747 @@ mod tests {
 
         clear_terminal_identity();
         server.await.expect("mock server task");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn claim_time_quarantine_is_counted_and_cannot_report_batch_success() {
+        let (fixture, setup) = FileBackedTestDb::new("claim-time-quarantine-count");
+        let process_db = std::sync::Mutex::new(setup);
+        let database_path = fixture.path.clone();
+        let mut gate_calls = 0_usize;
+
+        let result = process_queue_with_claim_gate(
+            &process_db,
+            "http://127.0.0.1:9",
+            "unused-api-key",
+            move || {
+                gate_calls += 1;
+                if gate_calls == 2 {
+                    let writer = Connection::open(&database_path).expect("open claim-gap writer");
+                    writer
+                        .execute(
+                            "INSERT INTO parity_sync_queue (
+                                 id, table_name, record_id, operation, data, organization_id,
+                                 created_at, attempts, retry_delay_ms, priority, module_type,
+                                 conflict_strategy, version, claim_generation, status
+                             ) VALUES (
+                                 'claim-time-poison', '\u{2003}repairs\u{2003}',
+                                 'claim-time-private-record', 'UPDATE',
+                                 'claim-time-private-payload', 'claim-time-org',
+                                 '2026-08-26T07:00:00Z', 0, 1000, 100,
+                                 '\u{2003}orders\u{2003}', 'manual', 1, 0, 'pending'
+                             )",
+                            [],
+                        )
+                        .expect("insert poison after prepass and before atomic claim");
+                }
+                Ok(())
+            },
+        )
+        .await
+        .expect("process claim-time poison");
+
+        assert!(!result.success);
+        assert_eq!(result.quarantined, 1);
+        assert_eq!(result.processed, 0);
+        assert_eq!(result.failed, 0);
+        assert_eq!(result.dead_lettered, 0);
+        let db = process_db.lock().expect("lock claim-time db");
+        assert_eq!(
+            db.query_row(
+                "SELECT status, error_message, data FROM parity_sync_queue
+                 WHERE id = 'claim-time-poison'",
+                [],
+                |row| Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?
+                )),
+            )
+            .expect("read claim-time quarantine"),
+            (
+                "failed".to_string(),
+                REPAIR_RESERVED_OWNER_QUARANTINED.to_string(),
+                "claim-time-private-payload".to_string(),
+            )
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn blocked_prepass_gate_preserves_actionable_rows_byte_for_byte() {
+        let conn = test_connection();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, claim_generation, status
+             ) VALUES (
+                 'blocked-prepass-poison', '\u{00a0}repair_attachments\u{00a0}',
+                 'blocked-prepass-private-record', 'UPDATE',
+                 'blocked-prepass-private-payload', 'blocked-prepass-org',
+                 '2000-01-01T00:00:00Z', 3, 1000, 100,
+                 '\u{00a0}repairs\u{00a0}', 'manual', 1, 4, 'processing'
+             )",
+            [],
+        )
+        .expect("seed prepass-actionable semantic poison");
+        let before = full_queue_row_fingerprint(&conn, "blocked-prepass-poison");
+        let process_db = std::sync::Mutex::new(conn);
+
+        let result = process_queue_with_claim_gate(
+            &process_db,
+            "http://127.0.0.1:9",
+            "unused-api-key",
+            || Err::<(), _>(ParityClaimGateBlock::ResetPending),
+        )
+        .await
+        .expect("return bounded prepass block");
+
+        assert!(!result.success);
+        assert_eq!(result.batch_block, Some(ParityClaimGateBlock::ResetPending));
+        assert_eq!(result.quarantined, 0);
+        assert_eq!(result.processed, 0);
+        assert_eq!(result.failed, 0);
+        assert_eq!(result.conflicts, 0);
+        assert_eq!(
+            full_queue_row_fingerprint(
+                &process_db.lock().expect("lock blocked prepass db"),
+                "blocked-prepass-poison",
+            ),
+            before,
+            "a denied lifecycle gate must precede quarantine/recovery/requeue mutations"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn renderer_claim_gate_blocks_before_generic_recovery_prepass() {
+        let conn = test_connection();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, last_attempt, retry_delay_ms, priority,
+                 module_type, conflict_strategy, version, claim_generation, status
+             ) VALUES (
+                 'renderer-blocked-prepass', 'customers',
+                 'renderer-blocked-private-record', 'UPDATE',
+                 'renderer-blocked-private-payload', 'renderer-blocked-org',
+                 '2000-01-01T00:00:00Z', 2, '2000-01-01T00:00:00Z', 1000, 100,
+                 'customers', 'manual', 1, 8, 'processing'
+             )",
+            [],
+        )
+        .expect("seed renderer stale-processing row");
+        let before = full_queue_row_fingerprint(&conn, "renderer-blocked-prepass");
+        let process_db = std::sync::Mutex::new(conn);
+
+        let result = process_queue_renderer_safe_with_claim_gate(
+            &process_db,
+            "http://127.0.0.1:9",
+            "unused-api-key",
+            || Err::<(), _>(ParityClaimGateBlock::RebindPending),
+        )
+        .await
+        .expect("return bounded renderer prepass block");
+
+        assert_eq!(
+            result.batch_block,
+            Some(ParityClaimGateBlock::RebindPending)
+        );
+        assert!(!result.success);
+        assert_eq!(
+            full_queue_row_fingerprint(
+                &process_db.lock().expect("lock renderer blocked db"),
+                "renderer-blocked-prepass",
+            ),
+            before,
+            "renderer lifecycle block must precede stale-processing recovery"
+        );
+    }
+
+    #[test]
+    fn renderer_semantic_owner_boundary_excludes_unicode_financial_and_audit_variants() {
+        let conn = test_connection();
+        let variants = [
+            ("exact", "repair_settlement", "orders"),
+            ("uppercase", "REPAIR_SETTLEMENT", "ORDERS"),
+            ("ascii-space", " repair_settlement ", " orders "),
+            ("tab", "\trepair_settlement\t", "\torders\t"),
+            (
+                "nbsp",
+                "\u{00a0}repair_settlement\u{00a0}",
+                "\u{00a0}orders\u{00a0}",
+            ),
+            (
+                "em-space",
+                "\u{2003}repair_settlement\u{2003}",
+                "\u{2003}orders\u{2003}",
+            ),
+        ];
+
+        for (index, (label, order_context, queue_table)) in variants.into_iter().enumerate() {
+            let order_id = format!("semantic-owner-order-{index}");
+            let remote_id = format!("semantic-owner-remote-{index}");
+            conn.execute(
+                "INSERT INTO orders (
+                     id, supabase_id, items, total_amount, status, sync_status,
+                     order_context, created_at, updated_at
+                 ) VALUES (?1, ?2, '[]', 9.50, 'ready', 'synced', ?3,
+                           datetime('now'), datetime('now'))",
+                params![order_id, remote_id, order_context],
+            )
+            .expect("seed semantic repair settlement order");
+
+            conn.execute(
+                "INSERT INTO parity_sync_queue (
+                     id, table_name, record_id, operation, data, organization_id,
+                     created_at, attempts, retry_delay_ms, priority, module_type,
+                     conflict_strategy, version, claim_generation, status
+                 ) VALUES (?1, ?2, ?3, 'UPDATE', ?4, 'semantic-owner-org',
+                           '2026-08-26T07:00:00Z', 0, 1000, 100, 'orders',
+                           'manual', 1, 0, 'pending')",
+                params![
+                    format!("semantic-owner-queue-{index}"),
+                    queue_table,
+                    remote_id,
+                    format!("private-queue-payload-{label}")
+                ],
+            )
+            .expect("seed semantic repair settlement queue row");
+
+            log_conflict(
+                &conn,
+                "UPDATE",
+                &format!("semantic-owner-remote-{index}"),
+                queue_table,
+                1,
+                2,
+                &format!("private-audit-payload-{label}"),
+                "manual",
+                true,
+                false,
+            )
+            .expect("seed semantic repair settlement audit row");
+        }
+
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, claim_generation, status
+             ) VALUES (
+                 'semantic-owner-generic-control', '\u{2003}customers\u{2003}',
+                 'generic-control', 'UPDATE', '{\"safe\":true}',
+                 'semantic-owner-org', '2026-08-26T07:00:01Z', 0, 1000, 1,
+                 'customers', 'manual', 1, 0, 'pending'
+             )",
+            [],
+        )
+        .expect("seed unrelated generic control");
+        log_conflict(
+            &conn,
+            "UPDATE",
+            "generic-control",
+            "\u{2003}customers\u{2003}",
+            1,
+            2,
+            "safe generic audit payload",
+            "manual",
+            false,
+            false,
+        )
+        .expect("seed unrelated generic audit control");
+
+        assert_eq!(
+            renderer_get_length(&conn).expect("renderer-safe length"),
+            1,
+            "only the unrelated generic control may count on the renderer surface"
+        );
+        assert_eq!(
+            renderer_peek(&conn)
+                .expect("renderer-safe peek")
+                .map(|item| item.id),
+            Some("semantic-owner-generic-control".to_string())
+        );
+        let listed = renderer_list_actionable_items(
+            &conn,
+            &QueueListQuery {
+                module_type: None,
+                limit: Some(50),
+            },
+        )
+        .expect("renderer-safe list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "semantic-owner-generic-control");
+
+        let audit =
+            renderer_list_conflict_audit_entries(&conn, 50).expect("renderer-safe conflict audit");
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].entity_id, "generic-control");
+        assert_eq!(audit[0].discarded_payload, "safe generic audit payload");
+        assert!(
+            !format!("{audit:?}").contains("private-audit-payload"),
+            "renderer audit surface exposed a repair-settlement payload"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn renderer_owner_matrix_fences_every_unicode_axis_and_financial_family() {
+        let conn = test_connection();
+        let families = [
+            "orders",
+            "payments",
+            "order_payments",
+            "payment_adjustments",
+        ];
+        let mut protected_queue_ids = Vec::new();
+        let mut direct_queue_ids = Vec::new();
+        let mut financial_queue_ids = Vec::new();
+
+        for family in families {
+            for (index, (label, context_variant)) in semantic_matrix_variants("repair_settlement")
+                .into_iter()
+                .enumerate()
+            {
+                let prefix = format!("semantic-matrix-context-{family}-{label}-{index}");
+                let graph = seed_semantic_matrix_graph(&conn, &prefix, &context_variant);
+                let record_id = semantic_matrix_record_id(family, &graph);
+                let queue_id = format!("{prefix}-queue");
+                seed_semantic_matrix_queue_row(&conn, &queue_id, family, record_id);
+                log_conflict(
+                    &conn,
+                    "INSERT",
+                    record_id,
+                    family,
+                    1,
+                    2,
+                    &format!("semantic-matrix-private-audit-context-{family}-{label}"),
+                    "manual",
+                    true,
+                    false,
+                )
+                .expect("seed context-axis audit row");
+                protected_queue_ids.push(queue_id.clone());
+                financial_queue_ids.push(queue_id);
+            }
+
+            for (index, (label, family_variant)) in
+                semantic_matrix_variants(family).into_iter().enumerate()
+            {
+                let prefix = format!("semantic-matrix-shape-{family}-{label}-{index}");
+                let graph = seed_semantic_matrix_graph(&conn, &prefix, "repair_settlement");
+                let record_id = semantic_matrix_record_id(family, &graph);
+                let queue_id = format!("{prefix}-queue");
+                seed_semantic_matrix_queue_row(&conn, &queue_id, &family_variant, record_id);
+                log_conflict(
+                    &conn,
+                    "INSERT",
+                    record_id,
+                    &family_variant,
+                    1,
+                    2,
+                    &format!("semantic-matrix-private-audit-shape-{family}-{label}"),
+                    "manual",
+                    true,
+                    false,
+                )
+                .expect("seed entity-type-axis audit row");
+                protected_queue_ids.push(queue_id.clone());
+                financial_queue_ids.push(queue_id);
+            }
+        }
+
+        for direct_family in ["repairs", "repair_attachments"] {
+            for (index, (label, table_variant)) in semantic_matrix_variants(direct_family)
+                .into_iter()
+                .enumerate()
+            {
+                let queue_id =
+                    format!("semantic-matrix-direct-{direct_family}-{label}-{index}-queue");
+                let record_id =
+                    format!("semantic-matrix-direct-{direct_family}-{label}-{index}-record");
+                seed_semantic_matrix_queue_row(&conn, &queue_id, &table_variant, &record_id);
+                log_conflict(
+                    &conn,
+                    "INSERT",
+                    &record_id,
+                    &table_variant,
+                    1,
+                    2,
+                    &format!("semantic-matrix-private-audit-direct-{direct_family}-{label}"),
+                    "manual",
+                    false,
+                    false,
+                )
+                .expect("seed direct semantic audit row");
+                protected_queue_ids.push(queue_id.clone());
+                direct_queue_ids.push(queue_id);
+            }
+        }
+
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, claim_generation, status
+             ) VALUES (
+                 'semantic-matrix-generic-control', '\u{2003}customers\u{2003}',
+                 'semantic-matrix-generic-control-record', 'UPDATE',
+                 '{\"safe\":true}', 'semantic-matrix-org',
+                 '2026-08-26T07:00:01Z', 0, 1000, 1, 'customers',
+                 'manual', 1, 0, 'pending'
+             )",
+            [],
+        )
+        .expect("seed semantic matrix generic control");
+        log_conflict(
+            &conn,
+            "UPDATE",
+            "semantic-matrix-generic-control-record",
+            "\u{2003}customers\u{2003}",
+            1,
+            2,
+            "safe semantic matrix generic audit",
+            "manual",
+            false,
+            false,
+        )
+        .expect("seed semantic matrix generic audit control");
+
+        let queue_fingerprints = |connection: &Connection| {
+            protected_queue_ids
+                .iter()
+                .map(|item_id| full_queue_row_fingerprint(connection, item_id))
+                .collect::<Vec<_>>()
+        };
+        let local_before = (
+            full_table_rows_fingerprint(&conn, "orders", "semantic-matrix-"),
+            full_table_rows_fingerprint(&conn, "order_payments", "semantic-matrix-"),
+            full_table_rows_fingerprint(&conn, "payment_adjustments", "semantic-matrix-"),
+        );
+        let audit_before = full_table_rows_fingerprint(&conn, "conflict_audit_log", "");
+
+        for item_id in &protected_queue_ids {
+            conn.execute(
+                "UPDATE parity_sync_queue
+                    SET status = 'processing',
+                        last_attempt = '2000-01-01T00:00:00Z'
+                  WHERE id = ?1",
+                [item_id],
+            )
+            .expect("make semantic matrix row recovery-actionable");
+        }
+        let recovery_before = queue_fingerprints(&conn);
+        assert_eq!(
+            recover_stale_processing_items_renderer_safe(&conn)
+                .expect("run renderer-safe recovery matrix"),
+            0
+        );
+        assert_eq!(queue_fingerprints(&conn), recovery_before);
+
+        for item_id in &protected_queue_ids {
+            conn.execute(
+                "UPDATE parity_sync_queue
+                    SET status = 'pending', last_attempt = NULL,
+                        next_retry_at = NULL
+                  WHERE id = ?1",
+                [item_id],
+            )
+            .expect("make semantic matrix row renderer-actionable");
+        }
+        let read_before = queue_fingerprints(&conn);
+        assert_eq!(renderer_get_length(&conn).expect("matrix length"), 1);
+        let status = renderer_get_status(&conn).expect("matrix status");
+        assert_eq!(
+            (
+                status.total,
+                status.pending,
+                status.in_progress,
+                status.failed,
+                status.conflicts,
+            ),
+            (1, 1, 0, 0, 0)
+        );
+        assert_eq!(
+            renderer_peek(&conn)
+                .expect("matrix peek")
+                .map(|item| item.id),
+            Some("semantic-matrix-generic-control".to_string())
+        );
+        let actionable = renderer_list_actionable_items(
+            &conn,
+            &QueueListQuery {
+                module_type: None,
+                limit: Some(500),
+            },
+        )
+        .expect("matrix actionable list");
+        assert_eq!(actionable.len(), 1);
+        assert_eq!(actionable[0].id, "semantic-matrix-generic-control");
+        let renderer_audit =
+            renderer_list_conflict_audit_entries(&conn, 500).expect("matrix audit list");
+        assert_eq!(renderer_audit.len(), 1);
+        assert_eq!(
+            renderer_audit[0].entity_id,
+            "semantic-matrix-generic-control-record"
+        );
+        assert_eq!(
+            renderer_audit[0].discarded_payload,
+            "safe semantic matrix generic audit"
+        );
+        assert!(!format!("{renderer_audit:?}").contains("semantic-matrix-private-audit"));
+        let claimed_control = renderer_dequeue(&conn)
+            .expect("matrix dequeue")
+            .expect("generic control must remain claimable");
+        assert_eq!(claimed_control.id, "semantic-matrix-generic-control");
+        mark_success(&conn, &claimed_control.id, claimed_control.claim_generation)
+            .expect("remove claimed generic control");
+        assert_eq!(queue_fingerprints(&conn), read_before);
+
+        for item_id in &protected_queue_ids {
+            conn.execute(
+                "UPDATE parity_sync_queue
+                    SET status = 'failed', attempts = 3,
+                        error_message = 'semantic matrix private error',
+                        last_attempt = '2000-01-01T00:00:00Z'
+                  WHERE id = ?1",
+                [item_id],
+            )
+            .expect("make semantic matrix row retry-actionable");
+        }
+        let mutation_before = queue_fingerprints(&conn);
+        for item_id in &direct_queue_ids {
+            assert_eq!(
+                renderer_retry_item(&conn, item_id).expect_err("direct owner retry must route"),
+                "REPAIR_TYPED_CONFLICT_REQUIRED"
+            );
+        }
+        for item_id in &financial_queue_ids {
+            assert_eq!(
+                renderer_retry_item(&conn, item_id).expect_err("repair financial retry must route"),
+                "REPAIR_SETTLEMENT_ROUTE_REQUIRED"
+            );
+        }
+        assert_eq!(
+            renderer_retry_items_by_module(&conn, "semantic-matrix")
+                .expect("matrix module retry")
+                .retried,
+            0
+        );
+        renderer_clear(&conn).expect("matrix renderer clear");
+        assert_eq!(queue_fingerprints(&conn), mutation_before);
+
+        let process_db = std::sync::Mutex::new(conn);
+        let result =
+            process_queue_renderer_safe(&process_db, "http://127.0.0.1:9", "unused-api-key")
+                .await
+                .expect("matrix renderer-safe no-HTTP pass");
+        assert!(result.success);
+        assert_eq!(result.processed, 0);
+        assert_eq!(result.failed, 0);
+        assert_eq!(result.conflicts, 0);
+        assert_eq!(result.quarantined, 0);
+        let conn = process_db.lock().expect("lock semantic matrix db");
+        assert_eq!(queue_fingerprints(&conn), mutation_before);
+        assert_eq!(
+            (
+                full_table_rows_fingerprint(&conn, "orders", "semantic-matrix-"),
+                full_table_rows_fingerprint(&conn, "order_payments", "semantic-matrix-"),
+                full_table_rows_fingerprint(&conn, "payment_adjustments", "semantic-matrix-"),
+            ),
+            local_before,
+            "renderer operations mutated a linked repair financial row"
+        );
+        assert_eq!(
+            full_table_rows_fingerprint(&conn, "conflict_audit_log", ""),
+            audit_before,
+            "renderer operations mutated semantic repair audit history"
+        );
+    }
+
+    fn seed_timestamp_format_backoff_rows(conn: &Connection, prefix: &str) -> String {
+        seed_terminal_context(conn);
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, next_retry_at, retry_delay_ms, priority,
+                 module_type, conflict_strategy, version, claim_generation, status
+             ) VALUES (
+                 ?1, 'customers', ?2, 'UPDATE', '{\"due\":true}', 'backoff-org',
+                 '2026-08-26T07:00:01Z', 1, datetime('now', '-1 minute'), 1000,
+                 1, 'customers', 'manual', 1, 0, 'pending'
+             ), (
+                 ?3, 'customers', ?4, 'UPDATE', '{\"privateFuture\":true}',
+                 'backoff-org', '2026-08-26T07:00:00Z', 1,
+                 strftime('%Y-%m-%d 24:00:00-14:00', 'now'), 1000,
+                 100, 'customers', 'manual', 1, 0, 'pending'
+             )",
+            params![
+                format!("{prefix}-due"),
+                format!("{prefix}-due-record"),
+                format!("{prefix}-future"),
+                format!("{prefix}-future-record")
+            ],
+        )
+        .expect("seed timestamp-format backoff rows");
+        assert!(
+            conn.query_row(
+                "SELECT julianday(next_retry_at) > julianday('now')
+                 FROM parity_sync_queue WHERE id = ?1",
+                [format!("{prefix}-future")],
+                |row| row.get::<_, bool>(0),
+            )
+            .expect("prove SQLite-format row is in the future"),
+            "test fixture must be chronologically future even though it sorts before RFC3339 now"
+        );
+        format!("{prefix}-future")
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn queue_backoff_uses_timestamp_value_not_lexical_format_on_every_path() {
+        let internal_peek = test_connection();
+        let future_id = seed_timestamp_format_backoff_rows(&internal_peek, "internal-peek");
+        let future_before = full_queue_row_fingerprint(&internal_peek, &future_id);
+        assert_eq!(
+            peek(&internal_peek)
+                .expect("internal peek")
+                .expect("due internal item")
+                .id,
+            "internal-peek-due"
+        );
+        assert_eq!(
+            full_queue_row_fingerprint(&internal_peek, &future_id),
+            future_before
+        );
+
+        let renderer_peek_conn = test_connection();
+        let future_id = seed_timestamp_format_backoff_rows(&renderer_peek_conn, "renderer-peek");
+        let future_before = full_queue_row_fingerprint(&renderer_peek_conn, &future_id);
+        assert_eq!(
+            renderer_peek(&renderer_peek_conn)
+                .expect("renderer peek")
+                .expect("due renderer item")
+                .id,
+            "renderer-peek-due"
+        );
+        assert_eq!(
+            full_queue_row_fingerprint(&renderer_peek_conn, &future_id),
+            future_before
+        );
+
+        let internal_dequeue = test_connection();
+        let future_id = seed_timestamp_format_backoff_rows(&internal_dequeue, "internal-dequeue");
+        let future_before = full_queue_row_fingerprint(&internal_dequeue, &future_id);
+        assert_eq!(
+            dequeue(&internal_dequeue)
+                .expect("internal dequeue")
+                .expect("due internal claim")
+                .id,
+            "internal-dequeue-due"
+        );
+        assert_eq!(
+            full_queue_row_fingerprint(&internal_dequeue, &future_id),
+            future_before
+        );
+
+        let renderer_dequeue_conn = test_connection();
+        let future_id =
+            seed_timestamp_format_backoff_rows(&renderer_dequeue_conn, "renderer-dequeue");
+        let future_before = full_queue_row_fingerprint(&renderer_dequeue_conn, &future_id);
+        assert_eq!(
+            renderer_dequeue(&renderer_dequeue_conn)
+                .expect("renderer dequeue")
+                .expect("due renderer claim")
+                .id,
+            "renderer-dequeue-due"
+        );
+        assert_eq!(
+            full_queue_row_fingerprint(&renderer_dequeue_conn, &future_id),
+            future_before
+        );
+
+        let process_conn = test_connection();
+        let future_id = seed_timestamp_format_backoff_rows(&process_conn, "process");
+        let future_before = full_queue_row_fingerprint(&process_conn, &future_id);
+        let process_conn = std::sync::Arc::new(std::sync::Mutex::new(process_conn));
+        let (base_url, observed, release, server) = spawn_blocked_first_response_server(
+            MockResponse::json(200, r#"{"success":true,"data":{}}"#),
+        )
+        .await;
+        let process_task = {
+            let process_conn = process_conn.clone();
+            tokio::spawn(async move { process_queue(&process_conn, &base_url, "api-key").await })
+        };
+        observed.await.expect("observe first due request");
+        release.send(()).expect("release due response");
+        let result = process_task
+            .await
+            .expect("join backoff processor")
+            .expect("process due row");
+        let requests = server.await.expect("join backoff server");
+        assert_eq!(
+            requests.len(),
+            1,
+            "future row must not be sent in this batch"
+        );
+        assert!(requests[0].request_line.contains("process-due-record"));
+        assert_eq!(result.processed, 1);
+        assert_eq!(result.failed, 0);
+        assert_eq!(result.conflicts, 0);
+        assert_eq!(
+            full_queue_row_fingerprint(
+                &process_conn.lock().expect("lock backoff process db"),
+                &future_id
+            ),
+            future_before,
+            "chronologically future row must stay byte-for-byte unchanged"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn stale_409_response_cannot_follow_up_a_semantically_reowned_claim() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        let queue_id = enqueue_test_item(
+            &conn,
+            "customers",
+            "UPDATE",
+            "stale-409-customer",
+            json!({
+                "name": "private-stale-409-payload",
+                "version": 1
+            }),
+        );
+        let conn = std::sync::Arc::new(std::sync::Mutex::new(conn));
+        let (base_url, observed, release, server) =
+            spawn_blocked_first_response_server(MockResponse::json(
+                409,
+                r#"{"success":false,"error":"version conflict","private":"response-409-sentinel"}"#,
+            ))
+            .await;
+        let process_task = {
+            let conn = conn.clone();
+            tokio::spawn(async move { process_queue(&conn, &base_url, "api-key").await })
+        };
+
+        observed.await.expect("observe blocked 409 request");
+        let quarantined_fingerprint = {
+            let db = conn.lock().expect("lock blocked 409 db");
+            db.execute(
+                "UPDATE parity_sync_queue
+                 SET module_type = ?2
+                 WHERE id = ?1 AND status = 'processing'",
+                params![queue_id.as_str(), "\u{2003}repairs\u{2003}"],
+            )
+            .expect("semantically re-own blocked 409 row");
+            assert_eq!(
+                quarantine_reserved_repair_lookalikes(&db).expect("quarantine blocked 409 owner"),
+                1
+            );
+            full_queue_row_fingerprint(&db, &queue_id).expect("fingerprint quarantined 409 row")
+        };
+        release.send(()).expect("release blocked 409 response");
+        let result = process_task
+            .await
+            .expect("join blocked 409 processor")
+            .expect("process blocked 409 response");
+        let requests = server.await.expect("join blocked 409 server");
+
+        assert_eq!(requests.len(), 1, "stale claim must not issue conflict GET");
+        assert_eq!(
+            (result.processed, result.failed, result.conflicts),
+            (0, 0, 0)
+        );
+        assert!(
+            result.errors.is_empty(),
+            "stale claim produced a public error"
+        );
+        let db = conn.lock().expect("lock final 409 db");
+        assert_eq!(
+            full_queue_row_fingerprint(&db, &queue_id),
+            Some(quarantined_fingerprint),
+            "stale response changed the quarantined row"
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT COUNT(*) FROM conflict_audit_log
+                 WHERE entity_id = 'stale-409-customer'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count stale 409 audit rows"),
+            0,
+            "stale claimant copied private payload into conflict audit"
+        );
+        let exposed = format!("{result:?}");
+        assert!(!exposed.contains("private-stale-409-payload"));
+        assert!(!exposed.contains("response-409-sentinel"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn stale_payment_422_cannot_adopt_quarantine_generation_or_mutate_payment() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        conn.execute_batch(
+            "INSERT INTO orders (
+                 id, supabase_id, items, total_amount, total_amount_cents, status, payment_status,
+                 payment_transaction_id, sync_status, created_at, updated_at
+             ) VALUES (
+                 'stale-422-order', 'remote-stale-422-order', '[]', 4.79, 479, 'completed', 'paid',
+                 'stale-422-valid', 'synced', datetime('now'), datetime('now')
+             );
+             INSERT INTO order_payments (
+                 id, order_id, method, amount, amount_cents, currency, status,
+                 remote_payment_id, sync_status, sync_state, created_at, updated_at
+             ) VALUES (
+                 'stale-422-valid', 'stale-422-order', 'cash', 4.79, 479, 'EUR',
+                 'completed', 'remote-stale-422-valid', 'synced', 'applied',
+                 datetime('now'), datetime('now')
+             ), (
+                 'stale-422-payment', 'stale-422-order', 'cash', 0.55, 55, 'EUR',
+                 'completed', NULL, 'pending', 'pending', datetime('now'), datetime('now')
+             );",
+        )
+        .expect("seed stale payment conflict graph");
+        let queue_id = enqueue(
+            &conn,
+            &EnqueueInput {
+                table_name: "payments".to_string(),
+                record_id: "stale-422-payment".to_string(),
+                operation: "INSERT".to_string(),
+                data: json!({
+                    "paymentId": "stale-422-payment",
+                    "orderId": "stale-422-order",
+                    "amount": 0.55,
+                    "private": "payment-422-payload-sentinel"
+                })
+                .to_string(),
+                organization_id: "stale-422-org".to_string(),
+                priority: Some(100),
+                module_type: Some("payment".to_string()),
+                conflict_strategy: Some("server-wins".to_string()),
+                version: Some(1),
+            },
+        )
+        .expect("enqueue stale payment conflict");
+        let conn = std::sync::Arc::new(std::sync::Mutex::new(conn));
+        let (base_url, observed, release, server) = spawn_blocked_first_response_server(
+            MockResponse::json(
+                422,
+                r#"{"success":false,"error":"Payment exceeds order total","details":"Order total: 4.79, tip: 0, existing completed: 4.79, payment: 0.55","private":"response-422-sentinel"}"#,
+            ),
+        )
+        .await;
+        let process_task = {
+            let conn = conn.clone();
+            tokio::spawn(async move { process_queue(&conn, &base_url, "api-key").await })
+        };
+
+        match tokio::time::timeout(Duration::from_secs(5), observed).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => panic!("blocked payment server closed before observing request"),
+            Err(_) if process_task.is_finished() => {
+                let outcome = process_task.await;
+                panic!("payment processor finished before reaching HTTP: {outcome:?}");
+            }
+            Err(_) => {
+                process_task.abort();
+                panic!("payment processor did not reach HTTP within five seconds");
+            }
+        }
+        let (queue_fingerprint, payment_fingerprint) = {
+            let db = conn.lock().expect("lock blocked payment db");
+            db.execute(
+                "UPDATE parity_sync_queue SET module_type = ?2
+                 WHERE id = ?1 AND status = 'processing'",
+                params![queue_id.as_str(), "\u{2003}repairs\u{2003}"],
+            )
+            .expect("semantically re-own blocked payment row");
+            assert_eq!(
+                quarantine_reserved_repair_lookalikes(&db)
+                    .expect("quarantine blocked payment owner"),
+                1
+            );
+            (
+                full_queue_row_fingerprint(&db, &queue_id)
+                    .expect("fingerprint quarantined payment row"),
+                full_order_payment_row_fingerprint(&db, "stale-422-payment")
+                    .expect("fingerprint payment at response boundary"),
+            )
+        };
+        release.send(()).expect("release blocked payment response");
+        let result = process_task
+            .await
+            .expect("join blocked payment processor")
+            .expect("process blocked payment response");
+        let requests = server.await.expect("join blocked payment server");
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            (result.processed, result.failed, result.conflicts),
+            (0, 0, 0)
+        );
+        assert!(result.errors.is_empty());
+        let db = conn.lock().expect("lock final payment db");
+        assert_eq!(
+            full_queue_row_fingerprint(&db, &queue_id),
+            Some(queue_fingerprint),
+            "stale payment response adopted the quarantine generation"
+        );
+        assert_eq!(
+            full_order_payment_row_fingerprint(&db, "stale-422-payment"),
+            Some(payment_fingerprint),
+            "stale payment response mutated the canonical local payment"
+        );
+        let exposed = format!("{result:?}");
+        assert!(!exposed.contains("payment-422-payload-sentinel"));
+        assert!(!exposed.contains("response-422-sentinel"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn stale_order_500_cannot_issue_legacy_fallback_after_semantic_reownership() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        conn.execute(
+            "INSERT INTO orders (
+                 id, supabase_id, items, total_amount, total_amount_cents, status,
+                 payment_status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'stale-500-order', 'stale-500-order-remote', '[]', 29.4, 2940,
+                 'pending', 'paid', 'pending', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed stale fallback order");
+        let queue_id = enqueue(
+            &conn,
+            &EnqueueInput {
+                table_name: "orders".to_string(),
+                record_id: "stale-500-order".to_string(),
+                operation: "UPDATE".to_string(),
+                data: json!({
+                    "orderId": "stale-500-order",
+                    "status": "pending",
+                    "paymentStatus": "paid",
+                    "totalAmount": 29.4,
+                    "items": [{
+                        "menu_item_id": TEST_MENU_ITEM_ID,
+                        "name": "private-fallback-item-sentinel",
+                        "quantity": 1,
+                        "unit_price": 29.4
+                    }]
+                })
+                .to_string(),
+                organization_id: "stale-500-org".to_string(),
+                priority: Some(100),
+                module_type: Some("orders".to_string()),
+                conflict_strategy: Some("server-wins".to_string()),
+                version: Some(1),
+            },
+        )
+        .expect("enqueue stale fallback order");
+        let conn = std::sync::Arc::new(std::sync::Mutex::new(conn));
+        let (base_url, observed, release, server) = spawn_blocked_first_response_server(
+            MockResponse::json(
+                500,
+                r#"{"success":false,"error":"Failed to update order","private":"response-500-sentinel"}"#,
+            ),
+        )
+        .await;
+        let process_task = {
+            let conn = conn.clone();
+            tokio::spawn(async move { process_queue(&conn, &base_url, "api-key").await })
+        };
+
+        observed
+            .await
+            .expect("observe blocked legacy order request");
+        let quarantined_fingerprint = {
+            let db = conn.lock().expect("lock blocked legacy order db");
+            db.execute(
+                "UPDATE parity_sync_queue SET module_type = ?2
+                 WHERE id = ?1 AND status = 'processing'",
+                params![queue_id.as_str(), "\u{2003}repairs\u{2003}"],
+            )
+            .expect("semantically re-own blocked legacy order row");
+            assert_eq!(
+                quarantine_reserved_repair_lookalikes(&db)
+                    .expect("quarantine blocked legacy order owner"),
+                1
+            );
+            full_queue_row_fingerprint(&db, &queue_id)
+                .expect("fingerprint quarantined legacy order row")
+        };
+        release
+            .send(())
+            .expect("release blocked legacy order response");
+        let result = process_task
+            .await
+            .expect("join blocked legacy order processor")
+            .expect("process blocked legacy order response");
+        let requests = server.await.expect("join blocked legacy order server");
+
+        assert_eq!(
+            requests.len(),
+            1,
+            "stale claim issued a legacy fallback HTTP request"
+        );
+        assert_eq!(
+            (result.processed, result.failed, result.conflicts),
+            (0, 0, 0)
+        );
+        assert!(result.errors.is_empty());
+        let db = conn.lock().expect("lock final legacy order db");
+        assert_eq!(
+            full_queue_row_fingerprint(&db, &queue_id),
+            Some(quarantined_fingerprint)
+        );
+        let exposed = format!("{result:?}");
+        assert!(!exposed.contains("private-fallback-item-sentinel"));
+        assert!(!exposed.contains("response-500-sentinel"));
+    }
+
+    #[test]
+    fn legacy_prepasses_never_select_semantic_or_linked_repair_financial_rows() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        seed_customer_cache(
+            &conn,
+            "prepass-customer",
+            json!({
+                "id": "local-prepass-address",
+                "street_address": "Private Prepass Street",
+                "city": "Athens"
+            }),
+        );
+        let seed_failed = |id: &str,
+                           table_name: &str,
+                           record_id: &str,
+                           operation: &str,
+                           module_type: &str,
+                           data: &str,
+                           error_message: &str| {
+            conn.execute(
+                "INSERT INTO parity_sync_queue (
+                     id, table_name, record_id, operation, data, organization_id,
+                     created_at, attempts, last_attempt, error_message, retry_delay_ms,
+                     priority, module_type, conflict_strategy, version, claim_generation, status
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, 'prepass-org',
+                           '2026-08-26T07:00:00Z', 10, '2026-08-26T07:01:00Z',
+                           ?7, 64000, 100, ?6, 'manual', 1, 4, 'failed')",
+                params![
+                    id,
+                    table_name,
+                    record_id,
+                    operation,
+                    data,
+                    module_type,
+                    error_message
+                ],
+            )
+            .expect("seed protected prepass row");
+        };
+
+        let semantic_module = "\u{2003}repairs\u{2003}";
+        seed_failed(
+            "prepass-terminal",
+            "customers",
+            "prepass-terminal-record",
+            "UPDATE",
+            semantic_module,
+            r#"{"private":"terminal-prepass-sentinel"}"#,
+            "Parity sync request is missing terminal_id context",
+        );
+        seed_failed(
+            "prepass-rate-limit",
+            "customers",
+            "prepass-rate-record",
+            "UPDATE",
+            semantic_module,
+            r#"{"private":"rate-prepass-sentinel"}"#,
+            "HTTP 429: rate limit exceeded",
+        );
+        seed_failed(
+            "prepass-fiscal",
+            "\u{00a0}repair_attachments\u{00a0}",
+            "prepass-fiscal-record",
+            "INSERT",
+            "fiscal",
+            r#"{"issuedAt":"2026-06-19 11:35:00","private":"fiscal-prepass-sentinel"}"#,
+            r#"HTTP 400: {"error":"InvalidFiscalReceiptInput","issues":[{"path":["issuedAt"],"message":"Invalid datetime"}]}"#,
+        );
+        seed_failed(
+            "prepass-order",
+            "orders",
+            "prepass-order-record",
+            "UPDATE",
+            semantic_module,
+            r#"{"status":"pending","private":"order-prepass-sentinel"}"#,
+            r#"HTTP 400: {"error":"Validation failed","details":[{"field":"payment_method","message":"Required"}]}"#,
+        );
+        seed_failed(
+            "prepass-address",
+            "customer_addresses",
+            "local-prepass-address",
+            "UPDATE",
+            semantic_module,
+            r#"{"customer_id":"prepass-customer","private":"address-prepass-sentinel"}"#,
+            r#"HTTP 404: {"error":"Address not found"}"#,
+        );
+        seed_failed(
+            "prepass-session",
+            "restaurant_table_sessions",
+            "local-table-session:prepass-order",
+            "UPDATE",
+            semantic_module,
+            r#"{"private":"session-prepass-sentinel"}"#,
+            r#"HTTP 500: {"error":"invalid input syntax for type uuid: \"local-table-session:prepass-order\""}"#,
+        );
+
+        conn.execute_batch(
+            "INSERT INTO orders (
+                 id, items, total_amount, total_amount_cents, status, payment_status,
+                 payment_transaction_id, sync_status, order_context, created_at, updated_at
+             ) VALUES (
+                 'prepass-repair-order', '[]', 4.79, 479, 'completed', 'paid',
+                 'prepass-valid-payment', 'synced',
+                 '\u{2003}repair_settlement\u{2003}', datetime('now'), datetime('now')
+             );
+             INSERT INTO order_payments (
+                 id, order_id, method, amount, amount_cents, currency, status,
+                 remote_payment_id, sync_status, sync_state, created_at, updated_at
+             ) VALUES (
+                 'prepass-valid-payment', 'prepass-repair-order', 'cash', 4.79, 479,
+                 'EUR', 'completed', 'remote-prepass-valid', 'synced', 'applied',
+                 datetime('now'), datetime('now')
+             ), (
+                 'prepass-repair-payment', 'prepass-repair-order', 'cash', 0.55, 55,
+                 'EUR', 'completed', NULL, 'failed', 'failed', datetime('now'), datetime('now')
+             );",
+        )
+        .expect("seed linked repair financial graph");
+        seed_failed(
+            "prepass-linked-payment",
+            "payments",
+            "prepass-repair-payment",
+            "INSERT",
+            "payment",
+            r#"{"orderId":"prepass-repair-order","amount":0.55,"private":"linked-payment-prepass-sentinel"}"#,
+            r#"HTTP 422: {"error":"Payment exceeds order total","details":"Order total: 4.79, tip: 0, existing completed: 4.79, payment: 0.55"}"#,
+        );
+
+        let protected_ids = [
+            "prepass-terminal",
+            "prepass-rate-limit",
+            "prepass-fiscal",
+            "prepass-order",
+            "prepass-address",
+            "prepass-session",
+            "prepass-linked-payment",
+        ];
+        let before = protected_ids
+            .iter()
+            .map(|id| full_queue_row_fingerprint(&conn, id))
+            .collect::<Vec<_>>();
+        let payment_before = full_order_payment_row_fingerprint(&conn, "prepass-repair-payment");
+
+        let _ = retry_failed_terminal_context_items_limited(&conn, 10)
+            .expect("run terminal-context prepass");
+        let _ = retry_failed_rate_limited_items_limited(&conn, 10).expect("run rate-limit prepass");
+        let _ = retry_failed_invalid_fiscal_issued_at_items_limited(&conn, 10)
+            .expect("run fiscal prepass");
+        let _ = retry_failed_legacy_order_insert_items_limited(&conn, 10)
+            .expect("run legacy-order prepass");
+        let _ = resolve_failed_payment_total_conflict_items_limited(&conn, 10)
+            .expect("run payment-conflict prepass");
+        let _ = retry_failed_customer_address_not_found_items_limited(&conn, 10)
+            .expect("run customer-address prepass");
+        let _ = retry_failed_table_session_local_placeholder_items_limited(&conn, 10)
+            .expect("run table-session prepass");
+
+        let after = protected_ids
+            .iter()
+            .map(|id| full_queue_row_fingerprint(&conn, id))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            after, before,
+            "legacy prepasses selected or mutated a semantically protected row"
+        );
+        assert_eq!(
+            full_order_payment_row_fingerprint(&conn, "prepass-repair-payment"),
+            payment_before,
+            "linked repair-settlement payment was mutated by generic recovery"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn real_database_restart_quarantines_unicode_poison_once_without_payload_logging() {
+        let directory = crate::tests::harness::TempDir::new();
+        let initial = crate::db::init(directory.path()).expect("initialize startup quarantine db");
+        {
+            let conn = initial
+                .conn
+                .lock()
+                .expect("lock startup quarantine seed db");
+            for (index, (status, generation)) in [
+                ("pending", 0_i64),
+                ("processing", 7_i64),
+                ("failed", 3_i64),
+                ("conflict", 4_i64),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                conn.execute(
+                    "INSERT INTO parity_sync_queue (
+                         id, table_name, record_id, operation, data, organization_id,
+                         created_at, attempts, last_attempt, error_message, next_retry_at,
+                         retry_delay_ms, priority, module_type, conflict_strategy, version,
+                         claim_generation, status
+                     ) VALUES (?1, ?2, ?3, 'UPDATE', ?4, 'startup-poison-org',
+                               '2026-08-26T07:00:00Z', 5, '2026-08-26T07:01:00Z',
+                               'old startup error', '2099-01-01 00:00:00', 64000, 100,
+                               ?5, 'manual', 1, ?6, ?7)",
+                    params![
+                        format!("startup-poison-{status}"),
+                        if index % 2 == 0 {
+                            "\u{2003}repairs\u{2003}"
+                        } else {
+                            "\u{00a0}repair_attachments\u{00a0}"
+                        },
+                        format!("startup-poison-record-{status}"),
+                        format!("private-startup-payload-{status}"),
+                        "\trepairs\t",
+                        generation,
+                        status
+                    ],
+                )
+                .expect("seed startup Unicode poison");
+            }
+        }
+        drop(initial);
+
+        let logs = CapturedLogWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(logs.clone())
+            .finish();
+        let reopened =
+            tracing::subscriber::with_default(subscriber, || crate::db::init(directory.path()))
+                .expect("reopen through real database init");
+        let first_fingerprints = {
+            let conn = reopened.conn.lock().expect("lock first reopened db");
+            for (status, expected_generation) in [
+                ("pending", 0_i64),
+                ("processing", 8_i64),
+                ("failed", 3_i64),
+                ("conflict", 4_i64),
+            ] {
+                let row = conn
+                    .query_row(
+                        "SELECT status, claim_generation, error_message, next_retry_at, data
+                         FROM parity_sync_queue WHERE id = ?1",
+                        [format!("startup-poison-{status}")],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, i64>(1)?,
+                                row.get::<_, String>(2)?,
+                                row.get::<_, Option<String>>(3)?,
+                                row.get::<_, String>(4)?,
+                            ))
+                        },
+                    )
+                    .expect("read startup-quarantined row");
+                assert_eq!(row.0, "failed");
+                assert_eq!(row.1, expected_generation);
+                assert_eq!(row.2, REPAIR_RESERVED_OWNER_QUARANTINED);
+                assert_eq!(row.3, None);
+                assert_eq!(row.4, format!("private-startup-payload-{status}"));
+            }
+            let usage = capacity_usage(&conn).expect("startup capacity after quarantine");
+            assert_eq!((usage.replayable, usage.conflicts), (0, 0));
+            ["pending", "processing", "failed", "conflict"]
+                .into_iter()
+                .map(|status| {
+                    full_queue_row_fingerprint(&conn, &format!("startup-poison-{status}"))
+                })
+                .collect::<Vec<_>>()
+        };
+        let captured_logs = logs.contents();
+        for status in ["pending", "processing", "failed", "conflict"] {
+            assert!(
+                !captured_logs.contains(&format!("private-startup-payload-{status}")),
+                "startup quarantine copied a private payload into logs"
+            );
+        }
+        drop(reopened);
+
+        let reopened_again =
+            crate::db::init(directory.path()).expect("reopen startup quarantine db again");
+        let second_fingerprints = {
+            let conn = reopened_again.conn.lock().expect("lock second reopened db");
+            ["pending", "processing", "failed", "conflict"]
+                .into_iter()
+                .map(|status| {
+                    full_queue_row_fingerprint(&conn, &format!("startup-poison-{status}"))
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            second_fingerprints, first_fingerprints,
+            "second startup must be byte-for-byte idempotent"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn batch_dead_letter_count_uses_the_live_transition_not_dequeued_attempts() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        let item_id = enqueue_test_item(
+            &conn,
+            "customers",
+            "UPDATE",
+            "authoritative-dead-letter-record",
+            json!({ "safe": true }),
+        );
+        let conn = std::sync::Arc::new(std::sync::Mutex::new(conn));
+        let (base_url, observed, release, server) = spawn_blocked_first_response_server(
+            MockResponse::json(500, r#"{"error":"temporary"}"#),
+        )
+        .await;
+        let process_task = {
+            let conn = conn.clone();
+            tokio::spawn(async move { process_queue(&conn, &base_url, "api-key").await })
+        };
+        observed.await.expect("observe dead-letter request");
+        conn.lock()
+            .expect("lock live attempts row")
+            .execute(
+                "UPDATE parity_sync_queue SET attempts = ?1 WHERE id = ?2",
+                params![MAX_RETRY_ATTEMPTS - 1, item_id.as_str()],
+            )
+            .expect("advance live attempts after dequeue snapshot");
+        release.send(()).expect("release dead-letter response");
+
+        let result = process_task
+            .await
+            .expect("join authoritative dead-letter processor")
+            .expect("process authoritative dead-letter row");
+        assert_eq!(server.await.expect("join dead-letter server").len(), 1);
+        assert_eq!(result.failed, 1);
+        assert_eq!(result.dead_lettered, 1);
+        assert!(result.monetary_dead_letters.is_empty());
+        assert!(!result.success);
+        assert_eq!(
+            conn.lock()
+                .expect("lock terminal dead-letter row")
+                .query_row(
+                    "SELECT status, attempts FROM parity_sync_queue WHERE id = ?1",
+                    [item_id.as_str()],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .expect("read terminal dead-letter row"),
+            ("failed".to_string(), MAX_RETRY_ATTEMPTS)
+        );
+    }
+
+    #[test]
+    fn monetary_dead_letter_notice_is_bounded_and_emitted_only_on_transition() {
+        let conn = test_connection();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, claim_generation, status
+             ) VALUES (
+                 'bounded-dead-letter', 'payments', 'private-payment-record-id',
+                 'INSERT', '{\"phone\":\"+301234567890\",\"private\":true}',
+                 'bounded-dead-letter-org', '2026-08-26T07:00:00Z', ?1, 1000,
+                 100, 'payment', 'server-wins', 1, 7, 'processing'
+             )",
+            [MAX_RETRY_ATTEMPTS - 1],
+        )
+        .expect("seed bounded dead-letter row");
+
+        let first = mark_failure(
+            &conn,
+            "bounded-dead-letter",
+            "HTTP 500: private-provider-response +301234567890",
+            7,
+        )
+        .expect("transition monetary dead-letter");
+        assert!(first.applied);
+        assert!(first.transitioned_to_dead_letter);
+        let serialized = serde_json::to_value(
+            first
+                .monetary_notice
+                .expect("new monetary terminal transition emits one notice"),
+        )
+        .expect("serialize bounded notice");
+        assert_eq!(serialized, json!({ "category": "payment" }));
+        let exposed = serialized.to_string();
+        assert!(!exposed.contains("private-payment-record-id"));
+        assert!(!exposed.contains("private-provider-response"));
+        assert!(!exposed.contains("+301234567890"));
+
+        let repeated = mark_failure(
+            &conn,
+            "bounded-dead-letter",
+            "HTTP 500: second private response",
+            7,
+        )
+        .expect("repeat dead-letter acknowledgement");
+        assert!(!repeated.applied);
+        assert!(!repeated.transitioned_to_dead_letter);
+        assert!(repeated.monetary_notice.is_none());
+    }
+
+    #[test]
+    fn telemetry_module_category_never_echoes_queue_controlled_text() {
+        let mut item = queue_item(
+            "customers",
+            "UPDATE",
+            "telemetry-private-record",
+            json!({ "safe": true }),
+        );
+        item.module_type = "private-module-sentinel/+301234567890".to_string();
+        let mut telemetry = SyncTelemetryBuilder::new(Utc::now().to_rfc3339(), 1);
+        telemetry.record_success(&item);
+
+        let categories = telemetry
+            .outcomes
+            .keys()
+            .map(|(module, _, _)| module.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(categories, vec!["other"]);
+        assert!(!format!("{:?}", telemetry.outcomes).contains("private-module-sentinel"));
+        assert!(!format!("{:?}", telemetry.outcomes).contains("+301234567890"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn terminal_auth_result_is_bounded_and_stops_before_the_second_generic_row() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        let first_id = enqueue_test_item(
+            &conn,
+            "customers",
+            "UPDATE",
+            "terminal-auth-first",
+            json!({ "private": "terminal-auth-request-sentinel" }),
+        );
+        let second_id = enqueue_test_item(
+            &conn,
+            "customers",
+            "UPDATE",
+            "terminal-auth-second",
+            json!({ "safe": true }),
+        );
+        conn.execute(
+            "UPDATE parity_sync_queue SET priority = 100 WHERE id = ?1",
+            [first_id.as_str()],
+        )
+        .expect("prioritize first terminal-auth row");
+        let second_before = full_queue_row_fingerprint(&conn, &second_id);
+        let conn = std::sync::Arc::new(std::sync::Mutex::new(conn));
+        let (base_url, observed, release, server) = spawn_blocked_first_response_server(
+            MockResponse::json(
+                401,
+                r#"{"success":false,"code":"terminal_inactive","terminalActive":false,"private":"terminal-auth-response-sentinel"}"#,
+            ),
+        )
+        .await;
+        let process_task = {
+            let conn = conn.clone();
+            tokio::spawn(async move { process_queue(&conn, &base_url, "api-key").await })
+        };
+        observed.await.expect("observe terminal auth request");
+        release.send(()).expect("release terminal auth response");
+        let result = process_task
+            .await
+            .expect("join terminal auth processor")
+            .expect("return bounded terminal auth result");
+        let requests = server.await.expect("join terminal auth server");
+        assert_eq!(requests.len(), 1, "terminal auth must stop the batch");
+        assert_eq!(
+            full_queue_row_fingerprint(&conn.lock().expect("lock terminal auth db"), &second_id),
+            second_before,
+            "second row changed after terminal-auth stop"
+        );
+
+        let serialized = serde_json::to_value(&result).expect("serialize terminal auth result");
+        assert_eq!(
+            serialized.pointer("/authOutcome/kind"),
+            Some(&json!("hard_terminal_auth"))
+        );
+        assert_eq!(
+            serialized.pointer("/authOutcome/code"),
+            Some(&json!("terminal_inactive"))
+        );
+        assert_eq!(
+            serialized.pointer("/authOutcome/terminalActive"),
+            Some(&json!(false))
+        );
+        assert_eq!(serialized.get("batchBlock"), Some(&Value::Null));
+        let exposed = serialized.to_string();
+        assert!(!exposed.contains("terminal-auth-request-sentinel"));
+        assert!(!exposed.contains("terminal-auth-response-sentinel"));
+    }
+
+    #[test]
+    fn aggregate_queue_status_exposes_only_safe_complete_counts() {
+        let conn = test_connection();
+        for (id, status, attempts, error) in [
+            ("status-pending", "pending", 0_i64, None),
+            ("status-processing", "processing", 1_i64, None),
+            (
+                "status-failed",
+                "failed",
+                2_i64,
+                Some("private ordinary failure"),
+            ),
+            (
+                "status-quarantined",
+                "failed",
+                0_i64,
+                Some(REPAIR_RESERVED_OWNER_QUARANTINED),
+            ),
+            (
+                "status-dead-letter",
+                "failed",
+                MAX_RETRY_ATTEMPTS,
+                Some("private terminal provider body"),
+            ),
+            (
+                "status-conflict",
+                "conflict",
+                1_i64,
+                Some("private conflict body"),
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO parity_sync_queue (
+                     id, table_name, record_id, operation, data, organization_id,
+                     created_at, attempts, error_message, retry_delay_ms, priority,
+                     module_type, conflict_strategy, version, claim_generation, status
+                 ) VALUES (?1, 'customers', ?1, 'UPDATE', '{\"safe\":true}', 'safe-status-org',
+                           '2026-08-26T07:00:00Z', ?3, ?4, 1000, 1,
+                           'customers', 'manual', 1, 0, ?2)",
+                params![id, status, attempts, error],
+            )
+            .expect("seed aggregate queue status row");
+        }
+
+        let serialized = serde_json::to_value(get_status(&conn).expect("read safe queue status"))
+            .expect("serialize safe queue status");
+        assert_eq!(serialized.get("total"), Some(&json!(6)));
+        assert_eq!(serialized.get("pending"), Some(&json!(1)));
+        assert_eq!(serialized.get("inProgress"), Some(&json!(1)));
+        assert_eq!(serialized.get("failed"), Some(&json!(3)));
+        assert_eq!(serialized.get("conflicts"), Some(&json!(1)));
+        assert_eq!(serialized.get("quarantined"), Some(&json!(1)));
+        assert_eq!(serialized.get("deadLettered"), Some(&json!(1)));
+        let exposed = serialized.to_string();
+        assert!(!exposed.contains("private"));
+        assert!(!exposed.contains("status-dead-letter"));
+    }
+
+    #[test]
+    fn queue_status_oldest_age_accepts_rfc3339_and_sqlite_datetime_formats() {
+        let age_source = Utc::now() - ChronoDuration::minutes(2);
+        for (label, created_at) in [
+            ("rfc3339", age_source.to_rfc3339()),
+            ("sqlite", age_source.format("%Y-%m-%d %H:%M:%S").to_string()),
+        ] {
+            let conn = test_connection();
+            conn.execute(
+                "INSERT INTO parity_sync_queue (
+                     id, table_name, record_id, operation, data, organization_id,
+                     created_at, attempts, retry_delay_ms, priority, module_type,
+                     conflict_strategy, version, claim_generation, status
+                 ) VALUES (?1, 'customers', ?2, 'UPDATE', '{\"safe\":true}',
+                           'status-age-org', ?3, 0, 1000, 1, 'customers',
+                           'manual', 1, 0, 'pending')",
+                params![
+                    format!("status-age-{label}"),
+                    format!("status-age-record-{label}"),
+                    created_at
+                ],
+            )
+            .expect("seed oldest-age format row");
+
+            for (surface, age) in [
+                (
+                    "internal",
+                    get_status(&conn)
+                        .expect("internal age status")
+                        .oldest_item_age,
+                ),
+                (
+                    "renderer",
+                    renderer_get_status(&conn)
+                        .expect("renderer age status")
+                        .oldest_item_age,
+                ),
+            ] {
+                let age = age.unwrap_or_else(|| {
+                    panic!("{surface} status dropped the {label} timestamp format")
+                });
+                assert!(
+                    (90_000..=180_000).contains(&age),
+                    "unexpected {surface}/{label} age: {age}ms"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn startup_redacts_identifiable_legacy_repair_audit_payloads_without_guessing_generic_rows() {
+        const REDACTED: &str = "REPAIR_AUDIT_PAYLOAD_REDACTED";
+        let directory = crate::tests::harness::TempDir::new();
+        let initial = crate::db::init(directory.path()).expect("initialize audit-redaction db");
+        {
+            let conn = initial.conn.lock().expect("lock audit-redaction seed db");
+            conn.execute(
+                "INSERT INTO orders (
+                     id, supabase_id, items, total_amount, status, sync_status,
+                     order_context, created_at, updated_at
+                 ) VALUES (
+                     'audit-redaction-order', 'audit-redaction-order-remote', '[]',
+                     9.50, 'ready', 'synced', ?1, datetime('now'), datetime('now')
+                 )",
+                ["\u{2003}repair_settlement\u{2003}"],
+            )
+            .expect("seed audit-redaction repair order");
+            log_conflict(
+                &conn,
+                "UPDATE",
+                "audit-direct-repair",
+                "\u{00a0}repairs\u{00a0}",
+                1,
+                2,
+                "private-direct-audit-payload",
+                "manual",
+                false,
+                false,
+            )
+            .expect("seed direct repair audit payload");
+            log_conflict(
+                &conn,
+                "UPDATE",
+                "audit-redaction-order-remote",
+                "\torders\t",
+                1,
+                2,
+                "private-financial-audit-payload",
+                "manual",
+                true,
+                false,
+            )
+            .expect("seed linked financial audit payload");
+            log_conflict(
+                &conn,
+                "UPDATE",
+                "audit-generic-control",
+                "\u{2003}customers\u{2003}",
+                1,
+                2,
+                "safe-generic-audit-payload",
+                "manual",
+                false,
+                false,
+            )
+            .expect("seed generic audit payload");
+        }
+        drop(initial);
+
+        let reopened = crate::db::init(directory.path()).expect("reopen audit-redaction db");
+        let first_state = {
+            let conn = reopened.conn.lock().expect("lock audit-redaction db");
+            let mut stmt = conn
+                .prepare(
+                    "SELECT entity_id, discarded_payload, operation_type, local_version,
+                            server_version, resolution, is_monetary
+                     FROM conflict_audit_log
+                     ORDER BY entity_id",
+                )
+                .expect("prepare redacted audit read");
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, i64>(6)?,
+                    ))
+                })
+                .expect("query redacted audit rows")
+                .map(|row| row.expect("read redacted audit row"))
+                .collect::<Vec<_>>();
+            assert_eq!(rows[0].0, "audit-direct-repair");
+            assert_eq!(rows[0].1, REDACTED);
+            assert_eq!(rows[1].0, "audit-generic-control");
+            assert_eq!(rows[1].1, "safe-generic-audit-payload");
+            assert_eq!(rows[2].0, "audit-redaction-order-remote");
+            assert_eq!(rows[2].1, REDACTED);
+
+            let renderer = renderer_list_conflict_audit_entries(&conn, 50)
+                .expect("read renderer audit after redaction");
+            assert_eq!(renderer.len(), 1);
+            assert_eq!(renderer[0].entity_id, "audit-generic-control");
+            assert_eq!(renderer[0].discarded_payload, "safe-generic-audit-payload");
+            rows
+        };
+        drop(reopened);
+
+        let reopened_again =
+            crate::db::init(directory.path()).expect("reopen audit-redaction db twice");
+        let second_state = {
+            let conn = reopened_again
+                .conn
+                .lock()
+                .expect("lock audit-redaction db twice");
+            let mut stmt = conn
+                .prepare(
+                    "SELECT entity_id, discarded_payload, operation_type, local_version,
+                            server_version, resolution, is_monetary
+                     FROM conflict_audit_log
+                     ORDER BY entity_id",
+                )
+                .expect("prepare second redacted audit read");
+            stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
+                ))
+            })
+            .expect("query second redacted audit rows")
+            .map(|row| row.expect("read second redacted audit row"))
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            second_state, first_state,
+            "audit redaction must be idempotent"
+        );
     }
 }

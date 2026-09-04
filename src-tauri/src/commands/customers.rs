@@ -439,6 +439,14 @@ fn build_remote_customer_create_body(source: &serde_json::Value) -> serde_json::
     ) {
         body.insert("phone".to_string(), serde_json::json!(phone));
     }
+    if let Some(phone_country_code) =
+        string_field(source, &["phone_country_code", "phoneCountryCode"])
+    {
+        body.insert(
+            "phone_country_code".to_string(),
+            serde_json::json!(phone_country_code.to_uppercase()),
+        );
+    }
     if let Some(email) = customer_body_field(source, &["email", "customerEmail"], &["email"]) {
         body.insert("email".to_string(), serde_json::json!(email));
     }
@@ -527,8 +535,29 @@ fn build_remote_customer_update_body(source: &serde_json::Value) -> serde_json::
     if let Some(name) = string_field(source, &["name", "fullName"]) {
         body.insert("name".to_string(), serde_json::json!(name));
     }
-    if let Some(phone) = string_field(source, &["phone", "customerPhone", "mobile", "telephone"]) {
-        body.insert("phone".to_string(), serde_json::json!(phone));
+    let phone_keys = ["phone", "customerPhone", "mobile", "telephone"];
+    if let Some(phone_value) = phone_keys.iter().find_map(|key| source.get(*key)) {
+        body.insert(
+            "phone".to_string(),
+            phone_value
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| serde_json::Value::String(value.to_string()))
+                .unwrap_or(serde_json::Value::Null),
+        );
+    }
+    let country_keys = ["phone_country_code", "phoneCountryCode"];
+    if let Some(country_value) = country_keys.iter().find_map(|key| source.get(*key)) {
+        body.insert(
+            "phone_country_code".to_string(),
+            country_value
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| serde_json::Value::String(value.to_uppercase()))
+                .unwrap_or(serde_json::Value::Null),
+        );
     }
     if source.get("email").is_some() {
         let email = string_field(source, &["email"]);
@@ -826,6 +855,7 @@ fn build_local_customer_from_source(source: &serde_json::Value) -> serde_json::V
         "id": customer_id,
         "name": value_str(&body, &["name"]).unwrap_or_else(|| "Customer".to_string()),
         "phone": value_str(&body, &["phone"]).unwrap_or_default(),
+        "phone_country_code": body.get("phone_country_code").cloned().unwrap_or(serde_json::Value::Null),
         "email": body.get("email").cloned().unwrap_or(serde_json::Value::Null),
         "branch_id": body.get("branch_id").cloned().unwrap_or(serde_json::Value::Null),
         "createdAt": now,
@@ -2429,7 +2459,8 @@ mod dto_tests {
     fn build_remote_customer_create_body_prefers_street_only_address_fields() {
         let source = serde_json::json!({
             "name": "Endrit Bashi",
-            "phone": "6948128474",
+            "phone": "+44 20 7946 0018",
+            "phoneCountryCode": "GB",
             "addresses": [{
                 "street_address": "Xenofontos 28",
                 "city": "Thessaloniki",
@@ -2446,7 +2477,16 @@ mod dto_tests {
         );
         assert_eq!(
             body.get("phone").and_then(|v| v.as_str()),
-            Some("6948128474")
+            Some("+44 20 7946 0018")
+        );
+        assert_eq!(
+            body.get("phone_country_code").and_then(|v| v.as_str()),
+            Some("GB")
+        );
+        let local = build_local_customer_from_source(&source);
+        assert_eq!(
+            local.get("phone_country_code").and_then(|v| v.as_str()),
+            Some("GB")
         );
         assert_eq!(
             body.get("address").and_then(|v| v.as_str()),
@@ -2461,6 +2501,34 @@ mod dto_tests {
             Some("54641")
         );
         assert_eq!(body.get("floor_number").and_then(|v| v.as_str()), Some("2"));
+    }
+
+    #[test]
+    fn build_remote_customer_update_body_preserves_phone_clear_and_country_alias() {
+        let clear = build_remote_customer_update_body(&serde_json::json!({
+            "phone": null,
+            "phone_country_code": null
+        }));
+        assert_eq!(clear.get("phone"), Some(&serde_json::Value::Null));
+        assert_eq!(
+            clear.get("phone_country_code"),
+            Some(&serde_json::Value::Null)
+        );
+
+        let international = build_remote_customer_update_body(&serde_json::json!({
+            "phone": "+44 20 7946 0018",
+            "phoneCountryCode": "GB"
+        }));
+        assert_eq!(
+            international.get("phone").and_then(|v| v.as_str()),
+            Some("+44 20 7946 0018")
+        );
+        assert_eq!(
+            international
+                .get("phone_country_code")
+                .and_then(|v| v.as_str()),
+            Some("GB")
+        );
     }
 
     #[test]

@@ -57,6 +57,7 @@ export interface Customer {
   name: string; // Normalized from full_name
   full_name?: string; // Supabase field name
   phone: string;
+  phone_country_code?: string | null;
   email?: string;
   // Legacy address field (simple string) - used for delivery fallback
   address?: string | null;

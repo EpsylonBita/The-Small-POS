@@ -2,8 +2,8 @@
 //! `.claude/specs/fiscalization-core/tasks.md`).
 //!
 //! Exercises `crate::fiscal::dispatcher::enqueue_for_order` end-to-end
-//! against an in-memory SQLite DB with the minimum schema the function
-//! needs (`orders` + `parity_sync_queue`). Verifies:
+//! against an in-memory SQLite DB with the minimum production-compatible
+//! order/payment/adjustment and parity schemas the function needs. Verifies:
 //!   - row lands in `parity_sync_queue` with `module_type='fiscal'`
 //!   - `idempotency_key` is the deterministic `fiscal:{order_id}:{branch_id}`
 //!   - `record_id` matches the order id
@@ -44,8 +44,10 @@ fn fresh_db() -> Connection {
     conn.execute_batch(
         "CREATE TABLE orders (
              id              TEXT PRIMARY KEY,
+             supabase_id     TEXT,
              organization_id TEXT NOT NULL DEFAULT '',
              branch_id       TEXT,
+             order_context   TEXT,
              receipt_number  TEXT,
              items           TEXT NOT NULL DEFAULT '[]',
              total_amount    REAL DEFAULT 0,
@@ -65,6 +67,37 @@ fn fresh_db() -> Connection {
              created_at      TEXT NOT NULL
          );
 
+         -- The repair-safe generic queue cleanup resolves ownership through
+         -- both canonical payment tables before deleting an existing fiscal
+         -- row. Keep the production v10 adjustment shape available even
+         -- though these dispatcher cases do not seed an adjustment.
+         CREATE TABLE payment_adjustments (
+             id                    TEXT PRIMARY KEY,
+             payment_id            TEXT NOT NULL,
+             order_id              TEXT NOT NULL,
+             adjustment_type       TEXT NOT NULL
+                 CHECK (adjustment_type IN ('void', 'refund')),
+             amount                REAL NOT NULL,
+             reason                TEXT NOT NULL,
+             staff_id              TEXT,
+             sync_state            TEXT NOT NULL DEFAULT 'pending'
+                 CHECK (sync_state IN ('pending', 'waiting_parent', 'syncing', 'applied', 'failed')),
+             sync_last_error       TEXT,
+             sync_retry_count      INTEGER NOT NULL DEFAULT 0,
+             sync_next_retry_at    TEXT,
+             created_at            TEXT NOT NULL,
+             updated_at            TEXT NOT NULL,
+             FOREIGN KEY(payment_id) REFERENCES order_payments(id) ON DELETE CASCADE,
+             FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE CASCADE
+         );
+
+         CREATE INDEX idx_payment_adjustments_payment_id
+             ON payment_adjustments(payment_id);
+         CREATE INDEX idx_payment_adjustments_order_id
+             ON payment_adjustments(order_id);
+         CREATE INDEX idx_payment_adjustments_sync_state
+             ON payment_adjustments(sync_state);
+
          -- Audit #1 (pos-tauri) added this table via migration v65. The
          -- payload_builder allocates a sequenceNumber per receipt via
          -- sequence_counter::next_sequence, which UPSERTs into this table.
@@ -78,7 +111,9 @@ fn fresh_db() -> Connection {
              PRIMARY KEY (branch_id, business_day_iso)
          );",
     )
-    .expect("create orders + order_payments + fiscal_sequence_counters test tables");
+    .expect(
+        "create orders + order_payments + payment_adjustments + fiscal_sequence_counters test tables",
+    );
     conn
 }
 
@@ -188,6 +223,20 @@ fn duplicate_enqueue_collapses_onto_single_row_via_unique_idem_key() {
     enqueue_for_order(&conn, "order-2").expect("second enqueue (idempotent)");
 
     assert_eq!(count_fiscal_rows(&conn), 1, "still one row after duplicate");
+}
+
+#[test]
+fn protected_repair_settlement_never_enters_generic_fiscal_queue() {
+    let conn = fresh_db();
+    seed_order(&conn, "repair-order-1", "branch-1");
+    conn.execute(
+        "UPDATE orders SET order_context = 'repair_settlement' WHERE id = ?1",
+        ["repair-order-1"],
+    )
+    .expect("mark protected repair settlement");
+
+    enqueue_for_order(&conn, "repair-order-1").expect("protected order is a safe no-op");
+    assert_eq!(count_fiscal_rows(&conn), 0);
 }
 
 #[test]

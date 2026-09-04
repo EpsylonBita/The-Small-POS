@@ -1,4 +1,36 @@
 {
+  "primaryActions": {
+    "trigger": "New",
+    "newSale": "New sale",
+    "newRepair": "New repair",
+    "quickService": "Quick service",
+    "newAppointment": "New appointment",
+    "status": { "comingSoon": "Coming soon in the Repairs beta workflow" }
+  },
+  "repairs": {
+    "title": "Repairs",
+    "subtitle": "Track intake, diagnosis, estimates and collection from one workspace.",
+    "newRepair": "New repair",
+    "quickService": "Quick service",
+    "refresh": "Refresh repairs",
+    "searchLabel": "Search repairs",
+    "searchPlaceholder": "Repair number, offline alias or safe device label",
+    "filters": { "status": "Status", "priority": "Priority", "due": "Due", "sync": "Sync", "all": "All", "overdue": "Overdue" },
+    "tabs": { "overview": "Overview", "diagnosis": "Diagnosis", "partsLabour": "Parts & labour", "estimateApproval": "Estimate & approval", "timeline": "Timeline", "photos": "Photos", "payments": "Payments", "communication": "Communication" },
+    "status": { "received": "Received", "diagnosing": "Diagnosing", "waiting_customer_approval": "Waiting for customer approval", "approved": "Approved", "waiting_parts": "Waiting for parts", "repairing": "Repairing", "quality_check": "Quality check", "ready": "Ready", "delivered": "Delivered", "cancelled": "Cancelled", "unrepairable": "Unrepairable" },
+    "priority": { "low": "Low", "normal": "Normal", "high": "High", "urgent": "Urgent" },
+    "intake": { "standard": "Standard repair", "quickService": "Quick service", "anonymous": "Anonymous quick service", "linked": "Link customer", "mode": "Quick Service customer mode", "customerDevice": "Customer and device", "customerSearch": "Customer search", "searchCustomers": "Search customers", "customerResults": "Customer results", "deviceResults": "Customer devices", "newDevice": "New device", "deviceType": "Device type", "deviceLabel": "Device label", "manufacturer": "Manufacturer", "model": "Model", "saveDevice": "Save device", "title": "Repair title", "customerRequired": "Select a customer and device for a standard repair.", "quickCustomerRequired": "Select a customer for linked Quick Service.", "anonymousHelp": "Anonymous quick service has no customer history or automated messages." },
+    "sync": { "synced": "Synced", "pending": "Queued for sync", "conflict": "Needs review", "needs_refetch": "Refresh required", "local": "Local" },
+    "list": { "loading": "Loading repairs…", "empty": "No repairs match these filters.", "select": "Select a repair to open its workspace.", "overdue": "Overdue", "due": "Due {{date}}", "aliases": "Also known as {{aliases}}" },
+    "pagination": { "label": "Repair pages", "previous": "Previous", "next": "Next", "summary": "{{start}}–{{end}} of {{total}}" },
+    "timeline": { "created": "Repair created", "status_changed": "Status changed", "note_added": "Note added", "assignment_changed": "Assignment changed", "diagnosis_updated": "Diagnosis updated", "line_changed": "Repair line changed", "part_consumed": "Part consumed", "part_reversed": "Part consumption reversed", "estimate_created": "Estimate created", "approval_recorded": "Approval recorded", "attachment_added": "Attachment added", "attachment_retention_changed": "Attachment retention changed", "settlement_linked": "Settlement linked", "branch_transferred": "Branch transferred", "reopened": "Repair reopened", "unknown": "Repair activity" },
+    "fields": { "customer": "Customer", "device": "Device", "assignedTo": "Assigned to", "assigned": "Assigned", "dueAt": "Due date", "intakeNotes": "Intake notes", "diagnosis": "Diagnosis", "anonymous": "Anonymous customer", "unassigned": "Unassigned", "notRecorded": "Not recorded" },
+    "actions": { "create": "Create repair", "operations": "Repair actions", "changeStatus": "Change status", "transitionReason": "Audited reason", "remainConsumed": "Keep consumed parts consumed", "addNote": "Add note", "assign": "Assign", "assignToMe": "Assign to me", "unassign": "Unassign", "updateDiagnosis": "Save diagnosis draft", "finalizeDiagnosis": "Save final diagnosis", "planLine": "Add planned line", "consumePart": "Consume part", "reversePart": "Reverse consumption", "reversalReason": "Reversal reason", "lineType": "Line type", "part": "Part", "labour": "Labour", "charge": "Charge", "lineName": "Line name", "sku": "SKU", "quantity": "Quantity", "unitPrice": "Unit price", "vatRate": "VAT rate", "discount": "Discount", "validUntil": "Valid until", "estimateNote": "Estimate note", "createEstimate": "Create estimate", "recordApproval": "Record in-person approval", "stagePhoto": "Add photo", "openAttachment": "Open attachment", "acceptServer": "Use server version", "rebase": "Rebase my changes", "close": "Close" },
+    "panels": { "partsEmpty": "No planned parts, labour or charges yet.", "estimateEmpty": "No estimate has been issued yet.", "timelineEmpty": "No timeline events yet.", "photosEmpty": "No attachment metadata is available.", "conflictsTitle": "Sync conflicts", "conflictsEmpty": "No repair conflicts need review." },
+    "messages": { "readyQueued": "Ready status is queued for sync.", "noNotificationSent": "No customer notification has been sent yet.", "offline": "Offline changes stay queued until this terminal reconnects.", "onlineActionRequired": "This action requires an online server check.", "activeShiftRequired": "Start a staff shift to load repair data and actions.", "selectorOnline": "Customer and device lookup requires an online native connection. A previously selected canonical customer and device can still be submitted offline.", "createUnavailable": "Creating repairs requires an active shift and repair-create permission.", "conflictResolutionUnavailable": "Conflict resolution requires an active shift, an online native connection and repair-update permission.", "submitInProgress": "The repair is being saved. Closing is temporarily disabled.", "finalDiagnosisOnline": "Final diagnosis requires an online server check; drafts can be queued offline.", "estimateOnline": "Estimates and approvals require an online server check.", "estimateNeedsLines": "Add at least one planned line before creating an estimate.", "photoOneShot": "The selected photo is read once and handed to encrypted native staging; the renderer does not persist it.", "photoUnavailable": "Photo staging requires loaded attachment settings, repair permission, a known connection state and an active shift.", "attachmentTypeInvalid": "This file type is not allowed by repair settings.", "attachmentTooLarge": "This photo is larger than the repair attachment limit.", "attachmentInvalid": "Select a non-empty photo allowed by repair settings.", "attachmentStageFailed": "The photo could not be staged.", "attachmentOpenFailed": "The attachment could not be opened securely.", "loadFailed": "Repairs could not be loaded.", "commandFailed": "The repair change could not be saved.", "assignmentUnavailable": "Self-assignment requires a canonical staff identity and repair-assignment permission.", "settingsUnavailable": "Repair intake stays disabled until authoritative or cached settings are available.", "invalidIntake": "Check the intake details and try again.", "customerSearchFailed": "Customer search could not be completed.", "deviceLoadFailed": "Customer devices could not be loaded.", "deviceCreateFailed": "The device could not be saved.", "secureIdUnavailable": "Secure device identifiers are unavailable. Restart the application before creating a repair." },
+    "locked": { "communication": "Customer Messaging is not enabled in this private-beta build.", "money": "Repair payments, refunds, fiscalization and delivery remain locked until the typed native money transport is available.", "approvalTransition": "Approved status is reached only through the audited approval action in Estimate & approval.", "assignment": "Assignment changes remain locked until a scoped, repair-safe staff projection is available.", "stockReversal": "Stock reversal remains locked because the native workspace does not expose the original movement reference.", "catalog": "Product and service catalog lookup remains locked until a repair-safe read-only native projection is available.", "attachmentOpen": "Opening existing attachments remains locked until signed native retrieval is available.", "printing": "Repair printing remains locked until the typed native print queue is available." },
+    "a11y": { "resultsUpdated": "{{count}} repair results available.", "currentRepair": "Current repair: {{number}}", "tabHint": "Use the left and right arrow keys to change tabs.", "statusLabel": "Repair status: {{status}}" }
+  },
   "common": {
     "all": "All",
     "floorPresets": {
@@ -8182,5 +8214,16 @@
       "partySizeMin": "Party size must be at least 1",
       "partySizeExceedsCapacity": "Party size exceeds table capacity of {{capacity}}"
     }
+  },
+  "customerMessaging": {
+    "title": "Customer messages", "customerRequired": "Link a customer to use messaging.", "onlineOnly": "Messaging actions require an online connection.",
+    "unavailable": "Message history is temporarily unavailable.", "sessionRequired": "A live staff session is required.", "readOnly": "History remains available, but linking, sending and retrying are locked.",
+    "optedOut": "This customer opted out of transactional messages.", "noPreference": "No communication preference is recorded; sending is blocked.",
+    "preferenceTitle": "Transactional updates", "preferenceDescription": "Record the customer’s explicit choice. No channel is assumed.",
+    "preferenceNoPreference": "No automated updates", "preferenceDeny": "Do not send", "preferenceSms": "SMS", "preferenceWhatsApp": "WhatsApp", "preferenceFailed": "The communication preference was not saved.",
+    "sendReady": "Send ready-for-collection message", "retry": "Retry", "link": "Link {{provider}}", "linkingUnavailable": "{{provider}} customer linking is unavailable.", "queued": "Message queued.",
+    "sendFailed": "Message could not be queued.", "retryFailed": "Retry was not queued.", "linkOpened": "Secure provider link opened.", "linkFailed": "The secure provider link could not be opened.",
+    "attemptCount": "{{count}} attempt(s)", "attempt": "Attempt {{number}}",
+    "status": { "queued": "Queued", "delayed": "Delayed", "sending": "Sending", "accepted": "Accepted", "sent": "Sent", "delivered": "Delivered", "read": "Read", "failed": "Failed", "skipped": "Skipped", "dead_lettered": "Retry limit reached", "unknown": "Outcome unknown" }
   }
 }

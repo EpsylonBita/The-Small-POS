@@ -353,6 +353,8 @@ fn load_legacy_financial_parity_orphan_issues(
              FROM parity_sync_queue psq
              LEFT JOIN order_payments op ON op.id = psq.record_id
              WHERE psq.table_name = 'payments'
+               AND COALESCE(psq.module_type, '') <> 'repairs'
+               AND psq.table_name NOT IN ('repairs', 'repair_attachments')
                AND op.id IS NULL
              ORDER BY datetime(psq.created_at) ASC, psq.id ASC",
         )
@@ -398,6 +400,8 @@ fn load_legacy_financial_parity_orphan_issues(
              FROM parity_sync_queue psq
              LEFT JOIN payment_adjustments pa ON pa.id = psq.record_id
              WHERE psq.table_name = 'payment_adjustments'
+               AND COALESCE(psq.module_type, '') <> 'repairs'
+               AND psq.table_name NOT IN ('repairs', 'repair_attachments')
                AND pa.id IS NULL
              ORDER BY datetime(psq.created_at) ASC, psq.id ASC",
         )
@@ -433,6 +437,21 @@ fn load_legacy_financial_parity_orphan_issues(
     }
 
     Ok(issues)
+}
+
+fn retry_failed_non_repair_parity_rows(conn: &rusqlite::Connection) -> Result<usize, String> {
+    conn.execute(
+        "UPDATE parity_sync_queue
+         SET status = 'pending',
+             attempts = 0,
+             error_message = NULL,
+             next_retry_at = NULL
+         WHERE status IN ('failed', 'conflict')
+           AND COALESCE(module_type, '') <> 'repairs'
+           AND table_name NOT IN ('repairs', 'repair_attachments')",
+        [],
+    )
+    .map_err(|e| format!("retry_all parity_sync_queue reset: {e}"))
 }
 
 pub(crate) fn collect_financial_integrity(db: &db::DbState) -> Result<serde_json::Value, String> {
@@ -1080,17 +1099,7 @@ pub async fn sync_retry_all_failed_financial(
             // to mean both queues. We reset `failed` / `conflict`
             // parity-queue rows in the same transaction so the retry
             // is atomic with the financial reset.
-            let parity_updated = conn
-                .execute(
-                    "UPDATE parity_sync_queue
-                     SET status = 'pending',
-                         attempts = 0,
-                         error_message = NULL,
-                         next_retry_at = NULL
-                     WHERE status IN ('failed', 'conflict')",
-                    [],
-                )
-                .map_err(|e| format!("retry_all parity_sync_queue reset: {e}"))?;
+            let parity_updated = retry_failed_non_repair_parity_rows(&conn)?;
 
             Ok((updated as i64) + (parity_updated as i64))
         })();
@@ -1201,6 +1210,87 @@ pub async fn sync_clear_all_orders(
     Ok(serde_json::json!({ "success": true, "cleared": cleared }))
 }
 
+fn cleanup_deleted_orders_in_transaction(
+    conn: &mut rusqlite::Connection,
+    remote_ids: &[String],
+) -> Result<usize, String> {
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("begin deleted-order cleanup transaction: {e}"))?;
+    let mut deleted = 0usize;
+
+    for remote_id in remote_ids {
+        let remote_id = remote_id.trim();
+        if remote_id.is_empty() {
+            continue;
+        }
+
+        // Remote tombstones are untrusted. Classify the local row inside the
+        // same write transaction that owns cleanup, and never expose repair
+        // settlement money/history to this generic order maintenance path.
+        let local_id = match tx.query_row(
+            "SELECT id
+             FROM orders
+             WHERE (supabase_id = ?1 OR id = ?1)
+               AND lower(trim(COALESCE(order_context, ''))) <> 'repair_settlement'
+             LIMIT 1",
+            rusqlite::params![remote_id],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(local_id) => Some(local_id),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(error) => {
+                return Err(format!(
+                    "classify local deleted-order target {remote_id}: {error}"
+                ));
+            }
+        };
+
+        let Some(local_id) = local_id else {
+            continue;
+        };
+
+        tx.execute(
+            "DELETE FROM sync_queue WHERE entity_type = 'order' AND entity_id = ?1",
+            rusqlite::params![local_id],
+        )
+        .map_err(|e| format!("delete order queue row for {local_id}: {e}"))?;
+        tx.execute(
+            "DELETE FROM sync_queue
+             WHERE entity_type = 'payment'
+               AND entity_id IN (SELECT id FROM order_payments WHERE order_id = ?1)",
+            rusqlite::params![local_id],
+        )
+        .map_err(|e| format!("delete payment queue rows for {local_id}: {e}"))?;
+        tx.execute(
+            "DELETE FROM sync_queue
+             WHERE entity_type = 'payment_adjustment'
+               AND entity_id IN (SELECT id FROM payment_adjustments WHERE order_id = ?1)",
+            rusqlite::params![local_id],
+        )
+        .map_err(|e| format!("delete payment-adjustment queue rows for {local_id}: {e}"))?;
+
+        let count = tx
+            .execute(
+                "DELETE FROM orders
+                 WHERE id = ?1
+                   AND lower(trim(COALESCE(order_context, ''))) <> 'repair_settlement'",
+                rusqlite::params![local_id],
+            )
+            .map_err(|e| format!("delete ordinary local order {local_id}: {e}"))?;
+        if count != 1 {
+            return Err(format!(
+                "local deleted-order target {local_id} changed classification during cleanup"
+            ));
+        }
+        deleted += count;
+    }
+
+    tx.commit()
+        .map_err(|e| format!("commit deleted-order cleanup transaction: {e}"))?;
+    Ok(deleted)
+}
+
 #[tauri::command]
 pub async fn sync_cleanup_deleted_orders(
     db: tauri::State<'_, db::DbState>,
@@ -1230,43 +1320,16 @@ pub async fn sync_cleanup_deleted_orders(
         .unwrap_or_default();
 
     let checked = deleted_ids.len();
+    let remote_ids = deleted_ids
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|remote_id| !remote_id.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
     let deleted = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let mut deleted = 0usize;
-        for deleted_id in &deleted_ids {
-            let Some(remote_id) = deleted_id.as_str().filter(|s| !s.trim().is_empty()) else {
-                continue;
-            };
-            let local_id: Option<String> = conn
-                .query_row(
-                    "SELECT id FROM orders WHERE supabase_id = ?1 OR id = ?1 LIMIT 1",
-                    rusqlite::params![remote_id],
-                    |row| row.get(0),
-                )
-                .ok();
-            if let Some(local_id) = local_id {
-                let _ = conn.execute(
-                    "DELETE FROM sync_queue WHERE entity_type = 'order' AND entity_id = ?1",
-                    rusqlite::params![local_id],
-                );
-                let _ = conn.execute(
-                    "DELETE FROM sync_queue WHERE entity_type = 'payment' AND entity_id IN (SELECT id FROM order_payments WHERE order_id = ?1)",
-                    rusqlite::params![local_id],
-                );
-                let _ = conn.execute(
-                    "DELETE FROM sync_queue WHERE entity_type = 'payment_adjustment' AND entity_id IN (SELECT id FROM payment_adjustments WHERE order_id = ?1)",
-                    rusqlite::params![local_id],
-                );
-                let count = conn
-                    .execute(
-                        "DELETE FROM orders WHERE id = ?1",
-                        rusqlite::params![local_id],
-                    )
-                    .unwrap_or(0);
-                deleted += count;
-            }
-        }
-        deleted
+        let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
+        cleanup_deleted_orders_in_transaction(&mut conn, &remote_ids)?
     };
 
     emit_sync_status_snapshot(&app, &db, &sync_state).await;
@@ -1654,6 +1717,125 @@ mod dto_tests {
     use crate::db;
     use rusqlite::params;
 
+    fn seed_deleted_order_cleanup_fixture(
+        conn: &rusqlite::Connection,
+        order_id: &str,
+        remote_id: &str,
+        order_context: Option<&str>,
+    ) {
+        conn.execute(
+            "INSERT INTO orders (
+                 id, order_number, items, total_amount, total_amount_cents, status,
+                 order_type, order_context, payment_status, sync_status, supabase_id,
+                 created_at, updated_at
+             ) VALUES (
+                 ?1, '#cleanup', '[]', 12.0, 1200, 'completed',
+                 'takeaway', ?3, 'paid', 'synced', ?2, datetime('now'), datetime('now')
+             )",
+            params![order_id, remote_id, order_context],
+        )
+        .expect("insert cleanup order");
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, sync_status, sync_state, created_at, updated_at
+             ) VALUES (
+                 ?1, ?2, 'cash', 12.0, 'pending', 'pending', datetime('now'), datetime('now')
+             )",
+            params![format!("payment-{order_id}"), order_id],
+        )
+        .expect("insert cleanup payment");
+        conn.execute(
+            "INSERT INTO payment_adjustments (
+                 id, payment_id, order_id, adjustment_type, amount, reason,
+                 sync_state, created_at, updated_at
+             ) VALUES (
+                 ?1, ?2, ?3, 'refund', 2.0, 'cleanup fixture',
+                 'pending', datetime('now'), datetime('now')
+             )",
+            params![
+                format!("adjustment-{order_id}"),
+                format!("payment-{order_id}"),
+                order_id
+            ],
+        )
+        .expect("insert cleanup adjustment");
+
+        for (entity_type, entity_id) in [
+            ("order", order_id.to_string()),
+            ("payment", format!("payment-{order_id}")),
+            ("payment_adjustment", format!("adjustment-{order_id}")),
+        ] {
+            conn.execute(
+                "INSERT INTO sync_queue (
+                     entity_type, entity_id, operation, payload, idempotency_key, status
+                 ) VALUES (?1, ?2, 'insert', '{}', ?3, 'pending')",
+                params![
+                    entity_type,
+                    entity_id,
+                    format!("cleanup:{entity_type}:{order_id}")
+                ],
+            )
+            .expect("insert cleanup queue row");
+        }
+    }
+
+    fn deleted_order_cleanup_counts(
+        conn: &rusqlite::Connection,
+        order_id: &str,
+    ) -> (i64, i64, i64, i64) {
+        conn.query_row(
+            "SELECT
+                 (SELECT COUNT(*) FROM orders WHERE id = ?1),
+                 (SELECT COUNT(*) FROM order_payments WHERE order_id = ?1),
+                 (SELECT COUNT(*) FROM payment_adjustments WHERE order_id = ?1),
+                 (SELECT COUNT(*) FROM sync_queue
+                    WHERE entity_id IN (?1, 'payment-' || ?1, 'adjustment-' || ?1))",
+            params![order_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("read cleanup fixture counts")
+    }
+
+    #[test]
+    fn sync_cleanup_deleted_orders_preserves_local_repair_settlement_and_children() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open db");
+        db::run_migrations_for_test(&conn);
+        seed_deleted_order_cleanup_fixture(
+            &conn,
+            "repair-order",
+            "remote-repair-order",
+            Some("  RePaIr_SeTtLeMeNt  "),
+        );
+        let before = deleted_order_cleanup_counts(&conn, "repair-order");
+
+        let deleted =
+            cleanup_deleted_orders_in_transaction(&mut conn, &["remote-repair-order".to_string()])
+                .expect("cleanup should classify the local order safely");
+
+        assert_eq!(deleted, 0);
+        assert_eq!(deleted_order_cleanup_counts(&conn, "repair-order"), before);
+        assert_eq!(before, (1, 1, 1, 3));
+    }
+
+    #[test]
+    fn sync_cleanup_deleted_orders_removes_ordinary_order_and_children() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open db");
+        db::run_migrations_for_test(&conn);
+        seed_deleted_order_cleanup_fixture(&conn, "ordinary-order", "remote-ordinary-order", None);
+
+        let deleted = cleanup_deleted_orders_in_transaction(
+            &mut conn,
+            &["remote-ordinary-order".to_string()],
+        )
+        .expect("ordinary cleanup should commit");
+
+        assert_eq!(deleted, 1);
+        assert_eq!(
+            deleted_order_cleanup_counts(&conn, "ordinary-order"),
+            (0, 0, 0, 0)
+        );
+    }
+
     // Gap review P0-03 (review round 2): the 'Clear Old Orders' maintenance
     // path must not delete a live table tab that legitimately spans business
     // days — the end-of-day rollover preserves it, so this side door must too.
@@ -2020,6 +2202,102 @@ mod dto_tests {
                 .and_then(serde_json::Value::as_str),
             Some("clear_legacy_financial_parity_orphan")
         );
+    }
+
+    #[test]
+    fn financial_integrity_does_not_surface_repair_shaped_parity_orphans() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             PRAGMA busy_timeout = 5000;
+             PRAGMA synchronous = NORMAL;",
+        )
+        .expect("pragma setup");
+        db::run_migrations_for_test(&conn);
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                id, table_name, record_id, operation, data, organization_id,
+                created_at, module_type, conflict_strategy, version, status, error_message
+             ) VALUES (
+                'repair-financial-orphan-op', 'payments', 'repair-private-payment',
+                'INSERT', '{\"ciphertext\":\"repair-private-ciphertext\"}',
+                'repair-private-org', '2026-08-26T10:00:00Z', 'repairs',
+                'manual', 1, 'conflict', 'repair-private-error'
+             )",
+            [],
+        )
+        .expect("insert repair-shaped financial row");
+        let db = db::DbState {
+            conn: std::sync::Mutex::new(conn),
+            db_path: std::path::PathBuf::from(":memory:"),
+        };
+
+        let response = collect_financial_integrity(&db).expect("collect integrity");
+        let serialized = response.to_string();
+        assert!(!serialized.contains("repair-private-payment"));
+        assert!(!serialized.contains("repair-private-org"));
+        assert!(!serialized.contains("repair-private-ciphertext"));
+    }
+
+    #[test]
+    fn renderer_retry_all_preserves_every_recognized_repair_shape() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        db::run_migrations_for_test(&conn);
+        for (id, table_name, module_type, status) in [
+            ("generic-failed", "orders", "orders", "failed"),
+            ("repair-exact", "repairs", "repairs", "failed"),
+            ("repair-module-half", "orders", "repairs", "conflict"),
+            (
+                "repair-table-half",
+                "repair_attachments",
+                "orders",
+                "failed",
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO parity_sync_queue (
+                     id, table_name, record_id, operation, data, organization_id,
+                     created_at, attempts, retry_delay_ms, priority, module_type,
+                     conflict_strategy, version, status, error_message
+                 ) VALUES (
+                     ?1, ?2, ?1, 'UPDATE', '{}', 'org-retry-all', datetime('now'),
+                     4, 1000, 1, ?3, 'manual', 1, ?4, 'keep-this-error'
+                 )",
+                rusqlite::params![id, table_name, module_type, status],
+            )
+            .unwrap();
+        }
+
+        assert_eq!(retry_failed_non_repair_parity_rows(&conn).unwrap(), 1);
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, status, attempts, error_message
+                 FROM parity_sync_queue ORDER BY id",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        for (id, status, attempts, error) in rows {
+            if id == "generic-failed" {
+                assert_eq!(status, "pending");
+                assert_eq!(attempts, 0);
+                assert!(error.is_none());
+            } else {
+                assert!(matches!(status.as_str(), "failed" | "conflict"));
+                assert_eq!(attempts, 4);
+                assert_eq!(error.as_deref(), Some("keep-this-error"));
+            }
+        }
     }
 
     #[test]

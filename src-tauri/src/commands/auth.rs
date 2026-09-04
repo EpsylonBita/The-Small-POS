@@ -84,8 +84,9 @@ pub async fn auth_logout(
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     auth::logout(&auth_state);
+    let actor_clear = crate::repair_transport::clear_repair_actor_attestation();
     let _ = app.emit("session_timeout", serde_json::json!({ "reason": "logout" }));
-    Ok(())
+    actor_clear
 }
 
 // -- Secure session blob (Wave 1 C6) -----------------------------------------
@@ -118,12 +119,16 @@ pub async fn auth_secure_session_set(arg0: Option<Value>) -> Result<(), String> 
         other => serde_json::to_string(&other)
             .map_err(|e| format!("session payload serialisation failed: {e}"))?,
     };
+    crate::repair_transport::invalidate_repair_actor_for_session_claim(&raw)?;
     storage::session_set(&raw)
 }
 
 #[tauri::command]
 pub async fn auth_secure_session_clear() -> Result<(), String> {
-    storage::session_clear()
+    let actor_clear = crate::repair_transport::clear_repair_actor_attestation();
+    let session_clear = storage::session_clear();
+    actor_clear?;
+    session_clear
 }
 
 #[tauri::command]
@@ -311,7 +316,7 @@ pub async fn staff_auth_logout(
     auth_state: tauri::State<'_, auth::AuthState>,
 ) -> Result<(), String> {
     auth::logout(&auth_state);
-    Ok(())
+    crate::repair_transport::clear_repair_actor_attestation()
 }
 
 #[tauri::command]
@@ -365,5 +370,25 @@ mod dto_tests {
         assert_eq!(from_array, vec!["orders.view", "orders.edit"]);
         assert_eq!(from_object, vec!["inventory.view", "inventory.edit"]);
         assert_eq!(from_single, vec!["shifts.view"]);
+    }
+
+    #[tokio::test]
+    async fn secure_session_clear_removes_native_repair_actor() {
+        let _keyring = crate::tests::fake_keyring::install_seeded([
+            (
+                crate::storage::KEY_REPAIR_ACTOR_ATTESTATION_V1,
+                "native-actor-sentinel",
+            ),
+            ("pos_session", "renderer-session-sentinel"),
+        ]);
+
+        super::auth_secure_session_clear()
+            .await
+            .expect("secure clear is fail-closed and complete");
+        assert!(
+            crate::storage::get_credential(crate::storage::KEY_REPAIR_ACTOR_ATTESTATION_V1,)
+                .is_none()
+        );
+        assert!(crate::storage::session_get_strict().unwrap().is_none());
     }
 }

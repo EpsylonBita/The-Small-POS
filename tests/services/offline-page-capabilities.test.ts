@@ -57,3 +57,31 @@ test('offline capability registry resolves aliases and representative page actio
     message: null,
   });
 });
+
+test('repair offline policy queues safe work and blocks authoritative or financial actions', () => {
+  assert.equal(isOfflineManagedPage('repairs'), true);
+  assert.match(
+    getOfflinePageBanner('repairs', true) || '',
+    /saved on this terminal and synced after reconnect/i,
+  );
+  assert.deepEqual(getOfflineActionState('repairs', 'create-intake', false), {
+    disabled: false,
+    message: 'This repair will be saved on this terminal and synced after reconnect.',
+  });
+  assert.deepEqual(getOfflineActionState('repairs', 'transition-ready', false), {
+    disabled: false,
+    message: 'Ready status will sync after reconnect. No customer notification has been sent yet.',
+  });
+  assert.deepEqual(getOfflineActionState('repairs', 'create-estimate', false), {
+    disabled: true,
+    message: 'Reconnect to create or revise an estimate.',
+  });
+  assert.deepEqual(getOfflineActionState('repairs', 'collect-payment', false), {
+    disabled: true,
+    message: 'Reconnect to collect a repair payment.',
+  });
+  assert.deepEqual(getOfflineActionState('repairs', 'transition-delivered', false), {
+    disabled: true,
+    message: 'Reconnect to mark a repair as delivered.',
+  });
+});

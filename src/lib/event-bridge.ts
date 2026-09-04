@@ -106,6 +106,16 @@ const EVENT_MAP: Record<string, string> = {
   'modules_sync_error': 'modules:sync-error',
   'modules_refresh_needed': 'modules:refresh-needed',
 
+  // --- Repairs --------------------------------------------------------------
+  // Rust already emits these canonical channel names. Identity mappings are
+  // required because attachChannelListener fails closed for unknown channels.
+  'repairs:cache-changed': 'repairs:cache-changed',
+  'repairs:conflict': 'repairs:conflict',
+  'repairs:scope-reset': 'repairs:scope-reset',
+
+  // Native serial scanner event used as a SKU lookup signal by Repairs.
+  'barcode_scanned_serial': 'barcode_scanned_serial',
+
   // --- Printer status events ---
   'printer_status_changed': 'printer:status-changed',
   'print_queue_changed': 'printer:queue-changed',

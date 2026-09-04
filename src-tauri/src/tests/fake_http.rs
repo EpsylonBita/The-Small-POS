@@ -83,6 +83,15 @@ impl MockServer {
     /// (as a `200 OK` JSON). The caller keeps the returned handle alive
     /// for the duration of the test; dropping it stops the server.
     pub fn new(response_body: impl Into<String>) -> Self {
+        Self::new_with_request_hook(response_body, || {})
+    }
+
+    /// Spawn a recorder that invokes a deterministic test hook after the
+    /// request is captured and immediately before the response is written.
+    pub fn new_with_request_hook<F>(response_body: impl Into<String>, hook: F) -> Self
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
         let response_body = response_body.into();
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
         listener
@@ -94,6 +103,7 @@ impl MockServer {
         let recorder_for_thread = Arc::clone(&recorder);
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_for_thread = Arc::clone(&shutdown);
+        let hook = Arc::new(hook);
 
         let thread = thread::spawn(move || {
             while !shutdown_for_thread.load(Ordering::Relaxed) {
@@ -113,6 +123,7 @@ impl MockServer {
                             .lock()
                             .expect("lock recorder")
                             .push(recorded);
+                        hook();
 
                         let response = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",

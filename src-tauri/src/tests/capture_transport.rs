@@ -426,7 +426,7 @@ async fn raw_upload_requires_a_terminal_identity() {
     .expect_err("an unidentified terminal must not upload");
 
     assert!(
-        error.to_string().contains("missing terminal_id"),
+        error.to_string().contains("TERMINAL_MANAGED_TUPLE_MISSING"),
         "unexpected error: {error}",
     );
     assert_eq!(server.count(), 0);

@@ -3,7 +3,8 @@ use serde_json::{json, Value};
 use tracing::info;
 use uuid::Uuid;
 
-use crate::{api, auth, db, payments, recovery, storage, sync, sync_queue};
+use crate::terminal_helpers::TerminalEventSink;
+use crate::{auth, db, payments, recovery, sync, sync_queue};
 
 fn parse_point_id(arg0: Option<Value>) -> Result<String, String> {
     crate::payload_arg0_as_string(arg0, &["id", "pointId", "point_id", "value"])
@@ -150,29 +151,15 @@ fn request_param_string_array(request: &Value, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn load_admin_url(db: &db::DbState) -> Result<String, String> {
-    let admin_url = storage::get_credential("admin_dashboard_url")
-        .or_else(|| storage::get_credential("admin_url"))
-        .or_else(|| crate::read_local_setting(db, "terminal", "admin_dashboard_url"))
-        .or_else(|| crate::read_local_setting(db, "terminal", "admin_url"))
-        .ok_or_else(|| "Admin URL not configured".to_string())?;
-    let normalized = api::normalize_admin_url(&admin_url);
-    if normalized.trim().is_empty() {
-        return Err("Admin URL not configured".into());
-    }
-    Ok(normalized)
-}
-
-fn load_pos_api_key() -> Result<String, String> {
-    let raw_api_key = storage::get_credential("pos_api_key")
-        .ok_or_else(|| "POS API key not configured".to_string())?;
-    let extracted =
-        api::extract_api_key_from_connection_string(&raw_api_key).unwrap_or(raw_api_key);
-    let normalized = extracted.trim().to_string();
-    if normalized.is_empty() {
-        return Err("POS API key not configured".into());
-    }
-    Ok(normalized)
+async fn guarded_renderer_db_mutation<T>(
+    db: &db::DbState,
+    sync_state: &sync::SyncState,
+    cancellation: &tokio_util::sync::CancellationToken,
+    mutation: impl FnOnce(&db::DbState) -> Result<T, String>,
+) -> Result<T, String> {
+    let context = sync::RendererParityExecutionContext::new(db, sync_state, cancellation).await?;
+    let _lease = context.acquire_step_lease()?;
+    mutation(db)
 }
 
 fn failed_payment_total_conflict_for_payment(
@@ -184,6 +171,8 @@ fn failed_payment_total_conflict_for_payment(
          FROM parity_sync_queue
          WHERE table_name = 'payments'
            AND record_id = ?1
+           AND COALESCE(module_type, '') <> 'repairs'
+           AND table_name NOT IN ('repairs', 'repair_attachments')
            AND status = 'failed'
            AND error_message IS NOT NULL
            AND lower(error_message) LIKE '%payment exceeds order total%'
@@ -327,6 +316,8 @@ fn promote_waiting_settlement_refunds_for_payment(
                  claim_generation = claim_generation + 1
              WHERE table_name = 'payment_adjustments'
                AND record_id = ?1
+               AND COALESCE(module_type, '') <> 'repairs'
+               AND table_name NOT IN ('repairs', 'repair_attachments')
                AND status IN ('pending', 'processing', 'failed', 'conflict')",
             rusqlite::params![adjustment_id.as_str()],
         );
@@ -358,7 +349,9 @@ fn prepare_invalid_driver_order_repair(
              FROM parity_sync_queue
              WHERE id = ?1
                AND table_name = 'orders'
-               AND operation = 'UPDATE'",
+               AND operation = 'UPDATE'
+               AND COALESCE(module_type, '') <> 'repairs'
+               AND table_name NOT IN ('repairs', 'repair_attachments')",
             rusqlite::params![item_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
@@ -389,7 +382,9 @@ fn prepare_invalid_driver_order_repair(
              claim_generation = claim_generation + 1
          WHERE id = ?2
            AND table_name = 'orders'
-           AND operation = 'UPDATE'",
+           AND operation = 'UPDATE'
+           AND COALESCE(module_type, '') <> 'repairs'
+           AND table_name NOT IN ('repairs', 'repair_attachments')",
         rusqlite::params![sanitized, item_id],
     )
     .map_err(|e| format!("requeue invalid-driver order parity row: {e}"))?;
@@ -639,6 +634,28 @@ pub async fn recovery_execute_action(
     arg0: Option<Value>,
     db: tauri::State<'_, db::DbState>,
     auth_state: tauri::State<'_, auth::AuthState>,
+    sync_state: tauri::State<'_, std::sync::Arc<sync::SyncState>>,
+    cancellation: tauri::State<'_, tokio_util::sync::CancellationToken>,
+    app: tauri::AppHandle,
+) -> Result<Value, auth::GuardedCommandError> {
+    recovery_execute_action_core(
+        arg0,
+        db.inner(),
+        auth_state.inner(),
+        sync_state.inner(),
+        cancellation.inner(),
+        &app,
+    )
+    .await
+}
+
+async fn recovery_execute_action_core(
+    arg0: Option<Value>,
+    db: &db::DbState,
+    auth_state: &auth::AuthState,
+    sync_state: &std::sync::Arc<sync::SyncState>,
+    cancellation: &tokio_util::sync::CancellationToken,
+    app: &impl TerminalEventSink,
 ) -> Result<Value, auth::GuardedCommandError> {
     let request = arg0.ok_or_else(|| "Missing recovery action request".to_string())?;
     let action_id = request
@@ -711,7 +728,7 @@ pub async fn recovery_execute_action(
             );
 
             let orphan_rows =
-                sync::count_legacy_financial_parity_orphan_rows(&db, &entity_type, &entity_id)
+                sync::count_legacy_financial_parity_orphan_rows(db, &entity_type, &entity_id)
                     .map_err(auth::GuardedCommandError::from)?;
             if orphan_rows == 0 {
                 return Ok(json!({
@@ -721,7 +738,7 @@ pub async fn recovery_execute_action(
                 }));
             }
 
-            let result = sync::clear_legacy_financial_parity_orphan(&db, &entity_type, &entity_id)
+            let result = sync::clear_legacy_financial_parity_orphan(db, &entity_type, &entity_id)
                 .map_err(auth::GuardedCommandError::from)?;
 
             info!(
@@ -743,7 +760,7 @@ pub async fn recovery_execute_action(
         "clearAllLegacyFinancialOrphans" => {
             info!("Running bulk local legacy financial parity orphan cleanup");
 
-            let result = sync::clear_all_legacy_financial_parity_orphans(&db)
+            let result = sync::clear_all_legacy_financial_parity_orphans(db)
                 .map_err(auth::GuardedCommandError::from)?;
 
             info!(
@@ -766,8 +783,8 @@ pub async fn recovery_execute_action(
         "openShiftRepair" | "forceCloseShift" => {
             auth::authorize_privileged_action(
                 auth::PrivilegedActionScope::CashDrawerControl,
-                &db,
-                &auth_state,
+                db,
+                auth_state,
             )?;
             let shift_id = request
                 .get("shiftId")
@@ -785,7 +802,7 @@ pub async fn recovery_execute_action(
             });
 
             let api_result =
-                crate::admin_fetch(Some(&db), "/api/pos/shifts/force-close", "POST", Some(body))
+                crate::admin_fetch(Some(db), "/api/pos/shifts/force-close", "POST", Some(body))
                     .await
                     .map_err(|e| format!("Force-close API call failed: {e}"))?;
 
@@ -866,14 +883,18 @@ pub async fn recovery_execute_action(
             }))
         }
         "runParitySyncNow" => {
-            let admin_url = load_admin_url(&db)?;
-            let api_key = load_pos_api_key()?;
-            let result = sync_queue::process_queue(&db.conn, &admin_url, &api_key)
-                .await
-                .map_err(auth::GuardedCommandError::from)?;
+            let result = sync::process_renderer_parity_queue_guarded(
+                db,
+                sync_state.as_ref(),
+                app,
+                cancellation,
+                "recovery:run_parity_sync_now",
+            )
+            .await
+            .map_err(auth::GuardedCommandError::from)?;
             let status = {
                 let conn = db.conn.lock().map_err(|e| e.to_string())?;
-                sync_queue::get_status(&conn)
+                sync_queue::renderer_get_status(&conn)
             }
             .map_err(auth::GuardedCommandError::from)?;
 
@@ -904,27 +925,43 @@ pub async fn recovery_execute_action(
                     "Missing payment id for payment/order mismatch repair".to_string()
                 })?;
 
-            let (order_id, queued_parent_order) = {
-                let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
-                prepare_payment_total_conflict_repair(&conn, payment_id.as_str())
-                    .map_err(auth::GuardedCommandError::from)?
-            };
+            let (order_id, queued_parent_order) = sync::guarded_renderer_local_mutation(
+                db,
+                sync_state.as_ref(),
+                cancellation,
+                |conn| prepare_payment_total_conflict_repair(conn, payment_id.as_str()),
+            )
+            .await
+            .map_err(auth::GuardedCommandError::from)?;
 
-            let admin_url = load_admin_url(&db)?;
-            let api_key = load_pos_api_key()?;
-            let result = sync_queue::process_queue(&db.conn, &admin_url, &api_key)
-                .await
-                .map_err(auth::GuardedCommandError::from)?;
-            let promoted_adjustments = {
-                let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
-                promote_waiting_settlement_refunds_for_payment(&conn, payment_id.as_str())
-                    .map_err(auth::GuardedCommandError::from)?
-            };
+            let result = sync::process_renderer_parity_queue_guarded(
+                db,
+                sync_state.as_ref(),
+                app,
+                cancellation,
+                "recovery:repair_payment_total_conflict",
+            )
+            .await
+            .map_err(auth::GuardedCommandError::from)?;
+            let promoted_adjustments = sync::guarded_renderer_local_mutation(
+                db,
+                sync_state.as_ref(),
+                cancellation,
+                |conn| promote_waiting_settlement_refunds_for_payment(conn, payment_id.as_str()),
+            )
+            .await
+            .map_err(auth::GuardedCommandError::from)?;
             let adjustment_result = if promoted_adjustments > 0 {
                 Some(
-                    sync_queue::process_queue(&db.conn, &admin_url, &api_key)
-                        .await
-                        .map_err(auth::GuardedCommandError::from)?,
+                    sync::process_renderer_parity_queue_guarded(
+                        db,
+                        sync_state.as_ref(),
+                        app,
+                        cancellation,
+                        "recovery:repair_payment_total_conflict_adjustment",
+                    )
+                    .await
+                    .map_err(auth::GuardedCommandError::from)?,
                 )
             } else {
                 None
@@ -970,20 +1007,27 @@ pub async fn recovery_execute_action(
             let item_id = request_param_str(&request, "sampleItemId")
                 .or_else(|| request_field_str(&request, "queueId").map(ToOwned::to_owned))
                 .ok_or_else(|| "Missing invalid-driver parity item id".to_string())?;
-            let order_id = {
-                let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
-                prepare_invalid_driver_order_repair(&conn, item_id.as_str())
-                    .map_err(auth::GuardedCommandError::from)?
-            };
+            let order_id = sync::guarded_renderer_local_mutation(
+                db,
+                sync_state.as_ref(),
+                cancellation,
+                |conn| prepare_invalid_driver_order_repair(conn, item_id.as_str()),
+            )
+            .await
+            .map_err(auth::GuardedCommandError::from)?;
 
-            let admin_url = load_admin_url(&db)?;
-            let api_key = load_pos_api_key()?;
-            let result = sync_queue::process_queue(&db.conn, &admin_url, &api_key)
-                .await
-                .map_err(auth::GuardedCommandError::from)?;
+            let result = sync::process_renderer_parity_queue_guarded(
+                db,
+                sync_state.as_ref(),
+                app,
+                cancellation,
+                "recovery:repair_invalid_driver_order_update",
+            )
+            .await
+            .map_err(auth::GuardedCommandError::from)?;
             let status = {
                 let conn = db.conn.lock().map_err(|e| e.to_string())?;
-                sync_queue::get_status(&conn)
+                sync_queue::renderer_get_status(&conn)
             }
             .map_err(auth::GuardedCommandError::from)?;
 
@@ -1004,11 +1048,14 @@ pub async fn recovery_execute_action(
             // left the POS because of the historical `https://https/...` URL,
             // then repairs failed order replays and their dependent payments.
             // It does not delete, void, or mutate local order/payment rows.
-            let admin_url = load_admin_url(&db)?;
-            let api_key = load_pos_api_key()?;
-            let stats = sync::repair_order_update_replay_blockers(&db, &admin_url, &api_key)
-                .await
-                .map_err(auth::GuardedCommandError::from)?;
+            let stats = sync::repair_order_update_replay_blockers(
+                db,
+                sync_state.as_ref(),
+                app,
+                cancellation,
+            )
+            .await
+            .map_err(auth::GuardedCommandError::from)?;
 
             if stats.remaining_parent_order_inserts > 0
                 || stats.remaining_order_blockers > 0
@@ -1077,32 +1124,43 @@ pub async fn recovery_execute_action(
             let item_id = request_param_str(&request, "sampleItemId")
                 .or_else(|| request_field_str(&request, "entityId").map(ToOwned::to_owned))
                 .ok_or_else(|| "Missing parity item id".to_string())?;
-            let should_repair_parent_wait = {
-                let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
-                conn.query_row(
-                    "SELECT EXISTS(
+            let should_repair_parent_wait = sync::guarded_renderer_local_mutation(
+                db,
+                sync_state.as_ref(),
+                cancellation,
+                |conn| {
+                    conn.query_row(
+                        "SELECT EXISTS(
                          SELECT 1
                          FROM parity_sync_queue
                          WHERE id = ?1
                            AND table_name = 'orders'
                            AND upper(operation) = 'UPDATE'
+                           AND COALESCE(module_type, '') <> 'repairs'
+                           AND table_name NOT IN ('repairs', 'repair_attachments')
                            AND error_message IS NOT NULL
                            AND lower(error_message) LIKE '%waiting for parent order sync%'
                      )",
-                    rusqlite::params![item_id.as_str()],
-                    |row| row.get::<_, bool>(0),
-                )
-                .unwrap_or(false)
-            };
-            let admin_url = load_admin_url(&db)?;
-            let api_key = load_pos_api_key()?;
+                        rusqlite::params![item_id.as_str()],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .map_err(|_| "PARITY_ITEM_READ_FAILED".to_string())
+                },
+            )
+            .await
+            .map_err(auth::GuardedCommandError::from)?;
             if should_repair_parent_wait {
-                let stats = sync::repair_order_update_replay_blockers(&db, &admin_url, &api_key)
-                    .await
-                    .map_err(auth::GuardedCommandError::from)?;
+                let stats = sync::repair_order_update_replay_blockers(
+                    db,
+                    sync_state.as_ref(),
+                    app,
+                    cancellation,
+                )
+                .await
+                .map_err(auth::GuardedCommandError::from)?;
                 let status = {
                     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-                    sync_queue::get_status(&conn)
+                    sync_queue::renderer_get_status(&conn)
                 }
                 .map_err(auth::GuardedCommandError::from)?;
                 return Ok(json!({
@@ -1125,17 +1183,19 @@ pub async fn recovery_execute_action(
                     ),
                 }));
             }
-            {
-                let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
-                sync_queue::retry_item(&conn, item_id.as_str())
-                    .map_err(auth::GuardedCommandError::from)?;
-            }
-            let result = sync_queue::process_queue(&db.conn, &admin_url, &api_key)
-                .await
-                .map_err(auth::GuardedCommandError::from)?;
+            let result = sync::guarded_renderer_retry_item(
+                db,
+                sync_state.as_ref(),
+                app,
+                cancellation,
+                "recovery:retry_parity_item",
+                item_id.as_str(),
+            )
+            .await
+            .map_err(auth::GuardedCommandError::from)?;
             let status = {
                 let conn = db.conn.lock().map_err(|e| e.to_string())?;
-                sync_queue::get_status(&conn)
+                sync_queue::renderer_get_status(&conn)
             }
             .map_err(auth::GuardedCommandError::from)?;
             Ok(json!({
@@ -1154,15 +1214,18 @@ pub async fn recovery_execute_action(
             let module_type = request_param_str(&request, "moduleType")
                 .or_else(|| request_field_str(&request, "entityId").map(ToOwned::to_owned))
                 .ok_or_else(|| "Missing parity module type".to_string())?;
-            let admin_url = load_admin_url(&db)?;
-            let api_key = load_pos_api_key()?;
             if module_type.eq_ignore_ascii_case("orders") {
-                let stats = sync::repair_order_update_replay_blockers(&db, &admin_url, &api_key)
-                    .await
-                    .map_err(auth::GuardedCommandError::from)?;
+                let stats = sync::repair_order_update_replay_blockers(
+                    db,
+                    sync_state.as_ref(),
+                    app,
+                    cancellation,
+                )
+                .await
+                .map_err(auth::GuardedCommandError::from)?;
                 let status = {
                     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-                    sync_queue::get_status(&conn)
+                    sync_queue::renderer_get_status(&conn)
                 }
                 .map_err(auth::GuardedCommandError::from)?;
                 return Ok(json!({
@@ -1187,17 +1250,24 @@ pub async fn recovery_execute_action(
                     ),
                 }));
             }
-            let result = {
-                let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
-                sync_queue::retry_items_by_module(&conn, module_type.as_str())
-            }
+            let item_results = sync::guarded_renderer_retry_module(
+                db,
+                sync_state.as_ref(),
+                app,
+                cancellation,
+                "recovery:retry_parity_module",
+                module_type.as_str(),
+                usize::MAX,
+            )
+            .await
             .map_err(auth::GuardedCommandError::from)?;
-            let process_result = sync_queue::process_queue(&db.conn, &admin_url, &api_key)
-                .await
-                .map_err(auth::GuardedCommandError::from)?;
+            let retried = item_results.len();
+            let processed: i64 = item_results.iter().map(|result| result.processed).sum();
+            let failed: i64 = item_results.iter().map(|result| result.failed).sum();
+            let conflicts: i64 = item_results.iter().map(|result| result.conflicts).sum();
             let status = {
                 let conn = db.conn.lock().map_err(|e| e.to_string())?;
-                sync_queue::get_status(&conn)
+                sync_queue::renderer_get_status(&conn)
             }
             .map_err(auth::GuardedCommandError::from)?;
 
@@ -1207,10 +1277,10 @@ pub async fn recovery_execute_action(
                 "message": format!(
                     "Parity module {} retried {} item(s) now: processed {}, failed {}, conflicts {}, remaining {}.",
                     module_type,
-                    result.retried,
-                    process_result.processed,
-                    process_result.failed,
-                    process_result.conflicts,
+                    retried,
+                    processed,
+                    failed,
+                    conflicts,
                     status.total,
                 ),
             }))
@@ -1218,11 +1288,11 @@ pub async fn recovery_execute_action(
         "validatePendingOrders" => {
             auth::authorize_privileged_action(
                 auth::PrivilegedActionScope::CashDrawerControl,
-                &db,
-                &auth_state,
+                db,
+                auth_state,
             )?;
             let result =
-                sync::validate_pending_orders(&db).map_err(auth::GuardedCommandError::from)?;
+                sync::validate_pending_orders(db).map_err(auth::GuardedCommandError::from)?;
             let total_pending = result
                 .get("total_pending")
                 .and_then(Value::as_i64)
@@ -1239,14 +1309,14 @@ pub async fn recovery_execute_action(
         "removeInvalidOrders" => {
             auth::authorize_privileged_action(
                 auth::PrivilegedActionScope::CashDrawerControl,
-                &db,
-                &auth_state,
+                db,
+                auth_state,
             )?;
             let order_ids = request_param_string_array(&request, "orderIds");
             if order_ids.is_empty() {
                 return Err("No invalid orders were provided for removal".into());
             }
-            let result = sync::remove_invalid_orders(&db, order_ids)
+            let result = sync::remove_invalid_orders(db, order_ids)
                 .map_err(auth::GuardedCommandError::from)?;
             let removed = result.get("removed").and_then(Value::as_i64).unwrap_or(0);
             Ok(json!({
@@ -1258,13 +1328,13 @@ pub async fn recovery_execute_action(
         "retryFinancialItem" => {
             auth::authorize_privileged_action(
                 auth::PrivilegedActionScope::CashDrawerControl,
-                &db,
-                &auth_state,
+                db,
+                auth_state,
             )?;
             let queue_id = request_field_i64(&request, "queueId")
                 .or_else(|| request_param_i64(&request, "queueId"))
                 .ok_or_else(|| "Missing financial queue id".to_string())?;
-            sync::retry_financial_queue_item(&db, queue_id)
+            sync::retry_financial_queue_item(db, queue_id)
                 .map_err(auth::GuardedCommandError::from)?;
             Ok(json!({
                 "success": true,
@@ -1275,8 +1345,8 @@ pub async fn recovery_execute_action(
         "retryAllFailedFinancial" => {
             auth::authorize_privileged_action(
                 auth::PrivilegedActionScope::CashDrawerControl,
-                &db,
-                &auth_state,
+                db,
+                auth_state,
             )?;
             let count: usize = {
                 let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -1323,8 +1393,8 @@ pub async fn recovery_execute_action(
         "resolveCheckoutPaymentBlocker" => {
             auth::authorize_privileged_action(
                 auth::PrivilegedActionScope::CashDrawerControl,
-                &db,
-                &auth_state,
+                db,
+                auth_state,
             )?;
 
             let order_id = request_field_str(&request, "orderId")
@@ -1346,7 +1416,7 @@ pub async fn recovery_execute_action(
                 .unwrap_or_else(|| "card".to_string());
 
             let result = payments::resolve_unsettled_payment_blocker_payment(
-                &db,
+                db,
                 &json!({
                     "orderId": order_id,
                     "method": preferred_method,
@@ -1383,33 +1453,25 @@ pub async fn recovery_execute_action(
         "repairOrphanedFinancial" => {
             auth::authorize_privileged_action(
                 auth::PrivilegedActionScope::CashDrawerControl,
-                &db,
-                &auth_state,
+                db,
+                auth_state,
             )?;
-            let admin_url = load_admin_url(&db)?;
-            let api_key = load_pos_api_key()?;
-            let stats = sync::repair_orphaned_financial_queue_items(&db, &admin_url, &api_key)
-                .await
-                .map_err(auth::GuardedCommandError::from)?;
-            Ok(json!({
-                "success": true,
-                "requiresRefresh": true,
-                "message": format!(
-                    "Repaired {} orphaned item(s), requeued {}, skipped {}.",
-                    stats.repaired,
-                    stats.requeued,
-                    stats.skipped,
-                ),
-            }))
+            Err("RECOVERY_ORPHANED_FINANCIAL_GUARDED_AUDIT_REQUIRED".into())
         }
         "repairWaitingParentPayments" => {
             auth::authorize_privileged_action(
                 auth::PrivilegedActionScope::CashDrawerControl,
-                &db,
-                &auth_state,
+                db,
+                auth_state,
             )?;
-            let repaired =
-                sync::reconcile_deferred_payments(&db).map_err(auth::GuardedCommandError::from)?;
+            let repaired = guarded_renderer_db_mutation(
+                db,
+                sync_state.as_ref(),
+                cancellation,
+                sync::reconcile_deferred_payments,
+            )
+            .await
+            .map_err(auth::GuardedCommandError::from)?;
             Ok(json!({
                 "success": true,
                 "requiresRefresh": true,
@@ -1419,11 +1481,17 @@ pub async fn recovery_execute_action(
         "repairWaitingParentAdjustments" => {
             auth::authorize_privileged_action(
                 auth::PrivilegedActionScope::CashDrawerControl,
-                &db,
-                &auth_state,
+                db,
+                auth_state,
             )?;
-            let repaired = sync::reconcile_deferred_adjustments(&db)
-                .map_err(auth::GuardedCommandError::from)?;
+            let repaired = guarded_renderer_db_mutation(
+                db,
+                sync_state.as_ref(),
+                cancellation,
+                sync::reconcile_deferred_adjustments,
+            )
+            .await
+            .map_err(auth::GuardedCommandError::from)?;
             Ok(json!({
                 "success": true,
                 "requiresRefresh": true,
@@ -1433,11 +1501,17 @@ pub async fn recovery_execute_action(
         "requeueFailedOrderValidationRows" => {
             auth::authorize_privileged_action(
                 auth::PrivilegedActionScope::CashDrawerControl,
-                &db,
-                &auth_state,
+                db,
+                auth_state,
             )?;
-            let repaired = sync::requeue_failed_order_validation_rows(&db)
-                .map_err(auth::GuardedCommandError::from)?;
+            let repaired = guarded_renderer_db_mutation(
+                db,
+                sync_state.as_ref(),
+                cancellation,
+                sync::requeue_failed_order_validation_rows,
+            )
+            .await
+            .map_err(auth::GuardedCommandError::from)?;
             Ok(json!({
                 "success": true,
                 "requiresRefresh": true,
@@ -1447,11 +1521,17 @@ pub async fn recovery_execute_action(
         "requeueRetryableFailedShiftRows" => {
             auth::authorize_privileged_action(
                 auth::PrivilegedActionScope::CashDrawerControl,
-                &db,
-                &auth_state,
+                db,
+                auth_state,
             )?;
-            let repaired = sync::requeue_retryable_failed_shift_rows(&db)
-                .map_err(auth::GuardedCommandError::from)?;
+            let repaired = guarded_renderer_db_mutation(
+                db,
+                sync_state.as_ref(),
+                cancellation,
+                sync::requeue_retryable_failed_shift_rows,
+            )
+            .await
+            .map_err(auth::GuardedCommandError::from)?;
             Ok(json!({
                 "success": true,
                 "requiresRefresh": true,
@@ -1461,11 +1541,17 @@ pub async fn recovery_execute_action(
         "requeueFailedFinancialShiftRows" => {
             auth::authorize_privileged_action(
                 auth::PrivilegedActionScope::CashDrawerControl,
-                &db,
-                &auth_state,
+                db,
+                auth_state,
             )?;
-            let repaired = sync::requeue_failed_financial_shift_rows(&db)
-                .map_err(auth::GuardedCommandError::from)?;
+            let repaired = guarded_renderer_db_mutation(
+                db,
+                sync_state.as_ref(),
+                cancellation,
+                sync::requeue_failed_financial_shift_rows,
+            )
+            .await
+            .map_err(auth::GuardedCommandError::from)?;
             Ok(json!({
                 "success": true,
                 "requiresRefresh": true,
@@ -1475,11 +1561,17 @@ pub async fn recovery_execute_action(
         "requeueFailedShiftCashierReferenceRows" => {
             auth::authorize_privileged_action(
                 auth::PrivilegedActionScope::CashDrawerControl,
-                &db,
-                &auth_state,
+                db,
+                auth_state,
             )?;
-            let repaired = sync::requeue_failed_shift_cashier_reference_rows(&db)
-                .map_err(auth::GuardedCommandError::from)?;
+            let repaired = guarded_renderer_db_mutation(
+                db,
+                sync_state.as_ref(),
+                cancellation,
+                sync::requeue_failed_shift_cashier_reference_rows,
+            )
+            .await
+            .map_err(auth::GuardedCommandError::from)?;
             Ok(json!({
                 "success": true,
                 "requiresRefresh": true,
@@ -1489,11 +1581,17 @@ pub async fn recovery_execute_action(
         "requeueFailedAdjustmentMissingEndpointRows" => {
             auth::authorize_privileged_action(
                 auth::PrivilegedActionScope::CashDrawerControl,
-                &db,
-                &auth_state,
+                db,
+                auth_state,
             )?;
-            let repaired = sync::requeue_failed_adjustment_missing_endpoint_rows(&db)
-                .map_err(auth::GuardedCommandError::from)?;
+            let repaired = guarded_renderer_db_mutation(
+                db,
+                sync_state.as_ref(),
+                cancellation,
+                sync::requeue_failed_adjustment_missing_endpoint_rows,
+            )
+            .await
+            .map_err(auth::GuardedCommandError::from)?;
             Ok(json!({
                 "success": true,
                 "requiresRefresh": true,
@@ -1503,11 +1601,17 @@ pub async fn recovery_execute_action(
         "requeueFailedAdjustmentLegacyValidationRows" => {
             auth::authorize_privileged_action(
                 auth::PrivilegedActionScope::CashDrawerControl,
-                &db,
-                &auth_state,
+                db,
+                auth_state,
             )?;
-            let repaired = sync::requeue_failed_adjustment_legacy_validation_rows(&db)
-                .map_err(auth::GuardedCommandError::from)?;
+            let repaired = guarded_renderer_db_mutation(
+                db,
+                sync_state.as_ref(),
+                cancellation,
+                sync::requeue_failed_adjustment_legacy_validation_rows,
+            )
+            .await
+            .map_err(auth::GuardedCommandError::from)?;
             Ok(json!({
                 "success": true,
                 "requiresRefresh": true,
@@ -1522,7 +1626,7 @@ pub async fn recovery_execute_action(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusqlite::Connection;
+    use rusqlite::{types::ValueRef, Connection};
     use serde_json::json;
 
     fn test_db() -> db::DbState {
@@ -1537,6 +1641,350 @@ mod tests {
             conn: std::sync::Mutex::new(conn),
             db_path: std::path::PathBuf::from(":memory:"),
         }
+    }
+
+    #[derive(Default)]
+    struct NoopTerminalEventSink;
+
+    impl TerminalEventSink for NoopTerminalEventSink {
+        fn emit_json(&self, _event: &str, _payload: serde_json::Value) {}
+    }
+
+    fn recovery_test_state(
+        cancelled: bool,
+    ) -> (
+        db::DbState,
+        auth::AuthState,
+        std::sync::Arc<sync::SyncState>,
+        tokio_util::sync::CancellationToken,
+    ) {
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        if cancelled {
+            cancellation.cancel();
+        }
+        (
+            test_db(),
+            auth::AuthState::new(),
+            std::sync::Arc::new(sync::SyncState::new()),
+            cancellation,
+        )
+    }
+
+    fn recovery_boundary_fingerprint(conn: &Connection) -> String {
+        fn bytes(value: &[u8]) -> String {
+            value.iter().map(|byte| format!("{byte:02x}")).collect()
+        }
+        let mut output = String::new();
+        for table in [
+            "parity_sync_queue",
+            "orders",
+            "order_payments",
+            "payment_adjustments",
+            "conflict_audit_log",
+        ] {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+                    [table],
+                    |row| row.get(0),
+                )
+                .expect("inspect recovery boundary table");
+            output.push_str(table);
+            output.push(':');
+            if !exists {
+                output.push_str("<absent>\n");
+                continue;
+            }
+            let sql = format!("SELECT * FROM {table} ORDER BY rowid");
+            let mut statement = conn.prepare(&sql).expect("prepare recovery fingerprint");
+            let column_count = statement.column_count();
+            let rows = statement
+                .query_map([], |row| {
+                    let mut values = Vec::with_capacity(column_count);
+                    for index in 0..column_count {
+                        values.push(match row.get_ref(index)? {
+                            ValueRef::Null => "n".to_string(),
+                            ValueRef::Integer(value) => format!("i:{value}"),
+                            ValueRef::Real(value) => format!("r:{:016x}", value.to_bits()),
+                            ValueRef::Text(value) => format!("t:{}", bytes(value)),
+                            ValueRef::Blob(value) => format!("b:{}", bytes(value)),
+                        });
+                    }
+                    Ok(values.join("|"))
+                })
+                .expect("query recovery fingerprint");
+            for row in rows {
+                output.push_str(&row.expect("read recovery fingerprint"));
+                output.push('\n');
+            }
+        }
+        output
+    }
+
+    fn seed_failed_recovery_row(conn: &Connection, id: &str, module: &str, priority: i64) {
+        sync_queue::enqueue_payload_item(
+            conn,
+            "customers",
+            id,
+            "INSERT",
+            &json!({
+                "id": id,
+                "organization_id": "00000000-0000-4000-8000-000000000001",
+                "name": "recovery-boundary-probe"
+            }),
+            Some(priority),
+            Some(module),
+            None,
+            Some(1),
+        )
+        .expect("enqueue recovery boundary row");
+        conn.execute(
+            "UPDATE parity_sync_queue
+             SET status = 'failed', attempts = 4, error_message = 'bounded failure'
+             WHERE record_id = ?1",
+            [id],
+        )
+        .expect("mark recovery row failed");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn blocked_recovery_retry_item_and_module_do_not_prepare_or_mutate_rows() {
+        let lifecycle = crate::repairs::isolate_lifecycle_for_test();
+        for (action_id, params) in [
+            (
+                "retryParityItem",
+                json!({ "sampleItemId": "blocked-retry-item" }),
+            ),
+            ("retryParityModule", json!({ "moduleType": "customers" })),
+        ] {
+            lifecycle.reset();
+            let server = crate::tests::fake_http::MockServer::new(r#"{"success":true}"#);
+            let _keyring = crate::tests::fake_keyring::install_seeded([
+                (
+                    "pos_api_key",
+                    json!({
+                        "key": "PRIVATE_KEY",
+                        "tid": "terminal-recovery",
+                        "url": server.url.clone(),
+                    })
+                    .to_string(),
+                ),
+                ("terminal_id", "terminal-recovery".to_string()),
+                ("admin_dashboard_url", server.url.clone()),
+            ]);
+            let (db, auth_state, sync_state, cancellation) = recovery_test_state(true);
+            let events = NoopTerminalEventSink;
+            {
+                let conn = db.conn.lock().expect("lock recovery seed db");
+                seed_failed_recovery_row(&conn, "blocked-retry-item", "customers", 100);
+                seed_failed_recovery_row(&conn, "blocked-retry-second", "customers", 1);
+            }
+            let before = {
+                let conn = db.conn.lock().expect("lock recovery before db");
+                recovery_boundary_fingerprint(&conn)
+            };
+            let request = json!({ "actionId": action_id, "params": params });
+
+            let error = recovery_execute_action_core(
+                Some(request),
+                &db,
+                &auth_state,
+                &sync_state,
+                &cancellation,
+                &events,
+            )
+            .await
+            .expect_err("blocked recovery must fail before preparation");
+
+            assert!(
+                error.to_string().contains("SYNC_CANCELLED"),
+                "unexpected bounded error for {action_id}: {error}"
+            );
+            let after = {
+                let conn = db.conn.lock().expect("lock recovery after db");
+                recovery_boundary_fingerprint(&conn)
+            };
+            assert_eq!(after, before, "{action_id} mutated before lifecycle gate");
+            assert_eq!(server.count(), 0, "{action_id} reached HTTP while blocked");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn module_recovery_blocked_after_first_item_sends_once_and_preserves_second_row() {
+        let _lifecycle = crate::repairs::isolate_lifecycle_for_test();
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let cancellation_for_server = cancellation.clone();
+        let server = crate::tests::fake_http::MockServer::new_with_request_hook(
+            r#"{"success":true}"#,
+            move || cancellation_for_server.cancel(),
+        );
+        let _keyring = crate::tests::fake_keyring::install_seeded([
+            (
+                "pos_api_key",
+                json!({
+                    "key": "PRIVATE_KEY",
+                    "tid": "terminal-recovery",
+                    "url": server.url.clone(),
+                })
+                .to_string(),
+            ),
+            ("terminal_id", "terminal-recovery".to_string()),
+            ("admin_dashboard_url", server.url.clone()),
+        ]);
+        let db = test_db();
+        let auth_state = auth::AuthState::new();
+        let sync_state = std::sync::Arc::new(sync::SyncState::new());
+        let events = NoopTerminalEventSink;
+        {
+            let conn = db.conn.lock().expect("lock recovery interleaving seed db");
+            seed_failed_recovery_row(&conn, "module-first", "customers", 100);
+            seed_failed_recovery_row(&conn, "module-second", "customers", 1);
+        }
+        let second_before = {
+            let conn = db.conn.lock().expect("lock second-row before db");
+            conn.query_row(
+                "SELECT * FROM parity_sync_queue WHERE record_id = 'module-second'",
+                [],
+                |row| {
+                    let mut values = Vec::new();
+                    for index in 0..row.as_ref().column_count() {
+                        values.push(format!("{:?}", row.get_ref(index)?));
+                    }
+                    Ok(values)
+                },
+            )
+            .expect("fingerprint second row before")
+        };
+
+        let error = recovery_execute_action_core(
+            Some(json!({
+                "actionId": "retryParityModule",
+                "params": { "moduleType": "customers" }
+            })),
+            &db,
+            &auth_state,
+            &sync_state,
+            &cancellation,
+            &events,
+        )
+        .await
+        .expect_err("second claim must observe cancellation");
+
+        assert!(
+            error.to_string().contains("SYNC_CANCELLED"),
+            "unexpected bounded error after first module item: {error}"
+        );
+        assert_eq!(server.count(), 1, "recovery crossed the cancellation fence");
+        let second_after = {
+            let conn = db.conn.lock().expect("lock second-row after db");
+            conn.query_row(
+                "SELECT * FROM parity_sync_queue WHERE record_id = 'module-second'",
+                [],
+                |row| {
+                    let mut values = Vec::new();
+                    for index in 0..row.as_ref().column_count() {
+                        values.push(format!("{:?}", row.get_ref(index)?));
+                    }
+                    Ok(values)
+                },
+            )
+            .expect("fingerprint second row after")
+        };
+        assert_eq!(
+            second_after, second_before,
+            "bulk preparation touched item two"
+        );
+    }
+
+    #[test]
+    fn generic_recovery_cannot_read_or_mutate_repair_shaped_order_rows() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status, error_message
+             ) VALUES (
+                 'repair-recovery-order-op', 'orders',
+                 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'UPDATE',
+                 '{\"driverId\":\"repair-private-driver\",\"note\":\"repair-private-note\"}',
+                 'repair-private-org', datetime('now'), 4, 1000, 1,
+                 'repairs', 'manual', 7, 'conflict', 'Invalid driver id'
+             )",
+            [],
+        )
+        .expect("seed repair-shaped order row");
+
+        let before: (String, i64, Option<String>, String, String) = conn
+            .query_row(
+                "SELECT status, attempts, error_message, data, organization_id
+                 FROM parity_sync_queue WHERE id = 'repair-recovery-order-op'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+
+        let error = prepare_invalid_driver_order_repair(&conn, "repair-recovery-order-op")
+            .expect_err("generic Recovery Center must reject native repair rows");
+        assert!(
+            error.contains("not found") || error.contains("REPAIR_TYPED_CONFLICT_REQUIRED"),
+            "unexpected repair guard error: {error}"
+        );
+
+        let after: (String, i64, Option<String>, String, String) = conn
+            .query_row(
+                "SELECT status, attempts, error_message, data, organization_id
+                 FROM parity_sync_queue WHERE id = 'repair-recovery-order-op'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn generic_recovery_does_not_surface_repair_shaped_payment_conflicts() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status, error_message
+             ) VALUES (
+                 'repair-recovery-payment-op', 'payments', 'repair-private-payment',
+                 'INSERT', '{\"ciphertext\":\"repair-private-ciphertext\"}',
+                 'repair-private-org', datetime('now'), 4, 1000, 1,
+                 'repairs', 'manual', 7, 'failed', 'Payment exceeds order total: repair-private-equation'
+             )",
+            [],
+        )
+        .expect("seed repair-shaped payment row");
+
+        assert_eq!(
+            failed_payment_total_conflict_for_payment(&conn, "repair-private-payment")
+                .expect("query conflict"),
+            None
+        );
     }
 
     #[test]

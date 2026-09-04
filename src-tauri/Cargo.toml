@@ -116,6 +116,8 @@ dunce = "1.0.5"
 windows-sys = { version = "0.59", features = [
   "Win32_Foundation",
   "Win32_Graphics_Printing",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
   "Win32_System_Registry",
   "Win32_System_Threading",
   "Win32_UI_Shell",
@@ -124,10 +126,10 @@ windows-sys = { version = "0.59", features = [
 
 # COM/IDispatch bindings for the WIA Automation layer that drives connected
 # scanners (`capture::wia`, spec `.claude/specs/invoice-scan-capture/` D-Rust2 /
-# D4). `windows-sys` above stays exactly as it is — it exposes raw C bindings
-# with no COM interface support, and `IDispatch` needs the vtable types only the
-# full `windows` crate generates. Already in the lockfile transitively, so this
-# adds no new crate.
+# D4). `windows-sys` above exposes raw C bindings (including the repair cleanup
+# file-system primitives) but no COM interface support; `IDispatch` needs the
+# vtable types only the full `windows` crate generates. Already in the lockfile
+# transitively, so this adds no new crate.
 #
 # `Win32_System_Com` brings `IDispatch` + `CoInitializeEx`; `IDispatch::Invoke`
 # is additionally gated behind `Win32_System_Ole` (which also carries

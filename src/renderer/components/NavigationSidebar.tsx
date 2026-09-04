@@ -50,8 +50,16 @@ import {
   MonitorPlay,
   Award,
   Plug2,
+  Wrench,
 } from 'lucide-react';
 import UpgradePromptModal from './modals/UpgradePromptModal';
+
+export const NavigationModuleIcon: React.FC<{ iconName: string }> = ({ iconName }) => {
+  if (iconName === 'Wrench') {
+    return <Wrench className="w-5 h-5" strokeWidth={2} />;
+  }
+  return <Package className="w-5 h-5" strokeWidth={2} />;
+};
 
 const NAVIGATION_DRAG_HOLD_MS = 280;
 const NAVIGATION_DRAG_SCROLL_CANCEL_THRESHOLD_PX = 8;
@@ -454,6 +462,8 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
         return <Award className={iconClass} strokeWidth={2} />;
       case 'Plug2':
         return <Plug2 className={iconClass} strokeWidth={2} />;
+      case 'Wrench':
+        return <NavigationModuleIcon iconName={iconName} />;
       default:
         // Log unknown icons for debugging
         console.warn(`[NavigationSidebar] Unknown icon: ${iconName}, using default`);

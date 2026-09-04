@@ -197,6 +197,22 @@ pub async fn zreport_print(
     zreport::print_z_report(&db, &payload, &app)
 }
 
+#[tauri::command]
+pub async fn repair_reporting_projection_apply(
+    projection: zreport::RepairReportingProjection,
+    db: tauri::State<'_, db::DbState>,
+) -> Result<serde_json::Value, String> {
+    zreport::apply_repair_reporting_projection(&db, &projection)
+}
+
+#[tauri::command]
+pub async fn repair_reporting_projection_invalidate(
+    staff_shift_id: Option<String>,
+    db: tauri::State<'_, db::DbState>,
+) -> Result<bool, String> {
+    zreport::invalidate_repair_reporting_projection(&db, staff_shift_id.as_deref())
+}
+
 #[cfg(test)]
 mod dto_tests {
     use super::*;

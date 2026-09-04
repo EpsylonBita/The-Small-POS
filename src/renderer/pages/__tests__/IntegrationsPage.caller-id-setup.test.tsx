@@ -165,4 +165,36 @@ describe('Caller ID setup entry point', () => {
     expect(screen.queryByLabelText('API Key')).not.toBeInTheDocument()
     expect(screen.queryByLabelText('API Secret')).not.toBeInTheDocument()
   })
+
+  it('opens the dedicated Customer Messaging workspace without exposing credentials', async () => {
+    mocks.posApiGet.mockResolvedValue({
+      success: true,
+      data: {
+        integrations: [
+          {
+            plugin_id: 'customer_messaging',
+            provider: 'customer_messaging',
+            name: 'Customer Messaging (Private Beta)',
+            category: 'communications',
+            is_purchased: true,
+            status: 'inactive',
+          },
+        ],
+      },
+    })
+
+    render(<IntegrationsPage />)
+
+    await screen.findByText('Customer Messaging (Private Beta)')
+    expect(screen.queryByRole('switch')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Open Admin Dashboard' }))
+
+    await waitFor(() => {
+      expect(mocks.openExternalUrl).toHaveBeenCalledWith(
+        'https://admin.example/plugins?workspace=customer-messaging&branch_id=branch-1&organization_id=org-1',
+      )
+    })
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('API Key')).not.toBeInTheDocument()
+  })
 })

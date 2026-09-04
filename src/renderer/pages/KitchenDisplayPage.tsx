@@ -114,6 +114,14 @@ const normalizeKdsString = (value: unknown): string =>
 const readKdsString = (record: Record<string, unknown> | null | undefined, key: string): string =>
   normalizeKdsString(record?.[key]);
 
+const isRepairSettlement = (record: Record<string, unknown> | null | undefined): boolean => {
+  const nested = record?.['orders'];
+  const order = nested && typeof nested === 'object' && !Array.isArray(nested)
+    ? nested as Record<string, unknown>
+    : undefined;
+  return (readKdsString(record, 'order_context') || readKdsString(record, 'orderContext') || readKdsString(order, 'order_context')) === 'repair_settlement';
+};
+
 const getKdsRecordDedupeKeys = (record: Record<string, unknown> | null | undefined): string[] => {
   if (!record) return [];
   return [
@@ -209,7 +217,7 @@ const getKitchenOrderDedupeKeys = (order: KitchenOrder): string[] =>
 
 const isActiveLocalKitchenOrder = (order: Record<string, unknown>): boolean => {
   const status = readKdsString(order, 'status').toLowerCase();
-  return order['is_ghost'] !== true && !isClosedKdsTicket({}, order) && ACTIVE_LOCAL_KDS_ORDER_STATUSES.has(status);
+  return !isRepairSettlement(order) && order['is_ghost'] !== true && !isClosedKdsTicket({}, order) && ACTIVE_LOCAL_KDS_ORDER_STATUSES.has(status);
 };
 
 const mapLocalOrderToKitchenOrder = (order: Record<string, unknown>): KitchenOrder | null => {
@@ -420,7 +428,7 @@ const KitchenDisplayPage: React.FC = () => {
             const ticketMatchesTerminal = terminalId
               ? matchesKdsTerminal(ticket, terminalId, localOrder)
               : true;
-            if (isClosedKdsTicket(ticket, localOrder) || !ticketMatchesTerminal) {
+            if (isRepairSettlement(ticket) || isRepairSettlement(localOrder) || isClosedKdsTicket(ticket, localOrder) || !ticketMatchesTerminal) {
               return null;
             }
 

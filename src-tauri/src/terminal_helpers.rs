@@ -3,6 +3,16 @@ use tracing::warn;
 
 use crate::{api, db, storage};
 
+pub(crate) trait TerminalEventSink {
+    fn emit_json(&self, event: &str, payload: serde_json::Value);
+}
+
+impl<R: tauri::Runtime> TerminalEventSink for tauri::AppHandle<R> {
+    fn emit_json(&self, event: &str, payload: serde_json::Value) {
+        let _ = self.emit(event, payload);
+    }
+}
+
 fn nested_value_str(v: &serde_json::Value, pointers: &[&str]) -> Option<String> {
     for pointer in pointers {
         if let Some(s) = v.pointer(pointer).and_then(|x| x.as_str()) {
@@ -400,7 +410,8 @@ pub(crate) fn cache_terminal_settings_snapshot(
     db: &db::DbState,
     resp: &serde_json::Value,
 ) -> Result<Vec<String>, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let transaction = conn.transaction().map_err(|e| e.to_string())?;
     let mut updated = Vec::new();
 
     if let Some(settings_obj) = resp.get("settings").and_then(|value| value.as_object()) {
@@ -413,18 +424,23 @@ pub(crate) fn cache_terminal_settings_snapshot(
                 continue;
             };
             for (key, raw_value) in values_obj {
+                // Native repair state is keyring-only and renderer-opaque.  Do
+                // this check independently of the server-supplied category so
+                // a malformed settings payload cannot persist a plaintext
+                // shadow under another local_settings namespace.
+                if is_sensitive_setting_path(category, key) {
+                    continue;
+                }
                 if normalized_category == "system" && !is_syncable_system_setting(key) {
                     continue;
                 }
-                if normalized_category == "terminal"
-                    && (is_sensitive_terminal_setting(key) || is_local_only_terminal_setting(key))
-                {
+                if normalized_category == "terminal" && is_local_only_terminal_setting(key) {
                     continue;
                 }
                 let Some(serialized) = setting_value_to_string(raw_value) else {
                     continue;
                 };
-                db::set_setting(&conn, category, key, &serialized)?;
+                db::set_setting(&transaction, category, key, &serialized)?;
                 updated.push(format!("{category}.{key}"));
             }
         }
@@ -440,7 +456,7 @@ pub(crate) fn cache_terminal_settings_snapshot(
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            db::set_setting(&conn, "organization", "name", name)?;
+            db::set_setting(&transaction, "organization", "name", name)?;
             updated.push("organization.name".to_string());
         }
         if let Some(logo_url) = org
@@ -449,7 +465,7 @@ pub(crate) fn cache_terminal_settings_snapshot(
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            db::set_setting(&conn, "organization", "logo_url", logo_url)?;
+            db::set_setting(&transaction, "organization", "logo_url", logo_url)?;
             updated.push("organization.logo_url".to_string());
         }
     }
@@ -457,7 +473,7 @@ pub(crate) fn cache_terminal_settings_snapshot(
     if let Some(branch_name) =
         nested_value_str(resp, &["/branch_info/name", "/branch_info/display_name"])
     {
-        db::set_setting(&conn, "restaurant", "name", &branch_name)?;
+        db::set_setting(&transaction, "restaurant", "name", &branch_name)?;
         updated.push("restaurant.name".to_string());
 
         let branch_subtitle = nested_value_str(
@@ -469,7 +485,7 @@ pub(crate) fn cache_terminal_settings_snapshot(
             ],
         )
         .unwrap_or_else(|| branch_name.clone());
-        db::set_setting(&conn, "restaurant", "subtitle", &branch_subtitle)?;
+        db::set_setting(&transaction, "restaurant", "subtitle", &branch_subtitle)?;
         updated.push("restaurant.subtitle".to_string());
     }
 
@@ -482,7 +498,7 @@ pub(crate) fn cache_terminal_settings_snapshot(
             "/settings/terminal/display_name",
         ],
     ) {
-        db::set_setting(&conn, "terminal", "name", &terminal_name)?;
+        db::set_setting(&transaction, "terminal", "name", &terminal_name)?;
         updated.push("terminal.name".to_string());
     }
 
@@ -494,7 +510,7 @@ pub(crate) fn cache_terminal_settings_snapshot(
             "/settings/terminal/location",
         ],
     ) {
-        db::set_setting(&conn, "terminal", "location", &terminal_location)?;
+        db::set_setting(&transaction, "terminal", "location", &terminal_location)?;
         updated.push("terminal.location".to_string());
     }
 
@@ -509,7 +525,7 @@ pub(crate) fn cache_terminal_settings_snapshot(
             "/organization_branding/name",
         ],
     ) {
-        db::set_setting(&conn, "terminal", "store_name", &store_name)?;
+        db::set_setting(&transaction, "terminal", "store_name", &store_name)?;
         updated.push("terminal.store_name".to_string());
     }
     if let Some(store_address) = nested_value_str(
@@ -532,8 +548,8 @@ pub(crate) fn cache_terminal_settings_snapshot(
         } else {
             store_address
         };
-        db::set_setting(&conn, "restaurant", "address", &full_address)?;
-        db::set_setting(&conn, "terminal", "store_address", &full_address)?;
+        db::set_setting(&transaction, "restaurant", "address", &full_address)?;
+        db::set_setting(&transaction, "terminal", "store_address", &full_address)?;
         updated.push("restaurant.address".to_string());
     }
     if let Some(store_phone) = nested_value_str(
@@ -545,8 +561,8 @@ pub(crate) fn cache_terminal_settings_snapshot(
             "/organization_branding/phone",
         ],
     ) {
-        db::set_setting(&conn, "restaurant", "phone", &store_phone)?;
-        db::set_setting(&conn, "terminal", "store_phone", &store_phone)?;
+        db::set_setting(&transaction, "restaurant", "phone", &store_phone)?;
+        db::set_setting(&transaction, "terminal", "store_phone", &store_phone)?;
         updated.push("restaurant.phone".to_string());
     }
     if let Some(latitude) = nested_value_number_string(
@@ -557,8 +573,8 @@ pub(crate) fn cache_terminal_settings_snapshot(
             "/branch_info/latitude",
         ],
     ) {
-        db::set_setting(&conn, "restaurant", "latitude", &latitude)?;
-        db::set_setting(&conn, "terminal", "store_latitude", &latitude)?;
+        db::set_setting(&transaction, "restaurant", "latitude", &latitude)?;
+        db::set_setting(&transaction, "terminal", "store_latitude", &latitude)?;
         updated.push("restaurant.latitude".to_string());
     }
     if let Some(longitude) = nested_value_number_string(
@@ -569,8 +585,8 @@ pub(crate) fn cache_terminal_settings_snapshot(
             "/branch_info/longitude",
         ],
     ) {
-        db::set_setting(&conn, "restaurant", "longitude", &longitude)?;
-        db::set_setting(&conn, "terminal", "store_longitude", &longitude)?;
+        db::set_setting(&transaction, "restaurant", "longitude", &longitude)?;
+        db::set_setting(&transaction, "terminal", "store_longitude", &longitude)?;
         updated.push("restaurant.longitude".to_string());
     }
 
@@ -580,16 +596,17 @@ pub(crate) fn cache_terminal_settings_snapshot(
         resp,
         &["/branch_info/tax_id", "/organization_branding/vat_number"],
     ) {
-        db::set_setting(&conn, "organization", "vat_number", &tax_id)?;
+        db::set_setting(&transaction, "organization", "vat_number", &tax_id)?;
         updated.push("organization.vat_number".to_string());
     }
 
     // Branch tax_office → organization.tax_office (for receipt header).
     if let Some(tax_office) = nested_value_str(resp, &["/branch_info/tax_office"]) {
-        db::set_setting(&conn, "organization", "tax_office", &tax_office)?;
+        db::set_setting(&transaction, "organization", "tax_office", &tax_office)?;
         updated.push("organization.tax_office".to_string());
     }
 
+    transaction.commit().map_err(|e| e.to_string())?;
     Ok(updated)
 }
 
@@ -623,64 +640,90 @@ pub(crate) fn is_sensitive_terminal_setting(setting_key: &str) -> bool {
             | "access_token"
             | "refresh_token"
             | "client_secret"
+            | "simple_pin"
+            | "repair_queue_aes_key_v1"
+            | "repair_scope_v1"
+            | "repair_entitlement_v1"
+            | "repair_actor_attestation_v1"
+            | "repair_scope_transition_journal_v1"
     ) || key.contains("service_role")
         || key.ends_with("_secret")
         || key.ends_with("_token")
 }
 
+pub(crate) fn is_protected_terminal_setting(setting_key: &str) -> bool {
+    let key = setting_key.trim().to_ascii_lowercase();
+    matches!(
+        key.as_str(),
+        "terminal_id"
+            | "organization_id"
+            | "branch_id"
+            | "admin_dashboard_url"
+            | "admin_url"
+            | "pos_api_key"
+            | "api_key"
+            | "connection_string"
+            | "terminal_connection_string"
+            | "pos_connection_string"
+            | "pos_session"
+    ) || is_sensitive_terminal_setting(&key)
+}
+
+pub(crate) fn is_sensitive_setting_path(category: &str, setting_key: &str) -> bool {
+    category
+        .split('.')
+        .chain(setting_key.split('.'))
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .any(is_protected_terminal_setting)
+}
+
 pub(crate) fn scrub_sensitive_local_settings(db: &db::DbState) {
-    let sensitive_keys = [
-        "pos_api_key",
-        "supabase_anon_key",
-        "service_role_key",
-        "supabase_service_role_key",
-        "supabase_service_key",
-        "jwt_secret",
-        "supabase_jwt_secret",
-        "admin_api_token",
-        "access_token",
-        "refresh_token",
-        "client_secret",
-    ];
+    let _ = scrub_sensitive_local_settings_checked(db);
+}
 
-    if let Ok(conn) = db.conn.lock() {
-        for key in sensitive_keys {
-            let _ = conn.execute(
-                "DELETE FROM local_settings
-                 WHERE setting_category = 'terminal'
-                   AND setting_key = ?1",
-                rusqlite::params![key],
-            );
-        }
-
-        let _ = conn.execute(
-            "DELETE FROM local_settings
-             WHERE setting_category = 'terminal'
-               AND (
-                    lower(setting_key) LIKE '%service_role%'
-                 OR lower(setting_key) LIKE '%_secret'
-                 OR lower(setting_key) LIKE '%_token'
-               )",
-            [],
-        );
+pub(crate) fn scrub_sensitive_local_settings_checked(db: &db::DbState) -> Result<(), String> {
+    let mut conn = db.conn.lock().map_err(|error| error.to_string())?;
+    let sensitive_rows = {
+        let mut statement = conn
+            .prepare("SELECT setting_category, setting_key FROM local_settings")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter(|(category, key)| is_sensitive_setting_path(category, key))
+            .collect::<Vec<_>>()
+    };
+    let transaction = conn.transaction().map_err(|error| error.to_string())?;
+    for (category, key) in sensitive_rows {
+        transaction
+            .execute(
+                "DELETE FROM local_settings WHERE setting_category = ?1 AND setting_key = ?2",
+                rusqlite::params![category, key],
+            )
+            .map_err(|error| error.to_string())?;
     }
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 /// Clear terminal metadata that is derived from a successful admin settings
 /// sync. When the operator saves a new connection code, stale values from the
 /// previous org must not participate in terminal identity reconciliation.
-pub(crate) fn clear_derived_terminal_context(db: &db::DbState) {
+#[cfg(test)]
+pub(crate) fn clear_derived_terminal_context_checked(db: &db::DbState) -> Result<(), String> {
     const DERIVED_CREDENTIAL_KEYS: &[&str] = &[
-        "branch_id",
-        "organization_id",
         "business_type",
         "supabase_url",
         "supabase_anon_key",
         "ghost_mode_feature_enabled",
     ];
     const DERIVED_LOCAL_SETTING_KEYS: &[&str] = &[
-        "branch_id",
-        "organization_id",
         "business_type",
         "supabase_url",
         "supabase_anon_key",
@@ -694,34 +737,31 @@ pub(crate) fn clear_derived_terminal_context(db: &db::DbState) {
         "source_terminal_db_id",
         "pos_operating_mode",
         "enabled_features",
+        "repair_queue_aes_key_v1",
+        "repair_scope_v1",
+        "repair_entitlement_v1",
+        "repair_actor_attestation_v1",
     ];
 
     for key in DERIVED_CREDENTIAL_KEYS {
-        let _ = storage::delete_credential(key);
+        storage::delete_credential(key)?;
     }
 
-    if let Ok(conn) = db.conn.lock() {
-        for key in DERIVED_LOCAL_SETTING_KEYS {
-            let _ = db::delete_setting(&conn, "terminal", key);
-        }
+    let conn = db.conn.lock().map_err(|error| error.to_string())?;
+    for key in DERIVED_LOCAL_SETTING_KEYS {
+        db::delete_setting(&conn, "terminal", key)?;
     }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn clear_derived_terminal_context(db: &db::DbState) {
+    let _ = clear_derived_terminal_context_checked(db);
 }
 
 pub(crate) fn read_local_setting(db: &db::DbState, category: &str, key: &str) -> Option<String> {
     let conn = db.conn.lock().ok()?;
     db::get_setting(&conn, category, key)
-}
-
-pub(crate) fn persist_terminal_identity(
-    db: &db::DbState,
-    terminal_id: impl Into<String>,
-) -> Option<String> {
-    let normalized = normalize_terminal_identity(Some(terminal_id.into()))?;
-    let _ = storage::set_credential("terminal_id", normalized.trim());
-    if let Ok(conn) = db.conn.lock() {
-        let _ = db::set_setting(&conn, "terminal", "terminal_id", normalized.trim());
-    }
-    Some(normalized)
 }
 
 fn resolve_connection_string_terminal_identity(db: &db::DbState) -> Option<String> {
@@ -746,10 +786,10 @@ pub(crate) fn resolve_canonical_local_terminal_identity(db: &db::DbState) -> Opt
 }
 
 pub(crate) fn reconcile_terminal_identity_from_local_sources(db: &db::DbState) -> Option<String> {
-    let canonical = resolve_canonical_local_terminal_identity(db)?;
-    persist_terminal_identity(db, canonical)
+    resolve_canonical_local_terminal_identity(db)
 }
 
+#[cfg(test)]
 fn normalized_keyring_credential(credential_key: &str) -> Option<String> {
     let value = storage::get_credential(credential_key)?;
     let trimmed = value.trim();
@@ -770,10 +810,12 @@ fn normalized_keyring_credential(credential_key: &str) -> Option<String> {
     }
 }
 
+#[cfg(test)]
 fn keyring_matches_expected_value(credential_key: &str, expected_value: &str) -> bool {
     normalized_keyring_credential(credential_key).as_deref() == Some(expected_value)
 }
 
+#[cfg(test)]
 fn local_terminal_setting_is_purge_safe(setting_key: &str, raw_value: &str) -> bool {
     let trimmed = raw_value.trim();
     if trimmed.is_empty() {
@@ -839,6 +881,7 @@ fn local_terminal_setting_is_purge_safe(setting_key: &str, raw_value: &str) -> b
 /// `terminal_id` has an extra guard: we never purge if the value is the
 /// generic placeholder `"terminal-001"` that `hydrate` explicitly ignores,
 /// so we match that skip here too.
+#[cfg(test)]
 pub(crate) fn purge_hydrated_terminal_credentials_from_local_settings(db: &db::DbState) {
     // Credential keys that map 1:1 between `local_settings` (category='terminal')
     // and the OS keyring. Mirrors the `mappings` in
@@ -892,78 +935,11 @@ pub(crate) fn purge_hydrated_terminal_credentials_from_local_settings(db: &db::D
 }
 
 pub(crate) fn hydrate_terminal_credentials_from_local_settings(db: &db::DbState) {
-    // Keep keyring credentials aligned with local_settings values used by Electron
-    // compatibility paths.
-    let mappings = [
-        ("terminal_id", "terminal_id"),
-        ("pos_api_key", "pos_api_key"),
-        ("admin_dashboard_url", "admin_dashboard_url"),
-        ("branch_id", "branch_id"),
-        ("organization_id", "organization_id"),
-        ("business_type", "business_type"),
-        ("supabase_url", "supabase_url"),
-        ("supabase_anon_key", "supabase_anon_key"),
-        ("ghost_mode_feature_enabled", "ghost_mode_feature_enabled"),
-    ];
-
-    for (credential_key, setting_key) in mappings {
-        if let Some(value) = read_local_setting(db, "terminal", setting_key) {
-            let trimmed = value.trim();
-            if !trimmed.is_empty() {
-                if credential_key == "terminal_id" && trimmed == "terminal-001" {
-                    continue;
-                }
-
-                let normalized_value = if credential_key == "admin_dashboard_url" {
-                    api::normalize_admin_url(trimmed)
-                } else if credential_key == "pos_api_key" {
-                    if let Some(decoded) = api::extract_api_key_from_connection_string(trimmed) {
-                        if let Some(decoded_tid) =
-                            api::extract_terminal_id_from_connection_string(trimmed)
-                        {
-                            let _ = storage::set_credential("terminal_id", decoded_tid.trim());
-                        }
-                        if let Some(decoded_url) =
-                            api::extract_admin_url_from_connection_string(trimmed)
-                        {
-                            let _ =
-                                storage::set_credential("admin_dashboard_url", decoded_url.trim());
-                        }
-                        decoded
-                    } else {
-                        trimmed.to_string()
-                    }
-                } else {
-                    trimmed.to_string()
-                };
-
-                if !normalized_value.trim().is_empty() {
-                    match storage::get_credential(credential_key) {
-                        Some(current) if current.trim() == normalized_value.trim() => {}
-                        _ => {
-                            let _ =
-                                storage::set_credential(credential_key, normalized_value.trim());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Backward compatibility for legacy admin_url key.
-    if let Some(value) = read_local_setting(db, "terminal", "admin_url") {
-        let trimmed = value.trim();
-        if !trimmed.is_empty() {
-            let normalized = api::normalize_admin_url(trimmed);
-            if !normalized.is_empty() {
-                match storage::get_credential("admin_dashboard_url") {
-                    Some(current) if current.trim() == normalized => {}
-                    _ => {
-                        let _ = storage::set_credential("admin_dashboard_url", &normalized);
-                    }
-                }
-            }
-        }
+    // Ordinary runtime hydration is intentionally read-only. Legacy plaintext
+    // mirrors may inform compatibility reads, but only the canonical checked
+    // publisher may adopt them into managed keyring state.
+    for setting_key in ["business_type", "ghost_mode_feature_enabled"] {
+        let _ = read_local_setting(db, "terminal", setting_key);
     }
 }
 
@@ -1099,40 +1075,21 @@ pub(crate) fn terminal_access_reset_reason(error: &str) -> &'static str {
     }
 }
 
-fn clear_terminal_api_key(db: Option<&db::DbState>) {
-    let _ = storage::delete_credential("pos_api_key");
-    if let Some(db_state) = db {
-        if let Ok(conn) = db_state.conn.lock() {
-            let _ = conn.execute(
-                "DELETE FROM local_settings
-                 WHERE setting_category = 'terminal'
-                   AND setting_key IN ('pos_api_key', 'api_key')",
-                [],
-            );
-        }
-    }
-}
-
-fn clear_terminal_identity(db: Option<&db::DbState>) {
-    let _ = storage::delete_credential("terminal_id");
-    if let Some(db_state) = db {
-        if let Ok(conn) = db_state.conn.lock() {
-            let _ = conn.execute(
-                "DELETE FROM local_settings
-                 WHERE setting_category = 'terminal'
-                   AND setting_key = 'terminal_id'",
-                [],
-            );
-        }
-    }
-}
-
 pub(crate) fn handle_invalid_terminal_credentials(
     db: Option<&db::DbState>,
-    app: &tauri::AppHandle,
+    app: &impl TerminalEventSink,
     source: &str,
     error: &str,
 ) {
+    let _ = handle_invalid_terminal_credentials_checked(db, app, source, error);
+}
+
+pub(crate) fn handle_invalid_terminal_credentials_checked(
+    db: Option<&db::DbState>,
+    app: &impl TerminalEventSink,
+    source: &str,
+    error: &str,
+) -> Result<(), String> {
     let auth_code = terminal_auth_failure_code(error);
     if matches!(
         auth_code.as_deref(),
@@ -1140,7 +1097,7 @@ pub(crate) fn handle_invalid_terminal_credentials(
     ) {
         warn!(
             source = %source,
-            error = %error,
+            error = %crate::api::redact(error),
             auth_code = auth_code.as_deref().unwrap_or("unknown"),
             "Soft terminal auth failure reached destructive reset helper; emitting terminal_auth_paused instead"
         );
@@ -1151,83 +1108,85 @@ pub(crate) fn handle_invalid_terminal_credentials(
             terminal_auth_failure_requested_terminal_id(error).as_deref(),
             None,
         );
-        return;
+        return Ok(());
     }
 
     let reason = terminal_access_reset_reason(error);
-    let auth_source = terminal_auth_failure_source(error);
-    let terminal_active = terminal_auth_failure_terminal_active(error);
     warn!(
         source = %source,
-        error = %error,
+        error = %crate::api::redact(error),
         reason = %reason,
         auth_code = auth_code.as_deref().unwrap_or("unknown"),
-        auth_source = auth_source.as_deref().unwrap_or("unknown"),
-        terminal_active = ?terminal_active,
         "Terminal access revoked; clearing stored API key and forcing onboarding reset without deleting local data"
     );
-    clear_terminal_api_key(db);
-    if matches!(
-        auth_code.as_deref(),
-        Some("terminal_not_found" | "terminal_identity_mismatch")
-    ) {
-        clear_terminal_identity(db);
+    let Some(db) = db else {
+        return Err("TERMINAL_CLEAR_CONTEXT_REQUIRED".to_string());
+    };
+    match crate::commands::settings::clear_terminal_connection_lifecycle(db) {
+        Ok(()) => {
+            let bounded_code = auth_code
+                .as_deref()
+                .unwrap_or("invalid_terminal_credentials");
+            let bounded_source = match source {
+                "settings_update_terminal_credentials"
+                | "settings_refresh_terminal_config"
+                | "admin_sync_terminal_config"
+                | "startup"
+                | "sync" => source,
+                _ => "terminal_auth",
+            };
+            app.emit_json(
+                "app_reset",
+                serde_json::json!({
+                    "reason": reason,
+                    "source": bounded_source,
+                    "errorCode": bounded_code,
+                }),
+            );
+            app.emit_json(
+                "terminal_disabled",
+                serde_json::json!({
+                    "reason": reason,
+                    "source": bounded_source,
+                    "errorCode": bounded_code,
+                }),
+            );
+            Ok(())
+        }
+        Err(_) => Err("TERMINAL_CLEAR_DURABILITY_FAILED".to_string()),
     }
-    let _ = app.emit(
-        "app_reset",
-        serde_json::json!({
-            "reason": reason,
-            "source": source,
-            "error": error,
-        }),
-    );
-    let _ = app.emit(
-        "terminal_disabled",
-        serde_json::json!({
-            "reason": reason,
-            "source": source,
-            "error": error,
-        }),
-    );
 }
 
 pub(crate) fn emit_terminal_auth_paused(
-    app: &tauri::AppHandle,
+    app: &impl TerminalEventSink,
     source: &str,
     error: &str,
     requested_terminal_id: Option<&str>,
     canonical_terminal_id: Option<&str>,
 ) {
     let auth_code = terminal_auth_failure_code(error);
-    let auth_source = terminal_auth_failure_source(error);
-    let terminal_active = terminal_auth_failure_terminal_active(error);
     let reason = match auth_code.as_deref() {
         Some("terminal_identity_mismatch") => "terminal_identity_out_of_sync",
         Some("terminal_not_found") => "terminal_identity_out_of_sync",
         _ => "remote_auth_paused",
     };
 
-    let requested_terminal_id = requested_terminal_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(|| terminal_auth_failure_requested_terminal_id(error));
-    let canonical_terminal_id = canonical_terminal_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
+    let _ = (requested_terminal_id, canonical_terminal_id);
+    let bounded_source = match source {
+        "settings_update_terminal_credentials"
+        | "settings_refresh_terminal_config"
+        | "admin_sync_terminal_config"
+        | "startup"
+        | "sync" => source,
+        _ => "terminal_auth",
+    };
 
-    let _ = app.emit(
+    app.emit_json(
         "terminal_auth_paused",
         serde_json::json!({
             "reason": reason,
-            "source": source,
-            "error": error,
-            "authCode": auth_code,
-            "authSource": auth_source,
-            "terminalActive": terminal_active,
-            "requestedTerminalId": requested_terminal_id,
-            "canonicalTerminalId": canonical_terminal_id,
+            "source": bounded_source,
+            "errorCode": auth_code.unwrap_or_else(|| "terminal_auth_paused".to_string()),
         }),
     );
 }
@@ -1271,41 +1230,33 @@ mod tests {
         }
     }
 
-    const TEST_CREDENTIAL_KEYS: &[&str] = &[
-        "terminal_id",
-        "pos_api_key",
-        "admin_dashboard_url",
-        "admin_url",
-        "branch_id",
-        "organization_id",
-        "business_type",
-        "supabase_url",
-        "supabase_anon_key",
-        "ghost_mode_feature_enabled",
-    ];
-
-    struct CredentialCleanupGuard;
-
-    impl Drop for CredentialCleanupGuard {
-        fn drop(&mut self) {
-            clear_test_credentials();
-        }
-    }
-
-    fn clear_test_credentials() {
-        for key in TEST_CREDENTIAL_KEYS {
-            let _ = storage::delete_credential(key);
-        }
+    struct CredentialCleanupGuard {
+        _keyring: crate::tests::fake_keyring::Guard,
     }
 
     fn credential_guard() -> CredentialCleanupGuard {
-        clear_test_credentials();
-        CredentialCleanupGuard
+        CredentialCleanupGuard {
+            _keyring: crate::tests::fake_keyring::install_empty(),
+        }
     }
 
     fn set_terminal_setting(db: &db::DbState, key: &str, value: &str) {
         let conn = db.conn.lock().expect("lock db");
         db::set_setting(&conn, "terminal", key, value).expect("store terminal setting");
+    }
+
+    #[test]
+    fn native_repair_state_keys_are_renderer_sensitive_by_default() {
+        for key in [
+            crate::storage::KEY_REPAIR_QUEUE_AES_KEY_V1,
+            crate::storage::KEY_REPAIR_SCOPE_V1,
+            crate::storage::KEY_REPAIR_ENTITLEMENT_V1,
+        ] {
+            assert!(
+                is_sensitive_terminal_setting(key),
+                "generic renderer settings surfaces must deny {key}"
+            );
+        }
     }
 
     #[test]
@@ -1591,7 +1542,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn hydrate_connection_string_populates_decoded_and_derived_credentials() {
+    fn legacy_hydration_does_not_publish_connection_string_identity() {
         let _guard = credential_guard();
         let db = test_db();
         let connection_string =
@@ -1600,17 +1551,31 @@ mod tests {
         set_terminal_setting(&db, "pos_api_key", connection_string);
         hydrate_terminal_credentials_from_local_settings(&db);
 
+        assert!(storage::get_credential("pos_api_key").is_none());
+        assert!(storage::get_credential("terminal_id").is_none());
+        assert!(storage::get_credential("admin_dashboard_url").is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn ordinary_legacy_hydration_is_read_only_for_mapped_terminal_mirrors() {
+        let _guard = credential_guard();
+        let db = test_db();
+        set_terminal_setting(&db, "business_type", "retail");
+        set_terminal_setting(&db, "ghost_mode_feature_enabled", "true");
+
+        hydrate_terminal_credentials_from_local_settings(&db);
+
+        assert!(storage::get_credential("business_type").is_none());
+        assert!(storage::get_credential("ghost_mode_feature_enabled").is_none());
+        let connection = db.conn.lock().expect("read legacy source rows");
         assert_eq!(
-            storage::get_credential("pos_api_key").as_deref(),
-            Some("decoded-api-key")
+            db::get_setting(&connection, "terminal", "business_type").as_deref(),
+            Some("retail")
         );
         assert_eq!(
-            storage::get_credential("terminal_id").as_deref(),
-            Some("terminal-9")
-        );
-        assert_eq!(
-            storage::get_credential("admin_dashboard_url").as_deref(),
-            Some("https://admin.example.com")
+            db::get_setting(&connection, "terminal", "ghost_mode_feature_enabled").as_deref(),
+            Some("true")
         );
     }
 
@@ -1623,7 +1588,8 @@ mod tests {
             r#"{"key":"decoded-api-key","tid":"terminal-9","url":"admin.example.com/api"}"#;
 
         set_terminal_setting(&db, "pos_api_key", connection_string);
-        storage::set_credential("pos_api_key", "decoded-api-key").expect("seed api key");
+        storage::seed_terminal_credential_for_test("pos_api_key", "decoded-api-key")
+            .expect("seed api key");
 
         purge_hydrated_terminal_credentials_from_local_settings(&db);
 
@@ -1643,10 +1609,15 @@ mod tests {
             r#"{"key":"decoded-api-key","tid":"terminal-9","url":"admin.example.com/api"}"#;
 
         set_terminal_setting(&db, "pos_api_key", connection_string);
-        storage::set_credential("pos_api_key", "decoded-api-key").expect("seed api key");
-        storage::set_credential("terminal_id", "terminal-9").expect("seed terminal id");
-        storage::set_credential("admin_dashboard_url", "https://admin.example.com")
-            .expect("seed admin url");
+        storage::seed_terminal_credential_for_test("pos_api_key", "decoded-api-key")
+            .expect("seed api key");
+        storage::seed_terminal_credential_for_test("terminal_id", "terminal-9")
+            .expect("seed terminal id");
+        storage::seed_terminal_credential_for_test(
+            "admin_dashboard_url",
+            "https://admin.example.com",
+        )
+        .expect("seed admin url");
 
         purge_hydrated_terminal_credentials_from_local_settings(&db);
 
@@ -1664,8 +1635,11 @@ mod tests {
         let db = test_db();
 
         set_terminal_setting(&db, "admin_url", "admin.example.com/api/");
-        storage::set_credential("admin_dashboard_url", "https://admin.example.com")
-            .expect("seed admin dashboard url");
+        storage::seed_terminal_credential_for_test(
+            "admin_dashboard_url",
+            "https://admin.example.com",
+        )
+        .expect("seed admin dashboard url");
 
         purge_hydrated_terminal_credentials_from_local_settings(&db);
 
@@ -1695,7 +1669,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn reconcile_terminal_identity_prefers_managed_snapshot_over_stale_keyring() {
+    fn derive_terminal_identity_is_read_only_until_canonical_publication() {
         let _guard = credential_guard();
         let db = test_db();
 
@@ -1704,20 +1678,21 @@ mod tests {
         set_terminal_setting(&db, "owner_terminal_id", "terminal-efe99d27");
         set_terminal_setting(&db, "source_terminal_id", "terminal-efe99d27");
         set_terminal_setting(&db, "terminal_id", "terminal-manager");
-        storage::set_credential("terminal_id", "terminal-manager").expect("seed stale terminal id");
+        storage::seed_terminal_credential_for_test("terminal_id", "terminal-manager")
+            .expect("seed stale terminal id");
 
         let reconciled = reconcile_terminal_identity_from_local_sources(&db);
 
         assert_eq!(reconciled.as_deref(), Some("terminal-efe99d27"));
         assert_eq!(
             storage::get_credential("terminal_id").as_deref(),
-            Some("terminal-efe99d27")
+            Some("terminal-manager")
         );
 
         let conn = db.conn.lock().expect("lock db");
         assert_eq!(
             db::get_setting(&conn, "terminal", "terminal_id").as_deref(),
-            Some("terminal-efe99d27")
+            Some("terminal-manager")
         );
     }
 
@@ -1733,8 +1708,10 @@ mod tests {
         set_terminal_setting(&db, "source_terminal_id", "terminal-old");
         set_terminal_setting(&db, "terminal_id", "terminal-new");
         set_terminal_setting(&db, "branch_id", "branch-old");
-        storage::set_credential("terminal_id", "terminal-new").expect("seed new terminal id");
-        storage::set_credential("branch_id", "branch-old").expect("seed old branch id");
+        storage::seed_terminal_credential_for_test("terminal_id", "terminal-new")
+            .expect("seed new terminal id");
+        storage::seed_terminal_credential_for_test("branch_id", "branch-old")
+            .expect("seed old branch id");
 
         clear_derived_terminal_context(&db);
         let reconciled = reconcile_terminal_identity_from_local_sources(&db);
@@ -1744,17 +1721,66 @@ mod tests {
             storage::get_credential("terminal_id").as_deref(),
             Some("terminal-new")
         );
-        assert!(storage::get_credential("branch_id").is_none());
+        assert_eq!(
+            storage::get_credential("branch_id").as_deref(),
+            Some("branch-old")
+        );
 
         let conn = db.conn.lock().expect("lock db");
         assert!(db::get_setting(&conn, "terminal", "owner_terminal_id").is_none());
         assert!(db::get_setting(&conn, "terminal", "source_terminal_id").is_none());
         assert!(db::get_setting(&conn, "terminal", "terminal_type").is_none());
         assert!(db::get_setting(&conn, "terminal", "pos_operating_mode").is_none());
-        assert!(db::get_setting(&conn, "terminal", "branch_id").is_none());
+        assert_eq!(
+            db::get_setting(&conn, "terminal", "branch_id").as_deref(),
+            Some("branch-old")
+        );
         assert_eq!(
             db::get_setting(&conn, "terminal", "terminal_id").as_deref(),
             Some("terminal-new")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn checked_hard_auth_reset_propagates_bounded_durability_failure_without_event() {
+        struct Sink(std::sync::Mutex<Vec<(String, serde_json::Value)>>);
+        impl TerminalEventSink for Sink {
+            fn emit_json(&self, event: &str, payload: serde_json::Value) {
+                self.0
+                    .lock()
+                    .expect("capture event")
+                    .push((event.to_string(), payload));
+            }
+        }
+        let _keyring = crate::tests::fake_keyring::install_seeded([
+            ("pos_api_key", "old-key"),
+            ("terminal_id", "terminal-old"),
+            ("admin_dashboard_url", "https://old.example.com"),
+            ("organization_id", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+            ("branch_id", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+        ]);
+        let db = test_db();
+        crate::tests::fake_keyring::fail_deletes_for("terminal_id", "private delete fault");
+        let sink = Sink(std::sync::Mutex::new(Vec::new()));
+
+        let error = handle_invalid_terminal_credentials_checked(
+            Some(&db),
+            &sink,
+            "hostile-source-with-id",
+            "API key is invalid or expired: private provider body",
+        )
+        .expect_err("durability failure must propagate");
+
+        assert_eq!(error, "TERMINAL_CLEAR_DURABILITY_FAILED");
+        assert!(sink.0.lock().expect("inspect events").is_empty());
+        assert_eq!(
+            storage::get_credential("pos_api_key").as_deref(),
+            Some("old-key")
+        );
+        assert_eq!(
+            storage::get_credential("terminal_id").as_deref(),
+            Some("terminal-old")
         );
     }
 }

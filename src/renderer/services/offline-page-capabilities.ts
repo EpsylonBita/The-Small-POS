@@ -16,6 +16,7 @@ export type OfflinePageId =
   | 'product_catalog'
   | 'reservations'
   | 'reports'
+  | 'repairs'
   | 'rooms'
   | 'staff_schedule'
   | 'settings'
@@ -127,6 +128,43 @@ const PAGE_CAPABILITIES: Record<OfflinePageId, OfflinePageCapability> = {
   reports: {
     bannerMessage:
       'Reports remain available offline from the local reporting cache. Reconnect to refresh reporting aggregates.',
+  },
+  repairs: {
+    bannerMessage:
+      'Repairs remain available from this terminal cache. Safe changes are saved on this terminal and synced after reconnect; authoritative, stock, money, delivery, and file-open actions remain locked.',
+    actions: {
+      'finalize-diagnosis': 'Reconnect to finalize the diagnosis.',
+      'create-estimate': 'Reconnect to create or revise an estimate.',
+      'record-approval': 'Reconnect to record an estimate approval.',
+      'consume-part': 'Reconnect to consume or reverse repair parts.',
+      'reverse-part': 'Reconnect to consume or reverse repair parts.',
+      'transfer-branch': 'Reconnect to transfer a repair between branches.',
+      'reopen-repair': 'Reconnect to reopen this repair.',
+      'transition-approved': 'Reconnect to mark a repair as approved.',
+      'transition-delivered': 'Reconnect to mark a repair as delivered.',
+      'transition-cancelled': 'Reconnect to cancel a repair.',
+      'transition-unrepairable': 'Reconnect to mark a repair as unrepairable.',
+      'collect-payment': 'Reconnect to collect a repair payment.',
+      'refund-payment': 'Reconnect to refund a repair payment.',
+      fiscalize: 'Reconnect to issue the fiscal repair document.',
+      'open-attachment': 'Reconnect to open an existing repair attachment.',
+      'print-intake': 'Reconnect to print the repair intake document.',
+      'print-label': 'Reconnect to print the repair label.',
+    },
+    queuedActions: {
+      'create-intake': 'This repair will be saved on this terminal and synced after reconnect.',
+      'add-note': 'This note will be saved on this terminal and synced after reconnect.',
+      'assign-repair': 'This assignment will be saved on this terminal and synced after reconnect.',
+      'update-diagnosis-draft': 'This diagnosis draft will be saved on this terminal and synced after reconnect.',
+      'plan-line': 'This planned line will be saved on this terminal and synced after reconnect.',
+      'stage-attachment': 'This attachment will be encrypted on this terminal and synced after reconnect.',
+      'transition-diagnosing': 'This status change will be saved on this terminal and synced after reconnect.',
+      'transition-waiting-customer-approval': 'This status change will be saved on this terminal and synced after reconnect.',
+      'transition-waiting-parts': 'This status change will be saved on this terminal and synced after reconnect.',
+      'transition-repairing': 'This status change will be saved on this terminal and synced after reconnect.',
+      'transition-quality-check': 'This status change will be saved on this terminal and synced after reconnect.',
+      'transition-ready': 'Ready status will sync after reconnect. No customer notification has been sent yet.',
+    },
   },
   rooms: {
     bannerMessage:

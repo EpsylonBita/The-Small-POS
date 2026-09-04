@@ -31,8 +31,7 @@
   "bundle": {
     "active": true,
     "targets": [
-      "nsis",
-      "msi"
+      "nsis"
     ],
     "resources": [
       "caller-id-firewall.ps1"

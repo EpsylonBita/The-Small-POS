@@ -1541,7 +1541,8 @@ mod tests {
         // keyring-first in production) returns the expected value. Tests that
         // call this helper must be `#[serial_test::serial]` because the
         // keyring is a process-global resource.
-        let _ = storage::set_credential("terminal_id", terminal_id);
+        storage::seed_terminal_credential_for_test("terminal_id", terminal_id)
+            .expect("seed strict terminal identity");
     }
 
     fn insert_active_shift(db_state: &db::DbState, terminal_id: &str, role_type: &str) {

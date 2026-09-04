@@ -268,11 +268,53 @@ pub(crate) fn write_module_cache(
     std::fs::write(path, text).map_err(|e| format!("write module cache: {e}"))
 }
 
-pub(crate) fn clear_operational_data_inner(db: &db::DbState) -> Result<serde_json::Value, String> {
+pub(crate) fn prepare_operational_clear(
+    db: &db::DbState,
+) -> Result<
+    (
+        crate::repairs::RepairTransitionGuard,
+        crate::recovery::DestructiveSnapshotDecision,
+    ),
+    String,
+> {
+    prepare_operational_clear_with_recovery(
+        db,
+        crate::recovery::RecoveryPointKind::PreClearOperationalData,
+        crate::recovery::preflight_snapshot_before_destructive_action,
+    )
+}
+
+pub(crate) fn prepare_operational_clear_with_recovery<F>(
+    db: &db::DbState,
+    kind: crate::recovery::RecoveryPointKind,
+    recovery_preflight: F,
+) -> Result<
+    (
+        crate::repairs::RepairTransitionGuard,
+        crate::recovery::DestructiveSnapshotDecision,
+    ),
+    String,
+>
+where
+    F: FnOnce(
+        &db::DbState,
+        crate::recovery::RecoveryPointKind,
+    ) -> Result<crate::recovery::DestructiveSnapshotDecision, String>,
+{
+    let repair_transition = crate::repairs::arm_operational_clear()?;
+    let recovery_decision = recovery_preflight(db, kind)?;
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    conn.execute_batch(
-        "
-        BEGIN IMMEDIATE;
+    crate::repairs::complete_operational_clear(&conn, &repair_transition)?;
+    drop(conn);
+    Ok((repair_transition, recovery_decision))
+}
+
+fn clear_generic_operational_data_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+) -> Result<(), String> {
+    transaction
+        .execute_batch(
+            "
         DELETE FROM payment_adjustments;
         DELETE FROM order_payments;
         DELETE FROM shift_expenses;
@@ -285,17 +327,155 @@ pub(crate) fn clear_operational_data_inner(db: &db::DbState) -> Result<serde_jso
         DELETE FROM parity_sync_queue;
         DELETE FROM sync_queue;
         DELETE FROM orders;
-        COMMIT;
         ",
-    )
-    .map_err(|e| format!("clear operational data: {e}"))?;
-    db::set_setting(&conn, "sync", "bootstrap_mode", "bootstrap_remote_rebuild")?;
-    db::set_setting(&conn, "sync", "orders_since", "1970-01-01T00:00:00.000Z")?;
-    db::set_setting(&conn, "sync", "payments_since", "1970-01-01T00:00:00.000Z")?;
+        )
+        .map_err(|e| format!("clear operational data: {e}"))?;
+    db::set_setting(
+        transaction,
+        "sync",
+        "bootstrap_mode",
+        "bootstrap_remote_rebuild",
+    )?;
+    db::set_setting(
+        transaction,
+        "sync",
+        "orders_since",
+        "1970-01-01T00:00:00.000Z",
+    )?;
+    db::set_setting(
+        transaction,
+        "sync",
+        "payments_since",
+        "1970-01-01T00:00:00.000Z",
+    )?;
+    Ok(())
+}
+
+fn clear_generic_operational_data(db: &db::DbState) -> Result<(), String> {
+    let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let transaction = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("clear operational data: {e}"))?;
+    clear_generic_operational_data_in_transaction(&transaction)?;
+    transaction
+        .commit()
+        .map_err(|e| format!("clear operational data: {e}"))?;
+    Ok(())
+}
+
+/// Finalize a terminal rebind while holding the only in-process SQLite writer
+/// mutex across the last generic clear, replacement repair-scope publication,
+/// and durable marker deletion. The keyring is not SQLite-transactional, so a
+/// pending replacement scope is published first; any later failure restores
+/// that pending scope and leaves the marker set for a fail-closed retry.
+pub(crate) fn finalize_operational_rebind<F>(
+    db: &db::DbState,
+    repair_transition: &crate::repairs::RepairTransitionGuard,
+    marker_category: &str,
+    marker_key: &str,
+    candidate_key: &str,
+    after_clear_before_scope_publication: F,
+) -> Result<(), String>
+where
+    F: FnOnce(),
+{
+    let mut conn = db.conn.lock().map_err(|error| error.to_string())?;
+    let transaction = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|error| format!("clear operational data: {error}"))?;
+    clear_generic_operational_data_in_transaction(&transaction)?;
+    transaction
+        .commit()
+        .map_err(|error| format!("clear operational data: {error}"))?;
+
+    after_clear_before_scope_publication();
+
+    let mut publication =
+        crate::repairs::prepare_operational_clear_publication(&conn, repair_transition)?;
+    crate::repairs::activate_operational_clear_publication(&mut publication)?;
+    let candidate_before_clear = db::get_setting(&conn, marker_category, candidate_key);
+
+    let clear_journal = (|| {
+        let transaction = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|error| format!("clear terminal rebind journal: {error}"))?;
+        db::delete_setting(&transaction, marker_category, candidate_key)?;
+        db::delete_setting(&transaction, marker_category, marker_key)?;
+        transaction
+            .commit()
+            .map_err(|error| format!("clear terminal rebind journal: {error}"))
+    })();
+    if let Err(marker_error) = clear_journal {
+        let reblock_error =
+            crate::repairs::reblock_operational_clear_publication(&mut publication).err();
+        return Err(match reblock_error {
+            Some(reblock_error) => {
+                format!("{marker_error}; failed to restore pending repair scope: {reblock_error}")
+            }
+            None => marker_error,
+        });
+    }
+
+    if let Err(finalize_error) = crate::repairs::finish_operational_clear_publication(&publication)
+    {
+        let marker_restore_error = db::set_setting(&conn, marker_category, marker_key, "1").err();
+        let candidate_restore_error = candidate_before_clear.as_deref().and_then(|candidate| {
+            db::set_setting(&conn, marker_category, candidate_key, candidate).err()
+        });
+        let reblock_error =
+            crate::repairs::reblock_operational_clear_publication(&mut publication).err();
+        let mut error = finalize_error;
+        if let Some(marker_restore_error) = marker_restore_error {
+            error.push_str(&format!(
+                "; failed to restore durable rebind marker: {marker_restore_error}"
+            ));
+        }
+        if let Some(candidate_restore_error) = candidate_restore_error {
+            error.push_str(&format!(
+                "; failed to restore durable rebind candidate: {candidate_restore_error}"
+            ));
+        }
+        if let Some(reblock_error) = reblock_error {
+            error.push_str(&format!(
+                "; failed to restore pending repair scope: {reblock_error}"
+            ));
+        }
+        return Err(error);
+    }
+
+    Ok(())
+}
+
+/// Clear the generic operational ledger while the caller still owns the
+/// repair lifecycle transition. A terminal switch uses this boundary so the
+/// old tenant is gone before any identity credential can change, while repair
+/// IPC remains blocked until the replacement scope is published.
+pub(crate) fn clear_operational_data_while_repair_blocked(
+    db: &db::DbState,
+    _repair_transition: &crate::repairs::RepairTransitionGuard,
+) -> Result<serde_json::Value, String> {
+    clear_generic_operational_data(db)?;
+    Ok(serde_json::json!({
+        "success": true
+    }))
+}
+
+pub(crate) fn clear_operational_data_after_repair_purge(
+    db: &db::DbState,
+    repair_transition: crate::repairs::RepairTransitionGuard,
+) -> Result<serde_json::Value, String> {
+    clear_generic_operational_data(db)?;
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    crate::repairs::finish_operational_clear(&conn, &repair_transition)?;
 
     Ok(serde_json::json!({
         "success": true
     }))
+}
+
+pub(crate) fn clear_operational_data_inner(db: &db::DbState) -> Result<serde_json::Value, String> {
+    let (repair_transition, _recovery_decision) = prepare_operational_clear(db)?;
+    clear_operational_data_after_repair_purge(db, repair_transition)
 }
 
 pub(crate) async fn fetch_supabase_rows(
@@ -488,44 +668,45 @@ mod tests {
     }
 
     #[test]
-    fn clear_operational_data_removes_parity_and_recovery_rows() {
-        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
-        crate::db::run_migrations_for_test(&conn);
-        conn.execute(
-            "INSERT INTO parity_sync_queue (
-                id, table_name, record_id, operation, data, organization_id, status, error_message
-             ) VALUES (
-                'queue-old', 'orders', 'order-old', 'UPDATE', '{}', 'org-old', 'failed',
-                'Waiting for parent order sync'
-             )",
-            [],
-        )
-        .expect("seed parity queue");
-        conn.execute(
-            "INSERT INTO conflict_audit_log (
-                id, operation_type, entity_id, entity_type, local_version, server_version,
-                discarded_payload, resolution
-             ) VALUES (
-                'conflict-old', 'UPDATE', 'order-old', 'orders', 1, 2, '{}', 'server-wins'
-             )",
-            [],
-        )
-        .expect("seed conflict audit");
-        conn.execute(
-            "INSERT INTO recovery_action_log (
-                id, action_id, issue_code, success
-             ) VALUES (
-                'recovery-old', 'repair_order_replay', 'stale_order_update_parent_wait', 1
-             )",
-            [],
-        )
-        .expect("seed recovery log");
-        let db = crate::db::DbState {
-            conn: std::sync::Mutex::new(conn),
-            db_path: std::path::PathBuf::from(":memory:"),
-        };
+    #[serial_test::serial]
+    fn clear_operational_data_removes_parity_and_recovery_rows_after_snapshot() {
+        let _lifecycle = crate::repairs::isolate_lifecycle_for_test();
+        let database = crate::tests::harness::TestDb::open();
+        let db = &database.state;
+        {
+            let conn = db.conn.lock().expect("lock operational clear db");
+            conn.execute(
+                "INSERT INTO parity_sync_queue (
+                    id, table_name, record_id, operation, data, organization_id, status, error_message
+                 ) VALUES (
+                    'queue-old', 'orders', 'order-old', 'UPDATE', '{}', 'org-old', 'failed',
+                    'Waiting for parent order sync'
+                 )",
+                [],
+            )
+            .expect("seed parity queue");
+            conn.execute(
+                "INSERT INTO conflict_audit_log (
+                    id, operation_type, entity_id, entity_type, local_version, server_version,
+                    discarded_payload, resolution
+                 ) VALUES (
+                    'conflict-old', 'UPDATE', 'order-old', 'orders', 1, 2, '{}', 'server-wins'
+                 )",
+                [],
+            )
+            .expect("seed conflict audit");
+            conn.execute(
+                "INSERT INTO recovery_action_log (
+                    id, action_id, issue_code, success
+                 ) VALUES (
+                    'recovery-old', 'repair_order_replay', 'stale_order_update_parent_wait', 1
+                 )",
+                [],
+            )
+            .expect("seed recovery log");
+        }
 
-        clear_operational_data_inner(&db).expect("clear operational data");
+        clear_operational_data_inner(db).expect("clear operational data");
 
         let conn = db.conn.lock().expect("lock db");
         for table in [
@@ -541,6 +722,70 @@ mod tests {
                 .expect("count table");
             assert_eq!(count, 0, "{table} should be empty");
         }
+        drop(conn);
+        let points = crate::recovery::list_recovery_points(db)
+            .expect("clean operational clear should create a recovery point");
+        assert_eq!(points.len(), 1);
+        assert_eq!(
+            points[0].kind,
+            crate::recovery::RecoveryPointKind::PreClearOperationalData
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn recovery_detector_failure_blocks_operational_clear_before_any_purge() {
+        let _lifecycle = crate::repairs::isolate_lifecycle_for_test();
+        let database = crate::tests::harness::TestDb::open();
+        let state = &database.state;
+        {
+            let conn = state.conn.lock().expect("lock detector failure db");
+            conn.execute_batch(
+                "INSERT INTO orders (
+                     id, items, total_amount, total_amount_cents, status,
+                     sync_status, created_at, updated_at
+                 ) VALUES ('detector-order', '[]', 3.0, 300, 'pending', 'pending',
+                           datetime('now'), datetime('now'));
+                 INSERT INTO parity_sync_queue (
+                     id, table_name, record_id, operation, data, organization_id,
+                     created_at, retry_delay_ms, module_type, conflict_strategy,
+                     version, repair_aggregate_id, status
+                 ) VALUES ('detector-repair-operation', 'repairs', 'detector-repair',
+                           'INSERT', 'opaque', 'detector-org', datetime('now'), 1000,
+                           'repairs', 'manual', 0, 'detector-repair', 'pending');
+                 DROP TABLE repair_cache;
+                 CREATE VIEW repair_cache AS SELECT * FROM missing_repair_detector_source;",
+            )
+            .expect("seed detector failure fixture");
+        }
+
+        let error = clear_operational_data_inner(state)
+            .expect_err("detector failure must fail closed before operational purge");
+
+        assert!(
+            error.contains("could not verify native repair data"),
+            "unexpected detector error: {error}"
+        );
+        {
+            let conn = state.conn.lock().expect("inspect detector failure db");
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM orders", [], |row| row
+                    .get::<_, i64>(0))
+                    .expect("count preserved order"),
+                1
+            );
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM parity_sync_queue", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("count preserved repair operation"),
+                1
+            );
+        }
+        assert!(
+            !crate::recovery::recovery_root_for_db(state).exists(),
+            "detector failure created a partial recovery artifact"
+        );
     }
 
     #[test]

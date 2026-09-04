@@ -96,8 +96,11 @@ function parseRustCommandDefinitions() {
   const rustRoot = path.join(rootDir, 'src-tauri', 'src');
   const files = walk(rustRoot, ['.rs']);
 
-  // Accept both async and sync command signatures.
-  const regex = /#\[tauri::command(?:\([^\)]*\))?\][\s\S]*?(?:async\s+)?fn\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(/g;
+  // Accept both async and sync command signatures, but only when the function
+  // immediately follows a real line-level attribute. A cross-file `\s\S*?`
+  // scan also matched `#[tauri::command]` text in comments/include_str audit
+  // helpers and then mislabeled the next ordinary or test function as IPC.
+  const regex = /^[ \t]*#\[tauri::command(?:\([^\r\n]*\))?\][ \t]*\r?\n[ \t]*(?:(?:pub(?:\s*\([^\r\n)]*\))?)\s+)?(?:async\s+)?fn\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(/gm;
   for (const file of files) {
     const text = fs.readFileSync(file, 'utf8');
     for (const m of text.matchAll(regex)) {
@@ -147,7 +150,10 @@ function parseRustEmittedEvents() {
   // table above. Declaring a constant is deliberately NOT enough: the name only
   // counts as emitted when it is passed to an actual `emit(` call, so this
   // stays as strict as the literal-only form it replaces.
-  const regex = /\bemit\(\s*(?:"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*))/g;
+  // TerminalEventSink deliberately abstracts Tauri's `emit` behind
+  // `emit_json` so auth-reset behavior can be exercised without an AppHandle.
+  // Both calls are real runtime emission sites and must satisfy event parity.
+  const regex = /\bemit(?:_json)?\(\s*(?:"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*))/g;
   for (const file of files) {
     const text = fs.readFileSync(file, 'utf8');
     for (const m of text.matchAll(regex)) {

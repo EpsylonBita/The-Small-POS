@@ -31,9 +31,14 @@ import KitchenDisplayPage from '../pages/KitchenDisplayPage';
 import CustomerDisplayPage from '../pages/CustomerDisplayPage';
 import KioskManagementPage from '../pages/KioskManagementPage';
 import IntegrationsPage from '../pages/IntegrationsPage';
-import { getBridge } from '../../lib';
-import { clearSecureSession } from '../lib/secure-session-cache';
+import { getBridge, offEvent, onEvent } from '../../lib';
+import { clearSecureSession, getSecureSessionSync } from '../lib/secure-session-cache';
 import { getOfflinePageBanner } from '../services/offline-page-capabilities';
+import {
+  consumeAuthorizedPendingPostLoginIntent,
+  savePendingPostLoginIntent,
+  type RepairIntent,
+} from '../features/repairs/navigation';
 
 import { ExpenseModal } from './modals/ExpenseModal';
 
@@ -49,6 +54,7 @@ const AppointmentsView = lazy(() => import('../pages/verticals').then(m => ({ de
 const StaffScheduleView = lazy(() => import('../pages/verticals').then(m => ({ default: m.StaffScheduleView })));
 const ServiceCatalogView = lazy(() => import('../pages/verticals').then(m => ({ default: m.ServiceCatalogView })));
 const ProductCatalogView = lazy(() => import('../pages/verticals').then(m => ({ default: m.ProductCatalogView })));
+const RepairsView = lazy(() => import('../features/repairs/RepairsView'));
 
 // View components
 // DashboardView now uses BusinessCategoryDashboard which automatically selects
@@ -155,31 +161,7 @@ interface RefactoredMainLayoutProps {
   onOpenConnectionSettings?: (section?: 'recovery' | null) => void;
 }
 
-const PENDING_POST_LOGIN_INTENT_KEY = 'PendingPostLoginIntent';
-
-function savePendingPostLoginIntent(view: string) {
-  if (typeof window === 'undefined') return;
-  window.sessionStorage.setItem(
-    PENDING_POST_LOGIN_INTENT_KEY,
-    JSON.stringify({ view, createdAt: Date.now() })
-  );
-}
-
-function consumePendingPostLoginIntent(): string | null {
-  if (typeof window === 'undefined') return null;
-
-  const raw = window.sessionStorage.getItem(PENDING_POST_LOGIN_INTENT_KEY);
-  if (!raw) return null;
-
-  window.sessionStorage.removeItem(PENDING_POST_LOGIN_INTENT_KEY);
-
-  try {
-    const parsed = JSON.parse(raw) as { view?: unknown };
-    return typeof parsed.view === 'string' && parsed.view.trim() ? parsed.view.trim() : null;
-  } catch {
-    return null;
-  }
-}
+type RepairConnectivity = 'online' | 'offline' | 'unknown';
 
 export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
   className = '',
@@ -191,12 +173,23 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
   const { resolvedTheme } = useTheme();
   const { enabledModules, lockedModules } = useModules();
   const [currentView, setCurrentView] = React.useState<string>('dashboard');
+  const [repairIntent, setRepairIntent] = React.useState<RepairIntent | null>(null);
   const [showZReport, setShowZReport] = React.useState(false);
   const [isOffline, setIsOffline] = React.useState(
     typeof navigator !== 'undefined' ? !navigator.onLine : false,
   );
+  const [repairConnectivity, setRepairConnectivity] = React.useState<RepairConnectivity>('unknown');
   const [offlineBundleStatus, setOfflineBundleStatus] = React.useState<any>(null);
-  const { staff, isShiftActive } = useShift();
+  const { staff, activeShift, isShiftActive } = useShift();
+  const secureRepairSessionId = getSecureSessionSync()?.sessionId ?? null;
+  const repairActorKey = isShiftActive
+    && secureRepairSessionId
+    && staff?.staffId
+    && staff.branchId
+    && staff.terminalId
+    && activeShift?.id
+    ? [secureRepairSessionId, staff.staffId, staff.branchId, staff.terminalId, activeShift.id].join(':')
+    : null;
   const { endOfDayStatus, isPendingLocalSubmit } = useEndOfDayStatus(staff?.branchId || null);
 
   const [showExpenses, setShowExpenses] = React.useState(false);
@@ -255,7 +248,7 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
   // Route guard: Prevent access to locked modules
   // Users can see locked modules in navigation but cannot access them
   // Attempting to access shows upgrade prompt and redirects to dashboard
-  const handleViewChange = (view: string) => {
+  const handleViewChange = (view: string, nextRepairIntent?: RepairIntent) => {
     console.log('🔄 View change requested:', view);
 
     if (view === 'settings') {
@@ -275,11 +268,15 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
     }
 
     if (!isShiftActive && view !== 'dashboard') {
-      savePendingPostLoginIntent(view);
+      savePendingPostLoginIntent(window.sessionStorage, {
+        view,
+        repairIntent: view === 'repairs' ? nextRepairIntent : undefined,
+      });
       shiftManagerRef.current?.openCheckin();
       return;
     }
 
+    setRepairIntent(view === 'repairs' ? nextRepairIntent ?? null : null);
     setCurrentView(view);
     console.log('✅ View state updated to:', view);
   };
@@ -289,6 +286,7 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
       const detail = (event as CustomEvent<{
         view?: string;
         customerSearch?: string;
+        repairIntent?: RepairIntent;
       }>).detail;
       const requestedView = detail?.view?.trim();
       if (!requestedView) {
@@ -300,7 +298,11 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
       ) {
         setCustomerSearchTerm(detail.customerSearch);
       }
-      handleViewChange(requestedView);
+      const nextRepairIntent = requestedView === 'repairs'
+        && (detail.repairIntent === 'new_repair' || detail.repairIntent === 'quick_service')
+        ? detail.repairIntent
+        : undefined;
+      handleViewChange(requestedView, nextRepairIntent);
     };
 
     window.addEventListener('pos:navigate-view', handleNavigateView as EventListener);
@@ -314,8 +316,12 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
       return;
     }
 
-    const pendingView = consumePendingPostLoginIntent();
-    if (!pendingView || pendingView === currentView) {
+    const pendingIntent = consumeAuthorizedPendingPostLoginIntent(
+      window.sessionStorage,
+      enabledModules,
+    );
+    const pendingView = pendingIntent?.view;
+    if (!pendingView || (pendingView === currentView && !pendingIntent?.repairIntent)) {
       return;
     }
 
@@ -327,8 +333,9 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
       return;
     }
 
+    setRepairIntent(pendingView === 'repairs' ? pendingIntent?.repairIntent ?? null : null);
     setCurrentView(pendingView);
-  }, [currentView, isShiftActive, onOpenConnectionSettings]);
+  }, [currentView, enabledModules, isShiftActive, onOpenConnectionSettings]);
 
   useEffect(() => {
     const handleNetworkState = () => {
@@ -342,6 +349,28 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
       window.removeEventListener('offline', handleNetworkState);
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const applyNativeNetworkStatus = (payload: unknown) => {
+      if (!payload || typeof payload !== 'object') return;
+      const isOnline = (payload as { isOnline?: unknown }).isOnline;
+      if (typeof isOnline === 'boolean') setRepairConnectivity(isOnline ? 'online' : 'offline');
+    };
+
+    onEvent<unknown>('network:status', applyNativeNetworkStatus);
+    void bridge.sync.getNetworkStatus()
+      .then((status) => {
+        if (!cancelled) applyNativeNetworkStatus(status);
+      })
+      .catch(() => {
+        if (!cancelled) setRepairConnectivity('unknown');
+      });
+    return () => {
+      cancelled = true;
+      offEvent<unknown>('network:status', applyNativeNetworkStatus);
+    };
+  }, [bridge]);
 
   useEffect(() => {
     if (!staff?.branchId) {
@@ -464,6 +493,22 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
     if (currentView === 'users' || currentView === 'customers') {
       return <UsersPage initialSearchTerm={customerSearchTerm} />;
     }
+    if (currentView === 'repairs') {
+      return (
+        <Suspense fallback={<ViewLoadingSpinner />}>
+          <RepairsView
+            initialIntent={repairIntent}
+            onIntentConsumed={() => setRepairIntent(null)}
+            connectivity={repairConnectivity}
+            hasActiveShift={isShiftActive}
+            actorKey={repairActorKey}
+            currentStaffId={staff?.databaseStaffId ?? null}
+            organizationId={staff?.organizationId ?? null}
+            branchId={staff?.branchId ?? null}
+          />
+        </Suspense>
+      );
+    }
 
     const ViewComponent = VIEW_COMPONENTS[currentView];
 
@@ -492,7 +537,7 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
   const advisorySummary = missingAdvisoryDatasets.length > 0
     ? missingAdvisoryDatasets.map((dataset) => dataset.replace(/_/g, ' ')).join(', ')
     : '';
-  const locksPageScroll = currentView === 'orders' || currentView === 'tables';
+  const locksPageScroll = currentView === 'orders' || currentView === 'tables' || currentView === 'repairs';
 
   return (
     <NavigationProvider currentView={currentView} onViewChange={handleViewChange}>

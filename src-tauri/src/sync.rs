@@ -59,7 +59,7 @@ use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -76,6 +76,7 @@ use crate::normalize_status_for_storage;
 use crate::order_ownership;
 use crate::payments;
 use crate::print;
+use crate::repair_transport::{ParityTerminalAuthCode, ParityTerminalAuthFailure};
 // Wave 5 Session 7 PR 0: `use crate::refunds;` was dropped together with
 // the reconcile-bridge gutting that was its sole caller (via
 // `refunds::build_adjustment_sync_payload_for_adjustment`). PR 2 re-adds
@@ -86,11 +87,13 @@ use crate::sync_queue;
 use crate::terminal_helpers::{
     emit_terminal_auth_paused, normalize_terminal_identity,
     reconcile_terminal_identity_from_local_sources, terminal_auth_failure_requested_terminal_id,
+    TerminalEventSink,
 };
 use crate::APP_START_EPOCH;
 
 const ADMIN_API_CACHE_PREFIX: &str = "admin_api_get::";
 const POS_INTEGRATIONS_PATH: &str = "/api/pos/integrations";
+pub(crate) const REPAIR_SETTLEMENT_ROUTE_REQUIRED: &str = "REPAIR_SETTLEMENT_ROUTE_REQUIRED";
 
 // ---------------------------------------------------------------------------
 // Typed sync response schemas
@@ -358,11 +361,22 @@ pub struct RemoteAuthPauseState {
     pub canonical_terminal_id: Option<String>,
 }
 
+#[derive(Debug, Default)]
+struct VersionedRemoteAuthState {
+    revision: u64,
+    pause: RemoteAuthPauseState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RemoteAuthAttemptToken {
+    revision: u64,
+}
+
 /// Managed state for the background sync engine.
 pub struct SyncState {
     pub is_running: Arc<AtomicBool>,
     pub last_sync: Arc<std::sync::Mutex<Option<String>>>,
-    remote_auth_pause: Arc<std::sync::Mutex<RemoteAuthPauseState>>,
+    remote_auth_pause: Arc<std::sync::Mutex<VersionedRemoteAuthState>>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -682,15 +696,53 @@ impl SyncState {
         Self {
             is_running: Arc::new(AtomicBool::new(false)),
             last_sync: Arc::new(std::sync::Mutex::new(None)),
-            remote_auth_pause: Arc::new(std::sync::Mutex::new(RemoteAuthPauseState::default())),
+            remote_auth_pause: Arc::new(std::sync::Mutex::new(VersionedRemoteAuthState::default())),
         }
     }
 
     pub fn remote_auth_snapshot(&self) -> RemoteAuthPauseState {
         self.remote_auth_pause
             .lock()
-            .map(|guard| guard.clone())
+            .map(|guard| guard.pause.clone())
             .unwrap_or_default()
+    }
+
+    fn remote_auth_revision(&self) -> u64 {
+        self.remote_auth_pause
+            .lock()
+            .map(|guard| guard.revision)
+            .unwrap_or(u64::MAX)
+    }
+
+    fn begin_remote_auth_attempt(&self) -> Option<RemoteAuthAttemptToken> {
+        let guard = self.remote_auth_pause.lock().ok()?;
+        if guard.pause.remote_auth_paused || guard.revision == u64::MAX {
+            return None;
+        }
+        Some(RemoteAuthAttemptToken {
+            revision: guard.revision,
+        })
+    }
+
+    fn clear_remote_auth_pause_if_current(&self, attempt: RemoteAuthAttemptToken) -> bool {
+        let Ok(mut guard) = self.remote_auth_pause.lock() else {
+            return false;
+        };
+        if guard.revision != attempt.revision || guard.pause.remote_auth_paused {
+            return false;
+        }
+        guard.pause = RemoteAuthPauseState::default();
+        true
+    }
+
+    fn advance_remote_auth_revision(guard: &mut VersionedRemoteAuthState) {
+        guard.revision = guard.revision.saturating_add(1);
+    }
+
+    fn invalidate_remote_auth_attempts(&self) {
+        if let Ok(mut guard) = self.remote_auth_pause.lock() {
+            Self::advance_remote_auth_revision(&mut guard);
+        }
     }
 
     pub fn is_remote_auth_paused(&self) -> bool {
@@ -706,7 +758,8 @@ impl SyncState {
         auth_code: Option<String>,
     ) {
         if let Ok(mut guard) = self.remote_auth_pause.lock() {
-            *guard = RemoteAuthPauseState {
+            Self::advance_remote_auth_revision(&mut guard);
+            guard.pause = RemoteAuthPauseState {
                 remote_auth_paused: true,
                 remote_auth_code: auth_code,
                 remote_auth_reason: Some(reason.into()),
@@ -719,7 +772,8 @@ impl SyncState {
 
     pub fn clear_remote_auth_pause(&self) {
         if let Ok(mut guard) = self.remote_auth_pause.lock() {
-            *guard = RemoteAuthPauseState::default();
+            Self::advance_remote_auth_revision(&mut guard);
+            guard.pause = RemoteAuthPauseState::default();
         }
     }
 }
@@ -733,10 +787,112 @@ struct TerminalAuthRepairContext {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RemoteAuthExecutionOutcome<T> {
-    Success(T),
+    Success(T, RemoteAuthAttemptToken),
     Paused(String),
     Reset(String),
     Failed(String),
+}
+
+/// Aggregate-only result of one parity replay pass. Every field is either a
+/// bounded enum or a count; queue row identifiers, payloads and provider
+/// response text never enter the Tauri lifecycle layer.
+struct SafeParitySyncSummary {
+    batch_success: bool,
+    processed: usize,
+    failed: i64,
+    conflicts: i64,
+    quarantined: i64,
+    dead_lettered: i64,
+    auth_outcome: Option<sync_queue::ParityAuthOutcome>,
+    batch_block: Option<sync_queue::ParityClaimGateBlock>,
+    queue_status: sync_queue::QueueStatus,
+}
+
+impl SafeParitySyncSummary {
+    fn empty(queue_status: sync_queue::QueueStatus) -> Self {
+        Self {
+            batch_success: true,
+            processed: 0,
+            failed: 0,
+            conflicts: 0,
+            quarantined: 0,
+            dead_lettered: 0,
+            auth_outcome: None,
+            batch_block: None,
+            queue_status,
+        }
+    }
+
+    fn has_unresolved_failure(&self) -> bool {
+        !self.batch_success
+            || self.failed > 0
+            || self.conflicts > 0
+            || self.quarantined > 0
+            || self.dead_lettered > 0
+            || self.queue_status.failed > 0
+            || self.queue_status.conflicts > 0
+            || self.queue_status.quarantined > 0
+            || self.queue_status.dead_lettered > 0
+    }
+}
+
+enum ParitySyncExecutionOutcome {
+    Complete(SafeParitySyncSummary),
+    Partial(SafeParitySyncSummary, &'static str),
+    Paused(SafeParitySyncSummary),
+    Reset(SafeParitySyncSummary),
+    Failed(&'static str),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NativeSyncTickOutcome {
+    Success(usize),
+    Partial { synced: usize, error: String },
+    Paused(String),
+    Reset(String),
+    Failed(String),
+}
+
+/// Completes one existing native background tick. Parity work is allowed only
+/// after the guarded legacy cycle succeeds, so auth pause/reset/rebind failures
+/// remain a fail-closed barrier for repair payloads and credentials.
+async fn complete_native_background_sync_tick<RunParity, ParityFuture>(
+    legacy_outcome: RemoteAuthExecutionOutcome<usize>,
+    run_parity: RunParity,
+) -> NativeSyncTickOutcome
+where
+    RunParity: FnOnce(RemoteAuthAttemptToken) -> ParityFuture,
+    ParityFuture: Future<Output = ParitySyncExecutionOutcome>,
+{
+    match legacy_outcome {
+        RemoteAuthExecutionOutcome::Success(legacy_synced, auth_attempt) => {
+            match run_parity(auth_attempt).await {
+                ParitySyncExecutionOutcome::Complete(summary) => {
+                    NativeSyncTickOutcome::Success(legacy_synced.saturating_add(summary.processed))
+                }
+                ParitySyncExecutionOutcome::Partial(summary, error) => {
+                    NativeSyncTickOutcome::Partial {
+                        synced: legacy_synced.saturating_add(summary.processed),
+                        error: error.to_string(),
+                    }
+                }
+                ParitySyncExecutionOutcome::Paused(summary) => {
+                    let _processed_before_pause = summary.processed;
+                    NativeSyncTickOutcome::Paused("REMOTE_AUTH_PAUSED".to_string())
+                }
+                ParitySyncExecutionOutcome::Reset(summary) => {
+                    let _processed_before_reset = summary.processed;
+                    NativeSyncTickOutcome::Reset("TERMINAL_AUTH_RESET".to_string())
+                }
+                ParitySyncExecutionOutcome::Failed(error) => {
+                    NativeSyncTickOutcome::Failed(error.to_string())
+                }
+            }
+        }
+        RemoteAuthExecutionOutcome::Paused(error) => NativeSyncTickOutcome::Paused(error),
+        RemoteAuthExecutionOutcome::Reset(error) => NativeSyncTickOutcome::Reset(error),
+        RemoteAuthExecutionOutcome::Failed(error) => NativeSyncTickOutcome::Failed(error),
+    }
 }
 
 pub(crate) fn terminal_auth_failure_requires_reset(error: &str) -> bool {
@@ -786,7 +942,7 @@ fn prepare_terminal_auth_repair_context(db: &DbState, error: &str) -> TerminalAu
 
 fn pause_remote_auth_with_context(
     sync_state: &SyncState,
-    app: &AppHandle,
+    app: &impl TerminalEventSink,
     source: &str,
     error: &str,
     context: TerminalAuthRepairContext,
@@ -826,10 +982,53 @@ fn pause_remote_auth_with_context(
     );
 }
 
+fn bounded_parity_terminal_auth_error(failure: ParityTerminalAuthFailure) -> String {
+    serde_json::json!({
+        "success": false,
+        "error": "POS_TERMINAL_AUTH_REQUIRED",
+        "code": failure.code.as_str(),
+        "terminalActive": failure.terminal_active,
+    })
+    .to_string()
+}
+
+/// Install a global terminal-auth pause from the queue's bounded classifier.
+/// Unlike the legacy repair-context path, this function deliberately performs
+/// no terminal-id lookup and therefore cannot copy an identifier or arbitrary
+/// provider text into state, events or logs.
+fn pause_remote_auth_for_parity(
+    sync_state: &SyncState,
+    app: &impl TerminalEventSink,
+    source: &str,
+    failure: ParityTerminalAuthFailure,
+) -> String {
+    let error = bounded_parity_terminal_auth_error(failure);
+    let reason = match failure.code {
+        ParityTerminalAuthCode::TerminalIdentityMismatch
+        | ParityTerminalAuthCode::TerminalNotFound => "terminal_identity_out_of_sync",
+        _ => failure.code.as_str(),
+    };
+    warn!(
+        source = %source,
+        auth_code = failure.code.as_str(),
+        terminal_active = ?failure.terminal_active,
+        "Pausing parity replay after bounded terminal-auth failure"
+    );
+    sync_state.pause_remote_auth(
+        reason,
+        error.clone(),
+        None,
+        None,
+        Some(failure.code.as_str().to_string()),
+    );
+    emit_terminal_auth_paused(app, source, &error, None, None);
+    error
+}
+
 pub(crate) fn handle_soft_terminal_auth_failure(
     db: &DbState,
     sync_state: &SyncState,
-    app: &AppHandle,
+    app: &impl TerminalEventSink,
     source: &str,
     error: &str,
 ) {
@@ -842,7 +1041,14 @@ pub(crate) fn handle_soft_terminal_auth_failure(
     );
 }
 
-fn handle_terminal_auth_failure_from_sync(db: &DbState, app: &AppHandle, error: &str) {
+fn handle_terminal_auth_failure_from_sync(
+    db: &DbState,
+    sync_state: &SyncState,
+    app: &impl TerminalEventSink,
+    source: &str,
+    error: &str,
+) {
+    sync_state.invalidate_remote_auth_attempts();
     let reason = crate::terminal_access_reset_reason(error);
     let auth_code = crate::terminal_auth_failure_code(error);
     let auth_source = crate::terminal_auth_failure_source(error);
@@ -855,7 +1061,7 @@ fn handle_terminal_auth_failure_from_sync(db: &DbState, app: &AppHandle, error: 
         terminal_active = ?terminal_active,
         "Sync loop detected terminal access revocation; preserving local data and forcing re-onboarding"
     );
-    crate::handle_invalid_terminal_credentials(Some(db), app, "sync_loop", error);
+    crate::handle_invalid_terminal_credentials(Some(db), app, source, error);
 }
 
 async fn run_sync_cycle_with_auth_guard(
@@ -867,10 +1073,19 @@ async fn run_sync_cycle_with_auth_guard(
     let mut repair_attempted = false;
 
     loop {
+        let Some(auth_attempt) = sync_state.begin_remote_auth_attempt() else {
+            return RemoteAuthExecutionOutcome::Paused("REMOTE_AUTH_PAUSED".to_string());
+        };
         match run_sync_cycle(db, app).await {
             Ok(synced) => {
-                sync_state.clear_remote_auth_pause();
-                return RemoteAuthExecutionOutcome::Success(synced);
+                if sync_state.clear_remote_auth_pause_if_current(auth_attempt) {
+                    return RemoteAuthExecutionOutcome::Success(synced, auth_attempt);
+                }
+                return if sync_state.is_remote_auth_paused() {
+                    RemoteAuthExecutionOutcome::Paused("REMOTE_AUTH_PAUSED".to_string())
+                } else {
+                    RemoteAuthExecutionOutcome::Failed("REMOTE_AUTH_REVISION_CHANGED".to_string())
+                };
             }
             Err(error) => {
                 if !is_terminal_auth_failure(&error) {
@@ -878,7 +1093,7 @@ async fn run_sync_cycle_with_auth_guard(
                 }
 
                 if terminal_auth_failure_requires_reset(&error) {
-                    handle_terminal_auth_failure_from_sync(db, app, &error);
+                    handle_terminal_auth_failure_from_sync(db, sync_state, app, source, &error);
                     return RemoteAuthExecutionOutcome::Reset(error);
                 }
 
@@ -922,10 +1137,19 @@ async fn send_terminal_heartbeat_with_auth_guard(
     let mut repair_attempted = false;
 
     loop {
+        let Some(auth_attempt) = sync_state.begin_remote_auth_attempt() else {
+            return RemoteAuthExecutionOutcome::Paused("REMOTE_AUTH_PAUSED".to_string());
+        };
         match send_terminal_heartbeat_now(db, sync_state).await {
             Ok(sent) => {
-                sync_state.clear_remote_auth_pause();
-                return RemoteAuthExecutionOutcome::Success(sent);
+                if sync_state.clear_remote_auth_pause_if_current(auth_attempt) {
+                    return RemoteAuthExecutionOutcome::Success(sent, auth_attempt);
+                }
+                return if sync_state.is_remote_auth_paused() {
+                    RemoteAuthExecutionOutcome::Paused("REMOTE_AUTH_PAUSED".to_string())
+                } else {
+                    RemoteAuthExecutionOutcome::Failed("REMOTE_AUTH_REVISION_CHANGED".to_string())
+                };
             }
             Err(error) => {
                 if !is_terminal_auth_failure(&error) {
@@ -933,7 +1157,7 @@ async fn send_terminal_heartbeat_with_auth_guard(
                 }
 
                 if terminal_auth_failure_requires_reset(&error) {
-                    handle_terminal_auth_failure_from_sync(db, app, &error);
+                    handle_terminal_auth_failure_from_sync(db, sync_state, app, source, &error);
                     return RemoteAuthExecutionOutcome::Reset(error);
                 }
 
@@ -1226,6 +1450,54 @@ pub fn create_order(
     }
 
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let identity_payload = payload.get("orderData").unwrap_or(payload);
+    if remote_order_is_repair_settlement(payload)
+        || remote_order_is_repair_settlement(identity_payload)
+    {
+        return Err(REPAIR_SETTLEMENT_ROUTE_REQUIRED.to_string());
+    }
+    let mut renderer_identities = Vec::new();
+    for keys in [
+        &["id", "orderId", "order_id", "supabaseId", "supabase_id"][..],
+        &[
+            "clientRequestId",
+            "client_request_id",
+            "clientOrderId",
+            "client_order_id",
+        ][..],
+        &[
+            "orderNumber",
+            "order_number",
+            "displayOrderNumber",
+            "display_order_number",
+        ][..],
+    ] {
+        if let Some(identity) = str_any(identity_payload, keys) {
+            if !renderer_identities.contains(&identity) {
+                renderer_identities.push(identity);
+            }
+        }
+    }
+    for identity in renderer_identities {
+        let targets_repair_settlement = conn
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM orders
+                     WHERE (id = ?1
+                            OR supabase_id = ?1
+                            OR client_request_id = ?1
+                            OR order_number = ?1
+                            OR display_order_number = ?1)
+                       AND lower(trim(COALESCE(order_context, ''))) = 'repair_settlement'
+                 )",
+                [identity],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|error| format!("guard generic order create identity: {error}"))?;
+        if targets_repair_settlement {
+            return Err(REPAIR_SETTLEMENT_ROUTE_REQUIRED.to_string());
+        }
+    }
 
     let client_request_id = str_field(payload, "clientRequestId")
         .or_else(|| str_field(payload, "client_request_id"))
@@ -2210,6 +2482,7 @@ pub(crate) fn get_all_orders_since_utc(
                     integration_environment, is_test
              FROM orders
              WHERE COALESCE(is_ghost, 0) = 0
+               AND lower(trim(COALESCE(order_context, ''))) <> 'repair_settlement'
                AND (?1 IS NULL OR created_at >= ?1 OR {open_table_tab})
              ORDER BY created_at ASC"),
         )
@@ -2369,6 +2642,7 @@ pub(crate) fn get_all_orders_since_utc(
 /// Get a single order by ID.
 pub fn get_order_by_id(db: &DbState, id: &str) -> Result<Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    ensure_generic_order_recovery_allowed(&conn, id)?;
 
     // W6: `orders.payment_method` was dropped in v55. Derive subquery
     // slotted in at the same position so downstream row indices stay
@@ -2635,10 +2909,22 @@ pub fn remove_invalid_orders(db: &DbState, order_ids: Vec<String>) -> Result<Val
         }));
     }
 
+    for order_id in &order_ids {
+        ensure_generic_order_recovery_allowed(&conn, order_id)?;
+    }
+
     // Build placeholders for the IN clause
     let placeholders = order_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let query = format!(
-        "DELETE FROM sync_queue WHERE entity_type = 'order' AND entity_id IN ({})",
+        "DELETE FROM sync_queue
+         WHERE entity_type = 'order'
+           AND entity_id IN ({})
+           AND NOT EXISTS (
+             SELECT 1
+             FROM orders
+             WHERE orders.id = sync_queue.entity_id
+               AND lower(trim(COALESCE(orders.order_context, ''))) = 'repair_settlement'
+           )",
         placeholders
     );
 
@@ -2783,10 +3069,12 @@ pub fn get_sync_status(db: &DbState, sync_state: &SyncState) -> Result<Value, St
     let financial_stats = collect_financial_sync_stats(&conn);
     let last_queue_failure = extract_last_queue_failure_snapshot(&conn).map(|s| s.to_json());
     let historical_z_report_conflicts = count_historical_z_report_conflicts(&conn);
+    let parity_status = sync_queue::get_status(&conn)?;
 
     let is_online = storage::is_configured();
     let last_sync = sync_state.last_sync.lock().ok().and_then(|g| g.clone());
-    let pending_total = pending + queued_remote;
+    let pending_total = pending + queued_remote + parity_status.pending + parity_status.in_progress;
+    let error_total = errors + parity_status.failed + parity_status.conflicts;
     let remote_auth_pause = sync_state.remote_auth_snapshot();
     let mut payload = serde_json::json!({
         "isOnline": is_online,
@@ -2794,13 +3082,13 @@ pub fn get_sync_status(db: &DbState, sync_state: &SyncState) -> Result<Value, St
         "lastSyncAt": last_sync,
         "pendingItems": pending_total,
         "pendingChanges": pending_total,
-        "syncInProgress": in_progress > 0,
-        "error": if errors > 0 {
+        "syncInProgress": in_progress > 0 || parity_status.in_progress > 0,
+        "error": if error_total > 0 {
             Value::String("sync_queue_failed_items".to_string())
         } else {
             Value::Null
         },
-        "syncErrors": errors,
+        "syncErrors": error_total,
         "queuedRemote": queued_remote,
         "backpressureDeferred": backpressure_deferred,
         "oldestNextRetryAt": oldest_next_retry_at,
@@ -2809,6 +3097,7 @@ pub fn get_sync_status(db: &DbState, sync_state: &SyncState) -> Result<Value, St
         "pendingPaymentItems": financial_stats.pending_payment_items(),
         "failedPaymentItems": financial_stats.failed_payment_items(),
         "financialStats": financial_stats.to_json(),
+        "parityQueue": parity_status,
     });
 
     if let Some(map) = payload.as_object_mut() {
@@ -3335,7 +3624,11 @@ fn has_actionable_remote_sync_work(db: &DbState) -> Result<bool, String> {
         .optional()
         .map_err(|e| format!("inspect actionable sync queue rows: {e}"))?;
 
-    Ok(actionable.is_some())
+    if actionable.is_some() {
+        return Ok(true);
+    }
+
+    sync_queue::has_actionable_internal_work(&conn)
 }
 
 fn read_terminal_setting(conn: &rusqlite::Connection, keys: &[&str]) -> Option<String> {
@@ -3597,8 +3890,10 @@ pub fn start_terminal_heartbeat_loop(
             )
             .await
             {
-                RemoteAuthExecutionOutcome::Success(true) => trace!("Terminal heartbeat sent"),
-                RemoteAuthExecutionOutcome::Success(false) => trace!("Terminal heartbeat skipped"),
+                RemoteAuthExecutionOutcome::Success(true, _) => trace!("Terminal heartbeat sent"),
+                RemoteAuthExecutionOutcome::Success(false, _) => {
+                    trace!("Terminal heartbeat skipped")
+                }
                 RemoteAuthExecutionOutcome::Paused(error) => {
                     warn!(error = %error, "Terminal heartbeat paused after terminal identity auth failure");
                 }
@@ -3750,9 +4045,21 @@ pub fn start_sync_loop(
                 previous_network_online = Some(true);
             }
 
-            match run_sync_cycle_with_auth_guard(&db, sync_state.as_ref(), &app, "sync_loop").await
+            let guarded_legacy_outcome =
+                run_sync_cycle_with_auth_guard(&db, sync_state.as_ref(), &app, "sync_loop").await;
+            match complete_native_background_sync_tick(guarded_legacy_outcome, |auth_attempt| {
+                force_parity_sync_once(
+                    &db,
+                    sync_state.as_ref(),
+                    &app,
+                    Some(&cancel),
+                    "sync_loop",
+                    auth_attempt,
+                )
+            })
+            .await
             {
-                RemoteAuthExecutionOutcome::Success(synced) => {
+                NativeSyncTickOutcome::Success(synced) => {
                     if synced > 0 {
                         info!("Sync cycle complete: {synced} items synced");
                     }
@@ -3760,16 +4067,23 @@ pub fn start_sync_loop(
                         *guard = Some(Utc::now().to_rfc3339());
                     }
                 }
-                RemoteAuthExecutionOutcome::Paused(error) => {
+                NativeSyncTickOutcome::Partial { synced, error } => {
+                    warn!(
+                        synced,
+                        error = %error,
+                        "Sync cycle completed partially; full-success timestamp preserved"
+                    );
+                }
+                NativeSyncTickOutcome::Paused(error) => {
                     warn!(error = %error, "Sync cycle paused after terminal identity auth failure");
                 }
-                RemoteAuthExecutionOutcome::Reset(error) => {
+                NativeSyncTickOutcome::Reset(error) => {
                     warn!(error = %error, "Sync loop stopped after terminal access revocation");
                     is_running.store(false, Ordering::SeqCst);
                     info!("Sync loop stopped after terminal access revocation");
                     break;
                 }
-                RemoteAuthExecutionOutcome::Failed(error) => {
+                NativeSyncTickOutcome::Failed(error) => {
                     log_sync_cycle_failure_with_context(&db, &error);
                 }
             }
@@ -3810,6 +4124,8 @@ fn capture_unsynced_sync_queue_snapshot_with_limit(
             "SELECT COUNT(*)
              FROM parity_sync_queue
              WHERE table_name = 'z_reports'
+               AND COALESCE(module_type, '') <> 'repairs'
+               AND table_name NOT IN ('repairs', 'repair_attachments')
                AND status NOT IN ('synced', 'applied')",
             [],
             |row| row.get(0),
@@ -3850,6 +4166,8 @@ fn capture_unsynced_sync_queue_snapshot_with_limit(
             "SELECT status, COUNT(*) AS total
              FROM parity_sync_queue
              WHERE table_name = 'z_reports'
+               AND COALESCE(module_type, '') <> 'repairs'
+               AND table_name NOT IN ('repairs', 'repair_attachments')
                AND status NOT IN ('synced', 'applied')
              GROUP BY status
              ORDER BY total DESC, status ASC
@@ -3967,6 +4285,8 @@ fn query_parity_z_report_blocker_details_with_conn(
             "SELECT id, record_id, operation, status, error_message
              FROM parity_sync_queue
              WHERE table_name = 'z_reports'
+               AND COALESCE(module_type, '') <> 'repairs'
+               AND table_name NOT IN ('repairs', 'repair_attachments')
                AND status NOT IN ('synced', 'applied')
              ORDER BY
                 CASE
@@ -4342,13 +4662,27 @@ async fn force_sync_once(
 
     let _ = run_recurring_sync_recovery(db);
 
-    match run_sync_cycle_with_auth_guard(db, sync_state, app, "force_sync").await {
-        RemoteAuthExecutionOutcome::Success(synced) => {
-            let parity_synced = force_parity_sync_once(db, app).await?;
-            let total_synced = synced + parity_synced;
+    let cancellation = app.try_state::<tokio_util::sync::CancellationToken>();
+    let outcome = complete_native_background_sync_tick(
+        run_sync_cycle_with_auth_guard(db, sync_state, app, "force_sync").await,
+        |auth_attempt| {
+            force_parity_sync_once(
+                db,
+                sync_state,
+                app,
+                cancellation.as_ref().map(|state| state.inner()),
+                "force_sync",
+                auth_attempt,
+            )
+        },
+    )
+    .await;
+
+    match outcome {
+        NativeSyncTickOutcome::Success(total_synced) => {
             info!(
-                legacy_synced = synced,
-                parity_synced, total_synced, "Force sync complete"
+                total_synced,
+                "Force sync complete across legacy and parity queues"
             );
 
             if let Ok(mut guard) = sync_state.last_sync.lock() {
@@ -4357,37 +4691,568 @@ async fn force_sync_once(
 
             Ok(total_synced)
         }
-        RemoteAuthExecutionOutcome::Paused(error) => Err(error),
-        RemoteAuthExecutionOutcome::Reset(error) => Err(error),
-        RemoteAuthExecutionOutcome::Failed(error) => Err(error),
+        NativeSyncTickOutcome::Partial { error, .. } => Err(error),
+        NativeSyncTickOutcome::Paused(error) => Err(error),
+        NativeSyncTickOutcome::Reset(error) => Err(error),
+        NativeSyncTickOutcome::Failed(error) => Err(error),
     }
 }
 
-async fn force_parity_sync_once(db: &DbState, app: &AppHandle) -> Result<usize, String> {
-    let admin_url = match storage::get_credential("admin_dashboard_url") {
-        Some(url) => url,
-        None => return Ok(0),
-    };
-    let api_key = match load_zeroized_pos_api_key_optional() {
-        Some(key) => key,
-        None => return Ok(0),
-    };
+fn read_parity_queue_status(db: &DbState) -> Result<sync_queue::QueueStatus, String> {
+    let conn = db
+        .conn
+        .lock()
+        .map_err(|_| "PARITY_STATUS_UNAVAILABLE".to_string())?;
+    sync_queue::get_status(&conn).map_err(|_| "PARITY_STATUS_UNAVAILABLE".to_string())
+}
 
-    let result = sync_queue::process_queue(&db.conn, admin_url.as_str(), api_key.as_str()).await?;
-    for dead_letter in &result.monetary_dead_letters {
-        let _ = app.emit("sync:dead-letter:monetary", dead_letter);
+fn terminal_binding_error_to_gate(error: &str) -> sync_queue::ParityClaimGateBlock {
+    if error == "REPAIR_RESET_PENDING" {
+        sync_queue::ParityClaimGateBlock::ResetPending
+    } else {
+        // Scope transitions, fatal maintenance latches and lifecycle lock
+        // failures all mean the credential binding cannot be trusted. They
+        // share the same bounded fail-closed outcome; no internal error text
+        // is returned to the renderer.
+        sync_queue::ParityClaimGateBlock::RebindPending
     }
+}
 
-    if result.failed > 0 || result.conflicts > 0 {
+fn initial_parity_binding_lease(
+    db: &DbState,
+    sync_state: &SyncState,
+    cancellation: Option<&tokio_util::sync::CancellationToken>,
+    expected_auth_attempt: RemoteAuthAttemptToken,
+) -> Result<crate::repairs::TerminalBindingLease, sync_queue::ParityClaimGateBlock> {
+    let lease = crate::repairs::acquire_terminal_binding_lease()
+        .map_err(|error| terminal_binding_error_to_gate(&error))?;
+    if cancellation.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
+        return Err(sync_queue::ParityClaimGateBlock::Cancelled);
+    }
+    if sync_state.remote_auth_revision() != expected_auth_attempt.revision
+        || sync_state.is_remote_auth_paused()
+    {
+        return Err(sync_queue::ParityClaimGateBlock::RemoteAuthPaused);
+    }
+    if crate::commands::settings::terminal_connection_rebind_pending(db).unwrap_or(true) {
+        return Err(sync_queue::ParityClaimGateBlock::RebindPending);
+    }
+    Ok(lease)
+}
+
+fn acquire_live_parity_claim_gate(
+    db: &DbState,
+    sync_state: &SyncState,
+    cancellation: Option<&tokio_util::sync::CancellationToken>,
+    expected_binding_generation: u64,
+    expected_auth_revision: u64,
+) -> Result<crate::repairs::TerminalBindingLease, sync_queue::ParityClaimGateBlock> {
+    // This is intentionally the first operation in the per-item gate. A
+    // rebind/reset writer either publishes its new generation before this
+    // lease or waits for the returned lease through HTTP and authoritative
+    // acknowledgement.
+    let lease = crate::repairs::acquire_terminal_binding_lease()
+        .map_err(|error| terminal_binding_error_to_gate(&error))?;
+    if lease.generation() != expected_binding_generation {
+        return Err(sync_queue::ParityClaimGateBlock::RebindPending);
+    }
+    if cancellation.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
+        return Err(sync_queue::ParityClaimGateBlock::Cancelled);
+    }
+    if sync_state.remote_auth_revision() != expected_auth_revision
+        || sync_state.is_remote_auth_paused()
+    {
+        return Err(sync_queue::ParityClaimGateBlock::RemoteAuthPaused);
+    }
+    if crate::commands::settings::terminal_connection_rebind_pending(db).unwrap_or(true) {
+        return Err(sync_queue::ParityClaimGateBlock::RebindPending);
+    }
+    Ok(lease)
+}
+
+fn parity_outcome_for_gate_block(
+    mut summary: SafeParitySyncSummary,
+    block: sync_queue::ParityClaimGateBlock,
+) -> ParitySyncExecutionOutcome {
+    summary.batch_block = Some(block);
+    match block {
+        sync_queue::ParityClaimGateBlock::RemoteAuthPaused => {
+            ParitySyncExecutionOutcome::Paused(summary)
+        }
+        sync_queue::ParityClaimGateBlock::ResetPending => {
+            ParitySyncExecutionOutcome::Reset(summary)
+        }
+        sync_queue::ParityClaimGateBlock::Cancelled => {
+            ParitySyncExecutionOutcome::Partial(summary, "SYNC_CANCELLED")
+        }
+        sync_queue::ParityClaimGateBlock::RebindPending => {
+            ParitySyncExecutionOutcome::Partial(summary, "TERMINAL_REBIND_PENDING")
+        }
+    }
+}
+
+fn emit_monetary_dead_letters_with(
+    dead_letters: &[sync_queue::MonetaryDeadLetter],
+    mut emit: impl FnMut(&sync_queue::MonetaryDeadLetter),
+) {
+    for dead_letter in dead_letters {
+        emit(dead_letter);
+    }
+}
+
+fn emit_monetary_dead_letters(
+    app: &impl TerminalEventSink,
+    dead_letters: &[sync_queue::MonetaryDeadLetter],
+) {
+    emit_monetary_dead_letters_with(dead_letters, |dead_letter| {
+        if let Ok(payload) = serde_json::to_value(dead_letter) {
+            app.emit_json("sync:dead-letter:monetary", payload);
+        }
+    });
+}
+
+fn safe_parity_summary(
+    result: &sync_queue::SyncResult,
+    queue_status: sync_queue::QueueStatus,
+) -> SafeParitySyncSummary {
+    SafeParitySyncSummary {
+        batch_success: result.success,
+        processed: usize::try_from(result.processed.max(0)).unwrap_or(0),
+        failed: result.failed,
+        conflicts: result.conflicts,
+        quarantined: result.quarantined,
+        dead_lettered: result.dead_lettered,
+        auth_outcome: result.auth_outcome,
+        batch_block: result.batch_block,
+        queue_status,
+    }
+}
+
+/// An exact-item retry is classified from the selected batch only. Unrelated
+/// failed/conflict rows may remain in the renderer queue and must not stop a
+/// deterministic module retry before it reaches the next explicitly listed
+/// item. The selected item's own failures remain present on `SyncResult` and
+/// are still handled by `SafeParitySyncSummary::has_unresolved_failure`.
+fn safe_exact_item_parity_summary(result: &sync_queue::SyncResult) -> SafeParitySyncSummary {
+    safe_parity_summary(
+        result,
+        sync_queue::QueueStatus {
+            total: 0,
+            pending: 0,
+            in_progress: 0,
+            failed: 0,
+            conflicts: 0,
+            quarantined: 0,
+            dead_lettered: 0,
+            oldest_item_age: None,
+        },
+    )
+}
+
+fn classify_safe_parity_summary(
+    db: &DbState,
+    sync_state: &SyncState,
+    app: &impl TerminalEventSink,
+    source: &str,
+    summary: SafeParitySyncSummary,
+) -> ParitySyncExecutionOutcome {
+    if let Some(auth_outcome) = summary.auth_outcome {
+        match auth_outcome {
+            sync_queue::ParityAuthOutcome::HardTerminalAuth {
+                code,
+                terminal_active,
+            } => {
+                let failure = ParityTerminalAuthFailure {
+                    code,
+                    terminal_active,
+                };
+                let error = pause_remote_auth_for_parity(sync_state, app, source, failure);
+                handle_terminal_auth_failure_from_sync(db, sync_state, app, source, &error);
+                return ParitySyncExecutionOutcome::Reset(summary);
+            }
+            sync_queue::ParityAuthOutcome::SoftTerminalAuth {
+                code,
+                terminal_active,
+            } => {
+                let failure = ParityTerminalAuthFailure {
+                    code,
+                    terminal_active,
+                };
+                let _ = pause_remote_auth_for_parity(sync_state, app, source, failure);
+                return ParitySyncExecutionOutcome::Paused(summary);
+            }
+            sync_queue::ParityAuthOutcome::StaffSessionRequired => {
+                return ParitySyncExecutionOutcome::Partial(
+                    summary,
+                    "REPAIR_STAFF_SESSION_REQUIRED",
+                );
+            }
+        }
+    }
+    if let Some(block) = summary.batch_block {
+        return parity_outcome_for_gate_block(summary, block);
+    }
+    if summary.has_unresolved_failure() {
+        return ParitySyncExecutionOutcome::Partial(summary, "PARITY_SYNC_PARTIAL");
+    }
+    ParitySyncExecutionOutcome::Complete(summary)
+}
+
+async fn force_parity_sync_once(
+    db: &DbState,
+    sync_state: &SyncState,
+    app: &AppHandle,
+    cancellation: Option<&tokio_util::sync::CancellationToken>,
+    source: &str,
+    auth_attempt: RemoteAuthAttemptToken,
+) -> ParitySyncExecutionOutcome {
+    let status_before = match read_parity_queue_status(db) {
+        Ok(status) => status,
+        Err(_) => return ParitySyncExecutionOutcome::Failed("PARITY_STATUS_UNAVAILABLE"),
+    };
+
+    let initial_lease =
+        match initial_parity_binding_lease(db, sync_state, cancellation, auth_attempt) {
+            Ok(binding) => binding,
+            Err(block) => {
+                return parity_outcome_for_gate_block(
+                    SafeParitySyncSummary::empty(status_before),
+                    block,
+                )
+            }
+        };
+    let binding_generation = initial_lease.generation();
+    let expected_auth_revision = auth_attempt.revision;
+
+    // Credential resolution is covered by the same lifecycle lease as the
+    // captured binding generation. Missing credentials are a full success
+    // only when no parity work or unresolved failure exists.
+    let admin_url = storage::get_credential("admin_dashboard_url");
+    let api_key = load_zeroized_pos_api_key_optional();
+    drop(initial_lease);
+    let (Some(admin_url), Some(api_key)) = (admin_url, api_key) else {
+        let summary = SafeParitySyncSummary::empty(status_before);
+        return if summary.queue_status.total == 0 && !summary.has_unresolved_failure() {
+            ParitySyncExecutionOutcome::Complete(summary)
+        } else {
+            ParitySyncExecutionOutcome::Partial(summary, "PARITY_CREDENTIALS_UNAVAILABLE")
+        };
+    };
+
+    let result =
+        process_internal_parity_queue_once(db, admin_url.as_str(), api_key.as_str(), || {
+            acquire_live_parity_claim_gate(
+                db,
+                sync_state,
+                cancellation,
+                binding_generation,
+                expected_auth_revision,
+            )
+        })
+        .await;
+    let result = match result {
+        Ok(result) => result,
+        Err(_) => return ParitySyncExecutionOutcome::Failed("PARITY_SYNC_FAILED"),
+    };
+    emit_monetary_dead_letters(app, &result.monetary_dead_letters);
+    let status_after = match read_parity_queue_status(db) {
+        Ok(status) => status,
+        Err(_) => return ParitySyncExecutionOutcome::Failed("PARITY_STATUS_UNAVAILABLE"),
+    };
+    let summary = safe_parity_summary(&result, status_after);
+    if summary.failed > 0
+        || summary.conflicts > 0
+        || summary.quarantined > 0
+        || summary.dead_lettered > 0
+    {
         warn!(
-            processed = result.processed,
-            failed = result.failed,
-            conflicts = result.conflicts,
-            "Force sync parity queue finished with unresolved items"
+            processed = summary.processed,
+            failed = summary.failed,
+            conflicts = summary.conflicts,
+            quarantined = summary.quarantined,
+            dead_lettered = summary.dead_lettered,
+            "Parity queue finished with bounded failure state"
         );
     }
+    classify_safe_parity_summary(db, sync_state, app, source, summary)
+}
 
-    Ok(result.processed.max(0) as usize)
+async fn process_internal_parity_queue_once<Acquire, Lease>(
+    db: &DbState,
+    admin_url: &str,
+    api_key: &str,
+    acquire_claim_gate: Acquire,
+) -> Result<sync_queue::SyncResult, String>
+where
+    Acquire: FnMut() -> Result<Lease, sync_queue::ParityClaimGateBlock> + Send,
+    Lease: Send,
+{
+    sync_queue::process_queue_with_claim_gate(&db.conn, admin_url, api_key, acquire_claim_gate)
+        .await
+}
+
+fn read_renderer_parity_queue_status(db: &DbState) -> Result<sync_queue::QueueStatus, String> {
+    let conn = db
+        .conn
+        .lock()
+        .map_err(|_| "PARITY_STATUS_UNAVAILABLE".to_string())?;
+    sync_queue::renderer_get_status(&conn).map_err(|_| "PARITY_STATUS_UNAVAILABLE".to_string())
+}
+
+fn renderer_gate_error(block: sync_queue::ParityClaimGateBlock) -> String {
+    match block {
+        sync_queue::ParityClaimGateBlock::RemoteAuthPaused => "REMOTE_AUTH_PAUSED",
+        sync_queue::ParityClaimGateBlock::ResetPending => "TERMINAL_AUTH_RESET",
+        sync_queue::ParityClaimGateBlock::Cancelled => "SYNC_CANCELLED",
+        sync_queue::ParityClaimGateBlock::RebindPending => "TERMINAL_REBIND_PENDING",
+    }
+    .to_string()
+}
+
+/// One coherent renderer replay authority. The endpoint tuple and lifecycle
+/// generation are captured under the initial binding lease; every later local
+/// mutation or HTTP/ack step must acquire a fresh lease through this context.
+pub(crate) struct RendererParityExecutionContext<'a> {
+    db: &'a DbState,
+    sync_state: &'a SyncState,
+    cancellation: &'a tokio_util::sync::CancellationToken,
+    admin_url: String,
+    api_key: Zeroizing<String>,
+    binding_generation: u64,
+    auth_attempt: RemoteAuthAttemptToken,
+}
+
+impl<'a> RendererParityExecutionContext<'a> {
+    pub(crate) async fn new(
+        db: &'a DbState,
+        sync_state: &'a SyncState,
+        cancellation: &'a tokio_util::sync::CancellationToken,
+    ) -> Result<Self, String> {
+        let auth_attempt = sync_state
+            .begin_remote_auth_attempt()
+            .ok_or_else(|| "REMOTE_AUTH_PAUSED".to_string())?;
+        let initial_lease =
+            initial_parity_binding_lease(db, sync_state, Some(cancellation), auth_attempt)
+                .map_err(renderer_gate_error)?;
+        let binding_generation = initial_lease.generation();
+        let (admin_url, api_key) =
+            crate::resolve_admin_endpoint(Some(db))
+                .await
+                .map_err(|error| {
+                    error
+                        .renderer_endpoint_error_code()
+                        .unwrap_or("PARITY_CREDENTIALS_UNAVAILABLE")
+                        .to_string()
+                })?;
+        let parsed_admin_url = url::Url::parse(&admin_url)
+            .map_err(|_| "PARITY_CREDENTIAL_TUPLE_CONFLICT".to_string())?;
+        if !matches!(parsed_admin_url.scheme(), "http" | "https")
+            || parsed_admin_url.host_str().is_none()
+        {
+            return Err("PARITY_CREDENTIAL_TUPLE_CONFLICT".to_string());
+        }
+        drop(initial_lease);
+        Ok(Self {
+            db,
+            sync_state,
+            cancellation,
+            admin_url,
+            api_key,
+            binding_generation,
+            auth_attempt,
+        })
+    }
+
+    pub(crate) fn acquire_step_lease(
+        &self,
+    ) -> Result<crate::repairs::TerminalBindingLease, String> {
+        acquire_live_parity_claim_gate(
+            self.db,
+            self.sync_state,
+            Some(self.cancellation),
+            self.binding_generation,
+            self.auth_attempt.revision,
+        )
+        .map_err(renderer_gate_error)
+    }
+
+    pub(crate) fn run_local_step<T>(
+        &self,
+        step: impl FnOnce(&Connection) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let _lease = self.acquire_step_lease()?;
+        let connection = self
+            .db
+            .conn
+            .lock()
+            .map_err(|_| "PARITY_LOCAL_STEP_UNAVAILABLE".to_string())?;
+        step(&connection)
+    }
+
+    pub(crate) async fn process_item(
+        &self,
+        app: &impl TerminalEventSink,
+        source: &'static str,
+        item_id: &str,
+    ) -> Result<sync_queue::SyncResult, String> {
+        let mut result = sync_queue::process_queue_renderer_safe_item_with_claim_gate(
+            &self.db.conn,
+            self.admin_url.as_str(),
+            self.api_key.as_str(),
+            item_id,
+            || {
+                acquire_live_parity_claim_gate(
+                    self.db,
+                    self.sync_state,
+                    Some(self.cancellation),
+                    self.binding_generation,
+                    self.auth_attempt.revision,
+                )
+            },
+        )
+        .await
+        .map_err(bounded_renderer_item_error)?;
+        result.telemetry.scope = sync_queue::SyncTelemetryScope::default();
+        emit_monetary_dead_letters(app, &result.monetary_dead_letters);
+        let summary = safe_exact_item_parity_summary(&result);
+        match classify_safe_parity_summary(self.db, self.sync_state, app, source, summary) {
+            ParitySyncExecutionOutcome::Complete(_) => Ok(result),
+            ParitySyncExecutionOutcome::Partial(_, error) => Err(error.to_string()),
+            ParitySyncExecutionOutcome::Paused(_) => Err("REMOTE_AUTH_PAUSED".to_string()),
+            ParitySyncExecutionOutcome::Reset(_) => Err("TERMINAL_AUTH_RESET".to_string()),
+            ParitySyncExecutionOutcome::Failed(error) => Err(error.to_string()),
+        }
+    }
+
+    pub(crate) fn retryable_module_item_ids(
+        &self,
+        module_type: &str,
+        limit: usize,
+    ) -> Result<Vec<String>, String> {
+        self.run_local_step(|connection| {
+            sync_queue::renderer_retryable_item_ids_by_module(connection, module_type, limit)
+                .map_err(|_| "PARITY_MODULE_ITEMS_UNAVAILABLE".to_string())
+        })
+    }
+
+    pub(crate) async fn process_queue(
+        &self,
+        app: &impl TerminalEventSink,
+        source: &'static str,
+    ) -> Result<sync_queue::SyncResult, String> {
+        let mut result = sync_queue::process_queue_renderer_safe_with_claim_gate(
+            &self.db.conn,
+            self.admin_url.as_str(),
+            self.api_key.as_str(),
+            || {
+                acquire_live_parity_claim_gate(
+                    self.db,
+                    self.sync_state,
+                    Some(self.cancellation),
+                    self.binding_generation,
+                    self.auth_attempt.revision,
+                )
+            },
+        )
+        .await
+        .map_err(|_| "PARITY_SYNC_FAILED".to_string())?;
+        result.telemetry.scope = sync_queue::SyncTelemetryScope::default();
+        emit_monetary_dead_letters(app, &result.monetary_dead_letters);
+        let queue_status = read_renderer_parity_queue_status(self.db)?;
+        let summary = safe_parity_summary(&result, queue_status);
+        match classify_safe_parity_summary(self.db, self.sync_state, app, source, summary) {
+            ParitySyncExecutionOutcome::Complete(_) => {
+                if self
+                    .sync_state
+                    .clear_remote_auth_pause_if_current(self.auth_attempt)
+                {
+                    Ok(result)
+                } else {
+                    Err("REMOTE_AUTH_PAUSED".to_string())
+                }
+            }
+            ParitySyncExecutionOutcome::Partial(_, error) => Err(error.to_string()),
+            ParitySyncExecutionOutcome::Paused(_) => Err("REMOTE_AUTH_PAUSED".to_string()),
+            ParitySyncExecutionOutcome::Reset(_) => Err("TERMINAL_AUTH_RESET".to_string()),
+            ParitySyncExecutionOutcome::Failed(error) => Err(error.to_string()),
+        }
+    }
+
+    fn endpoint(&self) -> (&str, &str) {
+        (self.admin_url.as_str(), self.api_key.as_str())
+    }
+}
+
+fn bounded_renderer_item_error(error: String) -> String {
+    match error.as_str() {
+        "PARITY_ITEM_ID_INVALID"
+        | "REPAIR_TYPED_CONFLICT_REQUIRED"
+        | "REPAIR_SETTLEMENT_ROUTE_REQUIRED" => error,
+        _ => "PARITY_SYNC_FAILED".to_string(),
+    }
+}
+
+pub(crate) async fn guarded_renderer_retry_item(
+    db: &DbState,
+    sync_state: &SyncState,
+    app: &impl TerminalEventSink,
+    cancellation: &tokio_util::sync::CancellationToken,
+    source: &'static str,
+    item_id: &str,
+) -> Result<sync_queue::SyncResult, String> {
+    RendererParityExecutionContext::new(db, sync_state, cancellation)
+        .await?
+        .process_item(app, source, item_id)
+        .await
+}
+
+pub(crate) async fn guarded_renderer_retry_module(
+    db: &DbState,
+    sync_state: &SyncState,
+    app: &impl TerminalEventSink,
+    cancellation: &tokio_util::sync::CancellationToken,
+    source: &'static str,
+    module_type: &str,
+    limit: usize,
+) -> Result<Vec<sync_queue::SyncResult>, String> {
+    let context = RendererParityExecutionContext::new(db, sync_state, cancellation).await?;
+    let item_ids = context.retryable_module_item_ids(module_type, limit)?;
+    let mut results = Vec::with_capacity(item_ids.len());
+    for item_id in item_ids {
+        results.push(context.process_item(app, source, &item_id).await?);
+    }
+    Ok(results)
+}
+
+pub(crate) async fn guarded_renderer_local_mutation<T>(
+    db: &DbState,
+    sync_state: &SyncState,
+    cancellation: &tokio_util::sync::CancellationToken,
+    mutation: impl FnOnce(&Connection) -> Result<T, String>,
+) -> Result<T, String> {
+    RendererParityExecutionContext::new(db, sync_state, cancellation)
+        .await?
+        .run_local_step(mutation)
+}
+
+/// Shared boundary for every renderer-triggered parity replay.
+///
+/// Credentials are read from the canonical keyring only while the initial
+/// terminal-binding lease is held. The queue then reacquires a generation-
+/// checked lease before every mutating prepass and item claim, holding it
+/// through HTTP and the authoritative acknowledgement. Only the queue's
+/// bounded aggregate/error projection can leave this function.
+pub(crate) async fn process_renderer_parity_queue_guarded(
+    db: &DbState,
+    sync_state: &SyncState,
+    app: &impl TerminalEventSink,
+    cancellation: &tokio_util::sync::CancellationToken,
+    source: &'static str,
+) -> Result<sync_queue::SyncResult, String> {
+    RendererParityExecutionContext::new(db, sync_state, cancellation)
+        .await?
+        .process_queue(app, source)
+        .await
 }
 
 /// Emit `sync:queue-capacity-warning` while the parity queue sits at or
@@ -4477,6 +5342,33 @@ pub async fn force_sync_until_closeout_stable(
     Ok(state)
 }
 
+fn local_order_is_repair_settlement(conn: &Connection, order_id: &str) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1
+             FROM orders
+             WHERE (id = ?1 OR supabase_id = ?1)
+               AND lower(trim(COALESCE(order_context, ''))) = 'repair_settlement'
+         )",
+        params![order_id],
+        |row| row.get(0),
+    )
+    .map_err(|error| format!("check repair settlement order context: {error}"))
+}
+
+fn ensure_generic_order_recovery_allowed(conn: &Connection, order_id: &str) -> Result<(), String> {
+    if local_order_is_repair_settlement(conn, order_id)? {
+        return Err(REPAIR_SETTLEMENT_ROUTE_REQUIRED.to_string());
+    }
+    Ok(())
+}
+
+fn remote_order_is_repair_settlement(remote_order: &Value) -> bool {
+    str_any(remote_order, &["order_context", "orderContext"])
+        .map(|context| context.trim().eq_ignore_ascii_case("repair_settlement"))
+        .unwrap_or(false)
+}
+
 /// Remove unsupported order delete operations from the sync queue.
 ///
 /// Electron parity keeps deletes local; `/api/pos/orders/sync` only supports
@@ -4484,7 +5376,15 @@ pub async fn force_sync_until_closeout_stable(
 fn cleanup_unsupported_order_delete_ops(db: &DbState) -> Result<usize, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     conn.execute(
-        "DELETE FROM sync_queue WHERE entity_type = 'order' AND operation = 'delete'",
+        "DELETE FROM sync_queue
+         WHERE entity_type = 'order'
+           AND operation = 'delete'
+           AND NOT EXISTS (
+             SELECT 1
+             FROM orders
+             WHERE orders.id = sync_queue.entity_id
+               AND lower(trim(COALESCE(orders.order_context, ''))) = 'repair_settlement'
+           )",
         [],
     )
     .map_err(|e| format!("cleanup order delete ops: {e}"))
@@ -4502,6 +5402,12 @@ pub(crate) fn requeue_failed_order_validation_rows(db: &DbState) -> Result<usize
              updated_at = datetime('now')
          WHERE entity_type = 'order'
            AND status = 'failed'
+           AND NOT EXISTS (
+             SELECT 1
+             FROM orders
+             WHERE orders.id = sync_queue.entity_id
+               AND lower(trim(COALESCE(orders.order_context, ''))) = 'repair_settlement'
+           )
            AND last_error IS NOT NULL
            AND (
              lower(last_error) LIKE '%validation failed%'
@@ -4537,7 +5443,9 @@ pub(crate) struct OrderUpdateReplayRepairStats {
 }
 
 fn is_malformed_admin_url_failure_sql() -> &'static str {
-    "status IN ('failed', 'conflict')
+    "COALESCE(module_type, '') <> 'repairs'
+       AND table_name NOT IN ('repairs', 'repair_attachments')
+       AND status IN ('failed', 'conflict')
        AND error_message IS NOT NULL
        AND lower(error_message) LIKE '%error sending request for url (https://https/%'"
 }
@@ -4560,7 +5468,14 @@ fn requeue_malformed_admin_url_failures(conn: &Connection) -> Result<usize, Stri
 }
 
 fn is_failed_order_insert_parent_blocker_sql() -> &'static str {
-    "table_name = 'orders'
+    "COALESCE(module_type, '') <> 'repairs'
+       AND table_name NOT IN ('repairs', 'repair_attachments')
+       AND table_name = 'orders'
+       AND NOT EXISTS (
+         SELECT 1 FROM orders
+         WHERE orders.id = record_id
+           AND lower(trim(COALESCE(orders.order_context, ''))) = 'repair_settlement'
+       )
        AND upper(operation) = 'INSERT'
        AND status IN ('failed', 'conflict')
        AND error_message IS NOT NULL
@@ -4639,7 +5554,14 @@ fn is_failed_order_insert_parent_blocker_sql() -> &'static str {
 }
 
 fn is_order_update_replay_blocker_sql() -> &'static str {
-    "table_name = 'orders'
+    "COALESCE(module_type, '') <> 'repairs'
+       AND table_name NOT IN ('repairs', 'repair_attachments')
+       AND table_name = 'orders'
+       AND NOT EXISTS (
+         SELECT 1 FROM orders
+         WHERE orders.id = record_id
+           AND lower(trim(COALESCE(orders.order_context, ''))) = 'repair_settlement'
+       )
        AND upper(operation) = 'UPDATE'
        AND status IN ('pending', 'processing', 'failed', 'conflict')
        AND error_message IS NOT NULL
@@ -4651,7 +5573,14 @@ fn is_order_update_replay_blocker_sql() -> &'static str {
 }
 
 fn is_order_update_parent_wait_sql() -> &'static str {
-    "table_name = 'orders'
+    "COALESCE(module_type, '') <> 'repairs'
+       AND table_name NOT IN ('repairs', 'repair_attachments')
+       AND table_name = 'orders'
+       AND NOT EXISTS (
+         SELECT 1 FROM orders
+         WHERE orders.id = record_id
+           AND lower(trim(COALESCE(orders.order_context, ''))) = 'repair_settlement'
+       )
        AND upper(operation) = 'UPDATE'
        AND status IN ('pending', 'processing', 'failed', 'conflict')
        AND error_message IS NOT NULL
@@ -4824,6 +5753,13 @@ fn minimize_item_order_update_replay_blockers(conn: &Connection) -> Result<usize
              retry_delay_ms = 1000,
              claim_generation = claim_generation + 1
          WHERE table_name = 'orders'
+           AND COALESCE(module_type, '') <> 'repairs'
+           AND table_name NOT IN ('repairs', 'repair_attachments')
+           AND NOT EXISTS (
+             SELECT 1 FROM orders
+             WHERE orders.id = parity_sync_queue.record_id
+               AND lower(trim(COALESCE(orders.order_context, ''))) = 'repair_settlement'
+           )
            AND upper(operation) = 'UPDATE'
            AND status IN ('pending', 'processing', 'failed', 'conflict')
            AND error_message IS NOT NULL
@@ -4897,6 +5833,8 @@ fn requeue_missing_parent_order_insert_rows(conn: &Connection) -> Result<usize, 
                     organization_id
              FROM parity_sync_queue
              WHERE table_name = 'payments'
+               AND COALESCE(module_type, '') <> 'repairs'
+               AND table_name NOT IN ('repairs', 'repair_attachments')
                AND upper(operation) = 'INSERT'
                AND status IN ('pending', 'processing', 'failed', 'conflict')
                AND error_message IS NOT NULL
@@ -4911,6 +5849,8 @@ fn requeue_missing_parent_order_insert_rows(conn: &Connection) -> Result<usize, 
                     organization_id
              FROM parity_sync_queue
              WHERE table_name = 'restaurant_table_sessions'
+               AND COALESCE(module_type, '') <> 'repairs'
+               AND table_name NOT IN ('repairs', 'repair_attachments')
                AND upper(operation) = 'INSERT'
                AND status IN ('pending', 'processing', 'failed', 'conflict')
                AND error_message IS NOT NULL
@@ -4919,10 +5859,13 @@ fn requeue_missing_parent_order_insert_rows(conn: &Connection) -> Result<usize, 
          JOIN orders ON orders.id = waiting.record_id
          WHERE waiting.record_id IS NOT NULL
            AND NULLIF(TRIM(COALESCE(orders.supabase_id, '')), '') IS NULL
+           AND lower(trim(COALESCE(orders.order_context, ''))) <> 'repair_settlement'
            AND NOT EXISTS (
              SELECT 1
              FROM parity_sync_queue parent
              WHERE parent.table_name = 'orders'
+               AND COALESCE(parent.module_type, '') <> 'repairs'
+               AND parent.table_name NOT IN ('repairs', 'repair_attachments')
                AND upper(parent.operation) = 'INSERT'
                AND parent.record_id = waiting.record_id
                AND parent.status IN ('pending', 'processing', 'failed', 'conflict')
@@ -5082,6 +6025,8 @@ fn count_order_update_parent_wait_blockers(
              SELECT 1
              FROM parity_sync_queue parent
              WHERE parent.table_name = 'orders'
+               AND COALESCE(parent.module_type, '') <> 'repairs'
+               AND parent.table_name NOT IN ('repairs', 'repair_attachments')
                AND upper(parent.operation) = 'INSERT'
                AND parent.record_id = child.record_id
                AND parent.status IN ('pending', 'processing')
@@ -5157,6 +6102,8 @@ fn requeue_resolved_table_session_parent_wait_rows(conn: &Connection) -> Result<
              priority = CASE WHEN priority < 5 THEN 5 ELSE priority END,
              claim_generation = claim_generation + 1
          WHERE table_name = 'restaurant_table_sessions'
+           AND COALESCE(module_type, '') <> 'repairs'
+           AND table_name NOT IN ('repairs', 'repair_attachments')
            AND upper(operation) = 'INSERT'
            AND status IN ('pending', 'failed', 'conflict')
            AND (
@@ -5194,6 +6141,8 @@ fn force_requeue_settled_table_session_close_rows(conn: &Connection) -> Result<u
              retry_delay_ms = 1000,
              claim_generation = claim_generation + 1
          WHERE table_name = 'restaurant_table_sessions'
+           AND COALESCE(module_type, '') <> 'repairs'
+           AND table_name NOT IN ('repairs', 'repair_attachments')
            AND upper(operation) = 'UPDATE'
            AND status IN ('pending', 'processing', 'failed', 'conflict')
            AND error_message IS NOT NULL
@@ -5315,7 +6264,9 @@ fn requeue_order_update_parent_wait_rows_with_remote_order(
                      next_retry_at = NULL,
                      retry_delay_ms = 1000,
                      claim_generation = claim_generation + 1
-                 WHERE id = ?2",
+                 WHERE id = ?2
+                   AND COALESCE(module_type, '') <> 'repairs'
+                   AND table_name NOT IN ('repairs', 'repair_attachments')",
                 params![payload.to_string(), queue_id],
             )
             .map_err(|e| format!("requeue parent-wait order row with remote identity: {e}"))?;
@@ -5441,6 +6392,8 @@ fn quarantine_stale_order_update_parent_wait_rows(conn: &Connection) -> Result<u
             .execute(
                 "DELETE FROM parity_sync_queue
                  WHERE id = ?1
+                   AND COALESCE(module_type, '') <> 'repairs'
+                   AND table_name NOT IN ('repairs', 'repair_attachments')
                    AND NOT EXISTS (
                      SELECT 1
                      FROM orders
@@ -5467,10 +6420,10 @@ fn quarantine_stale_order_update_parent_wait_rows(conn: &Connection) -> Result<u
 
 pub(crate) async fn repair_order_update_parent_wait_blockers(
     db: &DbState,
-    admin_url: &str,
-    api_key: &str,
+    context: &RendererParityExecutionContext<'_>,
 ) -> Result<(usize, usize, usize), String> {
     let requeued_resolved_local_parents = {
+        let _lease = context.acquire_step_lease()?;
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         requeue_resolved_order_update_parent_wait_rows(&conn)?
     };
@@ -5483,6 +6436,8 @@ pub(crate) async fn repair_order_update_parent_wait_blockers(
     let mut repaired = 0usize;
     let mut requeued_from_remote_payload = 0usize;
     for record_id in record_ids {
+        let lease = context.acquire_step_lease()?;
+        let (admin_url, api_key) = context.endpoint();
         match resolve_remote_order_for_local_order(db, admin_url, api_key, record_id.as_str()).await
         {
             Ok(Some((_remote_order_id, remote_order))) => {
@@ -5498,23 +6453,22 @@ pub(crate) async fn repair_order_update_parent_wait_blockers(
                 }
             }
             Ok(None) => {}
-            Err(error) => {
-                warn!(
-                    order_id = %record_id,
-                    error = %error,
-                    "Order update parent wait repair could not attach remote order identity"
-                );
+            Err(_error) => {
+                warn!("Order update parent wait repair could not attach remote order identity");
             }
         }
+        drop(lease);
     }
 
     let requeued = {
+        let _lease = context.acquire_step_lease()?;
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         requeued_resolved_local_parents
             + requeued_from_remote_payload
             + requeue_resolved_order_update_parent_wait_rows(&conn)?
     };
     let quarantined = {
+        let _lease = context.acquire_step_lease()?;
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         quarantine_stale_order_update_parent_wait_rows(&conn)?
     };
@@ -5524,34 +6478,47 @@ pub(crate) async fn repair_order_update_parent_wait_blockers(
 
 pub(crate) async fn repair_order_update_replay_blockers(
     db: &DbState,
-    admin_url: &str,
-    api_key: &str,
+    sync_state: &SyncState,
+    app: &impl TerminalEventSink,
+    cancellation: &tokio_util::sync::CancellationToken,
 ) -> Result<OrderUpdateReplayRepairStats, String> {
+    let context = RendererParityExecutionContext::new(db, sync_state, cancellation).await?;
     // v1.4.60 could persist a scheme-only admin URL as `https:`. The queue
     // then built `https://https/...`, so these requests provably never reached
     // any backend. Replaying only that exact failure signature is safe and is
     // required before parent-order recovery can see the original INSERT rows.
     let requeued_malformed_admin_url_failures = {
+        let _lease = context.acquire_step_lease()?;
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         requeue_malformed_admin_url_failures(&conn)?
     };
     let malformed_admin_url_pass = if requeued_malformed_admin_url_failures > 0 {
-        Some(sync_queue::process_queue(&db.conn, admin_url, api_key).await?)
+        Some(
+            context
+                .process_queue(app, "repair_order_recovery:malformed_admin_url")
+                .await?,
+        )
     } else {
         None
     };
     let requeued_parent_order_inserts = {
+        let _lease = context.acquire_step_lease()?;
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         requeue_or_recreate_parent_order_inserts(&conn)?
     };
     let parent_insert_pass = if requeued_parent_order_inserts > 0 {
-        Some(sync_queue::process_queue(&db.conn, admin_url, api_key).await?)
+        Some(
+            context
+                .process_queue(app, "repair_order_recovery:parent_insert")
+                .await?,
+        )
     } else {
         None
     };
     let (repaired_parent_orders, requeued_parent_wait_orders, quarantined_stale_parent_wait_orders) =
-        repair_order_update_parent_wait_blockers(db, admin_url, api_key).await?;
+        repair_order_update_parent_wait_blockers(db, &context).await?;
     let minimized_item_update_replays = {
+        let _lease = context.acquire_step_lease()?;
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         minimize_item_order_update_replay_blockers(&conn)?
     };
@@ -5561,20 +6528,37 @@ pub(crate) async fn repair_order_update_replay_blockers(
             "Minimized item order update replay blockers for admin compatibility"
         );
     }
-    let requeued_orders = minimized_item_update_replays + requeue_order_update_replay_blockers(db)?;
-    let first_pass = sync_queue::process_queue(&db.conn, admin_url, api_key).await?;
-    let promoted_payments = reconcile_deferred_payments(db)?;
+    let requeued_orders = {
+        let _lease = context.acquire_step_lease()?;
+        minimized_item_update_replays + requeue_order_update_replay_blockers(db)?
+    };
+    let first_pass = context
+        .process_queue(app, "repair_order_recovery:update")
+        .await?;
+    let promoted_payments = {
+        let _lease = context.acquire_step_lease()?;
+        reconcile_deferred_payments(db)?
+    };
     let second_pass = if promoted_payments > 0 {
-        Some(sync_queue::process_queue(&db.conn, admin_url, api_key).await?)
+        Some(
+            context
+                .process_queue(app, "repair_order_recovery:payment")
+                .await?,
+        )
     } else {
         None
     };
     let forced_table_session_closes = {
+        let _lease = context.acquire_step_lease()?;
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         force_requeue_settled_table_session_close_rows(&conn)?
     };
     let table_session_pass = if forced_table_session_closes > 0 {
-        Some(sync_queue::process_queue(&db.conn, admin_url, api_key).await?)
+        Some(
+            context
+                .process_queue(app, "repair_order_recovery:table_session")
+                .await?,
+        )
     } else {
         None
     };
@@ -5629,6 +6613,31 @@ fn prune_old_sync_failures(db: &DbState) -> Result<usize, String> {
     conn.execute(
         "DELETE FROM sync_queue
          WHERE status = 'failed'
+           AND NOT (
+             (entity_type = 'order' AND EXISTS (
+               SELECT 1 FROM orders
+               WHERE orders.id = sync_queue.entity_id
+                 AND lower(trim(COALESCE(orders.order_context, ''))) = 'repair_settlement'
+             ))
+             OR (entity_type = 'payment' AND EXISTS (
+               SELECT 1
+               FROM order_payments
+               JOIN orders ON orders.id = order_payments.order_id
+               WHERE order_payments.id = sync_queue.entity_id
+                 AND lower(trim(COALESCE(orders.order_context, ''))) = 'repair_settlement'
+             ))
+             OR (entity_type = 'payment_adjustment' AND EXISTS (
+               SELECT 1
+               FROM payment_adjustments
+               LEFT JOIN order_payments ON order_payments.id = payment_adjustments.payment_id
+               JOIN orders ON orders.id = COALESCE(
+                 NULLIF(payment_adjustments.order_id, ''),
+                 NULLIF(order_payments.order_id, '')
+               )
+               WHERE payment_adjustments.id = sync_queue.entity_id
+                 AND lower(trim(COALESCE(orders.order_context, ''))) = 'repair_settlement'
+             ))
+           )
            AND updated_at < datetime('now', ?1)",
         params![format!("-{SYNC_FAILURE_MAX_AGE_DAYS} days")],
     )
@@ -5969,6 +6978,8 @@ fn cleanup_order_update_queue_rows(
              WHERE sq.entity_type = 'order'
                AND sq.operation = 'update'
                AND (?1 IS NULL OR sq.entity_id = ?1)
+               AND (o.id IS NULL
+                    OR lower(trim(COALESCE(o.order_context, ''))) <> 'repair_settlement')
                AND (
                     (sq.synced_at IS NOT NULL AND sq.status != 'synced')
                     OR sq.status IN ('failed', 'pending', 'in_progress')
@@ -7248,6 +8259,10 @@ fn materialize_remote_order(
     conn: &rusqlite::Connection,
     remote_order: &Value,
 ) -> Result<Option<String>, String> {
+    if remote_order_is_repair_settlement(remote_order) {
+        return Ok(None);
+    }
+
     let remote_id = match remote_order.get("id").and_then(Value::as_str) {
         Some(value) if !value.trim().is_empty() => value.trim().to_string(),
         _ => return Ok(None),
@@ -7262,6 +8277,9 @@ fn materialize_remote_order(
     }
 
     if let Some(existing_local_id) = resolve_local_order_id(conn, remote_order) {
+        if local_order_is_repair_settlement(conn, &existing_local_id)? {
+            return Ok(None);
+        }
         return Ok(Some(existing_local_id));
     }
 
@@ -7273,6 +8291,9 @@ fn materialize_remote_order(
         )
         .ok();
     if let Some(existing_local_id) = existing_local_id {
+        if local_order_is_repair_settlement(conn, &existing_local_id)? {
+            return Ok(None);
+        }
         return Ok(Some(existing_local_id));
     }
 
@@ -7646,6 +8667,23 @@ fn mark_payment_queue_row_synced(
     crate::sync_queue::clear_unsynced_items(conn, "order_payments", payment_id)?;
 
     Ok(())
+}
+
+pub(crate) fn clear_non_repair_unsynced_parity_items(
+    conn: &Connection,
+    table_name: &str,
+    record_id: &str,
+) -> Result<usize, String> {
+    conn.execute(
+        "DELETE FROM parity_sync_queue
+         WHERE table_name = ?1
+           AND record_id = ?2
+           AND status IN ('pending', 'failed', 'conflict')
+           AND COALESCE(module_type, '') <> 'repairs'
+           AND table_name NOT IN ('repairs', 'repair_attachments')",
+        params![table_name, record_id],
+    )
+    .map_err(|e| format!("clear non-repair parity items: {e}"))
 }
 
 fn canonical_financial_local_state(queue_status: &str) -> (&'static str, &'static str) {
@@ -8221,9 +9259,11 @@ fn rebind_waiting_adjustments_to_canonical_duplicate_payments(
             "SELECT pa.id, pa.payment_id
              FROM payment_adjustments pa
              JOIN order_payments op ON op.id = pa.payment_id
+             JOIN orders o ON o.id = COALESCE(NULLIF(pa.order_id, ''), op.order_id)
              WHERE pa.sync_state = 'waiting_parent'
                AND op.sync_state = 'applied'
-               AND NULLIF(TRIM(COALESCE(op.remote_payment_id, '')), '') IS NULL",
+               AND NULLIF(TRIM(COALESCE(op.remote_payment_id, '')), '') IS NULL
+               AND lower(trim(COALESCE(o.order_context, ''))) <> 'repair_settlement'",
         )
         .map_err(|e| format!("prepare waiting adjustment duplicate parent scan: {e}"))?;
 
@@ -8376,9 +9416,11 @@ fn resolve_duplicate_payment_total_conflict_with_conn(
 ) -> Result<Option<String>, String> {
     let order_id: Option<String> = conn
         .query_row(
-            "SELECT order_id
-             FROM order_payments
-             WHERE id = ?1
+            "SELECT op.order_id
+             FROM order_payments op
+             JOIN orders o ON o.id = op.order_id
+             WHERE op.id = ?1
+               AND lower(trim(COALESCE(o.order_context, ''))) <> 'repair_settlement'
              LIMIT 1",
             params![payment_id],
             |row| row.get(0),
@@ -8474,19 +9516,21 @@ fn load_local_payment_total_conflict_context(
 ) -> Result<Option<LocalPaymentTotalConflictContext>, String> {
     conn.query_row(
         "SELECT
-             order_id,
-             amount,
-             COALESCE(sync_status, ''),
-             COALESCE(sync_state, ''),
-             NULLIF(TRIM(COALESCE(remote_payment_id, '')), ''),
+             op.order_id,
+             op.amount,
+             COALESCE(op.sync_status, ''),
+             COALESCE(op.sync_state, ''),
+             NULLIF(TRIM(COALESCE(op.remote_payment_id, '')), ''),
              (
                  SELECT COUNT(*)
                  FROM payment_adjustments
                  WHERE payment_id = op.id
              )
          FROM order_payments op
+         JOIN orders o ON o.id = op.order_id
          WHERE op.id = ?1
            AND op.status = 'completed'
+           AND lower(trim(COALESCE(o.order_context, ''))) <> 'repair_settlement'
          LIMIT 1",
         params![payment_id],
         |row| {
@@ -9113,6 +10157,7 @@ fn recompute_local_order_payment_snapshot(
     order_id: &str,
     now: &str,
 ) -> Result<(), String> {
+    ensure_generic_order_recovery_allowed(conn, order_id)?;
     let payment_context: Option<(String, String)> = conn
         .query_row(
             "SELECT
@@ -9182,6 +10227,7 @@ fn hydrate_local_payment_from_remote(
     created_at: &str,
     updated_at: &str,
 ) -> Result<usize, String> {
+    ensure_generic_order_recovery_allowed(conn, local_order_id)?;
     // W4c dual-write: the remote-payment-mirror UPDATE writes a new
     // `amount` from the remote snapshot — its `amount_cents` sibling
     // must follow, otherwise the COALESCE-with-real read shim shadows
@@ -9250,7 +10296,11 @@ fn sync_remote_payment_into_local_with_context(
 
     let local_order_id: Option<String> = conn
         .query_row(
-            "SELECT id FROM orders WHERE supabase_id = ?1 OR id = ?1 LIMIT 1",
+            "SELECT id
+             FROM orders
+             WHERE (supabase_id = ?1 OR id = ?1)
+               AND lower(trim(COALESCE(order_context, ''))) <> 'repair_settlement'
+             LIMIT 1",
             params![remote_order_id],
             |row| row.get(0),
         )
@@ -9328,8 +10378,9 @@ fn sync_remote_payment_into_local_with_context(
             "SELECT id
              FROM order_payments
              WHERE remote_payment_id = ?1
+               AND order_id = ?2
              LIMIT 1",
-            params![remote_payment_id],
+            params![remote_payment_id, local_order_id],
             |row| row.get(0),
         )
         .optional()
@@ -9598,8 +10649,10 @@ fn collect_applied_payment_queue_reconciliation_candidates(
     let base_sql = "SELECT DISTINCT op.id
          FROM sync_queue sq
          JOIN order_payments op ON op.id = sq.entity_id
+         JOIN orders o ON o.id = op.order_id
          WHERE sq.entity_type IN ('payment', 'order_payments')
            AND sq.status != 'synced'
+           AND lower(trim(COALESCE(o.order_context, ''))) <> 'repair_settlement'
            AND (
                 COALESCE(op.remote_payment_id, '') != ''
                 OR COALESCE(op.sync_state, '') = 'applied'
@@ -9703,6 +10756,9 @@ fn maybe_reconstruct_paid_remote_order_payment(
     conn: &Connection,
     remote_order: &Value,
 ) -> Result<usize, String> {
+    if remote_order_is_repair_settlement(remote_order) {
+        return Ok(0);
+    }
     let Some(remote_order_id) = remote_order
         .get("id")
         .and_then(Value::as_str)
@@ -9739,7 +10795,11 @@ fn maybe_reconstruct_paid_remote_order_payment(
 
     let local_order_id: Option<String> = conn
         .query_row(
-            "SELECT id FROM orders WHERE supabase_id = ?1 OR id = ?1 LIMIT 1",
+            "SELECT id
+             FROM orders
+             WHERE (supabase_id = ?1 OR id = ?1)
+               AND lower(trim(COALESCE(order_context, ''))) <> 'repair_settlement'
+             LIMIT 1",
             params![remote_order_id],
             |row| row.get(0),
         )
@@ -9855,9 +10915,18 @@ pub(crate) fn has_outstanding_local_order_queue(conn: &Connection, local_id: &st
         "SELECT
             EXISTS(
                 SELECT 1
+                FROM orders
+                WHERE id = ?1
+                  AND lower(trim(COALESCE(order_context, ''))) = 'repair_settlement'
+            )
+            OR
+            EXISTS(
+                SELECT 1
                 FROM parity_sync_queue
                 WHERE table_name = 'orders'
                   AND record_id = ?1
+                  AND COALESCE(module_type, '') <> 'repairs'
+                  AND table_name NOT IN ('repairs', 'repair_attachments')
                   AND status IN ('pending', 'processing', 'failed', 'conflict')
             )
             OR EXISTS(
@@ -9940,7 +11009,11 @@ async fn reconcile_remote_orders(
                 };
                 let local_id: Option<String> = conn
                     .query_row(
-                        "SELECT id FROM orders WHERE supabase_id = ?1 OR id = ?1 LIMIT 1",
+                        "SELECT id
+                         FROM orders
+                         WHERE (supabase_id = ?1 OR id = ?1)
+                           AND lower(trim(COALESCE(order_context, ''))) <> 'repair_settlement'
+                         LIMIT 1",
                         params![remote_id],
                         |row| row.get(0),
                     )
@@ -9985,12 +11058,20 @@ async fn reconcile_remote_orders(
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
             for remote_order in orders {
+                if remote_order_is_repair_settlement(&remote_order) {
+                    continue;
+                }
                 let remote_id = match remote_order.get("id").and_then(Value::as_str) {
                     Some(v) if !v.trim().is_empty() => v.to_string(),
                     _ => continue,
                 };
                 let local_id = match resolve_local_order_id(&conn, &remote_order) {
-                    Some(v) => v,
+                    Some(v) => {
+                        if local_order_is_repair_settlement(&conn, &v)? {
+                            continue;
+                        }
+                        v
+                    }
                     None => {
                         // Pre-Z-report filtering happens inside
                         // materialize_remote_order: it is status-aware (a still
@@ -10534,6 +11615,7 @@ fn load_local_order_remote_lookup(
              NULLIF(TRIM(COALESCE(updated_at, '')), '')
          FROM orders
          WHERE id = ?1
+           AND lower(trim(COALESCE(order_context, ''))) <> 'repair_settlement'
          LIMIT 1",
         params![local_order_id],
         |row| {
@@ -10832,6 +11914,7 @@ fn build_local_order_update_payload_for_lagged_snapshot(
     conn: &Connection,
     local_order_id: &str,
 ) -> Result<Value, String> {
+    ensure_generic_order_recovery_allowed(conn, local_order_id)?;
     conn.query_row(
         "SELECT
              COALESCE(status, 'pending'),
@@ -10919,6 +12002,7 @@ pub(crate) fn enqueue_local_order_update_after_lagged_snapshot(
     conn: &Connection,
     local_order_id: &str,
 ) -> Result<bool, String> {
+    ensure_generic_order_recovery_allowed(conn, local_order_id)?;
     if has_outstanding_local_order_queue(conn, local_order_id) {
         return Ok(false);
     }
@@ -10957,6 +12041,7 @@ pub(crate) fn force_requeue_local_order_update_after_lagged_snapshot(
     conn: &Connection,
     local_order_id: &str,
 ) -> Result<bool, String> {
+    ensure_generic_order_recovery_allowed(conn, local_order_id)?;
     let payload = build_local_order_update_payload_for_lagged_snapshot(conn, local_order_id)?;
     let refreshed = conn
         .execute(
@@ -10976,6 +12061,8 @@ pub(crate) fn force_requeue_local_order_update_after_lagged_snapshot(
                  claim_generation = claim_generation + 1
              WHERE table_name = 'orders'
                AND record_id = ?2
+               AND COALESCE(module_type, '') <> 'repairs'
+               AND table_name NOT IN ('repairs', 'repair_attachments')
                AND status IN ('pending', 'processing', 'failed', 'conflict')",
             params![payload.to_string(), local_order_id],
         )
@@ -11057,6 +12144,10 @@ fn attach_remote_order_identity_to_local_order(
     remote_order: &Value,
     now: &str,
 ) -> Result<Option<String>, String> {
+    ensure_generic_order_recovery_allowed(conn, local_order_id)?;
+    if remote_order_is_repair_settlement(remote_order) {
+        return Err(REPAIR_SETTLEMENT_ROUTE_REQUIRED.to_string());
+    }
     let Some(remote_order_id) = str_any(remote_order, &["id"]) else {
         return Ok(None);
     };
@@ -11081,6 +12172,10 @@ fn sync_remote_order_snapshot_into_local(
     remote_order: &Value,
     repaired_at: &str,
 ) -> Result<usize, String> {
+    ensure_generic_order_recovery_allowed(conn, local_order_id)?;
+    if remote_order_is_repair_settlement(remote_order) {
+        return Err(REPAIR_SETTLEMENT_ROUTE_REQUIRED.to_string());
+    }
     let remote_order_id = str_any(remote_order, &["id"]);
     if !remote_order_visible_to_current_terminal(conn, remote_order)? {
         debug!(
@@ -11388,6 +12483,9 @@ async fn resolve_remote_order_for_local_order(
 ) -> Result<Option<(String, Option<Value>)>, String> {
     let lookup = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        if local_order_is_repair_settlement(&conn, local_order_id)? {
+            return Ok(None);
+        }
         match load_local_order_remote_lookup(&conn, local_order_id)? {
             Some(lookup) => Some(lookup),
             None => load_order_update_parent_wait_lookup_from_queue(&conn, local_order_id)?,
@@ -11530,6 +12628,9 @@ async fn reconcile_remote_payments_for_local_order_with_context(
 ) -> Result<RemotePaymentReconciliationOutcome, String> {
     let lookup = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        if local_order_is_repair_settlement(&conn, local_order_id)? {
+            return Ok(RemotePaymentReconciliationOutcome::default());
+        }
         load_local_order_remote_lookup(&conn, local_order_id)?
     };
     let remote_order_id_hint = lookup
@@ -11717,8 +12818,10 @@ fn collect_waiting_adjustment_order_ids_missing_canonical_remote_payment_id(
                     op.remote_payment_id
              FROM payment_adjustments pa
              JOIN order_payments op ON op.id = pa.payment_id
+             JOIN orders o ON o.id = COALESCE(NULLIF(pa.order_id, ''), op.order_id)
              WHERE pa.sync_state = 'waiting_parent'
-               AND op.sync_state = 'applied'",
+               AND op.sync_state = 'applied'
+               AND lower(trim(COALESCE(o.order_context, ''))) <> 'repair_settlement'",
         )
         .map_err(|e| format!("prepare waiting adjustment repair candidates: {e}"))?;
 
@@ -11941,6 +13044,13 @@ async fn repair_local_payment_mirrors_for_orders_with_auth_context(
             continue;
         }
 
+        {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            if local_order_is_repair_settlement(&conn, normalized)? {
+                continue;
+            }
+        }
+
         let outcome = reconcile_remote_payments_for_local_order_with_context(
             db, admin_url, api_key, normalized,
         )
@@ -12001,9 +13111,11 @@ async fn recover_payment_total_conflicts(
                 "SELECT op.id, op.order_id, COALESCE(MAX(sq.last_error), 'Payment exceeds order total')
                  FROM sync_queue sq
                  JOIN order_payments op ON op.id = sq.entity_id
+                 JOIN orders o ON o.id = op.order_id
                  WHERE sq.entity_type IN ('payment', 'order_payments')
                    AND sq.status != 'synced'
                    AND LOWER(COALESCE(sq.last_error, '')) LIKE '%payment exceeds order total%'
+                   AND lower(trim(COALESCE(o.order_context, ''))) <> 'repair_settlement'
                  GROUP BY op.id, op.order_id",
             )
             .map_err(|e| format!("prepare payment conflict recovery query: {e}"))?;
@@ -12618,6 +13730,32 @@ fn claim_pending_sync_items(conn: &Connection, limit: usize) -> Result<Vec<SyncI
                  FROM sync_queue
                  WHERE status = 'pending'
                    AND retry_count < max_retries
+                   AND NOT (
+                     (entity_type = 'order' AND EXISTS (
+                       SELECT 1 FROM orders
+                       WHERE orders.id = sync_queue.entity_id
+                         AND lower(trim(COALESCE(orders.order_context, ''))) = 'repair_settlement'
+                     ))
+                     OR (entity_type = 'payment' AND EXISTS (
+                       SELECT 1
+                       FROM order_payments
+                       JOIN orders ON orders.id = order_payments.order_id
+                       WHERE order_payments.id = sync_queue.entity_id
+                         AND lower(trim(COALESCE(orders.order_context, ''))) = 'repair_settlement'
+                     ))
+                     OR (entity_type = 'payment_adjustment' AND EXISTS (
+                       SELECT 1
+                       FROM payment_adjustments
+                       LEFT JOIN order_payments
+                         ON order_payments.id = payment_adjustments.payment_id
+                       JOIN orders ON orders.id = COALESCE(
+                         NULLIF(payment_adjustments.order_id, ''),
+                         NULLIF(order_payments.order_id, '')
+                       )
+                       WHERE payment_adjustments.id = sync_queue.entity_id
+                         AND lower(trim(COALESCE(orders.order_context, ''))) = 'repair_settlement'
+                     ))
+                   )
                    AND (
                         next_retry_at IS NULL
                         OR julianday(next_retry_at) <= julianday('now')
@@ -17157,6 +18295,7 @@ fn get_sync_status_for_event(db: &DbState, sync_state: &SyncState, is_online: bo
         financial_stats,
         last_queue_failure,
         historical_z_report_conflicts,
+        parity_status,
     ) = match db.conn.lock() {
         Ok(conn) => {
             let _ = cleanup_order_update_queue_rows(&conn, None);
@@ -17226,6 +18365,7 @@ fn get_sync_status_for_event(db: &DbState, sync_state: &SyncState, is_online: bo
             let financial = collect_financial_sync_stats(&conn);
             let last_failure = extract_last_queue_failure_snapshot(&conn).map(|s| s.to_json());
             let historical_conflicts = count_historical_z_report_conflicts(&conn);
+            let parity = sync_queue::get_status(&conn).ok();
             (
                 p,
                 q,
@@ -17236,13 +18376,52 @@ fn get_sync_status_for_event(db: &DbState, sync_state: &SyncState, is_online: bo
                 financial,
                 last_failure,
                 historical_conflicts,
+                parity,
             )
         }
-        Err(_) => (0, 0, 0, 0, 0, None, FinancialSyncStats::default(), None, 0),
+        Err(_) => (
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            FinancialSyncStats::default(),
+            None,
+            0,
+            None,
+        ),
     };
 
     let last = sync_state.last_sync.lock().ok().and_then(|g| g.clone());
-    let pending_total = pending + queued_remote;
+    let parity_pending = parity_status
+        .as_ref()
+        .map(|status| status.pending + status.in_progress)
+        .unwrap_or(0);
+    let parity_errors = parity_status
+        .as_ref()
+        .map(|status| status.failed + status.conflicts)
+        .unwrap_or(1);
+    let parity_in_progress = parity_status
+        .as_ref()
+        .is_some_and(|status| status.in_progress > 0);
+    let pending_total = pending + queued_remote + parity_pending;
+    let error_total = errors + parity_errors;
+    let parity_status_value = parity_status
+        .and_then(|status| serde_json::to_value(status).ok())
+        .unwrap_or_else(|| {
+            serde_json::json!({
+                "total": 0,
+                "pending": 0,
+                "inProgress": 0,
+                "failed": 0,
+                "conflicts": 0,
+                "quarantined": 0,
+                "deadLettered": 0,
+                "oldestItemAge": null,
+                "statusAvailable": false,
+            })
+        });
     let remote_auth_pause = sync_state.remote_auth_snapshot();
     let mut payload = serde_json::json!({
         "isOnline": is_online,
@@ -17250,13 +18429,13 @@ fn get_sync_status_for_event(db: &DbState, sync_state: &SyncState, is_online: bo
         "lastSyncAt": last,
         "pendingItems": pending_total,
         "pendingChanges": pending_total,
-        "syncInProgress": in_progress > 0,
-        "error": if errors > 0 {
+        "syncInProgress": in_progress > 0 || parity_in_progress,
+        "error": if error_total > 0 {
             Value::String("sync_queue_failed_items".to_string())
         } else {
             Value::Null
         },
-        "syncErrors": errors,
+        "syncErrors": error_total,
         "queuedRemote": queued_remote,
         "backpressureDeferred": backpressure_deferred,
         "oldestNextRetryAt": oldest_next_retry_at,
@@ -17265,6 +18444,7 @@ fn get_sync_status_for_event(db: &DbState, sync_state: &SyncState, is_online: bo
         "pendingPaymentItems": financial_stats.pending_payment_items(),
         "failedPaymentItems": financial_stats.failed_payment_items(),
         "financialStats": financial_stats.to_json(),
+        "parityQueue": parity_status_value,
     });
 
     if let Some(map) = payload.as_object_mut() {
@@ -17338,7 +18518,8 @@ pub(crate) fn reconcile_deferred_payments(db: &DbState) -> Result<usize, String>
              JOIN orders o ON o.id = op.order_id
              WHERE op.sync_state = 'waiting_parent'
                AND o.supabase_id IS NOT NULL
-               AND o.supabase_id != ''",
+               AND o.supabase_id != ''
+               AND lower(trim(COALESCE(o.order_context, ''))) <> 'repair_settlement'",
         )
         .map_err(|e| e.to_string())?;
 
@@ -17393,6 +18574,8 @@ pub(crate) fn reconcile_deferred_payments(db: &DbState) -> Result<usize, String>
                      claim_generation = claim_generation + 1
                  WHERE table_name = 'payments'
                    AND record_id = ?1
+                   AND COALESCE(module_type, '') <> 'repairs'
+                   AND table_name NOT IN ('repairs', 'repair_attachments')
                    AND status IN ('pending', 'failed', 'conflict')
                    AND (
                      error_message IS NULL
@@ -18218,6 +19401,18 @@ pub(crate) fn requeue_failed_adjustment_missing_endpoint_rows(
                  updated_at = ?1
              WHERE entity_type = 'payment_adjustment'
                AND status = 'failed'
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM payment_adjustments
+                 LEFT JOIN order_payments
+                   ON order_payments.id = payment_adjustments.payment_id
+                 JOIN orders ON orders.id = COALESCE(
+                   NULLIF(payment_adjustments.order_id, ''),
+                   NULLIF(order_payments.order_id, '')
+                 )
+                 WHERE payment_adjustments.id = sync_queue.entity_id
+                   AND lower(trim(COALESCE(orders.order_context, ''))) = 'repair_settlement'
+               )
                AND lower(COALESCE(last_error, '')) LIKE '%/api/pos/payments/adjustments/sync%'
                AND (
                     lower(COALESCE(last_error, '')) LIKE '%404%'
@@ -18271,7 +19466,19 @@ pub(crate) fn requeue_failed_adjustment_legacy_validation_rows(
             "SELECT id, entity_id, last_error
              FROM sync_queue
              WHERE entity_type = 'payment_adjustment'
-               AND status = 'failed'",
+               AND status = 'failed'
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM payment_adjustments
+                 LEFT JOIN order_payments
+                   ON order_payments.id = payment_adjustments.payment_id
+                 JOIN orders ON orders.id = COALESCE(
+                   NULLIF(payment_adjustments.order_id, ''),
+                   NULLIF(order_payments.order_id, '')
+                 )
+                 WHERE payment_adjustments.id = sync_queue.entity_id
+                   AND lower(trim(COALESCE(orders.order_context, ''))) = 'repair_settlement'
+               )",
         )
         .map_err(|e| e.to_string())?;
 
@@ -18372,7 +19579,19 @@ pub(crate) async fn repair_orphaned_financial_queue_items(
                 "SELECT id, entity_id, payload, last_error
                  FROM sync_queue
                  WHERE entity_type = 'payment_adjustment'
-                   AND status = 'failed'",
+                   AND status = 'failed'
+                   AND NOT EXISTS (
+                     SELECT 1
+                     FROM payment_adjustments
+                     LEFT JOIN order_payments
+                       ON order_payments.id = payment_adjustments.payment_id
+                     JOIN orders ON orders.id = COALESCE(
+                       NULLIF(payment_adjustments.order_id, ''),
+                       NULLIF(order_payments.order_id, '')
+                     )
+                     WHERE payment_adjustments.id = sync_queue.entity_id
+                       AND lower(trim(COALESCE(orders.order_context, ''))) = 'repair_settlement'
+                   )",
             )
             .map_err(|e| format!("load orphaned financial queue rows: {e}"))?;
 
@@ -18591,6 +19810,8 @@ fn list_legacy_financial_parity_row_ids(
              FROM parity_sync_queue
              WHERE table_name = ?1
                AND record_id = ?2
+               AND COALESCE(module_type, '') <> 'repairs'
+               AND table_name NOT IN ('repairs', 'repair_attachments')
              ORDER BY datetime(created_at) ASC, id ASC",
         )
         .map_err(|e| format!("prepare legacy parity orphan lookup: {e}"))?;
@@ -18633,7 +19854,9 @@ fn remove_legacy_financial_parity_rows(
     conn.execute(
         "DELETE FROM parity_sync_queue
          WHERE table_name = ?1
-           AND record_id = ?2",
+           AND record_id = ?2
+           AND COALESCE(module_type, '') <> 'repairs'
+           AND table_name NOT IN ('repairs', 'repair_attachments')",
         params![table_name, record_id],
     )
     .map_err(|e| format!("delete legacy parity rows for {table_name}/{record_id}: {e}"))
@@ -18697,6 +19920,8 @@ pub(crate) fn clear_all_legacy_financial_parity_orphans(
             "SELECT id, table_name, record_id
              FROM parity_sync_queue
              WHERE table_name IN ('payments', 'payment_adjustments')
+               AND COALESCE(module_type, '') <> 'repairs'
+               AND table_name NOT IN ('repairs', 'repair_attachments')
              ORDER BY datetime(created_at) ASC, id ASC",
         )
         .map_err(|e| format!("prepare legacy parity orphan bulk lookup: {e}"))?;
@@ -18831,10 +20056,12 @@ pub(crate) fn reconcile_deferred_adjustments(db: &DbState) -> Result<usize, Stri
             "SELECT pa.id, pa.payment_id, op.remote_payment_id
              FROM payment_adjustments pa
              JOIN order_payments op ON op.id = pa.payment_id
+             JOIN orders o ON o.id = COALESCE(NULLIF(pa.order_id, ''), op.order_id)
              WHERE pa.sync_state = 'waiting_parent'
                AND op.sync_state = 'applied'
                AND op.remote_payment_id IS NOT NULL
-               AND TRIM(op.remote_payment_id) != ''",
+               AND TRIM(op.remote_payment_id) != ''
+               AND lower(trim(COALESCE(o.order_context, ''))) <> 'repair_settlement'",
         )
         .map_err(|e| e.to_string())?;
 
@@ -18952,7 +20179,7 @@ fn bool_field(v: &Value, key: &str) -> Option<bool> {
 mod tests {
     use super::*;
     use crate::db;
-    use rusqlite::{params, Connection};
+    use rusqlite::{params, types::ValueRef, Connection};
 
     #[test]
     fn realtime_platform_identity_accepts_the_server_platform_field() {
@@ -19012,6 +20239,853 @@ mod tests {
         DbState {
             conn: std::sync::Mutex::new(conn),
             db_path: std::path::PathBuf::from(":memory:"),
+        }
+    }
+
+    #[derive(Default)]
+    struct NoopTerminalEventSink;
+
+    impl TerminalEventSink for NoopTerminalEventSink {
+        fn emit_json(&self, _event: &str, _payload: serde_json::Value) {}
+    }
+
+    fn renderer_boundary_fingerprint(db: &DbState) -> String {
+        fn bytes(value: &[u8]) -> String {
+            value.iter().map(|byte| format!("{byte:02x}")).collect()
+        }
+        let conn = db.conn.lock().expect("lock renderer boundary db");
+        let mut output = String::new();
+        for table in [
+            "parity_sync_queue",
+            "orders",
+            "order_payments",
+            "payment_adjustments",
+            "conflict_audit_log",
+        ] {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+                    [table],
+                    |row| row.get(0),
+                )
+                .expect("inspect renderer boundary table");
+            output.push_str(table);
+            output.push(':');
+            if !exists {
+                output.push_str("<absent>\n");
+                continue;
+            }
+            let sql = format!("SELECT * FROM {table} ORDER BY rowid");
+            let mut statement = conn.prepare(&sql).expect("prepare full-row fingerprint");
+            let column_count = statement.column_count();
+            let rows = statement
+                .query_map([], |row| {
+                    let mut values = Vec::with_capacity(column_count);
+                    for index in 0..column_count {
+                        let encoded = match row.get_ref(index)? {
+                            ValueRef::Null => "n".to_string(),
+                            ValueRef::Integer(value) => format!("i:{value}"),
+                            ValueRef::Real(value) => format!("r:{:016x}", value.to_bits()),
+                            ValueRef::Text(value) => format!("t:{}", bytes(value)),
+                            ValueRef::Blob(value) => format!("b:{}", bytes(value)),
+                        };
+                        values.push(encoded);
+                    }
+                    Ok(values.join("|"))
+                })
+                .expect("query full-row fingerprint");
+            for row in rows {
+                output.push_str(&row.expect("read full-row fingerprint"));
+                output.push('\n');
+            }
+        }
+        output
+    }
+
+    fn enqueue_renderer_probe(db: &DbState, record_id: &str, priority: i64) {
+        let conn = db.conn.lock().expect("lock renderer probe db");
+        sync_queue::enqueue_payload_item(
+            &conn,
+            "customers",
+            record_id,
+            "INSERT",
+            &serde_json::json!({
+                "id": record_id,
+                "organization_id": "00000000-0000-4000-8000-000000000001",
+                "name": "renderer-boundary-probe"
+            }),
+            Some(priority),
+            Some("customers"),
+            None,
+            Some(1),
+        )
+        .expect("enqueue renderer boundary probe");
+    }
+
+    fn coherent_connection(api_key: &str, terminal_id: &str, admin_url: &str) -> String {
+        serde_json::json!({ "key": api_key, "tid": terminal_id, "url": admin_url }).to_string()
+    }
+
+    async fn run_parent_wait_recovery_with_context(
+        db: &DbState,
+        admin_url: &str,
+    ) -> Result<(usize, usize, usize), String> {
+        let _lifecycle = crate::repairs::isolate_lifecycle_for_test();
+        let _keyring = crate::tests::fake_keyring::install_seeded([
+            ("pos_api_key", "test-api-key"),
+            ("terminal_id", "terminal-parent-recovery"),
+            ("admin_dashboard_url", admin_url),
+        ]);
+        let sync_state = SyncState::new();
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let context = RendererParityExecutionContext::new(db, &sync_state, &cancellation).await?;
+        repair_order_update_parent_wait_blockers(db, &context).await
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn renderer_guard_rejects_cross_server_credential_tuple_without_http_or_mutation() {
+        let _lifecycle = crate::repairs::isolate_lifecycle_for_test();
+        let server_a = crate::tests::fake_http::MockServer::new(r#"{"success":true}"#);
+        let server_b = crate::tests::fake_http::MockServer::new(r#"{"success":true}"#);
+        let _keyring = crate::tests::fake_keyring::install_seeded([
+            (
+                "pos_api_key",
+                coherent_connection("PRIVATE_KEY_B", "terminal-b", &server_b.url),
+            ),
+            ("terminal_id", "terminal-a".to_string()),
+            ("admin_dashboard_url", server_a.url.clone()),
+        ]);
+        let db = test_db();
+        enqueue_renderer_probe(&db, "tuple-conflict", 100);
+        let before = renderer_boundary_fingerprint(&db);
+        let sync_state = SyncState::new();
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let events = NoopTerminalEventSink;
+
+        let error = process_renderer_parity_queue_guarded(
+            &db,
+            &sync_state,
+            &events,
+            &cancellation,
+            "test:renderer_tuple_conflict",
+        )
+        .await
+        .expect_err("mixed canonical tuple must fail closed");
+
+        assert_eq!(error, "PARITY_CREDENTIAL_TUPLE_CONFLICT");
+        assert_eq!(server_a.count(), 0, "old URL must receive no request");
+        assert_eq!(server_b.count(), 0, "new URL must receive no request");
+        assert_eq!(renderer_boundary_fingerprint(&db), before);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn renderer_context_accepts_coherent_plain_and_connection_string_tuples() {
+        let lifecycle = crate::repairs::isolate_lifecycle_for_test();
+        for connection_string in [false, true] {
+            lifecycle.reset();
+            let server = crate::tests::fake_http::MockServer::new(r#"{"success":true}"#);
+            let key = if connection_string {
+                coherent_connection("PRIVATE_KEY", "terminal-coherent", &server.url)
+            } else {
+                "PRIVATE_KEY".to_string()
+            };
+            let _keyring = crate::tests::fake_keyring::install_seeded([
+                ("pos_api_key", key),
+                ("terminal_id", "terminal-coherent".to_string()),
+                ("admin_dashboard_url", server.url.clone()),
+            ]);
+            let db = test_db();
+            set_terminal_setting(&db, "terminal_id", "terminal-coherent");
+            enqueue_renderer_probe(
+                &db,
+                if connection_string {
+                    "coherent-connection"
+                } else {
+                    "coherent-plain"
+                },
+                100,
+            );
+            let sync_state = SyncState::new();
+            let cancellation = tokio_util::sync::CancellationToken::new();
+            let events = NoopTerminalEventSink;
+
+            process_renderer_parity_queue_guarded(
+                &db,
+                &sync_state,
+                &events,
+                &cancellation,
+                "test:renderer_coherent_tuple",
+            )
+            .await
+            .expect("coherent renderer tuple is accepted");
+
+            assert_eq!(server.count(), 1);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn renderer_guard_strict_credential_read_failures_never_fallback_or_mutate() {
+        let lifecycle = crate::repairs::isolate_lifecycle_for_test();
+        for failed_key in ["pos_api_key", "terminal_id", "admin_dashboard_url"] {
+            lifecycle.reset();
+            let server = crate::tests::fake_http::MockServer::new(r#"{"success":true}"#);
+            let _keyring = crate::tests::fake_keyring::install_seeded([
+                (
+                    "pos_api_key",
+                    coherent_connection("PRIVATE_KEY", "terminal-canonical", &server.url),
+                ),
+                ("terminal_id", "terminal-canonical".to_string()),
+                ("admin_dashboard_url", server.url.clone()),
+            ]);
+            crate::tests::fake_keyring::fail_reads_for(failed_key, "backend_unavailable");
+            let db = test_db();
+            {
+                let conn = db.conn.lock().expect("lock fallback sentinel db");
+                db::set_setting(&conn, "terminal", "pos_api_key", "SQLITE_PRIVATE_KEY")
+                    .expect("seed api-key fallback sentinel");
+                db::set_setting(&conn, "terminal", "terminal_id", "sqlite-terminal")
+                    .expect("seed terminal fallback sentinel");
+                db::set_setting(
+                    &conn,
+                    "terminal",
+                    "admin_dashboard_url",
+                    "http://127.0.0.1:9",
+                )
+                .expect("seed URL fallback sentinel");
+            }
+            enqueue_renderer_probe(&db, &format!("strict-{failed_key}"), 100);
+            let before = renderer_boundary_fingerprint(&db);
+            let sync_state = SyncState::new();
+            let cancellation = tokio_util::sync::CancellationToken::new();
+            let events = NoopTerminalEventSink;
+
+            let error = process_renderer_parity_queue_guarded(
+                &db,
+                &sync_state,
+                &events,
+                &cancellation,
+                "test:renderer_strict_read_failure",
+            )
+            .await
+            .expect_err("strict keyring failure must fail closed");
+
+            assert_eq!(
+                error, "PARITY_CREDENTIAL_READ_FAILED",
+                "wrong bounded failure for {failed_key}"
+            );
+            assert_eq!(server.count(), 0, "{failed_key} failure reached HTTP");
+            assert_eq!(
+                renderer_boundary_fingerprint(&db),
+                before,
+                "{failed_key} failure mutated renderer boundary tables"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn blocked_order_recovery_does_not_prepare_rows_or_reach_parent_http() {
+        let _lifecycle = crate::repairs::isolate_lifecycle_for_test();
+        let server = crate::tests::fake_http::MockServer::new(r#"{"success":true}"#);
+        let _keyring = crate::tests::fake_keyring::install_seeded([
+            (
+                "pos_api_key",
+                coherent_connection("PRIVATE_KEY", "terminal-order-recovery", &server.url),
+            ),
+            ("terminal_id", "terminal-order-recovery".to_string()),
+            ("admin_dashboard_url", server.url.clone()),
+        ]);
+        let db = test_db();
+        {
+            let conn = db.conn.lock().expect("lock order recovery seed db");
+            conn.execute(
+                "INSERT INTO parity_sync_queue (
+                     id, table_name, record_id, operation, data, organization_id,
+                     created_at, attempts, retry_delay_ms, priority, module_type,
+                     conflict_strategy, version, status, error_message, next_retry_at
+                 ) VALUES (
+                     'blocked-order-recovery', 'orders', 'blocked-order-recovery', 'UPDATE',
+                     '{}', '00000000-0000-4000-8000-000000000001', datetime('now'), 50,
+                     60000, 100, 'orders', 'server-wins', 1, 'failed',
+                     'Network error: error sending request for url (https://https/api/pos/orders)',
+                     '2026-08-06T03:00:00Z'
+                 )",
+                [],
+            )
+            .expect("seed blocked order recovery row");
+        }
+        let before = renderer_boundary_fingerprint(&db);
+        let sync_state = SyncState::new();
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        cancellation.cancel();
+        let events = NoopTerminalEventSink;
+
+        let error = repair_order_update_replay_blockers(&db, &sync_state, &events, &cancellation)
+            .await
+            .expect_err("blocked order recovery must fail before preparation");
+
+        assert_eq!(error, "SYNC_CANCELLED");
+        assert_eq!(server.count(), 0, "blocked parent recovery reached HTTP");
+        assert_eq!(renderer_boundary_fingerprint(&db), before);
+    }
+
+    fn empty_parity_status() -> sync_queue::QueueStatus {
+        sync_queue::QueueStatus {
+            total: 0,
+            pending: 0,
+            in_progress: 0,
+            failed: 0,
+            conflicts: 0,
+            quarantined: 0,
+            dead_lettered: 0,
+            oldest_item_age: None,
+        }
+    }
+
+    fn empty_parity_summary() -> SafeParitySyncSummary {
+        SafeParitySyncSummary::empty(empty_parity_status())
+    }
+
+    fn source_function<'a>(source: &'a str, function_name: &str) -> &'a str {
+        let marker = format!("fn {function_name}");
+        let start = source
+            .find(&marker)
+            .unwrap_or_else(|| panic!("missing source function {function_name}"));
+        let open = start
+            + source[start..]
+                .find('{')
+                .unwrap_or_else(|| panic!("missing opening brace for {function_name}"));
+        let mut depth = 0_u32;
+        for (offset, character) in source[open..].char_indices() {
+            match character {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &source[start..=open + offset];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("missing closing brace for {function_name}");
+    }
+
+    fn source_occurrences(source: &str, needle: &str) -> usize {
+        source.match_indices(needle).count()
+    }
+
+    #[test]
+    fn renderer_replay_inventory_routes_all_thirteen_calls_through_guarded_orchestrator() {
+        let no_op = ["process_queue_renderer_", "safe("].concat();
+        let guarded = ["process_renderer_parity_queue_", "guarded("].concat();
+        let sources = [
+            (
+                "commands/sync_queue.rs",
+                include_str!("commands/sync_queue.rs"),
+            ),
+            ("commands/orders.rs", include_str!("commands/orders.rs")),
+            ("commands/recovery.rs", include_str!("commands/recovery.rs")),
+            ("sync.rs", include_str!("sync.rs")),
+        ];
+        for (path, source) in sources {
+            assert_eq!(
+                source_occurrences(source, &no_op),
+                0,
+                "{path} still has a production no-op renderer replay bypass"
+            );
+        }
+
+        let direct_command_calls =
+            source_occurrences(include_str!("commands/sync_queue.rs"), &guarded)
+                + source_occurrences(include_str!("commands/orders.rs"), &guarded);
+        let recovery = source_function(
+            include_str!("commands/recovery.rs"),
+            "recovery_execute_action_core",
+        );
+        let recovery_calls = source_occurrences(recovery, &guarded)
+            + source_occurrences(recovery, "guarded_renderer_retry_item(")
+            + source_occurrences(recovery, "guarded_renderer_retry_module(");
+        let order_recovery = source_function(
+            include_str!("sync.rs"),
+            "repair_order_update_replay_blockers",
+        );
+        let order_recovery_passes = source_occurrences(order_recovery, ".process_queue(");
+
+        assert_eq!(
+            direct_command_calls, 2,
+            "both direct renderer commands stay guarded"
+        );
+        assert_eq!(
+            recovery_calls, 6,
+            "the six direct recovery replay actions stay guarded"
+        );
+        assert_eq!(
+            order_recovery_passes, 5,
+            "all five order-recovery passes stay guarded"
+        );
+        assert_eq!(
+            direct_command_calls + recovery_calls + order_recovery_passes,
+            13
+        );
+    }
+
+    #[test]
+    fn renderer_no_op_queue_processor_is_removed_or_test_only() {
+        let source = include_str!("sync_queue.rs");
+        let signature = ["pub(crate) async fn process_queue_renderer_", "safe("].concat();
+        let Some(position) = source.find(&signature) else {
+            return;
+        };
+        let previous_non_empty_line = source[..position]
+            .lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .expect("wrapper has a preceding cfg line");
+        assert_eq!(
+            previous_non_empty_line.trim(),
+            "#[cfg(test)]",
+            "the no-op renderer processor must not remain production-callable"
+        );
+    }
+
+    #[test]
+    fn guarded_renderer_orchestrator_orders_auth_binding_credentials_and_live_claim_gate() {
+        let source = include_str!("sync.rs");
+        let context_start = source
+            .find("pub(crate) struct RendererParityExecutionContext")
+            .expect("renderer execution context");
+        let wrapper_start = source[context_start..]
+            .find("pub(crate) async fn process_renderer_parity_queue_guarded")
+            .map(|offset| context_start + offset)
+            .expect("guarded renderer wrapper");
+        let function = &source[context_start..wrapper_start];
+        let construction_boundaries = [
+            "begin_remote_auth_attempt",
+            "initial_parity_binding_lease",
+            "generation()",
+            "resolve_admin_endpoint",
+            "drop(initial_lease)",
+        ];
+        let mut previous = 0_usize;
+        for boundary in construction_boundaries {
+            let position = function
+                .find(boundary)
+                .unwrap_or_else(|| panic!("guarded renderer orchestrator misses {boundary}"));
+            assert!(
+                position >= previous,
+                "guarded renderer boundary {boundary} is out of order"
+            );
+            previous = position;
+        }
+
+        let constructor = source_function(function, "new");
+        let process = source_function(function, "process_queue");
+        let process_boundaries = [
+            "process_queue_renderer_safe_with_claim_gate",
+            "acquire_live_parity_claim_gate",
+            "SyncTelemetryScope::default()",
+            "safe_parity_summary",
+            "classify_safe_parity_summary",
+        ];
+        let mut previous = 0_usize;
+        for boundary in process_boundaries {
+            let position = process
+                .find(boundary)
+                .unwrap_or_else(|| panic!("guarded renderer processor misses {boundary}"));
+            assert!(
+                position >= previous,
+                "renderer process boundary {boundary} is out of order"
+            );
+            previous = position;
+        }
+
+        for required_input in ["SyncState", "CancellationToken", "TerminalEventSink"] {
+            assert!(
+                function.contains(required_input),
+                "guarded renderer orchestrator misses managed {required_input}"
+            );
+        }
+        assert!(function.contains("ParitySyncExecutionOutcome"));
+
+        let guarded_boundary = format!("{constructor}\n{process}");
+        let no_op = ["process_queue_renderer_", "safe("].concat();
+        for forbidden in [
+            no_op.as_str(),
+            "hydrate_terminal_credentials_from_local_settings",
+            "read_local_setting",
+            "set_credential",
+            "db::set_setting",
+            "storage::get_credential",
+            "load_zeroized_pos_api_key_optional",
+            "last_sync",
+            "response_body",
+            "error_message",
+            "organization_id",
+            "terminal_id",
+            "module_type",
+            "payload",
+        ] {
+            assert!(
+                !guarded_boundary.contains(forbidden),
+                "guarded renderer orchestrator contains forbidden boundary {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn renderer_entry_points_require_managed_lifecycle_inputs_and_central_credentials() {
+        let guarded = ["process_renderer_parity_queue_", "guarded("].concat();
+        let no_op = ["process_queue_renderer_", "safe("].concat();
+        let entry_points = [
+            (
+                "commands/sync_queue.rs::sync_queue_process",
+                source_function(include_str!("commands/sync_queue.rs"), "sync_queue_process"),
+            ),
+            (
+                "commands/orders.rs::order_process_retry_queue",
+                source_function(
+                    include_str!("commands/orders.rs"),
+                    "order_process_retry_queue",
+                ),
+            ),
+            (
+                "commands/recovery.rs::recovery_execute_action_core",
+                source_function(
+                    include_str!("commands/recovery.rs"),
+                    "recovery_execute_action_core",
+                ),
+            ),
+            (
+                "sync.rs::repair_order_update_replay_blockers",
+                source_function(
+                    include_str!("sync.rs"),
+                    "repair_order_update_replay_blockers",
+                ),
+            ),
+        ];
+
+        for (name, function) in entry_points {
+            assert_eq!(
+                source_occurrences(function, &no_op),
+                0,
+                "{name} still calls the no-op renderer processor"
+            );
+            for lifecycle_input in ["SyncState", "CancellationToken"] {
+                assert!(
+                    function.contains(lifecycle_input),
+                    "{name} does not receive managed {lifecycle_input}"
+                );
+            }
+            let event_boundary = if name.contains("recovery_execute_action_core")
+                || name.contains("repair_order_update_replay_blockers")
+            {
+                "TerminalEventSink"
+            } else {
+                "AppHandle"
+            };
+            assert!(
+                function.contains(event_boundary),
+                "{name} does not receive managed {event_boundary}"
+            );
+        }
+
+        let recovery = source_function(
+            include_str!("commands/recovery.rs"),
+            "recovery_execute_action_core",
+        );
+        for required in [
+            guarded.as_str(),
+            "guarded_renderer_retry_item(",
+            "guarded_renderer_retry_module(",
+            "guarded_renderer_local_mutation(",
+            "repair_order_update_replay_blockers(",
+        ] {
+            assert!(
+                recovery.contains(required),
+                "recovery does not use central renderer boundary {required}"
+            );
+        }
+        let order_recovery = source_function(
+            include_str!("sync.rs"),
+            "repair_order_update_replay_blockers",
+        );
+        assert!(order_recovery.contains("RendererParityExecutionContext::new("));
+        assert_eq!(source_occurrences(order_recovery, ".process_queue("), 5);
+        for forbidden in [
+            "admin_url: &str",
+            "api_key: &str",
+            "storage::get_credential",
+        ] {
+            assert!(
+                !order_recovery.contains(forbidden),
+                "order recovery retains duplicate credential boundary {forbidden}"
+            );
+        }
+
+        let direct_queue_source = include_str!("commands/sync_queue.rs");
+        for forbidden in [
+            "resolve_sync_queue_credentials",
+            "hydrate_terminal_credentials_from_local_settings",
+            "read_local_setting",
+            "set_credential",
+            "db::set_setting",
+        ] {
+            assert!(
+                !direct_queue_source.contains(forbidden),
+                "direct queue command retains duplicate credential path {forbidden}"
+            );
+        }
+
+        let order_retry = source_function(
+            include_str!("commands/orders.rs"),
+            "order_process_retry_queue",
+        );
+        for forbidden in ["storage::get_credential", "db::get_setting", "pos_api_key"] {
+            assert!(
+                !order_retry.contains(forbidden),
+                "order retry retains duplicate credential path {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn older_sync_success_cannot_clear_a_newer_heartbeat_pause_revision() {
+        let sync_state = SyncState::new();
+        let older_sync = sync_state
+            .begin_remote_auth_attempt()
+            .expect("unpaused sync may capture an auth revision");
+        let revision_before_pause = sync_state.remote_auth_revision();
+
+        sync_state.pause_remote_auth(
+            "terminal_identity_out_of_sync",
+            r#"{"code":"terminal_not_found"}"#,
+            None,
+            None,
+            Some("terminal_not_found".to_string()),
+        );
+
+        assert!(sync_state.remote_auth_revision() > revision_before_pause);
+        assert!(!sync_state.clear_remote_auth_pause_if_current(older_sync));
+        let snapshot = sync_state.remote_auth_snapshot();
+        assert!(snapshot.remote_auth_paused);
+        assert_eq!(
+            snapshot.remote_auth_code.as_deref(),
+            Some("terminal_not_found")
+        );
+    }
+
+    #[test]
+    fn older_heartbeat_success_cannot_clear_a_newer_sync_pause_revision() {
+        let sync_state = SyncState::new();
+        let older_heartbeat = sync_state
+            .begin_remote_auth_attempt()
+            .expect("unpaused heartbeat may capture an auth revision");
+
+        sync_state.pause_remote_auth(
+            "invalid_terminal_credentials",
+            r#"{"code":"invalid_terminal_api_key","terminalActive":true}"#,
+            None,
+            None,
+            Some("invalid_terminal_api_key".to_string()),
+        );
+
+        assert!(!sync_state.clear_remote_auth_pause_if_current(older_heartbeat));
+        assert!(sync_state.remote_auth_snapshot().remote_auth_paused);
+    }
+
+    #[test]
+    fn explicit_auth_clear_invalidates_an_inflight_force_sync_revision() {
+        let sync_state = SyncState::new();
+        let inflight_force_sync = sync_state
+            .begin_remote_auth_attempt()
+            .expect("force sync captures the live auth revision");
+        let revision_before_clear = sync_state.remote_auth_revision();
+
+        sync_state.clear_remote_auth_pause();
+
+        assert!(sync_state.remote_auth_revision() > revision_before_clear);
+        assert!(!sync_state.clear_remote_auth_pause_if_current(inflight_force_sync));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn pause_then_clear_in_success_to_parity_gap_rejects_the_legacy_auth_token() {
+        let _lifecycle = crate::repairs::isolate_lifecycle_for_test();
+        let db = test_db();
+        let sync_state = SyncState::new();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let legacy_auth_attempt = sync_state
+            .begin_remote_auth_attempt()
+            .expect("legacy cycle captures auth revision");
+        let binding = crate::repairs::acquire_terminal_binding_lease()
+            .expect("capture terminal binding generation");
+        let generation = binding.generation();
+        drop(binding);
+
+        sync_state.pause_remote_auth(
+            "terminal_identity_out_of_sync",
+            r#"{"code":"terminal_not_found"}"#,
+            None,
+            None,
+            Some("terminal_not_found".to_string()),
+        );
+        sync_state.clear_remote_auth_pause();
+        assert!(!sync_state.is_remote_auth_paused());
+
+        let initial_error =
+            initial_parity_binding_lease(&db, &sync_state, Some(&cancel), legacy_auth_attempt)
+                .expect_err("newer pause/clear revision must close the parity gap");
+        assert_eq!(
+            initial_error,
+            sync_queue::ParityClaimGateBlock::RemoteAuthPaused
+        );
+        let per_item_error = acquire_live_parity_claim_gate(
+            &db,
+            &sync_state,
+            Some(&cancel),
+            generation,
+            legacy_auth_attempt.revision,
+        )
+        .expect_err("per-item gate must reject the stale legacy revision too");
+        assert_eq!(
+            per_item_error,
+            sync_queue::ParityClaimGateBlock::RemoteAuthPaused
+        );
+    }
+
+    #[test]
+    fn bounded_parity_auth_projection_contains_no_response_text_or_terminal_id() {
+        let error = bounded_parity_terminal_auth_error(ParityTerminalAuthFailure {
+            code: ParityTerminalAuthCode::TerminalIdentityMismatch,
+            terminal_active: Some(true),
+        });
+        assert_eq!(
+            serde_json::from_str::<Value>(&error).expect("bounded auth JSON"),
+            serde_json::json!({
+                "success": false,
+                "error": "POS_TERMINAL_AUTH_REQUIRED",
+                "code": "terminal_identity_mismatch",
+                "terminalActive": true,
+            })
+        );
+        assert!(!error.contains("PRIVATE-PROVIDER-TEXT"));
+        assert!(!error.contains("terminal-private-identifier"));
+        assert!(error.len() < 256);
+    }
+
+    #[tokio::test]
+    async fn parity_partial_result_never_becomes_a_full_success_tick() {
+        let sync_state = SyncState::new();
+        let auth_attempt = sync_state
+            .begin_remote_auth_attempt()
+            .expect("capture full tick auth revision");
+        let mut summary = empty_parity_summary();
+        summary.batch_success = false;
+        summary.processed = 1;
+        summary.failed = 1;
+        summary.queue_status.failed = 1;
+        let outcome = complete_native_background_sync_tick(
+            RemoteAuthExecutionOutcome::Success(2, auth_attempt),
+            |_auth_attempt| async {
+                ParitySyncExecutionOutcome::Partial(summary, "PARITY_SYNC_PARTIAL")
+            },
+        )
+        .await;
+        assert_eq!(
+            outcome,
+            NativeSyncTickOutcome::Partial {
+                synced: 3,
+                error: "PARITY_SYNC_PARTIAL".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn live_gate_blocks_have_bounded_non_success_outcomes() {
+        for (block, expected) in [
+            (sync_queue::ParityClaimGateBlock::RemoteAuthPaused, "paused"),
+            (sync_queue::ParityClaimGateBlock::ResetPending, "reset"),
+            (sync_queue::ParityClaimGateBlock::Cancelled, "partial"),
+            (sync_queue::ParityClaimGateBlock::RebindPending, "partial"),
+        ] {
+            let outcome = parity_outcome_for_gate_block(empty_parity_summary(), block);
+            let actual = match outcome {
+                ParitySyncExecutionOutcome::Paused(summary) => {
+                    assert_eq!(summary.batch_block, Some(block));
+                    "paused"
+                }
+                ParitySyncExecutionOutcome::Reset(summary) => {
+                    assert_eq!(summary.batch_block, Some(block));
+                    "reset"
+                }
+                ParitySyncExecutionOutcome::Partial(summary, error) => {
+                    assert_eq!(summary.batch_block, Some(block));
+                    assert!(matches!(
+                        error,
+                        "SYNC_CANCELLED" | "TERMINAL_REBIND_PENDING"
+                    ));
+                    "partial"
+                }
+                _ => "unexpected",
+            };
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn exact_item_boundary_preserves_only_actionable_bounded_errors() {
+        for code in [
+            "PARITY_ITEM_ID_INVALID",
+            "REPAIR_TYPED_CONFLICT_REQUIRED",
+            "REPAIR_SETTLEMENT_ROUTE_REQUIRED",
+        ] {
+            assert_eq!(bounded_renderer_item_error(code.to_string()), code);
+        }
+        for untrusted in [
+            "database path C:\\private\\queue.sqlite failed",
+            "provider returned PRIVATE BODY",
+            "unknown queue invariant",
+        ] {
+            assert_eq!(
+                bounded_renderer_item_error(untrusted.to_string()),
+                "PARITY_SYNC_FAILED"
+            );
+        }
+    }
+
+    #[test]
+    fn monetary_dead_letter_projection_emits_each_safe_category_once() {
+        let dead_letters = vec![
+            sync_queue::MonetaryDeadLetter {
+                category: sync_queue::MonetaryDeadLetterCategory::Payment,
+            },
+            sync_queue::MonetaryDeadLetter {
+                category: sync_queue::MonetaryDeadLetterCategory::PaymentAdjustment,
+            },
+        ];
+        let mut emitted = Vec::new();
+        emit_monetary_dead_letters_with(&dead_letters, |event| {
+            emitted.push(serde_json::to_value(event).expect("serialize safe dead-letter"));
+        });
+        assert_eq!(emitted.len(), 2);
+        assert_eq!(emitted[0], serde_json::json!({ "category": "payment" }));
+        assert_eq!(
+            emitted[1],
+            serde_json::json!({ "category": "payment_adjustment" })
+        );
+        let exposed = Value::Array(emitted).to_string();
+        for forbidden in [
+            "PRIVATE-REMOTE-ERROR",
+            "PRIVATE-PAYLOAD",
+            "item_id",
+            "entity_id",
+            "record_id",
+        ] {
+            assert!(!exposed.contains(forbidden));
         }
     }
 
@@ -19135,6 +21209,60 @@ mod tests {
             stream
                 .write_all(response.as_bytes())
                 .expect("write mock response");
+        });
+
+        (format!("http://{}", addr), handle)
+    }
+
+    fn spawn_timed_single_json_response_server<AssertFn>(
+        body: String,
+        assert_request: AssertFn,
+    ) -> (String, std::thread::JoinHandle<()>)
+    where
+        AssertFn: FnOnce(&str) + Send + 'static,
+    {
+        use std::io::{ErrorKind, Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind timed mock server");
+        listener
+            .set_nonblocking(true)
+            .expect("set timed mock server nonblocking");
+        let addr = listener.local_addr().expect("timed mock server address");
+        let handle = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(accepted) => break accepted,
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "timed out waiting for background repair request"
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("accept timed mock request: {error}"),
+                }
+            };
+            stream
+                .set_nonblocking(false)
+                .expect("restore blocking timed mock stream");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .expect("set timed mock read timeout");
+            let mut buffer = vec![0u8; 32 * 1024];
+            let bytes_read = stream.read(&mut buffer).expect("read timed mock request");
+            let request = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
+            assert_request(&request);
+
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write timed mock response");
         });
 
         (format!("http://{}", addr), handle)
@@ -19369,6 +21497,110 @@ mod tests {
             params![id, table_name, record_id, status],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn sync_status_merges_safe_parity_counts_without_payload_or_error_text() {
+        let db = test_db();
+        let sync_state = SyncState::new();
+        let sensitive_payload = "PRIVATE-PARITY-PAYLOAD-MUST-NOT-RENDER";
+        let rows = [
+            ("parity-pending", "pending", 0, None),
+            ("parity-processing", "processing", 0, None),
+            (
+                "parity-quarantined",
+                "failed",
+                0,
+                Some("REPAIR_RESERVED_OWNER_QUARANTINED"),
+            ),
+            (
+                "parity-dead-letter",
+                "failed",
+                10,
+                Some("PRIVATE-REMOTE-ERROR"),
+            ),
+            (
+                "parity-conflict",
+                "conflict",
+                0,
+                Some("PRIVATE-CONFLICT-BODY"),
+            ),
+        ];
+        {
+            let conn = db.conn.lock().expect("lock parity status fixture");
+            for (id, status, attempts, error_message) in rows {
+                conn.execute(
+                    "INSERT INTO parity_sync_queue (
+                         id, table_name, record_id, operation, data, organization_id,
+                         created_at, attempts, retry_delay_ms, priority, module_type,
+                         conflict_strategy, version, status, error_message
+                     ) VALUES (
+                         ?1, 'orders', ?1, 'UPDATE', ?2, 'org-status-test',
+                         '2026-08-26T00:00:00Z', ?3, 1000, 1, 'orders',
+                         'server-wins', 1, ?4, ?5
+                     )",
+                    params![id, sensitive_payload, attempts, status, error_message],
+                )
+                .expect("seed parity status fixture");
+            }
+        }
+
+        for status in [
+            get_sync_status(&db, &sync_state).expect("command sync status"),
+            get_sync_status_for_event(&db, &sync_state, true),
+        ] {
+            assert_eq!(
+                status.pointer("/parityQueue/total").and_then(Value::as_i64),
+                Some(5)
+            );
+            assert_eq!(
+                status
+                    .pointer("/parityQueue/pending")
+                    .and_then(Value::as_i64),
+                Some(1)
+            );
+            assert_eq!(
+                status
+                    .pointer("/parityQueue/inProgress")
+                    .and_then(Value::as_i64),
+                Some(1)
+            );
+            assert_eq!(
+                status
+                    .pointer("/parityQueue/failed")
+                    .and_then(Value::as_i64),
+                Some(2)
+            );
+            assert_eq!(
+                status
+                    .pointer("/parityQueue/conflicts")
+                    .and_then(Value::as_i64),
+                Some(1)
+            );
+            assert_eq!(
+                status
+                    .pointer("/parityQueue/quarantined")
+                    .and_then(Value::as_i64),
+                Some(1)
+            );
+            assert_eq!(
+                status
+                    .pointer("/parityQueue/deadLettered")
+                    .and_then(Value::as_i64),
+                Some(1)
+            );
+            assert_eq!(status.get("pendingItems").and_then(Value::as_i64), Some(2));
+            assert_eq!(status.get("syncErrors").and_then(Value::as_i64), Some(3));
+            let exposed = status.to_string();
+            for forbidden in [
+                sensitive_payload,
+                "PRIVATE-REMOTE-ERROR",
+                "PRIVATE-CONFLICT-BODY",
+                "REPAIR_RESERVED_OWNER_QUARANTINED",
+            ] {
+                assert!(!exposed.contains(forbidden), "status exposed {forbidden}");
+            }
+        }
     }
 
     #[test]
@@ -19609,6 +21841,123 @@ mod tests {
             payload.get("syncRecoveryReason").and_then(Value::as_str),
             Some("remote_snapshot_lags_local_delivery_payment_delta")
         );
+    }
+
+    #[test]
+    fn force_requeue_local_order_update_preserves_repair_shaped_rows() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        db::set_setting(&conn, "terminal", "organization_id", "org-test").expect("set org setting");
+        conn.execute(
+            "INSERT INTO orders (
+                 id, supabase_id, order_number, items,
+                 total_amount, total_amount_cents, subtotal, subtotal_cents,
+                 order_type, status, sync_status, payment_status,
+                 created_at, updated_at
+             ) VALUES (
+                 'order-force-generic', 'remote-order-force-generic', 'ORD-FORCE-GENERIC',
+                 '[{\"name\":\"Service\",\"quantity\":1,\"unit_price\":6.6,\"total_price\":6.6}]',
+                 6.6, 660, 6.6, 660, 'pickup', 'completed', 'synced', 'paid',
+                 datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("insert local order");
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status, error_message
+             ) VALUES (
+                 'repair-force-order-op', 'orders', 'order-force-generic', 'UPDATE',
+                 '{\"ciphertext\":\"repair-private-ciphertext\"}', 'repair-private-org',
+                 '2000-01-01T00:00:00Z', 3, 1000, 0, 'repairs',
+                 'manual', 7, 'conflict', 'repair-private-error'
+             )",
+            [],
+        )
+        .expect("insert repair-shaped order row");
+
+        assert!(force_requeue_local_order_update_after_lagged_snapshot(
+            &conn,
+            "order-force-generic"
+        )
+        .expect("force requeue generic order"));
+
+        let repair_state: (String, i64, String, String, String, Option<String>) = conn
+            .query_row(
+                "SELECT status, attempts, module_type, data, organization_id, error_message
+                 FROM parity_sync_queue WHERE id = 'repair-force-order-op'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(repair_state.0, "failed");
+        assert_eq!(repair_state.1, 3);
+        assert_eq!(repair_state.2, "repairs");
+        assert!(repair_state.3.contains("repair-private-ciphertext"));
+        assert_eq!(repair_state.4, "repair-private-org");
+        assert_eq!(
+            repair_state.5.as_deref(),
+            Some("REPAIR_RESERVED_OWNER_QUARANTINED")
+        );
+
+        let generic_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue
+                 WHERE table_name = 'orders'
+                   AND record_id = 'order-force-generic'
+                   AND module_type = 'orders'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(generic_rows, 1);
+    }
+
+    #[test]
+    fn non_repair_unsynced_clear_preserves_repair_shaped_rows() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        for (id, module_type) in [
+            ("generic-driver-row", "financial"),
+            ("repair-driver-row", "repairs"),
+        ] {
+            conn.execute(
+                "INSERT INTO parity_sync_queue (
+                     id, table_name, record_id, operation, data, organization_id,
+                     created_at, attempts, retry_delay_ms, priority, module_type,
+                     conflict_strategy, version, status
+                 ) VALUES (
+                     ?1, 'driver_earnings', 'driver-row', 'DELETE', '{}', 'org-test',
+                     datetime('now'), 0, 1000, 1, ?2, 'manual', 1, 'conflict'
+                 )",
+                params![id, module_type],
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            clear_non_repair_unsynced_parity_items(&conn, "driver_earnings", "driver-row").unwrap(),
+            1
+        );
+        let remaining: Vec<String> = conn
+            .prepare("SELECT id FROM parity_sync_queue ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(remaining, vec!["repair-driver-row".to_string()]);
     }
 
     #[test]
@@ -20306,6 +22655,91 @@ mod tests {
             )
             .unwrap();
         assert_eq!(supabase_id, "remote-order-1");
+    }
+
+    #[test]
+    fn materialize_remote_order_rejects_repair_settlement_contexts() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        for remote_order in [
+            serde_json::json!({
+                "id": "remote-repair-settlement-snake",
+                "order_context": "repair_settlement",
+                "items": [],
+                "total_amount": 7.0,
+                "status": "completed"
+            }),
+            serde_json::json!({
+                "id": "remote-repair-settlement-camel",
+                "orderContext": " REPAIR_SETTLEMENT ",
+                "items": [],
+                "totalAmount": 8.0,
+                "status": "completed"
+            }),
+        ] {
+            assert!(materialize_remote_order(&conn, &remote_order)
+                .expect("reject repair settlement from generic materializer")
+                .is_none());
+        }
+
+        let materialized: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM orders
+                 WHERE supabase_id IN (
+                   'remote-repair-settlement-snake',
+                   'remote-repair-settlement-camel'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(materialized, 0);
+    }
+
+    #[test]
+    fn materialize_remote_order_never_returns_existing_local_repair_settlement() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, supabase_id, order_number, items, total_amount, total_amount_cents,
+                status, sync_status, order_context, created_at, updated_at
+             ) VALUES (
+                'local-repair-settlement-read-guard', 'remote-repair-settlement-read-guard',
+                'REPAIR-ORIGINAL', '[]', 11.0, 1100, 'ready', 'synced',
+                'repair_settlement', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+
+        let generic_response_missing_context = serde_json::json!({
+            "id": "remote-repair-settlement-read-guard",
+            "order_number": "GENERIC-OVERWRITE",
+            "items": [],
+            "total_amount": 1.0,
+            "status": "cancelled"
+        });
+
+        assert!(
+            materialize_remote_order(&conn, &generic_response_missing_context)
+                .expect("skip existing local repair settlement")
+                .is_none()
+        );
+
+        let state: (String, String, i64) = conn
+            .query_row(
+                "SELECT order_number, status, total_amount_cents
+                 FROM orders WHERE id = 'local-repair-settlement-read-guard'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            state,
+            ("REPAIR-ORIGINAL".to_string(), "ready".to_string(), 1100)
+        );
     }
 
     #[test]
@@ -22598,9 +25032,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_recover_payment_total_conflicts_refreshes_remote_order_snapshot_before_voiding_stale_local_payment(
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_recover_payment_total_conflicts_refreshes_remote_order_snapshot_before_voiding_stale_local_payment(
     ) {
+        let _keyring = crate::tests::fake_keyring::install_seeded([(
+            "terminal_id",
+            "terminal-payment-refresh",
+        )]);
         let db = test_db();
         set_terminal_setting(&db, "terminal_id", "terminal-payment-refresh");
         let conn = db.conn.lock().unwrap();
@@ -22694,12 +25132,9 @@ mod tests {
             ),
         ]);
 
-        let recovered = tauri::async_runtime::block_on(recover_payment_total_conflicts(
-            &db,
-            &mock_url,
-            r#"{"key":"test-api-key","tid":"terminal-payment-refresh"}"#,
-        ))
-        .expect("recover stale payment total conflicts");
+        let recovered = recover_payment_total_conflicts(&db, &mock_url, "test-api-key")
+            .await
+            .expect("recover stale payment total conflicts");
         assert_eq!(recovered, 1);
         server_handle.join().expect("join mock sequence server");
 
@@ -24316,6 +26751,365 @@ mod tests {
     }
 
     #[test]
+    fn repair_owned_legacy_financial_orphans_are_invisible_to_single_and_bulk_cleanup() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        for (row_id, table_name, record_id) in [
+            (
+                "repair-owned-payment-orphan",
+                "payments",
+                "repair-pay-orphan",
+            ),
+            (
+                "repair-owned-adjustment-orphan",
+                "payment_adjustments",
+                "repair-adjustment-orphan",
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO parity_sync_queue (
+                    id, table_name, record_id, operation, data, organization_id,
+                    created_at, attempts, retry_delay_ms, priority, module_type,
+                    conflict_strategy, version, status, error_message
+                 ) VALUES (
+                    ?1, ?2, ?3, 'INSERT', '{\"ciphertext\":\"repair-private\"}',
+                    'repair-private-org', datetime('now'), 8, 60000, 1,
+                    'repairs', 'manual', 7, 'conflict', 'repair-private-error'
+                 )",
+                params![row_id, table_name, record_id],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        assert_eq!(
+            count_legacy_financial_parity_orphan_rows(&db, "payment", "repair-pay-orphan").unwrap(),
+            0
+        );
+        let single =
+            clear_legacy_financial_parity_orphan(&db, "payment", "repair-pay-orphan").unwrap();
+        assert_eq!(single.cleared, 0);
+        assert!(single.legacy_row_ids.is_empty());
+
+        let bulk = clear_all_legacy_financial_parity_orphans(&db).unwrap();
+        assert_eq!(bulk.scanned, 0);
+        assert_eq!(bulk.cleared, 0);
+        assert!(bulk.legacy_row_ids.is_empty());
+
+        let conn = db.conn.lock().unwrap();
+        let repair_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue
+                 WHERE module_type = 'repairs'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(repair_rows, 2);
+    }
+
+    #[test]
+    fn reconcile_deferred_payments_skips_repair_settlement_and_repair_parity_rows() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, supabase_id, items, total_amount, total_amount_cents,
+                status, sync_status, order_context, created_at, updated_at
+             ) VALUES (
+                'repair-settlement-order', 'remote-repair-settlement', '[]', 12.0, 1200,
+                'completed', 'synced', 'repair_settlement', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, amount_cents, sync_status,
+                sync_state, created_at, updated_at
+             ) VALUES (
+                'repair-settlement-payment', 'repair-settlement-order', 'cash', 12.0, 1200,
+                'pending', 'waiting_parent', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key, status
+             ) VALUES (
+                'payment', 'repair-settlement-payment', 'insert', '{}',
+                'payment:repair-settlement-payment', 'deferred'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                id, table_name, record_id, operation, data, organization_id,
+                created_at, attempts, retry_delay_ms, priority, module_type,
+                conflict_strategy, version, status, error_message
+             ) VALUES (
+                'repair-payment-transport', 'payments', 'repair-settlement-payment', 'INSERT',
+                '{\"ciphertext\":\"repair-private\"}', 'repair-private-org', datetime('now'),
+                8, 60000, 1, 'repairs', 'manual', 7, 'conflict',
+                'Waiting for parent order sync'
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        assert_eq!(reconcile_deferred_payments(&db).unwrap(), 0);
+
+        let conn = db.conn.lock().unwrap();
+        let state: (String, String, String, i64, String) = conn
+            .query_row(
+                "SELECT
+                    (SELECT sync_state FROM order_payments
+                     WHERE id = 'repair-settlement-payment'),
+                    (SELECT status FROM sync_queue
+                     WHERE entity_id = 'repair-settlement-payment'),
+                    (SELECT status FROM parity_sync_queue
+                     WHERE id = 'repair-payment-transport'),
+                    (SELECT attempts FROM parity_sync_queue
+                     WHERE id = 'repair-payment-transport'),
+                    (SELECT data FROM parity_sync_queue
+                     WHERE id = 'repair-payment-transport')",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(state.0, "waiting_parent");
+        assert_eq!(state.1, "deferred");
+        assert_eq!(state.2, "conflict");
+        assert_eq!(state.3, 8);
+        assert!(state.4.contains("repair-private"));
+    }
+
+    #[test]
+    fn generic_deferred_payment_ignores_repair_owned_order_cokey() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, supabase_id, items, total_amount, total_amount_cents,
+                status, sync_status, created_at, updated_at
+             ) VALUES (
+                'generic-order-with-repair-cokey', 'remote-generic-order', '[]', 5.0, 500,
+                'completed', 'synced', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, amount_cents, sync_status,
+                sync_state, created_at, updated_at
+             ) VALUES (
+                'generic-payment-with-repair-cokey', 'generic-order-with-repair-cokey',
+                'cash', 5.0, 500, 'pending', 'waiting_parent', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key, status
+             ) VALUES (
+                'payment', 'generic-payment-with-repair-cokey', 'insert', '{}',
+                'payment:generic-payment-with-repair-cokey', 'deferred'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                id, table_name, record_id, operation, data, organization_id,
+                created_at, attempts, retry_delay_ms, priority, module_type,
+                conflict_strategy, version, status
+             ) VALUES (
+                'repair-order-cokey', 'orders', 'generic-order-with-repair-cokey', 'INSERT',
+                '{\"ciphertext\":\"repair-private\"}', 'repair-private-org', datetime('now'),
+                4, 60000, 1, 'repairs', 'manual', 7, 'conflict'
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        assert_eq!(reconcile_deferred_payments(&db).unwrap(), 1);
+
+        let conn = db.conn.lock().unwrap();
+        let repair_state: (String, i64, String) = conn
+            .query_row(
+                "SELECT status, attempts, data FROM parity_sync_queue
+                 WHERE id = 'repair-order-cokey'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(repair_state.0, "conflict");
+        assert_eq!(repair_state.1, 4);
+        assert!(repair_state.2.contains("repair-private"));
+    }
+
+    #[test]
+    fn missing_parent_recreation_skips_repair_settlement_orders() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, items, total_amount, total_amount_cents, subtotal, subtotal_cents,
+                status, sync_status, order_context, created_at, updated_at
+             ) VALUES (
+                'repair-parent-missing', '[{\"name\":\"Repair\",\"quantity\":1}]',
+                9.0, 900, 9.0, 900, 'completed', 'pending', 'repair_settlement',
+                datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                id, table_name, record_id, operation, data, organization_id,
+                created_at, attempts, retry_delay_ms, priority, module_type,
+                conflict_strategy, version, status, error_message
+             ) VALUES (
+                'generic-child-for-repair-parent', 'orders', 'repair-parent-missing', 'UPDATE',
+                '{\"orderId\":\"repair-parent-missing\"}', 'org-test', datetime('now'),
+                1, 1000, 1, 'orders', 'server-wins', 1, 'failed',
+                'Waiting for parent order sync'
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        assert_eq!(
+            requeue_missing_parent_order_insert_rows(&db.conn.lock().unwrap()).unwrap(),
+            0
+        );
+
+        let conn = db.conn.lock().unwrap();
+        let parent_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue
+                 WHERE table_name = 'orders'
+                   AND record_id = 'repair-parent-missing'
+                   AND operation = 'INSERT'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(parent_rows, 0);
+    }
+
+    #[test]
+    fn generic_order_recovery_rejects_repair_settlement_with_stable_error() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, items, total_amount, total_amount_cents, subtotal, subtotal_cents,
+                status, sync_status, payment_status, order_context, created_at, updated_at
+             ) VALUES (
+                'repair-force-settlement', '[]', 8.0, 800, 8.0, 800,
+                'completed', 'synced', 'paid', 'repair_settlement', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                id, table_name, record_id, operation, data, organization_id,
+                created_at, attempts, retry_delay_ms, priority, module_type,
+                conflict_strategy, version, status
+             ) VALUES (
+                'repair-force-existing', 'orders', 'repair-force-settlement', 'INSERT',
+                '{\"ciphertext\":\"repair-private\"}', 'repair-private-org', datetime('now'),
+                2, 60000, 1, 'repairs', 'manual', 4, 'conflict'
+             )",
+            [],
+        )
+        .unwrap();
+
+        let error = force_requeue_local_order_update_after_lagged_snapshot(
+            &conn,
+            "repair-force-settlement",
+        )
+        .unwrap_err();
+        assert_eq!(error, "REPAIR_SETTLEMENT_ROUTE_REQUIRED");
+
+        let state: (String, String, i64, String) = conn
+            .query_row(
+                "SELECT sync_status,
+                    (SELECT status FROM parity_sync_queue WHERE id = 'repair-force-existing'),
+                    (SELECT attempts FROM parity_sync_queue WHERE id = 'repair-force-existing'),
+                    (SELECT data FROM parity_sync_queue WHERE id = 'repair-force-existing')
+                 FROM orders WHERE id = 'repair-force-settlement'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(state.0, "synced");
+        assert_eq!(state.1, "conflict");
+        assert_eq!(state.2, 2);
+        assert!(state.3.contains("repair-private"));
+    }
+
+    #[test]
+    fn legacy_order_delete_cleanup_preserves_repair_settlement_rows() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, items, total_amount, total_amount_cents, status, sync_status,
+                order_context, created_at, updated_at
+             ) VALUES (
+                'repair-delete-settlement', '[]', 3.0, 300, 'cancelled', 'pending',
+                'repair_settlement', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key, status
+             ) VALUES (
+                'order', 'repair-delete-settlement', 'delete', '{}',
+                'order:repair-delete-settlement:delete', 'pending'
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        assert_eq!(cleanup_unsupported_order_delete_ops(&db).unwrap(), 0);
+        let conn = db.conn.lock().unwrap();
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_queue
+                 WHERE entity_type = 'order'
+                   AND entity_id = 'repair-delete-settlement'
+                   AND operation = 'delete'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 1);
+    }
+
+    #[test]
     fn test_reconcile_promotes_waiting_parent_adjustments() {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
@@ -24440,8 +27234,10 @@ mod tests {
         assert_eq!(state, "waiting_parent");
     }
 
-    #[test]
-    fn test_auto_heal_waiting_adjustment_repairs_missing_canonical_remote_id_and_allows_sync() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_auto_heal_waiting_adjustment_repairs_missing_canonical_remote_id_and_allows_sync()
+    {
+        let _keyring = crate::tests::fake_keyring::install_seeded([("terminal_id", "term-heal")]);
         let db = test_db();
         let conn = db.conn.lock().unwrap();
         let queue_payload = serde_json::json!({
@@ -24483,28 +27279,27 @@ mod tests {
         drop(conn);
 
         let canonical_payment_id = Uuid::new_v4().to_string();
-        let heal_summary = tauri::async_runtime::block_on(
-            auto_heal_waiting_adjustments_missing_canonical_remote_payment_ids_with(
-                &db,
-                |order_ids| {
-                    assert_eq!(order_ids, vec!["ord-adj-missing-remote".to_string()]);
-                    let canonical_payment_id = canonical_payment_id.clone();
-                    let db = &db;
-                    async move {
-                        let conn = db.conn.lock().unwrap();
-                        conn.execute(
-                            "UPDATE order_payments
+        let heal_summary = auto_heal_waiting_adjustments_missing_canonical_remote_payment_ids_with(
+            &db,
+            |order_ids| {
+                assert_eq!(order_ids, vec!["ord-adj-missing-remote".to_string()]);
+                let canonical_payment_id = canonical_payment_id.clone();
+                let db = &db;
+                async move {
+                    let conn = db.conn.lock().unwrap();
+                    conn.execute(
+                        "UPDATE order_payments
                              SET remote_payment_id = ?1,
                                  updated_at = datetime('now')
                              WHERE order_id = 'ord-adj-missing-remote'",
-                            params![canonical_payment_id],
-                        )
-                        .map_err(|e| e.to_string())?;
-                        Ok(1usize)
-                    }
-                },
-            ),
+                        params![canonical_payment_id],
+                    )
+                    .map_err(|e| e.to_string())?;
+                    Ok(1usize)
+                }
+            },
         )
+        .await
         .unwrap();
 
         assert_eq!(heal_summary.candidate_orders, 1);
@@ -24560,15 +27355,9 @@ mod tests {
         );
         let item = load_sync_item(&db, queue_id);
         let items = vec![&item];
-        let api_key = r#"{"key":"test-key","tid":"term-heal"}"#;
-        let synced = tauri::async_runtime::block_on(sync_adjustment_items(
-            &mock_url,
-            api_key,
-            "term-heal",
-            "branch-1",
-            &db,
-            &items,
-        ));
+        let api_key = "test-key";
+        let synced =
+            sync_adjustment_items(&mock_url, api_key, "term-heal", "branch-1", &db, &items).await;
         assert_eq!(synced, 1);
         server_handle.join().expect("join mock server");
 
@@ -24594,8 +27383,10 @@ mod tests {
         ensure_sync_queue_clear_for_z_report(&db, "pre-Z-report sync").unwrap();
     }
 
-    #[test]
-    fn test_auto_heal_rebinds_waiting_adjustment_from_duplicate_parent_to_canonical_payment() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_auto_heal_rebinds_waiting_adjustment_from_duplicate_parent_to_canonical_payment()
+    {
+        let _keyring = crate::tests::fake_keyring::install_seeded([("terminal_id", "term-heal")]);
         let db = test_db();
         let conn = db.conn.lock().unwrap();
         let queue_payload = serde_json::json!({
@@ -24657,31 +27448,30 @@ mod tests {
         drop(conn);
 
         let canonical_remote_payment_id = Uuid::new_v4().to_string();
-        let heal_summary = tauri::async_runtime::block_on(
-            auto_heal_waiting_adjustments_missing_canonical_remote_payment_ids_with(
-                &db,
-                |order_ids| {
-                    assert_eq!(order_ids, vec!["ord-adj-duplicate-parent".to_string()]);
-                    let canonical_remote_payment_id = canonical_remote_payment_id.clone();
-                    let db = &db;
-                    async move {
-                        let conn = db.conn.lock().unwrap();
-                        conn.execute(
-                            "UPDATE order_payments
+        let heal_summary = auto_heal_waiting_adjustments_missing_canonical_remote_payment_ids_with(
+            &db,
+            |order_ids| {
+                assert_eq!(order_ids, vec!["ord-adj-duplicate-parent".to_string()]);
+                let canonical_remote_payment_id = canonical_remote_payment_id.clone();
+                let db = &db;
+                async move {
+                    let conn = db.conn.lock().unwrap();
+                    conn.execute(
+                        "UPDATE order_payments
                              SET remote_payment_id = CASE id
                                  WHEN 'pay-adj-canonical-parent' THEN ?1
                                  ELSE remote_payment_id
                              END,
                              updated_at = datetime('now')
                              WHERE order_id = 'ord-adj-duplicate-parent'",
-                            params![canonical_remote_payment_id],
-                        )
-                        .map_err(|e| e.to_string())?;
-                        Ok(1usize)
-                    }
-                },
-            ),
+                        params![canonical_remote_payment_id],
+                    )
+                    .map_err(|e| e.to_string())?;
+                    Ok(1usize)
+                }
+            },
         )
+        .await
         .unwrap();
 
         assert_eq!(heal_summary.candidate_orders, 1);
@@ -24767,15 +27557,9 @@ mod tests {
         );
         let item = load_sync_item(&db, adjustment_queue_id);
         let items = vec![&item];
-        let api_key = r#"{"key":"test-key","tid":"term-heal"}"#;
-        let synced = tauri::async_runtime::block_on(sync_adjustment_items(
-            &mock_url,
-            api_key,
-            "term-heal",
-            "branch-1",
-            &db,
-            &items,
-        ));
+        let api_key = "test-key";
+        let synced =
+            sync_adjustment_items(&mock_url, api_key, "term-heal", "branch-1", &db, &items).await;
         assert_eq!(synced, 1);
         server_handle.join().expect("join mock server");
 
@@ -26061,6 +28845,328 @@ mod tests {
         drop(conn);
 
         assert!(has_actionable_remote_sync_work(&db).unwrap());
+    }
+
+    #[test]
+    fn canonical_repair_parity_row_is_actionable_for_normal_background_sync() {
+        const ORGANIZATION_ID: &str = "11111111-1111-4111-8111-111111111111";
+        const REPAIR_ID: &str = "22222222-2222-4222-8222-222222222222";
+        const OPERATION_ID: &str = "33333333-3333-4333-8333-333333333333";
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, repair_aggregate_id, status
+             ) VALUES (
+                 ?1, 'repairs', ?2, 'INSERT', 'native-ciphertext', ?3,
+                 datetime('now'), 0, 1000, 50, 'repairs', 'manual', 0, ?2, 'pending'
+             )",
+            params![OPERATION_ID, REPAIR_ID, ORGANIZATION_ID],
+        )
+        .expect("seed canonical repair parity row");
+        drop(conn);
+
+        assert!(
+            has_actionable_remote_sync_work(&db).unwrap(),
+            "normal background loop must wake for canonical repair parity work"
+        );
+
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE parity_sync_queue
+                SET next_retry_at = datetime('now', '+1 hour')
+              WHERE id = ?1",
+            [OPERATION_ID],
+        )
+        .expect("defer repair parity row");
+        drop(conn);
+        assert!(
+            !has_actionable_remote_sync_work(&db).unwrap(),
+            "future parity retry must not force an early remote attempt"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn normal_background_tick_reaches_native_repair_processor_and_reconciles_success() {
+        const ORGANIZATION_ID: &str = "11111111-1111-4111-8111-111111111111";
+        const BRANCH_ID: &str = "22222222-2222-4222-8222-222222222222";
+        const SCOPE_TOKEN: &str = "33333333-3333-4333-8333-333333333333";
+        const STAFF_SESSION_ID: &str = "44444444-4444-4444-8444-444444444444";
+        const STAFF_ID: &str = "55555555-5555-4555-8555-555555555555";
+        const REPAIR_ID: &str = "66666666-6666-4666-8666-666666666666";
+        const OPERATION_ID: &str = "77777777-7777-4777-8777-777777777777";
+        const CUSTOMER_ID: &str = "88888888-8888-4888-8888-888888888888";
+        const DEVICE_ID: &str = "99999999-9999-4999-8999-999999999999";
+        const TERMINAL_ID: &str = "terminal-background-repair";
+
+        let _lifecycle = crate::repairs::isolate_lifecycle_for_test();
+        let now = chrono::Utc::now();
+        let issued_at = now - chrono::Duration::minutes(1);
+        let expires_at = now + chrono::Duration::hours(1);
+        let mut permissions = crate::repair_transport::REPAIR_PERMISSIONS
+            .iter()
+            .map(|permission| (*permission).to_string())
+            .collect::<Vec<_>>();
+        permissions.sort();
+        let scope = serde_json::json!({
+            "version": 1,
+            "organization_id": ORGANIZATION_ID,
+            "branch_id": BRANCH_ID,
+            "terminal_id": TERMINAL_ID,
+            "scope_token": SCOPE_TOKEN,
+            "scope_epoch": 7,
+            "transition_pending": false,
+            "reset_pending": false,
+            "offline_terminal_token": "A19F",
+            "offline_sequence_lease_start": 1,
+            "offline_sequence_lease_end": 100
+        });
+        let entitlement = serde_json::json!({
+            "version": 1,
+            "organization_id": ORGANIZATION_ID,
+            "branch_id": BRANCH_ID,
+            "terminal_id": TERMINAL_ID,
+            "scope_epoch": 7,
+            "enabled": true,
+            "verified_at": "2026-08-27T00:00:00Z"
+        });
+        let actor = serde_json::json!({
+            "version": 1,
+            "organization_id": ORGANIZATION_ID,
+            "branch_id": BRANCH_ID,
+            "terminal_public_id": TERMINAL_ID,
+            "staff_id": STAFF_ID,
+            "staff_session_id": STAFF_SESSION_ID,
+            "issued_at": issued_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "session_expires_at": expires_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "offline_expires_at": expires_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "permissions": permissions
+        });
+        let session = serde_json::json!({
+            "sessionId": STAFF_SESSION_ID,
+            "staffId": STAFF_ID,
+            "branchId": BRANCH_ID,
+            "organizationId": ORGANIZATION_ID,
+            "terminalId": TERMINAL_ID,
+            "staffName": "Background Repair Technician",
+            "role": { "name": "technician" }
+        });
+        let _keyring = crate::tests::fake_keyring::install_seeded([
+            ("organization_id", ORGANIZATION_ID.to_string()),
+            ("branch_id", BRANCH_ID.to_string()),
+            ("terminal_id", TERMINAL_ID.to_string()),
+            (crate::storage::KEY_REPAIR_SCOPE_V1, scope.to_string()),
+            (
+                crate::storage::KEY_REPAIR_ENTITLEMENT_V1,
+                entitlement.to_string(),
+            ),
+            (
+                crate::storage::KEY_REPAIR_ACTOR_ATTESTATION_V1,
+                actor.to_string(),
+            ),
+            ("pos_session", session.to_string()),
+        ]);
+        let db = test_db();
+        let local = {
+            let conn = db.conn.lock().expect("lock repair producer database");
+            crate::repairs::apply_offline_mutation(
+                &conn,
+                &crate::repairs::RepairOfflineMutationInput {
+                    operation_id: OPERATION_ID.to_string(),
+                    repair_id: REPAIR_ID.to_string(),
+                    expected_version: 0,
+                    staff_session_id: STAFF_SESSION_ID.to_string(),
+                    occurred_at: "2026-08-27T00:10:00Z".to_string(),
+                    command: crate::repairs::RepairOfflineCommand::CreateIntake {
+                        intake_mode: "standard".to_string(),
+                        is_anonymous: false,
+                        customer_id: Some(CUSTOMER_ID.to_string()),
+                        customer_device_id: Some(DEVICE_ID.to_string()),
+                        priority: "normal".to_string(),
+                        currency: "EUR".to_string(),
+                        title: Some("Background drain fixture".to_string()),
+                        intake_notes: Some("private local note".to_string()),
+                        due_at: None,
+                        offline_alias: None,
+                        offline_sequence: None,
+                    },
+                },
+            )
+            .expect("create encrypted offline repair command")
+        };
+        assert_eq!(local.display_number, "R-OFF-A19F-000001");
+
+        let response = serde_json::json!({
+            "results": [{
+                "operation_id": OPERATION_ID,
+                "repair_id": REPAIR_ID,
+                "ok": true,
+                "status": 200,
+                "signal": {
+                    "repair_id": REPAIR_ID,
+                    "status": "received",
+                    "version": 1,
+                    "display_number": "R-ATH-26-000001",
+                    "provisional_alias": local.display_number
+                }
+            }]
+        })
+        .to_string();
+        let (server_url, server) = spawn_timed_single_json_response_server(response, |request| {
+            let lower = request.to_ascii_lowercase();
+            assert!(request.starts_with("POST /api/pos/repairs/sync HTTP/1.1"));
+            assert!(lower.contains("x-pos-api-key: native-background-api-key"));
+            assert!(lower.contains(&format!("x-terminal-id: {TERMINAL_ID}")));
+            assert!(lower.contains(&format!("x-staff-session-id: {STAFF_SESSION_ID}")));
+            assert!(request.contains(OPERATION_ID));
+            assert!(request.contains(REPAIR_ID));
+        });
+
+        let sync_state = SyncState::new();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let auth_attempt = sync_state
+            .begin_remote_auth_attempt()
+            .expect("capture guarded legacy auth revision");
+        let replay_db = &db;
+
+        let outcome = complete_native_background_sync_tick(
+            RemoteAuthExecutionOutcome::Success(0, auth_attempt),
+            |auth_attempt| async move {
+                let initial_binding = match initial_parity_binding_lease(
+                    replay_db,
+                    &sync_state,
+                    Some(&cancel),
+                    auth_attempt,
+                ) {
+                    Ok(binding) => binding,
+                    Err(_) => {
+                        return ParitySyncExecutionOutcome::Failed("TERMINAL_BINDING_UNAVAILABLE")
+                    }
+                };
+                let binding_generation = initial_binding.generation();
+                let auth_revision = auth_attempt.revision;
+                drop(initial_binding);
+                let result = match process_internal_parity_queue_once(
+                    replay_db,
+                    &server_url,
+                    "native-background-api-key",
+                    || {
+                        acquire_live_parity_claim_gate(
+                            replay_db,
+                            &sync_state,
+                            Some(&cancel),
+                            binding_generation,
+                            auth_revision,
+                        )
+                    },
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => return ParitySyncExecutionOutcome::Failed("PARITY_SYNC_FAILED"),
+                };
+                let queue_status = match read_parity_queue_status(replay_db) {
+                    Ok(status) => status,
+                    Err(_) => {
+                        return ParitySyncExecutionOutcome::Failed("PARITY_STATUS_UNAVAILABLE")
+                    }
+                };
+                let summary = SafeParitySyncSummary {
+                    batch_success: result.success,
+                    processed: usize::try_from(result.processed.max(0)).unwrap_or(0),
+                    failed: result.failed,
+                    conflicts: result.conflicts,
+                    quarantined: result.quarantined,
+                    dead_lettered: result.dead_lettered,
+                    auth_outcome: result.auth_outcome,
+                    batch_block: result.batch_block,
+                    queue_status,
+                };
+                if summary.has_unresolved_failure() {
+                    ParitySyncExecutionOutcome::Partial(summary, "PARITY_SYNC_PARTIAL")
+                } else {
+                    ParitySyncExecutionOutcome::Complete(summary)
+                }
+            },
+        )
+        .await;
+        server.join().expect("join repair background server");
+        assert_eq!(outcome, NativeSyncTickOutcome::Success(1));
+
+        let conn = db.conn.lock().expect("lock reconciled repair database");
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE id = ?1",
+                [OPERATION_ID],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count reconciled queue row"),
+            0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT display_number, official_number, status,
+                        authoritative_status, authoritative_version,
+                        optimistic_version, dirty, needs_refetch
+                   FROM repair_cache WHERE repair_id = ?1",
+                [REPAIR_ID],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, i64>(7)?,
+                    ))
+                },
+            )
+            .expect("read reconciled repair cache"),
+            (
+                "R-ATH-26-000001".to_string(),
+                Some("R-ATH-26-000001".to_string()),
+                "received".to_string(),
+                "received".to_string(),
+                1,
+                1,
+                0,
+                1,
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn background_parity_drain_is_blocked_by_auth_pause_reset_and_failure() {
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let guarded = [
+            (
+                RemoteAuthExecutionOutcome::Paused("paused".to_string()),
+                NativeSyncTickOutcome::Paused("paused".to_string()),
+            ),
+            (
+                RemoteAuthExecutionOutcome::Reset("reset".to_string()),
+                NativeSyncTickOutcome::Reset("reset".to_string()),
+            ),
+            (
+                RemoteAuthExecutionOutcome::Failed("failed".to_string()),
+                NativeSyncTickOutcome::Failed("failed".to_string()),
+            ),
+        ];
+        for (legacy_outcome, expected) in guarded {
+            let outcome =
+                complete_native_background_sync_tick(legacy_outcome, |_auth_attempt| async {
+                    calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    ParitySyncExecutionOutcome::Failed("UNEXPECTED_PARITY_CALL")
+                })
+                .await;
+            assert_eq!(outcome, expected);
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -27636,6 +30742,58 @@ mod tests {
     }
 
     #[test]
+    fn malformed_admin_url_recovery_preserves_repair_shaped_rows() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status, error_message, next_retry_at
+             ) VALUES (
+                 'repair-poisoned-url-op', 'fiscal_submission',
+                 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'INSERT',
+                 '{\"ciphertext\":\"repair-private-ciphertext\"}', 'repair-private-org',
+                 datetime('now'), 50, 60000, 1, 'repairs', 'manual', 7,
+                 'conflict',
+                 'Network error: error sending request for url (https://https/api/pos/repairs)',
+                 '2026-08-26T03:00:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+
+        assert_eq!(requeue_malformed_admin_url_failures(&conn).unwrap(), 0);
+        let state: (String, i64, Option<String>, Option<String>, String, String) = conn
+            .query_row(
+                "SELECT status, attempts, error_message, next_retry_at, data, organization_id
+                 FROM parity_sync_queue WHERE id = 'repair-poisoned-url-op'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(state.0, "conflict");
+        assert_eq!(state.1, 50);
+        assert!(state
+            .2
+            .as_deref()
+            .unwrap_or_default()
+            .contains("https://https"));
+        assert_eq!(state.3.as_deref(), Some("2026-08-26T03:00:00Z"));
+        assert!(state.4.contains("repair-private-ciphertext"));
+        assert_eq!(state.5, "repair-private-org");
+    }
+
+    #[test]
     fn unrepaired_total_mismatch_parent_is_quarantined_instead_of_requeued_forever() {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
@@ -27858,10 +31016,9 @@ mod tests {
             body,
         )]);
 
-        let (repaired, requeued, quarantined) = tauri::async_runtime::block_on(
-            repair_order_update_parent_wait_blockers(&db, &mock_url, "test-api-key"),
-        )
-        .expect("repair parent-wait order update");
+        let (repaired, requeued, quarantined) =
+            tauri::async_runtime::block_on(run_parent_wait_recovery_with_context(&db, &mock_url))
+                .expect("repair parent-wait order update");
         server_handle.join().expect("join mock server");
 
         assert_eq!(repaired, 1);
@@ -27952,10 +31109,9 @@ mod tests {
             ),
         ]);
 
-        let (repaired, requeued, quarantined) = tauri::async_runtime::block_on(
-            repair_order_update_parent_wait_blockers(&db, &mock_url, "test-api-key"),
-        )
-        .expect("repair rolled-over parent-wait order update");
+        let (repaired, requeued, quarantined) =
+            tauri::async_runtime::block_on(run_parent_wait_recovery_with_context(&db, &mock_url))
+                .expect("repair rolled-over parent-wait order update");
         server_handle.join().expect("join mock server");
 
         assert_eq!(repaired, 1);
@@ -28102,10 +31258,9 @@ mod tests {
             ),
         ]);
 
-        let (repaired, requeued, quarantined) = tauri::async_runtime::block_on(
-            repair_order_update_parent_wait_blockers(&db, &mock_url, "test-api-key"),
-        )
-        .expect("repair stale parent-wait order update");
+        let (repaired, requeued, quarantined) =
+            tauri::async_runtime::block_on(run_parent_wait_recovery_with_context(&db, &mock_url))
+                .expect("repair stale parent-wait order update");
         server_handle.join().expect("join mock server");
 
         assert_eq!(repaired, 0);
@@ -28208,10 +31363,9 @@ mod tests {
             ),
         ]);
 
-        let (repaired, requeued, quarantined) = tauri::async_runtime::block_on(
-            repair_order_update_parent_wait_blockers(&db, &mock_url, "test-api-key"),
-        )
-        .expect("repair live parent-wait order update");
+        let (repaired, requeued, quarantined) =
+            tauri::async_runtime::block_on(run_parent_wait_recovery_with_context(&db, &mock_url))
+                .expect("repair live parent-wait order update");
         server_handle.join().expect("join mock server");
 
         assert_eq!(repaired, 0);
@@ -28930,8 +32084,10 @@ mod tests {
         assert_eq!(parsed["orderId"], "ord-pr0-pay");
     }
 
-    #[test]
-    fn payment_sync_body_forwards_table_service_metadata_and_cents() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn payment_sync_body_forwards_table_service_metadata_and_cents() {
+        let _keyring =
+            crate::tests::fake_keyring::install_seeded([("terminal_id", "term-table-sync")]);
         let db = test_db();
         let now = "2026-05-21T07:26:26Z";
         let payload = serde_json::json!({
@@ -28999,14 +32155,8 @@ mod tests {
         );
         let item = load_sync_item(&db, queue_id);
         let items = vec![&item];
-        let api_key = r#"{"key":"test-key","tid":"term-table-sync"}"#;
-        let synced = tauri::async_runtime::block_on(sync_payment_items(
-            &mock_url,
-            api_key,
-            "term-table-sync",
-            &db,
-            &items,
-        ));
+        let api_key = "test-key";
+        let synced = sync_payment_items(&mock_url, api_key, "term-table-sync", &db, &items).await;
         assert_eq!(synced, 1);
         server_handle.join().expect("join mock server");
     }
@@ -29165,5 +32315,236 @@ mod tests {
             local_sync_state, "pending",
             "z_reports.sync_state must be reset to 'pending' after canonical requeue"
         );
+    }
+
+    #[test]
+    fn generic_order_reads_and_payment_recovery_hide_repair_settlements() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        for (id, remote_id, context) in [
+            ("generic-visible-order", "remote-generic-visible", ""),
+            (
+                "repair-hidden-order",
+                "remote-repair-hidden",
+                "  RePaIr_SeTtLeMeNt  ",
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO orders (
+                     id, supabase_id, order_number, items, total_amount, total_amount_cents,
+                     status, sync_status, payment_status, order_context, created_at, updated_at
+                 ) VALUES (?1, ?2, ?1, '[]', 12.0, 1200, 'completed', 'synced', 'paid', ?3,
+                           datetime('now'), datetime('now'))",
+                params![id, remote_id, context],
+            )
+            .unwrap();
+        }
+
+        let remote_payment = serde_json::json!({
+            "id": "remote-repair-payment",
+            "order_id": "remote-repair-hidden",
+            "payment_method": "cash",
+            "amount": 12.0,
+            "created_at": "2026-08-26T08:00:00Z",
+            "updated_at": "2026-08-26T08:00:00Z"
+        });
+        assert!(
+            sync_remote_payment_into_local_with_context(&conn, &remote_payment)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            maybe_reconstruct_paid_remote_order_payment(
+                &conn,
+                &serde_json::json!({
+                    "id": "remote-repair-hidden",
+                    "order_context": "REPAIR_SETTLEMENT",
+                    "payment_status": "paid",
+                    "payment_method": "cash",
+                    "status": "completed"
+                })
+            )
+            .unwrap(),
+            0
+        );
+        assert!(load_local_order_remote_lookup(&conn, "repair-hidden-order")
+            .unwrap()
+            .is_none());
+        drop(conn);
+
+        let visible = get_all_orders(&db).unwrap();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0]["id"], "generic-visible-order");
+        assert_eq!(
+            get_order_by_id(&db, "repair-hidden-order").unwrap_err(),
+            REPAIR_SETTLEMENT_ROUTE_REQUIRED
+        );
+        assert_eq!(
+            create_order(
+                &db,
+                &serde_json::json!({
+                    "clientRequestId": "repair-hidden-order",
+                    "orderContext": "ordinary",
+                    "items": []
+                }),
+                &crate::print::NoopPrintQueueInvalidator,
+            )
+            .unwrap_err(),
+            REPAIR_SETTLEMENT_ROUTE_REQUIRED
+        );
+
+        let conn = db.conn.lock().unwrap();
+        let repair_payment_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM order_payments WHERE order_id = 'repair-hidden-order'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(repair_payment_count, 0);
+    }
+
+    #[test]
+    fn generic_adjustment_and_conflict_candidates_exclude_repair_settlements() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                 id, items, total_amount, total_amount_cents, status, sync_status,
+                 order_context, created_at, updated_at
+             ) VALUES (
+                 'repair-financial-candidate', '[]', 10.0, 1000, 'completed', 'synced',
+                 'repair_settlement', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, amount_cents, status, sync_status, sync_state,
+                 created_at, updated_at
+             ) VALUES (
+                 'repair-financial-payment', 'repair-financial-candidate', 'cash', 10.0, 1000,
+                 'completed', 'failed', 'applied', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO payment_adjustments (
+                 id, payment_id, order_id, adjustment_type, amount, amount_cents, reason,
+                 sync_state, created_at, updated_at
+             ) VALUES (
+                 'repair-financial-adjustment', 'repair-financial-payment',
+                 'repair-financial-candidate', 'refund', 2.0, 200, 'repair refund',
+                 'waiting_parent', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                 entity_type, entity_id, operation, payload, idempotency_key, status, last_error
+             ) VALUES
+                 ('payment', 'repair-financial-payment', 'insert', '{}',
+                  'repair-financial-payment', 'failed', 'Payment exceeds order total'),
+                 ('payment_adjustment', 'repair-financial-adjustment', 'insert', '{}',
+                  'repair-financial-adjustment', 'deferred', 'Waiting for parent')",
+            [],
+        )
+        .unwrap();
+
+        assert!(
+            collect_applied_payment_queue_reconciliation_candidates(&conn, None)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            load_local_payment_total_conflict_context(&conn, "repair-financial-payment")
+                .unwrap()
+                .is_none()
+        );
+        drop(conn);
+
+        assert!(
+            collect_waiting_adjustment_order_ids_missing_canonical_remote_payment_id(&db)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            rebind_waiting_adjustments_to_canonical_duplicate_payments(&db, None).unwrap(),
+            0
+        );
+        assert_eq!(reconcile_deferred_adjustments(&db).unwrap(), 0);
+        assert_eq!(
+            tauri::async_runtime::block_on(recover_payment_total_conflicts(
+                &db,
+                "http://127.0.0.1:9",
+                "never-send-this-key",
+            ))
+            .expect("repair-only conflict set must short-circuit before network"),
+            0
+        );
+
+        let conn = db.conn.lock().unwrap();
+        let state: (String, String, String) = conn
+            .query_row(
+                "SELECT
+                     (SELECT status FROM order_payments WHERE id = 'repair-financial-payment'),
+                     (SELECT sync_state FROM payment_adjustments
+                      WHERE id = 'repair-financial-adjustment'),
+                     (SELECT status FROM sync_queue
+                      WHERE entity_type = 'payment' AND entity_id = 'repair-financial-payment')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            state,
+            ("completed".into(), "waiting_parent".into(), "failed".into())
+        );
+    }
+
+    #[test]
+    fn targeted_remote_payment_recovery_for_repair_settlement_never_enters_network_or_mutates() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (
+                     id, supabase_id, items, total_amount, total_amount_cents, status,
+                     sync_status, order_context, created_at, updated_at
+                 ) VALUES (
+                     'repair-targeted-recovery', 'remote-repair-targeted', '[]', 14.0, 1400,
+                     'ready', 'synced', 'repair_settlement', datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .unwrap();
+        }
+
+        let outcome =
+            tauri::async_runtime::block_on(reconcile_remote_payments_for_local_order_with_context(
+                &db,
+                "http://127.0.0.1:9",
+                "never-send-this-key",
+                "repair-targeted-recovery",
+            ))
+            .expect("repair settlement recovery must short-circuit before network");
+        assert_eq!(outcome.changed, 0);
+        assert!(outcome.mirrored_payments.is_empty());
+
+        let conn = db.conn.lock().unwrap();
+        let state: (String, String, i64) = conn
+            .query_row(
+                "SELECT status, sync_status,
+                        (SELECT COUNT(*) FROM order_payments
+                         WHERE order_id = 'repair-targeted-recovery')
+                 FROM orders WHERE id = 'repair-targeted-recovery'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(state, ("ready".into(), "synced".into(), 0));
     }
 }

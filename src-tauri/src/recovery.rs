@@ -26,6 +26,7 @@ const SNAPSHOT_WAL_FILE_NAME: &str = "snapshot.db-wal";
 const SNAPSHOT_SHM_FILE_NAME: &str = "snapshot.db-shm";
 const METADATA_FILE_NAME: &str = "metadata.json";
 const RESTORE_FILE_NAME: &str = "restore.json";
+const APPLIED_RESTORE_FILE_NAME: &str = "restore.applied.json";
 const DENSE_RETENTION_HOURS: i64 = 24;
 const TOTAL_RETENTION_DAYS: i64 = 7;
 const DEFAULT_SNAPSHOT_INTERVAL_SECS: u64 = 15 * 60;
@@ -159,6 +160,17 @@ pub struct RecoveryPointMetadata {
     pub error: Option<String>,
 }
 
+/// Internal preflight outcome for destructive operations that also own native
+/// repair state. Generic recovery points cannot represent that encrypted
+/// state, so callers must distinguish a real generic snapshot from an
+/// intentional native-state skip before they are allowed to purge anything.
+#[derive(Debug, Clone)]
+pub(crate) enum DestructiveSnapshotDecision {
+    Created,
+    SkippedNativeRepairState,
+    SkippedNoDatabase,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecoveryListResponse {
@@ -208,6 +220,94 @@ struct SnapshotLayout {
     final_snapshot_path: PathBuf,
 }
 
+struct RecoveryExportArtifacts {
+    recovery_root: PathBuf,
+    exports_root: PathBuf,
+    temp_dir: PathBuf,
+    final_zip: PathBuf,
+    recovery_root_existed: bool,
+    exports_root_existed: bool,
+    keep_final_zip: bool,
+}
+
+impl RecoveryExportArtifacts {
+    fn new(
+        recovery_root: PathBuf,
+        exports_root: PathBuf,
+        temp_dir: PathBuf,
+        final_zip: PathBuf,
+    ) -> Self {
+        let recovery_root_existed = recovery_root.exists();
+        let exports_root_existed = exports_root.exists();
+        Self {
+            recovery_root,
+            exports_root,
+            temp_dir,
+            final_zip,
+            recovery_root_existed,
+            exports_root_existed,
+            keep_final_zip: false,
+        }
+    }
+
+    fn keep_final_zip(&mut self) {
+        self.keep_final_zip = true;
+    }
+}
+
+impl Drop for RecoveryExportArtifacts {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.temp_dir);
+        if !self.keep_final_zip {
+            let _ = fs::remove_file(&self.final_zip);
+        }
+        if !self.exports_root_existed {
+            let _ = fs::remove_dir(&self.exports_root);
+        }
+        if !self.recovery_root_existed {
+            let _ = fs::remove_dir(&self.recovery_root);
+        }
+    }
+}
+
+struct PendingRestoreStagingArtifacts {
+    pending_dir: PathBuf,
+    pre_restore_point_dir: PathBuf,
+    owns_pending_dir: bool,
+    keep: bool,
+}
+
+impl PendingRestoreStagingArtifacts {
+    fn new(pending_dir: PathBuf, pre_restore_point_dir: PathBuf) -> Self {
+        Self {
+            pending_dir,
+            pre_restore_point_dir,
+            owns_pending_dir: false,
+            keep: false,
+        }
+    }
+
+    fn mark_pending_dir_owned(&mut self) {
+        self.owns_pending_dir = true;
+    }
+
+    fn keep(&mut self) {
+        self.keep = true;
+    }
+}
+
+impl Drop for PendingRestoreStagingArtifacts {
+    fn drop(&mut self) {
+        if self.keep {
+            return;
+        }
+        if self.owns_pending_dir {
+            let _ = fs::remove_dir_all(&self.pending_dir);
+        }
+        let _ = fs::remove_dir_all(&self.pre_restore_point_dir);
+    }
+}
+
 pub(crate) fn recovery_root_for_db(db: &db::DbState) -> PathBuf {
     db.db_path
         .parent()
@@ -233,6 +333,159 @@ fn quarantine_dir(root: &Path) -> PathBuf {
 
 fn pending_restore_dir(root: &Path) -> PathBuf {
     root.join(RECOVERY_PENDING_DIR)
+}
+
+fn validate_exact_pending_restore_file(
+    pending_dir: &Path,
+    configured_path: &str,
+    expected_file_name: &str,
+    label: &str,
+) -> Result<PathBuf, String> {
+    let expected_path = pending_dir.join(expected_file_name);
+    if Path::new(configured_path) != expected_path {
+        return Err(format!(
+            "RECOVERY_RESTORE_INVALID_STAGED_PATH: {label} must be exactly {}",
+            expected_path.display()
+        ));
+    }
+
+    let metadata = fs::symlink_metadata(&expected_path)
+        .map_err(|e| format!("RECOVERY_RESTORE_INVALID_STAGED_PATH: inspect {label}: {e}"))?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return Err(format!(
+            "RECOVERY_RESTORE_INVALID_STAGED_PATH: {label} is not a regular staged file"
+        ));
+    }
+
+    let canonical_pending = fs::canonicalize(pending_dir).map_err(|e| {
+        format!("RECOVERY_RESTORE_INVALID_STAGED_PATH: resolve pending restore directory: {e}")
+    })?;
+    let canonical_file = fs::canonicalize(&expected_path).map_err(|e| {
+        format!("RECOVERY_RESTORE_INVALID_STAGED_PATH: resolve staged {label}: {e}")
+    })?;
+    if canonical_file.parent() != Some(canonical_pending.as_path())
+        || canonical_file.file_name() != expected_path.file_name()
+    {
+        return Err(format!(
+            "RECOVERY_RESTORE_INVALID_STAGED_PATH: {label} resolves outside the pending restore directory"
+        ));
+    }
+
+    Ok(expected_path)
+}
+
+fn validate_optional_pending_restore_file(
+    pending_dir: &Path,
+    configured_path: Option<&str>,
+    expected_file_name: &str,
+    label: &str,
+) -> Result<Option<PathBuf>, String> {
+    configured_path
+        .map(|path| {
+            validate_exact_pending_restore_file(pending_dir, path, expected_file_name, label)
+        })
+        .transpose()
+}
+
+trait PendingRestoreApplyHooks {
+    fn after_staged_validation(&mut self, _staged_snapshot: &Path) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn before_live_file_move(
+        &mut self,
+        _move_index: usize,
+        _original: &Path,
+        _backup: &Path,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn before_marker_commit(&mut self, _restore_file: &Path) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn before_rollback_restore(&mut self, _backup: &Path, _original: &Path) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn before_committed_cleanup(&mut self, _pending_dir: &Path) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+struct NoopPendingRestoreApplyHooks;
+
+impl PendingRestoreApplyHooks for NoopPendingRestoreApplyHooks {}
+
+fn rollback_pending_restore_file_swap<H: PendingRestoreApplyHooks>(
+    written_targets: &[PathBuf],
+    moved_files: &[(PathBuf, PathBuf)],
+    rollback_dir: &Path,
+    hooks: &mut H,
+) -> Result<(), String> {
+    let mut errors = Vec::new();
+
+    for target in written_targets.iter().rev() {
+        if target.exists() {
+            if let Err(error) = fs::remove_file(target) {
+                errors.push(format!(
+                    "remove partially applied restore file {}: {error}",
+                    target.display()
+                ));
+            }
+        }
+    }
+
+    for (backup, original) in moved_files.iter().rev() {
+        if let Err(error) = hooks.before_rollback_restore(backup, original) {
+            errors.push(error);
+            continue;
+        }
+        if !backup.exists() {
+            errors.push(format!(
+                "restore backup is missing for {}",
+                original.display()
+            ));
+            continue;
+        }
+        if let Err(error) = fs::rename(backup, original) {
+            errors.push(format!(
+                "restore original database file {}: {error}",
+                original.display()
+            ));
+        }
+    }
+
+    if errors.is_empty() && rollback_dir.exists() {
+        if let Err(error) = fs::remove_dir_all(rollback_dir) {
+            errors.push(format!(
+                "remove completed restore rollback directory {}: {error}",
+                rollback_dir.display()
+            ));
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join(" | "))
+    }
+}
+
+fn restore_failure_with_rollback<H: PendingRestoreApplyHooks>(
+    apply_error: String,
+    written_targets: &[PathBuf],
+    moved_files: &[(PathBuf, PathBuf)],
+    rollback_dir: &Path,
+    hooks: &mut H,
+) -> String {
+    match rollback_pending_restore_file_swap(written_targets, moved_files, rollback_dir, hooks) {
+        Ok(()) => apply_error,
+        Err(rollback_error) => {
+            format!("{apply_error}; RECOVERY_RESTORE_ROLLBACK_FAILED: {rollback_error}")
+        }
+    }
 }
 
 fn parse_restored_attempt_target(value: &str, tag: &str) -> Option<(String, u64)> {
@@ -529,6 +782,14 @@ pub(crate) fn start_snapshot_monitor(
 }
 
 pub(crate) fn maybe_apply_pending_restore(app_data_dir: &Path) -> Result<Option<Value>, String> {
+    let mut hooks = NoopPendingRestoreApplyHooks;
+    maybe_apply_pending_restore_with_hooks(app_data_dir, &mut hooks)
+}
+
+fn maybe_apply_pending_restore_with_hooks<H: PendingRestoreApplyHooks>(
+    app_data_dir: &Path,
+    hooks: &mut H,
+) -> Result<Option<Value>, String> {
     ensure_recovery_dirs(app_data_dir)?;
     let root = recovery_root_for_app_data(app_data_dir);
     let pending_dir = pending_restore_dir(&root);
@@ -542,52 +803,107 @@ pub(crate) fn maybe_apply_pending_restore(app_data_dir: &Path) -> Result<Option<
     let staged: PendingRestoreMetadata =
         serde_json::from_str(&raw).map_err(|e| format!("parse pending restore: {e}"))?;
 
-    let staged_snapshot = PathBuf::from(&staged.staged_snapshot_path);
-    if !staged_snapshot.exists() {
-        return Err("Pending restore snapshot file is missing".into());
-    }
+    let staged_snapshot = validate_exact_pending_restore_file(
+        &pending_dir,
+        &staged.staged_snapshot_path,
+        SNAPSHOT_FILE_NAME,
+        "snapshot",
+    )?;
+    let staged_wal = validate_optional_pending_restore_file(
+        &pending_dir,
+        staged.staged_wal_path.as_deref(),
+        SNAPSHOT_WAL_FILE_NAME,
+        "wal",
+    )?;
+    let staged_shm = validate_optional_pending_restore_file(
+        &pending_dir,
+        staged.staged_shm_path.as_deref(),
+        SNAPSHOT_SHM_FILE_NAME,
+        "shm",
+    )?;
 
     let db_path = app_data_dir.join("pos.db");
     let wal_path = app_data_dir.join("pos.db-wal");
     let shm_path = app_data_dir.join("pos.db-shm");
     let rollback_dir = pending_dir.join("rollback");
 
+    if db_path.exists() {
+        let current_conn = open_snapshot_connection(&db_path).map_err(|error| {
+            format!(
+                "REPAIR_RECOVERY_RESTORE_BLOCKED: could not open current database for native repair verification: {error}"
+            )
+        })?;
+        ensure_no_native_repair_data(
+            &current_conn,
+            "REPAIR_RECOVERY_RESTORE_BLOCKED",
+            "current database",
+        )?;
+    }
+    let staged_conn = open_snapshot_connection(&staged_snapshot).map_err(|error| {
+        format!(
+            "REPAIR_RECOVERY_RESTORE_BLOCKED: could not open staged database for native repair verification: {error}"
+        )
+    })?;
+    ensure_no_native_repair_data(
+        &staged_conn,
+        "REPAIR_RECOVERY_RESTORE_BLOCKED",
+        "staged database",
+    )?;
+    drop(staged_conn);
+    hooks.after_staged_validation(&staged_snapshot)?;
+
     if rollback_dir.exists() {
-        let _ = fs::remove_dir_all(&rollback_dir);
+        return Err(format!(
+            "RECOVERY_RESTORE_ROLLBACK_PENDING: unresolved rollback artifacts exist at {}",
+            rollback_dir.display()
+        ));
     }
     fs::create_dir_all(&rollback_dir).map_err(|e| format!("create restore rollback dir: {e}"))?;
 
     let mut moved_files: Vec<(PathBuf, PathBuf)> = Vec::new();
-    for path in [&db_path, &wal_path, &shm_path] {
-        if path.exists() {
-            let file_name = path
-                .file_name()
-                .map(PathBuf::from)
-                .ok_or_else(|| format!("invalid database path: {}", path.display()))?;
-            let backup_path = rollback_dir.join(file_name);
-            fs::rename(path, &backup_path)
-                .map_err(|e| format!("move existing database file {}: {e}", path.display()))?;
-            moved_files.push((backup_path, path.to_path_buf()));
+    let mut written_targets = Vec::new();
+    let apply_result = (|| -> Result<(), String> {
+        for (move_index, path) in [&db_path, &wal_path, &shm_path].into_iter().enumerate() {
+            if path.exists() {
+                let file_name = path
+                    .file_name()
+                    .map(PathBuf::from)
+                    .ok_or_else(|| format!("invalid database path: {}", path.display()))?;
+                let backup_path = rollback_dir.join(file_name);
+                hooks.before_live_file_move(move_index, path, &backup_path)?;
+                fs::rename(path, &backup_path)
+                    .map_err(|e| format!("move existing database file {}: {e}", path.display()))?;
+                moved_files.push((backup_path, path.to_path_buf()));
+            }
         }
-    }
 
-    let apply_result = (|| {
+        // SQLite may create sidecars while the restored database is opened for
+        // verification or print-job cancellation, even when none were staged.
+        // Treat the entire target set as apply-owned once all original moves
+        // have completed so rollback never mixes restored sidecars with the
+        // original database.
+        written_targets.extend([db_path.clone(), wal_path.clone(), shm_path.clone()]);
         fs::copy(&staged_snapshot, &db_path)
             .map_err(|e| format!("restore snapshot database file: {e}"))?;
-        if let Some(wal_path_value) = staged.staged_wal_path.as_deref() {
-            let source = PathBuf::from(wal_path_value);
-            if source.exists() {
-                fs::copy(&source, &wal_path)
-                    .map_err(|e| format!("restore snapshot wal file: {e}"))?;
-            }
+        if let Some(source) = staged_wal.as_deref() {
+            fs::copy(source, &wal_path).map_err(|e| format!("restore snapshot wal file: {e}"))?;
         }
-        if let Some(shm_path_value) = staged.staged_shm_path.as_deref() {
-            let source = PathBuf::from(shm_path_value);
-            if source.exists() {
-                fs::copy(&source, &shm_path)
-                    .map_err(|e| format!("restore snapshot shm file: {e}"))?;
-            }
+        if let Some(source) = staged_shm.as_deref() {
+            fs::copy(source, &shm_path).map_err(|e| format!("restore snapshot shm file: {e}"))?;
         }
+
+        let final_conn = open_snapshot_connection(&db_path).map_err(|error| {
+            format!(
+                "REPAIR_RECOVERY_RESTORE_BLOCKED: could not open final restored database for native repair verification: {error}"
+            )
+        })?;
+        ensure_no_native_repair_data(
+            &final_conn,
+            "REPAIR_RECOVERY_RESTORE_BLOCKED",
+            "final restored database",
+        )?;
+        drop(final_conn);
+
         let cancelled_jobs = cancel_replayable_restored_print_jobs(&db_path)?;
         if cancelled_jobs > 0 {
             info!(
@@ -596,21 +912,34 @@ pub(crate) fn maybe_apply_pending_restore(app_data_dir: &Path) -> Result<Option<
                 "Cancelled replayable print jobs on restored snapshot"
             );
         }
-        Ok::<(), String>(())
+        hooks.before_marker_commit(&restore_file)?;
+        let applied_marker = pending_dir.join(APPLIED_RESTORE_FILE_NAME);
+        if applied_marker.exists() {
+            return Err(format!(
+                "RECOVERY_RESTORE_MARKER_COMMIT_FAILED: applied marker already exists at {}",
+                applied_marker.display()
+            ));
+        }
+        fs::rename(&restore_file, &applied_marker)
+            .map_err(|e| format!("RECOVERY_RESTORE_MARKER_COMMIT_FAILED: {e}"))?;
+        Ok(())
     })();
 
     if let Err(error) = apply_result {
-        let _ = fs::remove_file(&db_path);
-        let _ = fs::remove_file(&wal_path);
-        let _ = fs::remove_file(&shm_path);
-        for (backup_path, original_path) in moved_files.into_iter().rev() {
-            let _ = fs::rename(&backup_path, &original_path);
-        }
-        return Err(error);
+        return Err(restore_failure_with_rollback(
+            error,
+            &written_targets,
+            &moved_files,
+            &rollback_dir,
+            hooks,
+        ));
     }
 
-    let _ = fs::remove_dir_all(&rollback_dir);
-    let _ = fs::remove_dir_all(&pending_dir);
+    hooks
+        .before_committed_cleanup(&pending_dir)
+        .map_err(|error| format!("RECOVERY_RESTORE_APPLIED_CLEANUP_FAILED: {error}"))?;
+    fs::remove_dir_all(&pending_dir)
+        .map_err(|error| format!("RECOVERY_RESTORE_APPLIED_CLEANUP_FAILED: {error}"))?;
 
     Ok(Some(json!({
         "success": true,
@@ -637,11 +966,43 @@ pub(crate) fn snapshot_before_destructive_action(
     create_snapshot_for_db(db, kind, None)
 }
 
+pub(crate) fn preflight_snapshot_before_destructive_action(
+    db: &db::DbState,
+    kind: RecoveryPointKind,
+) -> Result<DestructiveSnapshotDecision, String> {
+    let contains_native_repair_state = {
+        let conn = db.conn.lock().map_err(|error| {
+            format!("REPAIR_RECOVERY_PREFLIGHT_FAILED: could not lock current database: {error}")
+        })?;
+        connection_contains_native_repair_data(&conn).map_err(|error| {
+            format!(
+                "REPAIR_RECOVERY_PREFLIGHT_FAILED: could not verify native repair data in current database: {error}"
+            )
+        })?
+    };
+
+    if contains_native_repair_state {
+        info!(
+            recovery_kind = %kind.as_str(),
+            decision = "skipped_native_repair_state",
+            "Skipped generic destructive snapshot because native repair state is present"
+        );
+        return Ok(DestructiveSnapshotDecision::SkippedNativeRepairState);
+    }
+
+    snapshot_before_destructive_action(db, kind).map(|_| DestructiveSnapshotDecision::Created)
+}
+
 pub(crate) fn maybe_create_scheduled_snapshot(
     db: &db::DbState,
 ) -> Result<Option<RecoveryPointMetadata>, String> {
     let current_fingerprint = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        ensure_no_native_repair_data(
+            &conn,
+            "REPAIR_RECOVERY_SNAPSHOT_BLOCKED",
+            "current database",
+        )?;
         compute_operational_fingerprint(&conn)?
     };
 
@@ -664,6 +1025,12 @@ pub(crate) fn create_pre_migration_snapshot(
     if !db_path.exists() {
         return Ok(None);
     }
+
+    ensure_no_native_repair_data(
+        conn,
+        "REPAIR_RECOVERY_SNAPSHOT_BLOCKED",
+        "pre-migration database",
+    )?;
 
     let app_data_dir = db_path
         .parent()
@@ -788,18 +1155,28 @@ pub(crate) fn list_recovery_points(db: &db::DbState) -> Result<Vec<RecoveryPoint
 }
 
 pub(crate) fn export_current_bundle(db: &db::DbState) -> Result<RecoveryExportResponse, String> {
+    {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        ensure_no_native_repair_data(&conn, "REPAIR_RECOVERY_EXPORT_BLOCKED", "current database")?;
+    }
+
     let root = recovery_root_for_db(db);
     let exports_root = exports_dir(&root);
-    fs::create_dir_all(&exports_root).map_err(|e| format!("create recovery exports dir: {e}"))?;
-
     let temp_export_dir = exports_root.join(format!(".tmp-current-{}", Uuid::new_v4()));
-    fs::create_dir_all(&temp_export_dir)
-        .map_err(|e| format!("create temporary export dir: {e}"))?;
     let temp_snapshot_path = temp_export_dir.join(SNAPSHOT_FILE_NAME);
     let final_zip = exports_root.join(format!(
         "thesmall-pos-recovery-current-{}.zip",
         Utc::now().format("%Y%m%d_%H%M%S")
     ));
+    let mut artifacts = RecoveryExportArtifacts::new(
+        root,
+        exports_root.clone(),
+        temp_export_dir.clone(),
+        final_zip.clone(),
+    );
+    fs::create_dir_all(&exports_root).map_err(|e| format!("create recovery exports dir: {e}"))?;
+    fs::create_dir_all(&temp_export_dir)
+        .map_err(|e| format!("create temporary export dir: {e}"))?;
 
     {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -807,6 +1184,11 @@ pub(crate) fn export_current_bundle(db: &db::DbState) -> Result<RecoveryExportRe
     }
 
     let snapshot_conn = open_snapshot_connection(&temp_snapshot_path)?;
+    ensure_no_native_repair_data(
+        &snapshot_conn,
+        "REPAIR_RECOVERY_EXPORT_BLOCKED",
+        "export snapshot",
+    )?;
     let metadata = build_metadata_from_connection(
         &snapshot_conn,
         &db.db_path,
@@ -822,7 +1204,7 @@ pub(crate) fn export_current_bundle(db: &db::DbState) -> Result<RecoveryExportRe
             .unwrap_or(0),
     )?;
     write_export_bundle(&snapshot_conn, &metadata, &temp_snapshot_path, &final_zip)?;
-    let _ = fs::remove_dir_all(&temp_export_dir);
+    artifacts.keep_final_zip();
 
     Ok(RecoveryExportResponse {
         success: true,
@@ -844,6 +1226,20 @@ pub(crate) fn export_recovery_point(
 
     let snapshot_path = PathBuf::from(&point.snapshot_path);
     let snapshot_conn = open_snapshot_connection(&snapshot_path)?;
+    match connection_contains_native_repair_data(&snapshot_conn) {
+        Ok(false) => {}
+        Ok(true) => {
+            return Err(
+                "REPAIR_RECOVERY_EXPORT_BLOCKED: native repair data requires the repair-safe recovery flow"
+                    .to_string(),
+            );
+        }
+        Err(error) => {
+            return Err(format!(
+                "REPAIR_RECOVERY_EXPORT_BLOCKED: could not verify native repair data: {error}"
+            ));
+        }
+    }
     let final_zip = exports_root.join(format!(
         "thesmall-pos-recovery-{}-{}.zip",
         point.id,
@@ -863,58 +1259,121 @@ pub(crate) fn stage_restore_from_point(
     db: &db::DbState,
     point_id: &str,
 ) -> Result<RecoveryRestoreResponse, String> {
+    stage_restore_from_point_with_target_validated_hook(db, point_id, || {})
+}
+
+fn stage_restore_from_point_with_target_validated_hook<F>(
+    db: &db::DbState,
+    point_id: &str,
+    after_target_validation: F,
+) -> Result<RecoveryRestoreResponse, String>
+where
+    F: FnOnce(),
+{
     let root = recovery_root_for_db(db);
     let point = load_recovery_point_by_id(&root, point_id)?
         .ok_or_else(|| format!("Recovery point not found: {point_id}"))?;
 
     validate_restore_point(db, &point)?;
-    let pre_restore = create_snapshot_for_db(db, RecoveryPointKind::PreRestore, None)?;
+    let target_snapshot_path = PathBuf::from(&point.snapshot_path);
+    let target_snapshot_conn = open_snapshot_connection(&target_snapshot_path)?;
+    ensure_no_native_repair_data(
+        &target_snapshot_conn,
+        "REPAIR_RECOVERY_RESTORE_BLOCKED",
+        "target database",
+    )?;
+    drop(target_snapshot_conn);
+    after_target_validation();
 
-    let pending_dir = pending_restore_dir(&root);
-    if pending_dir.exists() {
-        let _ = fs::remove_dir_all(&pending_dir);
-    }
-    fs::create_dir_all(&pending_dir).map_err(|e| format!("create pending restore dir: {e}"))?;
+    // Keep the only writable connection locked from the authoritative current-data
+    // check through the pre-restore snapshot and durable pending metadata commit.
+    // A repair enqueue can therefore happen either before the check (and block the
+    // generic restore) or after the complete staging transaction, never in between.
+    let (pre_restore, mut artifacts) = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        ensure_no_native_repair_data(&conn, "REPAIR_RECOVERY_RESTORE_BLOCKED", "current database")?;
 
-    let staged_snapshot_path = pending_dir.join(SNAPSHOT_FILE_NAME);
-    fs::copy(PathBuf::from(&point.snapshot_path), &staged_snapshot_path)
-        .map_err(|e| format!("stage restore snapshot: {e}"))?;
+        let app_data_dir = db
+            .db_path
+            .parent()
+            .ok_or_else(|| "database path does not have a parent directory".to_string())?;
+        ensure_recovery_dirs(app_data_dir)?;
+        let pre_restore = create_snapshot_from_connection(
+            &conn,
+            &db.db_path,
+            RecoveryPointKind::PreRestore,
+            points_dir(&root),
+            None,
+            None,
+        )?;
 
-    let staged_wal_path = if let Some(path) = point.wal_path.as_deref() {
-        let source = PathBuf::from(path);
-        if source.exists() {
-            let staged = pending_dir.join(SNAPSHOT_WAL_FILE_NAME);
-            fs::copy(&source, &staged).map_err(|e| format!("stage restore wal: {e}"))?;
-            Some(staged.to_string_lossy().to_string())
+        let pending_dir = pending_restore_dir(&root);
+        let mut artifacts = PendingRestoreStagingArtifacts::new(
+            pending_dir.clone(),
+            PathBuf::from(&pre_restore.path),
+        );
+        if pending_dir.exists() {
+            fs::remove_dir_all(&pending_dir)
+                .map_err(|e| format!("remove existing pending restore dir: {e}"))?;
+        }
+        fs::create_dir_all(&pending_dir).map_err(|e| format!("create pending restore dir: {e}"))?;
+        artifacts.mark_pending_dir_owned();
+
+        let staged_snapshot_path = pending_dir.join(SNAPSHOT_FILE_NAME);
+        fs::copy(PathBuf::from(&point.snapshot_path), &staged_snapshot_path)
+            .map_err(|e| format!("stage restore snapshot: {e}"))?;
+
+        let staged_wal_path = if let Some(path) = point.wal_path.as_deref() {
+            let source = PathBuf::from(path);
+            if source.exists() {
+                let staged = pending_dir.join(SNAPSHOT_WAL_FILE_NAME);
+                fs::copy(&source, &staged).map_err(|e| format!("stage restore wal: {e}"))?;
+                Some(staged.to_string_lossy().to_string())
+            } else {
+                None
+            }
         } else {
             None
-        }
-    } else {
-        None
-    };
+        };
 
-    let staged_shm_path = if let Some(path) = point.shm_path.as_deref() {
-        let source = PathBuf::from(path);
-        if source.exists() {
-            let staged = pending_dir.join(SNAPSHOT_SHM_FILE_NAME);
-            fs::copy(&source, &staged).map_err(|e| format!("stage restore shm: {e}"))?;
-            Some(staged.to_string_lossy().to_string())
+        let staged_shm_path = if let Some(path) = point.shm_path.as_deref() {
+            let source = PathBuf::from(path);
+            if source.exists() {
+                let staged = pending_dir.join(SNAPSHOT_SHM_FILE_NAME);
+                fs::copy(&source, &staged).map_err(|e| format!("stage restore shm: {e}"))?;
+                Some(staged.to_string_lossy().to_string())
+            } else {
+                None
+            }
         } else {
             None
-        }
-    } else {
-        None
-    };
+        };
 
-    let pending = PendingRestoreMetadata {
-        point_id: point.id.clone(),
-        created_at: Utc::now().to_rfc3339(),
-        staged_snapshot_path: staged_snapshot_path.to_string_lossy().to_string(),
-        staged_wal_path,
-        staged_shm_path,
-        metadata: point.clone(),
+        let staged_snapshot_conn = open_snapshot_connection(&staged_snapshot_path).map_err(|error| {
+            format!(
+                "REPAIR_RECOVERY_RESTORE_BLOCKED: could not open exact staged database for native repair verification: {error}"
+            )
+        })?;
+        ensure_no_native_repair_data(
+            &staged_snapshot_conn,
+            "REPAIR_RECOVERY_RESTORE_BLOCKED",
+            "exact staged database",
+        )?;
+        drop(staged_snapshot_conn);
+
+        let pending = PendingRestoreMetadata {
+            point_id: point.id.clone(),
+            created_at: Utc::now().to_rfc3339(),
+            staged_snapshot_path: staged_snapshot_path.to_string_lossy().to_string(),
+            staged_wal_path,
+            staged_shm_path,
+            metadata: point.clone(),
+        };
+        write_json_file(&pending_dir.join(RESTORE_FILE_NAME), &pending)?;
+        (pre_restore, artifacts)
     };
-    write_json_file(&pending_dir.join(RESTORE_FILE_NAME), &pending)?;
+    prune_recovery_points(&root)?;
+    artifacts.keep();
 
     Ok(RecoveryRestoreResponse {
         success: true,
@@ -935,10 +1394,15 @@ fn create_snapshot_for_db(
         .db_path
         .parent()
         .ok_or_else(|| "database path does not have a parent directory".to_string())?;
-    ensure_recovery_dirs(app_data_dir)?;
     let root = recovery_root_for_app_data(app_data_dir);
     let point = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        ensure_no_native_repair_data(
+            &conn,
+            "REPAIR_RECOVERY_SNAPSHOT_BLOCKED",
+            "current database",
+        )?;
+        ensure_recovery_dirs(app_data_dir)?;
         create_snapshot_from_connection(
             &conn,
             &db.db_path,
@@ -960,6 +1424,11 @@ fn create_snapshot_from_connection(
     existing_fingerprint: Option<String>,
     error: Option<String>,
 ) -> Result<RecoveryPointMetadata, String> {
+    ensure_no_native_repair_data(
+        conn,
+        "REPAIR_RECOVERY_SNAPSHOT_BLOCKED",
+        "snapshot source database",
+    )?;
     fs::create_dir_all(&output_dir).map_err(|e| format!("create recovery output dir: {e}"))?;
     let layout = build_snapshot_layout(&output_dir, kind);
     fs::create_dir_all(&layout.temp_dir).map_err(|e| format!("create recovery temp dir: {e}"))?;
@@ -1364,6 +1833,118 @@ fn table_exists(conn: &Connection, table: &str) -> Result<bool, String> {
     .map_err(|e| format!("table exists {table}: {e}"))
 }
 
+fn connection_contains_native_repair_data(conn: &Connection) -> Result<bool, String> {
+    for table in [
+        "repair_cache",
+        "repair_alias_cache",
+        "repair_attachment_staging",
+        "repair_conflicts",
+    ] {
+        if !table_exists(conn, table)? {
+            continue;
+        }
+        let query = format!(
+            "SELECT EXISTS(SELECT 1 FROM {} LIMIT 1)",
+            quote_identifier(table)
+        );
+        let exists = conn
+            .query_row(&query, [], |row| row.get::<_, i64>(0))
+            .map_err(|e| format!("inspect native repair table {table}: {e}"))?;
+        if exists == 1 {
+            return Ok(true);
+        }
+    }
+
+    if table_exists(conn, "parity_sync_queue")? {
+        let exists = conn
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1
+                     FROM parity_sync_queue
+                     WHERE lower(trim(COALESCE(module_type, ''))) = 'repairs'
+                        OR lower(trim(COALESCE(table_name, '')))
+                           IN ('repairs', 'repair_attachments')
+                     LIMIT 1
+                 )",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|e| format!("inspect native repair parity rows: {e}"))?;
+        if exists == 1 {
+            return Ok(true);
+        }
+    }
+
+    if table_has_column(conn, "orders", "order_context")? {
+        let exists = conn
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM orders
+                     WHERE lower(trim(COALESCE(order_context, ''))) = 'repair_settlement'
+                     LIMIT 1
+                 )",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|e| format!("inspect repair settlement orders: {e}"))?;
+        if exists == 1 {
+            return Ok(true);
+        }
+    }
+
+    if table_has_column(conn, "conflict_audit_log", "entity_type")? {
+        let exists = conn
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM conflict_audit_log
+                     WHERE lower(trim(COALESCE(entity_type, '')))
+                           IN ('repairs', 'repair_attachments')
+                     LIMIT 1
+                 )",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|e| format!("inspect native repair conflict audit: {e}"))?;
+        if exists == 1 {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+/// Read-only migration preflight. This intentionally exposes only the repair
+/// ownership decision; it does not relax any generic snapshot, restore, or
+/// export guard.
+pub(crate) fn pre_migration_contains_native_repair_data(conn: &Connection) -> Result<bool, String> {
+    connection_contains_native_repair_data(conn)
+}
+
+fn ensure_no_native_repair_data(
+    conn: &Connection,
+    error_code: &str,
+    subject: &str,
+) -> Result<(), String> {
+    match connection_contains_native_repair_data(conn) {
+        Ok(false) => Ok(()),
+        Ok(true) => Err(format!(
+            "{error_code}: {subject} contains native repair data; use the repair-safe recovery flow"
+        )),
+        Err(error) => Err(format!(
+            "{error_code}: could not verify native repair data in {subject}: {error}"
+        )),
+    }
+}
+
+fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, String> {
+    if !table_exists(conn, table)? {
+        return Ok(false);
+    }
+    Ok(read_table_columns(conn, table)?
+        .iter()
+        .any(|candidate| candidate == column))
+}
+
 fn first_existing_column(
     conn: &Connection,
     table: &str,
@@ -1735,6 +2316,141 @@ mod tests {
         dir
     }
 
+    fn seed_native_repair_queue_row(conn: &Connection) -> (String, String) {
+        let operation_id = Uuid::new_v4().to_string();
+        let repair_id = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status, error_message,
+                 repair_aggregate_id
+             ) VALUES (
+                 ?1, 'repairs', ?2, 'UPDATE',
+                 '{\"ciphertext\":\"repair-recovery-export-ciphertext-secret\"}',
+                 'repair-recovery-export-tenant-secret', datetime('now'), 4,
+                 1000, 1, 'repairs', 'manual', 7, 'conflict',
+                 'repair-recovery-export-error-secret', ?2
+             )",
+            params![operation_id, repair_id],
+        )
+        .expect("seed native repair parity row");
+        (operation_id, repair_id)
+    }
+
+    fn seed_repair_settlement_order(conn: &Connection, order_id: &str) {
+        conn.execute(
+            "INSERT INTO orders (
+                 id, items, total_amount, total_amount_cents, status, order_context,
+                 sync_status, created_at, updated_at
+             ) VALUES (
+                 ?1, '[]', 13.0, 1300, 'pending', 'repair_settlement',
+                 'pending', datetime('now'), datetime('now')
+             )",
+            params![order_id],
+        )
+        .expect("seed repair settlement order");
+    }
+
+    fn seed_repair_conflict_audit(conn: &Connection, audit_id: &str) {
+        conn.execute(
+            "INSERT INTO conflict_audit_log (
+                 id, operation_type, entity_id, entity_type, local_version,
+                 server_version, discarded_payload, resolution
+             ) VALUES (
+                 ?1, 'UPDATE', 'repair-audit-entity', 'repairs', 2, 3,
+                 '{\"ciphertext\":\"repair-audit-secret\"}', 'manual_review'
+             )",
+            params![audit_id],
+        )
+        .expect("seed repair conflict audit");
+    }
+
+    fn assert_recovery_tree_absent(path: &Path, context: &str) {
+        assert!(
+            !path.exists(),
+            "{context} created recovery directories or snapshot artifacts"
+        );
+    }
+
+    fn mutate_snapshot<F>(point: &RecoveryPointMetadata, mutation: F)
+    where
+        F: FnOnce(&Connection),
+    {
+        let conn = Connection::open(&point.snapshot_path).expect("open snapshot for mutation");
+        mutation(&conn);
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .expect("checkpoint mutated snapshot");
+    }
+
+    #[derive(Default)]
+    struct DeterministicPendingRestoreHooks {
+        swap_staged_with: Option<PathBuf>,
+        create_live_sidecars_in: Option<PathBuf>,
+        fail_before_move: Option<usize>,
+        fail_rollback_file_name: Option<String>,
+        fail_before_marker_commit: bool,
+        fail_before_cleanup: bool,
+    }
+
+    impl PendingRestoreApplyHooks for DeterministicPendingRestoreHooks {
+        fn after_staged_validation(&mut self, staged_snapshot: &Path) -> Result<(), String> {
+            if let Some(source) = self.swap_staged_with.as_deref() {
+                fs::copy(source, staged_snapshot)
+                    .map_err(|e| format!("inject staged snapshot swap: {e}"))?;
+            }
+            if let Some(app_data_dir) = self.create_live_sidecars_in.as_deref() {
+                fs::write(app_data_dir.join("pos.db-wal"), b"original-live-wal")
+                    .map_err(|e| format!("inject live wal: {e}"))?;
+                fs::write(app_data_dir.join("pos.db-shm"), b"original-live-shm")
+                    .map_err(|e| format!("inject live shm: {e}"))?;
+            }
+            Ok(())
+        }
+
+        fn before_live_file_move(
+            &mut self,
+            move_index: usize,
+            _original: &Path,
+            _backup: &Path,
+        ) -> Result<(), String> {
+            if self.fail_before_move == Some(move_index) {
+                return Err(format!("injected live move failure at index {move_index}"));
+            }
+            Ok(())
+        }
+
+        fn before_marker_commit(&mut self, _restore_file: &Path) -> Result<(), String> {
+            if self.fail_before_marker_commit {
+                return Err("injected restore marker commit failure".to_string());
+            }
+            Ok(())
+        }
+
+        fn before_rollback_restore(
+            &mut self,
+            _backup: &Path,
+            original: &Path,
+        ) -> Result<(), String> {
+            if original.file_name().and_then(|name| name.to_str())
+                == self.fail_rollback_file_name.as_deref()
+            {
+                return Err(format!(
+                    "injected rollback failure for {}",
+                    original.display()
+                ));
+            }
+            Ok(())
+        }
+
+        fn before_committed_cleanup(&mut self, _pending_dir: &Path) -> Result<(), String> {
+            if self.fail_before_cleanup {
+                return Err("injected committed cleanup failure".to_string());
+            }
+            Ok(())
+        }
+    }
+
     fn count_orders(app_data_dir: &Path) -> i64 {
         let conn = Connection::open(app_data_dir.join("pos.db")).expect("open db");
         conn.query_row("SELECT COUNT(*) FROM orders", [], |row| row.get(0))
@@ -1851,6 +2567,900 @@ mod tests {
 
         let listed = list_recovery_points(&db_state).expect("list recovery points");
         assert_eq!(listed.len(), 1);
+
+        let _ = fs::remove_dir_all(app_data_dir);
+    }
+
+    #[test]
+    fn every_generic_snapshot_creator_rejects_repair_state_before_artifacts() {
+        let app_data_dir = temp_app_dir("recovery_snapshot_all_entrypoints_repair_block");
+        let db_state = db::init(&app_data_dir).expect("init db");
+        {
+            let conn = db_state.conn.lock().expect("lock db");
+            seed_native_repair_queue_row(&conn);
+        }
+        let root = recovery_root_for_db(&db_state);
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("remove initial recovery tree");
+        }
+
+        for (name, result) in [
+            ("manual", create_manual_snapshot(&db_state).map(Some)),
+            (
+                "pre-recovery action",
+                create_pre_recovery_action_snapshot(&db_state).map(Some),
+            ),
+            (
+                "pre-destructive action",
+                snapshot_before_destructive_action(&db_state, RecoveryPointKind::PreFactoryReset)
+                    .map(Some),
+            ),
+            ("scheduled", maybe_create_scheduled_snapshot(&db_state)),
+        ] {
+            let error = result.expect_err(name);
+            assert!(
+                error.contains("REPAIR_RECOVERY_SNAPSHOT_BLOCKED"),
+                "{name}: {error}"
+            );
+            assert_recovery_tree_absent(&root, name);
+        }
+
+        {
+            let conn = db_state.conn.lock().expect("lock db for pre-migration");
+            let error =
+                create_pre_migration_snapshot(&db_state.db_path, &conn).expect_err("pre-migration");
+            assert!(
+                error.contains("REPAIR_RECOVERY_SNAPSHOT_BLOCKED"),
+                "pre-migration: {error}"
+            );
+        }
+        assert_recovery_tree_absent(&root, "pre-migration");
+
+        let direct_output = app_data_dir.join("direct-generic-recovery-points");
+        {
+            let conn = db_state.conn.lock().expect("lock db for internal creator");
+            let error = create_snapshot_from_connection(
+                &conn,
+                &db_state.db_path,
+                RecoveryPointKind::Manual,
+                direct_output.clone(),
+                None,
+                None,
+            )
+            .expect_err("internal snapshot creator");
+            assert!(
+                error.contains("REPAIR_RECOVERY_SNAPSHOT_BLOCKED"),
+                "internal creator: {error}"
+            );
+        }
+        assert_recovery_tree_absent(&direct_output, "internal creator");
+
+        let _ = fs::remove_dir_all(app_data_dir);
+    }
+
+    #[test]
+    fn normalized_repair_ownership_values_block_generic_snapshots() {
+        for case in ["module", "table", "order_context", "entity_type"] {
+            let app_data_dir = temp_app_dir(&format!("recovery_normalized_{case}"));
+            let db_state = db::init(&app_data_dir).expect("init normalized detector db");
+            {
+                let conn = db_state.conn.lock().expect("lock normalized detector db");
+                match case {
+                    "module" => {
+                        conn.execute(
+                            "INSERT INTO parity_sync_queue (
+                                 id, table_name, record_id, operation, data, organization_id,
+                                 created_at, attempts, retry_delay_ms, priority, module_type,
+                                 conflict_strategy, version, status
+                             ) VALUES (
+                                 ?1, 'orders', ?2, 'UPDATE', '{}', 'org-normalized',
+                                 datetime('now'), 0, 1000, 1, '  RePaIrS  ',
+                                 'manual', 1, 'pending'
+                             )",
+                            params![Uuid::new_v4().to_string(), Uuid::new_v4().to_string()],
+                        )
+                        .expect("seed normalized module");
+                    }
+                    "table" => {
+                        conn.execute(
+                            "INSERT INTO parity_sync_queue (
+                                 id, table_name, record_id, operation, data, organization_id,
+                                 created_at, attempts, retry_delay_ms, priority, module_type,
+                                 conflict_strategy, version, status
+                             ) VALUES (
+                                 ?1, '  RePaIr_AtTaChMeNtS  ', ?2, 'INSERT', '{}',
+                                 'org-normalized', datetime('now'), 0, 1000, 1, 'orders',
+                                 'manual', 1, 'pending'
+                             )",
+                            params![Uuid::new_v4().to_string(), Uuid::new_v4().to_string()],
+                        )
+                        .expect("seed normalized table");
+                    }
+                    "order_context" => {
+                        seed_repair_settlement_order(&conn, "normalized-repair-settlement-order")
+                    }
+                    "entity_type" => {
+                        seed_repair_conflict_audit(&conn, "normalized-repair-conflict");
+                    }
+                    _ => unreachable!(),
+                }
+                if case == "order_context" {
+                    conn.execute(
+                        "UPDATE orders
+                         SET order_context = '  RePaIr_SeTtLeMeNt  '
+                         WHERE id = 'normalized-repair-settlement-order'",
+                        [],
+                    )
+                    .expect("normalize repair settlement context");
+                } else if case == "entity_type" {
+                    conn.execute(
+                        "UPDATE conflict_audit_log
+                         SET entity_type = '  RePaIrS  '
+                         WHERE id = 'normalized-repair-conflict'",
+                        [],
+                    )
+                    .expect("normalize repair conflict entity type");
+                }
+            }
+
+            let root = recovery_root_for_db(&db_state);
+            if root.exists() {
+                fs::remove_dir_all(&root).expect("remove initial recovery tree");
+            }
+            let error = create_manual_snapshot(&db_state)
+                .expect_err("normalized repair ownership must fail closed");
+            assert!(
+                error.contains("REPAIR_RECOVERY_SNAPSHOT_BLOCKED"),
+                "{case}: {error}"
+            );
+            assert_recovery_tree_absent(&root, case);
+
+            let _ = fs::remove_dir_all(app_data_dir);
+        }
+    }
+
+    #[test]
+    fn empty_v78_repair_tables_allow_current_recovery_export() {
+        let app_data_dir = temp_app_dir("recovery_export_empty_repairs");
+        let db_state = db::init(&app_data_dir).expect("init db");
+
+        let export = export_current_bundle(&db_state)
+            .expect("empty repair tables must not block recovery export");
+        assert!(Path::new(&export.path).exists());
+
+        let _ = fs::remove_dir_all(app_data_dir);
+    }
+
+    #[test]
+    fn current_repair_data_blocks_recovery_export_without_artifact() {
+        let app_data_dir = temp_app_dir("recovery_export_current_repair_block");
+        let db_state = db::init(&app_data_dir).expect("init db");
+        {
+            let conn = db_state.conn.lock().expect("lock db");
+            seed_native_repair_queue_row(&conn);
+        }
+
+        let error = export_current_bundle(&db_state)
+            .expect_err("current native repair data must fail closed");
+        assert!(error.contains("REPAIR_RECOVERY_EXPORT_BLOCKED"));
+        let root = recovery_root_for_db(&db_state);
+        let export_root = exports_dir(&root);
+        if export_root.exists() {
+            let artifacts = fs::read_dir(&export_root)
+                .unwrap()
+                .filter_map(Result::ok)
+                .collect::<Vec<_>>();
+            assert!(artifacts.is_empty(), "blocked export left an artifact");
+        }
+
+        let _ = fs::remove_dir_all(app_data_dir);
+    }
+
+    #[test]
+    fn current_repair_data_blocks_export_before_creating_recovery_root() {
+        let app_data_dir = temp_app_dir("recovery_export_preflight_repair_block");
+        let db_state = db::init(&app_data_dir).expect("init db");
+        {
+            let conn = db_state.conn.lock().expect("lock db");
+            seed_native_repair_queue_row(&conn);
+        }
+        let root = recovery_root_for_db(&db_state);
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("remove pre-existing recovery root");
+        }
+
+        let error = export_current_bundle(&db_state)
+            .expect_err("repair data must be rejected before export setup");
+        assert!(error.contains("REPAIR_RECOVERY_EXPORT_BLOCKED"));
+        assert!(
+            !root.exists(),
+            "blocked export created recovery directories or plaintext temp artifacts"
+        );
+
+        let _ = fs::remove_dir_all(app_data_dir);
+    }
+
+    #[test]
+    fn repair_settlement_only_blocks_current_export_before_artifacts() {
+        let app_data_dir = temp_app_dir("recovery_export_settlement_only");
+        let db_state = db::init(&app_data_dir).expect("init db");
+        {
+            let conn = db_state.conn.lock().expect("lock db");
+            seed_repair_settlement_order(&conn, "repair-settlement-export");
+        }
+        let root = recovery_root_for_db(&db_state);
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("remove pre-existing recovery root");
+        }
+
+        let error = export_current_bundle(&db_state)
+            .expect_err("repair settlement data must block generic recovery export");
+        assert!(error.contains("REPAIR_RECOVERY_EXPORT_BLOCKED"));
+        assert!(
+            !root.exists(),
+            "blocked settlement export created artifacts"
+        );
+
+        let _ = fs::remove_dir_all(app_data_dir);
+    }
+
+    #[test]
+    fn repair_conflict_audit_only_blocks_current_export_before_artifacts() {
+        let app_data_dir = temp_app_dir("recovery_export_repair_audit_only");
+        let db_state = db::init(&app_data_dir).expect("init db");
+        {
+            let conn = db_state.conn.lock().expect("lock db");
+            seed_repair_conflict_audit(&conn, "repair-audit-export");
+        }
+        let root = recovery_root_for_db(&db_state);
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("remove pre-existing recovery root");
+        }
+
+        let error = export_current_bundle(&db_state)
+            .expect_err("repair conflict audit must block generic recovery export");
+        assert!(error.contains("REPAIR_RECOVERY_EXPORT_BLOCKED"));
+        assert!(
+            !root.exists(),
+            "blocked repair audit export created artifacts"
+        );
+
+        let _ = fs::remove_dir_all(app_data_dir);
+    }
+
+    #[test]
+    fn repair_data_in_target_snapshot_blocks_export_without_artifact() {
+        let app_data_dir = temp_app_dir("recovery_export_point_repair_block");
+        let db_state = db::init(&app_data_dir).expect("init db");
+        let point = create_manual_snapshot(&db_state).expect("create clean point");
+        mutate_snapshot(&point, |conn| {
+            seed_native_repair_queue_row(conn);
+        });
+
+        let error = export_recovery_point(&db_state, &point.id)
+            .expect_err("repair-bearing recovery point must fail closed");
+        assert!(error.contains("REPAIR_RECOVERY_EXPORT_BLOCKED"));
+        let export_root = exports_dir(&recovery_root_for_db(&db_state));
+        if export_root.exists() {
+            let artifacts = fs::read_dir(&export_root)
+                .unwrap()
+                .filter_map(Result::ok)
+                .collect::<Vec<_>>();
+            assert!(
+                artifacts.is_empty(),
+                "blocked point export left an artifact"
+            );
+        }
+
+        let _ = fs::remove_dir_all(app_data_dir);
+    }
+
+    #[test]
+    fn repair_data_in_current_or_target_db_blocks_restore_without_mutation() {
+        let current_dir = temp_app_dir("recovery_restore_current_repair_block");
+        let current_db = db::init(&current_dir).expect("init current-data db");
+        let clean_point = create_manual_snapshot(&current_db).expect("create clean point");
+        let current_operation_id = {
+            let conn = current_db.conn.lock().expect("lock current db");
+            seed_native_repair_queue_row(&conn).0
+        };
+
+        let current_error = stage_restore_from_point(&current_db, &clean_point.id)
+            .expect_err("current repair data must block generic restore");
+        assert!(current_error.contains("REPAIR_RECOVERY_RESTORE_BLOCKED"));
+        let current_conn = current_db.conn.lock().expect("lock current db after block");
+        let current_row_count: i64 = current_conn
+            .query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE id = ?1",
+                params![current_operation_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(current_row_count, 1);
+        drop(current_conn);
+        assert!(!pending_restore_dir(&recovery_root_for_db(&current_db)).exists());
+
+        let target_dir = temp_app_dir("recovery_restore_target_repair_block");
+        let target_db = db::init(&target_dir).expect("init target-data db");
+        let repair_point = create_manual_snapshot(&target_db).expect("create clean target point");
+        mutate_snapshot(&repair_point, |conn| {
+            seed_native_repair_queue_row(conn);
+        });
+
+        let target_error = stage_restore_from_point(&target_db, &repair_point.id)
+            .expect_err("target repair data must block generic restore");
+        assert!(target_error.contains("REPAIR_RECOVERY_RESTORE_BLOCKED"));
+        let target_conn = target_db.conn.lock().expect("lock target db after block");
+        let target_queue_count: i64 = target_conn
+            .query_row("SELECT COUNT(*) FROM parity_sync_queue", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(target_queue_count, 0);
+        drop(target_conn);
+        assert!(!pending_restore_dir(&recovery_root_for_db(&target_db)).exists());
+
+        let _ = fs::remove_dir_all(current_dir);
+        let _ = fs::remove_dir_all(target_dir);
+    }
+
+    #[test]
+    fn concurrent_repair_enqueue_after_target_check_blocks_stage_without_artifacts() {
+        let app_data_dir = temp_app_dir("recovery_restore_concurrent_repair_enqueue");
+        let db_state = Arc::new(db::init(&app_data_dir).expect("init db"));
+        let clean_point = create_manual_snapshot(&db_state).expect("create clean point");
+        let point_ids_before = list_recovery_points(&db_state)
+            .expect("list initial recovery points")
+            .into_iter()
+            .map(|point| point.id)
+            .collect::<HashSet<_>>();
+
+        let target_validated = Arc::new(std::sync::Barrier::new(2));
+        let repair_inserted = Arc::new(std::sync::Barrier::new(2));
+        let stage_db = Arc::clone(&db_state);
+        let stage_point_id = clean_point.id.clone();
+        let stage_target_validated = Arc::clone(&target_validated);
+        let stage_repair_inserted = Arc::clone(&repair_inserted);
+        let stage = std::thread::spawn(move || {
+            stage_restore_from_point_with_target_validated_hook(
+                &stage_db,
+                &stage_point_id,
+                move || {
+                    stage_target_validated.wait();
+                    stage_repair_inserted.wait();
+                },
+            )
+        });
+
+        target_validated.wait();
+        {
+            let conn = db_state
+                .conn
+                .lock()
+                .expect("lock live db for repair enqueue");
+            seed_native_repair_queue_row(&conn);
+        }
+        repair_inserted.wait();
+
+        let error = stage
+            .join()
+            .expect("stage restore thread")
+            .expect_err("repair enqueue racing stage must fail closed");
+        assert!(error.contains("REPAIR_RECOVERY_RESTORE_BLOCKED"));
+        assert!(
+            !pending_restore_dir(&recovery_root_for_db(&db_state)).exists(),
+            "blocked concurrent stage created pending restore artifacts"
+        );
+        let point_ids_after = list_recovery_points(&db_state)
+            .expect("list recovery points after block")
+            .into_iter()
+            .map(|point| point.id)
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            point_ids_after, point_ids_before,
+            "blocked concurrent stage created a pre-restore point"
+        );
+
+        let _ = fs::remove_dir_all(app_data_dir);
+    }
+
+    #[test]
+    fn target_swap_after_validation_blocks_stage_and_cleans_partial_artifacts() {
+        let app_data_dir = temp_app_dir("recovery_restore_target_swap");
+        let db_state = db::init(&app_data_dir).expect("init clean target db");
+        let clean_point = create_manual_snapshot(&db_state).expect("create clean point");
+        let point_ids_before = list_recovery_points(&db_state)
+            .expect("list initial recovery points")
+            .into_iter()
+            .map(|point| point.id)
+            .collect::<HashSet<_>>();
+
+        let repair_source_dir = temp_app_dir("recovery_restore_target_swap_source");
+        let repair_source_db = db::init(&repair_source_dir).expect("init repair source db");
+        let repair_point = create_manual_snapshot(&repair_source_db).expect("create source point");
+        mutate_snapshot(&repair_point, |conn| {
+            seed_native_repair_queue_row(conn);
+        });
+        drop(repair_source_db);
+
+        let clean_snapshot_path = PathBuf::from(&clean_point.snapshot_path);
+        let repair_snapshot_path = PathBuf::from(&repair_point.snapshot_path);
+        let error = stage_restore_from_point_with_target_validated_hook(
+            &db_state,
+            &clean_point.id,
+            move || {
+                fs::copy(&repair_snapshot_path, &clean_snapshot_path)
+                    .expect("swap validated target with repair-bearing snapshot");
+            },
+        )
+        .expect_err("a target swapped after validation must fail closed");
+
+        assert!(error.contains("REPAIR_RECOVERY_RESTORE_BLOCKED"));
+        assert!(
+            !pending_restore_dir(&recovery_root_for_db(&db_state)).exists(),
+            "blocked target swap left pending restore metadata or artifacts"
+        );
+        let point_ids_after = list_recovery_points(&db_state)
+            .expect("list recovery points after target-swap block")
+            .into_iter()
+            .map(|point| point.id)
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            point_ids_after, point_ids_before,
+            "blocked target swap left a pre-restore recovery point"
+        );
+
+        let _ = fs::remove_dir_all(app_data_dir);
+        let _ = fs::remove_dir_all(repair_source_dir);
+    }
+
+    #[test]
+    fn repair_settlement_only_target_blocks_restore_before_staging() {
+        let app_data_dir = temp_app_dir("recovery_restore_settlement_only");
+        let db_state = db::init(&app_data_dir).expect("init db");
+        let point = create_manual_snapshot(&db_state).expect("create clean target point");
+        mutate_snapshot(&point, |conn| {
+            seed_repair_settlement_order(conn, "repair-settlement-target");
+        });
+
+        let error = stage_restore_from_point(&db_state, &point.id)
+            .expect_err("settlement-bearing target must block generic restore");
+        assert!(error.contains("REPAIR_RECOVERY_RESTORE_BLOCKED"));
+        assert!(
+            !pending_restore_dir(&recovery_root_for_db(&db_state)).exists(),
+            "blocked settlement target was staged"
+        );
+
+        let _ = fs::remove_dir_all(app_data_dir);
+    }
+
+    #[test]
+    fn repair_conflict_audit_only_target_blocks_restore_before_staging() {
+        let app_data_dir = temp_app_dir("recovery_restore_repair_audit_only");
+        let db_state = db::init(&app_data_dir).expect("init db");
+        let point = create_manual_snapshot(&db_state).expect("create clean target point");
+        mutate_snapshot(&point, |conn| {
+            seed_repair_conflict_audit(conn, "repair-audit-target");
+        });
+
+        let error = stage_restore_from_point(&db_state, &point.id)
+            .expect_err("repair-audit-bearing target must block generic restore");
+        assert!(error.contains("REPAIR_RECOVERY_RESTORE_BLOCKED"));
+        assert!(
+            !pending_restore_dir(&recovery_root_for_db(&db_state)).exists(),
+            "blocked repair audit target was staged"
+        );
+
+        let _ = fs::remove_dir_all(app_data_dir);
+    }
+
+    #[test]
+    fn pending_restore_rechecks_live_database_before_moving_files() {
+        let app_data_dir = temp_app_dir("recovery_apply_live_repair_toctou");
+        let db_state = db::init(&app_data_dir).expect("init db");
+        let clean_point = create_manual_snapshot(&db_state).expect("create clean point");
+        stage_restore_from_point(&db_state, &clean_point.id).expect("stage clean restore");
+        let operation_id = {
+            let conn = db_state.conn.lock().expect("lock live db");
+            seed_native_repair_queue_row(&conn).0
+        };
+        drop(db_state);
+
+        let error = maybe_apply_pending_restore(&app_data_dir)
+            .expect_err("live repair data inserted after staging must block apply");
+        assert!(error.contains("REPAIR_RECOVERY_RESTORE_BLOCKED"));
+        let conn = Connection::open(app_data_dir.join("pos.db")).expect("open unchanged live db");
+        let repair_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE id = ?1",
+                params![operation_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            repair_rows, 1,
+            "live repair row was lost during blocked apply"
+        );
+        assert!(
+            !pending_restore_dir(&recovery_root_for_app_data(&app_data_dir))
+                .join("rollback")
+                .exists(),
+            "blocked apply moved database files into rollback"
+        );
+        drop(conn);
+
+        let _ = fs::remove_dir_all(app_data_dir);
+    }
+
+    #[test]
+    fn pending_restore_rechecks_exact_staged_snapshot_before_moving_current_db() {
+        let app_data_dir = temp_app_dir("recovery_apply_staged_repair_toctou");
+        let db_state = db::init(&app_data_dir).expect("init current db");
+        {
+            let conn = db_state.conn.lock().expect("lock current db");
+            conn.execute(
+                "INSERT INTO orders (
+                     id, items, total_amount, total_amount_cents, status, sync_status,
+                     created_at, updated_at
+                 ) VALUES (
+                     'current-order-must-survive', '[]', 7.0, 700, 'pending', 'pending',
+                     datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .expect("seed current order");
+        }
+        let clean_point = create_manual_snapshot(&db_state).expect("create clean point");
+        stage_restore_from_point(&db_state, &clean_point.id).expect("stage clean restore");
+
+        let repair_source_dir = temp_app_dir("recovery_apply_staged_repair_source");
+        let repair_source_db = db::init(&repair_source_dir).expect("init repair source db");
+        let repair_point =
+            create_manual_snapshot(&repair_source_db).expect("create clean source point");
+        mutate_snapshot(&repair_point, |conn| {
+            seed_native_repair_queue_row(conn);
+        });
+        drop(repair_source_db);
+
+        let pending_dir = pending_restore_dir(&recovery_root_for_db(&db_state));
+        fs::copy(
+            PathBuf::from(repair_point.snapshot_path),
+            pending_dir.join(SNAPSHOT_FILE_NAME),
+        )
+        .expect("replace staged snapshot with repair-bearing database");
+        drop(db_state);
+
+        let error = maybe_apply_pending_restore(&app_data_dir)
+            .expect_err("repair data injected into staged snapshot must block apply");
+        assert!(error.contains("REPAIR_RECOVERY_RESTORE_BLOCKED"));
+        let conn =
+            Connection::open(app_data_dir.join("pos.db")).expect("open unchanged current db");
+        let current_order_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM orders WHERE id = 'current-order-must-survive'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            current_order_count, 1,
+            "current database was replaced before guard"
+        );
+        assert!(
+            !pending_dir.join("rollback").exists(),
+            "blocked staged apply moved current database files"
+        );
+        drop(conn);
+
+        let _ = fs::remove_dir_all(app_data_dir);
+        let _ = fs::remove_dir_all(repair_source_dir);
+    }
+
+    #[test]
+    fn pending_restore_rejects_metadata_controlled_snapshot_path_before_live_mutation() {
+        let app_data_dir = temp_app_dir("recovery_apply_metadata_path_escape");
+        let db_state = db::init(&app_data_dir).expect("init current db");
+        let point = create_manual_snapshot(&db_state).expect("create canonical restore point");
+        {
+            let conn = db_state.conn.lock().expect("lock current db");
+            conn.execute(
+                "INSERT INTO orders (
+                     id, items, total_amount, total_amount_cents, status, sync_status,
+                     created_at, updated_at
+                 ) VALUES (
+                     'current-order-must-remain', '[]', 4.0, 400, 'pending', 'pending',
+                     datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .expect("seed current order");
+        }
+        stage_restore_from_point(&db_state, &point.id).expect("stage canonical restore");
+
+        let external_dir = temp_app_dir("recovery_apply_metadata_path_escape_external");
+        let external_db = db::init(&external_dir).expect("init external db");
+        drop(external_db);
+
+        let pending_dir = pending_restore_dir(&recovery_root_for_db(&db_state));
+        let restore_file = pending_dir.join(RESTORE_FILE_NAME);
+        let mut pending: PendingRestoreMetadata = serde_json::from_str(
+            &fs::read_to_string(&restore_file).expect("read staged restore metadata"),
+        )
+        .expect("parse staged restore metadata");
+        pending.staged_snapshot_path = external_dir.join("pos.db").to_string_lossy().to_string();
+        write_json_file(&restore_file, &pending).expect("tamper staged snapshot path");
+        drop(db_state);
+
+        let error = maybe_apply_pending_restore(&app_data_dir)
+            .expect_err("metadata-controlled snapshot path must fail closed");
+        assert!(
+            error.contains("RECOVERY_RESTORE_INVALID_STAGED_PATH"),
+            "{error}"
+        );
+        let conn = Connection::open(app_data_dir.join("pos.db")).expect("open current db");
+        let current_order_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM orders WHERE id = 'current-order-must-remain'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count preserved current order");
+        assert_eq!(current_order_count, 1);
+        assert!(
+            !pending_dir.join("rollback").exists(),
+            "path validation moved live files"
+        );
+        drop(conn);
+
+        let _ = fs::remove_dir_all(app_data_dir);
+        let _ = fs::remove_dir_all(external_dir);
+    }
+
+    #[test]
+    fn partial_live_move_failure_restores_moved_files_without_deleting_unmoved_sidecars() {
+        let app_data_dir = temp_app_dir("recovery_apply_partial_move_rollback");
+        let db_state = db::init(&app_data_dir).expect("init current db");
+        {
+            let conn = db_state.conn.lock().expect("lock current db");
+            conn.execute(
+                "INSERT INTO orders (
+                     id, items, total_amount, total_amount_cents, status, sync_status,
+                     created_at, updated_at
+                 ) VALUES (
+                     'partial-move-current-order', '[]', 6.0, 600, 'pending', 'pending',
+                     datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .expect("seed current order");
+        }
+        let point = create_manual_snapshot(&db_state).expect("create restore point");
+        stage_restore_from_point(&db_state, &point.id).expect("stage restore");
+        drop(db_state);
+
+        let db_path = app_data_dir.join("pos.db");
+        let original_db = fs::read(&db_path).expect("read original db bytes");
+        let mut hooks = DeterministicPendingRestoreHooks {
+            create_live_sidecars_in: Some(app_data_dir.clone()),
+            fail_before_move: Some(1),
+            ..Default::default()
+        };
+        let error = maybe_apply_pending_restore_with_hooks(&app_data_dir, &mut hooks)
+            .expect_err("second live-file move must fail deterministically");
+        assert!(error.contains("injected live move failure at index 1"));
+        assert_eq!(
+            fs::read(&db_path).expect("restored original db"),
+            original_db
+        );
+        assert_eq!(
+            fs::read(app_data_dir.join("pos.db-wal")).expect("unmoved wal"),
+            b"original-live-wal"
+        );
+        assert_eq!(
+            fs::read(app_data_dir.join("pos.db-shm")).expect("unmoved shm"),
+            b"original-live-shm"
+        );
+        assert!(
+            !pending_restore_dir(&recovery_root_for_app_data(&app_data_dir))
+                .join("rollback")
+                .exists(),
+            "successful rollback left a rollback directory"
+        );
+
+        let _ = fs::remove_dir_all(app_data_dir);
+    }
+
+    #[test]
+    fn rollback_failure_is_reported_together_with_the_original_move_failure() {
+        let app_data_dir = temp_app_dir("recovery_apply_rollback_error_observable");
+        let db_state = db::init(&app_data_dir).expect("init current db");
+        let point = create_manual_snapshot(&db_state).expect("create restore point");
+        stage_restore_from_point(&db_state, &point.id).expect("stage restore");
+        drop(db_state);
+
+        let mut hooks = DeterministicPendingRestoreHooks {
+            create_live_sidecars_in: Some(app_data_dir.clone()),
+            fail_before_move: Some(1),
+            fail_rollback_file_name: Some("pos.db".to_string()),
+            ..Default::default()
+        };
+        let error = maybe_apply_pending_restore_with_hooks(&app_data_dir, &mut hooks)
+            .expect_err("injected rollback failure must be surfaced");
+        assert!(error.contains("injected live move failure at index 1"));
+        assert!(
+            error.contains("RECOVERY_RESTORE_ROLLBACK_FAILED"),
+            "{error}"
+        );
+        assert!(error.contains("injected rollback failure for"), "{error}");
+        assert!(
+            pending_restore_dir(&recovery_root_for_app_data(&app_data_dir))
+                .join("rollback")
+                .join("pos.db")
+                .exists(),
+            "failed rollback lost the recoverable database backup"
+        );
+
+        let _ = fs::remove_dir_all(app_data_dir);
+    }
+
+    #[test]
+    fn staged_bytes_swapped_after_validation_are_rejected_by_final_database_verification() {
+        let app_data_dir = temp_app_dir("recovery_apply_post_validation_swap");
+        let db_state = db::init(&app_data_dir).expect("init current db");
+        let point = create_manual_snapshot(&db_state).expect("create clean target point");
+        {
+            let conn = db_state.conn.lock().expect("lock current db");
+            conn.execute(
+                "INSERT INTO orders (
+                     id, items, total_amount, total_amount_cents, status, sync_status,
+                     created_at, updated_at
+                 ) VALUES (
+                     'post-copy-current-order', '[]', 8.0, 800, 'pending', 'pending',
+                     datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .expect("seed current order");
+        }
+        stage_restore_from_point(&db_state, &point.id).expect("stage clean restore");
+
+        let source_dir = temp_app_dir("recovery_apply_post_validation_swap_source");
+        let source_db = db::init(&source_dir).expect("init swap source db");
+        let repair_point = create_manual_snapshot(&source_db).expect("create clean source point");
+        mutate_snapshot(&repair_point, |conn| {
+            seed_native_repair_queue_row(conn);
+        });
+        drop(source_db);
+        drop(db_state);
+
+        let mut hooks = DeterministicPendingRestoreHooks {
+            swap_staged_with: Some(PathBuf::from(repair_point.snapshot_path)),
+            ..Default::default()
+        };
+        let error = maybe_apply_pending_restore_with_hooks(&app_data_dir, &mut hooks)
+            .expect_err("post-validation staged swap must fail closed");
+        assert!(error.contains("REPAIR_RECOVERY_RESTORE_BLOCKED"), "{error}");
+        let conn = Connection::open(app_data_dir.join("pos.db")).expect("open rolled-back db");
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM orders WHERE id = 'post-copy-current-order'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count preserved current order"),
+            1
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM parity_sync_queue", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("count rolled-back repair rows"),
+            0
+        );
+        drop(conn);
+
+        let _ = fs::remove_dir_all(app_data_dir);
+        let _ = fs::remove_dir_all(source_dir);
+    }
+
+    #[test]
+    fn marker_commit_failure_rolls_back_and_leaves_restore_retryable() {
+        let app_data_dir = temp_app_dir("recovery_apply_marker_commit_failure");
+        let db_state = db::init(&app_data_dir).expect("init current db");
+        let point = create_manual_snapshot(&db_state).expect("create target point");
+        {
+            let conn = db_state.conn.lock().expect("lock current db");
+            conn.execute(
+                "INSERT INTO orders (
+                     id, items, total_amount, total_amount_cents, status, sync_status,
+                     created_at, updated_at
+                 ) VALUES (
+                     'marker-current-order', '[]', 9.0, 900, 'pending', 'pending',
+                     datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .expect("seed current order");
+        }
+        stage_restore_from_point(&db_state, &point.id).expect("stage restore");
+        let pending_dir = pending_restore_dir(&recovery_root_for_db(&db_state));
+        drop(db_state);
+
+        let mut hooks = DeterministicPendingRestoreHooks {
+            fail_before_marker_commit: true,
+            ..Default::default()
+        };
+        let error = maybe_apply_pending_restore_with_hooks(&app_data_dir, &mut hooks)
+            .expect_err("marker commit failure must roll back");
+        assert!(error.contains("injected restore marker commit failure"));
+        assert!(pending_dir.join(RESTORE_FILE_NAME).exists());
+        assert!(!pending_dir.join("restore.applied.json").exists());
+        let conn = Connection::open(app_data_dir.join("pos.db")).expect("open rolled-back db");
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM orders WHERE id = 'marker-current-order'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count preserved current order"),
+            1
+        );
+        drop(conn);
+
+        let _ = fs::remove_dir_all(app_data_dir);
+    }
+
+    #[test]
+    fn cleanup_failure_after_marker_commit_is_observable_and_cannot_replay() {
+        let app_data_dir = temp_app_dir("recovery_apply_committed_cleanup_failure");
+        let db_state = db::init(&app_data_dir).expect("init current db");
+        let point = create_manual_snapshot(&db_state).expect("create target point");
+        {
+            let conn = db_state.conn.lock().expect("lock current db");
+            conn.execute(
+                "INSERT INTO orders (
+                     id, items, total_amount, total_amount_cents, status, sync_status,
+                     created_at, updated_at
+                 ) VALUES (
+                     'cleanup-current-order', '[]', 10.0, 1000, 'pending', 'pending',
+                     datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .expect("seed current order");
+        }
+        stage_restore_from_point(&db_state, &point.id).expect("stage restore");
+        let pending_dir = pending_restore_dir(&recovery_root_for_db(&db_state));
+        drop(db_state);
+
+        let mut hooks = DeterministicPendingRestoreHooks {
+            fail_before_cleanup: true,
+            ..Default::default()
+        };
+        let error = maybe_apply_pending_restore_with_hooks(&app_data_dir, &mut hooks)
+            .expect_err("committed cleanup failure must be visible");
+        assert!(
+            error.contains("RECOVERY_RESTORE_APPLIED_CLEANUP_FAILED"),
+            "{error}"
+        );
+        assert!(!pending_dir.join(RESTORE_FILE_NAME).exists());
+        assert!(pending_dir.join("restore.applied.json").exists());
+        assert_eq!(
+            maybe_apply_pending_restore(&app_data_dir).expect("recheck consumed marker"),
+            None,
+            "a committed restore marker was replayable"
+        );
+        let conn = Connection::open(app_data_dir.join("pos.db")).expect("open applied db");
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM orders WHERE id = 'cleanup-current-order'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count removed current order"),
+            0
+        );
+        drop(conn);
 
         let _ = fs::remove_dir_all(app_data_dir);
     }

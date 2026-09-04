@@ -323,11 +323,31 @@ pub async fn database_reset(
         &db,
         &auth_state,
     )?;
-    crate::recovery::snapshot_before_destructive_action(
-        &db,
-        crate::recovery::RecoveryPointKind::PreClearOperationalData,
-    )?;
-    crate::clear_operational_data_inner(&db).map_err(Into::into)
+    database_reset_inner(&db).map_err(Into::into)
+}
+
+fn database_reset_inner(db: &db::DbState) -> Result<Value, String> {
+    crate::clear_operational_data_inner(db)
+}
+
+#[cfg(test)]
+fn database_reset_inner_with_recovery<F>(
+    db: &db::DbState,
+    recovery_preflight: F,
+) -> Result<Value, String>
+where
+    F: FnOnce(
+        &db::DbState,
+        crate::recovery::RecoveryPointKind,
+    ) -> Result<crate::recovery::DestructiveSnapshotDecision, String>,
+{
+    let (repair_transition, _recovery_decision) =
+        crate::core_helpers::prepare_operational_clear_with_recovery(
+            db,
+            crate::recovery::RecoveryPointKind::PreClearOperationalData,
+            recovery_preflight,
+        )?;
+    crate::clear_operational_data_after_repair_purge(db, repair_transition)
 }
 
 #[tauri::command]
@@ -341,11 +361,32 @@ pub async fn database_clear_operational_data(
         &db,
         &auth_state,
     )?;
-    crate::recovery::snapshot_before_destructive_action(
-        &db,
-        crate::recovery::RecoveryPointKind::PreClearOperationalData,
-    )?;
-    crate::clear_operational_data_inner(&db).map_err(Into::into)
+    database_clear_operational_data_inner(&db).map_err(Into::into)
+}
+
+fn database_clear_operational_data_inner(db: &db::DbState) -> Result<Value, String> {
+    let (repair_transition, _recovery_decision) = crate::prepare_operational_clear(db)?;
+    crate::clear_operational_data_after_repair_purge(db, repair_transition)
+}
+
+#[cfg(test)]
+fn database_clear_operational_data_inner_with_recovery<F>(
+    db: &db::DbState,
+    recovery_preflight: F,
+) -> Result<Value, String>
+where
+    F: FnOnce(
+        &db::DbState,
+        crate::recovery::RecoveryPointKind,
+    ) -> Result<crate::recovery::DestructiveSnapshotDecision, String>,
+{
+    let (repair_transition, _recovery_decision) =
+        crate::core_helpers::prepare_operational_clear_with_recovery(
+            db,
+            crate::recovery::RecoveryPointKind::PreClearOperationalData,
+            recovery_preflight,
+        )?;
+    crate::clear_operational_data_after_repair_purge(db, repair_transition)
 }
 
 #[tauri::command]
@@ -743,6 +784,145 @@ mod destructive_command_auth_audit {
         // Round 2: the canonical parity outbox wipe (a sync, not async, command).
         let sync_queue = include_str!("sync_queue.rs");
         assert_gated(sync_queue, "pub fn sync_queue_clear(");
+    }
+}
+
+#[cfg(test)]
+mod destructive_recovery_ordering_tests {
+    use super::{
+        database_clear_operational_data_inner_with_recovery, database_reset_inner_with_recovery,
+    };
+
+    const DIAGNOSTIC_REPAIR_AES_KEY: &str = "diagnostic-preserved-aes-key";
+    const DIAGNOSTIC_REPAIR_ENTITLEMENT: &str = "diagnostic-preserved-entitlement";
+
+    fn install_configured_repair_scope() -> crate::tests::fake_keyring::Guard {
+        let scope = serde_json::json!({
+            "version": 1,
+            "organization_id": "11111111-1111-4111-8111-111111111111",
+            "branch_id": "22222222-2222-4222-8222-222222222222",
+            "terminal_id": "diagnostic-terminal",
+            "scope_token": "33333333-3333-4333-8333-333333333333",
+            "scope_epoch": 4,
+            "transition_pending": false,
+            "reset_pending": false,
+            "offline_terminal_token": null,
+            "offline_sequence_lease_start": null,
+            "offline_sequence_lease_end": null
+        });
+        crate::tests::fake_keyring::install_seeded([
+            ("organization_id", "11111111-1111-4111-8111-111111111111"),
+            ("branch_id", "22222222-2222-4222-8222-222222222222"),
+            ("terminal_id", "diagnostic-terminal"),
+            (
+                crate::storage::KEY_REPAIR_SCOPE_V1,
+                scope.to_string().as_str(),
+            ),
+            (
+                crate::storage::KEY_REPAIR_QUEUE_AES_KEY_V1,
+                DIAGNOSTIC_REPAIR_AES_KEY,
+            ),
+            (
+                crate::storage::KEY_REPAIR_ENTITLEMENT_V1,
+                DIAGNOSTIC_REPAIR_ENTITLEMENT,
+            ),
+        ])
+    }
+
+    fn seeded_destructive_database() -> crate::tests::harness::TestDb {
+        let database = crate::tests::harness::TestDb::open();
+        let connection = database
+            .state
+            .conn
+            .lock()
+            .expect("lock diagnostic clear fixture");
+        connection
+            .execute_batch(
+                "INSERT INTO orders (
+                     id, items, total_amount, total_amount_cents, status,
+                     sync_status, created_at, updated_at
+                 ) VALUES (
+                     'diagnostic-order', '[]', 2.0, 200, 'pending', 'pending',
+                     datetime('now'), datetime('now')
+                 );
+                 INSERT INTO parity_sync_queue (
+                     id, table_name, record_id, operation, data, organization_id,
+                     created_at, retry_delay_ms, module_type, conflict_strategy,
+                     version, repair_aggregate_id, status
+                 ) VALUES (
+                     'diagnostic-repair-operation', 'repairs', 'diagnostic-repair',
+                     'INSERT', 'opaque', '11111111-1111-4111-8111-111111111111',
+                     datetime('now'), 1000,
+                     'repairs', 'manual', 0, 'diagnostic-repair', 'pending'
+                 );",
+            )
+            .expect("seed diagnostic destructive rows");
+        drop(connection);
+        database
+    }
+
+    fn assert_destructive_rows_preserved(database: &crate::tests::harness::TestDb) {
+        let connection = database
+            .state
+            .conn
+            .lock()
+            .expect("inspect diagnostic clear fixture");
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM orders", [], |row| row
+                    .get::<_, i64>(0))
+                .expect("count diagnostic orders"),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM parity_sync_queue", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("count diagnostic repair queue"),
+            1
+        );
+        drop(connection);
+        assert_eq!(
+            crate::storage::get_credential(crate::storage::KEY_REPAIR_QUEUE_AES_KEY_V1).as_deref(),
+            Some(DIAGNOSTIC_REPAIR_AES_KEY)
+        );
+        assert_eq!(
+            crate::storage::get_credential(crate::storage::KEY_REPAIR_ENTITLEMENT_V1).as_deref(),
+            Some(DIAGNOSTIC_REPAIR_ENTITLEMENT)
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn database_reset_stops_before_any_purge_when_recovery_preflight_fails() {
+        let _lifecycle = crate::repairs::isolate_lifecycle_for_test();
+        let _keyring = install_configured_repair_scope();
+        let database = seeded_destructive_database();
+
+        let error = database_reset_inner_with_recovery(&database.state, |_, _| {
+            Err("injected diagnostic reset snapshot failure".to_string())
+        })
+        .expect_err("diagnostic reset must fail before purge");
+
+        assert!(error.contains("injected diagnostic reset snapshot failure"));
+        assert_destructive_rows_preserved(&database);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn database_clear_operational_data_stops_before_any_purge_when_recovery_preflight_fails() {
+        let _lifecycle = crate::repairs::isolate_lifecycle_for_test();
+        let _keyring = install_configured_repair_scope();
+        let database = seeded_destructive_database();
+
+        let error = database_clear_operational_data_inner_with_recovery(&database.state, |_, _| {
+            Err("injected diagnostic clear snapshot failure".to_string())
+        })
+        .expect_err("diagnostic clear must fail before purge");
+
+        assert!(error.contains("injected diagnostic clear snapshot failure"));
+        assert_destructive_rows_preserved(&database);
     }
 }
 

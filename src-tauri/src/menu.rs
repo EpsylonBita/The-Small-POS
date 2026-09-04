@@ -236,27 +236,33 @@ fn build_menu_version_token(
 
 fn resolve_menu_sync_credentials() -> Result<MenuSyncCredentials, String> {
     let raw_api_key = Zeroizing::new(
-        storage::get_credential("pos_api_key").ok_or("Terminal not configured: missing API key")?,
+        storage::get_credential_strict("pos_api_key")
+            .map_err(|_| "TERMINAL_CREDENTIAL_READ_FAILED".to_string())?
+            .map(|value| value.to_string())
+            .ok_or("Terminal not configured: missing API key")?,
     );
     let api_key = Zeroizing::new(
         api::extract_api_key_from_connection_string(&raw_api_key)
             .unwrap_or_else(|| (*raw_api_key).clone()),
     );
-    let terminal_id = storage::get_credential("terminal_id")
-        .or_else(|| api::extract_terminal_id_from_connection_string(&raw_api_key))
+    let terminal_id = storage::get_credential_strict("terminal_id")
+        .map_err(|_| "TERMINAL_CREDENTIAL_READ_FAILED".to_string())?
+        .map(|value| value.to_string())
         .ok_or("Terminal not configured: missing terminal ID")?;
-    let admin_url = storage::get_credential("admin_dashboard_url")
-        .or_else(|| api::extract_admin_url_from_connection_string(&raw_api_key))
+    let admin_url = storage::get_credential_strict("admin_dashboard_url")
+        .map_err(|_| "TERMINAL_CREDENTIAL_READ_FAILED".to_string())?
+        .map(|value| value.to_string())
         .ok_or("Terminal not configured: missing admin URL")?;
 
-    if storage::get_credential("terminal_id").is_none() {
-        let _ = storage::set_credential("terminal_id", terminal_id.trim());
+    if let Some(decoded_terminal) = api::extract_terminal_id_from_connection_string(&raw_api_key) {
+        if decoded_terminal.trim() != terminal_id.trim() {
+            return Err("TERMINAL_CONNECTION_TUPLE_CONFLICT".to_string());
+        }
     }
-    if storage::get_credential("admin_dashboard_url").is_none() {
-        let _ = storage::set_credential("admin_dashboard_url", admin_url.trim());
-    }
-    if *api_key != *raw_api_key {
-        let _ = storage::set_credential("pos_api_key", api_key.trim());
+    if let Some(decoded_url) = api::extract_admin_url_from_connection_string(&raw_api_key) {
+        if api::normalize_admin_url(&decoded_url) != api::normalize_admin_url(&admin_url) {
+            return Err("TERMINAL_CONNECTION_TUPLE_CONFLICT".to_string());
+        }
     }
 
     Ok(MenuSyncCredentials {

@@ -290,6 +290,13 @@ const ALL_INTEGRATIONS: Integration[] = [
     category: 'communications',
   },
   {
+    id: 'customer_messaging',
+    name: 'Customer Messaging (Private Beta)',
+    description: 'Transactional customer messaging managed in the Admin Dashboard',
+    icon: <Phone className="w-6 h-6" />,
+    category: 'communications',
+  },
+  {
     id: 'mydata',
     name: 'MyData',
     description: 'Greek AADE e-invoicing compliance',
@@ -432,7 +439,12 @@ const normalizeProviderId = (value: string) =>
 // same plugins with `read_only_admin_setup: true` (admin-dashboard-setup-plugins);
 // that flag wins when present and this local set is the offline/older-server
 // fallback, so a newly admin-managed plugin never opens the credential modal.
-const ADMIN_DASHBOARD_SETUP_PLUGIN_IDS = new Set(['caller_id', 'efood', 'box']);
+const ADMIN_DASHBOARD_SETUP_PLUGIN_IDS = new Set([
+  'caller_id',
+  'customer_messaging',
+  'efood',
+  'box',
+]);
 
 const usesAdminDashboardSetup = (pluginId: string, readOnlyAdminSetup?: boolean): boolean =>
   readOnlyAdminSetup === true || ADMIN_DASHBOARD_SETUP_PLUGIN_IDS.has(pluginId);
@@ -446,7 +458,9 @@ const buildAdminDashboardPluginUrl = (
     const stored = localStorage.getItem('admin_dashboard_url') || '';
     const base = normalizeAdminDashboardUrl(stored).replace(/\/+$/, '');
     if (!base) return '';
-    const params = new URLSearchParams({ plugin: pluginId });
+    const params = pluginId === 'customer_messaging'
+      ? new URLSearchParams({ workspace: 'customer-messaging' })
+      : new URLSearchParams({ plugin: pluginId });
     if (branchId) params.set('branch_id', branchId);
     if (organizationId) params.set('organization_id', organizationId);
     return `${base}/plugins?${params.toString()}`;

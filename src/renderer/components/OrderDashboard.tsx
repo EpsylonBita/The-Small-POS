@@ -73,10 +73,13 @@ import {
   Pencil,
   Plus,
   ReceiptText,
+  ShoppingCart,
   UserCheck,
   Users,
   UtensilsCrossed,
   WalletCards,
+  Wrench,
+  Zap,
 } from "lucide-react";
 import TableOrderIcon from "./icons/TableOrderIcon";
 import PickupOrderIcon from "./icons/PickupOrderIcon";
@@ -123,6 +126,9 @@ import {
 } from "../services/caller-id-order-flow";
 import { openExternalUrl } from "../utils/external-url";
 import { formatCompactOrderNumberForDisplay, getVisibleOrderNumber } from "../utils/orderNumberUtils";
+import { resolveTauriPrimaryActions } from "../primary-actions";
+import { repairStore, useRepairStore } from "../features/repairs/store";
+import { getSecureSessionSync } from "../lib/secure-session-cache";
 import { formatTableDisplayNumber } from "../utils/table-display";
 import {
   buildSingleDeliveryRouteStop,
@@ -413,6 +419,104 @@ const readTableBalance = (table: RestaurantTable) => {
   return { total, paid, due, tips };
 };
 
+interface OrderPrimaryActionLauncherProps {
+  actions: ReturnType<typeof resolveTauriPrimaryActions>;
+  isShiftActive: boolean;
+  onNewSale: () => void;
+  onNewRepair: () => void;
+  onQuickService: () => void;
+  onNewAppointment: () => void;
+}
+
+/**
+ * The create launcher is intentionally shift-aware per action. Appointments
+ * are non-cash work and remain available without a drawer shift. Sales,
+ * repairs and Quick Service all require an active staff shift.
+ */
+export function OrderPrimaryActionLauncher({
+  actions,
+  isShiftActive,
+  onNewSale,
+  onNewRepair,
+  onQuickService,
+  onNewAppointment,
+}: OrderPrimaryActionLauncherProps) {
+  const { t } = useI18n();
+  const [isOpen, setIsOpen] = useState(false);
+  const canOpen = actions.some(
+    (action) => action.enabled && (action.id === "new_appointment" || isShiftActive),
+  );
+
+  return (
+    <>
+      <FloatingActionButton
+        onClick={() => setIsOpen(true)}
+        disabled={!canOpen}
+        movable
+        positionStorageKey="pos-orders-new-order-fab-position"
+        data-testid="tauri-primary-action-trigger"
+        aria-label={t("primaryActions.trigger")}
+      />
+
+      <LiquidGlassModal
+        isOpen={isOpen}
+        onClose={() => setIsOpen(false)}
+        title={t("primaryActions.trigger")}
+        className="!max-w-xl"
+      >
+        <div className="grid gap-3 sm:grid-cols-2">
+          {actions.map((action) => {
+            const Icon = action.id === "new_sale"
+              ? ShoppingCart
+              : action.id === "new_appointment"
+                ? CalendarPlus
+                : action.id === "quick_service"
+                  ? Zap
+                  : Wrench;
+            const shiftRequired = action.id !== "new_appointment";
+            const shiftBlocked = shiftRequired && !isShiftActive;
+            const disabled = !action.enabled || shiftBlocked;
+            const disabledReasonId = disabled
+              ? `tauri-primary-action-${action.id}-reason`
+              : undefined;
+            return (
+              <button
+                key={action.id}
+                type="button"
+                disabled={disabled}
+                aria-describedby={disabledReasonId}
+                data-testid={`tauri-primary-action-${action.id}`}
+                data-primary-action={action.id}
+                onClick={() => {
+                  if (disabled) return;
+                  setIsOpen(false);
+                  if (action.id === "new_sale") onNewSale();
+                  if (action.id === "new_repair") onNewRepair();
+                  if (action.id === "quick_service") onQuickService();
+                  if (action.id === "new_appointment") onNewAppointment();
+                }}
+                className="flex min-h-[88px] items-center gap-4 rounded-2xl border border-white/15 bg-white/5 px-4 py-3 text-left transition-colors enabled:hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-55"
+              >
+                <Icon className="h-7 w-7 shrink-0 text-yellow-400" strokeWidth={1.7} />
+                <span>
+                  <span className="block font-semibold text-white">{t(action.labelKey)}</span>
+                  {disabled && (
+                    <span id={disabledReasonId} className="mt-1 block text-xs text-white/55">
+                      {shiftBlocked
+                        ? t("orders.startShiftFirst")
+                        : t("primaryActions.status.comingSoon")}
+                    </span>
+                  )}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </LiquidGlassModal>
+    </>
+  );
+}
+
 export const OrderDashboard = memo<OrderDashboardProps>(
   ({ className = "", orderFilter }) => {
     const bridge = getBridge();
@@ -451,6 +555,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
     // Module-based feature flags
     const {
+      modules,
       hasDeliveryModule,
       hasTablesModule,
       hasRoomsModule,
@@ -458,6 +563,39 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       hasServiceCatalogModule,
       hasModule,
     } = useAcquiredModules();
+    const repairSettings = useRepairStore((state) => state.settings);
+    const repairSettingsScopeBoundRef = useRef(false);
+    const repairSessionId = getSecureSessionSync()?.sessionId ?? null;
+    const hasRepairsModule = modules.some(
+      (module) => module.isActive && module.moduleId === 'repairs',
+    );
+    useEffect(() => {
+      if (!hasRepairsModule || !repairSessionId) {
+        repairStore.getState().clearSession();
+        repairSettingsScopeBoundRef.current = false;
+        return;
+      }
+      if (repairSettingsScopeBoundRef.current) return;
+      repairStore.getState().clearSession();
+      repairSettingsScopeBoundRef.current = true;
+      void repairStore.getState().loadSettings().catch(() => {
+        // Fail closed: Quick Service remains hidden until a scoped native
+        // settings projection is available.
+      });
+      return () => {
+        repairSettingsScopeBoundRef.current = false;
+        repairStore.getState().clearSession();
+      };
+    }, [hasRepairsModule, repairSessionId]);
+    const primaryActions = useMemo(
+      () => resolveTauriPrimaryActions(
+        modules.filter((module) => module.isActive).map((module) => module.moduleId),
+        repairSettingsScopeBoundRef.current
+          && repairSessionId !== null
+          && repairSettings?.settings.quickServiceEnabled === true,
+      ),
+      [modules, repairSessionId, repairSettings?.settings.quickServiceEnabled],
+    );
     // Services hub is available when either the appointments or the service-catalog module is owned.
     // Round 285 (deliberately kept as OR, not tightened): the Services card opens the embedded
     // AppointmentsView booking flow, but appointment CREATION is independently guarded by the backend
@@ -7163,27 +7301,22 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         )}
         </div>
 
-        {/* Floating Action Button for New Order */}
-        <FloatingActionButton
-          onClick={handleNewOrderClick}
-          disabled={!isShiftActive}
-          movable
-          positionStorageKey="pos-orders-new-order-fab-position"
-          className={`${
-            !isShiftActive
-              ? "cursor-not-allowed opacity-80"
-              : resolvedTheme === "dark"
-                ? "shadow-yellow-500/30"
-                : ""
-          }`}
-          aria-label={
-            !isShiftActive
-              ? t(
-                  "orders.startShiftFirst",
-                  "Start a shift first to create orders",
-                )
-              : t("orders.newOrder")
-          }
+        {/* Declarative +New surface; real repair screens are owned by Task 9. */}
+        <OrderPrimaryActionLauncher
+          actions={primaryActions}
+          isShiftActive={isShiftActive}
+          onNewSale={handleNewOrderClick}
+          onNewRepair={() => {
+            window.dispatchEvent(new CustomEvent('pos:navigate-view', {
+              detail: { view: 'repairs', repairIntent: 'new_repair' },
+            }));
+          }}
+          onQuickService={() => {
+            window.dispatchEvent(new CustomEvent('pos:navigate-view', {
+              detail: { view: 'repairs', repairIntent: 'quick_service' },
+            }));
+          }}
+          onNewAppointment={handleSelectServiceFlow}
         />
 
         {/* Order Type Selection Modal - Glassmorphism style */}

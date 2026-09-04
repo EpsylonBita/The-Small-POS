@@ -4,7 +4,7 @@
 //! configuration. Provides schema migrations, settings helpers, and managed
 //! state for use across Tauri commands.
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -47,7 +47,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-const CURRENT_SCHEMA_VERSION: i32 = 75;
+const CURRENT_SCHEMA_VERSION: i32 = 79;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -76,12 +76,80 @@ pub fn init(app_data_dir: &Path) -> Result<DbState, String> {
 
     run_migrations(&conn)?;
 
+    let quarantined = crate::sync_queue::quarantine_reserved_repair_lookalikes(&conn)?;
+    if quarantined > 0 {
+        warn!(
+            quarantined,
+            "Quarantined non-canonical reserved repair queue owners during startup"
+        );
+    }
+    let redacted = crate::sync_queue::redact_identifiable_legacy_repair_audit_payloads(&conn)?;
+    if redacted > 0 {
+        info!(
+            redacted,
+            "Redacted legacy repair-owned conflict payloads during startup"
+        );
+    }
+
     info!("Database initialized (schema v{CURRENT_SCHEMA_VERSION})");
 
     Ok(DbState {
         conn: Mutex::new(conn),
         db_path,
     })
+}
+
+/// Open an already-existing POS database for the pre-webview emergency
+/// recovery decision. This boundary deliberately cannot create a directory or
+/// database, migrate, quarantine, replace, or bootstrap customer state.
+pub(crate) fn open_existing_for_recovery(app_data_dir: &Path) -> Result<Option<DbState>, String> {
+    let db_path = app_data_dir.join("pos.db");
+    let metadata = match fs::metadata(&db_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "RECOVERY_DATABASE_OPEN_FAILED: inspect {}: {error}",
+                db_path.display()
+            ));
+        }
+    };
+    if !metadata.is_file() {
+        return Err("RECOVERY_DATABASE_OPEN_FAILED: pos.db is not a file".to_string());
+    }
+
+    let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(|error| format!("RECOVERY_DATABASE_OPEN_FAILED: {error}"))?;
+    conn.busy_timeout(std::time::Duration::ZERO)
+        .map_err(|error| format!("RECOVERY_DATABASE_OPEN_FAILED: busy timeout: {error}"))?;
+
+    let quick_check = conn
+        .query_row("PRAGMA quick_check(1)", [], |row| row.get::<_, String>(0))
+        .map_err(|error| format!("RECOVERY_DATABASE_CORRUPT: {error}"))?;
+    if quick_check != "ok" {
+        return Err(format!("RECOVERY_DATABASE_CORRUPT: {quick_check}"));
+    }
+    let has_settings = conn
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'local_settings'
+             )",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| format!("RECOVERY_DATABASE_OPEN_FAILED: validate schema: {error}"))?
+        == 1;
+    if !has_settings {
+        return Err("RECOVERY_DATABASE_SCHEMA_MISSING".to_string());
+    }
+
+    conn.execute_batch("BEGIN IMMEDIATE; ROLLBACK;")
+        .map_err(|error| format!("RECOVERY_DATABASE_LOCKED: {error}"))?;
+
+    Ok(Some(DbState {
+        conn: Mutex::new(conn),
+        db_path,
+    }))
 }
 
 /// Open the database file and apply pragmas.
@@ -176,22 +244,140 @@ where
 
 /// Run all pending migrations up to `CURRENT_SCHEMA_VERSION`.
 fn run_migrations(conn: &Connection) -> Result<(), String> {
-    // Ensure schema_version table exists first
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS schema_version (
-            version INTEGER PRIMARY KEY,
-            applied_at TEXT DEFAULT (datetime('now'))
-        );",
+    run_migrations_with_preflight(
+        conn,
+        &query_main_database_path,
+        &crate::recovery::create_pre_migration_snapshot,
     )
-    .map_err(|e| format!("create schema_version: {e}"))?;
+}
 
-    let current: i32 = conn
+fn query_main_database_path(conn: &Connection) -> Result<PathBuf, String> {
+    conn.query_row(
+        "SELECT file FROM pragma_database_list WHERE name = 'main' LIMIT 1",
+        [],
+        |row| row.get::<_, String>(0),
+    )
+    .map(PathBuf::from)
+    .map_err(|error| format!("query main database path: {error}"))
+}
+
+struct SourceSchemaMetadata {
+    current: i32,
+    create_schema_version: bool,
+}
+
+fn inspect_source_schema_metadata(conn: &Connection) -> Result<SourceSchemaMetadata, String> {
+    let schema_object_type = conn
         .query_row(
-            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            "SELECT type FROM sqlite_master WHERE name = 'schema_version' LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| format!("SCHEMA_VERSION_METADATA_READ_FAILED: {error}"))?;
+    let has_application_objects: bool = conn
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM sqlite_master
+                 WHERE name NOT LIKE 'sqlite_%'
+                   AND name <> 'schema_version'
+                   AND type IN ('table', 'view', 'index', 'trigger')
+             )",
             [],
             |row| row.get(0),
         )
-        .unwrap_or(0);
+        .map_err(|error| format!("SCHEMA_VERSION_METADATA_READ_FAILED: {error}"))?;
+
+    let Some(schema_object_type) = schema_object_type else {
+        if has_application_objects {
+            return Err("SCHEMA_VERSION_METADATA_MISSING: existing application objects have no schema_version metadata".to_string());
+        }
+        return Ok(SourceSchemaMetadata {
+            current: 0,
+            create_schema_version: true,
+        });
+    };
+
+    if schema_object_type != "table" {
+        return Err(format!(
+            "SCHEMA_VERSION_METADATA_READ_FAILED: schema_version is a {schema_object_type}, not a table"
+        ));
+    }
+
+    let version_declared_type = conn
+        .query_row(
+            "SELECT type FROM pragma_table_info('schema_version') WHERE name = 'version' LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| format!("SCHEMA_VERSION_METADATA_READ_FAILED: {error}"))?
+        .ok_or_else(|| {
+            "SCHEMA_VERSION_METADATA_READ_FAILED: schema_version.version is missing".to_string()
+        })?;
+    if !version_declared_type.to_ascii_uppercase().contains("INT") {
+        return Err(format!(
+            "SCHEMA_VERSION_METADATA_READ_FAILED: schema_version.version must have INTEGER affinity, found {version_declared_type:?}"
+        ));
+    }
+
+    let mut statement = conn
+        .prepare("SELECT version FROM schema_version")
+        .map_err(|error| format!("SCHEMA_VERSION_METADATA_READ_FAILED: {error}"))?;
+    let versions = statement
+        .query_map([], |row| row.get::<_, i64>(0))
+        .map_err(|error| format!("SCHEMA_VERSION_METADATA_READ_FAILED: {error}"))?;
+    let mut current: Option<i64> = None;
+    for version in versions {
+        let version =
+            version.map_err(|error| format!("SCHEMA_VERSION_METADATA_READ_FAILED: {error}"))?;
+        if version <= 0 {
+            return Err(format!(
+                "SCHEMA_VERSION_METADATA_NON_POSITIVE: found schema version {version}"
+            ));
+        }
+        current = Some(current.map_or(version, |existing| existing.max(version)));
+    }
+
+    let Some(current) = current else {
+        if has_application_objects {
+            return Err("SCHEMA_VERSION_METADATA_EMPTY_EXISTING_DATABASE: existing application objects have empty schema_version metadata".to_string());
+        }
+        return Ok(SourceSchemaMetadata {
+            current: 0,
+            create_schema_version: false,
+        });
+    };
+    let current = i32::try_from(current).map_err(|error| {
+        format!("SCHEMA_VERSION_METADATA_READ_FAILED: schema version is out of range: {error}")
+    })?;
+    Ok(SourceSchemaMetadata {
+        current,
+        create_schema_version: false,
+    })
+}
+
+fn run_migrations_with_preflight<ResolveMainPath, CreateSnapshot>(
+    conn: &Connection,
+    resolve_main_path: &ResolveMainPath,
+    create_snapshot: &CreateSnapshot,
+) -> Result<(), String>
+where
+    ResolveMainPath: Fn(&Connection) -> Result<PathBuf, String>,
+    CreateSnapshot:
+        Fn(&Path, &Connection) -> Result<Option<crate::recovery::RecoveryPointMetadata>, String>,
+{
+    let source_metadata = inspect_source_schema_metadata(conn)?;
+    if source_metadata.create_schema_version {
+        conn.execute_batch(
+            "CREATE TABLE schema_version (
+            version INTEGER PRIMARY KEY,
+            applied_at TEXT DEFAULT (datetime('now'))
+        );",
+        )
+        .map_err(|e| format!("create schema_version: {e}"))?;
+    }
+    let current = source_metadata.current;
 
     if current > CURRENT_SCHEMA_VERSION {
         return Err(format!(
@@ -200,24 +386,24 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
         ));
     }
     let needs_v56_backfill = needs_v56_claim_generation_backfill(conn, current)?;
-    if current == CURRENT_SCHEMA_VERSION && !needs_v56_backfill {
+    let needs_v79_backfill = needs_v79_repair_aggregate_backfill(conn, current)?;
+    if current == CURRENT_SCHEMA_VERSION && !needs_v56_backfill && !needs_v79_backfill {
         info!("Database schema up to date (v{current})");
         return Ok(());
     }
+    let pending_migrations =
+        computed_pending_migrations(current, needs_v56_backfill, needs_v79_backfill);
 
     if current > 0 {
-        if let Ok(db_path_value) = conn.query_row(
-            "SELECT file FROM pragma_database_list WHERE name = 'main' LIMIT 1",
-            [],
-            |row| row.get::<_, String>(0),
-        ) {
-            if !db_path_value.trim().is_empty() {
-                let db_path = PathBuf::from(db_path_value);
-                if let Err(error) = crate::recovery::create_pre_migration_snapshot(&db_path, conn) {
-                    return Err(format!("pre-migration recovery snapshot failed: {error}"));
-                }
-            }
-        }
+        let db_path = resolve_main_path(conn)
+            .map_err(|error| format!("MIGRATION_MAIN_DATABASE_PATH_QUERY_FAILED: {error}"))?;
+        prepare_pre_migration_recovery_with_snapshot(
+            &db_path,
+            conn,
+            current,
+            &pending_migrations,
+            create_snapshot,
+        )?;
     }
 
     info!("Migrating database from v{current} to v{CURRENT_SCHEMA_VERSION}");
@@ -470,8 +656,134 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     if current < 75 {
         run_migration_tx(conn, 75, migrate_v75)?;
     }
+    if current < 76 {
+        run_migration_tx(conn, 76, migrate_v76)?;
+    }
+    if current < 77 {
+        run_migration_tx(conn, 77, migrate_v77)?;
+    }
+    if current < 78 {
+        run_migration_tx(conn, 78, migrate_v78)?;
+    }
+    if current < 79 || needs_v79_backfill {
+        run_migration_tx(conn, 79, migrate_v79)?;
+    }
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreMigrationRecoveryMode {
+    GenericSnapshot,
+    NativeRepairAtomicOnly,
+}
+
+const NATIVE_REPAIR_ATOMIC_MIGRATION_ALLOWLIST: &[i32] = &[56, 75, 76, 77, 78, 79];
+
+fn computed_pending_migrations(
+    current: i32,
+    needs_v56_backfill: bool,
+    needs_v79_backfill: bool,
+) -> Vec<i32> {
+    let mut pending = Vec::new();
+    if needs_v56_backfill && current >= 56 {
+        pending.push(56);
+    }
+    if current < CURRENT_SCHEMA_VERSION {
+        pending.extend((current.max(0) + 1)..=CURRENT_SCHEMA_VERSION);
+    }
+    if needs_v79_backfill && current >= 79 {
+        pending.push(79);
+    }
+    pending.sort_unstable();
+    pending.dedup();
+    pending
+}
+
+fn native_repair_atomic_only_allowed(current: i32, pending_migrations: &[i32]) -> bool {
+    current >= 75
+        && !pending_migrations.is_empty()
+        && pending_migrations
+            .iter()
+            .all(|version| NATIVE_REPAIR_ATOMIC_MIGRATION_ALLOWLIST.contains(version))
+}
+
+#[cfg(test)]
+fn prepare_pre_migration_recovery(
+    db_path: &Path,
+    conn: &Connection,
+    current: i32,
+    pending_migrations: &[i32],
+) -> Result<PreMigrationRecoveryMode, String> {
+    prepare_pre_migration_recovery_with_snapshot(
+        db_path,
+        conn,
+        current,
+        pending_migrations,
+        &crate::recovery::create_pre_migration_snapshot,
+    )
+}
+
+fn prepare_pre_migration_recovery_with_snapshot<CreateSnapshot>(
+    db_path: &Path,
+    conn: &Connection,
+    current: i32,
+    pending_migrations: &[i32],
+    create_snapshot: &CreateSnapshot,
+) -> Result<PreMigrationRecoveryMode, String>
+where
+    CreateSnapshot:
+        Fn(&Path, &Connection) -> Result<Option<crate::recovery::RecoveryPointMetadata>, String>,
+{
+    if db_path.as_os_str().is_empty() {
+        return Err(
+            "MIGRATION_MAIN_DATABASE_PATH_INVALID: main database path is empty".to_string(),
+        );
+    }
+    let metadata = fs::metadata(db_path).map_err(|error| {
+        format!(
+            "MIGRATION_MAIN_DATABASE_PATH_INVALID: cannot resolve {}: {error}",
+            db_path.display()
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "MIGRATION_MAIN_DATABASE_PATH_INVALID: {} is not a file",
+            db_path.display()
+        ));
+    }
+    let db_path = fs::canonicalize(db_path).map_err(|error| {
+        format!(
+            "MIGRATION_MAIN_DATABASE_PATH_INVALID: cannot canonicalize {}: {error}",
+            db_path.display()
+        )
+    })?;
+
+    let contains_native_repair_data =
+        crate::recovery::pre_migration_contains_native_repair_data(conn)
+            .map_err(|error| format!("REPAIR_MIGRATION_REPAIR_STATE_CHECK_FAILED: {error}"))?;
+
+    if !contains_native_repair_data {
+        let snapshot = create_snapshot(&db_path, conn)
+            .map_err(|error| format!("pre-migration recovery snapshot failed: {error}"))?;
+        if snapshot.is_none() {
+            return Err("MIGRATION_GENERIC_SNAPSHOT_MISSING: pre-migration recovery snapshot returned no artifact".to_string());
+        }
+        return Ok(PreMigrationRecoveryMode::GenericSnapshot);
+    }
+
+    if !native_repair_atomic_only_allowed(current, pending_migrations) {
+        return Err(format!(
+            "REPAIR_MIGRATION_ATOMIC_ONLY_UNSAFE: native repair data at schema v{current} requires a generic snapshot, but pending migrations {pending_migrations:?} are outside the bounded additive repair-safe migration set"
+        ));
+    }
+
+    warn!(
+        current_schema_version = current,
+        pending_migrations = ?pending_migrations,
+        "Skipping generic pre-migration snapshot for native repair data; running only bounded additive transaction-wrapped migrations"
+    );
+    Ok(PreMigrationRecoveryMode::NativeRepairAtomicOnly)
 }
 
 fn schema_version_exists(conn: &Connection, version: i32) -> Result<bool, String> {
@@ -491,6 +803,27 @@ fn needs_v56_claim_generation_backfill(conn: &Connection, current: i32) -> Resul
     let has_version = schema_version_exists(conn, 56)?;
     let has_column = column_exists(conn, "parity_sync_queue", "claim_generation")?;
     Ok(!has_version || !has_column)
+}
+
+fn sqlite_index_exists(conn: &Connection, index: &str) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1
+         )",
+        [index],
+        |row| row.get::<_, bool>(0),
+    )
+    .map_err(|error| format!("inspect sqlite index: {error}"))
+}
+
+fn needs_v79_repair_aggregate_backfill(conn: &Connection, current: i32) -> Result<bool, String> {
+    if current < 79 {
+        return Ok(false);
+    }
+    let has_version = schema_version_exists(conn, 79)?;
+    let has_column = column_exists(conn, "parity_sync_queue", "repair_aggregate_id")?;
+    let has_index = sqlite_index_exists(conn, "idx_parity_sync_queue_repair_aggregate_order")?;
+    Ok(!has_version || !has_column || !has_index)
 }
 
 /// Run a migration inside a `BEGIN IMMEDIATE`/`COMMIT` transaction. Use
@@ -584,6 +917,7 @@ fn migrate_v1(conn: &Connection) -> Result<(), String> {
             status TEXT NOT NULL DEFAULT 'pending',
             cancellation_reason TEXT,
             order_type TEXT DEFAULT 'dine-in',
+            order_context TEXT,
             table_number TEXT,
             table_id TEXT,
             table_session_id TEXT,
@@ -709,6 +1043,12 @@ fn migrate_v2(conn: &Connection) -> Result<(), String> {
             total_sales_amount REAL DEFAULT 0,
             total_cash_sales REAL DEFAULT 0,
             total_card_sales REAL DEFAULT 0,
+            repair_tender_sales REAL NOT NULL DEFAULT 0,
+            repair_cash_sales REAL NOT NULL DEFAULT 0,
+            repair_card_sales REAL NOT NULL DEFAULT 0,
+            repair_orders_count INTEGER NOT NULL DEFAULT 0,
+            repair_projection_version INTEGER NOT NULL DEFAULT 0,
+            repair_projection_synced_at TEXT,
             payment_amount REAL,
             is_day_start INTEGER DEFAULT 0,
             is_transfer_pending INTEGER DEFAULT 0,
@@ -5158,6 +5498,394 @@ fn migrate_v74(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// Task 7 read-only mirror for the server-protected repair settlement context.
+/// Generic local order/payment queues never write repair money rows; this
+/// nullable discriminator exists solely so KDS/fiscal/report code can fail
+/// closed if a protected server order is ever mirrored locally.
+fn migrate_v76(conn: &Connection) -> Result<(), String> {
+    if !column_exists(conn, "orders", "order_context")? {
+        conn.execute("ALTER TABLE orders ADD COLUMN order_context TEXT", [])
+            .map_err(|error| format!("v76 add orders.order_context: {error}"))?;
+    }
+    conn.execute("INSERT INTO schema_version (version) VALUES (76)", [])
+        .map_err(|error| format!("v76 record schema_version: {error}"))?;
+    info!("Applied migration v76 (protected repair order context mirror)");
+    Ok(())
+}
+
+/// Read-only, server-authoritative repair tender projection.  These columns
+/// are populated only from a successful server response; repair money never
+/// enters the local order/payment queues.
+fn migrate_v77(conn: &Connection) -> Result<(), String> {
+    let staff_shifts_exists = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='staff_shifts')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|error| format!("v77 inspect staff_shifts: {error}"))?;
+    if staff_shifts_exists {
+        for (name, definition) in [
+            ("repair_tender_sales", "REAL NOT NULL DEFAULT 0"),
+            ("repair_cash_sales", "REAL NOT NULL DEFAULT 0"),
+            ("repair_card_sales", "REAL NOT NULL DEFAULT 0"),
+            ("repair_orders_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("repair_projection_version", "INTEGER NOT NULL DEFAULT 0"),
+            ("repair_projection_synced_at", "TEXT"),
+        ] {
+            if !column_exists(conn, "staff_shifts", name)? {
+                conn.execute(
+                    &format!("ALTER TABLE staff_shifts ADD COLUMN {name} {definition}"),
+                    [],
+                )
+                .map_err(|error| format!("v77 add staff_shifts.{name}: {error}"))?;
+            }
+        }
+    }
+    conn.execute("INSERT INTO schema_version (version) VALUES (77)", [])
+        .map_err(|error| format!("v77 record schema_version: {error}"))?;
+    info!("Applied migration v77 (server repair reporting projection)");
+    Ok(())
+}
+
+/// Task 9C: durable, tenant-scoped repair cache and encrypted offline outbox
+/// metadata. Sensitive workspace/command/attachment content is always stored
+/// as AES-256-GCM ciphertext by `repairs.rs`; this migration deliberately does
+/// not backfill any legacy renderer cache because its plaintext provenance is
+/// unknown.
+fn migrate_v78(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS repair_cache (
+            organization_id TEXT NOT NULL,
+            branch_id TEXT NOT NULL,
+            terminal_id TEXT NOT NULL,
+            repair_id TEXT NOT NULL,
+            display_number TEXT NOT NULL,
+            official_number TEXT,
+            provisional_number TEXT,
+            status TEXT NOT NULL CHECK (status IN (
+                'received', 'diagnosing', 'waiting_customer_approval',
+                'approved', 'waiting_parts', 'repairing', 'quality_check',
+                'ready', 'delivered', 'cancelled', 'unrepairable'
+            )),
+            authoritative_status TEXT NOT NULL DEFAULT 'received' CHECK (authoritative_status IN (
+                'received', 'diagnosing', 'waiting_customer_approval',
+                'approved', 'waiting_parts', 'repairing', 'quality_check',
+                'ready', 'delivered', 'cancelled', 'unrepairable'
+            )),
+            priority TEXT NOT NULL CHECK (priority IN ('low', 'normal', 'high', 'urgent')),
+            intake_mode TEXT NOT NULL CHECK (intake_mode IN ('standard', 'quick_service')),
+            safe_device_label TEXT,
+            due_at TEXT,
+            ready_at TEXT,
+            authoritative_version INTEGER NOT NULL DEFAULT 0 CHECK (authoritative_version >= 0),
+            optimistic_version INTEGER NOT NULL DEFAULT 0 CHECK (optimistic_version >= authoritative_version),
+            scope_generation INTEGER NOT NULL DEFAULT 1 CHECK (scope_generation > 0),
+            workspace_nonce BLOB,
+            workspace_ciphertext BLOB,
+            dirty INTEGER NOT NULL DEFAULT 0 CHECK (dirty IN (0, 1)),
+            has_conflict INTEGER NOT NULL DEFAULT 0 CHECK (has_conflict IN (0, 1)),
+            needs_refetch INTEGER NOT NULL DEFAULT 0 CHECK (needs_refetch IN (0, 1)),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (organization_id, branch_id, terminal_id, repair_id),
+            CHECK (
+                (workspace_nonce IS NULL AND workspace_ciphertext IS NULL)
+                OR (length(workspace_nonce) = 12 AND length(workspace_ciphertext) >= 16)
+            )
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_repair_cache_scope_updated
+          ON repair_cache (organization_id, branch_id, terminal_id, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_repair_cache_scope_status
+          ON repair_cache (organization_id, branch_id, terminal_id, status, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_repair_cache_dirty
+          ON repair_cache (organization_id, branch_id, terminal_id, dirty, has_conflict)
+          WHERE dirty = 1 OR has_conflict = 1;
+
+        CREATE TABLE IF NOT EXISTS repair_alias_cache (
+            organization_id TEXT NOT NULL,
+            branch_id TEXT NOT NULL,
+            terminal_id TEXT NOT NULL,
+            alias TEXT NOT NULL,
+            repair_id TEXT NOT NULL,
+            is_official INTEGER NOT NULL DEFAULT 0 CHECK (is_official IN (0, 1)),
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (organization_id, branch_id, terminal_id, alias),
+            UNIQUE (organization_id, branch_id, terminal_id, repair_id, alias)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_repair_alias_identity
+          ON repair_alias_cache (organization_id, branch_id, terminal_id, repair_id);
+
+        CREATE TABLE IF NOT EXISTS repair_attachment_staging (
+            organization_id TEXT NOT NULL,
+            branch_id TEXT NOT NULL,
+            terminal_id TEXT NOT NULL,
+            attachment_id TEXT NOT NULL,
+            repair_id TEXT NOT NULL,
+            operation_id TEXT NOT NULL,
+            queue_id TEXT NOT NULL,
+            expected_version INTEGER NOT NULL CHECK (expected_version >= 0),
+            scope_generation INTEGER NOT NULL CHECK (scope_generation > 0),
+            file_key TEXT NOT NULL,
+            metadata_nonce BLOB NOT NULL CHECK (length(metadata_nonce) = 12),
+            metadata_ciphertext BLOB NOT NULL CHECK (length(metadata_ciphertext) >= 16),
+            sha256_hex TEXT NOT NULL CHECK (length(sha256_hex) = 64),
+            mime_type TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL CHECK (size_bytes > 0 AND size_bytes <= 15728640),
+            state TEXT NOT NULL CHECK (state IN ('queued', 'conflict', 'confirmed', 'cleanup_failed')),
+            server_version INTEGER,
+            cleanup_error_code TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (organization_id, branch_id, terminal_id, attachment_id),
+            UNIQUE (organization_id, branch_id, terminal_id, operation_id),
+            UNIQUE (organization_id, branch_id, terminal_id, queue_id),
+            CHECK (queue_id = operation_id),
+            CHECK (
+                (state IN ('queued', 'conflict') AND server_version IS NULL)
+                OR (state IN ('confirmed', 'cleanup_failed') AND server_version > 0)
+            ),
+            CHECK (
+                (state = 'cleanup_failed' AND cleanup_error_code IS NOT NULL)
+                OR (state <> 'cleanup_failed' AND cleanup_error_code IS NULL)
+            )
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_repair_attachment_staging_repair
+          ON repair_attachment_staging (
+            organization_id, branch_id, terminal_id, repair_id, expected_version
+          );
+        CREATE INDEX IF NOT EXISTS idx_repair_attachment_cleanup
+          ON repair_attachment_staging (state, updated_at)
+          WHERE state IN ('confirmed', 'cleanup_failed');
+
+        CREATE TABLE IF NOT EXISTS repair_conflicts (
+            organization_id TEXT NOT NULL,
+            branch_id TEXT NOT NULL,
+            terminal_id TEXT NOT NULL,
+            conflict_id TEXT NOT NULL,
+            repair_id TEXT NOT NULL,
+            operation_id TEXT NOT NULL,
+            expected_version INTEGER NOT NULL CHECK (expected_version >= 0),
+            current_version INTEGER NOT NULL CHECK (current_version > 0),
+            display_number TEXT,
+            status_summary TEXT NOT NULL,
+            updated_at_summary TEXT NOT NULL,
+            allowed_transitions_json TEXT NOT NULL DEFAULT '[]',
+            local_nonce BLOB NOT NULL CHECK (length(local_nonce) = 12),
+            local_ciphertext BLOB NOT NULL CHECK (length(local_ciphertext) >= 16),
+            state TEXT NOT NULL CHECK (state IN ('open', 'accepted_server', 'rebased')),
+            rebased_operation_id TEXT,
+            created_at TEXT NOT NULL,
+            resolved_at TEXT,
+            PRIMARY KEY (organization_id, branch_id, terminal_id, conflict_id),
+            UNIQUE (organization_id, branch_id, terminal_id, operation_id),
+            CHECK (json_valid(allowed_transitions_json)),
+            CHECK (json_type(allowed_transitions_json) = 'array'),
+            CHECK (
+                (state = 'open' AND resolved_at IS NULL AND rebased_operation_id IS NULL)
+                OR (state = 'accepted_server' AND resolved_at IS NOT NULL AND rebased_operation_id IS NULL)
+                OR (state = 'rebased' AND resolved_at IS NOT NULL AND rebased_operation_id IS NOT NULL)
+            )
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_repair_conflicts_one_open_per_repair
+          ON repair_conflicts (organization_id, branch_id, terminal_id, repair_id)
+          WHERE state = 'open';
+        CREATE INDEX IF NOT EXISTS idx_repair_conflicts_state
+          ON repair_conflicts (organization_id, branch_id, terminal_id, state, created_at DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_parity_sync_queue_repair_dependencies
+          ON parity_sync_queue (organization_id, record_id, version, created_at)
+          WHERE module_type = 'repairs' AND status IN ('pending', 'processing', 'conflict');
+
+        DELETE FROM local_settings
+         WHERE setting_category = 'local'
+           AND (
+                setting_key = 'admin_api_get::/api/pos/repairs'
+                OR substr(
+                    setting_key,
+                    1,
+                    length('admin_api_get::/api/pos/repairs') + 1
+                ) IN (
+                    'admin_api_get::/api/pos/repairs/',
+                    'admin_api_get::/api/pos/repairs?',
+                    'admin_api_get::/api/pos/repairs#'
+                )
+           );
+        "#,
+    )
+    .map_err(|error| format!("v78 create encrypted repair cache: {error}"))?;
+
+    conn.execute("INSERT INTO schema_version (version) VALUES (78)", [])
+        .map_err(|error| format!("v78 record schema_version: {error}"))?;
+    info!("Applied migration v78 (encrypted repair cache and conflict outbox)");
+    Ok(())
+}
+
+/// Task 9C queue ordering boundary. Repair commands and attachment uploads
+/// share one aggregate stream even though attachment queue `record_id` values
+/// identify the attachment itself. The explicit nullable aggregate column
+/// keeps generic parity rows unchanged while making repair predecessor checks
+/// tenant-scoped and independent of encrypted payloads.
+fn migrate_v79(conn: &Connection) -> Result<(), String> {
+    // Private-beta databases may already be at the former repair schema v78,
+    // which predates master's v75 platform-order compatibility migration.
+    // Re-assert that additive column here so those databases converge without
+    // rewriting or dropping any repair/order data.
+    ensure_orders_external_plugin_order_id(conn)?;
+
+    if !column_exists(conn, "parity_sync_queue", "repair_aggregate_id")? {
+        conn.execute(
+            "ALTER TABLE parity_sync_queue ADD COLUMN repair_aggregate_id TEXT",
+            [],
+        )
+        .map_err(|error| format!("v79 add repair aggregate column: {error}"))?;
+    }
+
+    let repair_rows: Vec<(String, String, String, String, String, String, String, i64)> = {
+        let mut statement = conn
+            .prepare(
+                "SELECT id, table_name, record_id, operation, organization_id,
+                        COALESCE(module_type, ''), conflict_strategy, version
+                   FROM parity_sync_queue
+                  WHERE repair_aggregate_id IS NULL
+                    AND (COALESCE(module_type, '') = 'repairs'
+                         OR table_name IN ('repairs', 'repair_attachments'))
+                  ORDER BY created_at ASC, id ASC",
+            )
+            .map_err(|error| format!("v79 prepare repair aggregate backfill: {error}"))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            })
+            .map_err(|error| format!("v79 query repair aggregate backfill: {error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("v79 read repair aggregate backfill: {error}"))?;
+        rows
+    };
+
+    let canonical_uuid = |value: &str| {
+        uuid::Uuid::parse_str(value)
+            .ok()
+            .is_some_and(|parsed| parsed.to_string() == value)
+    };
+    const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
+
+    for (id, table, record_id, operation, organization_id, module, strategy, version) in repair_rows
+    {
+        let common_shape_valid = module == "repairs"
+            && operation == "INSERT"
+            && strategy == "manual"
+            && canonical_uuid(&id)
+            && canonical_uuid(&organization_id)
+            && canonical_uuid(&record_id)
+            && (0..=MAX_SAFE_INTEGER).contains(&version);
+        let aggregate = if common_shape_valid && table == "repairs" {
+            Some(record_id.clone())
+        } else if common_shape_valid && table == "repair_attachments" {
+            let parents: Vec<String> = {
+                let mut statement = conn
+                    .prepare(
+                        "SELECT repair_id
+                           FROM repair_attachment_staging
+                          WHERE organization_id = ?1
+                            AND attachment_id = ?2
+                            AND operation_id = ?3
+                            AND queue_id = ?3
+                            AND expected_version = ?4
+                          LIMIT 2",
+                    )
+                    .map_err(|error| format!("v79 prepare attachment aggregate: {error}"))?;
+                let rows = statement
+                    .query_map(params![organization_id, record_id, id, version], |row| {
+                        row.get::<_, String>(0)
+                    })
+                    .map_err(|error| format!("v79 query attachment aggregate: {error}"))?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| format!("v79 read attachment aggregate: {error}"))?;
+                rows
+            };
+            match parents.as_slice() {
+                [parent] if canonical_uuid(parent) => Some(parent.clone()),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        let affected = if let Some(aggregate) = aggregate {
+            conn.execute(
+                "UPDATE parity_sync_queue
+                    SET repair_aggregate_id = ?1
+                  WHERE id = ?2 AND repair_aggregate_id IS NULL",
+                params![aggregate, id],
+            )
+            .map_err(|error| format!("v79 persist repair aggregate: {error}"))?
+        } else {
+            conn.execute(
+                "UPDATE parity_sync_queue
+                    SET status = 'conflict',
+                        error_message = 'REPAIR_AGGREGATE_ID_MISSING',
+                        next_retry_at = NULL,
+                        claim_generation = claim_generation
+                            + CASE WHEN status = 'processing' THEN 1 ELSE 0 END
+                  WHERE id = ?1 AND repair_aggregate_id IS NULL",
+                [id],
+            )
+            .map_err(|error| format!("v79 quarantine repair aggregate: {error}"))?
+        };
+        if affected != 1 {
+            return Err("v79 repair aggregate row changed during migration".to_string());
+        }
+    }
+
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_parity_sync_queue_repair_dependencies;
+         CREATE INDEX IF NOT EXISTS idx_parity_sync_queue_repair_aggregate_order
+           ON parity_sync_queue (
+                organization_id, repair_aggregate_id, status,
+                version, created_at, id
+           )
+          WHERE repair_aggregate_id IS NOT NULL
+            AND (COALESCE(module_type, '') = 'repairs'
+                 OR table_name IN ('repairs', 'repair_attachments'))
+            AND status IN ('pending', 'processing', 'failed', 'conflict');",
+    )
+    .map_err(|error| format!("v79 create repair aggregate ordering index: {error}"))?;
+
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_version (version) VALUES (79)",
+        [],
+    )
+    .map_err(|error| format!("v79 record schema_version: {error}"))?;
+    info!("Applied migration v79 (repair aggregate parity ordering)");
+    Ok(())
+}
+
+fn ensure_orders_external_plugin_order_id(conn: &Connection) -> Result<(), String> {
+    if !column_exists(conn, "orders", "external_plugin_order_id")? {
+        conn.execute(
+            "ALTER TABLE orders ADD COLUMN external_plugin_order_id TEXT",
+            [],
+        )
+        .map_err(|e| format!("add orders.external_plugin_order_id: {e}"))?;
+    }
+    Ok(())
+}
+
 fn migrate_v75(conn: &Connection) -> Result<(), String> {
     // THE-437 settle was dead on every terminal whose database predates the
     // base-schema introduction of `external_plugin_order_id`: the column only
@@ -5166,13 +5894,8 @@ fn migrate_v75(conn: &Connection) -> Result<(), String> {
     // silently classifying every platform order as non-platform (live
     // diagnosis at Το Μικρό Παρίσι, 31/08/2026: efood orders kept their
     // balance open and blocked the Z). Additive and idempotent.
-    if !column_exists(conn, "orders", "external_plugin_order_id")? {
-        conn.execute(
-            "ALTER TABLE orders ADD COLUMN external_plugin_order_id TEXT",
-            [],
-        )
+    ensure_orders_external_plugin_order_id(conn)
         .map_err(|e| format!("migration v75 add external_plugin_order_id: {e}"))?;
-    }
     conn.execute(
         "INSERT OR IGNORE INTO schema_version (version) VALUES (75)",
         [],
@@ -5909,6 +6632,7 @@ pub fn run_migrations_for_test(conn: &Connection) {
 mod tests {
     use super::*;
     use rusqlite::Connection;
+    use std::cell::Cell;
 
     /// Open an in-memory database and apply pragmas (mirrors open_and_configure).
     fn test_db() -> Connection {
@@ -5920,6 +6644,30 @@ mod tests {
         )
         .expect("pragma setup");
         conn
+    }
+
+    fn file_db() -> (crate::tests::harness::TempDir, Connection) {
+        let tmp = crate::tests::harness::TempDir::new();
+        let db_path = tmp.path().join("pos.db");
+        let conn = open_and_configure(&db_path).expect("open file-backed fixture");
+        (tmp, conn)
+    }
+
+    fn current_file_fixture() -> (crate::tests::harness::TempDir, Connection) {
+        let (tmp, conn) = file_db();
+        run_migrations(&conn).expect("build current file-backed fixture");
+        (tmp, conn)
+    }
+
+    fn pending_v79_file_fixture() -> (crate::tests::harness::TempDir, Connection) {
+        let (tmp, conn) = current_file_fixture();
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS idx_parity_sync_queue_repair_aggregate_order;
+             DELETE FROM schema_version WHERE version = 79;
+             ALTER TABLE parity_sync_queue DROP COLUMN repair_aggregate_id;",
+        )
+        .expect("rewind file-backed fixture to v78");
+        (tmp, conn)
     }
 
     /// Helper: list table names in the database.
@@ -6844,6 +7592,92 @@ mod tests {
         run_migration_tx(&conn, 75, migrate_v75).expect("v75 is idempotent");
     }
 
+    #[test]
+    fn migration_v79_converges_premerge_private_beta_v78_with_master_v75_column() {
+        let (_tmp, conn) = current_file_fixture();
+        conn.execute_batch(
+            "DELETE FROM schema_version WHERE version = 79;
+             ALTER TABLE orders DROP COLUMN external_plugin_order_id;",
+        )
+        .expect("rewind to the pre-merge private-beta v78 shape");
+        assert_eq!(max_schema_version(&conn), 78);
+        assert!(!column_exists(&conn, "orders", "external_plugin_order_id")
+            .expect("inspect pre-merge beta orders"));
+
+        run_migration_tx(&conn, 79, migrate_v79).expect("converge private-beta v78 to v79");
+
+        assert_eq!(max_schema_version(&conn), 79);
+        assert!(column_exists(&conn, "orders", "external_plugin_order_id")
+            .expect("inspect converged orders"));
+    }
+
+    #[test]
+    fn migration_chain_converges_master_v75_to_repair_v79_without_order_loss() {
+        let (_tmp, conn) = current_file_fixture();
+        conn.execute(
+            "INSERT INTO orders (
+                 id, order_number, items, total_amount, status, sync_status,
+                 external_plugin_order_id, created_at, updated_at
+             ) VALUES (
+                 'master-v75-order', 'MASTER-75', '[]', 12.5, 'completed',
+                 'synced', 'platform-order-75', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed representative master-v75 order");
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS idx_parity_sync_queue_repair_aggregate_order;
+             DROP INDEX IF EXISTS idx_parity_sync_queue_repair_dependencies;
+             DROP TABLE IF EXISTS repair_conflicts;
+             DROP TABLE IF EXISTS repair_attachment_staging;
+             DROP TABLE IF EXISTS repair_alias_cache;
+             DROP TABLE IF EXISTS repair_cache;
+             ALTER TABLE parity_sync_queue DROP COLUMN repair_aggregate_id;
+             ALTER TABLE orders DROP COLUMN order_context;
+             ALTER TABLE staff_shifts DROP COLUMN repair_tender_sales;
+             ALTER TABLE staff_shifts DROP COLUMN repair_cash_sales;
+             ALTER TABLE staff_shifts DROP COLUMN repair_card_sales;
+             ALTER TABLE staff_shifts DROP COLUMN repair_orders_count;
+             ALTER TABLE staff_shifts DROP COLUMN repair_projection_version;
+             ALTER TABLE staff_shifts DROP COLUMN repair_projection_synced_at;
+             DELETE FROM schema_version WHERE version > 75;",
+        )
+        .expect("rewind current fixture to the master-v75 shape");
+        assert_eq!(max_schema_version(&conn), 75);
+
+        run_migrations(&conn).expect("advance master v75 through repair v79");
+
+        assert_eq!(max_schema_version(&conn), 79);
+        assert!(
+            column_exists(&conn, "orders", "order_context").expect("inspect repair order context")
+        );
+        assert!(
+            column_exists(&conn, "staff_shifts", "repair_projection_version")
+                .expect("inspect repair shift projection")
+        );
+        assert!(
+            column_exists(&conn, "parity_sync_queue", "repair_aggregate_id")
+                .expect("inspect repair queue aggregate")
+        );
+        assert!(table_names(&conn).contains(&"repair_cache".to_string()));
+        let preserved: (String, String, f64) = conn
+            .query_row(
+                "SELECT order_number, external_plugin_order_id, total_amount
+                   FROM orders WHERE id = 'master-v75-order'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read preserved master-v75 order");
+        assert_eq!(
+            preserved,
+            (
+                "MASTER-75".to_string(),
+                "platform-order-75".to_string(),
+                12.5
+            )
+        );
+    }
+
     // --- receipt_number fiscal-entitlement migration scoping (v67/v68) --------
 
     /// Build a minimal pre-v67 schema: an `orders` row with NO receipt_number
@@ -7098,9 +7932,615 @@ mod tests {
     }
 
     #[test]
-    fn test_run_migrations_advances_existing_v67_database_to_current() {
+    fn migration_v79_native_repair_atomic_only_policy_uses_computed_explicit_allowlist() {
+        assert_eq!(
+            computed_pending_migrations(75, true, false),
+            vec![56, 76, 77, 78, 79]
+        );
+        assert_eq!(computed_pending_migrations(78, false, false), vec![79]);
+        assert_eq!(computed_pending_migrations(79, false, true), vec![79]);
+
+        assert!(native_repair_atomic_only_allowed(75, &[56, 76, 77, 78, 79]));
+        assert!(native_repair_atomic_only_allowed(78, &[79]));
+        assert!(native_repair_atomic_only_allowed(79, &[56, 79]));
+        assert!(!native_repair_atomic_only_allowed(
+            74,
+            &[75, 76, 77, 78, 79]
+        ));
+        assert!(!native_repair_atomic_only_allowed(
+            75,
+            &[74, 76, 77, 78, 79]
+        ));
+        assert!(!native_repair_atomic_only_allowed(79, &[]));
+    }
+
+    #[test]
+    fn migration_v79_empty_or_missing_main_path_fails_before_snapshot_or_schema_mutation() {
         let conn = test_db();
-        run_migrations(&conn).expect("initial migrations");
+        for (case, path) in [
+            ("empty", PathBuf::new()),
+            (
+                "missing",
+                std::env::temp_dir().join(format!(
+                    "missing-pos-migration-{}-{}.db",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .expect("system time")
+                        .as_nanos()
+                )),
+            ),
+        ] {
+            let error = prepare_pre_migration_recovery(&path, &conn, 78, &[79])
+                .expect_err("invalid main path must fail closed");
+            assert!(
+                error.contains("MIGRATION_MAIN_DATABASE_PATH_INVALID"),
+                "{case}: unexpected error: {error}"
+            );
+            assert!(
+                !schema_version_exists(&conn, 79).unwrap_or(false),
+                "{case}: path failure mutated schema metadata"
+            );
+        }
+    }
+
+    #[test]
+    fn migration_v79_main_path_and_snapshot_failures_block_the_real_migration_path() {
+        for (case, path_result, expected_code, expected_snapshot_calls) in [
+            (
+                "query",
+                Err("injected path query failure".to_string()),
+                "MIGRATION_MAIN_DATABASE_PATH_QUERY_FAILED",
+                0,
+            ),
+            (
+                "empty",
+                Ok(PathBuf::new()),
+                "MIGRATION_MAIN_DATABASE_PATH_INVALID",
+                0,
+            ),
+            (
+                "missing",
+                Ok(std::env::temp_dir().join(format!(
+                    "missing-main-db-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .expect("system time")
+                        .as_nanos()
+                ))),
+                "MIGRATION_MAIN_DATABASE_PATH_INVALID",
+                0,
+            ),
+        ] {
+            let (tmp, conn) = pending_v79_file_fixture();
+            let snapshot_calls = Cell::new(0);
+            let error = run_migrations_with_preflight(&conn, &|_| path_result.clone(), &|_, _| {
+                snapshot_calls.set(snapshot_calls.get() + 1);
+                Ok(None)
+            })
+            .expect_err("path failure must block v79");
+            assert!(
+                error.contains(expected_code),
+                "{case}: unexpected error: {error}"
+            );
+            assert_eq!(
+                snapshot_calls.get(),
+                expected_snapshot_calls,
+                "{case}: unexpected snapshot invocation"
+            );
+            assert_eq!(max_schema_version(&conn), 78, "{case}: version mutated");
+            assert!(
+                !column_exists(&conn, "parity_sync_queue", "repair_aggregate_id")
+                    .expect("inspect aggregate column"),
+                "{case}: v79 schema mutation escaped preflight"
+            );
+            assert!(
+                !crate::recovery::recovery_root_for_app_data(tmp.path()).exists(),
+                "{case}: preflight failure created recovery artifacts"
+            );
+        }
+
+        let (tmp, conn) = pending_v79_file_fixture();
+        let actual_path = std::fs::canonicalize(tmp.path().join("pos.db"))
+            .expect("resolve existing main database path");
+        let snapshot_calls = Cell::new(0);
+        let error = run_migrations_with_preflight(&conn, &|_| Ok(actual_path.clone()), &|_, _| {
+            snapshot_calls.set(snapshot_calls.get() + 1);
+            Ok(None)
+        })
+        .expect_err("missing generic snapshot metadata must block v79");
+        assert!(
+            error.contains("MIGRATION_GENERIC_SNAPSHOT_MISSING"),
+            "unexpected snapshot error: {error}"
+        );
+        assert_eq!(snapshot_calls.get(), 1);
+        assert_eq!(max_schema_version(&conn), 78);
+        assert!(
+            !column_exists(&conn, "parity_sync_queue", "repair_aggregate_id")
+                .expect("inspect aggregate column")
+        );
+        assert!(
+            !crate::recovery::recovery_root_for_app_data(tmp.path()).exists(),
+            "Ok(None) must not leave recovery artifacts"
+        );
+    }
+
+    /// Build a faithful pre-Task-9C fixture from the real migration chain.
+    ///
+    /// `sync_queue::create_tables` intentionally describes the newest schema,
+    /// so a fresh replay already contains the nullable v79 column by the time
+    /// v44 runs. Removing only the two Task-9C versions and their additive
+    /// objects gives these tests a populated v77 database without copying a
+    /// second, test-only version of the large parity queue schema.
+    fn downgrade_current_fixture_to_v77(conn: &Connection) {
+        assert_eq!(max_schema_version(conn), CURRENT_SCHEMA_VERSION);
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS idx_parity_sync_queue_repair_aggregate_order;
+             DROP INDEX IF EXISTS idx_parity_sync_queue_repair_dependencies;
+             DROP TABLE IF EXISTS repair_conflicts;
+             DROP TABLE IF EXISTS repair_attachment_staging;
+             DROP TABLE IF EXISTS repair_alias_cache;
+             DROP TABLE IF EXISTS repair_cache;
+             ALTER TABLE parity_sync_queue DROP COLUMN repair_aggregate_id;
+             DELETE FROM schema_version WHERE version >= 78;",
+        )
+        .expect("downgrade current test fixture to v77");
+
+        assert_eq!(max_schema_version(conn), 77);
+        assert!(
+            !column_exists(conn, "parity_sync_queue", "repair_aggregate_id")
+                .expect("inspect v77 parity queue"),
+            "v77 fixture must predate the repair aggregate column",
+        );
+    }
+
+    fn sqlite_objects_with_prefix(conn: &Connection, prefix: &str) -> Vec<(String, String)> {
+        let mut statement = conn
+            .prepare(
+                "SELECT type, name
+                   FROM sqlite_master
+                  WHERE name LIKE ?1 || '%'
+                  ORDER BY type, name",
+            )
+            .expect("prepare sqlite object inventory");
+        statement
+            .query_map([prefix], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("query sqlite object inventory")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("read sqlite object inventory")
+    }
+
+    fn parity_row_fingerprint(conn: &Connection, id: &str) -> String {
+        conn.query_row(
+            "SELECT printf(
+                 '%s|%s|%s|%s|%s|%s|%d|%d|%s|%s|%d',
+                 id, table_name, record_id, operation, data, organization_id,
+                 attempts, priority, module_type, status, claim_generation
+             )
+             FROM parity_sync_queue
+             WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+        .expect("read parity row fingerprint")
+    }
+
+    #[test]
+    fn v78_populated_v77_preserves_existing_domains_and_purges_only_legacy_repair_get_cache() {
+        let (_tmp, conn) = current_file_fixture();
+        downgrade_current_fixture_to_v77(&conn);
+
+        conn.execute(
+            "INSERT INTO orders (
+                 id, order_number, items, total_amount, status, sync_status,
+                 customer_name, created_at, updated_at
+             ) VALUES (
+                 'v77-order', 'ORD-V77', '[{\"sku\":\"KEEP\",\"quantity\":2}]',
+                 42.75, 'completed', 'synced', 'Existing customer',
+                 '2026-08-20T09:00:00Z', '2026-08-20T09:05:00Z'
+             )",
+            [],
+        )
+        .expect("seed representative v77 order");
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, status, sync_status, sync_state,
+                 created_at, updated_at
+             ) VALUES (
+                 'v77-payment', 'v77-order', 'cash', 42.75, 'completed',
+                 'synced', 'applied', '2026-08-20T09:01:00Z',
+                 '2026-08-20T09:02:00Z'
+             )",
+            [],
+        )
+        .expect("seed representative v77 payment");
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, priority, module_type,
+                 conflict_strategy, version, claim_generation, status
+             ) VALUES (
+                 'v77-generic-queue', 'customers', 'customer-v77', 'UPDATE',
+                 '{\"name\":\"Keep me\"}', 'org-v77',
+                 '2026-08-20T09:03:00Z', 2, 7, 'customers',
+                 'client-wins', 9, 3, 'failed'
+             )",
+            [],
+        )
+        .expect("seed representative non-repair parity row");
+
+        for (category, key, value) in [
+            ("local", "admin_api_get::/api/pos/repairs", "legacy-exact"),
+            (
+                "local",
+                "admin_api_get::/api/pos/repairs/repair-1",
+                "legacy-detail",
+            ),
+            (
+                "local",
+                "admin_api_get::/api/pos/repairs?status=ready",
+                "legacy-query",
+            ),
+            (
+                "local",
+                "admin_api_get::/api/pos/repairs#ready",
+                "legacy-fragment",
+            ),
+            (
+                "local",
+                "admin_api_get::/api/pos/repairs-v2",
+                "near-miss-must-stay",
+            ),
+            ("local", "receipt_printer", "printer-must-stay"),
+            (
+                "diagnostics",
+                "admin_api_get::/api/pos/repairs",
+                "different-category-must-stay",
+            ),
+        ] {
+            set_setting(&conn, category, key, value).expect("seed v77 setting");
+        }
+
+        let order_before: (String, String, f64, String, String) = conn
+            .query_row(
+                "SELECT order_number, items, total_amount, status, customer_name
+                 FROM orders WHERE id = 'v77-order'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("snapshot order");
+        let payment_before: (String, f64, String, String) = conn
+            .query_row(
+                "SELECT method, amount, status, sync_state
+                 FROM order_payments WHERE id = 'v77-payment'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("snapshot payment");
+        let queue_before = parity_row_fingerprint(&conn, "v77-generic-queue");
+
+        run_migration_tx(&conn, 78, migrate_v78).expect("apply v78 to populated v77 fixture");
+
+        let order_after: (String, String, f64, String, String) = conn
+            .query_row(
+                "SELECT order_number, items, total_amount, status, customer_name
+                 FROM orders WHERE id = 'v77-order'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("read preserved order");
+        let payment_after: (String, f64, String, String) = conn
+            .query_row(
+                "SELECT method, amount, status, sync_state
+                 FROM order_payments WHERE id = 'v77-payment'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("read preserved payment");
+        assert_eq!(order_after, order_before, "v78 must not rewrite orders");
+        assert_eq!(
+            payment_after, payment_before,
+            "v78 must not rewrite canonical payments",
+        );
+        assert_eq!(
+            parity_row_fingerprint(&conn, "v77-generic-queue"),
+            queue_before,
+            "v78 must not mutate a non-repair parity row",
+        );
+
+        for deleted_key in [
+            "admin_api_get::/api/pos/repairs",
+            "admin_api_get::/api/pos/repairs/repair-1",
+            "admin_api_get::/api/pos/repairs?status=ready",
+            "admin_api_get::/api/pos/repairs#ready",
+        ] {
+            assert_eq!(
+                get_setting(&conn, "local", deleted_key),
+                None,
+                "v78 must purge legacy plaintext GET cache {deleted_key}",
+            );
+        }
+        assert_eq!(
+            get_setting(&conn, "local", "admin_api_get::/api/pos/repairs-v2"),
+            Some("near-miss-must-stay".to_string()),
+        );
+        assert_eq!(
+            get_setting(&conn, "local", "receipt_printer"),
+            Some("printer-must-stay".to_string()),
+        );
+        assert_eq!(
+            get_setting(&conn, "diagnostics", "admin_api_get::/api/pos/repairs"),
+            Some("different-category-must-stay".to_string()),
+        );
+
+        // A real restart first advances the v78 database to v79; the next
+        // restart must be a strict no-op for all representative legacy rows.
+        run_migrations(&conn).expect("restart applies v79");
+        let restart_snapshot = (
+            max_schema_version(&conn),
+            parity_row_fingerprint(&conn, "v77-generic-queue"),
+            get_setting(&conn, "local", "receipt_printer"),
+            sqlite_objects_with_prefix(&conn, "repair_"),
+        );
+        run_migrations(&conn).expect("second restart is idempotent");
+        assert_eq!(
+            (
+                max_schema_version(&conn),
+                parity_row_fingerprint(&conn, "v77-generic-queue"),
+                get_setting(&conn, "local", "receipt_printer"),
+                sqlite_objects_with_prefix(&conn, "repair_"),
+            ),
+            restart_snapshot,
+            "restart must not duplicate or rewrite Task-9C state",
+        );
+        let generic_aggregate: Option<String> = conn
+            .query_row(
+                "SELECT repair_aggregate_id FROM parity_sync_queue
+                 WHERE id = 'v77-generic-queue'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read generic aggregate marker");
+        assert_eq!(generic_aggregate, None);
+    }
+
+    #[test]
+    fn v78_injected_failure_rolls_back_objects_cache_purge_and_version_then_retries_cleanly() {
+        let (_tmp, conn) = current_file_fixture();
+        downgrade_current_fixture_to_v77(&conn);
+        set_setting(
+            &conn,
+            "local",
+            "admin_api_get::/api/pos/repairs",
+            "must-return-on-rollback",
+        )
+        .expect("seed legacy repair GET cache");
+
+        let result = run_migration_tx(&conn, 78, |connection| {
+            migrate_v78(connection)?;
+            Err("injected v78 failure after DDL and cache purge".to_string())
+        });
+        assert!(result
+            .expect_err("injected v78 failure must escape")
+            .contains("injected v78 failure"),);
+
+        assert_eq!(max_schema_version(&conn), 77);
+        assert!(
+            sqlite_objects_with_prefix(&conn, "repair_").is_empty(),
+            "transaction rollback must remove every newly-created repair table/index",
+        );
+        assert!(
+            !sqlite_index_exists(&conn, "idx_parity_sync_queue_repair_dependencies")
+                .expect("inspect rolled-back dependency index")
+        );
+        assert_eq!(
+            get_setting(&conn, "local", "admin_api_get::/api/pos/repairs"),
+            Some("must-return-on-rollback".to_string()),
+            "legacy cache deletion must roll back with the failed migration",
+        );
+
+        run_migration_tx(&conn, 78, migrate_v78).expect("clean v78 retry");
+        assert_eq!(max_schema_version(&conn), 78);
+        assert_eq!(
+            get_setting(&conn, "local", "admin_api_get::/api/pos/repairs"),
+            None,
+        );
+        for table in [
+            "repair_cache",
+            "repair_alias_cache",
+            "repair_attachment_staging",
+            "repair_conflicts",
+        ] {
+            assert!(
+                table_names(&conn).contains(&table.to_string()),
+                "clean retry must create {table}",
+            );
+        }
+    }
+
+    #[test]
+    fn v79_mid_backfill_failure_rolls_back_column_rows_index_and_version_then_restart_retries() {
+        const VALID_OPERATION: &str = "11111111-1111-4111-8111-111111111111";
+        const INVALID_OPERATION: &str = "22222222-2222-4222-8222-222222222222";
+        const REPAIR_ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        const INVALID_RECORD_ID: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+        const ORGANIZATION_ID: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
+        let (_tmp, conn) = current_file_fixture();
+        downgrade_current_fixture_to_v77(&conn);
+        run_migration_tx(&conn, 78, migrate_v78).expect("prepare real v78 schema");
+
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, error_message, next_retry_at, module_type,
+                 conflict_strategy, version, claim_generation, status
+             ) VALUES (
+                 ?1, 'repairs', ?2, 'INSERT', '{\"ciphertext\":\"valid\"}', ?3,
+                 '2026-08-20T10:00:00Z', NULL, NULL, 'repairs',
+                 'manual', 4, 0, 'pending'
+             )",
+            params![VALID_OPERATION, REPAIR_ID, ORGANIZATION_ID],
+        )
+        .expect("seed valid repair row first in v79 ordering");
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, error_message, next_retry_at, module_type,
+                 conflict_strategy, version, claim_generation, status
+             ) VALUES (
+                 ?1, 'repairs', ?2, 'UPDATE', '{\"ciphertext\":\"invalid\"}', ?3,
+                 '2026-08-20T10:01:00Z', 'original-error',
+                 '2026-08-20T11:00:00Z', 'repairs', 'manual', 5, 7, 'processing'
+             )",
+            params![INVALID_OPERATION, INVALID_RECORD_ID, ORGANIZATION_ID],
+        )
+        .expect("seed invalid repair row second in v79 ordering");
+
+        let valid_before = parity_row_fingerprint(&conn, VALID_OPERATION);
+        let invalid_before = parity_row_fingerprint(&conn, INVALID_OPERATION);
+        conn.execute_batch(&format!(
+            "CREATE TRIGGER inject_v79_mid_backfill_failure
+             BEFORE UPDATE ON parity_sync_queue
+             WHEN OLD.id = '{INVALID_OPERATION}'
+             BEGIN
+               SELECT RAISE(ABORT, 'injected v79 mid-backfill failure');
+             END;"
+        ))
+        .expect("install deterministic v79 failure trigger");
+
+        let failure = run_migration_tx(&conn, 79, migrate_v79)
+            .expect_err("the second backfill mutation must fail");
+        assert!(failure.contains("injected v79 mid-backfill failure"));
+
+        assert_eq!(max_schema_version(&conn), 78);
+        assert!(
+            !column_exists(&conn, "parity_sync_queue", "repair_aggregate_id")
+                .expect("inspect rolled-back v79 column"),
+            "ALTER TABLE must roll back with the failed backfill",
+        );
+        assert_eq!(
+            parity_row_fingerprint(&conn, VALID_OPERATION),
+            valid_before,
+            "the first successful backfill update must also roll back",
+        );
+        assert_eq!(
+            parity_row_fingerprint(&conn, INVALID_OPERATION),
+            invalid_before,
+            "status/error/lease state on the failing row must remain intact",
+        );
+        assert!(
+            !sqlite_index_exists(&conn, "idx_parity_sync_queue_repair_aggregate_order")
+                .expect("inspect rolled-back v79 index")
+        );
+        assert!(
+            sqlite_index_exists(&conn, "idx_parity_sync_queue_repair_dependencies")
+                .expect("inspect restored v78 index")
+        );
+
+        conn.execute_batch("DROP TRIGGER inject_v79_mid_backfill_failure")
+            .expect("remove injected failure before restart");
+        run_migrations(&conn).expect("restart retries v79 cleanly");
+
+        let valid_aggregate: Option<String> = conn
+            .query_row(
+                "SELECT repair_aggregate_id FROM parity_sync_queue WHERE id = ?1",
+                [VALID_OPERATION],
+                |row| row.get(0),
+            )
+            .expect("read valid repair aggregate");
+        let invalid_after: (Option<String>, String, Option<String>, i64) = conn
+            .query_row(
+                "SELECT repair_aggregate_id, status, next_retry_at, claim_generation
+                 FROM parity_sync_queue WHERE id = ?1",
+                [INVALID_OPERATION],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("read quarantined repair row");
+        let invalid_error: String = conn
+            .query_row(
+                "SELECT error_message FROM parity_sync_queue WHERE id = ?1",
+                [INVALID_OPERATION],
+                |row| row.get(0),
+            )
+            .expect("read quarantine error");
+        assert_eq!(valid_aggregate, Some(REPAIR_ID.to_string()));
+        assert_eq!(
+            invalid_after,
+            (None, "conflict".to_string(), None, 8),
+            "invalid row must be quarantined exactly once on clean retry",
+        );
+        assert_eq!(invalid_error, "REPAIR_AGGREGATE_ID_MISSING");
+        assert_eq!(max_schema_version(&conn), 79);
+        assert!(
+            sqlite_index_exists(&conn, "idx_parity_sync_queue_repair_aggregate_order")
+                .expect("inspect committed v79 index")
+        );
+        assert!(
+            !sqlite_index_exists(&conn, "idx_parity_sync_queue_repair_dependencies")
+                .expect("inspect retired v78 index")
+        );
+
+        let committed_snapshot = (
+            valid_aggregate,
+            invalid_after,
+            invalid_error,
+            max_schema_version(&conn),
+        );
+        run_migrations(&conn).expect("post-retry restart is deterministic");
+        let rerun_valid: Option<String> = conn
+            .query_row(
+                "SELECT repair_aggregate_id FROM parity_sync_queue WHERE id = ?1",
+                [VALID_OPERATION],
+                |row| row.get(0),
+            )
+            .expect("read rerun valid aggregate");
+        let rerun_invalid: (Option<String>, String, Option<String>, i64) = conn
+            .query_row(
+                "SELECT repair_aggregate_id, status, next_retry_at, claim_generation
+                 FROM parity_sync_queue WHERE id = ?1",
+                [INVALID_OPERATION],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("read rerun invalid row");
+        let rerun_error: String = conn
+            .query_row(
+                "SELECT error_message FROM parity_sync_queue WHERE id = ?1",
+                [INVALID_OPERATION],
+                |row| row.get(0),
+            )
+            .expect("read rerun quarantine error");
+        assert_eq!(
+            (
+                rerun_valid,
+                rerun_invalid,
+                rerun_error,
+                max_schema_version(&conn),
+            ),
+            committed_snapshot,
+        );
+    }
+
+    #[test]
+    fn test_run_migrations_advances_existing_v67_database_to_current() {
+        let (_tmp, conn) = current_file_fixture();
         assert_eq!(
             max_schema_version(&conn),
             CURRENT_SCHEMA_VERSION,
@@ -7528,7 +8968,7 @@ mod tests {
 
     #[test]
     fn test_migrations_repair_missing_v56_after_later_versions_applied() {
-        let conn = test_db();
+        let (_tmp, conn) = file_db();
         conn.execute_batch(
             "
             CREATE TABLE schema_version (
@@ -7536,6 +8976,17 @@ mod tests {
                 applied_at TEXT DEFAULT (datetime('now'))
             );
             INSERT INTO schema_version (version) VALUES (58);
+
+            CREATE TABLE local_settings (
+                id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+                setting_category TEXT NOT NULL,
+                setting_key TEXT NOT NULL,
+                setting_value TEXT NOT NULL,
+                last_sync TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(setting_category, setting_key)
+            );
 
             CREATE TABLE orders (
                 id TEXT PRIMARY KEY

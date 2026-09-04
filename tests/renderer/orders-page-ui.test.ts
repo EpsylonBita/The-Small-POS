@@ -1505,36 +1505,26 @@ test('TablesDashboard uses aria-labels, not native title tooltips, for refresh +
   assert.doesNotMatch(source, /title=\{t\('tablesDashboard\.refresh'/);
 });
 
-// Round 210 (touch-first, static audit): the MOUNTED dashboard (OrderDashboard.tsx) New Order
-// FloatingActionButton still passed a native title=. The shared FAB converts title->aria-label, so
-// it was not a live DOM-tooltip bug, but the mounted source must be clean: the FAB exposes its
-// (conditional) accessible name via aria-label, not title. The visible LiquidGlassModal /
-// ReceiptPreviewModal `title` props are component heading text and stay allowed.
-test('OrderDashboard New Order FAB uses aria-label (conditional), not a native title tooltip', () => {
+// The mounted dashboard now opens the declarative +New registry. It retains the
+// touch-first accessible FAB contract and routes ready sale/appointment actions
+// into their existing flows; repair actions remain disabled Task 9 placeholders.
+test('OrderDashboard +New FAB uses aria-label and opens the declarative primary actions', () => {
   const source = orderDashboardSource();
 
-  // Slice just the mounted New Order FAB block (identified by its onClick + position storage key).
-  const clickIdx = source.indexOf('onClick={handleNewOrderClick}');
-  assert.notEqual(clickIdx, -1, 'New Order FAB onClick must exist');
-  const fabOpen = source.lastIndexOf('<FloatingActionButton', clickIdx);
-  assert.notEqual(fabOpen, -1, 'New Order FAB opening tag must exist');
-  const fabClose = source.indexOf('/>', clickIdx);
-  assert.notEqual(fabClose, -1, 'New Order FAB must self-close');
-  const fab = source.slice(fabOpen, fabClose + 2);
-
-  // This is the visible/mounted New Order FAB.
-  assert.match(fab, /positionStorageKey="pos-orders-new-order-fab-position"/);
-  // Accessible name via aria-label, preserving the exact conditional text (start-shift-first when
-  // disabled, orders.newOrder otherwise).
+  assert.match(source, /export function OrderPrimaryActionLauncher\(/);
+  assert.match(source, /data-testid="tauri-primary-action-trigger"/);
+  assert.match(source, /aria-label=\{t\("primaryActions\.trigger"\)\}/);
+  assert.match(source, /positionStorageKey="pos-orders-new-order-fab-position"/);
+  assert.match(source, /disabled=\{!canOpen\}/);
+  assert.match(source, /actions\.map\(\(action\) =>/);
+  assert.match(source, /data-primary-action=\{action\.id\}/);
+  assert.match(source, /action\.id === "new_sale"[\s\S]*?!isShiftActive/);
+  assert.match(source, /action\.id === "new_sale"\) onNewSale\(\)/);
+  assert.match(source, /action\.id === "new_appointment"\) onNewAppointment\(\)/);
   assert.match(
-    fab,
-    /aria-label=\{\s*!isShiftActive\s*\?\s*t\(\s*"orders\.startShiftFirst",[\s\S]*?\)\s*:\s*t\("orders\.newOrder"\)\s*\}/,
+    source,
+    /<OrderPrimaryActionLauncher[\s\S]*?actions=\{primaryActions\}[\s\S]*?isShiftActive=\{isShiftActive\}[\s\S]*?onNewSale=\{handleNewOrderClick\}[\s\S]*?onNewAppointment=\{handleSelectServiceFlow\}/,
   );
-  // No native title tooltip on the FAB, and onClick/disabled/movable/position-key are preserved.
-  assert.doesNotMatch(fab, /\btitle=/);
-  assert.match(fab, /onClick=\{handleNewOrderClick\}/);
-  assert.match(fab, /disabled=\{!isShiftActive\}/);
-  assert.match(fab, /\bmovable\b/);
 
   // The visible modal HEADING title props (component headings, not DOM tooltips) remain allowed.
   assert.match(source, /title=\{t\("orderFlow\.selectOrderType"\)/);

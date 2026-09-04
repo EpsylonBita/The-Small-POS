@@ -13,7 +13,9 @@ use crate::sync::SyncBlockerDetail;
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 use std::fs;
-use std::io::{Read as _, Write as _};
+#[cfg(test)]
+use std::io::Read as _;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use tracing::warn;
 
@@ -23,9 +25,6 @@ use tracing::warn;
 
 /// Maximum number of log files to retain.
 pub const MAX_LOG_FILES: usize = 10;
-
-/// Maximum size per log file in bytes (5 MB).
-pub const MAX_LOG_SIZE: u64 = 5 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy)]
 pub struct DiagnosticsExportOptions {
@@ -464,13 +463,13 @@ fn get_sync_status_summary(db: &DbState) -> Result<Value, String> {
 
 fn get_parity_queue_status(db: &DbState) -> Result<Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    serde_json::to_value(crate::sync_queue::get_status(&conn)?)
+    serde_json::to_value(crate::sync_queue::renderer_get_status(&conn)?)
         .map_err(|e| format!("serialize parity queue status: {e}"))
 }
 
 fn get_parity_actionable_items(db: &DbState, limit: i64) -> Result<Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let items = crate::sync_queue::list_actionable_items(
+    let items = crate::sync_queue::renderer_list_actionable_items(
         &conn,
         &crate::sync_queue::QueueListQuery {
             limit: Some(limit),
@@ -482,7 +481,7 @@ fn get_parity_actionable_items(db: &DbState, limit: i64) -> Result<Value, String
 
 fn get_parity_failure_families(db: &DbState) -> Result<Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let items = crate::sync_queue::list_actionable_items(
+    let items = crate::sync_queue::renderer_list_actionable_items(
         &conn,
         &crate::sync_queue::QueueListQuery {
             limit: Some(250),
@@ -901,36 +900,10 @@ pub fn export_diagnostics_with_options(
         &printers,
     )?;
 
-    // 6. Include log files
-    let log_dir = get_log_dir();
-    if export_options.include_logs && !export_options.redact_sensitive && log_dir.exists() {
-        if let Ok(entries) = fs::read_dir(&log_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("log")
-                    || path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .is_some_and(|n| n.starts_with("pos."))
-                {
-                    let fname = path
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-                    let zip_entry = format!("logs/{fname}");
-                    if zip.start_file(&zip_entry, zip_options).is_ok() {
-                        if let Ok(f) = fs::File::open(&path) {
-                            let mut buf = Vec::new();
-                            // Cap at 5MB per file to keep zip manageable
-                            let _ = f.take(MAX_LOG_SIZE).read_to_end(&mut buf);
-                            let _ = zip.write_all(&buf);
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // Raw runtime logs can contain queue identifiers, tenant context and
+    // encrypted repair envelopes emitted before field-level redaction. V1
+    // renderer diagnostics therefore fail closed: `include_logs` remains in
+    // the compatibility DTO, but no local export embeds raw log files.
 
     zip.finish().map_err(|e| e.to_string())?;
 
@@ -1544,6 +1517,123 @@ mod tests {
         let archive = zip::ZipArchive::new(file).unwrap();
         assert!(archive.len() >= 4); // at least about, health, backlog, errors
                                      // Cleanup
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn diagnostics_export_never_contains_native_repair_queue_data() {
+        let dir = std::env::temp_dir().join(format!("diag_repair_seal_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_state = crate::db::init(&dir).unwrap();
+        let conn = db_state.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status, error_message
+             ) VALUES (
+                 'repair-diagnostics-operation-secret', 'repairs',
+                 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'UPDATE',
+                 '{\"ciphertext\":\"repair-diagnostics-ciphertext-secret\"}',
+                 'repair-diagnostics-tenant-secret', datetime('now'), 4, 1000, 1,
+                 'repairs', 'manual', 7, 'failed', 'repair-diagnostics-error-secret'
+             )",
+            [],
+        )
+        .expect("seed native repair queue row");
+        drop(conn);
+
+        let export_path = export_diagnostics_with_options(
+            &db_state,
+            &dir,
+            DiagnosticsExportOptions {
+                include_logs: false,
+                redact_sensitive: false,
+            },
+        )
+        .expect("export diagnostics bundle");
+
+        let file = std::fs::File::open(&export_path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut bundle_text = String::new();
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index).unwrap();
+            if entry.is_dir() {
+                continue;
+            }
+            let mut entry_text = String::new();
+            entry.read_to_string(&mut entry_text).unwrap();
+            bundle_text.push_str(&entry_text);
+        }
+
+        for forbidden in [
+            "repair-diagnostics-operation-secret",
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "repair-diagnostics-ciphertext-secret",
+            "repair-diagnostics-tenant-secret",
+            "repair-diagnostics-error-secret",
+        ] {
+            assert!(
+                !bundle_text.contains(forbidden),
+                "diagnostics leaked native repair marker: {forbidden}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn default_diagnostics_export_never_includes_raw_pos_logs() {
+        struct RemoveFileOnDrop(std::path::PathBuf);
+        impl Drop for RemoveFileOnDrop {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+
+        let dir = std::env::temp_dir().join(format!("diag_raw_log_seal_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_state = crate::db::init(&dir).unwrap();
+        let sentinel_uuid = "9b36be15-9c2d-4ce1-a61b-c12f487cb2c1";
+        let log_dir = get_log_dir();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let log_path = log_dir.join(format!("pos.repair-seal-{}.log", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &log_path,
+            format!(
+                "WARN queue_id=repair-log-private-op table=repairs record_id={sentinel_uuid} organization_id=repair-log-private-org ciphertext=repair-log-private-ciphertext"
+            ),
+        )
+        .unwrap();
+        let _log_cleanup = RemoveFileOnDrop(log_path);
+
+        let export_path = export_diagnostics(&db_state, &dir).expect("default diagnostics export");
+        let file = std::fs::File::open(&export_path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index).unwrap();
+            let name = entry.name().to_string();
+            assert!(
+                !name.starts_with("logs/"),
+                "default diagnostics exported raw log entry {name}"
+            );
+            let mut contents = String::new();
+            let _ = entry.read_to_string(&mut contents);
+            for sentinel in [
+                sentinel_uuid,
+                "repair-log-private-op",
+                "repair-log-private-org",
+                "repair-log-private-ciphertext",
+            ] {
+                assert!(
+                    !contents.contains(sentinel),
+                    "bundle entry {name} leaked raw log sentinel {sentinel}"
+                );
+            }
+        }
+
+        drop(archive);
+        drop(db_state);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

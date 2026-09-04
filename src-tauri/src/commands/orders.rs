@@ -462,10 +462,148 @@ struct ForceOrderSyncRetryResult {
     blocked_by_invalid_transition: bool,
 }
 
+const REPAIR_SETTLEMENT_ROUTE_REQUIRED: &str = "REPAIR_SETTLEMENT_ROUTE_REQUIRED";
+
+fn ensure_renderer_order_payload_is_not_repair_settlement(payload: &Value) -> Result<(), String> {
+    let is_repair_settlement = value_str(payload, &["order_context", "orderContext"])
+        .is_some_and(|context| context.trim().eq_ignore_ascii_case("repair_settlement"));
+    if is_repair_settlement {
+        return Err(REPAIR_SETTLEMENT_ROUTE_REQUIRED.to_string());
+    }
+    if let Some(order_data) = payload.get("orderData") {
+        ensure_renderer_order_payload_is_not_repair_settlement(order_data)?;
+    }
+    Ok(())
+}
+
+fn ensure_renderer_order_is_not_repair_settlement(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+) -> Result<(), String> {
+    let is_repair_settlement = conn
+        .query_row(
+            "SELECT lower(trim(COALESCE(order_context, ''))) = 'repair_settlement'
+             FROM orders
+             WHERE id = ?1 OR supabase_id = ?1
+             LIMIT 1",
+            [order_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .optional()
+        .map_err(|error| format!("read renderer order context: {error}"))?
+        .unwrap_or(false);
+    if is_repair_settlement {
+        return Err(REPAIR_SETTLEMENT_ROUTE_REQUIRED.to_string());
+    }
+    Ok(())
+}
+
+fn resolve_renderer_deletable_order_id(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+) -> Result<Option<String>, String> {
+    let row = conn
+        .query_row(
+            "SELECT id, lower(trim(COALESCE(order_context, '')))
+             FROM orders
+             WHERE id = ?1 OR supabase_id = ?1
+             LIMIT 1",
+            [order_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|error| format!("resolve renderer deletable order: {error}"))?;
+    match row {
+        Some((_, context)) if context == "repair_settlement" => {
+            Err(REPAIR_SETTLEMENT_ROUTE_REQUIRED.to_string())
+        }
+        Some((id, _)) => Ok(Some(id)),
+        None => Ok(None),
+    }
+}
+
+fn resolve_renderer_order_id(
+    conn: &rusqlite::Connection,
+    order_id_raw: &str,
+) -> Result<String, String> {
+    let row = conn
+        .query_row(
+            "SELECT id, lower(trim(COALESCE(order_context, '')))
+             FROM orders
+             WHERE id = ?1 OR supabase_id = ?1
+             LIMIT 1",
+            [order_id_raw],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|error| format!("resolve renderer order: {error}"))?;
+    match row {
+        Some((_, context)) if context == "repair_settlement" => {
+            Err(REPAIR_SETTLEMENT_ROUTE_REQUIRED.to_string())
+        }
+        Some((id, _)) => Ok(id),
+        None => Err("Order not found".to_string()),
+    }
+}
+
+fn ensure_renderer_payload_does_not_target_existing_repair_settlement(
+    conn: &rusqlite::Connection,
+    payload: &Value,
+) -> Result<(), String> {
+    ensure_renderer_order_payload_is_not_repair_settlement(payload)?;
+
+    let mut identities = Vec::new();
+    for keys in [
+        &["id", "orderId", "order_id", "supabaseId", "supabase_id"][..],
+        &[
+            "clientRequestId",
+            "client_request_id",
+            "clientOrderId",
+            "client_order_id",
+        ][..],
+        &[
+            "orderNumber",
+            "order_number",
+            "displayOrderNumber",
+            "display_order_number",
+        ][..],
+    ] {
+        push_unique_identity(&mut identities, value_str(payload, keys));
+    }
+
+    for identity in identities {
+        let targets_repair = conn
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1
+                     FROM orders
+                     WHERE (id = ?1
+                            OR supabase_id = ?1
+                            OR client_request_id = ?1
+                            OR order_number = ?1
+                            OR display_order_number = ?1)
+                       AND lower(trim(COALESCE(order_context, ''))) = 'repair_settlement'
+                 )",
+                [identity],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|error| format!("check renderer order payload identity: {error}"))?;
+        if targets_repair {
+            return Err(REPAIR_SETTLEMENT_ROUTE_REQUIRED.to_string());
+        }
+    }
+
+    Ok(())
+}
+
 fn force_order_sync_retry_inner(
     db: &db::DbState,
     order_id: &str,
 ) -> Result<ForceOrderSyncRetryResult, String> {
+    {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        ensure_renderer_order_is_not_repair_settlement(&conn, order_id)?;
+    }
     sync::cleanup_order_update_queue_rows_for_order(db, Some(order_id))?;
 
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -475,7 +613,9 @@ fn force_order_sync_retry_inner(
              FROM parity_sync_queue
              WHERE table_name = 'orders'
                AND record_id = ?1
-               AND operation = 'UPDATE'",
+               AND operation = 'UPDATE'
+               AND COALESCE(module_type, '') <> 'repairs'
+               AND table_name NOT IN ('repairs', 'repair_attachments')",
         )
         .map_err(|e| format!("prepare parity order retry query: {e}"))?;
     let queue_rows = stmt
@@ -506,7 +646,7 @@ fn force_order_sync_retry_inner(
         if status == "failed" && error_message.contains("invalid status transition") {
             continue;
         }
-        crate::sync_queue::retry_item(&conn, item_id)?;
+        crate::sync_queue::renderer_retry_item(&conn, item_id)?;
         updated += 1;
     }
 
@@ -535,11 +675,60 @@ fn force_order_sync_retry_inner(
     })
 }
 
+fn delete_renderer_order_delete_queue_rows(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+) -> Result<usize, String> {
+    conn.execute(
+        "DELETE FROM parity_sync_queue
+         WHERE table_name = 'orders'
+           AND operation = 'DELETE'
+           AND (record_id = ?1 OR status IN ('pending', 'processing', 'failed', 'conflict'))
+           AND COALESCE(module_type, '') <> 'repairs'
+           AND table_name NOT IN ('repairs', 'repair_attachments')
+           AND NOT EXISTS (
+               SELECT 1 FROM orders
+               WHERE (orders.id = parity_sync_queue.record_id
+                      OR orders.supabase_id = parity_sync_queue.record_id)
+                 AND lower(trim(COALESCE(orders.order_context, ''))) = 'repair_settlement'
+           )",
+        rusqlite::params![order_id],
+    )
+    .map_err(|e| format!("delete renderer order queue rows: {e}"))
+}
+
+fn ensure_renderer_retry_processing_contains_no_repair_settlement_rows(
+    conn: &rusqlite::Connection,
+) -> Result<(), String> {
+    let contains_repair_settlement = conn
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM parity_sync_queue queue
+                 JOIN orders
+                   ON orders.id = queue.record_id OR orders.supabase_id = queue.record_id
+                 WHERE queue.status IN ('pending', 'processing', 'failed', 'conflict')
+                   AND queue.table_name = 'orders'
+                   AND COALESCE(queue.module_type, '') <> 'repairs'
+                   AND lower(trim(COALESCE(orders.order_context, ''))) = 'repair_settlement'
+             )",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|error| format!("check renderer retry repair settlement rows: {error}"))?;
+    if contains_repair_settlement {
+        return Err(REPAIR_SETTLEMENT_ROUTE_REQUIRED.to_string());
+    }
+    Ok(())
+}
+
 fn enqueue_order_sync_payload(
     conn: &rusqlite::Connection,
     order_id: &str,
     payload: &Value,
 ) -> Result<(), String> {
+    ensure_renderer_order_payload_is_not_repair_settlement(payload)?;
+    ensure_renderer_order_is_not_repair_settlement(conn, order_id)?;
     crate::sync_queue::enqueue_payload_item(
         conn,
         "orders",
@@ -558,15 +747,31 @@ fn resolve_order_id_with_remote(
     conn: &rusqlite::Connection,
     order_id_raw: &str,
 ) -> Result<(String, Option<String>), String> {
-    conn.query_row(
-        "SELECT id, NULLIF(TRIM(COALESCE(supabase_id, '')), '')
+    let row = conn
+        .query_row(
+            "SELECT id, NULLIF(TRIM(COALESCE(supabase_id, '')), ''),
+                lower(trim(COALESCE(order_context, '')))
          FROM orders
          WHERE id = ?1 OR supabase_id = ?1
          LIMIT 1",
-        rusqlite::params![order_id_raw],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-    )
-    .map_err(|_| "Order not found".to_string())
+            rusqlite::params![order_id_raw],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| format!("resolve renderer order with remote identity: {error}"))?;
+    match row {
+        Some((_, _, context)) if context == "repair_settlement" => {
+            Err(REPAIR_SETTLEMENT_ROUTE_REQUIRED.to_string())
+        }
+        Some((id, remote_id, _)) => Ok((id, remote_id)),
+        None => Err("Order not found".to_string()),
+    }
 }
 
 fn push_unique_identity(candidates: &mut Vec<String>, value: Option<String>) {
@@ -2219,23 +2424,7 @@ pub async fn order_get_by_id(
     .ok_or("Missing order ID")?;
     let resolved_id = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let by_local: Option<String> = conn
-            .query_row(
-                "SELECT id FROM orders WHERE id = ?1 LIMIT 1",
-                rusqlite::params![id.clone()],
-                |row| row.get(0),
-            )
-            .ok();
-        if let Some(v) = by_local {
-            v
-        } else {
-            conn.query_row(
-                "SELECT id FROM orders WHERE supabase_id = ?1 LIMIT 1",
-                rusqlite::params![id],
-                |row| row.get(0),
-            )
-            .map_err(|_| "Order not found")?
-        }
+        resolve_renderer_order_id(&conn, &id)?
     };
     sync::get_order_by_id(&db, &resolved_id)
 }
@@ -2304,11 +2493,8 @@ pub async fn order_update_status(
 
     let (actual_order_id, remote_order_id) = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        resolve_order_id_with_remote(&conn, &order_id_raw)?
-    };
-
-    {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let (actual_order_id, remote_order_id) =
+            resolve_order_id_with_remote(&conn, &order_id_raw)?;
         let previous_status =
             ensure_order_status_transition_allowed(&conn, &actual_order_id, &status)?;
         if status_requires_payment_integrity_guard(&status) {
@@ -2411,8 +2597,9 @@ pub async fn order_update_status(
                 obj.insert("cancelledAt".to_string(), serde_json::Value::Null);
             }
         }
-        let _ = enqueue_order_sync_payload(&conn, &actual_order_id, &sync_payload);
-    }
+        enqueue_order_sync_payload(&conn, &actual_order_id, &sync_payload)?;
+        (actual_order_id, remote_order_id)
+    };
 
     let mut event_payload = serde_json::json!({
         "orderId": actual_order_id,
@@ -2484,7 +2671,7 @@ fn convert_pickup_order_to_delivery_inner(
 
     let now = chrono::Utc::now().to_rfc3339();
     let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let actual_order_id = resolve_order_id(&conn, &order_id).ok_or("Order not found")?;
+    let actual_order_id = resolve_renderer_order_id(&conn, &order_id)?;
     let tx = conn
         .transaction()
         .map_err(|e| format!("begin pickup to delivery transaction: {e}"))?;
@@ -2617,11 +2804,7 @@ pub async fn order_update_customer_info(
 
     let actual_order_id = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        resolve_order_id(&conn, &order_id).ok_or("Order not found")?
-    };
-
-    {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let actual_order_id = resolve_renderer_order_id(&conn, &order_id)?;
         conn.execute(
             "UPDATE orders
              SET customer_name = ?1,
@@ -2683,8 +2866,9 @@ pub async fn order_update_customer_info(
             "deliveryAddressFingerprint": delivery_address_fingerprint,
             "delivery_address_fingerprint": delivery_address_fingerprint,
         });
-        let _ = enqueue_order_sync_payload(&conn, &actual_order_id, &sync_payload);
-    }
+        enqueue_order_sync_payload(&conn, &actual_order_id, &sync_payload)?;
+        actual_order_id
+    };
 
     if let Ok(order_json) = sync::get_order_by_id(&db, &actual_order_id) {
         let _ = app.emit("order_realtime_update", order_json);
@@ -2729,16 +2913,7 @@ pub async fn order_update_items(
 
     let actual_order_id = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        conn.query_row(
-            "SELECT id FROM orders WHERE id = ?1 OR supabase_id = ?1 LIMIT 1",
-            rusqlite::params![order_id_raw],
-            |row| row.get::<_, String>(0),
-        )
-        .map_err(|_| "Order not found")?
-    };
-
-    {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let actual_order_id = resolve_renderer_order_id(&conn, &order_id_raw)?;
         let merged_items =
             merge_existing_order_item_customizations(&conn, &actual_order_id, &items)?;
         let total = compute_order_items_total(&merged_items);
@@ -2770,8 +2945,9 @@ pub async fn order_update_items(
             "items": merged_items,
             "orderNotes": notes
         });
-        let _ = enqueue_order_sync_payload(&conn, &actual_order_id, &sync_payload);
-    }
+        enqueue_order_sync_payload(&conn, &actual_order_id, &sync_payload)?;
+        actual_order_id
+    };
 
     if let Ok(order_json) = sync::get_order_by_id(&db, &actual_order_id) {
         let _ = app.emit("order_realtime_update", order_json);
@@ -2790,7 +2966,7 @@ pub async fn orders_preview_edit_settlement(
 ) -> Result<serde_json::Value, String> {
     let payload = parse_order_edit_settlement_preview_payload(arg0)?;
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let actual_order_id = resolve_order_id(&conn, &payload.order_id).ok_or("Order not found")?;
+    let actual_order_id = resolve_renderer_order_id(&conn, &payload.order_id)?;
     let (next_total, _) = resolve_edit_settlement_totals(&conn, &actual_order_id, &payload)?;
 
     let (current_total, payment_status, order_type, is_ghost, branch_id, terminal_id, driver_id): (
@@ -2876,12 +3052,8 @@ pub async fn orders_apply_edit_settlement(
     let (payload, action) = parse_order_edit_settlement_apply_payload(arg0)?;
     let now = Utc::now().to_rfc3339();
 
-    let actual_order_id = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        resolve_order_id(&conn, &payload.order_id).ok_or("Order not found")?
-    };
-
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let actual_order_id = resolve_renderer_order_id(&conn, &payload.order_id)?;
     let merged_items =
         merge_existing_order_item_customizations(&conn, &actual_order_id, &payload.items)?;
     let (derived_total, derived_subtotal) =
@@ -3085,11 +3257,6 @@ pub async fn order_update_financials(
     let payload = parse_order_update_financials_payload(arg0)?;
     let now = Utc::now().to_rfc3339();
 
-    let actual_order_id = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        resolve_order_id(&conn, &payload.order_id).ok_or("Order not found")?
-    };
-
     let discount_amount = payload.discount_amount.unwrap_or(0.0).max(0.0);
     let discount_percentage = payload.discount_percentage.unwrap_or(0.0).max(0.0);
     let tax_amount = payload.tax_amount.unwrap_or(0.0).max(0.0);
@@ -3104,6 +3271,7 @@ pub async fn order_update_financials(
         .max(0.0);
 
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let actual_order_id = resolve_renderer_order_id(&conn, &payload.order_id)?;
     conn.execute_batch("BEGIN IMMEDIATE")
         .map_err(|e| format!("begin transaction: {e}"))?;
 
@@ -3218,39 +3386,37 @@ pub async fn order_delete(
 
     let actual_order_id = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        conn.query_row(
-            "SELECT id FROM orders WHERE id = ?1 OR supabase_id = ?1 LIMIT 1",
-            rusqlite::params![order_id_raw],
-            |row| row.get::<_, String>(0),
-        )
-        .ok()
+        let actual_order_id = resolve_renderer_deletable_order_id(&conn, &order_id_raw)?;
+        if let Some(actual_id) = actual_order_id.as_ref() {
+            conn.execute(
+                "DELETE FROM orders WHERE id = ?1",
+                rusqlite::params![actual_id],
+            )
+            .map_err(|e| format!("delete order: {e}"))?;
+            // Electron parity: order delete remains local-only.
+            // Also purge stale queued order delete operations so they cannot poison
+            // /api/pos/orders/sync (which only accepts insert/update).
+            delete_renderer_order_delete_queue_rows(&conn, actual_id)?;
+            // Compatibility cleanup for historical pre-parity order delete rows.
+            conn.execute(
+                "DELETE FROM sync_queue
+                 WHERE entity_type = 'order'
+                   AND operation = 'delete'
+                   AND (entity_id = ?1 OR status IN ('pending', 'in_progress', 'failed', 'deferred'))
+                   AND NOT EXISTS (
+                       SELECT 1 FROM orders
+                       WHERE (orders.id = sync_queue.entity_id
+                              OR orders.supabase_id = sync_queue.entity_id)
+                         AND lower(trim(COALESCE(orders.order_context, ''))) = 'repair_settlement'
+                   )",
+                rusqlite::params![actual_id],
+            )
+            .map_err(|e| format!("delete legacy renderer order queue rows: {e}"))?;
+        }
+        actual_order_id
     };
 
-    if let Some(actual_id) = actual_order_id.clone() {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "DELETE FROM orders WHERE id = ?1",
-            rusqlite::params![actual_id.clone()],
-        )
-        .map_err(|e| format!("delete order: {e}"))?;
-        // Electron parity: order delete remains local-only.
-        // Also purge stale queued order delete operations so they cannot poison
-        // /api/pos/orders/sync (which only accepts insert/update).
-        let _ = conn.execute(
-            "DELETE FROM parity_sync_queue
-             WHERE table_name = 'orders'
-               AND operation = 'DELETE'
-               AND (record_id = ?1 OR status IN ('pending', 'processing', 'failed', 'conflict'))",
-            rusqlite::params![actual_id.clone()],
-        );
-        // Compatibility cleanup for historical pre-parity order delete rows.
-        let _ = conn.execute(
-            "DELETE FROM sync_queue
-             WHERE entity_type = 'order'
-               AND operation = 'delete'
-               AND (entity_id = ?1 OR status IN ('pending', 'in_progress', 'failed', 'deferred'))",
-            rusqlite::params![actual_id],
-        );
+    if let Some(actual_id) = actual_order_id.as_ref() {
         let _ = app.emit("order_deleted", serde_json::json!({ "orderId": actual_id }));
     }
 
@@ -3271,6 +3437,8 @@ pub async fn order_save_from_remote(
         .get("orderData")
         .cloned()
         .unwrap_or_else(|| payload.clone());
+    ensure_renderer_order_payload_is_not_repair_settlement(&payload)?;
+    ensure_renderer_order_payload_is_not_repair_settlement(&order_data)?;
     let suppress_auto_print = value_bool_any(
         &payload,
         &[
@@ -3312,14 +3480,16 @@ pub async fn order_save_from_remote(
 
     let existing_local_id = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        resolve_existing_local_order_for_remote(&conn, &remote_id, &order_data)?
+        let existing_local_id =
+            resolve_existing_local_order_for_remote(&conn, &remote_id, &order_data)?;
+        if let Some(local_id) = existing_local_id.as_ref() {
+            let now = Utc::now().to_rfc3339();
+            ensure_renderer_order_is_not_repair_settlement(&conn, local_id)?;
+            attach_remote_order_identity_to_local(&conn, local_id, &remote_id, &order_data, &now)?;
+        }
+        existing_local_id
     };
     if let Some(local_id) = existing_local_id {
-        let now = Utc::now().to_rfc3339();
-        {
-            let conn = db.conn.lock().map_err(|e| e.to_string())?;
-            attach_remote_order_identity_to_local(&conn, &local_id, &remote_id, &order_data, &now)?;
-        }
         return Ok(serde_json::json!({
             "success": true,
             "orderId": local_id,
@@ -3604,6 +3774,39 @@ pub async fn order_fetch_items_from_supabase(
     .or(arg1)
     .ok_or("Missing orderId")?;
 
+    let local_order_exists = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        ensure_renderer_order_is_not_repair_settlement(&conn, &order_id)?;
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM orders WHERE id = ?1 OR supabase_id = ?1)",
+            [&order_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|error| format!("check local order before item fetch: {error}"))?
+    };
+
+    if !local_order_exists {
+        let remote_orders = match fetch_supabase_rows(
+            "orders",
+            &[
+                ("select", "id,order_context".to_string()),
+                ("id", format!("eq.{order_id}")),
+                ("limit", "1".to_string()),
+            ],
+        )
+        .await
+        {
+            Ok(remote_orders) => remote_orders,
+            Err(_) => return Ok(serde_json::json!([])),
+        };
+        if remote_orders.as_array().into_iter().flatten().any(|order| {
+            value_str(order, &["order_context", "orderContext"])
+                .is_some_and(|context| context.trim().eq_ignore_ascii_case("repair_settlement"))
+        }) {
+            return Err(REPAIR_SETTLEMENT_ROUTE_REQUIRED.to_string());
+        }
+    }
+
     if let Ok(items_json) = fetch_supabase_rows(
         "order_items",
         &[
@@ -3761,6 +3964,10 @@ pub async fn order_create(
 ) -> Result<serde_json::Value, String> {
     let payload = arg0.ok_or("Missing order payload")?;
     let normalized = payload.get("orderData").cloned().unwrap_or(payload);
+    {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        ensure_renderer_payload_does_not_target_existing_repair_settlement(&conn, &normalized)?;
+    }
     let mut resp = sync::create_order(&db, &normalized, &app)?;
     let order_id = resp
         .get("orderId")
@@ -3815,6 +4022,10 @@ pub async fn order_create_with_initial_payment(
 ) -> Result<serde_json::Value, String> {
     let payload = arg0.ok_or("Missing order payload")?;
     let mut normalized = payload.get("orderData").cloned().unwrap_or(payload);
+    {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        ensure_renderer_payload_does_not_target_existing_repair_settlement(&conn, &normalized)?;
+    }
     let initial_payment = normalized
         .get("initialPayment")
         .or_else(|| normalized.get("initial_payment"))
@@ -3841,13 +4052,24 @@ pub async fn order_create_with_initial_payment(
 
     let existing_order_id = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        conn.query_row(
-            "SELECT id FROM orders WHERE client_request_id = ?1 LIMIT 1",
-            rusqlite::params![client_request_id],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|e| format!("query existing checkout order: {e}"))?
+        let existing = conn
+            .query_row(
+                "SELECT id, lower(trim(COALESCE(order_context, '')))
+             FROM orders
+             WHERE client_request_id = ?1
+             LIMIT 1",
+                rusqlite::params![client_request_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(|e| format!("query existing checkout order: {e}"))?;
+        match existing {
+            Some((_, context)) if context == "repair_settlement" => {
+                return Err(REPAIR_SETTLEMENT_ROUTE_REQUIRED.to_string())
+            }
+            Some((id, _)) => Some(id),
+            None => None,
+        }
     };
 
     if existing_order_id.is_none() {
@@ -4205,7 +4427,7 @@ pub async fn order_assign_driver(
     let notes = arg2;
     let now = Utc::now().to_rfc3339();
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let order_id = resolve_order_id(&conn, &order_id_raw).ok_or("Order not found")?;
+    let order_id = resolve_renderer_order_id(&conn, &order_id_raw)?;
     let driver_name = resolve_driver_display_name(&conn, &driver_id);
     let current_status: String = conn
         .query_row(
@@ -4444,7 +4666,7 @@ pub async fn order_reset_to_active(
     let now = Utc::now().to_rfc3339();
     let (order_id, order_type, driver_was_unassigned, removed_driver_earning) = {
         let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let order_id = resolve_order_id(&conn, &order_id_raw).ok_or("Order not found")?;
+        let order_id = resolve_renderer_order_id(&conn, &order_id_raw)?;
         let (current_status, order_type, current_driver_id): (String, String, Option<String>) =
             conn.query_row(
                 "SELECT
@@ -4493,7 +4715,7 @@ pub async fn order_reset_to_active(
         let removed_driver_earning =
             order_ownership::remove_driver_earning_for_order(&tx, &order_id)?;
         if let Some(ref removed) = removed_driver_earning {
-            let _ = crate::sync_queue::clear_unsynced_items(
+            let _ = sync::clear_non_repair_unsynced_parity_items(
                 &tx,
                 "driver_earnings",
                 removed.id.as_str(),
@@ -4708,6 +4930,10 @@ pub async fn order_update_preparation(
     let stage = arg1.unwrap_or_else(|| "preparing".to_string());
     let progress = arg2.unwrap_or(0.0).clamp(0.0, 100.0);
     let message = arg3;
+    {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        ensure_renderer_order_is_not_repair_settlement(&conn, &order_id)?;
+    }
     let mut all = read_local_json_array(&db, "order_preparation_states")?;
     all.retain(|item| {
         item.get("orderId")
@@ -4749,7 +4975,7 @@ pub async fn order_update_type(
     let order_type = arg1.ok_or("Missing orderType")?.trim().to_ascii_lowercase();
     let now = Utc::now().to_rfc3339();
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let order_id = resolve_order_id(&conn, &order_id_raw).ok_or("Order not found")?;
+    let order_id = resolve_renderer_order_id(&conn, &order_id_raw)?;
     let mut emitted_status: Option<String> = None;
     if order_type == "pickup" {
         // Keyring-first; plaintext `local_settings` is backward-compat fallback.
@@ -4780,7 +5006,7 @@ pub async fn order_update_type(
         if let Some(removed_earning) =
             order_ownership::remove_driver_earning_for_order(&conn, &order_id)?
         {
-            let _ = crate::sync_queue::clear_unsynced_items(
+            let _ = sync::clear_non_repair_unsynced_parity_items(
                 &conn,
                 "driver_earnings",
                 removed_earning.id.as_str(),
@@ -4925,6 +5151,12 @@ pub async fn order_save_for_retry(
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let payload = arg0.ok_or("Missing order payload")?;
+    ensure_renderer_order_payload_is_not_repair_settlement(&payload)?;
+    {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let order_data = payload.get("orderData").unwrap_or(&payload);
+        ensure_renderer_payload_does_not_target_existing_repair_settlement(&conn, order_data)?;
+    }
     let mut resp = sync::create_order(&db, &payload, &app)?;
     let order_id = resp
         .get("orderId")
@@ -4940,7 +5172,7 @@ pub async fn order_save_for_retry(
 
     let queue_length = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        crate::sync_queue::get_length(&conn)?
+        crate::sync_queue::renderer_get_length(&conn)?
     };
     if let Some(obj) = resp.as_object_mut() {
         obj.insert("queueLength".to_string(), serde_json::json!(queue_length));
@@ -4964,7 +5196,7 @@ pub async fn order_get_retry_queue(
     db: tauri::State<'_, db::DbState>,
 ) -> Result<serde_json::Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let queue = crate::sync_queue::list_actionable_items(
+    let queue = crate::sync_queue::renderer_list_actionable_items(
         &conn,
         &crate::sync_queue::QueueListQuery {
             limit: Some(200),
@@ -4973,6 +5205,7 @@ pub async fn order_get_retry_queue(
     )?
     .into_iter()
     .filter(|item| item.table_name == "orders" && item.operation == "INSERT")
+    .filter(|item| ensure_renderer_order_is_not_repair_settlement(&conn, &item.record_id).is_ok())
     .filter_map(|item| serde_json::from_str::<Value>(&item.data).ok())
     .collect::<Vec<_>>();
     Ok(serde_json::json!(queue))
@@ -4981,29 +5214,26 @@ pub async fn order_get_retry_queue(
 #[tauri::command]
 pub async fn order_process_retry_queue(
     db: tauri::State<'_, db::DbState>,
+    sync_state: tauri::State<'_, std::sync::Arc<sync::SyncState>>,
+    cancellation: tauri::State<'_, tokio_util::sync::CancellationToken>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let (admin_url, api_key) = {
+    {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        // Keyring-first; plaintext `local_settings` entries are backward-compat
-        // fallback for installs that haven't yet been hydrated to the keyring.
-        let admin_url = storage::get_credential("admin_dashboard_url")
-            .or_else(|| storage::get_credential("admin_url"))
-            .or_else(|| db::get_setting(&conn, "terminal", "admin_dashboard_url"))
-            .or_else(|| db::get_setting(&conn, "terminal", "admin_url"))
-            .ok_or("Missing admin dashboard URL for retry processing")?;
-        let api_key = storage::get_credential("pos_api_key")
-            .or_else(|| storage::get_credential("api_key"))
-            .or_else(|| db::get_setting(&conn, "terminal", "pos_api_key"))
-            .or_else(|| db::get_setting(&conn, "terminal", "api_key"))
-            .ok_or("Missing POS API key for retry processing")?;
-        (admin_url, api_key)
-    };
+        ensure_renderer_retry_processing_contains_no_repair_settlement_rows(&conn)?;
+    }
 
-    let result = crate::sync_queue::process_queue(&db.conn, &admin_url, &api_key).await?;
+    let result = sync::process_renderer_parity_queue_guarded(
+        &db,
+        sync_state.inner().as_ref(),
+        &app,
+        cancellation.inner(),
+        "order_process_retry_queue",
+    )
+    .await?;
     let queue_status = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        crate::sync_queue::get_status(&conn)?
+        crate::sync_queue::renderer_get_status(&conn)?
     };
     let _ = app.emit(
         "sync_retry_scheduled",
@@ -5027,7 +5257,7 @@ pub async fn orders_force_sync_retry(
     let order_id_raw = arg0.ok_or("Missing orderId")?;
     let order_id = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        resolve_order_id(&conn, &order_id_raw).ok_or("Order not found")?
+        resolve_renderer_order_id(&conn, &order_id_raw)?
     };
     let retry_result = force_order_sync_retry_inner(&db, &order_id)?;
     Ok(serde_json::json!({
@@ -5044,6 +5274,7 @@ pub async fn orders_get_retry_info(
 ) -> Result<serde_json::Value, String> {
     let order_id_raw = arg0.ok_or("Missing orderId")?;
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    ensure_renderer_order_is_not_repair_settlement(&conn, &order_id_raw)?;
     let order_id = resolve_order_id(&conn, &order_id_raw).unwrap_or(order_id_raw.clone());
     let mut stmt = conn
         .prepare(
@@ -5052,6 +5283,8 @@ pub async fn orders_get_retry_info(
              WHERE table_name = 'orders'
                AND record_id = ?1
                AND operation = 'UPDATE'
+               AND COALESCE(module_type, '') <> 'repairs'
+               AND table_name NOT IN ('repairs', 'repair_attachments')
              ORDER BY created_at DESC
              LIMIT 5",
         )
@@ -5082,6 +5315,406 @@ pub async fn orders_get_retry_info(
 #[cfg(test)]
 mod dto_tests {
     use super::*;
+
+    #[test]
+    fn renderer_order_boundaries_reject_local_repair_settlement_without_mutation() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open settlement boundary db");
+        db::run_migrations_for_test(&conn);
+        db::set_setting(&conn, "terminal", "organization_id", "org-settlement-test")
+            .expect("set organization");
+        conn.execute(
+            "INSERT INTO orders (
+                 id, items, total_amount, total_amount_cents, status, sync_status,
+                 order_context, created_at, updated_at
+             ) VALUES (
+                 'repair-settlement-local', '[]', 25.0, 2500, 'pending', 'pending',
+                 '  RePaIr_SeTtLeMeNt  ', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed repair settlement order");
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status, error_message
+             ) VALUES (
+                 'generic-settlement-retry', 'orders', 'repair-settlement-local', 'UPDATE',
+                 '{\"status\":\"pending\"}', 'org-settlement-test', datetime('now'),
+                 4, 1000, 1, 'orders', 'server-wins', 1, 'failed', 'retry me'
+             )",
+            [],
+        )
+        .expect("seed generic settlement retry row");
+        let before: (String, i64, String, Option<String>) = conn
+            .query_row(
+                "SELECT status, attempts, data, error_message
+                 FROM parity_sync_queue WHERE id = 'generic-settlement-retry'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("read retry row before");
+        let db = db::DbState {
+            conn: std::sync::Mutex::new(conn),
+            db_path: std::path::PathBuf::from(":memory:"),
+        };
+
+        assert_eq!(
+            force_order_sync_retry_inner(&db, "repair-settlement-local").unwrap_err(),
+            REPAIR_SETTLEMENT_ROUTE_REQUIRED
+        );
+        let conn = db.conn.lock().expect("lock settlement db");
+        assert_eq!(
+            resolve_renderer_deletable_order_id(&conn, "repair-settlement-local").unwrap_err(),
+            REPAIR_SETTLEMENT_ROUTE_REQUIRED
+        );
+        assert_eq!(
+            enqueue_order_sync_payload(
+                &conn,
+                "repair-settlement-local",
+                &serde_json::json!({"status": "pending"}),
+            )
+            .unwrap_err(),
+            REPAIR_SETTLEMENT_ROUTE_REQUIRED
+        );
+        let after: (String, i64, String, Option<String>) = conn
+            .query_row(
+                "SELECT status, attempts, data, error_message
+                 FROM parity_sync_queue WHERE id = 'generic-settlement-retry'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("read retry row after");
+        assert_eq!(after, before);
+        let order_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM orders WHERE id = 'repair-settlement-local'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count settlement order");
+        assert_eq!(order_count, 1);
+    }
+
+    #[test]
+    fn renderer_order_payload_boundary_rejects_both_context_spellings() {
+        for payload in [
+            serde_json::json!({"order_context": "repair_settlement"}),
+            serde_json::json!({"orderContext": "  RePaIr_SeTtLeMeNt  "}),
+            serde_json::json!({
+                "orderData": {"order_context": " REPAIR_SETTLEMENT "}
+            }),
+        ] {
+            assert_eq!(
+                ensure_renderer_order_payload_is_not_repair_settlement(&payload).unwrap_err(),
+                REPAIR_SETTLEMENT_ROUTE_REQUIRED
+            );
+        }
+        ensure_renderer_order_payload_is_not_repair_settlement(&serde_json::json!({
+            "order_context": "ordinary"
+        }))
+        .expect("ordinary order payload remains allowed");
+    }
+
+    #[test]
+    fn renderer_create_identity_and_retry_processing_fail_closed_for_repair_settlements() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open renderer boundary db");
+        db::run_migrations_for_test(&conn);
+        db::set_setting(
+            &conn,
+            "terminal",
+            "organization_id",
+            "org-renderer-boundary",
+        )
+        .expect("set organization");
+        conn.execute(
+            "INSERT INTO orders (
+                 id, client_request_id, order_number, items, total_amount, total_amount_cents,
+                 status, sync_status, order_context, created_at, updated_at
+             ) VALUES (
+                 'repair-identity-target', 'repair-client-request', 'R-ATH-26-000001',
+                 '[]', 40.0, 4000, 'ready', 'synced', ' repair_SETTLEMENT ',
+                 datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status
+             ) VALUES (
+                 'generic-row-targeting-settlement', 'orders', 'repair-identity-target', 'INSERT',
+                 '{\"clientRequestId\":\"repair-client-request\"}', 'org-renderer-boundary',
+                 datetime('now'), 3, 1000, 1, 'orders', 'server-wins', 1, 'failed'
+             )",
+            [],
+        )
+        .unwrap();
+
+        for payload in [
+            serde_json::json!({"id": "repair-identity-target"}),
+            serde_json::json!({"clientRequestId": "repair-client-request"}),
+            serde_json::json!({"orderNumber": "R-ATH-26-000001"}),
+        ] {
+            assert_eq!(
+                ensure_renderer_payload_does_not_target_existing_repair_settlement(&conn, &payload)
+                    .unwrap_err(),
+                REPAIR_SETTLEMENT_ROUTE_REQUIRED
+            );
+        }
+        assert_eq!(
+            ensure_renderer_retry_processing_contains_no_repair_settlement_rows(&conn).unwrap_err(),
+            REPAIR_SETTLEMENT_ROUTE_REQUIRED
+        );
+
+        let queue_state: (String, i64, String) = conn
+            .query_row(
+                "SELECT status, attempts, data
+                 FROM parity_sync_queue
+                 WHERE id = 'generic-row-targeting-settlement'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(queue_state.0, "failed");
+        assert_eq!(queue_state.1, 3);
+        assert!(queue_state.2.contains("repair-client-request"));
+
+        conn.execute(
+            "UPDATE orders SET order_context = NULL WHERE id = 'repair-identity-target'",
+            [],
+        )
+        .unwrap();
+        ensure_renderer_payload_does_not_target_existing_repair_settlement(
+            &conn,
+            &serde_json::json!({"clientRequestId": "repair-client-request"}),
+        )
+        .expect("ordinary order identity stays usable");
+        ensure_renderer_retry_processing_contains_no_repair_settlement_rows(&conn)
+            .expect("ordinary retry row stays processable");
+    }
+
+    #[test]
+    fn renderer_mutation_and_fiscal_commands_keep_guard_before_side_effects() {
+        let source = include_str!("orders.rs");
+        let cases = [
+            (
+                "order_update_status",
+                "resolve_order_id_with_remote",
+                "reverse_order_drawer_attribution",
+            ),
+            (
+                "order_update_customer_info",
+                "resolve_renderer_order_id",
+                "UPDATE orders",
+            ),
+            (
+                "order_convert_pickup_to_delivery",
+                "convert_pickup_order_to_delivery_inner",
+                "order_realtime_update",
+            ),
+            (
+                "order_update_items",
+                "resolve_renderer_order_id",
+                "UPDATE orders",
+            ),
+            (
+                "orders_preview_edit_settlement",
+                "resolve_renderer_order_id",
+                "list_completed_payments_for_edit",
+            ),
+            (
+                "orders_apply_edit_settlement",
+                "resolve_renderer_order_id",
+                "BEGIN IMMEDIATE",
+            ),
+            (
+                "order_update_financials",
+                "resolve_renderer_order_id",
+                "BEGIN IMMEDIATE",
+            ),
+            (
+                "order_delete",
+                "resolve_renderer_deletable_order_id",
+                "DELETE FROM orders",
+            ),
+            (
+                "order_approve",
+                "resolve_order_id_with_remote",
+                "UPDATE orders",
+            ),
+            (
+                "order_decline",
+                "resolve_order_id_with_remote",
+                "reverse_order_drawer_attribution",
+            ),
+            (
+                "order_assign_driver",
+                "resolve_renderer_order_id",
+                "assign_order_to_driver_shift",
+            ),
+            (
+                "order_reset_to_active",
+                "resolve_renderer_order_id",
+                "remove_driver_earning_for_order",
+            ),
+            (
+                "order_notify_platform_ready",
+                "resolve_order_id_with_remote",
+                "UPDATE orders",
+            ),
+            (
+                "order_update_type",
+                "resolve_renderer_order_id",
+                "assign_order_to_cashier_pickup",
+            ),
+            (
+                "order_create",
+                "ensure_renderer_payload_does_not_target_existing_repair_settlement",
+                "sync::create_order",
+            ),
+            (
+                "order_create_with_initial_payment",
+                "ensure_renderer_payload_does_not_target_existing_repair_settlement",
+                "fiscal_checkout_for_order_payload",
+            ),
+            (
+                "order_save_for_retry",
+                "ensure_renderer_payload_does_not_target_existing_repair_settlement",
+                "sync::create_order",
+            ),
+        ];
+
+        for (command, guard, side_effect) in cases {
+            let start = source
+                .find(&format!("pub async fn {command}"))
+                .unwrap_or_else(|| panic!("missing command source for {command}"));
+            let remainder = &source[start..];
+            let end = remainder
+                .find("\n#[tauri::command]")
+                .unwrap_or(remainder.len());
+            let body = &remainder[..end];
+            let guard_index = body
+                .find(guard)
+                .unwrap_or_else(|| panic!("missing repair guard {guard} in {command}"));
+            let side_effect_index = body
+                .find(side_effect)
+                .unwrap_or_else(|| panic!("missing side-effect marker {side_effect} in {command}"));
+            assert!(
+                guard_index < side_effect_index,
+                "repair guard must precede {side_effect} in {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn force_order_retry_ignores_repair_shaped_order_rows() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open retry test database");
+        db::run_migrations_for_test(&conn);
+        db::set_setting(&conn, "terminal", "organization_id", "org-orders-test")
+            .expect("set organization");
+        conn.execute(
+            "INSERT INTO orders (
+                 id, items, total_amount, total_amount_cents, status, sync_status,
+                 created_at, updated_at
+             ) VALUES (
+                 'order-generic-retry', '[]', 5.0, 500, 'pending', 'pending',
+                 datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed local order");
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, attempts, retry_delay_ms, priority, module_type,
+                 conflict_strategy, version, status, error_message
+             ) VALUES (
+                 'repair-order-retry-op', 'orders', 'order-generic-retry', 'UPDATE',
+                 '{\"ciphertext\":\"repair-private-ciphertext\"}', 'repair-private-org',
+                 datetime('now'), 6, 1000, 1, 'repairs', 'manual', 4,
+                 'failed', 'Invalid status transition: repair-private-error'
+             )",
+            [],
+        )
+        .expect("seed repair-shaped order row");
+        let db = db::DbState {
+            conn: std::sync::Mutex::new(conn),
+            db_path: std::path::PathBuf::from(":memory:"),
+        };
+
+        let result =
+            force_order_sync_retry_inner(&db, "order-generic-retry").expect("retry generic order");
+        assert_eq!(result.updated, 0);
+        assert!(result.inserted_fallback);
+        assert!(!result.blocked_by_invalid_transition);
+
+        let conn = db.conn.lock().unwrap();
+        let repair_state: (String, i64, Option<String>, String) = conn
+            .query_row(
+                "SELECT status, attempts, error_message, data
+                 FROM parity_sync_queue WHERE id = 'repair-order-retry-op'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(repair_state.0, "failed");
+        assert_eq!(repair_state.1, 6);
+        assert_eq!(
+            repair_state.2.as_deref(),
+            Some("REPAIR_RESERVED_OWNER_QUARANTINED")
+        );
+        assert!(repair_state.3.contains("repair-private-ciphertext"));
+        let generic_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue
+                 WHERE record_id = 'order-generic-retry'
+                   AND module_type = 'orders'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(generic_rows, 1);
+    }
+
+    #[test]
+    fn renderer_order_delete_cleanup_preserves_repair_shaped_rows() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open delete test database");
+        db::run_migrations_for_test(&conn);
+        for (id, module_type, record_id) in [
+            ("generic-order-delete", "orders", "order-delete-target"),
+            ("generic-other-delete", "orders", "other-order"),
+            ("repair-order-delete", "repairs", "order-delete-target"),
+        ] {
+            conn.execute(
+                "INSERT INTO parity_sync_queue (
+                     id, table_name, record_id, operation, data, organization_id,
+                     created_at, attempts, retry_delay_ms, priority, module_type,
+                     conflict_strategy, version, status, error_message
+                 ) VALUES (
+                     ?1, 'orders', ?2, 'DELETE', '{}', 'org-delete', datetime('now'),
+                     2, 1000, 1, ?3, 'manual', 1, 'conflict', 'keep-error'
+                 )",
+                rusqlite::params![id, record_id, module_type],
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            delete_renderer_order_delete_queue_rows(&conn, "order-delete-target").unwrap(),
+            2
+        );
+        let remaining: Vec<String> = conn
+            .prepare("SELECT id FROM parity_sync_queue ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(remaining, vec!["repair-order-delete".to_string()]);
+    }
 
     #[test]
     fn reset_order_row_uses_the_deployed_schema_without_completed_at() {

@@ -24,7 +24,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -56,6 +56,8 @@ pub enum LocalOutcome {
     Server(DispatchOutcome),
     /// Active-cache said inactive — no payload built, no request sent.
     SkippedInactiveCached,
+    /// Protected repair settlements use the trusted server repair worker.
+    SkippedProtectedRepair,
     /// Tried POST but network or 5xx failed; row enqueued for retry.
     EnqueuedForRetry { idempotency_key: String },
     /// Could not build payload, could not enqueue, etc. — logged, dropped.
@@ -75,6 +77,19 @@ pub async fn submit_for_order(
     terminal_id: String,
     branch_id: String,
 ) -> LocalOutcome {
+    {
+        let db = match conn.lock() {
+            Ok(guard) => guard,
+            Err(error) => {
+                warn!("[fiscal.dispatcher] DB mutex poisoned: {error}");
+                return LocalOutcome::DroppedWithLog;
+            }
+        };
+        if is_protected_repair_order(&db, &order_id).unwrap_or(false) {
+            info!("[fiscal.dispatcher] protected repair settlement {order_id} uses server repair fiscal worker");
+            return LocalOutcome::SkippedProtectedRepair;
+        }
+    }
     // Step 1: short-circuit on cached inactive verdict (Req 4.10)
     if let CacheVerdict::Inactive = active_cache::verdict(&branch_id) {
         info!(
@@ -200,6 +215,10 @@ pub(crate) async fn try_post(
 /// enqueueing — the offline outbox would otherwise fill with payloads
 /// that always resolve to `status='skipped'` once replayed.
 pub fn enqueue_for_order(conn: &Connection, order_id: &str) -> Result<(), String> {
+    if is_protected_repair_order(conn, order_id)? {
+        info!("[fiscal.dispatcher] skipping generic fiscal queue for protected repair settlement {order_id}");
+        return Ok(());
+    }
     let branch_id: String = conn
         .query_row(
             "SELECT COALESCE(branch_id, '') FROM orders WHERE id = ?1",
@@ -225,6 +244,32 @@ pub fn enqueue_for_order(conn: &Connection, order_id: &str) -> Result<(), String
     let payload = super::payload_builder::build_fiscal_receipt_input(conn, order_id, &branch_id)?;
 
     enqueue_fiscal_row(conn, order_id, &branch_id, &payload)
+}
+
+fn is_protected_repair_order(conn: &Connection, order_id: &str) -> Result<bool, String> {
+    let has_context = conn
+        .prepare("PRAGMA table_info(orders)")
+        .and_then(|mut statement| {
+            let names = statement.query_map([], |row| row.get::<_, String>(1))?;
+            for name in names {
+                if name? == "order_context" {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        })
+        .map_err(|error| format!("inspect local orders schema: {error}"))?;
+    if !has_context {
+        return Ok(false);
+    }
+    conn.query_row(
+        "SELECT COALESCE(order_context, '') = 'repair_settlement' FROM orders WHERE id = ?1",
+        [order_id],
+        |row| row.get::<_, bool>(0),
+    )
+    .optional()
+    .map(|value| value.unwrap_or(false))
+    .map_err(|error| format!("read order_context for {order_id}: {error}"))
 }
 
 /// Insert a `module_type='fiscal'` row into `parity_sync_queue` for replay

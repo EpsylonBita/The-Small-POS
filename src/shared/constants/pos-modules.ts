@@ -62,6 +62,7 @@ export const POS_IMPLEMENTED_MODULES: Set<string> = new Set([
 
   // Salon vertical
   'appointments',
+  'repairs',
   'staff_schedule',
   'service_catalog',
 

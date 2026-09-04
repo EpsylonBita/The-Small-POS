@@ -52,9 +52,26 @@ test('force sync drains the parity queue so Z-report commit reaches admin', () =
   const sync = source(syncPath);
 
   assert.match(sync, /async fn force_parity_sync_once/);
-  assert.match(sync, /sync_queue::process_queue\(&db\.conn, admin_url\.as_str\(\), api_key\.as_str\(\)\)/);
-  assert.match(sync, /let parity_synced = force_parity_sync_once\(db, app\)\.await\?/);
-  assert.match(sync, /let total_synced = synced \+ parity_synced/);
+  assert.match(
+    sync,
+    /let outcome = complete_native_background_sync_tick\([\s\S]*run_sync_cycle_with_auth_guard\(db, sync_state, app, "force_sync"\)\.await,[\s\S]*force_parity_sync_once\(/,
+    'force sync must drain parity only through the guarded native background-tick boundary',
+  );
+  assert.match(
+    sync,
+    /process_internal_parity_queue_once\(db, admin_url\.as_str\(\), api_key\.as_str\(\), \|\|/,
+    'the force-sync parity path must reach the internal parity queue processor',
+  );
+  assert.match(
+    sync,
+    /sync_queue::process_queue_with_claim_gate\(&db\.conn, admin_url, api_key, acquire_claim_gate\)/,
+    'every parity claim must remain behind the live terminal-binding gate',
+  );
+  assert.match(
+    sync,
+    /NativeSyncTickOutcome::Success\(legacy_synced\.saturating_add\(summary\.processed\)\)/,
+    'the force-sync result must include both legacy and parity progress',
+  );
 });
 
 test('sync closeout translations exist in every POS locale', () => {

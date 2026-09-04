@@ -6,7 +6,8 @@
 
 use keyring::Entry;
 use serde_json::Value;
-use tracing::{info, warn};
+use tracing::warn;
+use zeroize::Zeroizing;
 
 // Keyring service name. Production reads/writes `the-small-pos`. Tests
 // that seed/clean credentials via `storage::set_credential` /
@@ -32,6 +33,11 @@ const KEY_BUSINESS_TYPE: &str = "business_type";
 const KEY_SUPABASE_URL: &str = "supabase_url";
 const KEY_SUPABASE_ANON_KEY: &str = "supabase_anon_key";
 const KEY_GHOST_MODE_FEATURE_ENABLED: &str = "ghost_mode_feature_enabled";
+pub const KEY_REPAIR_QUEUE_AES_KEY_V1: &str = "repair_queue_aes_key_v1";
+pub const KEY_REPAIR_SCOPE_V1: &str = "repair_scope_v1";
+pub const KEY_REPAIR_ENTITLEMENT_V1: &str = "repair_entitlement_v1";
+pub const KEY_REPAIR_ACTOR_ATTESTATION_V1: &str = "repair_actor_attestation_v1";
+pub const KEY_REPAIR_SCOPE_TRANSITION_JOURNAL_V1: &str = "repair_scope_transition_journal_v1";
 pub const KEY_CALLERID_SIP_PASSWORD: &str = "callerid_sip_password";
 pub const KEY_CALLERID_ACTIVATION_CACHE_MANIFEST: &str = "callerid_activation_cache_manifest_v1";
 pub const CALLERID_ACTIVATION_CACHE_BANK_A_KEYS: [&str; 8] = [
@@ -63,6 +69,14 @@ const KEY_POS_SESSION: &str = "pos_session";
 
 /// All credential keys managed by this module.
 const ALL_KEYS: &[&str] = &[
+    // Reset helpers must remove the durable repair barrier before generic
+    // terminal identity keys; otherwise the identity-write interceptor would
+    // correctly reject those deletes while reset_pending is latched.
+    KEY_REPAIR_SCOPE_V1,
+    KEY_REPAIR_QUEUE_AES_KEY_V1,
+    KEY_REPAIR_ENTITLEMENT_V1,
+    KEY_REPAIR_ACTOR_ATTESTATION_V1,
+    KEY_REPAIR_SCOPE_TRANSITION_JOURNAL_V1,
     KEY_ADMIN_URL,
     KEY_TERMINAL_ID,
     KEY_API_KEY,
@@ -93,6 +107,22 @@ const ALL_KEYS: &[&str] = &[
     KEY_POS_SESSION,
 ];
 
+fn is_native_repair_private_key(key: &str) -> bool {
+    matches!(
+        key.trim().to_ascii_lowercase().as_str(),
+        KEY_REPAIR_QUEUE_AES_KEY_V1
+            | KEY_REPAIR_SCOPE_V1
+            | KEY_REPAIR_ENTITLEMENT_V1
+            | KEY_REPAIR_ACTOR_ATTESTATION_V1
+            | KEY_REPAIR_SCOPE_TRANSITION_JOURNAL_V1
+    )
+}
+
+fn is_native_repair_actor_key(key: &str) -> bool {
+    key.trim()
+        .eq_ignore_ascii_case(KEY_REPAIR_ACTOR_ATTESTATION_V1)
+}
+
 // ---------------------------------------------------------------------------
 // Low-level helpers
 // ---------------------------------------------------------------------------
@@ -106,25 +136,30 @@ const ALL_KEYS: &[&str] = &[
 /// a fake see the existing real-OS-keyring behaviour (namespaced to
 /// `the-small-pos-test`).
 pub fn get_credential(key: &str) -> Option<String> {
-    #[cfg(test)]
-    if crate::tests::fake_keyring::is_installed() {
-        return crate::tests::fake_keyring::get(key);
-    }
-
-    let entry = match Entry::new(SERVICE_NAME, key) {
-        Ok(e) => e,
-        Err(e) => {
-            warn!(key, error = %e, "keyring: failed to create entry");
-            return None;
-        }
-    };
-    match entry.get_password() {
-        Ok(pw) => Some(pw),
-        Err(keyring::Error::NoEntry) => None,
-        Err(e) => {
-            warn!(key, error = %e, "keyring: failed to read credential");
+    match get_credential_strict(key) {
+        Ok(value) => value.map(|value| value.to_string()),
+        Err(error) => {
+            warn!(key, error = %error, "keyring: failed to read credential");
             None
         }
+    }
+}
+
+/// Strict keyring read used by native repair security state. Only an actual
+/// `NoEntry` becomes `Ok(None)`; backend/entry errors remain distinguishable
+/// so callers never rotate a key merely because the credential store failed.
+pub(crate) fn get_credential_strict(key: &str) -> Result<Option<Zeroizing<String>>, String> {
+    #[cfg(test)]
+    if crate::tests::fake_keyring::is_installed() {
+        return crate::tests::fake_keyring::get_strict(key).map(|value| value.map(Zeroizing::new));
+    }
+
+    let entry =
+        Entry::new(SERVICE_NAME, key).map_err(|_| "KEYRING_ENTRY_UNAVAILABLE".to_string())?;
+    match entry.get_password() {
+        Ok(password) => Ok(Some(Zeroizing::new(password))),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(_) => Err("KEYRING_READ_FAILED".to_string()),
     }
 }
 
@@ -133,9 +168,90 @@ pub fn get_credential(key: &str) -> Option<String> {
 /// Honours an installed `tests::fake_keyring` under `#[cfg(test)]`
 /// (see [`get_credential`] for the rationale).
 pub fn set_credential(key: &str, value: &str) -> Result<(), String> {
+    if is_terminal_binding_key(key) {
+        return Err("TERMINAL_CREDENTIAL_OWNER_REQUIRED".to_string());
+    }
+    if key
+        .trim()
+        .eq_ignore_ascii_case(KEY_REPAIR_SCOPE_TRANSITION_JOURNAL_V1)
+    {
+        return Err("REPAIR_TRANSITION_JOURNAL_NATIVE_ONLY".to_string());
+    }
+    if is_native_repair_actor_key(key) {
+        return Err("REPAIR_ACTOR_ATTESTATION_NATIVE_ONLY".to_string());
+    }
+    crate::repairs::coordinated_identity_credential_write(key, Some(value), || {
+        set_credential_uncoordinated(key, value)
+    })
+}
+
+fn is_terminal_binding_key(key: &str) -> bool {
+    matches!(
+        key.trim().to_ascii_lowercase().as_str(),
+        KEY_API_KEY | KEY_TERMINAL_ID | KEY_ADMIN_URL | KEY_ORG_ID | KEY_BRANCH_ID
+    )
+}
+
+pub(crate) fn set_terminal_credential(
+    _owner: &crate::commands::settings::TerminalCredentialOwner,
+    key: &str,
+    value: &str,
+) -> Result<(), String> {
+    if !is_terminal_binding_key(key) {
+        return Err("TERMINAL_CREDENTIAL_KEY_REQUIRED".to_string());
+    }
+    crate::repairs::coordinated_identity_credential_write(key, Some(value), || {
+        set_credential_uncoordinated(key, value)
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn seed_terminal_credential_for_test(key: &str, value: &str) -> Result<(), String> {
+    if !is_terminal_binding_key(key) {
+        return Err("TERMINAL_CREDENTIAL_KEY_REQUIRED".to_string());
+    }
+    set_credential_uncoordinated(key, value)
+}
+
+/// Persist the server-issued repair actor from the strict native bootstrap
+/// path. Keeping this seam crate-private prevents renderer-facing generic
+/// settings commands from minting or replacing offline repair authority.
+pub(crate) fn set_repair_actor_attestation(value: &str) -> Result<(), String> {
+    set_credential_uncoordinated(KEY_REPAIR_ACTOR_ATTESTATION_V1, value)
+}
+
+pub(crate) fn read_repair_transition_journal() -> Result<Option<Zeroizing<String>>, String> {
+    get_credential_strict(KEY_REPAIR_SCOPE_TRANSITION_JOURNAL_V1)
+        .map_err(|_| "REPAIR_TRANSITION_JOURNAL_UNAVAILABLE".to_string())
+}
+
+pub(crate) fn write_repair_transition_journal(value: &str) -> Result<(), String> {
+    set_credential_uncoordinated(KEY_REPAIR_SCOPE_TRANSITION_JOURNAL_V1, value)
+        .map_err(|_| "REPAIR_TRANSITION_JOURNAL_WRITE_FAILED".to_string())?;
+    let stored = get_credential_strict(KEY_REPAIR_SCOPE_TRANSITION_JOURNAL_V1)
+        .map_err(|_| "REPAIR_TRANSITION_JOURNAL_WRITE_FAILED".to_string())?;
+    if stored.as_ref().map(|stored| stored.as_str()) != Some(value) {
+        return Err("REPAIR_TRANSITION_JOURNAL_WRITE_FAILED".to_string());
+    }
+    Ok(())
+}
+
+pub(crate) fn delete_repair_transition_journal() -> Result<(), String> {
+    delete_credential_uncoordinated(KEY_REPAIR_SCOPE_TRANSITION_JOURNAL_V1)
+        .map_err(|_| "REPAIR_TRANSITION_JOURNAL_DELETE_FAILED".to_string())?;
+    if get_credential_strict(KEY_REPAIR_SCOPE_TRANSITION_JOURNAL_V1)
+        .map_err(|_| "REPAIR_TRANSITION_JOURNAL_DELETE_FAILED".to_string())?
+        .is_some()
+    {
+        return Err("REPAIR_TRANSITION_JOURNAL_DELETE_FAILED".to_string());
+    }
+    Ok(())
+}
+
+fn set_credential_uncoordinated(key: &str, value: &str) -> Result<(), String> {
     #[cfg(test)]
     if crate::tests::fake_keyring::is_installed() {
-        crate::tests::fake_keyring::set(key, value);
+        crate::tests::fake_keyring::set_checked(key, value)?;
         return Ok(());
     }
 
@@ -149,9 +265,45 @@ pub fn set_credential(key: &str, value: &str) -> Result<(), String> {
 ///
 /// Honours an installed `tests::fake_keyring` under `#[cfg(test)]`.
 pub fn delete_credential(key: &str) -> Result<(), String> {
+    if is_terminal_binding_key(key) {
+        return Err("TERMINAL_CREDENTIAL_OWNER_REQUIRED".to_string());
+    }
+    if key
+        .trim()
+        .eq_ignore_ascii_case(KEY_REPAIR_SCOPE_TRANSITION_JOURNAL_V1)
+    {
+        return Err("REPAIR_TRANSITION_JOURNAL_NATIVE_ONLY".to_string());
+    }
+    if is_native_repair_actor_key(key) {
+        return Err("REPAIR_ACTOR_ATTESTATION_NATIVE_ONLY".to_string());
+    }
+    crate::repairs::coordinated_identity_credential_write(key, None, || {
+        delete_credential_uncoordinated(key)
+    })
+}
+
+pub(crate) fn delete_terminal_credential(
+    _owner: &crate::commands::settings::TerminalCredentialOwner,
+    key: &str,
+) -> Result<(), String> {
+    if !is_terminal_binding_key(key) {
+        return Err("TERMINAL_CREDENTIAL_KEY_REQUIRED".to_string());
+    }
+    crate::repairs::coordinated_identity_credential_write(key, None, || {
+        delete_credential_uncoordinated(key)
+    })
+}
+
+/// Remove the managed repair actor only from native authentication/lifecycle
+/// code. Factory/emergency reset still owns the key through `managed_keys()`.
+pub(crate) fn delete_repair_actor_attestation() -> Result<(), String> {
+    delete_credential_uncoordinated(KEY_REPAIR_ACTOR_ATTESTATION_V1)
+}
+
+fn delete_credential_uncoordinated(key: &str) -> Result<(), String> {
     #[cfg(test)]
     if crate::tests::fake_keyring::is_installed() {
-        crate::tests::fake_keyring::delete(key);
+        crate::tests::fake_keyring::delete_checked(key)?;
         return Ok(());
     }
 
@@ -161,6 +313,140 @@ pub fn delete_credential(key: &str) -> Result<(), String> {
         Err(keyring::Error::NoEntry) => Ok(()),
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// Delete one exact reset-manifest credential after the reset helper has
+/// passed its native authorization, immutable ownership and claim-once gates.
+pub(crate) fn delete_managed_credential_for_reset(
+    owner: &crate::reset::ResetCredentialOwner,
+    key: &str,
+) -> Result<(), String> {
+    if !owner.authorizes(key) || !ALL_KEYS.contains(&key) {
+        return Err("RESET_CREDENTIAL_KEY_NOT_AUTHORIZED".to_string());
+    }
+    delete_credential_uncoordinated(key)
+        .map_err(|_| "RESET_CREDENTIAL_DELETE_FAILED".to_string())?;
+    match get_credential_strict(key) {
+        Ok(None) => Ok(()),
+        Ok(Some(_)) | Err(_) => Err("RESET_CREDENTIAL_DELETE_VERIFY_FAILED".to_string()),
+    }
+}
+
+/// Clear the complete native repair identity while the caller already owns
+/// `RepairTransitionGuard`. This deliberately bypasses the public identity
+/// coordinator, whose non-reentrant transition mutex is already held.
+pub(crate) fn delete_repair_identity_uncoordinated() -> Result<(), String> {
+    let keys = [KEY_ORG_ID, KEY_BRANCH_ID, KEY_TERMINAL_ID];
+    let mut failed = false;
+    for key in keys {
+        failed |= delete_credential_uncoordinated(key).is_err();
+    }
+    for key in keys {
+        match get_credential_strict(key) {
+            Ok(None) => {}
+            Ok(Some(_)) | Err(_) => failed = true,
+        }
+    }
+    if failed {
+        Err("REPAIR_IDENTITY_CLEAR_FAILED".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+/// Replace the three native repair scope identities while the repair lifecycle
+/// coordinator already owns its non-reentrant transition mutex. Calling the
+/// public `set_credential` functions here would attempt to acquire that mutex a
+/// second time and deadlock. This seam is intentionally narrow and verifies a
+/// complete read-back before returning.
+#[derive(Clone, Debug)]
+pub(crate) struct RepairIdentityCredentialSnapshot {
+    values: [Option<String>; 3],
+}
+
+fn restore_identity_values_uncoordinated(values: &[Option<String>; 3]) -> Result<(), String> {
+    let keys = [KEY_ORG_ID, KEY_BRANCH_ID, KEY_TERMINAL_ID];
+    let mut write_failed = false;
+
+    // Attempt every field even after one failure so compensation has the best
+    // possible chance of restoring a coherent identity rather than stopping
+    // with a deliberately mixed tenant scope.
+    for (key, value) in keys.iter().zip(values.iter()) {
+        let result = match value.as_deref() {
+            Some(value) => set_credential_uncoordinated(key, value),
+            None => delete_credential_uncoordinated(key),
+        };
+        write_failed |= result.is_err();
+    }
+
+    let readback = keys
+        .iter()
+        .map(|key| get_credential_strict(key).map(|value| value.map(|value| value.to_string())))
+        .collect::<Result<Vec<_>, _>>()?;
+    if write_failed || readback.as_slice() != values.as_slice() {
+        return Err("REPAIR_IDENTITY_COMPENSATION_FAILED".to_string());
+    }
+    Ok(())
+}
+
+pub(crate) fn restore_repair_identity_uncoordinated(
+    snapshot: &RepairIdentityCredentialSnapshot,
+) -> Result<(), String> {
+    restore_identity_values_uncoordinated(&snapshot.values)
+}
+
+pub(crate) fn replace_repair_identity_uncoordinated(
+    organization_id: &str,
+    branch_id: &str,
+    terminal_id: &str,
+) -> Result<RepairIdentityCredentialSnapshot, String> {
+    let replacements = [
+        (KEY_ORG_ID, organization_id),
+        (KEY_BRANCH_ID, branch_id),
+        (KEY_TERMINAL_ID, terminal_id),
+    ];
+    let previous = replacements
+        .iter()
+        .map(|(key, _)| {
+            get_credential_strict(key).map(|value| value.map(|value| value.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let snapshot = RepairIdentityCredentialSnapshot {
+        values: previous
+            .try_into()
+            .map_err(|_| "REPAIR_IDENTITY_READBACK_FAILED".to_string())?,
+    };
+
+    for (key, value) in replacements.iter() {
+        if set_credential_uncoordinated(key, value).is_err() {
+            if restore_identity_values_uncoordinated(&snapshot.values).is_err() {
+                crate::repairs::latch_startup_maintenance_failure();
+                return Err("REPAIR_IDENTITY_COMPENSATION_FAILED".to_string());
+            }
+            return Err("REPAIR_IDENTITY_WRITE_FAILED".to_string());
+        }
+    }
+    for (key, expected) in replacements.iter().copied() {
+        let actual = match get_credential_strict(key) {
+            Ok(value) => value,
+            Err(_) => {
+                if restore_identity_values_uncoordinated(&snapshot.values).is_err() {
+                    crate::repairs::latch_startup_maintenance_failure();
+                    return Err("REPAIR_IDENTITY_COMPENSATION_FAILED".to_string());
+                }
+                return Err("REPAIR_IDENTITY_READBACK_FAILED".to_string());
+            }
+        };
+        if actual.as_ref().map(|value| value.as_str()) != Some(expected) {
+            if restore_identity_values_uncoordinated(&snapshot.values).is_err() {
+                crate::repairs::latch_startup_maintenance_failure();
+                return Err("REPAIR_IDENTITY_COMPENSATION_FAILED".to_string());
+            }
+            return Err("REPAIR_IDENTITY_READBACK_FAILED".to_string());
+        }
+    }
+    Ok(snapshot)
 }
 
 /// Returns `true` when the three mandatory credentials exist.
@@ -193,126 +479,7 @@ pub fn get_full_config() -> Value {
     })
 }
 
-/// Store terminal credentials received during onboarding.
-///
-/// Expected JSON shape (camelCase, matching the TS `UpdateTerminalCredentialsPayload`):
-/// ```json
-/// {
-///   "terminalId": "...",
-///   "apiKey": "...",
-///   "adminUrl": "...",      // optional
-///   "branchId": "...",      // optional
-///   "organizationId": "..." // optional
-/// }
-/// ```
-pub fn update_terminal_credentials(payload: &Value) -> Result<Value, String> {
-    let raw_api_key = payload
-        .get("apiKey")
-        .or_else(|| payload.get("pos_api_key"))
-        .and_then(Value::as_str)
-        .ok_or("Missing required field: apiKey")?;
-    let mut terminal_id = payload
-        .get("terminalId")
-        .or_else(|| payload.get("terminal_id"))
-        .and_then(Value::as_str)
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    let mut admin_url = payload
-        .get("adminDashboardUrl")
-        .or_else(|| payload.get("adminUrl"))
-        .or_else(|| payload.get("admin_dashboard_url"))
-        .and_then(Value::as_str)
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-
-    let mut api_key = raw_api_key.trim().to_string();
-    if let Some(decoded_key) = crate::api::extract_api_key_from_connection_string(raw_api_key) {
-        api_key = decoded_key;
-        if let Some(decoded_tid) =
-            crate::api::extract_terminal_id_from_connection_string(raw_api_key)
-        {
-            terminal_id = Some(decoded_tid);
-        }
-        if let Some(decoded_url) = crate::api::extract_admin_url_from_connection_string(raw_api_key)
-        {
-            admin_url = Some(decoded_url);
-        }
-    }
-
-    let terminal_id = terminal_id.ok_or("Missing required field: terminalId")?;
-    if api_key.trim().is_empty() {
-        return Err("Missing required field: apiKey".to_string());
-    }
-
-    set_credential(KEY_TERMINAL_ID, &terminal_id)?;
-    set_credential(KEY_API_KEY, api_key.trim())?;
-
-    if let Some(url) = admin_url.as_deref() {
-        let normalized = crate::api::normalize_admin_url(url);
-        if !normalized.trim().is_empty() {
-            set_credential(KEY_ADMIN_URL, normalized.trim())?;
-        }
-    }
-    if let Some(bid) = payload
-        .get("branchId")
-        .or_else(|| payload.get("branch_id"))
-        .and_then(Value::as_str)
-    {
-        set_credential(KEY_BRANCH_ID, bid)?;
-    }
-    if let Some(oid) = payload
-        .get("organizationId")
-        .or_else(|| payload.get("organization_id"))
-        .and_then(Value::as_str)
-    {
-        set_credential(KEY_ORG_ID, oid)?;
-    }
-    if let Some(surl) = payload
-        .get("supabaseUrl")
-        .or_else(|| payload.get("supabase_url"))
-        .and_then(Value::as_str)
-    {
-        set_credential(KEY_SUPABASE_URL, surl)?;
-    }
-    if let Some(skey) = payload
-        .get("supabaseAnonKey")
-        .or_else(|| payload.get("supabase_anon_key"))
-        .and_then(Value::as_str)
-    {
-        set_credential(KEY_SUPABASE_ANON_KEY, skey)?;
-    }
-    if let Some(ghost_enabled) = payload
-        .get("ghostModeFeatureEnabled")
-        .or_else(|| payload.get("ghost_mode_feature_enabled"))
-    {
-        let normalized = if let Some(flag) = ghost_enabled.as_bool() {
-            Some(flag)
-        } else if let Some(flag) = ghost_enabled.as_i64() {
-            Some(flag == 1)
-        } else if let Some(flag) = ghost_enabled.as_str() {
-            let lower = flag.trim().to_ascii_lowercase();
-            if lower == "true" || lower == "1" || lower == "yes" || lower == "on" {
-                Some(true)
-            } else if lower == "false" || lower == "0" || lower == "no" || lower == "off" {
-                Some(false)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        if let Some(flag) = normalized {
-            set_credential(
-                KEY_GHOST_MODE_FEATURE_ENABLED,
-                if flag { "true" } else { "false" },
-            )?;
-        }
-    }
-
-    info!(terminal_id = %crate::api::redact(&terminal_id), "terminal credentials updated");
-    Ok(serde_json::json!({ "success": true }))
-}
-
+// Store terminal credentials received during onboarding.
 // ---------------------------------------------------------------------------
 // POS session blob (Wave 1 C6)
 // ---------------------------------------------------------------------------
@@ -329,6 +496,14 @@ pub fn session_get() -> Option<String> {
     get_credential(KEY_POS_SESSION)
 }
 
+/// Strict native repair session read. A missing staff session is an ordinary
+/// `Ok(None)` sign-in prerequisite; an unavailable OS credential backend is a
+/// distinct fail-closed result and must never be downgraded to "signed out".
+pub(crate) fn session_get_strict() -> Result<Option<Zeroizing<String>>, String> {
+    get_credential_strict(KEY_POS_SESSION)
+        .map_err(|_| "REPAIR_SESSION_KEYRING_UNAVAILABLE".to_string())
+}
+
 /// Persist the authenticated session blob. `payload` must be pre-serialised
 /// by the caller (the renderer uses `JSON.stringify`).
 pub fn session_set(payload: &str) -> Result<(), String> {
@@ -341,34 +516,29 @@ pub fn session_clear() -> Result<(), String> {
     delete_credential(KEY_POS_SESSION)
 }
 
+/// Invalidate both legacy renderer session state and native repair authority.
+/// Both deletes are attempted so a retry can converge even after one backend
+/// operation fails; any failure keeps the lifecycle marker fail-closed.
+pub(crate) fn invalidate_terminal_authority() -> Result<(), String> {
+    let actor = delete_repair_actor_attestation();
+    let session = session_clear();
+    match (actor, session) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(actor), Ok(())) => Err(actor),
+        (Ok(()), Err(session)) => Err(session),
+        (Err(actor), Err(session)) => Err(format!(
+            "terminal authority invalidation failed: actor={actor}; session={session}"
+        )),
+    }
+}
+
 #[allow(dead_code)]
 /// Delete every stored credential (factory reset).
 ///
-/// Best-effort: every key is attempted, even if earlier ones fail. Returning
-/// on the first failure (the previous behaviour) left later credentials in
-/// the keyring, so a "factory reset" operation could silently leave an
-/// authenticated terminal in a mixed state. The aggregated error message
-/// lists every per-key failure so the operator can surface or retry them
-/// individually.
+/// The generic surface is deliberately fail-closed. Only the reset helper's
+/// manifest-bound `ResetCredentialOwner` may delete the complete managed set.
 pub fn factory_reset() -> Result<Value, String> {
-    info!("performing factory reset – deleting all credentials");
-    let mut failures: Vec<String> = Vec::new();
-    for key in ALL_KEYS {
-        if let Err(e) = delete_credential(key) {
-            warn!(key, error = %e, "factory_reset: delete_credential failed");
-            failures.push(format!("{key}: {e}"));
-        }
-    }
-    if failures.is_empty() {
-        Ok(serde_json::json!({ "success": true }))
-    } else {
-        Err(format!(
-            "factory reset partial failure ({} of {} keys): {}",
-            failures.len(),
-            ALL_KEYS.len(),
-            failures.join("; ")
-        ))
-    }
+    Err("TERMINAL_CREDENTIAL_OWNER_REQUIRED".to_string())
 }
 
 /// Returns the full set of credential keys managed by this module.
@@ -380,9 +550,14 @@ pub fn managed_keys() -> &'static [&'static str] {
 ///
 /// The `category` parameter is accepted for compatibility with the existing
 /// `terminal_config_get_setting(category, key)` stub but is currently unused.
-pub fn get_setting(_category: Option<&str>, key: Option<&str>) -> Value {
+pub fn get_setting(category: Option<&str>, key: Option<&str>) -> Value {
     match key {
-        Some(k) if crate::is_sensitive_terminal_setting(k) => Value::Null,
+        Some(k)
+            if is_native_repair_private_key(k)
+                || crate::is_sensitive_setting_path(category.unwrap_or("terminal"), k) =>
+        {
+            Value::Null
+        }
         Some(k) => match get_credential(k) {
             Some(v) => Value::String(v),
             None => Value::Null,
@@ -396,7 +571,12 @@ pub fn get_setting(_category: Option<&str>, key: Option<&str>) -> Value {
 /// will read from the `local_settings` table instead.
 pub fn settings_get(key: Option<&str>) -> Value {
     match key {
-        Some(k) if crate::is_sensitive_terminal_setting(k) => Value::Null,
+        Some(k)
+            if is_native_repair_private_key(k)
+                || crate::is_sensitive_setting_path("general", k) =>
+        {
+            Value::Null
+        }
         Some(k) => match get_credential(k) {
             Some(v) => Value::String(v),
             None => Value::Null,

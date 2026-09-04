@@ -99,7 +99,12 @@ vi.mock('../../pages/IntegrationsPage', () => ({
 }))
 
 vi.mock('../../../lib', () => ({
+  onEvent: vi.fn(),
+  offEvent: vi.fn(),
   getBridge: () => ({
+    sync: {
+      getNetworkStatus: vi.fn().mockResolvedValue({ isOnline: true }),
+    },
     branchData: {
       getBundleStatus: vi.fn().mockResolvedValue({ success: false }),
     },
@@ -108,6 +113,7 @@ vi.mock('../../../lib', () => ({
 
 vi.mock('../../lib/secure-session-cache', () => ({
   clearSecureSession: vi.fn(),
+  getSecureSessionSync: () => null,
 }))
 
 vi.mock('../../services/offline-page-capabilities', () => ({

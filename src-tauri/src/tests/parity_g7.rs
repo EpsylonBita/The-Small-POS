@@ -130,7 +130,8 @@ fn parity_g7_factory_reset_leaves_no_state_behind() {
     // `manifest.credential_keys` and calls `delete_credential` on each.
     // `storage::factory_reset` is the library helper that does the
     // equivalent work and is routed through the fake_keyring shim.
-    storage::factory_reset().expect("factory_reset clears credentials");
+    crate::commands::settings::factory_reset_with_settings_owner_for_test()
+        .expect("canonical owner reset clears credentials");
 
     // 3b: filesystem wipe. Production's helper calls
     // `remove_path_with_retries` on each `manifest.wipe_paths` entry.
@@ -189,8 +190,11 @@ fn parity_g7_factory_reset_leaves_no_state_behind() {
     // accepts writes after the factory reset. This mirrors what the
     // renderer does post-relaunch when a fresh onboarding flow writes
     // the terminal_id / api_key etc. back to the keyring.
-    storage::set_credential("terminal_id", "550e8400-e29b-41d4-a716-446655440000")
-        .expect("re-seed terminal_id after reset");
+    storage::seed_terminal_credential_for_test(
+        "terminal_id",
+        "550e8400-e29b-41d4-a716-446655440000",
+    )
+    .expect("re-seed terminal_id after reset");
     assert_eq!(
         storage::get_credential("terminal_id").as_deref(),
         Some("550e8400-e29b-41d4-a716-446655440000"),

@@ -35,6 +35,169 @@ fn get_period_start(conn: &Connection) -> String {
 const PENDING_Z_REPORT_CONTEXT_KEY: &str = "pending_z_report_context";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct RepairReportingProjection {
+    pub source: String,
+    pub staff_shift_id: String,
+    pub projection_version: i64,
+    pub projected_at: String,
+    pub overall_tender: f64,
+    pub overall_cash: f64,
+    pub overall_card: f64,
+    pub overall_orders_count: i64,
+    pub repair_tender: f64,
+    pub repair_cash: f64,
+    pub repair_card: f64,
+    pub repair_orders_count: i64,
+}
+
+/// Cache a server-authored projection over the canonical payment and
+/// adjustment ledgers. This is a read mirror, never a local money ledger.
+pub fn apply_repair_reporting_projection(
+    db: &DbState,
+    projection: &RepairReportingProjection,
+) -> Result<Value, String> {
+    if projection.source != "repair_canonical_tender_projection_v1"
+        || Uuid::parse_str(&projection.staff_shift_id).is_err()
+        || projection.projection_version <= 0
+        || DateTime::parse_from_rfc3339(&projection.projected_at).is_err()
+        || projection.overall_orders_count < 0
+        || projection.repair_orders_count < 0
+        || ![
+            projection.overall_tender,
+            projection.overall_cash,
+            projection.overall_card,
+            projection.repair_tender,
+            projection.repair_cash,
+            projection.repair_card,
+        ]
+        .iter()
+        .all(|value| value.is_finite())
+    {
+        return Err("REPAIR_REPORTING_EVIDENCE_INVALID".to_string());
+    }
+
+    let conn = db.conn.lock().map_err(|error| error.to_string())?;
+    let current = conn
+        .query_row(
+            "SELECT COALESCE(repair_projection_version, 0),
+                    repair_projection_synced_at,
+                    COALESCE(total_sales_amount, 0),
+                    COALESCE(total_cash_sales, 0),
+                    COALESCE(total_card_sales, 0),
+                    COALESCE(total_orders_count, 0),
+                    COALESCE(repair_tender_sales, 0),
+                    COALESCE(repair_cash_sales, 0),
+                    COALESCE(repair_card_sales, 0),
+                    COALESCE(repair_orders_count, 0)
+               FROM staff_shifts WHERE id = ?1",
+            params![projection.staff_shift_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, f64>(2)?,
+                    row.get::<_, f64>(3)?,
+                    row.get::<_, f64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, f64>(6)?,
+                    row.get::<_, f64>(7)?,
+                    row.get::<_, f64>(8)?,
+                    row.get::<_, i64>(9)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| format!("read repair reporting projection: {error}"))?
+        .ok_or_else(|| "REPAIR_REPORTING_SHIFT_NOT_FOUND".to_string())?;
+
+    if current.0 > projection.projection_version {
+        return Ok(serde_json::json!({ "applied": false, "stale": true }));
+    }
+    if current.0 == projection.projection_version {
+        let same = current.1.as_deref() == Some(projection.projected_at.as_str())
+            && (current.2 - projection.overall_tender).abs() <= 0.000001
+            && (current.3 - projection.overall_cash).abs() <= 0.000001
+            && (current.4 - projection.overall_card).abs() <= 0.000001
+            && current.5 == projection.overall_orders_count
+            && (current.6 - projection.repair_tender).abs() <= 0.000001
+            && (current.7 - projection.repair_cash).abs() <= 0.000001
+            && (current.8 - projection.repair_card).abs() <= 0.000001
+            && current.9 == projection.repair_orders_count;
+        if !same {
+            return Err("REPAIR_REPORTING_EVIDENCE_COLLISION".to_string());
+        }
+        return Ok(serde_json::json!({ "applied": false, "wasReplay": true }));
+    }
+
+    conn.execute(
+        "UPDATE staff_shifts
+            SET total_sales_amount=?2, total_cash_sales=?3, total_card_sales=?4,
+                total_orders_count=?5, repair_tender_sales=?6,
+                repair_cash_sales=?7, repair_card_sales=?8,
+                repair_orders_count=?9, repair_projection_version=?10,
+                repair_projection_synced_at=?11, updated_at=?11
+          WHERE id=?1 AND COALESCE(repair_projection_version, 0) < ?10",
+        params![
+            projection.staff_shift_id,
+            projection.overall_tender,
+            projection.overall_cash,
+            projection.overall_card,
+            projection.overall_orders_count,
+            projection.repair_tender,
+            projection.repair_cash,
+            projection.repair_card,
+            projection.repair_orders_count,
+            projection.projection_version,
+            projection.projected_at,
+        ],
+    )
+    .map_err(|error| format!("apply repair reporting projection: {error}"))?;
+    Ok(serde_json::json!({ "applied": true, "wasReplay": false }))
+}
+
+/// Mark the affected active shift as requiring a fresh server-authored
+/// projection after the remote money transaction committed but its evidence
+/// could not be cached locally. No monetary value is reconstructed here.
+pub fn invalidate_repair_reporting_projection(
+    db: &DbState,
+    staff_shift_id: Option<&str>,
+) -> Result<bool, String> {
+    let conn = db
+        .conn
+        .lock()
+        .map_err(|_| "repair reporting database unavailable".to_string())?;
+    let updated = if let Some(shift_id) = staff_shift_id {
+        if shift_id.trim().is_empty() || shift_id.len() > 128 {
+            return Err("REPAIR_REPORTING_SHIFT_INVALID".to_string());
+        }
+        conn.execute(
+            "UPDATE staff_shifts
+                SET repair_projection_version = MAX(
+                      COALESCE(repair_projection_version, 0), 1
+                    ),
+                    repair_projection_synced_at = NULL,
+                    updated_at = datetime('now')
+              WHERE id = ?1",
+            [shift_id],
+        )
+    } else {
+        conn.execute(
+            "UPDATE staff_shifts
+                SET repair_projection_version = MAX(
+                      COALESCE(repair_projection_version, 0), 1
+                    ),
+                    repair_projection_synced_at = NULL,
+                    updated_at = datetime('now')
+              WHERE status IN ('active', 'open')",
+            [],
+        )
+    }
+    .map_err(|error| format!("invalidate repair reporting projection: {error}"))?;
+    Ok(updated > 0)
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PendingZReportContext {
     branch_id: String,
@@ -1145,6 +1308,7 @@ fn build_staff_cash_breakdown_row(
                  WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
                    AND COALESCE(o.is_ghost, 0) = 0
                    AND COALESCE(o.is_test, 0) = 0
+                   AND COALESCE(o.order_context, '') <> 'repair_settlement'
                    AND o.status NOT IN ('cancelled', 'canceled')
                    AND COALESCE(o.order_type, 'dine-in') = 'delivery'";
 
@@ -1166,6 +1330,7 @@ fn build_staff_cash_breakdown_row(
              WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
                AND COALESCE(o.is_ghost, 0) = 0
                AND COALESCE(o.is_test, 0) = 0
+               AND COALESCE(o.order_context, '') <> 'repair_settlement'
                AND o.status NOT IN ('cancelled', 'canceled')
                {}",
             role_order_type_filter_sql(role_type, "o")
@@ -1685,6 +1850,7 @@ fn load_sales_by_type_for_period(
            AND op.status = 'completed'
            AND COALESCE(o.is_ghost, 0) = 0
            AND COALESCE(o.is_test, 0) = 0
+           AND COALESCE(o.order_context, '') <> 'repair_settlement'
            AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
          GROUP BY bucket, op.method"
     );
@@ -1749,6 +1915,7 @@ fn load_sales_by_type_for_shift(conn: &Connection, shift_id: &str) -> Result<Val
                AND op.status = 'completed'
                AND COALESCE(o.is_ghost, 0) = 0
                AND COALESCE(o.is_test, 0) = 0
+               AND COALESCE(o.order_context, '') <> 'repair_settlement'
                AND o.status NOT IN ('cancelled', 'canceled')
              GROUP BY bucket, op.method",
         )
@@ -1818,6 +1985,7 @@ fn load_non_driver_order_totals(
               AND (?3 IS NULL OR {financial_expr} <= ?3)
               AND COALESCE(o.is_ghost, 0) = 0
               AND COALESCE(o.is_test, 0) = 0
+              AND COALESCE(o.order_context, '') <> 'repair_settlement'
               AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
               AND NOT {staff_open_tab}
               {}
@@ -1853,6 +2021,7 @@ fn load_non_driver_order_totals(
            AND (?3 IS NULL OR {financial_expr} <= ?3)
            AND COALESCE(o.is_ghost, 0) = 0
            AND COALESCE(o.is_test, 0) = 0
+           AND COALESCE(o.order_context, '') <> 'repair_settlement'
            AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
            {}
            AND NOT EXISTS (
@@ -2431,6 +2600,67 @@ fn build_driver_summary(staff_reports: &[Value], unsettled_counts: &HashMap<Stri
 // Generate Z-report (single shift — legacy path)
 // ---------------------------------------------------------------------------
 
+/// Load the server-authored repair tender projection for a reporting window.
+/// A non-zero/versioned row without sync evidence is deliberately fatal: the
+/// desktop must never reconstruct repair money from local repair commands.
+fn load_server_repair_projection(
+    conn: &rusqlite::Connection,
+    branch_id: &str,
+    period_start: &str,
+    period_end: &str,
+) -> Result<Value, String> {
+    let invalid_evidence: i64 = conn
+        .query_row(
+            "SELECT COUNT(*)
+               FROM staff_shifts
+              WHERE branch_id = ?1
+                AND check_in_time >= ?2
+                AND check_in_time <= ?3
+                AND (
+                  COALESCE(repair_projection_version, 0) > 0
+                  OR ABS(COALESCE(repair_tender_sales, 0)) > 0.000001
+                  OR ABS(COALESCE(repair_cash_sales, 0)) > 0.000001
+                  OR ABS(COALESCE(repair_card_sales, 0)) > 0.000001
+                  OR COALESCE(repair_orders_count, 0) <> 0
+                )
+                AND (
+                  COALESCE(repair_projection_version, 0) <= 0
+                  OR repair_projection_synced_at IS NULL
+                  OR trim(repair_projection_synced_at) = ''
+                )",
+            params![branch_id, period_start, period_end],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("load repair reporting evidence: {error}"))?;
+    if invalid_evidence > 0 {
+        return Err("REPAIR_REPORTING_EVIDENCE_REQUIRED".to_string());
+    }
+
+    let (orders, total, cash, card): (i64, f64, f64, f64) = conn
+        .query_row(
+            "SELECT
+                COALESCE(SUM(repair_orders_count), 0),
+                COALESCE(SUM(repair_tender_sales), 0),
+                COALESCE(SUM(repair_cash_sales), 0),
+                COALESCE(SUM(repair_card_sales), 0)
+               FROM staff_shifts
+              WHERE branch_id = ?1
+                AND check_in_time >= ?2
+                AND check_in_time <= ?3
+                AND COALESCE(repair_projection_version, 0) > 0",
+            params![branch_id, period_start, period_end],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .map_err(|error| format!("load server repair projection: {error}"))?;
+    Ok(serde_json::json!({
+        "repairOrders": orders,
+        "repairSales": total,
+        "repairCashSales": cash,
+        "repairCardSales": card,
+        "repairOtherSales": total - cash - card,
+    }))
+}
+
 /// Generate a Z-report for a closed shift.
 ///
 /// Aggregates orders, payments, adjustments, and expenses for the given shift,
@@ -2494,7 +2724,10 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
                     opening_cash_amount, closing_cash_amount,
                     expected_cash_amount, cash_variance,
                     check_in_time, check_out_time, branch_id, terminal_id,
-                    report_date, period_start_at
+                    report_date, period_start_at,
+                    repair_tender_sales, repair_cash_sales, repair_card_sales,
+                    repair_orders_count, repair_projection_version,
+                    repair_projection_synced_at
              FROM staff_shifts WHERE id = ?1",
             params![shift_id],
             |row| {
@@ -2514,6 +2747,12 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
                     row.get::<_, Option<String>>(12)?, // terminal_id
                     row.get::<_, Option<String>>(13)?, // report_date
                     row.get::<_, Option<String>>(14)?, // period_start_at
+                    row.get::<_, f64>(15)?,            // repair_tender_sales
+                    row.get::<_, f64>(16)?,            // repair_cash_sales
+                    row.get::<_, f64>(17)?,            // repair_card_sales
+                    row.get::<_, i64>(18)?,            // repair_orders_count
+                    row.get::<_, i64>(19)?,            // repair_projection_version
+                    row.get::<_, Option<String>>(20)?, // repair_projection_synced_at
                 ))
             },
         )
@@ -2535,6 +2774,12 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
         shift_terminal_id,
         stored_report_date,
         stored_period_start_at,
+        repair_tender_sales,
+        repair_cash_sales,
+        repair_card_sales,
+        repair_orders_count,
+        repair_projection_version,
+        repair_projection_synced_at,
     ) = shift;
 
     if status != "closed" {
@@ -2542,7 +2787,21 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
             "Shift must be closed to generate Z-report (current status: {status})"
         ));
     }
-
+    let has_repair_projection = repair_projection_version > 0
+        || repair_tender_sales.abs() > 0.000001
+        || repair_cash_sales.abs() > 0.000001
+        || repair_card_sales.abs() > 0.000001
+        || repair_orders_count != 0;
+    if has_repair_projection
+        && (repair_projection_version <= 0
+            || repair_projection_synced_at
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_none())
+    {
+        return Err("REPAIR_REPORTING_EVIDENCE_REQUIRED".to_string());
+    }
     let primary_shift = ReportStaffShift {
         id: shift_id.to_string(),
         staff_id: staff_id.clone(),
@@ -2592,6 +2851,7 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
          WHERE staff_shift_id = ?1
            AND COALESCE(is_ghost, 0) = 0
            AND COALESCE(is_test, 0) = 0
+           AND COALESCE(order_context, '') <> 'repair_settlement'
            AND status NOT IN ('cancelled', 'canceled')
            AND NOT {single_shift_open_tab}"
     );
@@ -2606,7 +2866,9 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
         })
         .unwrap_or((0, 0.0, 0.0, 0.0));
 
-    let (total_orders, gross_sales, discounts_total, tips_total) = order_agg;
+    let (ordinary_total_orders, ordinary_gross_sales, discounts_total, tips_total) = order_agg;
+    let total_orders = ordinary_total_orders + repair_orders_count;
+    let gross_sales = ordinary_gross_sales + repair_tender_sales;
 
     // Payments: breakdown by method
     let mut pay_stmt = conn
@@ -2627,6 +2889,7 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
                AND op.status = 'completed'
                AND COALESCE(o.is_ghost, 0) = 0
                AND COALESCE(o.is_test, 0) = 0
+               AND COALESCE(o.order_context, '') <> 'repair_settlement'
                AND o.status NOT IN ('cancelled', 'canceled')
              GROUP BY op.method, platform_ref",
         )
@@ -2679,6 +2942,18 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
             }
         }
     }
+    cash_sales += repair_cash_sales;
+    card_sales += repair_card_sales;
+    other_sales += repair_tender_sales - repair_cash_sales - repair_card_sales;
+    if repair_orders_count > 0 {
+        if repair_cash_sales.abs() > 0.000001 && repair_card_sales.abs() <= 0.000001 {
+            cash_count += repair_orders_count;
+        } else if repair_card_sales.abs() > 0.000001 && repair_cash_sales.abs() <= 0.000001 {
+            card_count += repair_orders_count;
+        } else {
+            other_count += repair_orders_count;
+        }
+    }
 
     // Adjustments: refunds and voids.
     //
@@ -2698,6 +2973,7 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
              WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
                AND COALESCE(o.is_ghost, 0) = 0
                AND COALESCE(o.is_test, 0) = 0
+               AND COALESCE(o.order_context, '') <> 'repair_settlement'
                AND o.status NOT IN ('cancelled', 'canceled')
              GROUP BY pa.adjustment_type",
         )
@@ -2909,6 +3185,7 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
          WHERE o.staff_shift_id = ?1
            AND COALESCE(o.is_ghost, 0) = 0
            AND COALESCE(o.is_test, 0) = 0
+           AND COALESCE(o.order_context, '') <> 'repair_settlement'
            AND o.status NOT IN ('cancelled', 'canceled')
            AND NOT {shift_ot_open_tab}
          GROUP BY COALESCE(o.order_type, 'dine-in')"
@@ -3087,6 +3364,12 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
             "deliveryOrders": delivery_orders,
             "deliverySales": delivery_sales,
             "deliverySales_cents": Cents::round_half_even(delivery_sales).as_i64(),
+            // Repair tender/revenue is server-owned and never mirrored into
+            // the generic local order/payment queues. Older JSON omits these
+            // keys; readers default them to zero.
+            "repairOrders": repair_orders_count,
+            "repairSales": repair_tender_sales,
+            "repairSales_cents": Cents::round_half_even(repair_tender_sales).as_i64(),
             "byType": sales_by_type,
         },
         "cashDrawer": drawer.as_ref().unwrap_or(&serde_json::json!({
@@ -3587,6 +3870,28 @@ fn build_z_report_for_date(
     let lower_bound_mode = window.lower_bound_mode;
     let cutoff_param = cutoff_at.as_deref();
     let period_end = cutoff_at.clone().unwrap_or_else(|| now.clone());
+    let repair_projection = load_server_repair_projection(
+        &conn,
+        branch_id.as_str(),
+        period_start.as_str(),
+        period_end.as_str(),
+    )?;
+    let repair_orders_count = repair_projection
+        .get("repairOrders")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let repair_tender_sales = repair_projection
+        .get("repairSales")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let repair_cash_sales = repair_projection
+        .get("repairCashSales")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let repair_card_sales = repair_projection
+        .get("repairCardSales")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
 
     info!(
         branch_id = %branch_id,
@@ -3670,6 +3975,7 @@ fn build_z_report_for_date(
            AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
            AND COALESCE(o.is_ghost, 0) = 0
            AND COALESCE(o.is_test, 0) = 0
+           AND COALESCE(o.order_context, '') <> 'repair_settlement'
            AND o.status NOT IN ('cancelled', 'canceled')
            AND NOT {open_table_tab}"
     );
@@ -3688,7 +3994,9 @@ fn build_z_report_for_date(
         )
         .unwrap_or((0, 0.0, 0.0, 0.0));
 
-    let (total_orders, gross_sales, discounts_total, tips_total) = order_agg;
+    let (ordinary_orders, ordinary_gross_sales, discounts_total, tips_total) = order_agg;
+    let total_orders = ordinary_orders + repair_orders_count;
+    let gross_sales = ordinary_gross_sales + repair_tender_sales;
 
     // --- Payments: breakdown by method across all shifts ---
     let payment_scope_expr = business_day::order_financial_timestamp_expr("o");
@@ -3715,6 +4023,7 @@ fn build_z_report_for_date(
            AND op.status = 'completed'
            AND COALESCE(o.is_ghost, 0) = 0
            AND COALESCE(o.is_test, 0) = 0
+           AND COALESCE(o.order_context, '') <> 'repair_settlement'
            AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
          GROUP BY op.method, platform_ref"
     );
@@ -3767,6 +4076,18 @@ fn build_z_report_for_date(
                 other_sales += total;
                 other_count += count;
             }
+        }
+    }
+    cash_sales += repair_cash_sales;
+    card_sales += repair_card_sales;
+    other_sales += repair_tender_sales - repair_cash_sales - repair_card_sales;
+    if repair_orders_count > 0 {
+        if repair_cash_sales.abs() > 0.000001 && repair_card_sales.abs() <= 0.000001 {
+            cash_count += repair_orders_count;
+        } else if repair_card_sales.abs() > 0.000001 && repair_cash_sales.abs() <= 0.000001 {
+            card_count += repair_orders_count;
+        } else {
+            other_count += repair_orders_count;
         }
     }
 
@@ -3911,6 +4232,7 @@ fn build_z_report_for_date(
            AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
            AND COALESCE(o.is_ghost, 0) = 0
            AND COALESCE(o.is_test, 0) = 0
+           AND COALESCE(o.order_context, '') <> 'repair_settlement'
            AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
          GROUP BY pa.adjustment_type"
     );
@@ -4078,6 +4400,7 @@ fn build_z_report_for_date(
            AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
            AND COALESCE(o.is_ghost, 0) = 0
            AND COALESCE(o.is_test, 0) = 0
+           AND COALESCE(o.order_context, '') <> 'repair_settlement'
            AND o.status NOT IN ('cancelled', 'canceled')
            AND NOT {order_type_open_tab}
          GROUP BY COALESCE(o.order_type, 'dine-in')"
@@ -4225,13 +4548,25 @@ fn build_z_report_for_date(
         "platform_online": { "count": platform_online_count, "total": platform_online_sales },
         "platform_cod": { "count": platform_cod_count, "total": platform_cod_sales },
     });
-    let sales_by_type = load_sales_by_type_for_period(
+    let mut sales_by_type = load_sales_by_type_for_period(
         &conn,
         branch_id.as_str(),
         &period_start,
         cutoff_param,
         lower_bound_mode,
     )?;
+    if let Some(by_type) = sales_by_type.as_object_mut() {
+        by_type.insert(
+            "repair".to_string(),
+            serde_json::json!({
+                "count": repair_orders_count,
+                "total": repair_tender_sales,
+                "cash": repair_cash_sales,
+                "card": repair_card_sales,
+                "other": repair_tender_sales - repair_cash_sales - repair_card_sales,
+            }),
+        );
+    }
     let drawer_rows = load_drawer_rows_for_period(
         &conn,
         &period_start,
@@ -4358,6 +4693,9 @@ fn build_z_report_for_date(
             "deliveryOrders": delivery_orders,
             "deliverySales": delivery_sales,
             "deliverySales_cents": Cents::round_half_even(delivery_sales).as_i64(),
+            "repairOrders": repair_orders_count,
+            "repairSales": repair_tender_sales,
+            "repairSales_cents": Cents::round_half_even(repair_tender_sales).as_i64(),
             "byType": sales_by_type,
         },
         "cashDrawer": drawer_agg.as_ref().unwrap_or(&serde_json::json!({
@@ -4927,6 +5265,7 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
         "SELECT o.id
          FROM orders o
          WHERE datetime({financial_expr}) <= datetime(?1)
+           AND COALESCE(o.order_context, '') <> 'repair_settlement'
            AND NOT {open_table_tab}"
     );
 
@@ -8931,5 +9270,163 @@ mod tests {
         assert_eq!(row["cashCollected"].as_f64(), Some(50.0));
         assert_eq!(row["expenses"].as_f64(), Some(5.0));
         assert_eq!(row["startingAmount"].as_f64(), Some(100.0));
+    }
+
+    #[test]
+    fn server_repair_projection_covers_cross_day_refund_and_fails_closed_without_evidence() {
+        let state = test_db();
+        let conn = state.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                check_in_time, check_out_time, status, sync_status, created_at, updated_at,
+                repair_tender_sales, repair_cash_sales, repair_card_sales,
+                repair_orders_count, repair_projection_version, repair_projection_synced_at
+             ) VALUES (
+                'repair-pay', 'staff-1', 'Alex', 'branch-1', 'term-1', 'cashier',
+                '2026-05-01T08:00:00Z', '2026-05-01T18:00:00Z', 'closed', 'synced',
+                '2026-05-01T08:00:00Z', '2026-05-01T18:01:00Z',
+                100.0, 100.0, 0.0, 1, 1, '2026-05-01T18:01:00Z'
+             )",
+            [],
+        )
+        .expect("insert payment projection");
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                check_in_time, check_out_time, status, sync_status, created_at, updated_at,
+                repair_tender_sales, repair_cash_sales, repair_card_sales,
+                repair_orders_count, repair_projection_version, repair_projection_synced_at
+             ) VALUES (
+                'repair-refund', 'staff-1', 'Alex', 'branch-1', 'term-1', 'cashier',
+                '2026-05-02T08:00:00Z', '2026-05-02T12:00:00Z', 'closed', 'synced',
+                '2026-05-02T08:00:00Z', '2026-05-02T12:01:00Z',
+                -20.0, -20.0, 0.0, 1, 1, '2026-05-02T12:01:00Z'
+             )",
+            [],
+        )
+        .expect("insert refund projection");
+
+        let projection = load_server_repair_projection(
+            &conn,
+            "branch-1",
+            "2026-05-01T00:00:00Z",
+            "2026-05-03T00:00:00Z",
+        )
+        .expect("authoritative projection");
+        assert_eq!(projection["repairOrders"], 2);
+        assert_eq!(projection["repairSales"], 80.0);
+        assert_eq!(projection["repairCashSales"], 80.0);
+
+        conn.execute(
+            "UPDATE staff_shifts SET repair_projection_synced_at=NULL WHERE id='repair-refund'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            load_server_repair_projection(
+                &conn,
+                "branch-1",
+                "2026-05-01T00:00:00Z",
+                "2026-05-03T00:00:00Z",
+            )
+            .unwrap_err(),
+            "REPAIR_REPORTING_EVIDENCE_REQUIRED",
+        );
+    }
+
+    #[test]
+    fn repair_reporting_projection_apply_is_replay_safe_and_collision_safe() {
+        let state = test_db();
+        let shift_id = "11111111-1111-4111-8111-111111111111";
+        {
+            let conn = state.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO staff_shifts (
+                    id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                    check_in_time, status, sync_status, created_at, updated_at
+                 ) VALUES (
+                    ?1, 'staff-1', 'Alex', 'branch-1', 'term-1', 'cashier',
+                    '2026-08-25T08:00:00Z', 'active', 'synced',
+                    '2026-08-25T08:00:00Z', '2026-08-25T08:00:00Z'
+                 )",
+                params![shift_id],
+            )
+            .expect("insert reporting shift");
+        }
+        let projection = RepairReportingProjection {
+            source: "repair_canonical_tender_projection_v1".to_string(),
+            staff_shift_id: shift_id.to_string(),
+            projection_version: 3,
+            projected_at: "2026-08-25T10:11:12Z".to_string(),
+            overall_tender: 178.0,
+            overall_cash: 88.0,
+            overall_card: 70.0,
+            overall_orders_count: 4,
+            repair_tender: 78.0,
+            repair_cash: 28.0,
+            repair_card: 50.0,
+            repair_orders_count: 2,
+        };
+        assert_eq!(
+            apply_repair_reporting_projection(&state, &projection).unwrap()["applied"],
+            true
+        );
+        assert_eq!(
+            apply_repair_reporting_projection(&state, &projection).unwrap()["wasReplay"],
+            true
+        );
+        let mut stale = projection.clone();
+        stale.projection_version = 2;
+        stale.projected_at = "2026-08-25T10:10:00Z".to_string();
+        assert_eq!(
+            apply_repair_reporting_projection(&state, &stale).unwrap()["stale"],
+            true
+        );
+        let mut collision = projection.clone();
+        collision.overall_tender = 179.0;
+        assert_eq!(
+            apply_repair_reporting_projection(&state, &collision).unwrap_err(),
+            "REPAIR_REPORTING_EVIDENCE_COLLISION"
+        );
+        let mut invalid = projection;
+        invalid.source = "local_projection".to_string();
+        assert_eq!(
+            apply_repair_reporting_projection(&state, &invalid).unwrap_err(),
+            "REPAIR_REPORTING_EVIDENCE_INVALID"
+        );
+    }
+
+    #[test]
+    fn repair_reporting_projection_invalidation_marks_stale_evidence_fail_closed() {
+        let state = test_db();
+        let conn = state.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, role_type, check_in_time, status,
+                branch_id, repair_projection_version, repair_projection_synced_at,
+                created_at, updated_at
+             ) VALUES (
+                'repair-invalidate', 'staff-1', 'Tech', 'cashier',
+                '2026-08-25T09:00:00Z', 'active', 'branch-1', 4,
+                '2026-08-25T10:00:00Z', '2026-08-25T09:00:00Z',
+                '2026-08-25T10:00:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        assert!(invalidate_repair_reporting_projection(&state, Some("repair-invalidate")).unwrap());
+        let conn = state.conn.lock().unwrap();
+        let evidence: (i64, Option<String>) = conn
+            .query_row(
+                "SELECT repair_projection_version, repair_projection_synced_at
+                   FROM staff_shifts WHERE id='repair-invalidate'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(evidence, (4, None));
     }
 }

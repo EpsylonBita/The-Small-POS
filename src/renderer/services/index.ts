@@ -57,6 +57,14 @@ export type {
 
 // Services (Salon Vertical)
 export { servicesService } from './ServicesService';
+export { repairMoneyApiService } from './RepairMoneyApiService';
+export type {
+  RepairMoneyIntentBase,
+  RepairPaymentIntent,
+  RepairRefundIntent,
+  RepairDeliveryIntent,
+  RepairMoneyResult,
+} from './RepairMoneyApiService';
 export type {
   Service,
   ServiceCategory,

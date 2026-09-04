@@ -50,6 +50,19 @@ export interface Product {
   preferredSupplierName: string | null;
   createdAt: string;
   updatedAt: string;
+  variants?: ProductVariant[];
+}
+
+export interface ProductVariant {
+  id: string;
+  productId: string;
+  sku: string;
+  barcode: string | null;
+  name: string;
+  attributes: Record<string, string>;
+  priceAdjustment: number;
+  quantity: number;
+  isActive: boolean;
 }
 
 /** Weight/price decoded from a scale/embedded-value barcode label. */
@@ -62,6 +75,7 @@ export interface EmbeddedScaleValue {
 export interface BarcodeScanResult {
   product: Product;
   embedded: EmbeddedScaleValue | null;
+  variantId: string | null;
 }
 
 export interface ProductSupplier {
@@ -165,6 +179,27 @@ function transformProductFromAPI(data: any): Product {
     preferredSupplierName,
     createdAt: data.created_at,
     updatedAt: data.updated_at,
+    variants: Array.isArray(data.variants)
+      ? data.variants.map(transformVariantFromAPI)
+      : [],
+  };
+}
+
+function transformVariantFromAPI(data: any): ProductVariant {
+  const rawAttributes = data?.attributes;
+  const attributes = rawAttributes && typeof rawAttributes === 'object' && !Array.isArray(rawAttributes)
+    ? Object.fromEntries(Object.entries(rawAttributes).filter((entry): entry is [string, string] => typeof entry[1] === 'string'))
+    : {};
+  return {
+    id: data?.id,
+    productId: data?.product_id,
+    sku: typeof data?.sku === 'string' ? data.sku : '',
+    barcode: typeof data?.barcode === 'string' ? data.barcode : null,
+    name: typeof data?.name === 'string' ? data.name : '',
+    attributes,
+    priceAdjustment: Number.isFinite(Number(data?.price_adjustment)) ? Number(data.price_adjustment) : 0,
+    quantity: Number.isFinite(Number(data?.quantity)) ? Number(data.quantity) : 0,
+    isActive: data?.is_active === true,
   };
 }
 
@@ -492,9 +527,14 @@ class ProductCatalogService {
         if (apiResult !== null) {
           return apiResult;
         }
+        if (!this.canUseSupabaseFallback()) {
+          // Desktop repair/catalog scans stay on the terminal-authenticated
+          // live API boundary; they never fall through to a direct client.
+          return null;
+        }
       }
       const product = await this.fetchProductByBarcodeFromSupabase(barcode);
-      return product ? { product, embedded: null } : null;
+      return product ? { product, embedded: null, variantId: null } : null;
     } catch (error) {
       console.error('Failed to fetch barcode scan result:', error);
       return null;
@@ -506,7 +546,7 @@ class ProductCatalogService {
       const cleanedBarcode = barcode.replace(/[\s\-]/g, '').trim();
       const endpoint = `/api/pos/products/lookup?barcode=${encodeURIComponent(cleanedBarcode)}`;
       const result = isBrowser()
-        ? await posApiGet<{ success: boolean; found: boolean; product?: any; embedded?: EmbeddedScaleValue | null }>(endpoint)
+        ? await posApiGet<{ success: boolean; found: boolean; product?: any; embedded?: EmbeddedScaleValue | null; variant_id?: unknown }>(endpoint)
         : await getBridge().adminApi.fetchFromAdmin(endpoint, { method: 'GET' });
 
       if (!result.success || !result.data?.success) {
@@ -520,10 +560,31 @@ class ProductCatalogService {
       return {
         product: transformProductFromAPI(result.data.product),
         embedded: result.data.embedded ?? null,
+        variantId: typeof result.data.variant_id === 'string' ? result.data.variant_id : null,
       };
     } catch (error) {
       console.error('ProductCatalogService: API barcode lookup error:', error);
       return null;
+    }
+  }
+
+  /** Read-only variant lookup used by repair planning and scanned variant resolution. */
+  async fetchProductVariants(productId: string): Promise<ProductVariant[]> {
+    if (!this.organizationId || !productId) {
+      return [];
+    }
+    try {
+      const endpoint = `/api/pos/products/${encodeURIComponent(productId)}/variants`;
+      const result = isBrowser()
+        ? await posApiGet<{ success?: boolean; variants?: any[] }>(endpoint)
+        : await getBridge().adminApi.fetchFromAdmin(endpoint, { method: 'GET' });
+      if (!result.success || result.data?.success === false || !Array.isArray(result.data?.variants)) {
+        return [];
+      }
+      return result.data.variants.map(transformVariantFromAPI);
+    } catch (error) {
+      console.error('ProductCatalogService: API product variants error:', error);
+      return [];
     }
   }
 

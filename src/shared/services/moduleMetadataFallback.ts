@@ -16,6 +16,7 @@ const iconMap: Record<string, string> = {
   delivery: 'Truck',
   loyalty: 'Gift',
   staff_schedule: 'UserCog',
+  repairs: 'Wrench',
 };
 
 function formatModuleName(moduleId: string): string {

@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { MapPin, User, Phone, Mail, FileText, Building, Users, AlertTriangle, CheckCircle, Clock, Hash, Minus, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { isSupportedCountry, type CountryCode } from 'libphonenumber-js/min';
 import { Customer } from '../../../shared/types/customer';
 import { customerService } from '../../services/CustomerService';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
@@ -32,6 +33,7 @@ import { inputBase } from '../../styles/designSystem';
 interface CustomerData {
   id?: string;
   phone: string;
+  phone_country_code?: string | null;
   name?: string;
   email?: string;
   address?: string;
@@ -109,6 +111,20 @@ const extractErrorMessage = (error: unknown, fallback: string): string => {
     }
   }
   return fallback;
+};
+
+const normalizePhoneCountryCode = (value: unknown): string => {
+  if (typeof value !== 'string') return '';
+  const normalized = value.trim().toUpperCase();
+  return /^[A-Z]{2}$/.test(normalized)
+    && isSupportedCountry(normalized as CountryCode)
+    ? normalized
+    : '';
+};
+
+const isInternationalPhone = (value: string): boolean => {
+  const normalized = value.trim();
+  return normalized.startsWith('+') || normalized.startsWith('00');
 };
 
 const ADD_ADDRESS_SAVE_TIMEOUT_MS = 35_000;
@@ -449,6 +465,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
 
   const [formData, setFormData] = useState({
     phone: '',
+    phoneCountryCode: '',
     name: '',
     email: '',
     nameOnRinger: '',
@@ -498,6 +515,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             const storedDetails = hasDeliveryPro ? getStoredAddressSelectionDetails(addressToEdit) : null;
             setFormData({
               phone: initialCustomer.phone || '',
+              phoneCountryCode: normalizePhoneCountryCode(initialCustomer.phone_country_code),
               name: initialCustomer.name || '',
               email: initialCustomer.email || '',
               nameOnRinger: addressToEdit.name_on_ringer || '',
@@ -514,6 +532,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             // Address not found, fall back to empty address fields
             setFormData({
               phone: initialCustomer.phone || '',
+              phoneCountryCode: normalizePhoneCountryCode(initialCustomer.phone_country_code),
               name: initialCustomer.name || '',
               email: initialCustomer.email || '',
               nameOnRinger: '',
@@ -528,6 +547,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
           // Add Address mode - only prefill customer info, leave address fields EMPTY for new address
           setFormData({
             phone: initialCustomer.phone || '',
+            phoneCountryCode: normalizePhoneCountryCode(initialCustomer.phone_country_code),
             name: initialCustomer.name || '',
             email: initialCustomer.email || '',
             nameOnRinger: '', // Empty for new address
@@ -543,6 +563,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
           const storedDetails = hasDeliveryPro ? getStoredAddressSelectionDetails(initialCustomer) : null;
           setFormData({
             phone: initialCustomer.phone || '',
+            phoneCountryCode: normalizePhoneCountryCode(initialCustomer.phone_country_code),
             name: initialCustomer.name || '',
             email: initialCustomer.email || '',
             nameOnRinger: initialCustomer.name_on_ringer || '',
@@ -560,6 +581,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         // New customer with just phone prefilled
         setFormData({
           phone: initialPhone,
+          phoneCountryCode: '',
           name: '',
           email: '',
           nameOnRinger: '',
@@ -573,6 +595,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         // Completely new - reset everything
         setFormData({
           phone: '',
+          phoneCountryCode: '',
           name: '',
           email: '',
           nameOnRinger: '',
@@ -835,6 +858,30 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       newErrors.phone = t('modals.addCustomer.phoneRequired');
     }
 
+    const phoneForValidation = formData.phone.trim();
+    const normalizedPhoneCountryCode = normalizePhoneCountryCode(formData.phoneCountryCode);
+    // The phone and its ISO country field are disabled in address-only mode
+    // (the customer already exists; only an address is being added/edited),
+    // so a missing country code must never block submit there — the operator
+    // has no way to fill it in.
+    if (!isAddressOnlyMode) {
+      if (
+        phoneForValidation
+        && !isInternationalPhone(phoneForValidation)
+        && !normalizedPhoneCountryCode
+      ) {
+        newErrors.phoneCountryCode = t(
+          'modals.addCustomer.phoneCountryRequired',
+          'Use a 2-letter ISO phone country code',
+        );
+      } else if (formData.phoneCountryCode.trim() && !normalizedPhoneCountryCode) {
+        newErrors.phoneCountryCode = t(
+          'modals.addCustomer.phoneCountryRequired',
+          'Use a 2-letter ISO phone country code',
+        );
+      }
+    }
+
     if (!formData.name.trim()) {
       newErrors.name = t('modals.addCustomer.nameRequired');
     }
@@ -879,6 +926,11 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         console.log('[AddCustomerModal.handleSubmit] Validation failed');
         return;
       }
+
+      const submittedPhone = formData.phone;
+      const submittedPhoneCountryCode = isInternationalPhone(submittedPhone)
+        ? null
+        : normalizePhoneCountryCode(formData.phoneCountryCode);
 
       let validationForSubmit: DeliveryValidationResult | null = null;
       if (hasDeliveryPro) {
@@ -1067,7 +1119,8 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
 
         try {
           const updates = {
-            phone: formData.phone.trim(),
+            phone: submittedPhone,
+            phone_country_code: submittedPhoneCountryCode,
             name: formData.name.trim(),
             email: formData.email ? formData.email.trim() : undefined,
             address: normalizedStreetAddress,
@@ -1138,6 +1191,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             onCustomerAdded(updatedCustomer);
             setFormData({
               phone: '',
+              phoneCountryCode: '',
               name: '',
               email: '',
               nameOnRinger: '',
@@ -1162,7 +1216,8 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       console.log('[AddCustomerModal] Creating new customer via IPC');
 
       const newCustomerData = {
-        phone: formData.phone.trim(),
+        phone: submittedPhone,
+        phone_country_code: submittedPhoneCountryCode,
         name: formData.name.trim(),
         email: formData.email ? formData.email.trim() : undefined,
         address: normalizedStreetAddress,
@@ -1242,6 +1297,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         // Reset form
         setFormData({
           phone: '',
+          phoneCountryCode: '',
           name: '',
           email: '',
           nameOnRinger: '',
@@ -1369,6 +1425,26 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
           </div>
           {errors.phone && (
             <p className="mt-1 text-sm text-red-600 dark:text-red-400">{errors.phone}</p>
+          )}
+        </div>
+
+        {/* Explicit country context is required for national phone numbers. */}
+        <div>
+          <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
+            {t('modals.addCustomer.phoneCountryLabel', 'Phone country (ISO)')}
+          </label>
+          <input
+            type="text"
+            value={formData.phoneCountryCode}
+            onChange={(e) => handleInputChange('phoneCountryCode', e.target.value.toUpperCase())}
+            placeholder="e.g. GB"
+            maxLength={2}
+            className={`${inputBase(resolvedTheme)} ${isAddressOnlyMode ? 'opacity-60 cursor-not-allowed' : ''}`}
+            disabled={isAddressOnlyMode}
+            readOnly={isAddressOnlyMode}
+          />
+          {errors.phoneCountryCode && (
+            <p className="mt-1 text-sm text-red-600 dark:text-red-400">{errors.phoneCountryCode}</p>
           )}
         </div>
 

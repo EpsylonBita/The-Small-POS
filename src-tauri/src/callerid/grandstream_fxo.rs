@@ -171,8 +171,6 @@ struct SourceLineWire {
     version: u64,
     is_receiving_target: bool,
     config: Value,
-    credential_version: Option<u64>,
-    credentials: Option<Value>,
     readiness_attempt: Option<ReadinessAttemptWire>,
 }
 
@@ -252,8 +250,6 @@ fn parse_source_line(value: &Value) -> Result<GrandstreamFxoSourceLine, String> 
         || source_channel.is_empty()
         || source_channel.chars().count() > 80
         || (wire.country_code.is_some() && country_code.is_none())
-        || wire.credential_version.is_some()
-        || wire.credentials.is_some()
     {
         return Err("Caller ID source line is not a reviewed local connector configuration".into());
     }
@@ -2108,8 +2104,6 @@ mod tests {
                 "trustedDeviceIp": "192.168.1.70",
                 "listenPort": 5060
             },
-            "credentialVersion": null,
-            "credentials": null
         })
     }
 
@@ -2133,8 +2127,6 @@ mod tests {
                 "listenPort": 3520,
                 "unitSerial": "000000844884"
             },
-            "credentialVersion": null,
-            "credentials": null
         })
     }
 
@@ -2215,9 +2207,7 @@ mod tests {
                 "transport": "udp",
                 "trustedDeviceIp": "192.168.1.70",
                 "listenPort": listen_port
-            },
-            "credentialVersion": null,
-            "credentials": null
+            }
         })
     }
 
@@ -2863,6 +2853,10 @@ mod tests {
         let mut with_secret = source_line();
         with_secret["credentials"] = json!({ "present": true });
         assert!(parse_source_line(&with_secret).is_err());
+
+        let mut with_deprecated_null_credential_contract = source_line();
+        with_deprecated_null_credential_contract["credentials"] = Value::Null;
+        assert!(parse_source_line(&with_deprecated_null_credential_contract).is_err());
 
         let mut with_unknown_setting = source_line();
         with_unknown_setting["config"]["outboundProxy"] = json!("attacker.invalid");

@@ -29,7 +29,8 @@ use crate::receipt_renderer::{
     self, AdjustmentLine, ClassicCustomerRenderMode, CommandProfile, DeliverySlipMode, FontType,
     HeaderEmphasis, KitchenTicketDoc, LayoutConfig, LayoutDensity, OrderReceiptDoc, PaymentLine,
     ReceiptCustomizationLine, ReceiptDocument, ReceiptEmulationMode, ReceiptItem, ReceiptTemplate,
-    ShiftCheckoutDoc, TotalsLine, ZReportDoc, PAYMENT_DETAIL_AMOUNT_UNKNOWN,
+    RepairIntakeDoc, RepairLabelDoc, ShiftCheckoutDoc, TotalsLine, ZReportDoc,
+    PAYMENT_DETAIL_AMOUNT_UNKNOWN,
 };
 
 // ---------------------------------------------------------------------------
@@ -477,6 +478,8 @@ fn is_receipt_like_entity_type(entity_type: &str) -> bool {
         "order_receipt"
             | "delivery_slip"
             | "kitchen_ticket"
+            | "repair_intake"
+            | "repair_label"
             | "shift_checkout"
             | "z_report"
             | "order_completed_receipt"
@@ -655,6 +658,8 @@ pub fn enqueue_print_job_with_payload(
 ) -> Result<Value, String> {
     if entity_type != "order_receipt"
         && entity_type != "kitchen_ticket"
+        && entity_type != "repair_intake"
+        && entity_type != "repair_label"
         && entity_type != "z_report"
         && entity_type != "shift_checkout"
         && entity_type != "delivery_slip"
@@ -664,7 +669,7 @@ pub fn enqueue_print_job_with_payload(
         && entity_type != "order_canceled_receipt"
     {
         return Err(format!(
-            "Invalid entity_type: {entity_type}. Must be order_receipt, kitchen_ticket, shift_checkout, z_report, delivery_slip, test_print, split_receipt, order_completed_receipt, or order_canceled_receipt"
+            "Invalid entity_type: {entity_type}. Must be order_receipt, kitchen_ticket, repair_intake, repair_label, shift_checkout, z_report, delivery_slip, test_print, split_receipt, order_completed_receipt, or order_canceled_receipt"
         ));
     }
 
@@ -6713,6 +6718,11 @@ fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &st
         .round() as i64;
     let delivery_sales =
         number_from_paths(payload, &["/sales/deliverySales", "/deliverySales"]).unwrap_or(0.0);
+    let repair_orders = number_from_paths(payload, &["/sales/repairOrders", "/repairOrders"])
+        .unwrap_or(0.0)
+        .round() as i64;
+    let repair_sales =
+        number_from_paths(payload, &["/sales/repairSales", "/repairSales"]).unwrap_or(0.0);
     let shift_count = number_from_paths(payload, &["/shiftCount", "/shift_count", "/shifts/total"])
         .map(|value| value.round() as i64)
         .filter(|count| *count > 0);
@@ -6777,6 +6787,8 @@ fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &st
         takeaway_sales,
         delivery_orders,
         delivery_sales,
+        repair_orders,
+        repair_sales,
         expense_lines: z_report_expense_entries(payload),
         platform_lines: z_report_platform_entries(payload),
         staff_payment_lines,
@@ -7019,6 +7031,14 @@ fn build_z_report_doc(db: &DbState, z_report_id: &str) -> Result<ZReportDoc, Str
             .pointer("/sales/deliverySales")
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0),
+        repair_orders: rj
+            .pointer("/sales/repairOrders")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0),
+        repair_sales: rj
+            .pointer("/sales/repairSales")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
         expense_lines: z_report_expense_entries(&rj),
         platform_lines: z_report_platform_entries(&rj),
         staff_payment_lines,
@@ -7097,6 +7117,28 @@ fn build_document_for_job(
         "kitchen_ticket" => Ok(ReceiptDocument::KitchenTicket(build_kitchen_ticket_doc(
             db, entity_id,
         )?)),
+        "repair_intake" => {
+            let payload = payload.ok_or("repair_intake requires a frozen safe payload")?;
+            let doc: RepairIntakeDoc = serde_json::from_value(payload)
+                .map_err(|error| format!("Invalid repair_intake safe payload: {error}"))?;
+            if doc.repair_id != entity_id {
+                return Err("repair_intake entity id does not match payload".into());
+            }
+            Ok(ReceiptDocument::RepairIntake(
+                receipt_renderer::normalize_repair_intake_doc(&doc)?,
+            ))
+        }
+        "repair_label" => {
+            let payload = payload.ok_or("repair_label requires a frozen safe payload")?;
+            let doc: RepairLabelDoc = serde_json::from_value(payload)
+                .map_err(|error| format!("Invalid repair_label safe payload: {error}"))?;
+            if doc.repair_id != entity_id {
+                return Err("repair_label entity id does not match payload".into());
+            }
+            Ok(ReceiptDocument::RepairLabel(
+                receipt_renderer::normalize_repair_label_doc(&doc)?,
+            ))
+        }
         "shift_checkout" => Ok(ReceiptDocument::ShiftCheckout(build_shift_checkout_doc(
             db,
             entity_id,
@@ -8314,6 +8356,8 @@ fn prepare_frozen_attempt_with_hooks(
         } else {
             let role = if entity_type == "kitchen_ticket" {
                 "kitchen"
+            } else if entity_type == "repair_label" {
+                "label"
             } else {
                 "receipt"
             };
@@ -9610,6 +9654,51 @@ mod tests {
             conn: Mutex::new(conn),
             db_path: PathBuf::from(":memory:"),
         }
+    }
+
+    #[test]
+    fn managed_repair_documents_require_matching_strict_safe_payloads() {
+        let db = test_db();
+        let repair_id = "11111111-1111-4111-8111-111111111111";
+        let safe = serde_json::json!({
+            "projection_source": "repair_authorized_projection_v1",
+            "projection_version": 7,
+            "projected_at": "2026-08-25T09:10:12Z",
+            "repair_id": repair_id,
+            "repair_number": "R-ATH-26-000001",
+            "customer_display_name": "Alex P.",
+            "safe_device_label": "Apple iPhone 15 - Black",
+            "masked_identifier": "IMEI **** 1234",
+            "received_at": "2026-08-25T09:10:11Z",
+            "branch_name": "Athens Central",
+            "branch_contact": "+30 210 000 0000"
+        });
+        let safe_json = safe.to_string();
+        assert!(matches!(
+            build_document_for_job(&db, "repair_intake", repair_id, Some(&safe_json)).unwrap(),
+            ReceiptDocument::RepairIntake(_)
+        ));
+        assert!(matches!(
+            build_document_for_job(&db, "repair_label", repair_id, Some(&safe_json)).unwrap(),
+            ReceiptDocument::RepairLabel(_)
+        ));
+
+        let mut unsafe_payload = safe;
+        unsafe_payload["private_notes"] = Value::String("secret".into());
+        assert!(build_document_for_job(
+            &db,
+            "repair_intake",
+            repair_id,
+            Some(&unsafe_payload.to_string()),
+        )
+        .is_err());
+        assert!(build_document_for_job(
+            &db,
+            "repair_label",
+            "22222222-2222-4222-8222-222222222222",
+            Some(&safe_json),
+        )
+        .is_err());
     }
 
     fn purge_result(rows_deleted: usize) -> crate::print_history::PrintJobPurgeResult {

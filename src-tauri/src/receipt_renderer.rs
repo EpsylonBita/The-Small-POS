@@ -325,6 +325,325 @@ pub struct KitchenTicketDoc {
     pub items: Vec<ReceiptItem>,
 }
 
+/// Strict, amount-free repair intake print contract.  The shape intentionally
+/// cannot carry diagnosis, private notes, full device identifiers, addresses,
+/// payment data or fiscal authority evidence.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct RepairIntakeDoc {
+    pub projection_source: String,
+    pub projection_version: i64,
+    pub projected_at: String,
+    pub repair_id: String,
+    pub repair_number: String,
+    #[serde(default)]
+    pub customer_display_name: Option<String>,
+    pub safe_device_label: String,
+    #[serde(default)]
+    pub masked_identifier: Option<String>,
+    pub received_at: String,
+    #[serde(default)]
+    pub due_at: Option<String>,
+    pub branch_name: String,
+    #[serde(default)]
+    pub branch_contact: Option<String>,
+}
+
+/// Compact repair label uses the same deliberately bounded safe projection.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct RepairLabelDoc {
+    pub projection_source: String,
+    pub projection_version: i64,
+    pub projected_at: String,
+    pub repair_id: String,
+    pub repair_number: String,
+    #[serde(default)]
+    pub customer_display_name: Option<String>,
+    pub safe_device_label: String,
+    #[serde(default)]
+    pub masked_identifier: Option<String>,
+    pub received_at: String,
+    #[serde(default)]
+    pub due_at: Option<String>,
+    pub branch_name: String,
+    #[serde(default)]
+    pub branch_contact: Option<String>,
+}
+
+fn sanitize_repair_print_text(value: &str, max_len: usize) -> Result<String, String> {
+    let cleaned = value
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if cleaned.is_empty() || cleaned.chars().count() > max_len {
+        return Err("repair print field length is invalid".to_string());
+    }
+    let lowered = cleaned.to_lowercase();
+    for prohibited in [
+        "diagnosis",
+        "diagnostic",
+        "private note",
+        "address",
+        "street",
+        "amount",
+        "subtotal",
+        "total",
+        "price",
+        "payment",
+        "receipt",
+        "fiscal",
+        "authority",
+        "password",
+        "cvv",
+    ] {
+        if lowered.contains(prohibited) {
+            return Err("prohibited repair print content".to_string());
+        }
+    }
+    if lowered
+        .split(|ch: char| !ch.is_alphanumeric())
+        .any(|token| matches!(token, "tax" | "vat" | "pin" | "pan"))
+    {
+        return Err("prohibited repair print content".to_string());
+    }
+    Ok(cleaned)
+}
+
+fn normalize_optional_repair_print_text(
+    value: Option<&str>,
+    max_len: usize,
+) -> Result<Option<String>, String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| sanitize_repair_print_text(value, max_len))
+        .transpose()
+}
+
+fn validate_repair_projection_header(
+    source: &str,
+    version: i64,
+    projected_at: &str,
+) -> Result<(), String> {
+    if source != "repair_authorized_projection_v1" || version <= 0 {
+        return Err("repair print projection is not server-authoritative".to_string());
+    }
+    DateTime::parse_from_rfc3339(projected_at)
+        .map_err(|_| "repair print projection timestamp is invalid".to_string())?;
+    Ok(())
+}
+
+fn validate_repair_number(value: &str) -> bool {
+    let parts = value.split('-').collect::<Vec<_>>();
+    (parts.len() == 4
+        && parts[0] == "R"
+        && (1..=12).contains(&parts[1].len())
+        && parts[1]
+            .chars()
+            .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
+        && parts[2].len() == 2
+        && parts[2].chars().all(|ch| ch.is_ascii_digit())
+        && parts[3].len() == 6
+        && parts[3].chars().all(|ch| ch.is_ascii_digit()))
+        || (parts.len() == 4
+            && parts[0] == "R"
+            && parts[1] == "OFF"
+            && parts[2].len() == 4
+            && parts[2]
+                .chars()
+                .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
+            && parts[3].len() == 6
+            && parts[3]
+                .chars()
+                .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit()))
+}
+
+fn validate_masked_identifier(value: &str) -> bool {
+    let mut parts = value.split_whitespace().collect::<Vec<_>>();
+    if matches!(
+        parts
+            .first()
+            .map(|value| value.to_ascii_uppercase())
+            .as_deref(),
+        Some("IMEI" | "SERIAL")
+    ) {
+        parts.remove(0);
+    }
+    if parts.len() != 2
+        || !(2..=4).contains(&parts[1].len())
+        || !parts[1].chars().all(|ch| ch.is_ascii_alphanumeric())
+    {
+        return false;
+    }
+    let mask = parts[0].chars().collect::<Vec<_>>();
+    mask.len() == 4 && mask.iter().all(|ch| matches!(ch, '*' | '•'))
+}
+
+pub(crate) fn normalize_repair_intake_doc(
+    doc: &RepairIntakeDoc,
+) -> Result<RepairIntakeDoc, String> {
+    validate_repair_projection_header(
+        &doc.projection_source,
+        doc.projection_version,
+        &doc.projected_at,
+    )?;
+    let repair_id = sanitize_repair_print_text(&doc.repair_id, 36)?;
+    let parsed_id = uuid::Uuid::parse_str(&repair_id)
+        .map_err(|_| "repair print repair id is invalid".to_string())?;
+    if repair_id.len() != 36 || parsed_id.hyphenated().to_string() != repair_id.to_ascii_lowercase()
+    {
+        return Err("repair print repair id is invalid".to_string());
+    }
+    let repair_number = sanitize_repair_print_text(&doc.repair_number, 32)?;
+    if !validate_repair_number(&repair_number) {
+        return Err("repair print repair number is invalid".to_string());
+    }
+    DateTime::parse_from_rfc3339(&doc.received_at)
+        .map_err(|_| "repair print received timestamp is invalid".to_string())?;
+    if let Some(due_at) = doc.due_at.as_deref() {
+        DateTime::parse_from_rfc3339(due_at)
+            .map_err(|_| "repair print due timestamp is invalid".to_string())?;
+    }
+    let masked_identifier =
+        normalize_optional_repair_print_text(doc.masked_identifier.as_deref(), 24)?;
+    if masked_identifier
+        .as_deref()
+        .is_some_and(|value| !validate_masked_identifier(value))
+    {
+        return Err("repair print identifier is not masked".to_string());
+    }
+    Ok(RepairIntakeDoc {
+        projection_source: doc.projection_source.clone(),
+        projection_version: doc.projection_version,
+        projected_at: doc.projected_at.clone(),
+        repair_id,
+        repair_number,
+        customer_display_name: normalize_optional_repair_print_text(
+            doc.customer_display_name.as_deref(),
+            120,
+        )?,
+        safe_device_label: sanitize_repair_print_text(&doc.safe_device_label, 160)?,
+        masked_identifier,
+        received_at: doc.received_at.clone(),
+        due_at: doc.due_at.clone(),
+        branch_name: sanitize_repair_print_text(&doc.branch_name, 120)?,
+        branch_contact: normalize_optional_repair_print_text(doc.branch_contact.as_deref(), 80)?,
+    })
+}
+
+pub(crate) fn normalize_repair_label_doc(doc: &RepairLabelDoc) -> Result<RepairLabelDoc, String> {
+    let intake = normalize_repair_intake_doc(&RepairIntakeDoc {
+        projection_source: doc.projection_source.clone(),
+        projection_version: doc.projection_version,
+        projected_at: doc.projected_at.clone(),
+        repair_id: doc.repair_id.clone(),
+        repair_number: doc.repair_number.clone(),
+        customer_display_name: doc.customer_display_name.clone(),
+        safe_device_label: doc.safe_device_label.clone(),
+        masked_identifier: doc.masked_identifier.clone(),
+        received_at: doc.received_at.clone(),
+        due_at: doc.due_at.clone(),
+        branch_name: doc.branch_name.clone(),
+        branch_contact: doc.branch_contact.clone(),
+    })?;
+    Ok(RepairLabelDoc {
+        projection_source: intake.projection_source,
+        projection_version: intake.projection_version,
+        projected_at: intake.projected_at,
+        repair_id: intake.repair_id,
+        repair_number: intake.repair_number,
+        customer_display_name: intake.customer_display_name,
+        safe_device_label: intake.safe_device_label,
+        masked_identifier: intake.masked_identifier,
+        received_at: intake.received_at,
+        due_at: intake.due_at,
+        branch_name: intake.branch_name,
+        branch_contact: intake.branch_contact,
+    })
+}
+
+fn code39_width_pattern(ch: char) -> Option<&'static str> {
+    Some(match ch {
+        '0' => "000110100",
+        '1' => "100100001",
+        '2' => "001100001",
+        '3' => "101100000",
+        '4' => "000110001",
+        '5' => "100110000",
+        '6' => "001110000",
+        '7' => "000100101",
+        '8' => "100100100",
+        '9' => "001100100",
+        'A' => "100001001",
+        'B' => "001001001",
+        'C' => "101001000",
+        'D' => "000011001",
+        'E' => "100011000",
+        'F' => "001011000",
+        'G' => "000001101",
+        'H' => "100001100",
+        'I' => "001001100",
+        'J' => "000011100",
+        'K' => "100000011",
+        'L' => "001000011",
+        'M' => "101000010",
+        'N' => "000010011",
+        'O' => "100010010",
+        'P' => "001010010",
+        'Q' => "000000111",
+        'R' => "100000110",
+        'S' => "001000110",
+        'T' => "000010110",
+        'U' => "110000001",
+        'V' => "011000001",
+        'W' => "111000000",
+        'X' => "010010001",
+        'Y' => "110010000",
+        'Z' => "011010000",
+        '-' => "010000101",
+        '*' => "010010100",
+        _ => return None,
+    })
+}
+
+fn repair_code39_pattern(repair_id: &str) -> Result<Vec<bool>, String> {
+    uuid::Uuid::parse_str(repair_id).map_err(|_| "repair barcode id is invalid".to_string())?;
+    let payload = format!("*REPAIR-{}*", repair_id.to_ascii_uppercase());
+    let mut modules = Vec::new();
+    for ch in payload.chars() {
+        let widths = code39_width_pattern(ch).ok_or("unsupported repair barcode character")?;
+        for (index, width) in widths.bytes().enumerate() {
+            let is_bar = index % 2 == 0;
+            let module_width = if width == b'1' { 3 } else { 1 };
+            modules.extend(std::iter::repeat(is_bar).take(module_width));
+        }
+        modules.push(false);
+    }
+    Ok(modules)
+}
+
+fn repair_barcode_svg(repair_id: &str) -> Result<String, String> {
+    let modules = repair_code39_pattern(repair_id)?;
+    let data = format!("repair:{repair_id}");
+    let mut bars = String::new();
+    for (x, is_bar) in modules.iter().enumerate() {
+        if *is_bar {
+            bars.push_str(&format!(
+                "<rect x=\"{}\" y=\"0\" width=\"1\" height=\"36\"/>",
+                x
+            ));
+        }
+    }
+    Ok(format!(
+        "<svg data-repair-barcode=\"{}\" viewBox=\"0 0 {} 36\" role=\"img\" aria-label=\"Repair barcode\">{}</svg>",
+        esc(&data), modules.len(), bars
+    ))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DriverDeliveryLine {
     pub order_number: String,
@@ -524,6 +843,10 @@ pub struct ZReportDoc {
     #[serde(default)]
     pub delivery_sales: f64,
     #[serde(default)]
+    pub repair_orders: i64,
+    #[serde(default)]
+    pub repair_sales: f64,
+    #[serde(default)]
     pub expense_lines: Vec<ZReportExpenseEntry>,
     #[serde(default)]
     pub staff_payment_lines: Vec<ZReportStaffPaymentEntry>,
@@ -538,6 +861,8 @@ pub struct ZReportDoc {
 pub enum ReceiptDocument {
     OrderReceipt(OrderReceiptDoc),
     KitchenTicket(KitchenTicketDoc),
+    RepairIntake(RepairIntakeDoc),
+    RepairLabel(RepairLabelDoc),
     ShiftCheckout(ShiftCheckoutDoc),
     ZReport(ZReportDoc),
     DeliverySlip(OrderReceiptDoc),
@@ -651,6 +976,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Discount" => "\u{0388}\u{03BA}\u{03C0}\u{03C4}\u{03C9}\u{03C3}\u{03B7}",
             "Tax" => "\u{03A6}\u{03A0}\u{0391}",
             "Delivery" => "\u{039C}\u{03B5}\u{03C4}\u{03B1}\u{03C6}\u{03BF}\u{03C1}\u{03B9}\u{03BA}\u{03AC}",
+            "Repairs" => "\u{0395}\u{03C0}\u{03B9}\u{03C3}\u{03BA}\u{03B5}\u{03C5}\u{03AD}\u{03C2}",
             "Tip" => "\u{03A6}\u{03B9}\u{03BB}\u{03BF}\u{03B4}\u{03CE}\u{03C1}\u{03B7}\u{03BC}\u{03B1}",
             "TOTAL" => "\u{03A3}\u{03A5}\u{039D}\u{039F}\u{039B}\u{039F}",
             "PAYMENT" => "\u{03A0}\u{039B}\u{0397}\u{03A1}\u{03A9}\u{039C}\u{0397}",
@@ -796,6 +1122,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Discount" => "Rabatt",
             "Tax" => "MwSt",
             "Delivery" => "Lieferung",
+            "Repairs" => "Reparaturen",
             "Tip" => "Trinkgeld",
             "TOTAL" => "GESAMT",
             "PAYMENT" => "ZAHLUNG",
@@ -940,6 +1267,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Discount" => "Remise",
             "Tax" => "TVA",
             "Delivery" => "Livraison",
+            "Repairs" => "Reparations",
             "Tip" => "Pourboire",
             "TOTAL" => "TOTAL",
             "PAYMENT" => "PAIEMENT",
@@ -1084,6 +1412,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Discount" => "Sconto",
             "Tax" => "IVA",
             "Delivery" => "Consegna",
+            "Repairs" => "Riparazioni",
             "Tip" => "Mancia",
             "TOTAL" => "TOTALE",
             "PAYMENT" => "PAGAMENTO",
@@ -3341,6 +3670,67 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
 
             html_shell("Order Receipt", &body, cfg)
         }
+        ReceiptDocument::RepairIntake(doc) => {
+            let mut body = String::new();
+            body.push_str("<div class=\"status-banner canceled\">NON-FISCAL / ΔΕΝ ΑΠΟΤΕΛΕΙ ΦΟΡΟΛΟΓΙΚΗ ΑΠΟΔΕΙΞΗ</div>");
+            body.push_str("<div class=\"sec-head\">REPAIR INTAKE / ΠΑΡΑΛΑΒΗ ΣΥΣΚΕΥΗΣ</div><div class=\"meta-grid\">");
+            for (label, value) in [
+                ("Repair", Some(doc.repair_number.as_str())),
+                ("Customer", doc.customer_display_name.as_deref()),
+                ("Device", Some(doc.safe_device_label.as_str())),
+                ("Identifier", doc.masked_identifier.as_deref()),
+                ("Received", Some(doc.received_at.as_str())),
+                ("Due", doc.due_at.as_deref()),
+                ("Branch", Some(doc.branch_name.as_str())),
+                ("Contact", doc.branch_contact.as_deref()),
+            ] {
+                if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+                    body.push_str(&format!(
+                        "<span class=\"k\">{}</span><span class=\"v\">{}</span>",
+                        esc(label),
+                        esc(value)
+                    ));
+                }
+            }
+            body.push_str("</div>");
+            body.push_str(&format!(
+                "<div class=\"center\"><strong>REPAIR-ID</strong><br>{}</div>",
+                esc(&doc.repair_id)
+            ));
+            if let Ok(barcode) = repair_barcode_svg(&doc.repair_id) {
+                body.push_str(&format!(
+                    "<div class=\"center repair-barcode\">{barcode}</div>"
+                ));
+            }
+            html_shell("Non-fiscal Repair Intake", &body, cfg)
+        }
+        ReceiptDocument::RepairLabel(doc) => {
+            let mut body = String::new();
+            body.push_str("<div class=\"status-banner canceled\">NON-FISCAL / ΔΕΝ ΑΠΟΤΕΛΕΙ ΦΟΡΟΛΟΓΙΚΗ ΑΠΟΔΕΙΞΗ</div>");
+            body.push_str(&format!(
+                "<div class=\"center\"><strong>{}</strong><br>{}</div>",
+                esc(&doc.repair_number),
+                esc(&doc.safe_device_label)
+            ));
+            if let Some(masked) = doc
+                .masked_identifier
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                body.push_str(&format!("<div class=\"center\">{}</div>", esc(masked)));
+            }
+            body.push_str(&format!(
+                "<div class=\"center\"><strong>REPAIR-ID</strong><br>{}</div>",
+                esc(&doc.repair_id)
+            ));
+            if let Ok(barcode) = repair_barcode_svg(&doc.repair_id) {
+                body.push_str(&format!(
+                    "<div class=\"center repair-barcode\">{barcode}</div>"
+                ));
+            }
+            html_shell("Non-fiscal Repair Label", &body, cfg)
+        }
         ReceiptDocument::KitchenTicket(doc) => {
             let lang = cfg.language.as_str();
             let mut body = String::new();
@@ -4064,8 +4454,10 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
             body.push_str("</div>");
 
             // Order breakdown
-            let has_breakdown =
-                doc.dine_in_orders > 0 || doc.takeaway_orders > 0 || doc.delivery_orders > 0;
+            let has_breakdown = doc.dine_in_orders > 0
+                || doc.takeaway_orders > 0
+                || doc.delivery_orders > 0
+                || doc.repair_orders > 0;
             if has_breakdown {
                 body.push_str(&format!(
                     "<div class=\"section\"><div class=\"center\"><strong>{}</strong></div>",
@@ -4093,6 +4485,14 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                         esc(receipt_label(lang, "Delivery")),
                         doc.delivery_orders,
                         money(doc.delivery_sales),
+                    ));
+                }
+                if doc.repair_orders > 0 {
+                    body.push_str(&format!(
+                        "<div class=\"line\"><span>{} ({})</span><span>{}</span></div>",
+                        esc(receipt_label(lang, "Repairs")),
+                        doc.repair_orders,
+                        money(doc.repair_sales),
                     ));
                 }
                 body.push_str("</div>");
@@ -5826,6 +6226,27 @@ impl TtfReceiptComposer {
         self.y += self.preset.contact_style.line_height;
     }
 
+    fn draw_repair_barcode(&mut self, repair_id: &str) -> Result<(), String> {
+        let modules = repair_code39_pattern(repair_id)?;
+        let module_width = (self.content_width / modules.len().max(1) as i32).max(1);
+        let barcode_width = module_width * modules.len() as i32;
+        let start_x = self.left_margin + (self.content_width - barcode_width).max(0) / 2;
+        let height = 48;
+        for (index, is_bar) in modules.iter().enumerate() {
+            if !is_bar {
+                continue;
+            }
+            let x = start_x + index as i32 * module_width;
+            for px in x..(x + module_width) {
+                for py in self.y..(self.y + height) {
+                    self.blend_pixel(px, py, 0, 1.0);
+                }
+            }
+        }
+        self.y += height + self.preset.small_gap;
+        Ok(())
+    }
+
     fn draw_reverse_banner(&mut self, text: &str) {
         let style = self.preset.banner_style;
         let banner_h = style.line_height + self.preset.banner_padding_y * 2;
@@ -7209,9 +7630,96 @@ fn render_classic_non_customer_raster_exact_ttf(
     let preset = canvas.preset;
     let cur = resolve_raster_currency_symbol(cfg, canvas.fonts);
 
-    emit_raster_common_header(&mut canvas, cfg, lang, preset);
+    if !matches!(
+        document,
+        ReceiptDocument::RepairIntake(_) | ReceiptDocument::RepairLabel(_)
+    ) {
+        emit_raster_common_header(&mut canvas, cfg, lang, preset);
+    }
 
     match document {
+        ReceiptDocument::RepairIntake(doc) => {
+            canvas.draw_reverse_banner("NON-FISCAL / ΔΕΝ ΑΠΟΤΕΛΕΙ ΦΟΡΟΛΟΓΙΚΗ ΑΠΟΔΕΙΞΗ");
+            canvas.draw_text_line(
+                "REPAIR INTAKE / ΠΑΡΑΛΑΒΗ",
+                BitmapAlign::Center,
+                preset.section_style,
+            );
+            canvas.draw_pair("Repair:", &doc.repair_number, preset.meta_style);
+            if let Some(value) = doc
+                .customer_display_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                canvas.draw_pair("Customer:", value, preset.meta_style);
+            }
+            canvas.draw_pair("Device:", &doc.safe_device_label, preset.meta_style);
+            if let Some(value) = doc
+                .masked_identifier
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                canvas.draw_pair("Identifier:", value, preset.meta_style);
+            }
+            canvas.draw_pair(
+                "Received:",
+                &format_datetime_human(&doc.received_at),
+                preset.meta_style,
+            );
+            if let Some(value) = doc
+                .due_at
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                canvas.draw_pair("Due:", &format_datetime_human(value), preset.meta_style);
+            }
+            canvas.draw_pair("Branch:", &doc.branch_name, preset.meta_style);
+            if let Some(value) = doc
+                .branch_contact
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                canvas.draw_pair("Contact:", value, preset.meta_style);
+            }
+            canvas.draw_rule();
+            canvas.draw_wrapped(
+                &format!("REPAIR-ID: {}", doc.repair_id),
+                BitmapAlign::Center,
+                preset.section_style,
+            );
+            canvas.draw_repair_barcode(&doc.repair_id)?;
+        }
+        ReceiptDocument::RepairLabel(doc) => {
+            canvas.draw_reverse_banner("NON-FISCAL / ΔΕΝ ΑΠΟΤΕΛΕΙ ΦΟΡΟΛΟΓΙΚΗ ΑΠΟΔΕΙΞΗ");
+            canvas.draw_text_line(
+                &doc.repair_number,
+                BitmapAlign::Center,
+                preset.section_style,
+            );
+            canvas.draw_wrapped(
+                &doc.safe_device_label,
+                BitmapAlign::Center,
+                preset.meta_style,
+            );
+            if let Some(value) = doc
+                .masked_identifier
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                canvas.draw_wrapped(value, BitmapAlign::Center, preset.meta_style);
+            }
+            canvas.draw_wrapped(
+                &format!("REPAIR-ID: {}", doc.repair_id),
+                BitmapAlign::Center,
+                preset.section_style,
+            );
+            canvas.draw_repair_barcode(&doc.repair_id)?;
+        }
         ReceiptDocument::KitchenTicket(doc) => {
             let title = receipt_label(lang, "KITCHEN TICKET").to_uppercase();
             canvas.draw_reverse_banner(&title);
@@ -7991,7 +8499,10 @@ fn render_classic_non_customer_raster_exact_ttf(
     // Skip "Thank you" footer for Z-report and shift-checkout receipts
     let skip_footer = matches!(
         document,
-        ReceiptDocument::ZReport(_) | ReceiptDocument::ShiftCheckout(_)
+        ReceiptDocument::ZReport(_)
+            | ReceiptDocument::ShiftCheckout(_)
+            | ReceiptDocument::RepairIntake(_)
+            | ReceiptDocument::RepairLabel(_)
     );
     if !skip_footer {
         emit_raster_common_footer(&mut canvas, cfg, lang, preset);
@@ -8013,6 +8524,8 @@ fn render_classic_raster_exact(
             render_classic_customer_raster_exact(document, cfg)
         }
         ReceiptDocument::KitchenTicket(_)
+        | ReceiptDocument::RepairIntake(_)
+        | ReceiptDocument::RepairLabel(_)
         | ReceiptDocument::ShiftCheckout(_)
         | ReceiptDocument::ZReport(_) => {
             let image = render_classic_non_customer_raster_exact_ttf(document, cfg)?;
@@ -8036,6 +8549,8 @@ pub fn render_classic_raster_exact_preview_data_url(
             }
         }
         ReceiptDocument::KitchenTicket(_)
+        | ReceiptDocument::RepairIntake(_)
+        | ReceiptDocument::RepairLabel(_)
         | ReceiptDocument::ShiftCheckout(_)
         | ReceiptDocument::ZReport(_) => {
             render_classic_non_customer_raster_exact_ttf(document, cfg)?
@@ -8823,7 +9338,12 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
     } else {
         cfg.paper_width.chars()
     };
-    emit_header(&mut builder, cfg, style, doc_target, &mut warnings);
+    if !matches!(
+        document,
+        ReceiptDocument::RepairIntake(_) | ReceiptDocument::RepairLabel(_)
+    ) {
+        emit_header(&mut builder, cfg, style, doc_target, &mut warnings);
+    }
 
     let lang = cfg.language.as_str();
     let comma = cfg.decimal_comma;
@@ -9384,6 +9904,95 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     builder.center().qr(qr).lf().left();
                 }
             }
+        }
+        ReceiptDocument::RepairIntake(doc) => {
+            builder.center().bold(true).reverse(true);
+            emit_centered_wrapped(
+                &mut builder,
+                "NON-FISCAL / ΔΕΝ ΑΠΟΤΕΛΕΙ ΦΟΡΟΛΟΓΙΚΗ ΑΠΟΔΕΙΞΗ",
+                width,
+            );
+            builder.reverse(false).bold(false).left();
+            emit_rule(&mut builder, width, '-');
+            builder
+                .center()
+                .bold(true)
+                .text("REPAIR INTAKE / ΠΑΡΑΛΑΒΗ")
+                .lf()
+                .bold(false)
+                .left();
+            emit_pair(&mut builder, "Repair", &doc.repair_number, width);
+            if let Some(value) = doc
+                .customer_display_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                emit_pair(&mut builder, "Customer", value, width);
+            }
+            emit_pair(&mut builder, "Device", &doc.safe_device_label, width);
+            if let Some(value) = doc
+                .masked_identifier
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                emit_pair(&mut builder, "Identifier", value, width);
+            }
+            emit_pair(
+                &mut builder,
+                "Received",
+                &format_datetime_human(&doc.received_at),
+                width,
+            );
+            if let Some(value) = doc
+                .due_at
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                emit_pair(&mut builder, "Due", &format_datetime_human(value), width);
+            }
+            emit_pair(&mut builder, "Branch", &doc.branch_name, width);
+            if let Some(value) = doc
+                .branch_contact
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                emit_pair(&mut builder, "Contact", value, width);
+            }
+            emit_rule(&mut builder, width, '-');
+            builder
+                .center()
+                .qr(&format!("repair:{}", doc.repair_id))
+                .lf()
+                .left();
+        }
+        ReceiptDocument::RepairLabel(doc) => {
+            builder.center().bold(true).reverse(true);
+            emit_centered_wrapped(
+                &mut builder,
+                "NON-FISCAL / ΔΕΝ ΑΠΟΤΕΛΕΙ ΦΟΡΟΛΟΓΙΚΗ ΑΠΟΔΕΙΞΗ",
+                width,
+            );
+            builder.reverse(false).bold(false).left();
+            builder
+                .center()
+                .bold(true)
+                .text(&doc.repair_number)
+                .lf()
+                .bold(false);
+            emit_centered_wrapped(&mut builder, &doc.safe_device_label, width);
+            if let Some(value) = doc
+                .masked_identifier
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                emit_centered_wrapped(&mut builder, value, width);
+            }
+            builder.qr(&format!("repair:{}", doc.repair_id)).lf().left();
         }
         ReceiptDocument::KitchenTicket(doc) => {
             let title = receipt_label(lang, "KITCHEN TICKET");
@@ -10211,8 +10820,10 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
             emit_rule(&mut builder, width, '-');
 
             // --- Order breakdown ---
-            let has_breakdown =
-                doc.dine_in_orders > 0 || doc.takeaway_orders > 0 || doc.delivery_orders > 0;
+            let has_breakdown = doc.dine_in_orders > 0
+                || doc.takeaway_orders > 0
+                || doc.delivery_orders > 0
+                || doc.repair_orders > 0;
             if has_breakdown {
                 builder
                     .bold(true)
@@ -10252,6 +10863,14 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                             doc.delivery_orders
                         ),
                         &money_locale(doc.delivery_sales, comma),
+                        width,
+                    );
+                }
+                if doc.repair_orders > 0 {
+                    emit_pair(
+                        &mut builder,
+                        &format!("{} ({})", receipt_label(lang, "Repairs"), doc.repair_orders),
+                        &money_locale(doc.repair_sales, comma),
                         width,
                     );
                 }
@@ -10503,46 +11122,51 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
         }
     }
 
-    if let Some(footer) = cfg
-        .footer_text
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-    {
-        builder.center();
-        if style.modern {
-            // Modern: spaced star separator + footer + closing star separator
-            let star_line: String = "* ".repeat(width / 2).trim_end().to_string();
-            builder.text(&star_line).lf();
-            let translated = receipt_label(lang, footer);
-            emit_wrapped(&mut builder, translated, width);
-            builder.text(&star_line).lf();
-        } else {
-            // Classic: dense asterisks + footer text (no sub-footer)
-            // Map generic "Thank you" to the longer "Thank you preference" for Classic
-            let footer_key = if footer == "Thank you" {
-                "Thank you preference"
-            } else {
-                footer
-            };
-            let translated = receipt_label(lang, footer_key);
-            if classic_customer_layout {
-                // Classic receipt v2.1: short top stars + long bottom stars.
-                let top_star_line = "*".repeat(14);
-                let bottom_star_line = "*".repeat(width.max(8));
-                emit_rule(&mut builder, width, style.profile.block_rule);
-                builder.lf();
-                builder.center().text(&top_star_line).lf();
-                emit_centered_wrapped(&mut builder, translated, width);
-                builder.left().text(&bottom_star_line).lf();
-            } else {
-                builder.lf().lf();
-                let star_line = "*".repeat(14);
+    if !matches!(
+        document,
+        ReceiptDocument::RepairIntake(_) | ReceiptDocument::RepairLabel(_)
+    ) {
+        if let Some(footer) = cfg
+            .footer_text
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            builder.center();
+            if style.modern {
+                // Modern: spaced star separator + footer + closing star separator
+                let star_line: String = "* ".repeat(width / 2).trim_end().to_string();
                 builder.text(&star_line).lf();
+                let translated = receipt_label(lang, footer);
                 emit_wrapped(&mut builder, translated, width);
+                builder.text(&star_line).lf();
+            } else {
+                // Classic: dense asterisks + footer text (no sub-footer)
+                // Map generic "Thank you" to the longer "Thank you preference" for Classic
+                let footer_key = if footer == "Thank you" {
+                    "Thank you preference"
+                } else {
+                    footer
+                };
+                let translated = receipt_label(lang, footer_key);
+                if classic_customer_layout {
+                    // Classic receipt v2.1: short top stars + long bottom stars.
+                    let top_star_line = "*".repeat(14);
+                    let bottom_star_line = "*".repeat(width.max(8));
+                    emit_rule(&mut builder, width, style.profile.block_rule);
+                    builder.lf();
+                    builder.center().text(&top_star_line).lf();
+                    emit_centered_wrapped(&mut builder, translated, width);
+                    builder.left().text(&bottom_star_line).lf();
+                } else {
+                    builder.lf().lf();
+                    let star_line = "*".repeat(14);
+                    builder.text(&star_line).lf();
+                    emit_wrapped(&mut builder, translated, width);
+                }
             }
+            builder.left();
         }
-        builder.left();
     }
     if use_star_commands {
         // Star Line Mode: LF feed + ESC d 1 partial cut.
@@ -10562,6 +11186,135 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn safe_repair_intake_doc() -> RepairIntakeDoc {
+        RepairIntakeDoc {
+            projection_source: "repair_authorized_projection_v1".into(),
+            projection_version: 7,
+            projected_at: "2026-08-25T09:10:12Z".into(),
+            repair_id: "11111111-1111-4111-8111-111111111111".into(),
+            repair_number: "R-ATH-26-000001".into(),
+            customer_display_name: Some("Alex P.".into()),
+            safe_device_label: "Apple iPhone 15 - Black".into(),
+            masked_identifier: Some("IMEI **** 1234".into()),
+            received_at: "2026-08-25T09:10:11Z".into(),
+            due_at: Some("2026-08-27T12:00:00Z".into()),
+            branch_name: "Athens Central".into(),
+            branch_contact: Some("+30 210 000 0000".into()),
+        }
+    }
+
+    #[test]
+    fn repair_intake_and_label_are_deterministic_non_fiscal_58_and_80mm() {
+        for paper_width in [PaperWidth::Mm58, PaperWidth::Mm80] {
+            let cfg = LayoutConfig {
+                paper_width,
+                language: "el".into(),
+                show_logo: false,
+                footer_text: Some("VAT 123 / receipt 999 / diagnosis secret".into()),
+                ..LayoutConfig::default()
+            };
+            let intake = ReceiptDocument::RepairIntake(safe_repair_intake_doc());
+            let label = ReceiptDocument::RepairLabel(RepairLabelDoc {
+                projection_source: "repair_authorized_projection_v1".into(),
+                projection_version: 7,
+                projected_at: "2026-08-25T09:10:12Z".into(),
+                repair_id: "11111111-1111-4111-8111-111111111111".into(),
+                repair_number: "R-ATH-26-000001".into(),
+                safe_device_label: "Apple iPhone 15 - Black".into(),
+                masked_identifier: Some("IMEI **** 1234".into()),
+                ..RepairLabelDoc::default()
+            });
+            let first = render_escpos(&intake, &cfg).bytes;
+            assert_eq!(first, render_escpos(&intake, &cfg).bytes);
+            let intake_text = String::from_utf8_lossy(&first);
+            assert!(intake_text.contains("NON-FISCAL"));
+            assert!(intake_text.contains("R-ATH-26-000001"));
+            assert!(intake_text.contains("repair:11111111-1111-4111-8111-111111111111"));
+            for forbidden in [
+                "receipt 999",
+                "diagnosis secret",
+                "amount due",
+                "PIN",
+                "CVV",
+            ] {
+                assert!(!intake_text.contains(forbidden));
+            }
+            let label_bytes = render_escpos(&label, &cfg).bytes;
+            assert_eq!(label_bytes, render_escpos(&label, &cfg).bytes);
+            assert!(String::from_utf8_lossy(&label_bytes).contains("NON-FISCAL"));
+
+            let html = render_html(&intake, &cfg);
+            assert!(html.contains("NON-FISCAL / ΔΕΝ ΑΠΟΤΕΛΕΙ ΦΟΡΟΛΟΓΙΚΗ ΑΠΟΔΕΙΞΗ"));
+            assert!(!html.contains("diagnosis secret"));
+            assert!(html
+                .contains("data-repair-barcode=\"repair:11111111-1111-4111-8111-111111111111\""));
+
+            let (raster, _) = render_classic_raster_exact_preview_data_url(&intake, &cfg)
+                .expect("repair raster preview");
+            assert!(raster.starts_with("data:image/png;base64,"));
+            assert!(
+                repair_code39_pattern("11111111-1111-4111-8111-111111111111")
+                    .expect("valid repair barcode")
+                    .len()
+                    > 100
+            );
+        }
+    }
+
+    #[test]
+    fn repair_print_contract_rejects_unknown_sensitive_fields() {
+        let value = serde_json::json!({
+            "repair_id": "11111111-1111-4111-8111-111111111111",
+            "repair_number": "R-ATH-26-000001",
+            "safe_device_label": "Phone",
+            "received_at": "2026-08-25T09:10:11Z",
+            "branch_name": "Athens",
+            "diagnosis": "private"
+        });
+        assert!(serde_json::from_value::<RepairIntakeDoc>(value).is_err());
+    }
+
+    #[test]
+    fn repair_print_projection_rejects_forged_or_unmasked_values_and_strips_controls() {
+        for mutate in [
+            ("repair_id", "not-a-uuid"),
+            ("received_at", "not-a-time"),
+            ("masked_identifier", "356938035643809"),
+            ("safe_device_label", "Diagnosis: board fault"),
+            ("branch_contact", "Address: 1 Main Street"),
+            ("safe_device_label", "Amount due EUR 99.00"),
+            ("projection_source", "client_supplied"),
+        ] {
+            let mut value = serde_json::to_value(safe_repair_intake_doc()).unwrap();
+            value[mutate.0] = serde_json::Value::String(mutate.1.into());
+            let doc: RepairIntakeDoc = serde_json::from_value(value).unwrap();
+            assert!(
+                normalize_repair_intake_doc(&doc).is_err(),
+                "accepted hostile {}",
+                mutate.0
+            );
+        }
+
+        let mut controlled = safe_repair_intake_doc();
+        controlled.customer_display_name = Some("Alex\u{1b}@P.\u{0}".into());
+        controlled.safe_device_label = "Apple\u{1d}VPhone".into();
+        let normalized = normalize_repair_intake_doc(&controlled).expect("sanitized projection");
+        assert_eq!(
+            normalized.customer_display_name.as_deref(),
+            Some("Alex @P.")
+        );
+        assert_eq!(normalized.safe_device_label, "Apple VPhone");
+        let bytes = render_escpos(
+            &ReceiptDocument::RepairIntake(normalized),
+            &LayoutConfig::default(),
+        )
+        .bytes;
+        // The encoder emits one initialize and one cut command. Sanitized field
+        // data must not inject additional control sequences.
+        assert_eq!(count_sequence(&bytes, &[0x1b, b'@']), 1);
+        assert_eq!(count_sequence(&bytes, &[0x1d, b'V']), 1);
+    }
 
     fn count_sequence(bytes: &[u8], seq: &[u8]) -> usize {
         if seq.is_empty() {

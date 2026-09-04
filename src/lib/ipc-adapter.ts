@@ -27,6 +27,8 @@ import {
   type PrintQueueSnapshot,
   type PrintQueueControlOptions,
 } from "../renderer/components/printing/print-queue-contract";
+import type { RepairBridge } from "../renderer/features/repairs/contracts";
+import type { CustomerMessagingBridge } from "../renderer/features/customer-messaging/contracts";
 import type {
   AuthSetupPinRequest,
   PrivilegedActionConfirmRequest,
@@ -95,6 +97,18 @@ export interface IpcResult<T = unknown> {
 
 export interface AdminApiBridgeResponse<T = unknown> extends IpcResult<T> {
   status?: number;
+}
+
+/**
+ * Frozen Task 9C renderer command for the online-only repair branch transfer.
+ * Tenant scope and authorization are intentionally absent: native code derives
+ * both and requires the attested `repairs.transfer` permission.
+ */
+export interface RepairTransferBranchCommand {
+  command: "transfer_branch";
+  payload: {
+    destination_branch_id: string;
+  };
 }
 
 export interface ReceiptSamplePreviewRequest {
@@ -1606,7 +1620,6 @@ export interface PlatformBridge {
     isConfigured(): Promise<SettingsConfiguredResponse>;
     getResetStatus(): Promise<ResetStatus | null>;
     factoryReset(): Promise<ResetStartResponse>;
-    emergencyReset(): Promise<ResetStartResponse>;
   };
 
   // -- Terminal config -------------------------------------------------------
@@ -2202,6 +2215,10 @@ export interface PlatformBridge {
     listActionLog(limit?: number): Promise<RecoveryActionLogEntry[]>;
   };
 
+  // -- Repairs ---------------------------------------------------------------
+  repairs: RepairBridge;
+  customerMessaging: CustomerMessagingBridge;
+
   /**
    * Raw invoke for channels not yet typed.
    *
@@ -2264,6 +2281,24 @@ export const CHANNEL_MAP: Record<string, string> = {
   "staff-auth:track-activity": "staffAuth.trackActivity",
   "staff-auth:verify-check-in-pin": "staffAuth.verifyCheckInPin",
   "staff-auth:refresh-directory": "staffAuth.refreshDirectory",
+
+  // Repairs. These map to strict named Rust commands whose sole renderer
+  // argument is `{ input }`, not the legacy positional `{ arg0 }` envelope.
+  "repairs:list": "repairs.list",
+  "repairs:workspace": "repairs.workspace",
+  "repairs:settings": "repairs.settings",
+  "repairs:money-request": "repairs.moneyRequest",
+  "repairs:search-customers": "repairs.searchCustomers",
+  "repairs:customer-devices": "repairs.customerDevices",
+  "repairs:create-customer-device": "repairs.createCustomerDevice",
+  "repairs:execute-command": "repairs.executeCommand",
+  "repairs:stage-attachment": "repairs.stageAttachment",
+  "repairs:list-attachments": "repairs.listAttachments",
+  "repairs:open-attachment": "repairs.openAttachment",
+  "repairs:list-conflicts": "repairs.listConflicts",
+  "repairs:resolve-conflict": "repairs.resolveConflict",
+  "repairs:print-projection": "repairs.printProjection",
+  "repairs:enqueue-print": "repairs.enqueuePrint",
 
   // Orders
   "order:get-all": "orders.getAll",
@@ -2377,7 +2412,6 @@ export const CHANNEL_MAP: Record<string, string> = {
   "settings:update-terminal-credentials": "settings.updateTerminalCredentials",
   "settings:is-configured": "settings.isConfigured",
   "settings:factory-reset": "settings.factoryReset",
-  "settings:emergency-reset": "settings.emergencyReset",
 
   // Terminal config
   "terminal-config:get-settings": "terminalConfig.getSettings",
@@ -2773,6 +2807,18 @@ export class TauriBridge implements PlatformBridge {
     return this.invoke(channel, ...args);
   }
 
+  /**
+   * Frozen repair IPC commands use a strict named `input` object. Keeping this
+   * separate from `inv()` prevents the legacy positional `arg0` envelope from
+   * crossing the repair trust boundary.
+   */
+  private repairInvoke<TInput extends object, TOutput>(
+    command: string,
+    input: TInput,
+  ): Promise<TOutput> {
+    return this.tauriInvoke(command, { input }) as Promise<TOutput>;
+  }
+
   private async adminFetch<T = unknown>(
     path: string,
     opts?: {
@@ -2852,6 +2898,87 @@ export class TauriBridge implements PlatformBridge {
     logout: () => this.inv("staff-auth:logout"),
     validateSession: () => this.inv("staff-auth:validate-session"),
     trackActivity: () => this.inv("staff-auth:track-activity"),
+  };
+
+  repairs: RepairBridge = {
+    list: (input) => this.repairInvoke("repairs_list", input),
+    workspace: (input) => this.repairInvoke("repairs_workspace", input),
+    settings: (input) => this.repairInvoke("repairs_settings", input),
+    moneyRequest: (input) => this.repairInvoke("repairs_money_request", input),
+    searchCustomers: (input) =>
+      this.repairInvoke("repairs_search_customers", input),
+    customerDevices: (input) =>
+      this.repairInvoke("repairs_customer_devices", input),
+    createCustomerDevice: (input) =>
+      this.repairInvoke("repairs_create_customer_device", input),
+    executeCommand: (input) =>
+      this.repairInvoke("repairs_execute_command", input),
+    stageAttachment: (input) =>
+      this.repairInvoke("repairs_stage_attachment", input),
+    listAttachments: (input) =>
+      this.repairInvoke("repairs_list_attachments", input),
+    openAttachment: (input) =>
+      this.repairInvoke("repairs_open_attachment", input),
+    listConflicts: (input) =>
+      this.repairInvoke("repairs_list_conflicts", input),
+    resolveConflict: (input) =>
+      this.repairInvoke("repairs_resolve_conflict", input),
+    printProjection: (input) =>
+      this.repairInvoke("repairs_print_projection", input),
+    enqueuePrint: (input) =>
+      this.repairInvoke("repairs_enqueue_print", input),
+  };
+
+  customerMessaging: CustomerMessagingBridge = {
+    history: (input) => this.repairInvoke("customer_messaging_request", {
+      staffSessionId: input.staffSessionId,
+      path: `/api/pos/customer-messaging?customer_id=${encodeURIComponent(input.customerId)}&limit=${input.limit}${input.before ? `&before=${encodeURIComponent(input.before)}` : ''}`,
+      method: "GET",
+    }),
+    preference: (input) => this.repairInvoke("customer_messaging_request", {
+      staffSessionId: input.staffSessionId,
+      path: "/api/pos/customer-messaging",
+      method: "POST",
+      body: {
+        customer_id: input.customerId,
+        decision: input.decision,
+        channel: input.channel,
+        connection_id: input.connectionId,
+        purpose: "transactional",
+      },
+    }),
+    send: (input) => this.repairInvoke("customer_messaging_request", {
+      staffSessionId: input.staffSessionId,
+      path: "/api/pos/customer-messaging/messages/send",
+      method: "POST",
+      body: {
+        customer_id: input.customerId,
+        repair_id: input.repairId,
+        repair_version: input.repairVersion,
+        idempotency_key: input.idempotencyKey,
+      },
+    }),
+    retry: (input) => this.repairInvoke("customer_messaging_request", {
+      staffSessionId: input.staffSessionId,
+      path: `/api/pos/customer-messaging/messages/${encodeURIComponent(input.messageId)}/retry`,
+      method: "POST",
+      body: { idempotency_key: input.idempotencyKey },
+    }),
+    link: async (input) => {
+      const result = await this.repairInvoke<Record<string, unknown>, {
+        session_id: string; deep_link: string; expires_at: string
+      }>("customer_messaging_request", {
+        staffSessionId: input.staffSessionId,
+        path: "/api/pos/customer-messaging/link-sessions",
+        method: "POST",
+        body: {
+          customer_id: input.customerId,
+          connection_id: input.connectionId,
+          ttl_seconds: input.expiresInSeconds,
+        },
+      });
+      return { sessionId: result.session_id, deepLink: result.deep_link, expiresAt: result.expires_at };
+    },
   };
 
   orders = {
@@ -3074,7 +3201,6 @@ export class TauriBridge implements PlatformBridge {
     isConfigured: () => this.inv("settings:is-configured"),
     getResetStatus: () => this.inv("settings:get-reset-status"),
     factoryReset: () => this.inv("settings:factory-reset"),
-    emergencyReset: () => this.inv("settings:emergency-reset"),
   };
 
   terminalConfig = {

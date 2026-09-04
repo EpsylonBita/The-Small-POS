@@ -67,11 +67,15 @@ mod printers;
 mod receipt_renderer;
 mod recovery;
 mod refunds;
+mod repair_attachment_cache;
+mod repair_transport;
+pub(crate) mod repairs;
 mod reset;
 mod scale;
 mod scanner;
 mod serial;
 mod shifts;
+mod startup_recovery;
 mod storage;
 mod sync;
 pub mod sync_queue; // pub so integration tests can call create_tables / enqueue_payload_item
@@ -155,24 +159,26 @@ pub(crate) fn value_i64(v: &serde_json::Value, keys: &[&str]) -> Option<i64> {
 }
 
 pub(crate) use core_helpers::{
-    build_admin_query, can_transition_locally, clear_operational_data_inner, fetch_supabase_rows,
-    normalize_status_for_storage, payload_arg0_as_string, read_module_cache, read_update_state,
-    stats_for_modules, update_info_from_release, validate_admin_api_path, write_module_cache,
-    write_update_state,
+    build_admin_query, can_transition_locally, clear_operational_data_after_repair_purge,
+    clear_operational_data_inner, clear_operational_data_while_repair_blocked, fetch_supabase_rows,
+    normalize_status_for_storage, payload_arg0_as_string, prepare_operational_clear,
+    read_module_cache, read_update_state, stats_for_modules, update_info_from_release,
+    validate_admin_api_path, write_module_cache, write_update_state,
 };
 pub(crate) use data_helpers::{
     load_orders_for_period, normalize_phone, parse_item_totals, read_local_json,
     read_local_json_array, resolve_order_id, validate_external_url, write_local_json,
 };
+#[cfg(test)]
+pub(crate) use terminal_helpers::clear_derived_terminal_context;
 pub(crate) use terminal_helpers::{
-    cache_terminal_settings_snapshot, clear_derived_terminal_context,
-    credential_key_for_terminal_setting, extract_branch_id_from_terminal_settings_response,
+    cache_terminal_settings_snapshot, credential_key_for_terminal_setting,
+    extract_branch_id_from_terminal_settings_response,
     extract_ghost_mode_feature_from_terminal_settings_response,
     extract_org_id_from_terminal_settings_response, handle_invalid_terminal_credentials,
     hydrate_terminal_credentials_from_local_settings, is_module_required_error,
-    is_sensitive_terminal_setting, is_terminal_auth_failure, mask_terminal_id,
-    purge_hydrated_terminal_credentials_from_local_settings, read_local_setting,
-    reconcile_terminal_identity_from_local_sources, scrub_sensitive_local_settings,
+    is_sensitive_setting_path, is_terminal_auth_failure, mask_terminal_id, read_local_setting,
+    scrub_sensitive_local_settings, scrub_sensitive_local_settings_checked,
     terminal_access_reset_reason, terminal_auth_failure_code, terminal_auth_failure_source,
     terminal_auth_failure_terminal_active,
 };
@@ -205,7 +211,6 @@ pub(crate) async fn maybe_lazy_warm_menu_cache(
         return;
     }
 
-    hydrate_terminal_credentials_from_local_settings(db);
     info!(
         source = %source,
         throttle_ms = MENU_WARMUP_THROTTLE_MS,
@@ -265,22 +270,24 @@ async fn admin_fetch(
 }
 
 /// Resolve the terminal's admin endpoint: the normalised dashboard URL and the
-/// keyring-held POS API key, self-healing both from an onboarding connection
-/// string when one is present.
+/// keyring-held POS API key. Connection strings are parsed only into ephemeral
+/// request credentials; publication belongs exclusively to the checked
+/// terminal lifecycle.
 ///
 /// Extracted verbatim from `admin_fetch_detailed` so that every transport —
 /// the JSON [`admin_fetch_detailed`] and the raw-bytes [`admin_fetch_raw`] —
 /// resolves credentials through exactly the same code path rather than a copy
 /// that can drift.
-async fn resolve_admin_endpoint(
+pub(crate) async fn resolve_admin_endpoint(
     db: Option<&db::DbState>,
 ) -> Result<(String, Zeroizing<String>), api::AdminFetchError> {
-    if let Some(db_state) = db {
-        hydrate_terminal_credentials_from_local_settings(db_state);
-    }
-
-    let mut raw_api_key: Zeroizing<String> = Zeroizing::new(
-        storage::get_credential("pos_api_key").ok_or("Terminal not configured: missing API key")?,
+    let strict_credential = |key: &str| {
+        storage::get_credential_strict(key)
+            .map(|value| value.map(|value| value.to_string()))
+            .map_err(|_| api::AdminFetchError::statusless("TERMINAL_CREDENTIAL_READ_FAILED"))
+    };
+    let raw_api_key: Zeroizing<String> = Zeroizing::new(
+        strict_credential("pos_api_key")?.ok_or("Terminal not configured: missing API key")?,
     );
     // Wave 9 H1: explicit `Zeroizing<String>` annotation ensures the clone
     // is also wrapped. `Zeroizing<T: Clone>` delegates `Clone` to produce
@@ -289,41 +296,43 @@ async fn resolve_admin_endpoint(
     // Clone implementation. The annotation pins the wrapping so the cloned
     // copy also zeroes on drop.
     let api_key_source: Zeroizing<String> = raw_api_key.clone();
-    if let Some(decoded_api_key) = api::extract_api_key_from_connection_string(&api_key_source) {
-        if *decoded_api_key != **raw_api_key {
-            let _ = storage::set_credential("pos_api_key", decoded_api_key.trim());
-            if let Some(db_state) = db {
-                if let Ok(conn) = db_state.conn.lock() {
-                    let _ =
-                        db::set_setting(&conn, "terminal", "pos_api_key", decoded_api_key.trim());
-                }
-            }
-            *raw_api_key = decoded_api_key;
-        }
-
-        if let Some(decoded_tid) = api::extract_terminal_id_from_connection_string(&api_key_source)
-        {
-            let _ = storage::set_credential("terminal_id", decoded_tid.trim());
-            if let Some(db_state) = db {
-                if let Ok(conn) = db_state.conn.lock() {
-                    let _ = db::set_setting(&conn, "terminal", "terminal_id", decoded_tid.trim());
-                }
-            }
-        }
+    let stored_terminal_id = strict_credential("terminal_id")?
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| api::AdminFetchError::statusless("TERMINAL_MANAGED_TUPLE_MISSING"))?;
+    let stored_admin_url = strict_credential("admin_dashboard_url")?
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| api::AdminFetchError::statusless("TERMINAL_MANAGED_TUPLE_MISSING"))?;
+    if db.is_some_and(commands::settings::terminal_connection_rebind_pending_fail_closed_public) {
+        return Err(api::AdminFetchError::statusless("TERMINAL_REBIND_PENDING"));
     }
 
-    let mut admin_url = storage::get_credential("admin_dashboard_url")
-        .or_else(|| {
-            db.and_then(|db_state| read_local_setting(db_state, "terminal", "admin_dashboard_url"))
-        })
-        .or_else(|| db.and_then(|db_state| read_local_setting(db_state, "terminal", "admin_url")))
-        .unwrap_or_default();
-
-    if admin_url.trim().is_empty() {
-        if let Some(decoded_url) = api::extract_admin_url_from_connection_string(&api_key_source) {
-            admin_url = decoded_url;
+    let decoded_api_key = api::extract_api_key_from_connection_string(&api_key_source);
+    let decoded_terminal_id = api::extract_terminal_id_from_connection_string(&api_key_source);
+    let decoded_admin_url = api::extract_admin_url_from_connection_string(&api_key_source);
+    let (api_key_value, admin_url) = match decoded_api_key {
+        Some(decoded_key) => {
+            let decoded_terminal_id = decoded_terminal_id
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    api::AdminFetchError::statusless("TERMINAL_CONNECTION_TUPLE_INVALID")
+                })?;
+            let decoded_admin_url = decoded_admin_url
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    api::AdminFetchError::statusless("TERMINAL_CONNECTION_TUPLE_INVALID")
+                })?;
+            if stored_terminal_id.trim() != decoded_terminal_id.trim()
+                || api::normalize_admin_url(&stored_admin_url)
+                    != api::normalize_admin_url(&decoded_admin_url)
+            {
+                return Err(api::AdminFetchError::statusless(
+                    "TERMINAL_CONNECTION_TUPLE_CONFLICT",
+                ));
+            }
+            (decoded_key, decoded_admin_url)
         }
-    }
+        None => (raw_api_key.trim().to_string(), stored_admin_url),
+    };
 
     let normalized_admin_url = api::normalize_admin_url(&admin_url);
     if normalized_admin_url.trim().is_empty() {
@@ -332,25 +341,7 @@ async fn resolve_admin_endpoint(
         ));
     }
 
-    if storage::get_credential("admin_dashboard_url")
-        .map(|v| v.trim().to_string())
-        .as_deref()
-        != Some(normalized_admin_url.trim())
-    {
-        let _ = storage::set_credential("admin_dashboard_url", normalized_admin_url.trim());
-        if let Some(db_state) = db {
-            if let Ok(conn) = db_state.conn.lock() {
-                let _ = db::set_setting(
-                    &conn,
-                    "terminal",
-                    "admin_dashboard_url",
-                    normalized_admin_url.trim(),
-                );
-            }
-        }
-    }
-
-    let api_key = Zeroizing::new(raw_api_key.trim().to_string());
+    let api_key = Zeroizing::new(api_key_value.trim().to_string());
     if api_key.is_empty() {
         return Err(api::AdminFetchError::statusless(
             "Terminal not configured: missing API key",
@@ -358,6 +349,207 @@ async fn resolve_admin_endpoint(
     }
 
     Ok((normalized_admin_url, api_key))
+}
+
+#[cfg(test)]
+mod admin_endpoint_lifecycle_tests {
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn conflicting_connection_tuple_fails_before_json_request() {
+        let server_a = crate::tests::fake_http::MockServer::new(r#"{"ok":true}"#);
+        let server_b = crate::tests::fake_http::MockServer::new(r#"{"ok":true}"#);
+        let connection_string = format!(
+            r#"{{"key":"decoded-b-key","tid":"terminal-b","url":"{}"}}"#,
+            server_b.url
+        );
+        let _keyring = crate::tests::fake_keyring::install_seeded([
+            ("pos_api_key", connection_string.as_str()),
+            ("terminal_id", "terminal-a"),
+            ("admin_dashboard_url", server_a.url.as_str()),
+            ("organization_id", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+            ("branch_id", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+            (crate::storage::KEY_REPAIR_ACTOR_ATTESTATION_V1, "actor-a"),
+            ("pos_session", "session-a"),
+        ]);
+        let database = crate::tests::harness::TestDb::open();
+        {
+            let connection = database.state.conn.lock().expect("seed tuple A mirrors");
+            for (key, value) in [
+                ("terminal_id", "terminal-a"),
+                ("admin_dashboard_url", server_a.url.as_str()),
+                ("organization_id", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+                ("branch_id", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+            ] {
+                crate::db::set_setting(&connection, "terminal", key, value)
+                    .expect("seed tuple A mirror");
+            }
+            crate::db::set_setting(&connection, "orders", "old_tenant_row", "opaque-a")
+                .expect("seed operational sentinel");
+        }
+        let before = {
+            let connection = database
+                .state
+                .conn
+                .lock()
+                .expect("snapshot before resolver");
+            crate::db::get_all_settings(&connection)
+        };
+
+        let error = super::admin_fetch_detailed(
+            Some(&database.state),
+            "/api/pos/modules/enabled",
+            "GET",
+            None,
+        )
+        .await
+        .expect_err("conflicting endpoint tuple must fail before HTTP");
+        let rendered = error.to_string();
+        assert!(!rendered.contains("decoded-b-key"));
+        assert!(!rendered.contains(&server_a.url));
+        assert!(!rendered.contains(&server_b.url));
+        assert_eq!(server_a.count(), 0);
+        assert_eq!(server_b.count(), 0);
+
+        let after = {
+            let connection = database.state.conn.lock().expect("snapshot after resolver");
+            crate::db::get_all_settings(&connection)
+        };
+        assert_eq!(
+            after, before,
+            "endpoint resolution persisted derived identity"
+        );
+        assert_eq!(
+            crate::storage::get_credential("pos_api_key").as_deref(),
+            Some(connection_string.as_str())
+        );
+        assert_eq!(
+            crate::storage::get_credential("terminal_id").as_deref(),
+            Some("terminal-a")
+        );
+        assert_eq!(
+            crate::storage::get_credential(crate::storage::KEY_REPAIR_ACTOR_ATTESTATION_V1)
+                .as_deref(),
+            Some("actor-a")
+        );
+        assert_eq!(crate::storage::session_get().as_deref(), Some("session-a"));
+        assert!(crate::read_local_setting(&database.state, "terminal", "pos_api_key").is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn strict_admin_url_read_failure_never_falls_back_or_requests() {
+        let server = crate::tests::fake_http::MockServer::new(r#"{"ok":true}"#);
+        let _keyring = crate::tests::fake_keyring::install_seeded([
+            ("pos_api_key", "plain-api-key"),
+            ("terminal_id", "terminal-a"),
+            ("admin_dashboard_url", server.url.as_str()),
+        ]);
+        let database = crate::tests::harness::TestDb::open();
+        {
+            let connection = database.state.conn.lock().expect("seed stale URL fallback");
+            crate::db::set_setting(
+                &connection,
+                "terminal",
+                "admin_dashboard_url",
+                server.url.as_str(),
+            )
+            .expect("seed stale URL fallback");
+        }
+        crate::tests::fake_keyring::fail_reads_for(
+            "admin_dashboard_url",
+            "private backend diagnostic",
+        );
+
+        let error = super::admin_fetch_detailed(
+            Some(&database.state),
+            "/api/pos/modules/enabled",
+            "GET",
+            None,
+        )
+        .await
+        .expect_err("strict keyring failure must stop before SQLite fallback");
+        assert_eq!(server.count(), 0);
+        assert!(!error.to_string().contains("private backend diagnostic"));
+        assert!(!error.to_string().contains("plain-api-key"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn missing_managed_terminal_or_admin_never_adopts_sqlite_or_decoded_tuple() {
+        {
+            let server = crate::tests::fake_http::MockServer::new(r#"{"ok":true}"#);
+            let _keyring = crate::tests::fake_keyring::install_seeded([
+                ("pos_api_key", "plain-api-key"),
+                ("terminal_id", "managed-terminal"),
+            ]);
+            let database = crate::tests::harness::TestDb::open();
+            {
+                let connection = database.state.conn.lock().expect("seed hostile fallback");
+                crate::db::set_setting(
+                    &connection,
+                    "terminal",
+                    "admin_dashboard_url",
+                    server.url.as_str(),
+                )
+                .expect("seed hostile URL");
+            }
+            super::admin_fetch_detailed(
+                Some(&database.state),
+                "/api/pos/modules/enabled",
+                "GET",
+                None,
+            )
+            .await
+            .expect_err("missing managed tuple member must fail before fallback or HTTP");
+            assert_eq!(server.count(), 0, "missing managed Admin URL reached HTTP");
+            assert!(crate::storage::get_credential("admin_dashboard_url").is_none());
+        }
+
+        {
+            let server = crate::tests::fake_http::MockServer::new(r#"{"ok":true}"#);
+            let connection_string = format!(
+                r#"{{"key":"decoded-secret","tid":"decoded-terminal","url":"{}"}}"#,
+                server.url
+            );
+            let _keyring = crate::tests::fake_keyring::install_seeded([
+                ("pos_api_key", connection_string.as_str()),
+                ("admin_dashboard_url", server.url.as_str()),
+            ]);
+            let database = crate::tests::harness::TestDb::open();
+            {
+                let connection = database.state.conn.lock().expect("seed matching fallback");
+                crate::db::set_setting(&connection, "terminal", "terminal_id", "decoded-terminal")
+                    .expect("seed matching decoded terminal");
+            }
+            let error = super::admin_fetch_detailed(
+                Some(&database.state),
+                "/api/pos/modules/enabled",
+                "GET",
+                None,
+            )
+            .await
+            .expect_err("missing managed terminal must not adopt matching decoded/SQLite tuple");
+            assert_eq!(server.count(), 0, "missing managed terminal reached HTTP");
+            assert!(!error.to_string().contains("decoded-secret"));
+            assert!(crate::storage::get_credential("terminal_id").is_none());
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn coherent_plain_tuple_reaches_exactly_one_server() {
+        let server = crate::tests::fake_http::MockServer::new(r#"{"ok":true}"#);
+        let _keyring = crate::tests::fake_keyring::install_seeded([
+            ("pos_api_key", "plain-api-key"),
+            ("terminal_id", "terminal-a"),
+            ("admin_dashboard_url", server.url.as_str()),
+        ]);
+        let response = super::admin_fetch_detailed(None, "/api/pos/modules/enabled", "GET", None)
+            .await
+            .expect("coherent request tuple remains valid");
+        assert_eq!(response, serde_json::json!({"ok": true}));
+        assert_eq!(server.count(), 1);
+    }
 }
 
 async fn admin_fetch_detailed(
@@ -546,15 +738,75 @@ pub(crate) fn write_system_clipboard_text(text: &str) -> Result<(), String> {
 // ============================================================================
 
 pub fn run() {
-    match reset::maybe_run_reset_helper_from_args() {
-        Ok(true) => return,
-        Ok(false) => {}
+    let startup_mode = match startup_recovery::parse_process_startup_mode() {
+        Ok(mode) => mode,
         Err(error) => {
-            eprintln!("reset helper failed: {error}");
-            std::process::exit(1);
+            eprintln!("startup rejected: {error}");
+            startup_recovery::show_native_startup_failure(
+                startup_recovery::NativeStartupFailure::InvalidArguments,
+            );
+            std::process::exit(2);
         }
+    };
+
+    if let startup_recovery::StartupMode::ResetHelper(manifest_path) = startup_mode {
+        reset::run_reset_helper_process_with(
+            &manifest_path,
+            reset::run_reset_helper,
+            |code, error| {
+                eprintln!("reset helper failed: {error}");
+                std::process::exit(code);
+            },
+        );
+        return;
     }
 
+    let context = tauri::generate_context!();
+    let compiled_identifier = context.config().identifier.clone();
+    let emergency_mode = matches!(
+        startup_mode,
+        startup_recovery::StartupMode::EmergencyRecovery
+    );
+    let result = startup_recovery::run_startup_with(
+        startup_mode,
+        || startup_recovery::acquire_runtime_mutex_for_identifier(&compiled_identifier),
+        |_| Err("RESET_HELPER_DISPATCH_ORDER_VIOLATION".to_string()),
+        || {
+            match startup_recovery::run_native_emergency_recovery(&compiled_identifier)? {
+                startup_recovery::EmergencyRecoveryDisposition::Cancelled => {}
+                startup_recovery::EmergencyRecoveryDisposition::Accepted(_) => {
+                    eprintln!("emergency recovery helper accepted ownership");
+                }
+                startup_recovery::EmergencyRecoveryDisposition::NotStarted(error) => {
+                    eprintln!("emergency recovery helper was not started: {error}");
+                    startup_recovery::show_native_startup_failure(
+                        startup_recovery::NativeStartupFailure::ResetNotStarted,
+                    );
+                }
+            }
+            Ok(())
+        },
+        || {
+            reset::prepare_normal_startup_after_reset()?;
+            run_normal(context);
+            Ok(())
+        },
+    );
+    if let Err(error) = result {
+        if error == "POS_ALREADY_RUNNING" {
+            startup_recovery::show_native_already_running();
+        } else {
+            eprintln!("startup failed: {error}");
+            startup_recovery::show_native_startup_failure(if emergency_mode {
+                startup_recovery::NativeStartupFailure::EmergencyRecoveryFailed
+            } else {
+                startup_recovery::NativeStartupFailure::NormalStartupFailed
+            });
+        }
+    }
+}
+
+fn run_normal(context: tauri::Context<tauri::Wry>) {
     // Record start time for uptime tracking
     let epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -665,6 +917,19 @@ pub fn run() {
                 e
             })?;
 
+            match app.path().app_cache_dir() {
+                Ok(app_cache_dir) => {
+                    if let Err(error) = repair_attachment_cache::initialize(&app_cache_dir) {
+                        error!(error = %error, "Repair attachment cache startup purge failed closed");
+                        repairs::latch_startup_maintenance_failure();
+                    }
+                }
+                Err(error) => {
+                    error!(error = %error, "Repair attachment cache path is unavailable");
+                    repairs::latch_startup_maintenance_failure();
+                }
+            }
+
             if let Err(error) = recovery::ensure_recovery_dirs(&app_data_dir) {
                 warn!(error = %error, "Failed to ensure recovery directories");
             }
@@ -682,12 +947,13 @@ pub fn run() {
             {
                 warn!(error = %error, "Failed to purge legacy Caller ID API cache");
             }
-            // Migrate credentials from legacy plaintext `local_settings` rows
-            // into the OS keyring, then purge the plaintext rows that have
-            // been successfully migrated. Hydrate must run before purge so a
-            // keyring-only failure doesn't wipe the plaintext fallback.
-            hydrate_terminal_credentials_from_local_settings(&db_state);
-            purge_hydrated_terminal_credentials_from_local_settings(&db_state);
+            if let Err(error) = commands::api_bridge::purge_repair_admin_cache(&db_state) {
+                warn!(error = %error, "Failed to purge legacy repair API cache");
+            }
+            if let Err(error) = scrub_sensitive_local_settings_checked(&db_state) {
+                error!(error = %error, "Failed to scrub protected local settings");
+                repairs::latch_startup_maintenance_failure();
+            }
             let caller_id_manager = Arc::new(callerid::CallerIdManager::new());
             app.manage(db_state);
 
@@ -734,8 +1000,53 @@ pub fn run() {
 
             {
                 let db_state = app.state::<db::DbState>();
-                hydrate_terminal_credentials_from_local_settings(&db_state);
-                let _ = reconcile_terminal_identity_from_local_sources(&db_state);
+                if let Err(error) =
+                    commands::settings::reconcile_startup_terminal_binding(&db_state)
+                {
+                    error!("Terminal identity reconciliation failed; repair access remains blocked: {error}");
+                    repairs::latch_startup_maintenance_failure();
+                }
+            }
+
+            if let Some(db_for_startup) = db_for_startup.as_ref() {
+                match db_for_startup.conn.lock() {
+                    Ok(connection) => match repairs::run_startup_staging_janitor(&connection) {
+                        Ok(report) => {
+                            if report.cleanup_failures > 0 {
+                                warn!(
+                                    cleaned_terminal_rows = report.cleaned_terminal_rows,
+                                    deferred_live_queue_rows = report.deferred_live_queue_rows,
+                                    cleanup_failures = report.cleanup_failures,
+                                    orphan_part_files_removed = report.orphan_part_files_removed,
+                                    orphan_bin_files_removed = report.orphan_bin_files_removed,
+                                    "Repair staging startup janitor completed with deferred cleanup"
+                                );
+                            } else if report.cleaned_terminal_rows > 0
+                                || report.deferred_live_queue_rows > 0
+                                || report.orphan_part_files_removed > 0
+                                || report.orphan_bin_files_removed > 0
+                            {
+                                info!(
+                                    cleaned_terminal_rows = report.cleaned_terminal_rows,
+                                    deferred_live_queue_rows = report.deferred_live_queue_rows,
+                                    orphan_part_files_removed = report.orphan_part_files_removed,
+                                    orphan_bin_files_removed = report.orphan_bin_files_removed,
+                                    "Repair staging startup janitor completed"
+                                );
+                            }
+                        }
+                        Err(code) => {
+                            warn!(
+                                error_code = %code,
+                                "Repair staging startup janitor failed closed"
+                            );
+                        }
+                    },
+                    Err(_) => {
+                        repairs::latch_startup_maintenance_failure();
+                        warn!("Repair staging startup janitor could not lock SQLite");
+                    }
+                }
             }
 
             // Start background sync loop (15s interval)
@@ -1021,7 +1332,6 @@ pub fn run() {
             commands::settings::settings_set,
             commands::settings::settings_update_local,
             commands::settings::settings_factory_reset,
-            commands::settings::settings_emergency_reset,
             commands::settings::settings_update_terminal_credentials,
             commands::settings::settings_get_admin_url,
             commands::settings::settings_clear_connection,
@@ -1192,6 +1502,8 @@ pub fn run() {
             commands::zreports::zreport_get,
             commands::zreports::zreport_list,
             commands::zreports::zreport_print,
+            commands::zreports::repair_reporting_projection_apply,
+            commands::zreports::repair_reporting_projection_invalidate,
             // Print
             commands::print::payment_print_receipt,
             commands::print::kitchen_print_ticket,
@@ -1435,9 +1747,27 @@ pub fn run() {
             commands::updates::update_set_channel,
             // API proxy
             commands::api_bridge::api_fetch_from_admin,
+            commands::api_bridge::customer_messaging_request,
             commands::api_bridge::api_list_cached_paths,
             commands::api_bridge::sync_test_parent_connection,
             commands::api_bridge::admin_sync_terminal_config,
+            // Renderer-safe Repairs IPC. The raw JSON transport remains an
+            // internal implementation detail and is deliberately not invoked.
+            commands::repairs::repairs_list,
+            commands::repairs::repairs_workspace,
+            commands::repairs::repairs_settings,
+            commands::repairs::repairs_money_request,
+            commands::repairs::repairs_search_customers,
+            commands::repairs::repairs_customer_devices,
+            commands::repairs::repairs_create_customer_device,
+            commands::repairs::repairs_execute_command,
+            commands::repairs::repairs_stage_attachment,
+            commands::repairs::repairs_list_attachments,
+            commands::repairs::repairs_open_attachment,
+            commands::repairs::repairs_list_conflicts,
+            commands::repairs::repairs_resolve_conflict,
+            commands::repairs::repairs_print_projection,
+            commands::repairs::repairs_enqueue_print,
             // Invoice capture
             capture::watcher::capture_attach_rendered_pages,
             commands::capture_documents::capture_list_documents,
@@ -1453,7 +1783,7 @@ pub fn run() {
             commands::capture_documents::capture_remove_page,
             commands::capture_documents::capture_reorder_pages,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building The Small POS")
         .run(|app, event| {
             use tauri::Manager;
@@ -1462,6 +1792,9 @@ pub fn run() {
                 if let Some(token) = app.try_state::<tokio_util::sync::CancellationToken>() {
                     info!("Exit requested — cancelling background tasks");
                     token.cancel();
+                }
+                if let Err(error) = repair_attachment_cache::purge_all() {
+                    warn!(error = %error, "Failed to purge repair attachment cache on exit");
                 }
             }
         });
