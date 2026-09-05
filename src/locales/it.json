@@ -4536,6 +4536,8 @@
       "namePlaceholder": "Inserisci il nome completo",
       "phoneLabel": "Numero di telefono *",
       "phonePlaceholder": "Inserisci il numero di telefono",
+      "phoneCountryLabel": "[NEEDS TRANSLATION] Phone country (ISO)",
+      "phoneCountryRequired": "[NEEDS TRANSLATION] Use a 2-letter ISO phone country code",
       "emailLabel": "Email (facoltativo)",
       "emailPlaceholder": "Inserisci l'indirizzo email",
       "nameOnRingerLabel": "Nome sul citofono *",

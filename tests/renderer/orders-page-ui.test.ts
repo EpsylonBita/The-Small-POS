@@ -957,7 +957,9 @@ test('main layout does not wrap order and table dashboards in a page scroll root
   );
   assert.match(
     layoutSource,
-    /const locksPageScroll = currentView === 'orders' \|\| currentView === 'tables';/,
+    // Orders and tables must always lock page scroll; other views (repairs, since 2026-09)
+    // may join the disjunction without changing that contract.
+    /const locksPageScroll = currentView === 'orders' \|\| currentView === 'tables'(?: \|\| currentView === '[a-z_]+')*;/,
     'orders and table dashboards should not inherit the outer page scroll container',
   );
   assert.match(

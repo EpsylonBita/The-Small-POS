@@ -209,8 +209,13 @@ test('Plugin setup modals keep light-theme text and controls readable', () => {
 // src/renderer/pages/__tests__/IntegrationsPage.box-admin-setup.test.tsx (vitest); this
 // guard pins the source-level contract so the fallback set and the flag cannot drift.
 test('BOX is Admin-Dashboard-managed on the till (no credential form, data-driven flag)', () => {
-  // Local fallback set includes box next to efood.
-  assert.match(source, /const ADMIN_DASHBOARD_SETUP_PLUGIN_IDS = new Set\(\['caller_id', 'efood', 'box'\]\);/);
+  // Local fallback set includes box next to efood. The set went multi-line when
+  // customer_messaging joined it, so pin membership rather than the literal's shape.
+  const fallbackSet = source.match(/const ADMIN_DASHBOARD_SETUP_PLUGIN_IDS = new Set\(\[([\s\S]*?)\]\);/);
+  assert.ok(fallbackSet, 'Admin-Dashboard-managed fallback set present');
+  for (const id of ['caller_id', 'efood', 'box']) {
+    assert.match(fallbackSet[1], new RegExp(`'${id}'`), `${id} is in the Admin-Dashboard-managed fallback set`);
+  }
 
   // The server flag wins when present; the set is only the fallback.
   assert.match(source, /read_only_admin_setup\?: boolean;/);
