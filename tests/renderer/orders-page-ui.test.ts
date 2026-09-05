@@ -1510,7 +1510,10 @@ test('TablesDashboard uses aria-labels, not native title tooltips, for refresh +
 // The mounted dashboard now opens the declarative +New registry. It retains the
 // touch-first accessible FAB contract and routes ready sale/appointment actions
 // into their existing flows; repair actions remain disabled Task 9 placeholders.
-test('OrderDashboard +New FAB uses aria-label and opens the declarative primary actions', () => {
+// v1.4.94 (founder, 05/09/2026): the (+) opens ONE picker with the business's
+// capabilities. The launcher is a plain shift/module-aware trigger and the
+// order-type modal IS the picker — no intermediate «Νέο» chooser.
+test('OrderDashboard +New FAB uses aria-label and opens the unified new-work picker', () => {
   const source = orderDashboardSource();
 
   assert.match(source, /export function OrderPrimaryActionLauncher\(/);
@@ -1518,18 +1521,25 @@ test('OrderDashboard +New FAB uses aria-label and opens the declarative primary 
   assert.match(source, /aria-label=\{t\("primaryActions\.trigger"\)\}/);
   assert.match(source, /positionStorageKey="pos-orders-new-order-fab-position"/);
   assert.match(source, /disabled=\{!canOpen\}/);
-  assert.match(source, /actions\.map\(\(action\) =>/);
-  assert.match(source, /data-primary-action=\{action\.id\}/);
-  assert.match(source, /action\.id === "new_sale"[\s\S]*?!isShiftActive/);
-  assert.match(source, /action\.id === "new_sale"\) onNewSale\(\)/);
-  assert.match(source, /action\.id === "new_appointment"\) onNewAppointment\(\)/);
+  assert.match(source, /onClick=\{onOpen\}/);
+  // The launcher renders no chooser of its own any more.
+  assert.doesNotMatch(source, /actions\.map\(\(action\) =>/);
+  assert.doesNotMatch(source, /data-primary-action=\{action\.id\}/);
+  // It is wired to the resolver-driven picker: canOpen comes from the card set,
+  // onOpen opens the order-type modal directly.
+  assert.match(source, /const newWorkCards = resolveNewWorkCards\(\{/);
+  assert.match(source, /const canLaunchNewWork = hasLaunchableNewWork\(newWorkCards\);/);
   assert.match(
     source,
-    /<OrderPrimaryActionLauncher[\s\S]*?actions=\{primaryActions\}[\s\S]*?isShiftActive=\{isShiftActive\}[\s\S]*?onNewSale=\{handleNewOrderClick\}[\s\S]*?onNewAppointment=\{handleSelectServiceFlow\}/,
+    /<OrderPrimaryActionLauncher[\s\S]*?canOpen=\{canLaunchNewWork\}[\s\S]*?onOpen=\{handleNewOrderClick\}/,
   );
+  // The picker carries the capability cards for the non-order modules too.
+  assert.match(source, /data-order-type-card="repair"/);
+  assert.match(source, /data-order-type-card="quick_service"/);
+  assert.match(source, /\{newWorkCard\("pickup"\) && \(/);
 
   // The visible modal HEADING title props (component headings, not DOM tooltips) remain allowed.
-  assert.match(source, /title=\{t\("orderFlow\.selectOrderType"\)/);
+  assert.match(source, /title=\{t\("primaryActions\.trigger"\)\}/);
   assert.match(source, /title=\{t\("orderDashboard\.receiptPreview"\)/);
 });
 
@@ -2094,19 +2104,28 @@ test('OrderDashboard order-type chooser adapts its width/grid for up to five car
   // The old unconditional >=4 three-column track is gone (it caused the 3+2 hole at five cards).
   assert.doesNotMatch(source, /visibleOrderTypeCardCount >= 4\s*\?\s*"grid-cols-1 sm:grid-cols-2 lg:grid-cols-3"/);
 
-  // Each card spans two of the six columns on lg, and the 4th visible card opens the centered bottom row
-  // at column 2 -- computed by visible index, so it is correct for any module combination (no card-name
-  // hardcoding). Every visible card threads its span class through the helper.
+  // Each card spans two of the six columns on lg. With exactly five cards the 5th opens the centered
+  // bottom row at column 2; with seven (v1.4.94: repair + quick service joined the picker) the 7th is
+  // centred at column 3 -- computed by visible index, so it is correct for any module combination
+  // (no card-name hardcoding). Every visible card threads its span class through the helper.
   assert.match(source, /const orderTypeCardSpanClass = \(visibleIndex: number\): string =>/);
-  assert.match(source, /visibleIndex === 4\s*\?\s*"lg:col-span-2 lg:col-start-2"\s*:\s*"lg:col-span-2"/);
+  assert.match(
+    source,
+    /visibleIndex === 4 && visibleOrderTypeCardCount === 5\s*\?\s*"lg:col-span-2 lg:col-start-2"/,
+  );
+  assert.match(source, /visibleIndex === 6\s*\?\s*"lg:col-span-2 lg:col-start-3"\s*:\s*"lg:col-span-2"/);
   assert.match(source, /orderTypeCardSpanClass\(deliveryCardVisibleIndex\)/);
   assert.match(source, /orderTypeCardSpanClass\(pickupCardVisibleIndex\)/);
   assert.match(source, /orderTypeCardSpanClass\(tableCardVisibleIndex\)/);
   assert.match(source, /orderTypeCardSpanClass\(roomCardVisibleIndex\)/);
   assert.match(source, /orderTypeCardSpanClass\(serviceCardVisibleIndex\)/);
-  // The visible index follows the live card order (Delivery, Pickup, Table, Room, Service) and pickup is
-  // always counted, so the helper never depends on a specific card being present.
-  assert.match(source, /const pickupCardVisibleIndex = deliveryCardVisibleIndex \+ 1;/);
+  assert.match(source, /orderTypeCardSpanClass\(repairCardVisibleIndex\)/);
+  assert.match(source, /orderTypeCardSpanClass\(quickServiceCardVisibleIndex\)/);
+  // The visible indices come from the resolver's live card order (delivery, pickup, table, room,
+  // service, repair, quick service); the count is the resolved card list, not hand-added flags.
+  assert.match(source, /const visibleOrderTypeCardCount = newWorkCards\.length;/);
+  assert.match(source, /const pickupCardVisibleIndex = newWorkCard\("pickup"\)\?\.visibleIndex \?\? 0;/);
+  assert.doesNotMatch(source, /const pickupCardVisibleIndex = deliveryCardVisibleIndex \+ 1;/);
 
   // Touch ergonomics intact: cards keep the active-tap micro-animation and no hover utilities sneak in.
   assert.match(source, /transition-transform duration-150 active:scale-95/);

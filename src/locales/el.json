@@ -5149,6 +5149,8 @@
     "roomDescription": "Παραγγελία δωματίου, άφιξη ή κράτηση",
     "serviceOrder": "Υπηρεσία",
     "serviceDescription": "Κλείστε ραντεβού",
+    "repairDescription": "Παραλαβή συσκευής για επισκευή",
+    "quickServiceDescription": "Άμεση εξυπηρέτηση χωρίς παραλαβή",
     "roomFlowTitle": "Δωμάτιο",
     "roomFlowOrder": "Παραγγελία Δωματίου",
     "roomFlowOrderDesc": "Χρέωση παραγγελίας σε δωμάτιο",

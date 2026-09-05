@@ -5149,6 +5149,8 @@
     "roomDescription": "Room order, check-in or reservation",
     "serviceOrder": "Service",
     "serviceDescription": "Book an appointment",
+    "repairDescription": "Take in a device for repair",
+    "quickServiceDescription": "Serve on the spot, no intake",
     "roomFlowTitle": "Room",
     "roomFlowOrder": "Room Order",
     "roomFlowOrderDesc": "Charge an order to a room",

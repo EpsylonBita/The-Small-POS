@@ -5149,6 +5149,8 @@
     "roomDescription": "Zimmerbestellung, Check-in oder Reservierung",
     "serviceOrder": "Dienstleistung",
     "serviceDescription": "Termin buchen",
+    "repairDescription": "Gerät zur Reparatur annehmen",
+    "quickServiceDescription": "Sofort bedienen, ohne Annahme",
     "roomFlowTitle": "Zimmer",
     "roomFlowOrder": "Zimmerbestellung",
     "roomFlowOrderDesc": "Eine Bestellung einem Zimmer berechnen",

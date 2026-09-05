@@ -1,7 +1,7 @@
 {
   "name": "the-small-pos-tauri",
   "private": true,
-  "version": "1.4.93",
+  "version": "1.4.94",
   "description": "The Small POS - Tauri v2 desktop application",
   "type": "module",
   "scripts": {

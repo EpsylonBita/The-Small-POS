@@ -5149,6 +5149,8 @@
     "roomDescription": "Ordine camera, check-in o prenotazione",
     "serviceOrder": "Servizio",
     "serviceDescription": "Prenota un appuntamento",
+    "repairDescription": "Ritiro di un dispositivo per riparazione",
+    "quickServiceDescription": "Servire subito, senza ritiro",
     "roomFlowTitle": "Camera",
     "roomFlowOrder": "Ordine camera",
     "roomFlowOrderDesc": "Addebita un ordine a una camera",

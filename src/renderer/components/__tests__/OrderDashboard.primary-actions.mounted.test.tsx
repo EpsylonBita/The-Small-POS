@@ -1,7 +1,7 @@
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+
 import * as OrderDashboardModule from '../OrderDashboard'
-import { resolveTauriPrimaryActions } from '../../primary-actions'
 
 vi.mock('../../contexts/i18n-context', () => ({
   useI18n: () => ({ t: (key: string) => key }),
@@ -10,12 +10,8 @@ vi.mock('../../contexts/i18n-context', () => ({
 afterEach(() => cleanup())
 
 type LauncherProps = {
-  actions: ReturnType<typeof resolveTauriPrimaryActions>
-  isShiftActive: boolean
-  onNewSale: () => void
-  onNewRepair: () => void
-  onQuickService: () => void
-  onNewAppointment: () => void
+  canOpen: boolean
+  onOpen: () => void
 }
 
 function getLauncher(): React.ComponentType<LauncherProps> | undefined {
@@ -24,65 +20,36 @@ function getLauncher(): React.ComponentType<LauncherProps> | undefined {
   }).OrderPrimaryActionLauncher
 }
 
-describe('OrderDashboard mounted primary-action launcher', () => {
-  it('opens appointments without a cash shift while keeping sale and repair intake actions disabled', () => {
+// The (+) is a plain trigger for the unified "new work" picker: the cards
+// (delivery, pickup, table, room, appointment, repair, quick service) are
+// resolved by resolveNewWorkCards and rendered by the dashboard modal. The
+// former intermediate «Νέο» chooser is gone (founder, 05/09/2026).
+describe('OrderDashboard (+) launcher', () => {
+  it('opens the picker directly when something can be started', () => {
     const Launcher = getLauncher()
     expect(Launcher).toBeDefined()
     if (!Launcher) return
+    const onOpen = vi.fn()
 
-    const onNewSale = vi.fn()
-    const onNewRepair = vi.fn()
-    const onQuickService = vi.fn()
-    const onNewAppointment = vi.fn()
-    render(
-      <Launcher
-        actions={resolveTauriPrimaryActions(['orders', 'appointments', 'repairs'], true)}
-        isShiftActive={false}
-        onNewSale={onNewSale}
-        onNewRepair={onNewRepair}
-        onQuickService={onQuickService}
-        onNewAppointment={onNewAppointment}
-      />,
-    )
-
+    render(<Launcher canOpen onOpen={onOpen} />)
     fireEvent.click(screen.getByTestId('tauri-primary-action-trigger'))
-    fireEvent.click(screen.getByTestId('tauri-primary-action-new_appointment'))
 
-    expect(onNewAppointment).toHaveBeenCalledTimes(1)
-    expect(onNewSale).not.toHaveBeenCalled()
-    expect(onNewRepair).not.toHaveBeenCalled()
-    expect(onQuickService).not.toHaveBeenCalled()
-    for (const actionId of ['new_sale', 'new_repair', 'quick_service']) {
-      const action = screen.getByTestId(`tauri-primary-action-${actionId}`)
-      expect(action).toBeDisabled()
-      expect(within(action).getByText('orders.startShiftFirst')).toBeVisible()
-    }
+    expect(onOpen).toHaveBeenCalledTimes(1)
+    // No chooser of its own: nothing but the trigger is rendered.
+    expect(screen.queryByTestId('tauri-primary-action-new_sale')).toBeNull()
   })
 
-  it('routes repair and quick-service actions when a shift is active', () => {
+  it('is disabled when nothing is launchable (sales-only store without a shift)', () => {
     const Launcher = getLauncher()
     expect(Launcher).toBeDefined()
     if (!Launcher) return
+    const onOpen = vi.fn()
 
-    const onNewRepair = vi.fn()
-    const onQuickService = vi.fn()
-    render(
-      <Launcher
-        actions={resolveTauriPrimaryActions(['orders', 'appointments', 'repairs'], true)}
-        isShiftActive
-        onNewSale={vi.fn()}
-        onNewRepair={onNewRepair}
-        onQuickService={onQuickService}
-        onNewAppointment={vi.fn()}
-      />,
-    )
+    render(<Launcher canOpen={false} onOpen={onOpen} />)
+    const trigger = screen.getByTestId('tauri-primary-action-trigger')
 
-    fireEvent.click(screen.getByTestId('tauri-primary-action-trigger'))
-    fireEvent.click(screen.getByTestId('tauri-primary-action-new_repair'))
-    expect(onNewRepair).toHaveBeenCalledTimes(1)
-
-    fireEvent.click(screen.getByTestId('tauri-primary-action-trigger'))
-    fireEvent.click(screen.getByTestId('tauri-primary-action-quick_service'))
-    expect(onQuickService).toHaveBeenCalledTimes(1)
+    expect(trigger).toBeDisabled()
+    fireEvent.click(trigger)
+    expect(onOpen).not.toHaveBeenCalled()
   })
 })

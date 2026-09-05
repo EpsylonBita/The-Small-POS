@@ -127,6 +127,11 @@ import {
 import { openExternalUrl } from "../utils/external-url";
 import { formatCompactOrderNumberForDisplay, getVisibleOrderNumber } from "../utils/orderNumberUtils";
 import { resolveTauriPrimaryActions } from "../primary-actions";
+import {
+  hasLaunchableNewWork,
+  resolveNewWorkCards,
+  type NewWorkCardId,
+} from "../new-work-cards";
 import { repairStore, useRepairStore } from "../features/repairs/store";
 import { getSecureSessionSync } from "../lib/secure-session-cache";
 import { formatTableDisplayNumber } from "../utils/table-display";
@@ -420,100 +425,32 @@ const readTableBalance = (table: RestaurantTable) => {
 };
 
 interface OrderPrimaryActionLauncherProps {
-  actions: ReturnType<typeof resolveTauriPrimaryActions>;
-  isShiftActive: boolean;
-  onNewSale: () => void;
-  onNewRepair: () => void;
-  onQuickService: () => void;
-  onNewAppointment: () => void;
+  /** Whether anything can be started right now (shift-aware, module-aware). */
+  canOpen: boolean;
+  onOpen: () => void;
 }
 
 /**
- * The create launcher is intentionally shift-aware per action. Appointments
- * are non-cash work and remain available without a drawer shift. Sales,
- * repairs and Quick Service all require an active staff shift.
+ * The (+) button. It opens ONE picker — the "new work" cards below — that
+ * shows every kind of work this business can start (delivery, pickup,
+ * table, room, appointment, repair, quick service), filtered by acquired
+ * modules. There is deliberately no intermediate «Νέο» chooser: the picker
+ * IS the choice (founder, 05/09/2026).
  */
 export function OrderPrimaryActionLauncher({
-  actions,
-  isShiftActive,
-  onNewSale,
-  onNewRepair,
-  onQuickService,
-  onNewAppointment,
+  canOpen,
+  onOpen,
 }: OrderPrimaryActionLauncherProps) {
   const { t } = useI18n();
-  const [isOpen, setIsOpen] = useState(false);
-  const canOpen = actions.some(
-    (action) => action.enabled && (action.id === "new_appointment" || isShiftActive),
-  );
-
   return (
-    <>
-      <FloatingActionButton
-        onClick={() => setIsOpen(true)}
-        disabled={!canOpen}
-        movable
-        positionStorageKey="pos-orders-new-order-fab-position"
-        data-testid="tauri-primary-action-trigger"
-        aria-label={t("primaryActions.trigger")}
-      />
-
-      <LiquidGlassModal
-        isOpen={isOpen}
-        onClose={() => setIsOpen(false)}
-        title={t("primaryActions.trigger")}
-        className="!max-w-xl"
-      >
-        <div className="grid gap-3 sm:grid-cols-2">
-          {actions.map((action) => {
-            const Icon = action.id === "new_sale"
-              ? ShoppingCart
-              : action.id === "new_appointment"
-                ? CalendarPlus
-                : action.id === "quick_service"
-                  ? Zap
-                  : Wrench;
-            const shiftRequired = action.id !== "new_appointment";
-            const shiftBlocked = shiftRequired && !isShiftActive;
-            const disabled = !action.enabled || shiftBlocked;
-            const disabledReasonId = disabled
-              ? `tauri-primary-action-${action.id}-reason`
-              : undefined;
-            return (
-              <button
-                key={action.id}
-                type="button"
-                disabled={disabled}
-                aria-describedby={disabledReasonId}
-                data-testid={`tauri-primary-action-${action.id}`}
-                data-primary-action={action.id}
-                onClick={() => {
-                  if (disabled) return;
-                  setIsOpen(false);
-                  if (action.id === "new_sale") onNewSale();
-                  if (action.id === "new_repair") onNewRepair();
-                  if (action.id === "quick_service") onQuickService();
-                  if (action.id === "new_appointment") onNewAppointment();
-                }}
-                className="flex min-h-[88px] items-center gap-4 rounded-2xl border border-white/15 bg-white/5 px-4 py-3 text-left transition-colors enabled:hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-55"
-              >
-                <Icon className="h-7 w-7 shrink-0 text-yellow-400" strokeWidth={1.7} />
-                <span>
-                  <span className="block font-semibold text-white">{t(action.labelKey)}</span>
-                  {disabled && (
-                    <span id={disabledReasonId} className="mt-1 block text-xs text-white/55">
-                      {shiftBlocked
-                        ? t("orders.startShiftFirst")
-                        : t("primaryActions.status.comingSoon")}
-                    </span>
-                  )}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      </LiquidGlassModal>
-    </>
+    <FloatingActionButton
+      onClick={onOpen}
+      disabled={!canOpen}
+      movable
+      positionStorageKey="pos-orders-new-order-fab-position"
+      data-testid="tauri-primary-action-trigger"
+      aria-label={t("primaryActions.trigger")}
+    />
   );
 }
 
@@ -610,52 +547,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     const hasOrdersModule = hasModule(MODULE_IDS.ORDERS);
     const hasReservationsModule = hasModule(MODULE_IDS.RESERVATIONS);
     // New Order modal sizing — pickup is always present; the modal must stay roomy for 4-5 cards.
-    const visibleOrderTypeCardCount =
-      1 +
-      (hasDeliveryModule ? 1 : 0) +
-      (hasTablesModule ? 1 : 0) +
-      (hasRoomsModule ? 1 : 0) +
-      (hasServicesModule ? 1 : 0);
-    const orderTypeModalWidthClass =
-      visibleOrderTypeCardCount >= 5
-        ? "!max-w-5xl"
-        : visibleOrderTypeCardCount === 4
-          ? "!max-w-4xl"
-          : visibleOrderTypeCardCount === 3
-            ? "!max-w-3xl"
-            : visibleOrderTypeCardCount === 2
-              ? "!max-w-xl"
-              : "!max-w-lg";
-    // Round 322: compose the chooser grid intentionally for 4 and 5 cards (live QA: a 3+2 set left a big
-    // empty bottom-right hole). FIVE cards use a 6-col track on lg where each card spans 2 columns, so the
-    // first row holds 3 and the bottom row of 2 is centered (the 4th visible card starts at col 2). FOUR
-    // cards use a clean 4-up row on lg (never 3+1). 1/2/3 keep the existing compact tracks.
-    const orderTypeGridColsClass =
-      visibleOrderTypeCardCount >= 5
-        ? "grid-cols-1 sm:grid-cols-2 lg:grid-cols-6"
-        : visibleOrderTypeCardCount === 4
-          ? "grid-cols-1 sm:grid-cols-2 lg:grid-cols-4"
-          : visibleOrderTypeCardCount === 3
-            ? "grid-cols-1 sm:grid-cols-3"
-            : visibleOrderTypeCardCount === 2
-              ? "grid-cols-2"
-              : "grid-cols-1";
-    // Each visible card's 1-based position in the live order (Delivery, Pickup, Table, Room, Service).
-    // Pickup is always present; the others are module-gated. Computed by index (not card name) so the
-    // centered layout is correct for any module combination.
-    const deliveryCardVisibleIndex = hasDeliveryModule ? 1 : 0;
-    const pickupCardVisibleIndex = deliveryCardVisibleIndex + 1;
-    const tableCardVisibleIndex = pickupCardVisibleIndex + (hasTablesModule ? 1 : 0);
-    const roomCardVisibleIndex = tableCardVisibleIndex + (hasRoomsModule ? 1 : 0);
-    const serviceCardVisibleIndex = roomCardVisibleIndex + (hasServicesModule ? 1 : 0);
-    // Per-card span/offset for the lg layout: in the 5-card 6-col track every card spans 2, and the 4th
-    // visible card opens the centered bottom row at column 2. Other counts need no per-card class.
-    const orderTypeCardSpanClass = (visibleIndex: number): string =>
-      visibleOrderTypeCardCount >= 5
-        ? visibleIndex === 4
-          ? "lg:col-span-2 lg:col-start-2"
-          : "lg:col-span-2"
-        : "";
+    // The "what can this business start" card set is resolved once the shift
+    // state is known (after useShift below) — resolveNewWorkCards is the
+    // single authority for which cards exist and which are launchable.
     const hasLoyaltyModule = hasModule(MODULE_IDS.LOYALTY);
 
     // Delivery validation hook
@@ -1622,6 +1516,66 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     // We avoid continuous polling and perform a single silent refresh when a
     // shift becomes active (or when blocked modals close after activation).
     const { isShiftActive, staff, activeShift } = useShift();
+    // One picker for every kind of work this business can start (founder,
+    // 05/09/2026): the cards below are the whole story — delivery, pickup,
+    // table, room, appointment, repair, quick service — filtered by acquired
+    // modules and gated by the cash shift where money moves.
+    const newWorkCards = resolveNewWorkCards({
+      hasOrdersModule,
+      hasDeliveryModule,
+      hasTablesModule,
+      hasRoomsModule,
+      hasServicesModule,
+      primaryActions,
+      isShiftActive,
+    });
+    const newWorkCard = (id: NewWorkCardId) => newWorkCards.find((card) => card.id === id);
+    const canLaunchNewWork = hasLaunchableNewWork(newWorkCards);
+    const visibleOrderTypeCardCount = newWorkCards.length;
+    const orderTypeModalWidthClass =
+      visibleOrderTypeCardCount >= 5
+        ? "!max-w-5xl"
+        : visibleOrderTypeCardCount === 4
+          ? "!max-w-4xl"
+          : visibleOrderTypeCardCount === 3
+            ? "!max-w-3xl"
+            : visibleOrderTypeCardCount === 2
+              ? "!max-w-xl"
+              : "!max-w-lg";
+    // Round 322 layout, extended to seven cards: from five cards up the lg
+    // track has six columns and every card spans two, so rows read as 3+2
+    // (fifth card starts at column 2), 3+3, or 3+3+1 (seventh card centred at
+    // column 3) — never a 3+1 / 4+1 orphan in the bottom-right hole.
+    const orderTypeGridColsClass =
+      visibleOrderTypeCardCount >= 5
+        ? "grid-cols-1 sm:grid-cols-2 lg:grid-cols-6"
+        : visibleOrderTypeCardCount === 4
+          ? "grid-cols-1 sm:grid-cols-2 lg:grid-cols-4"
+          : visibleOrderTypeCardCount === 3
+            ? "grid-cols-1 sm:grid-cols-3"
+            : visibleOrderTypeCardCount === 2
+              ? "grid-cols-2"
+              : "grid-cols-1";
+    const orderTypeCardSpanClass = (visibleIndex: number): string =>
+      visibleOrderTypeCardCount >= 5
+        ? visibleIndex === 4 && visibleOrderTypeCardCount === 5
+          ? "lg:col-span-2 lg:col-start-2"
+          : visibleIndex === 6
+            ? "lg:col-span-2 lg:col-start-3"
+            : "lg:col-span-2"
+        : "";
+    // Visible indices come from the resolver's live card order (delivery,
+    // pickup, table, room, service, repair, quick service), so the span
+    // helper is correct for any module combination without card-name math.
+    const deliveryCardVisibleIndex = newWorkCard("delivery")?.visibleIndex ?? 0;
+    const pickupCardVisibleIndex = newWorkCard("pickup")?.visibleIndex ?? 0;
+    const tableCardVisibleIndex = newWorkCard("table")?.visibleIndex ?? 0;
+    const roomCardVisibleIndex = newWorkCard("room")?.visibleIndex ?? 0;
+    const serviceCardVisibleIndex = newWorkCard("service")?.visibleIndex ?? 0;
+    const repairCardVisibleIndex = newWorkCard("repair")?.visibleIndex ?? 0;
+    const quickServiceCardVisibleIndex = newWorkCard("quick_service")?.visibleIndex ?? 0;
+    const newWorkCardStateClass = (id: NewWorkCardId): string =>
+      newWorkCard(id)?.enabled === false ? " opacity-55 cursor-not-allowed" : "";
     useEffect(() => {
       if (!isShiftActive) {
         shiftRefreshArmedRef.current = false;
@@ -7303,27 +7257,15 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
         {/* Declarative +New surface; real repair screens are owned by Task 9. */}
         <OrderPrimaryActionLauncher
-          actions={primaryActions}
-          isShiftActive={isShiftActive}
-          onNewSale={handleNewOrderClick}
-          onNewRepair={() => {
-            window.dispatchEvent(new CustomEvent('pos:navigate-view', {
-              detail: { view: 'repairs', repairIntent: 'new_repair' },
-            }));
-          }}
-          onQuickService={() => {
-            window.dispatchEvent(new CustomEvent('pos:navigate-view', {
-              detail: { view: 'repairs', repairIntent: 'quick_service' },
-            }));
-          }}
-          onNewAppointment={handleSelectServiceFlow}
+          canOpen={canLaunchNewWork}
+          onOpen={handleNewOrderClick}
         />
 
         {/* Order Type Selection Modal - Glassmorphism style */}
         <LiquidGlassModal
           isOpen={showOrderTypeModal}
           onClose={() => setShowOrderTypeModal(false)}
-          title={t("orderFlow.selectOrderType") || "Select Order Type"}
+          title={t("primaryActions.trigger")}
           className={`${orderTypeModalWidthClass} order-type-transparent-modal`}
           contentClassName="!p-0 !overflow-visible"
         >
@@ -7398,13 +7340,15 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                   </button>
                 )}
 
-                {/* Pickup Button - Green (always available) */}
+                {/* Pickup Button - Green (the plain sale; only with the Orders module) */}
+                {newWorkCard("pickup") && (
                 <button
                   type="button"
                   data-order-type-card="pickup"
+                  disabled={!newWorkCard("pickup")?.enabled}
                   onClick={() => handleOrderTypeSelect("pickup")}
                   aria-label={composeOrderTypeAriaLabel(pickupTitle, pickupDescription)}
-                  className={`relative p-6 rounded-2xl border-2 border-[#34d399]/45 bg-[linear-gradient(135deg,rgba(52,211,153,0.16),rgba(22,163,74,0.06))] transition-transform duration-150 active:scale-95 ${orderTypeCardSpanClass(pickupCardVisibleIndex)}`}
+                  className={`relative p-6 rounded-2xl border-2 border-[#34d399]/45 bg-[linear-gradient(135deg,rgba(52,211,153,0.16),rgba(22,163,74,0.06))] transition-transform duration-150 active:scale-95 ${orderTypeCardSpanClass(pickupCardVisibleIndex)}${newWorkCardStateClass("pickup")}`}
                 >
                   <div className="flex flex-col items-center gap-3">
                     <div className="w-16 h-16 flex items-center justify-center">
@@ -7420,6 +7364,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                     </div>
                   </div>
                 </button>
+                )}
 
                 {/* Table Button - Blue (only if Tables module acquired) */}
                 {hasTablesModule && (
@@ -7495,6 +7440,76 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                         </h3>
                         <p className="text-sm leading-snug text-white/60 transition-colors">
                           {serviceDescription}
+                        </p>
+                      </div>
+                    </div>
+                  </button>
+                )}
+                {/* Repair intake - Orange (only with the Repairs module) */}
+                {newWorkCard("repair") && (
+                  <button
+                    type="button"
+                    data-order-type-card="repair"
+                    disabled={!newWorkCard("repair")?.enabled}
+                    onClick={() => {
+                      setShowOrderTypeModal(false);
+                      window.dispatchEvent(new CustomEvent('pos:navigate-view', {
+                        detail: { view: 'repairs', repairIntent: 'new_repair' },
+                      }));
+                    }}
+                    aria-label={composeOrderTypeAriaLabel(
+                      t("primaryActions.newRepair"),
+                      t("orderFlow.repairDescription", { defaultValue: "Take in a device for repair" }),
+                    )}
+                    className={`relative p-6 rounded-2xl border-2 border-[#fb923c]/45 bg-[linear-gradient(135deg,rgba(251,146,60,0.16),rgba(234,88,12,0.06))] transition-transform duration-150 active:scale-95 ${orderTypeCardSpanClass(repairCardVisibleIndex)}${newWorkCardStateClass("repair")}`}
+                  >
+                    <div className="flex flex-col items-center gap-3">
+                      <div className="w-16 h-16 flex items-center justify-center">
+                        <Wrench className="w-full h-full text-white" strokeWidth={1.5} />
+                      </div>
+                      <div className="text-center">
+                        <h3 className="text-lg font-bold text-[#fb923c] transition-colors mb-1">
+                          {t("primaryActions.newRepair")}
+                        </h3>
+                        <p className="text-sm leading-snug text-white/60 transition-colors">
+                          {newWorkCard("repair")?.enabled === false
+                            ? t(newWorkCard("repair")?.disabledReasonKey ?? "orders.startShiftFirst")
+                            : t("orderFlow.repairDescription", { defaultValue: "Take in a device for repair" })}
+                        </p>
+                      </div>
+                    </div>
+                  </button>
+                )}
+                {/* Quick service - Violet (Repairs module with the quick-service capability) */}
+                {newWorkCard("quick_service") && (
+                  <button
+                    type="button"
+                    data-order-type-card="quick_service"
+                    disabled={!newWorkCard("quick_service")?.enabled}
+                    onClick={() => {
+                      setShowOrderTypeModal(false);
+                      window.dispatchEvent(new CustomEvent('pos:navigate-view', {
+                        detail: { view: 'repairs', repairIntent: 'quick_service' },
+                      }));
+                    }}
+                    aria-label={composeOrderTypeAriaLabel(
+                      t("primaryActions.quickService"),
+                      t("orderFlow.quickServiceDescription", { defaultValue: "Serve on the spot, no intake" }),
+                    )}
+                    className={`relative p-6 rounded-2xl border-2 border-[#a78bfa]/45 bg-[linear-gradient(135deg,rgba(167,139,250,0.16),rgba(124,58,237,0.06))] transition-transform duration-150 active:scale-95 ${orderTypeCardSpanClass(quickServiceCardVisibleIndex)}${newWorkCardStateClass("quick_service")}`}
+                  >
+                    <div className="flex flex-col items-center gap-3">
+                      <div className="w-16 h-16 flex items-center justify-center">
+                        <Zap className="w-full h-full text-white" strokeWidth={1.5} />
+                      </div>
+                      <div className="text-center">
+                        <h3 className="text-lg font-bold text-[#a78bfa] transition-colors mb-1">
+                          {t("primaryActions.quickService")}
+                        </h3>
+                        <p className="text-sm leading-snug text-white/60 transition-colors">
+                          {newWorkCard("quick_service")?.enabled === false
+                            ? t(newWorkCard("quick_service")?.disabledReasonKey ?? "orders.startShiftFirst")
+                            : t("orderFlow.quickServiceDescription", { defaultValue: "Serve on the spot, no intake" })}
                         </p>
                       </div>
                     </div>

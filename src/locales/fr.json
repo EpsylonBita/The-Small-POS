@@ -5149,6 +5149,8 @@
     "roomDescription": "Commande chambre, enregistrement ou réservation",
     "serviceOrder": "Service",
     "serviceDescription": "Prendre un rendez-vous",
+    "repairDescription": "Prendre un appareil en réparation",
+    "quickServiceDescription": "Servir sur place, sans dépôt",
     "roomFlowTitle": "Chambre",
     "roomFlowOrder": "Commande chambre",
     "roomFlowOrderDesc": "Facturer une commande à une chambre",
