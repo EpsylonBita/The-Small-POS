@@ -59,6 +59,39 @@ The view and the prune must never diverge: anything visible is retained,
 anything retained is visible. Do not add a third consumer with its own
 boundary arithmetic — call `retention_cutoff_utc`.
 
+### "Settled by the last Z": the one reader that is deliberately not floored
+
+The rollover cleanup deletes the closed day's `order_payments` on purpose
+(`zreport.rs`, cleanup step 2) and keeps the order rows for the retention
+view. After every Z the settled day therefore reads as **paid with no local
+payment row** — the Z's footprint, not unsettled work.
+
+`business_day::paid_order_swept_by_last_z_expr` names that footprint (paid,
+created before the marker, no completed local payment) and two consumers
+exclude it:
+
+- **Checkout gate** — `payment_integrity::load_branch_window_payment_blockers`
+  never reports such an order as `missing_local_payment_row`, whatever later
+  touch (remote snapshot refresh, platform ack replay, status edit) bumped its
+  `updated_at` into the open shift's window.
+- **Payment-mirror sweep** — `sync::paid_orders_missing_local_mirror_candidates`
+  never puts it back on the repair list, so the sweep no longer re-applies its
+  remote snapshot every pass (which is exactly the touch that dragged closed
+  days back into the gate).
+
+This reader takes the raw marker (`business_day::last_z_anchor_utc`), not
+the shift-floored cutoff: whether money was settled is decided at the Z
+moment regardless of which colleagues' shifts stayed open, and the floor
+exists to keep an open shift's day *visible*, never to reopen settled
+money. A genuinely unpaid old order (`payment_status` ≠ `paid`) is still a
+blocker — the Z sweeps payments, not debts. Pinned by
+`branch_window_blockers_ignore_paid_orders_swept_by_the_last_z` and
+`payment_mirror_sweep_skips_orders_settled_by_the_last_z`.
+
+History: 05/09/2026, Το Μικρό Παρίσι — the 03:36Z Z closed the 04/09 day;
+by the evening 16 of its orders blocked the shift checkout and the sweep
+re-fetched 47 of them every two minutes.
+
 ## Failure behavior
 
 | Failure | Behavior |

@@ -12965,6 +12965,39 @@ async fn auto_heal_waiting_adjustments_missing_canonical_remote_payment_ids(
 /// shift close / Z submit, and since the blocker prevents the close, the state
 /// was self-reinforcing (observed live 26/08: 57 blocked orders). Throttled to
 /// one pass per 2 minutes, 25 orders per pass.
+/// The paid-without-mirror sweep's work list: the newest paid orders that
+/// have no completed local payment row — EXCEPT the ones the last Z already
+/// settled. The rollover deletes the closed day's payment rows on purpose, so
+/// those orders are history rather than repair candidates; chasing them
+/// re-applied their remote snapshot every pass (bumping `updated_at`) and
+/// kept dragging a closed day into the open shift's checkout gate.
+fn paid_orders_missing_local_mirror_candidates(
+    conn: &rusqlite::Connection,
+) -> Result<Vec<String>, String> {
+    let swept_by_last_z_expr = crate::business_day::paid_order_swept_by_last_z_expr("o", "?1");
+    let last_z_anchor = crate::business_day::last_z_anchor_utc(conn);
+    let sql = format!(
+        "SELECT o.id FROM orders o
+          WHERE COALESCE(o.payment_status, '') = 'paid'
+            AND COALESCE(o.is_ghost, 0) = 0
+            AND LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'canceled', 'refunded')
+            AND NOT EXISTS (
+                SELECT 1 FROM order_payments op
+                 WHERE op.order_id = o.id AND op.status = 'completed'
+            )
+            AND NOT {swept_by_last_z_expr}
+          ORDER BY o.created_at DESC
+          LIMIT 25"
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("prepare paid-without-mirror sweep: {e}"))?;
+    let rows = stmt
+        .query_map(params![last_z_anchor], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("query paid-without-mirror sweep: {e}"))?;
+    Ok(rows.filter_map(|row| row.ok()).collect())
+}
+
 async fn sweep_paid_orders_missing_payment_mirrors(
     db: &DbState,
     admin_url: &str,
@@ -12980,24 +13013,7 @@ async fn sweep_paid_orders_missing_payment_mirrors(
 
     let candidates: Vec<String> = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT o.id FROM orders o
-                  WHERE COALESCE(o.payment_status, '') = 'paid'
-                    AND COALESCE(o.is_ghost, 0) = 0
-                    AND LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'canceled', 'refunded')
-                    AND NOT EXISTS (
-                        SELECT 1 FROM order_payments op
-                         WHERE op.order_id = o.id AND op.status = 'completed'
-                    )
-                  ORDER BY o.created_at DESC
-                  LIMIT 25",
-            )
-            .map_err(|e| format!("prepare paid-without-mirror sweep: {e}"))?;
-        let rows = stmt
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(|e| format!("query paid-without-mirror sweep: {e}"))?;
-        rows.filter_map(|row| row.ok()).collect()
+        paid_orders_missing_local_mirror_candidates(&conn)?
     };
     if candidates.is_empty() {
         LAST_SWEEP_UNIX.store(now, Ordering::Relaxed);
@@ -23118,6 +23134,55 @@ mod tests {
             .unwrap();
         }
         assert_eq!(visible(&db), vec!["opened-days-ago", "overnight"]);
+    }
+
+    /// The paid-without-mirror sweep must not chase orders the last Z
+    /// already settled: their payment rows were deleted by the rollover on
+    /// purpose, and every pass that "repaired" them re-applied the remote
+    /// snapshot, bumped `updated_at`, and dragged a closed day into the open
+    /// shift's checkout gate (live 05/09/2026, 47 orders re-fetched every
+    /// two minutes). Orders after the Z — and every order when no Z has ever
+    /// run — stay on the work list.
+    #[test]
+    fn payment_mirror_sweep_skips_orders_settled_by_the_last_z() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        seed_day_bound_order(
+            &conn,
+            "swept-by-z",
+            "2026-09-04T22:14:32Z",
+            "completed",
+            "paid",
+            "pickup",
+            None,
+        );
+        seed_day_bound_order(
+            &conn,
+            "open-day-missing-mirror",
+            "2026-09-05T17:09:34Z",
+            "completed",
+            "paid",
+            "pickup",
+            None,
+        );
+
+        // No Z yet: both are candidates, newest first.
+        assert_eq!(
+            paid_orders_missing_local_mirror_candidates(&conn).unwrap(),
+            vec!["open-day-missing-mirror", "swept-by-z"]
+        );
+
+        crate::db::set_setting(
+            &conn,
+            "system",
+            "last_z_report_timestamp",
+            "2026-09-05T03:36:16+00:00",
+        )
+        .unwrap();
+        assert_eq!(
+            paid_orders_missing_local_mirror_candidates(&conn).unwrap(),
+            vec!["open-day-missing-mirror"]
+        );
     }
 
     /// The read must return exactly the rows the daily prune

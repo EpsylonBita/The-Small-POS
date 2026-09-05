@@ -282,6 +282,38 @@ pub(crate) fn stored_period_start(conn: &Connection) -> Option<String> {
     db::get_setting(conn, "system", "last_z_report_timestamp")
 }
 
+/// The moment the last Z closed a day on this terminal, or `None` when no Z
+/// has ever run here (the epoch placeholder counts as "never").
+pub(crate) fn last_z_anchor_utc(conn: &Connection) -> Option<String> {
+    stored_period_start(conn).filter(|value| !is_epoch_timestamp(value))
+}
+
+/// SQL predicate matching the exact footprint the Z rollover leaves behind:
+/// a paid order created before the last Z whose local payment rows are gone.
+/// The rollover deletes the closed day's `order_payments` on purpose
+/// (zreport cleanup step 2) and keeps the order rows for the retention view,
+/// so after every Z the settled day reads as "paid with no local payment".
+/// Such rows are history, not unsettled work: they must never block the next
+/// shift's checkout nor be chased by the payment-mirror sweep, whatever
+/// later touch (remote snapshot refresh, platform ack replay) bumps their
+/// `updated_at` into the open window. Live 05/09/2026: 16 orders of the
+/// 04/09 day, closed by the 03:36Z Z-report, blocked the evening checkout.
+///
+/// `anchor_param` is the bound parameter carrying [`last_z_anchor_utc`];
+/// NULL (no Z yet) matches nothing.
+pub(crate) fn paid_order_swept_by_last_z_expr(order_alias: &str, anchor_param: &str) -> String {
+    format!(
+        "({anchor_param} IS NOT NULL
+          AND LOWER(TRIM(COALESCE({order_alias}.payment_status, ''))) = 'paid'
+          AND datetime({order_alias}.created_at) < datetime({anchor_param})
+          AND NOT EXISTS (
+              SELECT 1 FROM order_payments op_swept
+              WHERE op_swept.order_id = {order_alias}.id
+                AND op_swept.status = 'completed'
+          ))"
+    )
+}
+
 /// The local ledger's retention cutoff under the founder's day model
 /// (stated 2026-08-18, verbatim): «όλα πρέπει να είναι άνοιγμα ημέρας —
 /// κλείσιμο ημέρας, όχι βάση ώρας ή ημέρας· ένα τερματικό μπορεί να ανοίγει

@@ -4536,8 +4536,6 @@
       "namePlaceholder": "Vollständigen Namen eingeben",
       "phoneLabel": "Telefonnummer *",
       "phonePlaceholder": "Telefonnummer eingeben",
-      "phoneCountryLabel": "[NEEDS TRANSLATION] Phone country (ISO)",
-      "phoneCountryRequired": "[NEEDS TRANSLATION] Use a 2-letter ISO phone country code",
       "emailLabel": "E-Mail (optional)",
       "emailPlaceholder": "E-Mail-Adresse eingeben",
       "nameOnRingerLabel": "Name an der Klingel *",

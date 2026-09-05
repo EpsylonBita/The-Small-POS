@@ -329,6 +329,12 @@ pub fn load_branch_window_payment_blockers(
     // excludes them from Z revenue and protects them from rollover deletion
     // (see business_day::open_table_tab_expr).
     let open_table_tab_expr = business_day::open_table_tab_expr("o");
+    // A day the last Z already closed cannot reopen through the checkout gate:
+    // its paid orders lost their local payment rows to the rollover cleanup by
+    // design, so they are excluded here no matter what bumped their updated_at
+    // into this window (see business_day::paid_order_swept_by_last_z_expr).
+    let swept_by_last_z_expr = business_day::paid_order_swept_by_last_z_expr("o", "?4");
+    let last_z_anchor = business_day::last_z_anchor_utc(conn);
     let sql = format!(
         "{} FROM orders o
          WHERE {order_financial_expr} {operator} ?1
@@ -337,6 +343,7 @@ pub fn load_branch_window_payment_blockers(
            AND COALESCE(o.is_ghost, 0) = 0
            AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
            AND NOT {open_table_tab_expr}
+           AND NOT {swept_by_last_z_expr}
          ORDER BY COALESCE(o.updated_at, o.created_at) ASC, o.id ASC",
         order_blocker_row_select()
     );
@@ -344,19 +351,22 @@ pub fn load_branch_window_payment_blockers(
         .prepare(&sql)
         .map_err(|e| format!("prepare branch payment blocker lookup: {e}"))?;
     let rows = stmt
-        .query_map(params![period_start_at, cutoff_at, branch_id], |row| {
-            Ok(RawBlockerRow {
-                order_id: row.get(0)?,
-                order_number: row.get(1)?,
-                // W4b: cols 2 and 3 now select INTEGER cents columns.
-                total_amount: Cents::new(row.get::<_, i64>(2)?),
-                settled_amount: Cents::new(row.get::<_, i64>(3)?),
-                payment_status: row.get(4)?,
-                payment_method: row.get(5)?,
-                completed_payment_count: row.get(6)?,
-                invalid_completed_method_count: row.get(7)?,
-            })
-        })
+        .query_map(
+            params![period_start_at, cutoff_at, branch_id, last_z_anchor],
+            |row| {
+                Ok(RawBlockerRow {
+                    order_id: row.get(0)?,
+                    order_number: row.get(1)?,
+                    // W4b: cols 2 and 3 now select INTEGER cents columns.
+                    total_amount: Cents::new(row.get::<_, i64>(2)?),
+                    settled_amount: Cents::new(row.get::<_, i64>(3)?),
+                    payment_status: row.get(4)?,
+                    payment_method: row.get(5)?,
+                    completed_payment_count: row.get(6)?,
+                    invalid_completed_method_count: row.get(7)?,
+                })
+            },
+        )
         .map_err(|e| format!("query branch payment blocker lookup: {e}"))?;
 
     map_blocker_rows(rows)
@@ -457,6 +467,98 @@ mod tests {
         assert_eq!(blockers.len(), 1);
         assert_eq!(blockers[0].reason_code, "missing_local_payment_row");
         assert_eq!(blockers[0].order_number, "ORD-1");
+    }
+
+    /// Live 05/09/2026 (Το Μικρό Παρίσι): the 03:36Z Z-report closed the
+    /// 04/09 day and its rollover deleted those orders' local payment rows
+    /// by design. Later touches (remote snapshot refresh every sweep pass,
+    /// platform ack replays) bumped their `updated_at` into the evening
+    /// shift's window and 16 already-settled orders blocked the checkout as
+    /// "paid but its local payment record is missing". A paid order created
+    /// before the last Z with no local payment row IS that Z's footprint —
+    /// never a blocker — while the same shape after the Z still is, and a
+    /// genuinely unpaid old order still blocks.
+    #[test]
+    fn branch_window_blockers_ignore_paid_orders_swept_by_the_last_z() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        db::set_setting(
+            &conn,
+            "system",
+            "last_z_report_timestamp",
+            "2026-09-05T03:36:16+00:00",
+        )
+        .expect("seed last Z anchor");
+
+        let seed =
+            |id: &str, number: &str, created_at: &str, updated_at: &str, payment_status: &str| {
+                conn.execute(
+                    "INSERT INTO orders (
+                    id, order_number, branch_id, items, total_amount, total_amount_cents,
+                    status, payment_status, created_at, updated_at
+                ) VALUES (?1, ?2, 'branch-1', '[]', 4.0, 400, 'completed', ?5, ?3, ?4)",
+                    params![id, number, created_at, updated_at, payment_status],
+                )
+                .unwrap();
+            };
+        // Closed by the Z, payment rows swept, updated_at bumped tonight.
+        seed(
+            "ord-swept",
+            "ORD-20260904-SWEPT",
+            "2026-09-04T22:14:32Z",
+            "2026-09-05T18:33:00Z",
+            "paid",
+        );
+        // Today's order whose mirror is genuinely missing: still a blocker.
+        seed(
+            "ord-open",
+            "ORD-20260905-OPEN",
+            "2026-09-05T17:09:34Z",
+            "2026-09-05T18:40:00Z",
+            "paid",
+        );
+        // Old but never paid: the Z sweeps payments, not the debt.
+        seed(
+            "ord-unpaid-old",
+            "ORD-20260904-UNPAID",
+            "2026-09-04T23:00:00Z",
+            "2026-09-05T18:00:00Z",
+            "pending",
+        );
+
+        let blockers = load_branch_window_payment_blockers(
+            &conn,
+            "branch-1",
+            "2026-09-05T15:05:40Z",
+            Some("2026-09-05T20:00:00Z"),
+            true,
+        )
+        .expect("branch blockers");
+
+        let numbers: Vec<&str> = blockers
+            .iter()
+            .map(|blocker| blocker.order_number.as_str())
+            .collect();
+        assert_eq!(numbers, vec!["ORD-20260904-UNPAID", "ORD-20260905-OPEN"]);
+        assert_eq!(blockers[0].reason_code, "no_persisted_payment");
+        assert_eq!(blockers[1].reason_code, "missing_local_payment_row");
+
+        // Without any Z on this terminal nothing is history yet: the old paid
+        // order is a real missing mirror and blocks like before.
+        conn.execute(
+            "DELETE FROM local_settings WHERE setting_category = 'system' AND setting_key = 'last_z_report_timestamp'",
+            [],
+        )
+        .unwrap();
+        let blockers = load_branch_window_payment_blockers(
+            &conn,
+            "branch-1",
+            "2026-09-05T15:05:40Z",
+            Some("2026-09-05T20:00:00Z"),
+            true,
+        )
+        .expect("branch blockers without Z");
+        assert_eq!(blockers.len(), 3);
     }
 
     #[test]

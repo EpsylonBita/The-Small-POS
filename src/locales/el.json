@@ -4604,8 +4604,6 @@
       "namePlaceholder": "Εισάγετε πλήρες όνομα",
       "phoneLabel": "Αριθμός Τηλεφώνου *",
       "phonePlaceholder": "Εισάγετε αριθμό τηλεφώνου",
-      "phoneCountryLabel": "Χώρα τηλεφώνου (κωδικός ISO)",
-      "phoneCountryRequired": "Χρησιμοποιήστε διψήφιο κωδικό χώρας ISO (π.χ. GR)",
       "emailLabel": "Email (προαιρετικό)",
       "emailPlaceholder": "Εισάγετε διεύθυνση email",
       "nameOnRingerLabel": "Όνομα στο Κουδούνι *",

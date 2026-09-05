@@ -127,6 +127,12 @@ const isInternationalPhone = (value: string): boolean => {
   return normalized.startsWith('+') || normalized.startsWith('00');
 };
 
+// Founder (05/09/2026): the store is in Greece, so a national number IS a
+// Greek number — the operator never sees an ISO country field. International
+// numbers carry their own +prefix and are sent exactly as typed. A customer
+// that already holds another valid ISO country keeps it on edit.
+const HOME_PHONE_COUNTRY: CountryCode = 'GR';
+
 const ADD_ADDRESS_SAVE_TIMEOUT_MS = 35_000;
 
 class AddAddressSaveTimeoutError extends Error {
@@ -858,30 +864,6 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       newErrors.phone = t('modals.addCustomer.phoneRequired');
     }
 
-    const phoneForValidation = formData.phone.trim();
-    const normalizedPhoneCountryCode = normalizePhoneCountryCode(formData.phoneCountryCode);
-    // The phone and its ISO country field are disabled in address-only mode
-    // (the customer already exists; only an address is being added/edited),
-    // so a missing country code must never block submit there — the operator
-    // has no way to fill it in.
-    if (!isAddressOnlyMode) {
-      if (
-        phoneForValidation
-        && !isInternationalPhone(phoneForValidation)
-        && !normalizedPhoneCountryCode
-      ) {
-        newErrors.phoneCountryCode = t(
-          'modals.addCustomer.phoneCountryRequired',
-          'Use a 2-letter ISO phone country code',
-        );
-      } else if (formData.phoneCountryCode.trim() && !normalizedPhoneCountryCode) {
-        newErrors.phoneCountryCode = t(
-          'modals.addCustomer.phoneCountryRequired',
-          'Use a 2-letter ISO phone country code',
-        );
-      }
-    }
-
     if (!formData.name.trim()) {
       newErrors.name = t('modals.addCustomer.nameRequired');
     }
@@ -930,7 +912,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       const submittedPhone = formData.phone;
       const submittedPhoneCountryCode = isInternationalPhone(submittedPhone)
         ? null
-        : normalizePhoneCountryCode(formData.phoneCountryCode);
+        : normalizePhoneCountryCode(formData.phoneCountryCode) || HOME_PHONE_COUNTRY;
 
       let validationForSubmit: DeliveryValidationResult | null = null;
       if (hasDeliveryPro) {
@@ -1425,26 +1407,6 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
           </div>
           {errors.phone && (
             <p className="mt-1 text-sm text-red-600 dark:text-red-400">{errors.phone}</p>
-          )}
-        </div>
-
-        {/* Explicit country context is required for national phone numbers. */}
-        <div>
-          <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
-            {t('modals.addCustomer.phoneCountryLabel', 'Phone country (ISO)')}
-          </label>
-          <input
-            type="text"
-            value={formData.phoneCountryCode}
-            onChange={(e) => handleInputChange('phoneCountryCode', e.target.value.toUpperCase())}
-            placeholder="e.g. GB"
-            maxLength={2}
-            className={`${inputBase(resolvedTheme)} ${isAddressOnlyMode ? 'opacity-60 cursor-not-allowed' : ''}`}
-            disabled={isAddressOnlyMode}
-            readOnly={isAddressOnlyMode}
-          />
-          {errors.phoneCountryCode && (
-            <p className="mt-1 text-sm text-red-600 dark:text-red-400">{errors.phoneCountryCode}</p>
           )}
         </div>
 

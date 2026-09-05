@@ -4536,8 +4536,6 @@
       "namePlaceholder": "Enter full name",
       "phoneLabel": "Phone Number *",
       "phonePlaceholder": "Enter phone number",
-      "phoneCountryLabel": "Phone country (ISO)",
-      "phoneCountryRequired": "Use a 2-letter ISO phone country code",
       "emailLabel": "Email (optional)",
       "emailPlaceholder": "Enter email address",
       "nameOnRingerLabel": "Name on Ringer *",
