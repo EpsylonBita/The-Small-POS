@@ -29,6 +29,7 @@ import {
 import { useTheme } from '../contexts/theme-context';
 import { useShift } from '../contexts/shift-context';
 import { formatCurrency, formatTime } from '../utils/format';
+import { formatCompactOrderNumberForDisplay } from '../utils/orderNumberUtils';
 import { getBridge } from '../../lib';
 import { openExternalUrl } from '../utils/external-url';
 import { getOfflineActionState } from '../services/offline-page-capabilities';
@@ -393,12 +394,16 @@ const KioskManagementPage: React.FC = () => {
                     isDark ? 'bg-gray-700' : 'bg-gray-100'
                   }`}>
                     <span className="font-mono text-sm font-bold">
-                      #{order.order_number?.slice(-3) || '---'}
+                      {/* A kiosk number encodes the branch and business period,
+                          so a blind slice(-3) of the raw string was meaningless.
+                          Compact it first, then take its trailing sequence. */}
+                      #{formatCompactOrderNumberForDisplay(order.order_number || '').split('#').pop()?.slice(-4) || '---'}
                     </span>
                   </div>
                   <div>
                     <p className="font-medium">
-                      {t('modules.kiosk.orderNumber', { defaultValue: 'Order' })} #{order.order_number}
+                      {t('modules.kiosk.orderNumber', { defaultValue: 'Order' })}{' '}
+                      {formatCompactOrderNumberForDisplay(order.order_number || '') || `#${order.order_number}`}
                     </p>
                     <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
                       {order.items_count} {t('common.items', { defaultValue: 'items' })} • {formatTime(order.created_at)}

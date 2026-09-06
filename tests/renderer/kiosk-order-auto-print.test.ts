@@ -110,8 +110,8 @@ test('a repeatedly-failing order chimes once, updates one stable toast, and alwa
   );
   assert.match(
     hook,
-    /if \(!notifiedOrdersRef\.current\.has\(orderData\.id\)\)/,
-    'the chime must fire at most once per order, not on every failed-enqueue retry',
+    /if \(notifiedOrdersRef\.current\.has\(orderData\.id\)\)\s*\{\s*return;/,
+    'the chime must fire at most once per order, not on every re-fire of the arrival events',
   );
   assert.match(
     hook,
@@ -122,5 +122,111 @@ test('a repeatedly-failing order chimes once, updates one stable toast, and alwa
     hook,
     /finally\s*\{[\s\S]{0,160}?inFlightOrdersRef\.current\.delete\(orderData\.id\)/,
     'the in-flight claim must be released in a finally so a throw cannot permanently block the order',
+  );
+});
+
+// Founder report 06/09: the slip came out of the printer while the approval
+// modal was still asking for a prep time — i.e. before anyone had accepted the
+// order (and while it could still be declined). Arrival must only chime; the
+// print belongs to the approval handler.
+test('arriving kiosk orders are announced but never printed on arrival', () => {
+  const hook = source();
+
+  const effect = hook.slice(hook.indexOf('useEffect(() => {'));
+  assert.ok(effect.length > 0, 'the arrival listener effect must exist');
+
+  assert.doesNotMatch(
+    effect,
+    /enqueuePrintJobs\(/,
+    'the arrival listeners must not enqueue print jobs — printing waits for approval',
+  );
+  assert.doesNotMatch(
+    effect,
+    /printApprovedKioskOrder\(/,
+    'the arrival listeners must not print either, directly or indirectly',
+  );
+
+  // The chime and the "order received" toast stay on arrival.
+  assert.match(
+    effect,
+    /playKioskNotificationSound\(\)/,
+    'an arriving kiosk order must still chime so the operator opens the approval panel',
+  );
+  assert.match(
+    effect,
+    /kioskAutoPrint\.newOrderToast/,
+    'an arriving kiosk order must still raise the "received" toast',
+  );
+});
+
+test('the hook exposes an approval-time printer that ignores non-kiosk orders', () => {
+  const hook = source();
+
+  assert.match(
+    hook,
+    /const printApprovedKioskOrder = useCallback\(/,
+    'the approval-time printer must be exposed as a stable callback',
+  );
+  assert.match(
+    hook,
+    /return \{ kioskOrderCount, printApprovedKioskOrder \}/,
+    'the printer must be returned so the approval handler can call it',
+  );
+  // Non-kiosk orders must fall straight through: efood/Wolt, phone and counter
+  // orders keep their existing print behaviour.
+  assert.match(
+    hook,
+    /printApprovedKioskOrder = useCallback\([\s\S]{0,900}?if \(!isKioskOrder\(orderData\)\) return;/,
+    'the approval-time printer must ignore non-kiosk orders',
+  );
+  assert.match(
+    hook,
+    /export function isKioskOrder/,
+    'isKioskOrder must be exported so the approval handler can gate on it',
+  );
+});
+
+test('the approval handler prints kiosk orders only after a successful approval', () => {
+  const dashboard = readFileSync(
+    path.join(projectRoot, 'src', 'renderer', 'components', 'OrderDashboard.tsx'),
+    'utf8',
+  );
+
+  const approveHandler = dashboard.slice(
+    dashboard.indexOf('const handleApproveOrder = async ('),
+    dashboard.indexOf('const handleDeclineOrder = async ('),
+  );
+  assert.ok(approveHandler.length > 0, 'handleApproveOrder must exist');
+
+  // Gated on the approval succeeding...
+  assert.match(
+    approveHandler,
+    /const ok = await approveOrder\([\s\S]*?printApprovedKioskOrder\(/,
+    'the print must happen after the approval call, not before it',
+  );
+  // ...and on the order actually being a kiosk order.
+  assert.match(
+    approveHandler,
+    /isKioskOrder\(selectedOrderForApproval\)[\s\S]{0,240}?printApprovedKioskOrder\(/,
+    'only kiosk orders may be printed from the shared approval handler',
+  );
+  // Ordering is what puts the prep time on the ticket: the Rust print command
+  // takes only the order id and rebuilds the document from the local row, so
+  // `approveOrder` must have persisted estimated_time before the print is
+  // enqueued. The order object is passed along for the kiosk check and toast.
+  assert.match(
+    approveHandler,
+    /printApprovedKioskOrder\(\{[\s\S]{0,200}?estimatedTime,/,
+    'the approved prep time must travel with the order handed to the printer',
+  );
+  // A declined order must never print.
+  const declineHandler = dashboard.slice(
+    dashboard.indexOf('const handleDeclineOrder = async ('),
+    dashboard.indexOf('const handleDriverAssignment = async ('),
+  );
+  assert.doesNotMatch(
+    declineHandler,
+    /printApprovedKioskOrder\(/,
+    'declining an order must never print it',
   );
 });

@@ -5353,7 +5353,8 @@
   "kioskAutoPrint": {
     "sourceFallback": "Kiosque",
     "newOrderToast": "Nouvelle commande kiosque #{{orderNumber}} reçue de {{sourceLabel}}.",
-    "printFailedToast": "[NEEDS TRANSLATION] Kiosk order #{{orderNumber}} received, but sending it to the printer failed. Check the print queue."
+    "printFailedToast": "[NEEDS TRANSLATION] Kiosk order #{{orderNumber}} received, but sending it to the printer failed. Check the print queue.",
+    "printedToast": "[NEEDS TRANSLATION] Kiosk order #{{orderNumber}} approved — sent to the printer."
   },
   "shiftManager": {
     "noActiveShift": "Aucun service actif à clôturer",

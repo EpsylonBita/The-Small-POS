@@ -1,21 +1,29 @@
 /**
- * useKioskOrderAutoPrint — Automatically prints kitchen tickets and receipts
- * for orders arriving from kiosk terminals assigned to this POS terminal.
+ * useKioskOrderAutoPrint — announces kiosk orders arriving on this terminal and
+ * prints them once the operator has approved them.
  *
  * Listens to the same 'order-created' event that useOrderStore subscribes to
  * (emitted by the Rust sync engine when a remote order arrives). When a new
- * kiosk order matches the current terminal ID, it enqueues print jobs via
- * the existing IPC bridge without creating additional Realtime subscriptions.
+ * kiosk order matches the current terminal ID, it chimes and toasts so the
+ * operator opens the approval panel — no Realtime subscriptions of its own.
  *
- * Deduplication: a Set of recently auto-printed order IDs with a 5-minute TTL
- * prevents duplicate prints when the same order arrives through multiple event
- * paths (e.g., realtime + sync polling).
+ * Printing is deliberately NOT done on arrival. A kiosk order lands as
+ * 'pending' and the operator still has to pick a prep time and press Approve;
+ * printing before that produced a slip for an order nobody had accepted yet
+ * (and one that could still be declined). `printApprovedKioskOrder` is
+ * therefore called by the approval handler, after the approval succeeds, so
+ * the ticket carries the prep time the operator actually chose.
+ *
+ * Deduplication: a Map of recently printed order IDs with a 5-minute TTL
+ * prevents duplicate prints when approval is retried or the same order is
+ * approved through more than one path.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getBridge, onEvent, offEvent } from '../../lib';
 import type { Order } from '../../shared/types/orders';
 import toast from 'react-hot-toast';
 import { useI18n } from '../contexts/i18n-context';
+import { formatCompactOrderNumberForDisplay } from '../utils/orderNumberUtils';
 
 /** TTL in milliseconds for the deduplication set (5 minutes). */
 const DEDUP_TTL_MS = 5 * 60 * 1000;
@@ -24,8 +32,15 @@ const DEDUP_TTL_MS = 5 * 60 * 1000;
 const PRUNE_INTERVAL_MS = 60 * 1000;
 
 interface KioskAutoPrintResult {
-  /** Number of kiosk orders auto-printed this session. */
+  /** Number of kiosk orders printed after approval this session. */
   kioskOrderCount: number;
+  /**
+   * Enqueue the kitchen ticket and receipt for a kiosk order the operator has
+   * just approved. Call it from the approval handler — never on arrival.
+   * Non-kiosk orders are ignored, so the shared approval path (efood, Wolt,
+   * phone and counter orders) is unaffected.
+   */
+  printApprovedKioskOrder: (order: Partial<Order> | null | undefined) => Promise<void>;
 }
 
 interface KioskReceiptPrinterOverride {
@@ -205,7 +220,7 @@ function extractProfileEndpoint(profile: unknown): { host: string; port: number 
  * Determines whether an order originated from a kiosk.
  * Checks source first, then legacy plugin / platform fields for 'kiosk'.
  */
-function isKioskOrder(order: Partial<Order>): boolean {
+export function isKioskOrder(order: Partial<Order>): boolean {
   const metadata =
     order.ghost_metadata ||
     (order as Partial<Order> & { ghostMetadata?: unknown }).ghostMetadata ||
@@ -447,10 +462,93 @@ export function useKioskOrderAutoPrint(
     [bridge.payments, resolveReceiptPrinterProfileId],
   );
 
+  /**
+   * Print a kiosk order the operator has just approved.
+   *
+   * Called from the approval handler rather than from an arrival event: a kiosk
+   * order lands as 'pending' with the approval panel still asking for a prep
+   * time, and printing at that moment produced a slip for an order that had not
+   * been accepted (and could still be declined). Deliberately does not filter on
+   * the terminal id — the operator approved it on this terminal, which is a
+   * stronger signal than the order's routing fields.
+   */
+  const printApprovedKioskOrder = useCallback(
+    async (order: Partial<Order> | null | undefined) => {
+      const orderData = order as any;
+      if (!orderData || !orderData.id) return;
+
+      // Never touch non-kiosk orders — efood/Wolt, phone and counter orders keep
+      // their existing print behaviour untouched.
+      if (!isKioskOrder(orderData)) return;
+
+      // Deduplication check
+      const now = Date.now();
+      if (printedOrdersRef.current.has(orderData.id)) {
+        return;
+      }
+      // Guard against concurrent double-processing (a double-tapped Approve, or
+      // an approval retried after a transient failure) while the enqueue below
+      // is awaited.
+      if (inFlightOrdersRef.current.has(orderData.id)) {
+        return;
+      }
+      inFlightOrdersRef.current.add(orderData.id);
+      // Always release the in-flight claim, even if something below throws — an
+      // orphaned claim would block this order from ever being processed again
+      // (the prune interval never touches inFlightOrdersRef).
+      try {
+        const rawOrderNumber =
+          orderData.orderNumber ||
+          orderData.order_number ||
+          String(orderData.id).slice(0, 8);
+        // Kiosk numbers encode the branch and business period; show operators the
+        // same compact form the order screen and the slip use.
+        const orderNumber =
+          formatCompactOrderNumberForDisplay(rawOrderNumber, orderData.createdAt || orderData.created_at) ||
+          rawOrderNumber;
+
+        // Enqueue BEFORE claiming the order as printed. Only a durable enqueue marks
+        // it done; a failed enqueue leaves the order un-marked so a later approval
+        // can retry (backend dedup keeps retries idempotent), and surfaces an error
+        // instead of a silent drop behind a false success toast.
+        const enqueued = await enqueuePrintJobs(orderData);
+
+        if (enqueued) {
+          // Mark as printed only now that both jobs are durably queued.
+          printedOrdersRef.current.set(orderData.id, now);
+          setKioskOrderCount((prev) => prev + 1);
+          toast.success(t('kioskAutoPrint.printedToast', {
+            defaultValue: 'Kiosk order #{{orderNumber}} approved — sent to the printer.',
+            orderNumber,
+          }), {
+            duration: 5000,
+          });
+        } else {
+          // Stable per-order id so repeated retries update one toast instead of stacking.
+          toast.error(t('kioskAutoPrint.printFailedToast', {
+            defaultValue: 'Kiosk order #{{orderNumber}} received, but sending it to the printer failed. Check the print queue.',
+            orderNumber,
+          }), {
+            id: `kiosk-print-failed-${orderData.id}`,
+            duration: 7000,
+          });
+        }
+      } finally {
+        inFlightOrdersRef.current.delete(orderData.id);
+      }
+    },
+    [enqueuePrintJobs, t],
+  );
+
   useEffect(() => {
     // Do not attach listeners when there is no terminal identity
     if (!currentTerminalId) return;
 
+    /**
+     * A kiosk order for this terminal has arrived. Chime and toast so the
+     * operator opens the approval panel — nothing is printed until they pick a
+     * prep time and approve.
+     */
     const handleOrderCreated = async (orderData: any) => {
       if (!orderData || !orderData.id) return;
 
@@ -469,67 +567,34 @@ export function useKioskOrderAutoPrint(
 
       if (orderTerminalId !== terminalIdRef.current) return;
 
-      // Deduplication check
       const now = Date.now();
-      if (printedOrdersRef.current.has(orderData.id)) {
+      // Announce once per order — 'order-created' and 'order-realtime-update'
+      // can both fire for the same arrival.
+      if (notifiedOrdersRef.current.has(orderData.id)) {
         return;
       }
-      // Guard against concurrent double-processing (order-created + realtime-update
-      // can both fire for the same order) while the enqueue below is awaited.
-      if (inFlightOrdersRef.current.has(orderData.id)) {
-        return;
-      }
-      inFlightOrdersRef.current.add(orderData.id);
-      // Always release the in-flight claim, even if something below throws — an
-      // orphaned claim would block this order from ever being processed again
-      // (the prune interval never touches inFlightOrdersRef).
-      try {
-        const orderNumber =
-          orderData.orderNumber ||
-          orderData.order_number ||
-          String(orderData.id).slice(0, 8);
-        const sourceLabel =
-          orderData.customerName ||
-          orderData.customer_name ||
-          t('kioskAutoPrint.sourceFallback', { defaultValue: 'Kiosk' });
+      notifiedOrdersRef.current.set(orderData.id, now);
+      playKioskNotificationSound();
 
-        // The order has arrived — chime once per order (not on every failed-enqueue
-        // retry), regardless of print outcome.
-        if (!notifiedOrdersRef.current.has(orderData.id)) {
-          notifiedOrdersRef.current.set(orderData.id, now);
-          playKioskNotificationSound();
-        }
+      const rawOrderNumber =
+        orderData.orderNumber ||
+        orderData.order_number ||
+        String(orderData.id).slice(0, 8);
+      const orderNumber =
+        formatCompactOrderNumberForDisplay(rawOrderNumber, orderData.createdAt || orderData.created_at) ||
+        rawOrderNumber;
+      const sourceLabel =
+        orderData.customerName ||
+        orderData.customer_name ||
+        t('kioskAutoPrint.sourceFallback', { defaultValue: 'Kiosk' });
 
-        // Enqueue BEFORE claiming the order as printed. Only a durable enqueue marks
-        // it done; a failed enqueue leaves the order un-marked so a later order event
-        // can retry (backend dedup keeps retries idempotent), and surfaces an error
-        // instead of a silent drop behind a false success toast.
-        const enqueued = await enqueuePrintJobs(orderData);
-
-        if (enqueued) {
-          // Mark as printed only now that both jobs are durably queued.
-          printedOrdersRef.current.set(orderData.id, now);
-          setKioskOrderCount((prev) => prev + 1);
-          toast.success(t('kioskAutoPrint.newOrderToast', {
-            defaultValue: 'New kiosk order #{{orderNumber}} received from {{sourceLabel}}.',
-            orderNumber,
-            sourceLabel,
-          }), {
-            duration: 5000,
-          });
-        } else {
-          // Stable per-order id so repeated retries update one toast instead of stacking.
-          toast.error(t('kioskAutoPrint.printFailedToast', {
-            defaultValue: 'Kiosk order #{{orderNumber}} received, but sending it to the printer failed. Check the print queue.',
-            orderNumber,
-          }), {
-            id: `kiosk-print-failed-${orderData.id}`,
-            duration: 7000,
-          });
-        }
-      } finally {
-        inFlightOrdersRef.current.delete(orderData.id);
-      }
+      toast.success(t('kioskAutoPrint.newOrderToast', {
+        defaultValue: 'New kiosk order #{{orderNumber}} received from {{sourceLabel}}.',
+        orderNumber,
+        sourceLabel,
+      }), {
+        duration: 5000,
+      });
     };
 
     // Listen to the same event the order store uses for remote orders
@@ -544,7 +609,8 @@ export function useKioskOrderAutoPrint(
       if (!isKioskOrder(orderData)) return;
       const status = orderData.status;
       if (status && status !== 'pending') return;
-      // Delegate to the same handler (dedup + in-flight guard protect against double-print)
+      // Delegate to the same handler (the notified guard protects against a
+      // duplicate chime; neither path prints).
       void handleOrderCreated(orderData);
     };
 
@@ -570,7 +636,7 @@ export function useKioskOrderAutoPrint(
       offEvent('order-realtime-update', handleOrderRealtimeUpdate);
       clearInterval(pruneInterval);
     };
-  }, [currentTerminalId, enqueuePrintJobs, t]);
+  }, [currentTerminalId, t]);
 
-  return { kioskOrderCount };
+  return { kioskOrderCount, printApprovedKioskOrder };
 }

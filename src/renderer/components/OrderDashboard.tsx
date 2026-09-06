@@ -117,7 +117,7 @@ import { normalizePosOrderItems } from "../../shared/utils/pos-order-items";
 import { useDeliveryValidation } from "../hooks/useDeliveryValidation";
 import { useResolvedPosIdentity } from "../hooks/useResolvedPosIdentity";
 import { useTerminalSettings } from "../hooks/useTerminalSettings";
-import { useKioskOrderAutoPrint } from "../hooks/useKioskOrderAutoPrint";
+import { useKioskOrderAutoPrint, isKioskOrder } from "../hooks/useKioskOrderAutoPrint";
 import {
   resolveCallerIdOrderSelection,
   subscribeToCallerIdOrderIntents,
@@ -566,9 +566,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       terminalId: resolvedTerminalId,
     } = useResolvedPosIdentity("branch+organization");
 
-    // Auto-print kitchen tickets and receipts for incoming kiosk orders
-    // assigned to this terminal. Only active when the terminal identity is resolved.
-    useKioskOrderAutoPrint(resolvedTerminalId);
+    // Announce incoming kiosk orders assigned to this terminal, and hand back
+    // the printer for `handleApproveOrder` to call once the operator approves.
+    // Only active when the terminal identity is resolved.
+    const { printApprovedKioskOrder } = useKioskOrderAutoPrint(resolvedTerminalId);
 
     // Get branchId and organizationId from terminal credential cache / IPC
     const [branchId, setBranchId] = useState<string | null>(null);
@@ -1998,6 +1999,16 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         const ok = await approveOrder(orderId, estimatedTime);
         if (ok) {
           toast.success(t("orderApprovalPanel.approved"));
+          // Kiosk orders print here, not on arrival: the slip used to come out
+          // while this panel was still asking for a prep time, for an order the
+          // operator had not accepted yet. No-ops for every other source, so the
+          // efood/Wolt, phone and counter approval paths are unchanged.
+          if (selectedOrderForApproval && isKioskOrder(selectedOrderForApproval)) {
+            void printApprovedKioskOrder({
+              ...selectedOrderForApproval,
+              estimatedTime,
+            } as Partial<Order>);
+          }
         } else {
           toast.error(t("orderDashboard.approveOrderFailed"));
         }

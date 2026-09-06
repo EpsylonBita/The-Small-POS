@@ -3544,6 +3544,63 @@ fn parse_customization_entries(raw: &Value) -> Vec<ReceiptCustomizationLine> {
         .collect()
 }
 
+/// Kiosk (QR / self-service) orders are the only source that stores an item's
+/// materials as two named groups — `{"added":[{id,name,price,quantity}],
+/// "removed":["Ingredient name"]}`. The generic flattener below cannot read
+/// that shape: `{added,removed}` is not itself a customization object, so
+/// `flatten_customization_values` hands back the two *arrays* as entries and
+/// every one of them is then dropped for having no name — which is why kiosk
+/// slips printed the item line with no ingredients under it while the order
+/// screen showed them correctly.
+///
+/// This handles that one shape explicitly and returns `None` for anything
+/// else, so every other print path (efood/Wolt `{"modifiers":[…]}`, plain
+/// arrays, JSON strings, POS-entered orders) keeps its exact previous output.
+fn parse_kiosk_customization_groups(raw: &Value) -> Option<Vec<ReceiptCustomizationLine>> {
+    // The column is JSON text, so a row can still carry the groups as a string.
+    if let Some(text) = raw.as_str() {
+        let parsed = serde_json::from_str::<Value>(text.trim()).ok()?;
+        return parse_kiosk_customization_groups(&parsed);
+    }
+
+    let object = raw.as_object()?;
+    if !object.contains_key("added") && !object.contains_key("removed") {
+        return None;
+    }
+
+    let mut lines = Vec::new();
+
+    if let Some(added) = object.get("added") {
+        lines.extend(parse_customization_entries(added));
+    }
+
+    if let Some(removed) = object.get("removed").and_then(Value::as_array) {
+        for entry in removed {
+            // `removed` carries bare ingredient names, not objects.
+            let name = match entry {
+                Value::String(value) => value.trim().to_string(),
+                other => extract_customization_name(other).unwrap_or_default(),
+            };
+            if name.is_empty() {
+                continue;
+            }
+            lines.push(ReceiptCustomizationLine {
+                name,
+                quantity: 1.0,
+                is_without: true,
+                is_little: false,
+                price: None,
+            });
+        }
+    }
+
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines)
+    }
+}
+
 fn parse_item_customizations(item: &Value) -> Vec<ReceiptCustomizationLine> {
     for key in [
         "customizations",
@@ -3552,6 +3609,11 @@ fn parse_item_customizations(item: &Value) -> Vec<ReceiptCustomizationLine> {
         "selectedIngredients",
     ] {
         if let Some(raw) = item.get(key) {
+            // Kiosk `{added,removed}` groups first — no other source emits them,
+            // and the generic path below silently discards them.
+            if let Some(kiosk_lines) = parse_kiosk_customization_groups(raw) {
+                return kiosk_lines;
+            }
             // Platform orders mirror server rows where `customizations` is an
             // object wrapping the actual list ({"modifiers":[{name,price}],
             // "external_sku":…}) — the materials live one level down.
@@ -3567,6 +3629,44 @@ fn parse_item_customizations(item: &Value) -> Vec<ReceiptCustomizationLine> {
         }
     }
     Vec::new()
+}
+
+/// Kiosk orders persist a globally unique order number that encodes the branch
+/// and the business period — `K-d28cef2e-20260906-060000-0001`. That string is
+/// far wider than a 58/80 mm slip, so it printed truncated and ran off the
+/// paper edge, while every screen already shows the compact form staff and
+/// customers actually call the order by (`K#0001`).
+///
+/// Compacts ONLY that exact five-part kiosk pattern. `ORD-YYYYMMDD-NNNN`,
+/// efood/Wolt short codes, bare ids and every other order number fail the
+/// shape test and are returned untouched, so no other slip changes.
+fn compact_kiosk_order_number(order_number: &str) -> String {
+    let candidate = order_number.trim();
+    let parts: Vec<&str> = candidate.split('-').collect();
+    if parts.len() != 5 {
+        return candidate.to_string();
+    }
+
+    let [prefix, branch_key, business_date, period_time, sequence] =
+        [parts[0], parts[1], parts[2], parts[3], parts[4]];
+
+    let shaped = !prefix.is_empty()
+        && prefix.chars().all(|c| c.is_ascii_alphabetic())
+        && !branch_key.is_empty()
+        && branch_key.len() <= 16
+        && branch_key.chars().all(|c| c.is_ascii_alphanumeric())
+        && business_date.len() == 8
+        && business_date.chars().all(|c| c.is_ascii_digit())
+        && period_time.len() == 6
+        && period_time.chars().all(|c| c.is_ascii_digit())
+        && !sequence.is_empty()
+        && sequence.chars().all(|c| c.is_ascii_digit());
+
+    if !shaped {
+        return candidate.to_string();
+    }
+
+    format!("{}#{}", prefix.to_uppercase(), sequence)
 }
 
 fn parse_item_total(item: &Value) -> f64 {
@@ -5365,7 +5465,7 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
         order_number: platform_short_code.unwrap_or(if order_number.is_empty() {
             order_id.to_string()
         } else {
-            order_number
+            compact_kiosk_order_number(&order_number)
         }),
         order_type,
         status,
@@ -5693,7 +5793,7 @@ fn build_split_receipt_doc(db: &DbState, payment_id: &str) -> Result<OrderReceip
         order_number: if order_number.is_empty() {
             order_id.to_string()
         } else {
-            order_number
+            compact_kiosk_order_number(&order_number)
         },
         order_type,
         status,
@@ -5900,7 +6000,7 @@ fn build_kitchen_ticket_doc(db: &DbState, order_id: &str) -> Result<KitchenTicke
             if order_number.is_empty() {
                 order_id.to_string()
             } else {
-                order_number
+                compact_kiosk_order_number(&order_number)
             },
         ),
         order_type,
@@ -15172,6 +15272,122 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_item_customizations_from_kiosk_added_removed_groups() {
+        // Live kiosk order 06/09 (Γλυκιά Κρέπα): the order screen listed
+        // «+ Σοκολάτα» / «+ Πτι-μπερ» while the slip printed the item line
+        // bare, because `{added,removed}` is not itself a customization
+        // object and the generic flattener dropped both arrays.
+        let item = serde_json::json!({
+            "customizations": {
+                "added": [
+                    { "id": "ing-1", "name": "Σοκολάτα", "price": 0.8, "quantity": 1 },
+                    { "id": "ing-2", "name": "Πτι-μπερ", "price": 0.6, "quantity": 1 }
+                ],
+                "removed": ["Ζάχαρη"]
+            }
+        });
+
+        let parsed = parse_item_customizations(&item);
+        assert_eq!(parsed.len(), 3);
+
+        assert_eq!(parsed[0].name, "Σοκολάτα");
+        assert!(!parsed[0].is_without);
+        assert_eq!(parsed[0].price, Some(0.8));
+
+        assert_eq!(parsed[1].name, "Πτι-μπερ");
+        assert!(!parsed[1].is_without);
+        assert_eq!(parsed[1].price, Some(0.6));
+
+        // `removed` carries bare names and must print as a "without" line.
+        assert_eq!(parsed[2].name, "Ζάχαρη");
+        assert!(parsed[2].is_without);
+        assert_eq!(parsed[2].price, None);
+    }
+
+    #[test]
+    fn test_parse_item_customizations_from_kiosk_little_and_named_removals() {
+        // Founder 06/09 added «λίγο»/«χωρίς» to the kiosk. `added` entries can
+        // now carry `isLittle`, and the server rewrites each removal into
+        // {id,name} so the ticket prints the name, never the uuid it was sent.
+        let item = serde_json::json!({
+            "customizations": {
+                "added": [
+                    { "id": "ing-1", "name": "Σοκολάτα", "price": 0.8, "isLittle": true },
+                    { "id": "ing-2", "name": "Πτι-μπερ", "price": 0.6 }
+                ],
+                "removed": [
+                    { "id": "ing-9", "name": "Ζάχαρη" }
+                ]
+            }
+        });
+
+        let parsed = parse_item_customizations(&item);
+        assert_eq!(parsed.len(), 3);
+
+        assert_eq!(parsed[0].name, "Σοκολάτα");
+        assert!(parsed[0].is_little, "isLittle must reach the slip");
+        assert!(!parsed[0].is_without);
+
+        assert_eq!(parsed[1].name, "Πτι-μπερ");
+        assert!(!parsed[1].is_little);
+
+        // A named removal prints «- Ζάχαρη», not the uuid.
+        assert_eq!(parsed[2].name, "Ζάχαρη");
+        assert!(parsed[2].is_without);
+    }
+
+    #[test]
+    fn test_parse_item_customizations_from_kiosk_groups_as_json_string() {
+        let item = serde_json::json!({
+            "customizations": "{\"added\":[{\"name\":\"Μέλι\",\"price\":0.5}],\"removed\":[]}"
+        });
+
+        let parsed = parse_item_customizations(&item);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].name, "Μέλι");
+        assert!(!parsed[0].is_without);
+    }
+
+    #[test]
+    fn test_parse_item_customizations_kiosk_empty_groups_stay_empty() {
+        let item = serde_json::json!({
+            "customizations": { "added": [], "removed": [] }
+        });
+
+        assert!(parse_item_customizations(&item).is_empty());
+    }
+
+    #[test]
+    fn test_compact_kiosk_order_number_shortens_only_the_kiosk_pattern() {
+        // Kiosk: prefix-branch8-businessdate-periodtime-sequence.
+        assert_eq!(
+            compact_kiosk_order_number("K-d28cef2e-20260906-060000-0001"),
+            "K#0001"
+        );
+        assert_eq!(
+            compact_kiosk_order_number("kiosk-abc123-20260906-060000-0042"),
+            "KIOSK#0042"
+        );
+
+        // Every other order number must survive untouched.
+        assert_eq!(
+            compact_kiosk_order_number("ORD-20260906-0007"),
+            "ORD-20260906-0007"
+        );
+        assert_eq!(
+            compact_kiosk_order_number("ORD-20260906-0a1b2c3d4e5f60718293a4b5c6d7e8f90"),
+            "ORD-20260906-0a1b2c3d4e5f60718293a4b5c6d7e8f90"
+        );
+        assert_eq!(compact_kiosk_order_number("4545"), "4545");
+        assert_eq!(compact_kiosk_order_number(""), "");
+        // Right part count, wrong shapes — the business date is not 8 digits.
+        assert_eq!(
+            compact_kiosk_order_number("K-d28cef2e-2026090-060000-0001"),
+            "K-d28cef2e-2026090-060000-0001"
+        );
+    }
+
+    #[test]
     fn test_parse_item_customizations_from_array() {
         let item = serde_json::json!({
             "customizations": [
@@ -15347,6 +15563,124 @@ mod tests {
 
         assert!(image.width() <= 260);
         assert!(image.height() <= 160);
+    }
+
+    /// End-to-end for the founder's 06/09 slip: the order screen listed the
+    /// crêpe's ingredients and note and headlined «K #0001», while the printed
+    /// slip showed a bare item line under a raw
+    /// `K-d28cef2e-20260906-060000-0001` that ran off the paper. Both come from
+    /// the same local `orders` row, so this builds the receipt doc from that
+    /// row and asserts what would reach the printer.
+    #[test]
+    fn test_build_order_receipt_doc_prints_kiosk_ingredients_and_a_short_number() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            let items = serde_json::json!([
+                {
+                    "name": "Γλυκιά Κρέπα",
+                    "quantity": 1,
+                    "price": 3.30,
+                    "notes": "Ssdz",
+                    "customizations": {
+                        "added": [
+                            { "id": "ing-1", "name": "Σοκολάτα", "price": 0.80, "quantity": 1 },
+                            { "id": "ing-2", "name": "Πτι-μπερ", "price": 0.60, "quantity": 1 }
+                        ],
+                        "removed": ["Ζάχαρη"]
+                    }
+                }
+            ])
+            .to_string();
+
+            conn.execute(
+                "INSERT INTO orders (
+                    id, order_number, items, total_amount, total_amount_cents, subtotal, subtotal_cents,
+                    status, order_type, sync_status, created_at, updated_at
+                 ) VALUES (
+                    'ord-kiosk', 'K-d28cef2e-20260906-060000-0001', ?1, 3.30, 330, 3.30, 330,
+                    'pending', 'pickup', 'pending', datetime('now'), datetime('now')
+                 )",
+                params![items],
+            )
+            .unwrap();
+        }
+
+        let doc = build_order_receipt_doc(&db, "ord-kiosk").unwrap();
+
+        // The slip headline is the number staff and customers say out loud.
+        assert_eq!(doc.order_number, "K#0001");
+
+        let item = doc
+            .items
+            .first()
+            .expect("the kiosk item must reach the slip");
+        assert_eq!(item.name, "Γλυκιά Κρέπα");
+        // The note already printed before this fix; it must keep printing.
+        assert_eq!(item.note.as_deref(), Some("Ssdz"));
+
+        // …and now the ingredients do too.
+        let names: Vec<&str> = item
+            .customizations
+            .iter()
+            .map(|line| line.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["Σοκολάτα", "Πτι-μπερ", "Ζάχαρη"]);
+        assert!(!item.customizations[0].is_without);
+        assert!(!item.customizations[1].is_without);
+        assert!(item.customizations[2].is_without);
+    }
+
+    /// The founder's constraint: only the kiosk slip changes. A platform order
+    /// keeps the exact number and materials it printed before.
+    #[test]
+    fn test_build_order_receipt_doc_leaves_platform_orders_untouched() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            let items = serde_json::json!([
+                {
+                    "name": "Κρέπα Snickers",
+                    "quantity": 1,
+                    "price": 6.20,
+                    "customizations": {
+                        "modifiers": [{ "name": "Extra Snickers", "price": 1.0 }],
+                        "external_sku": "1440683243",
+                        "platform_source": "efood"
+                    }
+                }
+            ])
+            .to_string();
+
+            conn.execute(
+                "INSERT INTO orders (
+                    id, order_number, items, total_amount, total_amount_cents, subtotal, subtotal_cents,
+                    status, order_type, sync_status, created_at, updated_at
+                 ) VALUES (
+                    'ord-efood', 'ORD-20260906-0007', ?1, 6.20, 620, 6.20, 620,
+                    'pending', 'delivery', 'pending', datetime('now'), datetime('now')
+                 )",
+                params![items],
+            )
+            .unwrap();
+        }
+
+        let doc = build_order_receipt_doc(&db, "ord-efood").unwrap();
+
+        // Not a kiosk-shaped number — printed exactly as stored.
+        assert_eq!(doc.order_number, "ORD-20260906-0007");
+
+        let item = doc
+            .items
+            .first()
+            .expect("the platform item must reach the slip");
+        let names: Vec<&str> = item
+            .customizations
+            .iter()
+            .map(|line| line.name.as_str())
+            .collect();
+        // Only the real material, never the bookkeeping wrapper values.
+        assert_eq!(names, vec!["Extra Snickers"]);
     }
 
     #[test]

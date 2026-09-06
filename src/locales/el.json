@@ -5353,7 +5353,8 @@
   "kioskAutoPrint": {
     "sourceFallback": "Kiosk",
     "newOrderToast": "Νέα παραγγελία kiosk #{{orderNumber}} από {{sourceLabel}}.",
-    "printFailedToast": "[NEEDS TRANSLATION] Kiosk order #{{orderNumber}} received, but sending it to the printer failed. Check the print queue."
+    "printFailedToast": "Η παραγγελία kiosk #{{orderNumber}} λήφθηκε, αλλά η αποστολή στον εκτυπωτή απέτυχε. Δείτε την ουρά εκτύπωσης.",
+    "printedToast": "Η παραγγελία kiosk #{{orderNumber}} εγκρίθηκε — στάλθηκε στον εκτυπωτή."
   },
   "shiftManager": {
     "noActiveShift": "Δεν υπάρχει ενεργή βάρδια για κλείσιμο",
