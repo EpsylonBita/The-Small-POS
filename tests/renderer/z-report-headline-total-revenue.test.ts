@@ -72,8 +72,9 @@ test('Z modal shows the three-way split under the headline: cash in the till + c
   assert.doesNotMatch(source, /t\('common\.other'/, 'common.other is not a defined key — it rendered English on a Greek till');
   assert.match(source, /data-z-report-revenue-split/);
   assert.match(source, /\{t\('modals\.zReport\.revenueSplitHint'\)\}/);
-  // The Orders tab lists staff-served orders, so its badge counts that list.
-  assert.match(source, /icon: Receipt, badge: staffOrderDetailCount \}/);
+  // The Orders tab lists every order the day counts (store + platform), so its
+  // badge counts that day list — pinned in z-report-day-orders-list.test.ts.
+  assert.match(source, /icon: Receipt, badge: dayOrderDetailCount \}/);
 });
 
 test('Z report types expose the payment-level day summary the modal reads', () => {

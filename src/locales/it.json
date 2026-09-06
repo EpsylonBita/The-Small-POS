@@ -4356,7 +4356,8 @@
         "takeaway": "Asporto",
         "allPayments": "Tutti i pagamenti",
         "cash": "Contanti",
-        "card": "Carta"
+        "card": "Carta",
+        "platform": "Piattaforme"
       },
       "noOrdersMatchFilter": "Nessun ordine corrisponde ai filtri selezionati",
       "orderTypes": {
@@ -4375,9 +4376,13 @@
         "roomCharge": "Addebito in camera",
         "pending": "In sospeso",
         "unpaid": "Non pagato",
-        "unknown": "Sconosciuto"
+        "unknown": "Sconosciuto",
+        "platformOnline": "Piattaforma, online",
+        "platformCod": "Piattaforma, contrassegno"
       },
       "exportOrdersCSV": "Esporta ordini CSV",
+      "platformOrderSource": "Piattaforma {{platform}}",
+      "ordersListTruncated": "Vengono mostrati i primi 1000 ordini della giornata",
       "exportCSV": "Esporta CSV",
       "exportStaffCSV": "Esporta personale CSV",
       "print": "Stampa",

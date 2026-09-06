@@ -4356,7 +4356,8 @@
         "takeaway": "À emporter",
         "allPayments": "Tous les paiements",
         "cash": "Espèces",
-        "card": "Carte"
+        "card": "Carte",
+        "platform": "Plateformes"
       },
       "noOrdersMatchFilter": "Aucune commande ne correspond aux filtres sélectionnés",
       "orderTypes": {
@@ -4375,9 +4376,13 @@
         "roomCharge": "Frais de chambre",
         "pending": "En attente",
         "unpaid": "Impayé",
-        "unknown": "Inconnu"
+        "unknown": "Inconnu",
+        "platformOnline": "Plateforme, en ligne",
+        "platformCod": "Plateforme, paiement à la livraison"
       },
       "exportOrdersCSV": "Exporter les commandes en CSV",
+      "platformOrderSource": "Plateforme {{platform}}",
+      "ordersListTruncated": "Affichage des 1000 premières commandes de la journée",
       "exportCSV": "Exporter en CSV",
       "exportStaffCSV": "Exporter le personnel en CSV",
       "print": "Imprimer",

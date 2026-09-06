@@ -4360,7 +4360,8 @@
         "takeaway": "Takeaway",
         "allPayments": "All Payments",
         "cash": "Cash",
-        "card": "Card"
+        "card": "Card",
+        "platform": "Platforms"
       },
       "noOrdersMatchFilter": "No orders match the selected filters",
       "orderTypes": {
@@ -4379,9 +4380,13 @@
         "roomCharge": "Room charge",
         "pending": "Pending",
         "unpaid": "Unpaid",
-        "unknown": "Unknown"
+        "unknown": "Unknown",
+        "platformOnline": "Platform, online",
+        "platformCod": "Platform, cash on delivery"
       },
       "exportOrdersCSV": "Export Orders CSV",
+      "platformOrderSource": "Platform {{platform}}",
+      "ordersListTruncated": "Showing the first 1000 orders of the day",
       "exportCSV": "Export CSV",
       "exportStaffCSV": "Export Staff CSV",
       "print": "Print",

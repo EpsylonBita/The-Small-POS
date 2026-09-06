@@ -4353,7 +4353,8 @@
         "takeaway": "Takeaway",
         "allPayments": "Όλες οι Πληρωμές",
         "cash": "Μετρητά",
-        "card": "Κάρτα"
+        "card": "Κάρτα",
+        "platform": "Πλατφόρμες"
       },
       "noOrdersMatchFilter": "Καμία παραγγελία δεν ταιριάζει στα επιλεγμένα φίλτρα",
       "orderTypes": {
@@ -4372,9 +4373,13 @@
         "roomCharge": "Χρέωση δωματίου",
         "pending": "Σε εκκρεμότητα",
         "unpaid": "Απλήρωτο",
-        "unknown": "Άγνωστο"
+        "unknown": "Άγνωστο",
+        "platformOnline": "Πλατφόρμα, online",
+        "platformCod": "Πλατφόρμα, αντικαταβολή"
       },
       "exportOrdersCSV": "Εξαγωγή Παραγγελιών CSV",
+      "platformOrderSource": "Πλατφόρμα {{platform}}",
+      "ordersListTruncated": "Εμφανίζονται οι πρώτες 1000 παραγγελίες της ημέρας",
       "exportCSV": "Εξαγωγή CSV",
       "exportStaffCSV": "Εξαγωγή CSV Προσωπικού",
       "print": "Εκτύπωση",

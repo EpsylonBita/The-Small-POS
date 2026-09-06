@@ -2269,6 +2269,130 @@ fn load_driver_order_details(
     Ok((rows, truncated))
 }
 
+/// Day-level order list for the Z modal's Orders tab (founder, 06/09/2026:
+/// the tab listed only the staff shifts' orders, so every platform order was
+/// missing from the list, the badge and the CSV).
+///
+/// Every order the day COUNTS — store and platform alike — in chronological
+/// order, selected with exactly the predicate behind `sales.totalOrders`
+/// (same window, branch wildcard, ghost/test/repair exclusions, cancelled
+/// excluded, open unsettled table tabs excluded), so
+/// `dayOrders.len() + sales.repairOrders == daySummary.totalOrders`.
+///
+/// Platform orders are the ones `staffReports[].ordersDetails` can never
+/// hold: they carry no staff shift (ingested without a cashier assignment,
+/// settled with a NULL-shift `other` payment), so the per-shift lists skip
+/// them. Their tender is labelled like `paymentsBreakdown`
+/// (`platform_online` / `platform_cod`), never the bare `other`, and the row
+/// names its platform (`orders.plugin`) and whether the platform's own rider
+/// carried it. Store orders keep their staff attribution (driver shift first,
+/// then the settling payment's shift, then the order's own). Capped like the
+/// per-shift lists: 1000 rows + `dayOrdersTruncated`.
+fn load_day_order_details(
+    conn: &Connection,
+    branch_id: &str,
+    period_start: &str,
+    cutoff_at: Option<&str>,
+    lower_bound_mode: LowerBoundMode,
+) -> Result<(Vec<Value>, bool), String> {
+    let financial_expr = business_day::order_financial_timestamp_expr("o");
+    let financial_predicate = lower_bound_mode.sql_predicate(&financial_expr, "?1");
+    let open_table_tab = business_day::open_unsettled_table_tab_expr("o");
+    // instr() instead of LIKE for the fleet marker: it contains `_`, which
+    // LIKE treats as a single-character wildcard.
+    let sql = format!(
+        "SELECT x.*,
+                (SELECT ss.staff_name FROM staff_shifts ss WHERE ss.id = x.staff_shift_id) AS staff_name
+         FROM (
+            SELECT o.id AS id,
+                   COALESCE(NULLIF(TRIM(o.order_number), ''), o.id) AS order_number,
+                   COALESCE(o.order_type, 'dine-in') AS order_type,
+                   o.table_number AS table_number,
+                   o.delivery_address AS delivery_address,
+                   COALESCE(o.total_amount_cents, CAST(ROUND(o.total_amount * 100) AS INTEGER), 0) AS amount_cents,
+                   COALESCE((
+                       SELECT CASE
+                           WHEN COUNT(DISTINCT LOWER(TRIM(op2.method))) > 1 THEN 'split'
+                           WHEN LOWER(TRIM(MIN(op2.method))) = 'other'
+                                AND MAX(CASE WHEN COALESCE(op2.transaction_ref, '') LIKE 'platform_settlement:online:%' THEN 1 ELSE 0 END) = 1
+                             THEN 'platform_online'
+                           WHEN LOWER(TRIM(MIN(op2.method))) = 'other'
+                                AND MAX(CASE WHEN COALESCE(op2.transaction_ref, '') LIKE 'platform_settlement:cod:%' THEN 1 ELSE 0 END) = 1
+                             THEN 'platform_cod'
+                           ELSE LOWER(TRIM(MIN(op2.method)))
+                       END
+                       FROM order_payments op2
+                       WHERE op2.order_id = o.id
+                         AND op2.status = 'completed'
+                         AND TRIM(COALESCE(op2.method, '')) != ''
+                   ), 'pending') AS payment_method,
+                   o.payment_status AS payment_status,
+                   o.status AS status,
+                   o.created_at AS created_at,
+                   NULLIF(LOWER(TRIM(COALESCE(o.plugin, ''))), '') AS platform,
+                   CASE WHEN instr(COALESCE(o.ghost_metadata, ''),
+                                   '\"delivery_provider\":\"platform_delivery\"') > 0
+                        THEN 1 ELSE 0 END AS platform_fleet,
+                   COALESCE(
+                       (SELECT de.staff_shift_id FROM driver_earnings de
+                         WHERE de.order_id = o.id AND de.staff_shift_id IS NOT NULL
+                         ORDER BY de.created_at DESC LIMIT 1),
+                       (SELECT op3.staff_shift_id FROM order_payments op3
+                         WHERE op3.order_id = o.id AND op3.status = 'completed'
+                           AND op3.staff_shift_id IS NOT NULL
+                         ORDER BY op3.created_at ASC LIMIT 1),
+                       o.staff_shift_id
+                   ) AS staff_shift_id
+            FROM orders o
+            WHERE {financial_predicate}
+              AND (?2 IS NULL OR {financial_expr} <= ?2)
+              AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
+              AND COALESCE(o.is_ghost, 0) = 0
+              AND COALESCE(o.is_test, 0) = 0
+              AND COALESCE(o.order_context, '') <> 'repair_settlement'
+              AND o.status NOT IN ('cancelled', 'canceled')
+              AND NOT {open_table_tab}
+         ) x
+         ORDER BY x.created_at ASC, x.id ASC
+         LIMIT 1001"
+    );
+
+    let mut rows = conn
+        .prepare(&sql)
+        .map_err(|e| format!("prepare day order details: {e}"))?
+        .query_map(params![period_start, cutoff_at, branch_id], |row| {
+            let raw_order_type = row.get::<_, String>(2)?;
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "orderNumber": row.get::<_, String>(1)?,
+                "orderType": normalize_order_type(&raw_order_type),
+                "tableNumber": row.get::<_, Option<String>>(3)?,
+                "deliveryAddress": row.get::<_, Option<String>>(4)?,
+                "amount": Cents::new(row.get::<_, i64>(5)?).to_f64_dp2(),
+                "paymentMethod": row.get::<_, Option<String>>(6)?,
+                "paymentStatus": row.get::<_, Option<String>>(7)?,
+                // Nullable in the local schema; a NULL must not drop the row
+                // (the list promises the aggregate's count).
+                "status": row.get::<_, Option<String>>(8)?.unwrap_or_default(),
+                "createdAt": row.get::<_, Option<String>>(9)?.unwrap_or_default(),
+                "platform": row.get::<_, Option<String>>(10)?,
+                "platformFleet": row.get::<_, i64>(11)? == 1,
+                "staffShiftId": row.get::<_, Option<String>>(12)?,
+                "staffName": row.get::<_, Option<String>>(13)?,
+            }))
+        })
+        .map_err(|e| format!("query day order details: {e}"))?
+        .filter_map(|row| row.ok())
+        .collect::<Vec<_>>();
+
+    let truncated = rows.len() > 1000;
+    if truncated {
+        rows.truncate(1000);
+    }
+
+    Ok((rows, truncated))
+}
+
 fn load_driver_unsettled_counts_for_period(
     conn: &Connection,
     period_start: &str,
@@ -4654,6 +4778,15 @@ fn build_z_report_for_date(
             lower_bound_mode,
         )?,
     );
+    // Day-level order list (store + platform) for the modal's Orders tab;
+    // same window and predicate as the `totalOrders` aggregate above.
+    let (day_orders, day_orders_truncated) = load_day_order_details(
+        &conn,
+        branch_id.as_str(),
+        period_start.as_str(),
+        cutoff_param,
+        lower_bound_mode,
+    )?;
 
     // Build Electron-compatible report_json.
     // W4d-iv additive emission: every monetary float key carries a `_cents`
@@ -4736,6 +4869,11 @@ fn build_z_report_for_date(
             "totalOrders": total_orders,
         },
         "staffReports": staff_reports,
+        // Founder (06/09/2026): the Orders tab lists the whole day, not the
+        // staff subset. Date-path only — the legacy single-shift builder
+        // (`generate_z_report`) reports one shift by design.
+        "dayOrders": day_orders,
+        "dayOrdersTruncated": day_orders_truncated,
     });
     canonicalize_report_json_period(&mut report_json, period_start.as_str(), period_end.as_str());
 
@@ -6839,6 +6977,106 @@ mod tests {
         assert_eq!(efood["vendorOrders"], 2);
         assert_eq!(efood["vendorCash"], 8.0);
         assert_eq!(efood["vendorCard"], 5.0);
+    }
+
+    #[test]
+    fn test_date_z_report_lists_every_order_of_the_day_including_platform_orders() {
+        let db = test_db();
+        let shift_id = seed_closed_shift(&db);
+        {
+            let conn = db.conn.lock().unwrap();
+            // efood, platform fleet, prepaid online: no staff shift anywhere
+            // (ingested without a cashier assignment, settled with a
+            // NULL-shift `other` payment) — invisible to every staff list.
+            conn.execute(
+                "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents, status, order_type, payment_status, plugin, ghost_metadata, delivery_address, sync_status, created_at, updated_at)
+                 VALUES ('ord-efood-online', 'EF-ONLINE', '[]', 12.10, 1210, 'delivered', 'delivery', 'paid', 'efood', '{\"food_delivery\":{\"delivery_provider\":\"platform_delivery\",\"payment_method\":\"online\",\"prepaid\":true}}', 'Εγνατία 1', 'pending', '2026-02-16T12:00:00Z', '2026-02-16T12:00:00Z')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status, transaction_ref, sync_status, created_at, updated_at)
+                 VALUES ('pay-efood-online', 'ord-efood-online', 'other', 12.10, 1210, 'completed', 'platform_settlement:online:ord-efood-online', 'pending', '2026-02-16T12:00:30Z', '2026-02-16T12:00:30Z')",
+                [],
+            )
+            .unwrap();
+            // efood COD carried by the platform's own rider.
+            conn.execute(
+                "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents, status, order_type, payment_status, plugin, ghost_metadata, delivery_address, sync_status, created_at, updated_at)
+                 VALUES ('ord-efood-cod', 'EF-COD', '[]', 9.50, 950, 'delivered', 'delivery', 'paid', 'efood', '{\"food_delivery\":{\"delivery_provider\":\"platform_delivery\",\"payment_method\":\"cash\",\"prepaid\":false}}', 'Τσιμισκή 2', 'pending', '2026-02-16T12:30:00Z', '2026-02-16T12:30:00Z')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status, transaction_ref, sync_status, created_at, updated_at)
+                 VALUES ('pay-efood-cod', 'ord-efood-cod', 'other', 9.50, 950, 'completed', 'platform_settlement:cod:ord-efood-cod', 'pending', '2026-02-16T12:30:30Z', '2026-02-16T12:30:30Z')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let payload = serde_json::json!({ "branchId": "branch-1", "date": "2026-02-16" });
+        let result = generate_z_report_for_date(&db, &payload).expect("generate with day orders");
+        let report = &result["report"]["reportJson"];
+        let day_orders = report["dayOrders"].as_array().expect("dayOrders array");
+        assert_eq!(report["dayOrdersTruncated"], false);
+
+        // The list is exactly what the headline counts.
+        let total_orders = report["daySummary"]["totalOrders"]
+            .as_i64()
+            .expect("daySummary.totalOrders");
+        let repair_orders = report["sales"]["repairOrders"].as_i64().unwrap_or(0);
+        assert_eq!(
+            day_orders.len() as i64 + repair_orders,
+            total_orders,
+            "day list must match the day count: {day_orders:?}"
+        );
+
+        // Chronological.
+        let created: Vec<&str> = day_orders
+            .iter()
+            .map(|order| order["createdAt"].as_str().expect("createdAt"))
+            .collect();
+        let mut sorted = created.clone();
+        sorted.sort_unstable();
+        assert_eq!(created, sorted, "dayOrders must be in created_at order");
+
+        // Platform orders are listed with the paymentsBreakdown tender names.
+        let online = day_orders
+            .iter()
+            .find(|order| order["id"] == "ord-efood-online")
+            .expect("platform online order listed");
+        assert_eq!(online["paymentMethod"], "platform_online");
+        assert_eq!(online["platform"], "efood");
+        assert_eq!(online["platformFleet"], true);
+        assert_eq!(online["amount"], 12.10);
+        assert_eq!(online["orderType"], "delivery");
+        assert_eq!(online["deliveryAddress"], "Εγνατία 1");
+        assert!(online["staffShiftId"].is_null());
+        assert!(online["staffName"].is_null());
+        let cod = day_orders
+            .iter()
+            .find(|order| order["id"] == "ord-efood-cod")
+            .expect("platform COD order listed");
+        assert_eq!(cod["paymentMethod"], "platform_cod");
+
+        // Store orders keep their staff attribution.
+        let store = day_orders
+            .iter()
+            .find(|order| order["staffShiftId"] == shift_id.as_str())
+            .expect("a cashier order is listed too");
+        assert_eq!(store["staffName"], "John");
+        assert!(store["platform"].is_null());
+        assert_eq!(store["platformFleet"], false);
+
+        // …and the platform orders still sit in no staff list (that is the gap
+        // the day list closes).
+        for staff in report["staffReports"].as_array().expect("staffReports") {
+            for detail in staff["ordersDetails"].as_array().expect("ordersDetails") {
+                assert_ne!(detail["id"], "ord-efood-online");
+                assert_ne!(detail["id"], "ord-efood-cod");
+            }
+        }
     }
 
     #[test]

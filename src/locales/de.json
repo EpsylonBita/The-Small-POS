@@ -4356,7 +4356,8 @@
         "takeaway": "Mitnahme",
         "allPayments": "Alle Zahlungen",
         "cash": "Bar",
-        "card": "Karte"
+        "card": "Karte",
+        "platform": "Plattformen"
       },
       "noOrdersMatchFilter": "Keine Bestellungen entsprechen den ausgewählten Filtern",
       "orderTypes": {
@@ -4375,9 +4376,13 @@
         "roomCharge": "Zimmerrechnung",
         "pending": "Ausstehend",
         "unpaid": "Unbezahlt",
-        "unknown": "Unbekannt"
+        "unknown": "Unbekannt",
+        "platformOnline": "Plattform, online",
+        "platformCod": "Plattform, Nachnahme"
       },
       "exportOrdersCSV": "Bestellungen CSV exportieren",
+      "platformOrderSource": "Plattform {{platform}}",
+      "ordersListTruncated": "Es werden die ersten 1000 Bestellungen des Tages angezeigt",
       "exportCSV": "CSV exportieren",
       "exportStaffCSV": "Personal CSV exportieren",
       "print": "Drucken",

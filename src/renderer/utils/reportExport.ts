@@ -1,4 +1,4 @@
-import type { ZReportData, StaffPerformance } from '../types/reports';
+import type { ZReportData, ZReportDayOrder, StaffPerformance } from '../types/reports';
 import { resolveZReportPeriod } from './zReport';
 
 export function exportArrayToCSV(data: Record<string, any>[], filename: string) {
@@ -81,52 +81,30 @@ export function exportStaffPerformanceToCSV(staff: StaffPerformance[], filename:
 }
 
 
-type ZReportStaff = NonNullable<ZReportData['staffReports']>[number];
-
 /**
- * Export detailed orders from staff reports to CSV.
- * Intended for Z-Report staff objects that include 'ordersDetails'.
+ * Export the Z day's order list — store AND platform orders — to CSV. Rows are
+ * `ZReportData.dayOrders` (or the staff-list fallback the modal builds for
+ * reports persisted before 1.4.97). Platform rows have no staff, so `Source`
+ * names the platform instead.
  */
-export function exportStaffOrdersToCSV(
-  staffReports: ZReportStaff[],
-  filename: string = 'z-report-staff-orders'
+export function exportDayOrdersToCSV(
+  orders: Array<ZReportDayOrder & { staffName?: string | null }>,
+  filename: string = 'z-report-orders',
 ) {
-  if (!staffReports?.length) return;
-
-  const hasOrders = staffReports.some(s => s.ordersDetails && s.ordersDetails.length > 0);
-  if (!hasOrders) {
-    console.warn('exportStaffOrdersToCSV: no staff with ordersDetails provided');
-    return;
-  }
-
-  const rows: Record<string, any>[] = [];
-
-  staffReports.forEach(staff => {
-    if (staff.ordersDetails && staff.ordersDetails.length > 0) {
-      staff.ordersDetails.forEach((order: any) => {
-        rows.push({
-          'Staff Name': staff.staffName || staff.staffId,
-          'Staff Role': staff.role,
-          'Order Number': order.orderNumber,
-          'Order Type': order.orderType,
-          'Table/Address': order.orderType === 'delivery'
-            ? order.deliveryAddress
-            : order.orderType === 'dine-in'
-              ? `Table ${order.tableNumber}`
-              : '—',
-          'Amount': order.amount,
-          'Payment Method': order.paymentMethod || '—',
-          'Status': order.status,
-          'Time': order.createdAt
-        });
-      });
-    }
-  });
-
-  if (rows.length === 0) {
-    console.warn('No orders to export');
-    return;
-  }
-
+  if (!orders?.length) return;
+  const rows: Record<string, any>[] = orders.map((order) => ({
+    'Source': order.staffName || (order.platform ? `platform:${order.platform}` : '—'),
+    'Order Number': order.orderNumber,
+    'Order Type': order.orderType,
+    'Table/Address': order.orderType === 'delivery'
+      ? (order.deliveryAddress || '—')
+      : order.orderType === 'dine-in'
+        ? (order.tableNumber ? `Table ${order.tableNumber}` : '—')
+        : '—',
+    'Amount': order.amount,
+    'Payment Method': order.paymentMethod || '—',
+    'Status': order.status,
+    'Time': order.createdAt,
+  }));
   exportArrayToCSV(rows, filename);
 }

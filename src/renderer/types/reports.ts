@@ -1,5 +1,29 @@
 // Report-related types for the POS renderer
 
+/**
+ * One row of the Z builder's day-level order list (`ZReportData.dayOrders`).
+ * Platform orders (efood/wolt…) have no staff shift, so `staffName` is null
+ * and `platform` names the source instead; `paymentMethod` uses the
+ * `paymentsBreakdown` bucket names for platform-settled tenders
+ * (`platform_online` / `platform_cod`).
+ */
+export interface ZReportDayOrder {
+  id: string;
+  orderNumber: string;
+  orderType: string;
+  tableNumber?: string | null;
+  deliveryAddress?: string | null;
+  amount: number;
+  paymentMethod?: string | null;
+  paymentStatus?: string | null;
+  status: string;
+  createdAt: string;
+  platform?: string | null;
+  platformFleet?: boolean;
+  staffShiftId?: string | null;
+  staffName?: string | null;
+}
+
 export interface TodayStatistics {
   totalOrders: number;
   totalSales: number;
@@ -268,6 +292,15 @@ export interface ZReportData {
     total: number;
     totalOrders: number;
   };
+  /**
+   * Every order the Z day counts — store AND platform — in chronological
+   * order, selected with the same predicate as `sales.totalOrders`
+   * (founder, 06/09/2026: the Orders tab only listed staff-shift orders, so
+   * platform orders were missing). Absent on reports persisted before
+   * 1.4.97; the modal then falls back to the per-staff lists.
+   */
+  dayOrders?: ZReportDayOrder[];
+  dayOrdersTruncated?: boolean;
   /** Completed-payment buckets (count + total) behind `daySummary`. */
   paymentsBreakdown?: Partial<
     Record<'cash' | 'card' | 'other' | 'platform_online' | 'platform_cod', { count: number; total: number }>

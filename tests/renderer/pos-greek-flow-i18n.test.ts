@@ -311,7 +311,7 @@ test('ZReportModal order audit row localizes order type and payment label, not r
 
 test('Z-report order-type + payment audit labels exist in every POS locale (Greek translated)', () => {
   const orderTypeKeys = ['delivery', 'dineIn', 'pickup', 'takeaway', 'driveThrough', 'roomService', 'unknown'];
-  const paymentKeys = ['cash', 'card', 'split', 'roomCharge', 'pending', 'unpaid', 'unknown'];
+  const paymentKeys = ['cash', 'card', 'split', 'roomCharge', 'pending', 'unpaid', 'unknown', 'platformOnline', 'platformCod'];
 
   for (const lng of LOCALES) {
     for (const key of orderTypeKeys) {

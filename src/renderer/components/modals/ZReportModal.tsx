@@ -4,8 +4,8 @@ import { translateRoleName } from '../../utils/role-labels';
 import { useShift } from '../../contexts/shift-context';
 import { useTheme } from '../../contexts/theme-context';
 import { useFeatures } from '../../hooks/useFeatures';
-import type { ZReportData } from '../../types/reports';
-import { exportZReportToCSV, exportStaffOrdersToCSV } from '../../utils/reportExport';
+import type { ZReportData, ZReportDayOrder } from '../../types/reports';
+import { exportZReportToCSV, exportDayOrdersToCSV } from '../../utils/reportExport';
 import { formatCurrency, formatDate, formatTime } from '../../utils/format';
 import { parseLocalDateString, toLocalDateString } from '../../utils/date';
 import { clearBusinessDayStorage } from '../../utils/session-utils';
@@ -106,6 +106,8 @@ function localizeZReportPaymentLabel(
     card: 'card',
     split: 'split',
     room_charge: 'roomCharge',
+    platform_online: 'platformOnline',
+    platform_cod: 'platformCod',
     pending: 'pending',
     unpaid: 'unpaid',
     unknown: 'unknown',
@@ -114,6 +116,13 @@ function localizeZReportPaymentLabel(
     return t('modals.zReport.paymentLabels.unknown', { defaultValue: 'Unknown' });
   }
   return t(`modals.zReport.paymentLabels.${key}`, { defaultValue: key });
+}
+
+// Platform-settled tenders (efood/wolt prepaid online, or COD the platform's own
+// rider collected) share one «Platforms» chip in the Orders tab filter.
+function isPlatformTender(value: unknown): boolean {
+  const slug = normalizeZReportSlug(value);
+  return slug === 'platform_online' || slug === 'platform_cod';
 }
 
 const ZReportModal: React.FC<ZReportModalProps> = ({
@@ -170,14 +179,19 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   const pendingOpenDateRef = useRef<string | null>(null);
 
   const [orderTypeFilter, setOrderTypeFilter] = useState<'all' | 'delivery' | 'dine-in' | 'pickup'>('all');
-  const [paymentMethodFilter, setPaymentMethodFilter] = useState<'all' | 'cash' | 'card'>('all');
+  const [paymentMethodFilter, setPaymentMethodFilter] = useState<'all' | 'cash' | 'card' | 'platform'>('all');
 
   const filterOrders = (orders: any[] | null | undefined): any[] => {
     if (!orders || !Array.isArray(orders)) return [];
     return orders.filter(o => {
       if (!o) return false;
       const typeMatch = orderTypeFilter === 'all' || o.orderType === orderTypeFilter;
-      const paymentMatch = paymentMethodFilter === 'all' || o.paymentMethod === paymentMethodFilter;
+      // «Platforms» = every platform order: the platform-settled ones AND the
+      // ones our own driver delivered for the platform (cash/card in hand).
+      const paymentMatch = paymentMethodFilter === 'all'
+        || (paymentMethodFilter === 'platform'
+          ? Boolean(o.platform) || isPlatformTender(o.paymentMethod)
+          : o.paymentMethod === paymentMethodFilter);
       return typeMatch && paymentMatch;
     });
   };
@@ -199,6 +213,38 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
       return String(a.staffName || a.staffId).localeCompare(String(b.staffName || b.staffId));
     });
   }, [zReport]);
+
+  // Founder (06/09/2026): the Orders tab must list every order of the day,
+  // store AND platform. Platform orders (efood/wolt) carry no staff shift, so
+  // they never enter staffReports[].ordersDetails; the Z builder now emits a
+  // day-level list (`dayOrders`, same predicate as the headline count).
+  // Reports persisted before 1.4.97 lack it and fall back to the staff union.
+  type ZReportOrderRow = ZReportDayOrder & { staffName?: string | null };
+  const dayOrderDetails = useMemo<ZReportOrderRow[]>(() => {
+    const staffNameByShiftId = new Map<string, string>();
+    staffReportsSorted.forEach((staff) => {
+      if (staff.staffShiftId) {
+        staffNameByShiftId.set(staff.staffShiftId, staff.staffName || staff.staffId);
+      }
+    });
+    if (Array.isArray(zReport?.dayOrders)) {
+      return zReport.dayOrders.map((order) => ({
+        ...order,
+        staffName: order.staffName
+          || (order.staffShiftId ? staffNameByShiftId.get(order.staffShiftId) : undefined)
+          || null,
+      }));
+    }
+    return staffReportsSorted.flatMap((staff) =>
+      Array.isArray(staff.ordersDetails)
+        ? staff.ordersDetails.map((order) => ({
+          ...order,
+          staffName: staff.staffName || staff.staffId,
+        }))
+        : [],
+    );
+  }, [staffReportsSorted, zReport]);
+  const dayOrderDetailCount = dayOrderDetails.length;
 
   const formatMoney = (value?: number) => formatCurrency(value ?? 0);
   const formatWindowDateTime = (value?: string | null) => (
@@ -517,6 +563,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     { value: 'all' as const, label: t('modals.zReport.filters.allPayments') },
     { value: 'cash' as const, label: t('modals.zReport.filters.cash') },
     { value: 'card' as const, label: t('modals.zReport.filters.card') },
+    { value: 'platform' as const, label: t('modals.zReport.filters.platform') },
   ];
 
   const handleRefreshReport = useCallback(() => {
@@ -531,9 +578,9 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   }, [resolvedBusinessDate, zReport]);
 
   const handleExportOrdersReport = useCallback(() => {
-    if (!zReport?.staffReports) return;
-    exportStaffOrdersToCSV(zReport.staffReports, `z-report-orders-${resolvedBusinessDate}`);
-  }, [resolvedBusinessDate, zReport]);
+    if (!dayOrderDetails.length) return;
+    exportDayOrdersToCSV(dayOrderDetails, `z-report-orders-${resolvedBusinessDate}`);
+  }, [dayOrderDetails, resolvedBusinessDate]);
 
   const handlePrintReport = useCallback(async () => {
     if (!zReport) return;
@@ -808,12 +855,6 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   const otherTenderCollected = zReport?.paymentsBreakdown?.other?.total ?? 0;
   const collectedTotal = zReport?.daySummary?.total
     ?? (cashCollected + cardCollected + platformCollected + otherTenderCollected);
-  // The Orders tab lists the staff-served orders (platform orders have no
-  // staff shift), so its badge counts that list — not the day's order count.
-  const staffOrderDetailCount = staffReportsSorted.reduce(
-    (total, staff) => total + (staff.ordersDetails?.length ?? 0),
-    0,
-  );
   const expensesTotal = summaryExpenses.total ?? 0;
   const drawerOpening = summaryCashDrawer.openingTotal ?? 0;
   const drawerDrops = summaryCashDrawer.totalCashDrops ?? 0;
@@ -920,17 +961,9 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     { key: 'review', label: t('modals.zReport.clarity.tabReview', { defaultValue: 'Check' }), icon: ListChecks, badge: closeoutIssueCount },
     { key: 'money', label: t('modals.zReport.clarity.tabMoney', { defaultValue: 'Money' }), icon: Banknote },
     { key: 'staff', label: t('modals.zReport.staff'), icon: Users },
-    { key: 'orders', label: t('modals.zReport.orders'), icon: Receipt, badge: staffOrderDetailCount },
+    { key: 'orders', label: t('modals.zReport.orders'), icon: Receipt, badge: dayOrderDetailCount },
   ];
-  const allOrderDetails = staffReportsSorted.flatMap((staff) =>
-    Array.isArray(staff.ordersDetails)
-      ? staff.ordersDetails.map((order) => ({
-        ...order,
-        staffName: staff.staffName || staff.staffId,
-      }))
-      : [],
-  );
-  const filteredOrderDetails = filterOrders(allOrderDetails);
+  const filteredOrderDetails = filterOrders(dayOrderDetails);
   const dashboardPanelClass = isDarkTheme
     ? 'border-yellow-400/20 bg-black/35 text-white shadow-2xl shadow-black/25 backdrop-blur-2xl'
     : 'border-yellow-500/25 bg-white/75 text-slate-950 shadow-2xl shadow-slate-950/15 backdrop-blur-2xl';
@@ -1359,9 +1392,23 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                   )}
 
                   {activeTab === 'orders' && (
-                    <section className={`rounded-xl border p-4 ${dashboardInsetClass}`}>
+                    <section data-z-report-orders-list className={`rounded-xl border p-4 ${dashboardInsetClass}`}>
                       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                        <h3 className={`text-lg font-black ${strongTextClass}`}>{t('modals.zReport.orderDetails')}</h3>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <h3 className={`text-lg font-black ${strongTextClass}`}>{t('modals.zReport.orderDetails')}</h3>
+                          <span className={`rounded-full border border-slate-900/[0.12] px-2 py-0.5 text-xs font-black ${softTextClass} dark:border-white/[0.14]`}>{dayOrderDetailCount}</span>
+                          <button
+                            type="button"
+                            onClick={handleExportOrdersReport}
+                            disabled={!dayOrderDetails.length}
+                            className="min-h-[36px] rounded-lg border border-slate-900/[0.12] px-3 text-xs font-black text-slate-700 transition active:bg-slate-900/[0.06] disabled:opacity-50 dark:border-white/[0.14] dark:text-white/80 dark:active:bg-white/[0.1]"
+                          >
+                            {t('modals.zReport.exportOrdersCSV')}
+                          </button>
+                          {zReport?.dayOrdersTruncated ? (
+                            <span className={`text-xs font-semibold ${softTextClass}`}>{t('modals.zReport.ordersListTruncated')}</span>
+                          ) : null}
+                        </div>
                         <div className="flex flex-col gap-2 xl:items-end">
                           <div className="flex flex-wrap gap-1 rounded-xl border border-slate-900/[0.1] bg-white/45 p-1 backdrop-blur-xl dark:border-white/[0.12] dark:bg-black/10">
                             {orderTypeFilterOptions.map((option) => (
@@ -1402,7 +1449,14 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                           <div key={order.id || index} className={`grid gap-3 rounded-2xl border p-3 md:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)_auto] ${dashboardTileClass}`}>
                             <div className="min-w-0">
                               <div className={`truncate text-sm font-black ${strongTextClass}`}>{order.orderNumber || '—'}</div>
-                              <div className={`mt-1 text-xs font-semibold ${softTextClass}`}>{order.staffName}</div>
+                              <div className={`mt-1 text-xs font-semibold ${softTextClass}`}>
+                                {formatTime(order.createdAt)} · {[
+                                  order.staffName,
+                                  order.platform
+                                    ? t('modals.zReport.platformOrderSource', { platform: order.platform })
+                                    : null,
+                                ].filter(Boolean).join(' · ') || '—'}
+                              </div>
                             </div>
                             <div className={`text-xs font-semibold ${softTextClass}`}>{localizeZReportOrderType(order.orderType, t)} · {localizeZReportPaymentLabel(order.paymentMethod, t)}</div>
                             <div className="text-right text-sm font-black text-emerald-600 dark:text-emerald-300">{formatMoney(order.amount)}</div>
