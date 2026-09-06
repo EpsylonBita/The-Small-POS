@@ -35,6 +35,7 @@ const entryPoints = [
   path.join(testsRoot, 'renderer', 'edit-order-reprice.test.ts'),
   path.join(testsRoot, 'renderer', 'after-edit-reprint.test.ts'),
   path.join(testsRoot, 'renderer', 'orders-page-ui.test.ts'),
+  path.join(testsRoot, 'renderer', 'orders-dashboard-refresh-keeps-cart.test.ts'),
   path.join(testsRoot, 'renderer', 'menu-category-tabs-ui.test.ts'),
   path.join(testsRoot, 'renderer', 'order-taking-performance.test.ts'),
   path.join(testsRoot, 'renderer', 'menu-modal-customer-popover.test.ts'),
@@ -127,6 +128,7 @@ const entryPoints = [
   // that section is what the update dialog shows the operator.
   path.join(testsRoot, 'renderer', 'release-notes-changelog.test.ts'),
   path.join(testsRoot, 'renderer', 'z-report-closeout-sync.test.ts'),
+  path.join(testsRoot, 'renderer', 'z-report-headline-total-revenue.test.ts'),
   path.join(testsRoot, 'renderer', 'z-report-action-rail-scroll.test.ts'),
   path.join(testsRoot, 'renderer', 'display-pages-ui.test.ts'),
   path.join(testsRoot, 'renderer', 'order-number-utils.test.ts'),

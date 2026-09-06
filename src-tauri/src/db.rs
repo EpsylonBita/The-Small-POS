@@ -1593,7 +1593,7 @@ fn migrate_v12(conn: &Connection) -> Result<(), String> {
 /// development time so an accidental call like `column_exists(conn, user_input,
 /// "foo")` fails loudly under `cargo test` even if the runtime happens to
 /// accept it.
-fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, String> {
+pub(crate) fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, String> {
     debug_assert!(
         is_safe_sql_identifier(table),
         "column_exists: table name '{table}' is not a plain SQL identifier — \

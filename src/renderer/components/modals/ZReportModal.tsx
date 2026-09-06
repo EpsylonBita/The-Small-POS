@@ -794,17 +794,26 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   const platformOnlineCollected = summarySales.platformOnlineSales ?? 0;
   const platformCodCollected = summarySales.platformCodSales ?? 0;
   const totalSales = summarySales.totalSales ?? 0;
-  const staffEarnedSoFar = staffReportsSorted.reduce(
-    (total, staff) => total + resolveShiftEarnedTotal(staff),
+  // Founder (06/09/2026): «θέλω να δείχνει όλα τα κέρδη — και αυτά πραγματικά έσοδα
+  // είναι». The headline is the whole day's revenue — store AND platform orders —
+  // never the staff shifts' collected subset: on the 05/09 close the staff sum read
+  // 428.54 / 56 orders while the day was 629.49 / 72 (16 efood orders the platform
+  // settles). Cash-only money is shown separately as «money in the till» below.
+  const platformCollected = platformOnlineCollected + platformCodCollected;
+  // Payment-level figures from the same Z summary as the tiles: cash + card +
+  // platform online + platform COD + other tender (daySummary.total). An
+  // order-level total (sales.totalSales = gross − discounts) would disagree
+  // with the tiles as soon as an order is still uncollected or a payment was
+  // refunded, so the headline and its split read the money actually collected.
+  const otherTenderCollected = zReport?.paymentsBreakdown?.other?.total ?? 0;
+  const collectedTotal = zReport?.daySummary?.total
+    ?? (cashCollected + cardCollected + platformCollected + otherTenderCollected);
+  // The Orders tab lists the staff-served orders (platform orders have no
+  // staff shift), so its badge counts that list — not the day's order count.
+  const staffOrderDetailCount = staffReportsSorted.reduce(
+    (total, staff) => total + (staff.ordersDetails?.length ?? 0),
     0,
   );
-  const staffOrderCountSoFar = staffReportsSorted.reduce(
-    (total, staff) => total + resolveShiftActivityCount(staff),
-    0,
-  );
-  const hasStaffEarnedSoFar = staffReportsSorted.some((staff) => resolveShiftActivityCount(staff) > 0);
-  const storeEarnedSoFar = hasStaffEarnedSoFar ? staffEarnedSoFar : totalSales;
-  const storeOrderCountSoFar = hasStaffEarnedSoFar ? staffOrderCountSoFar : totalOrders;
   const expensesTotal = summaryExpenses.total ?? 0;
   const drawerOpening = summaryCashDrawer.openingTotal ?? 0;
   const drawerDrops = summaryCashDrawer.totalCashDrops ?? 0;
@@ -819,13 +828,19 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     drawerDrops -
     driverCashGiven +
     driverCashReturned;
-  const otherCollected = Math.max(
-    0,
-    storeEarnedSoFar - cashCollected - cardCollected - platformOnlineCollected - platformCodCollected,
-  );
+  const otherCollected = otherTenderCollected;
+  // Cash + Card + Platforms (+ Other tender) = the headline, by construction.
+  const revenueSplitTiles = [
+    { key: 'cash', label: t('modals.zReport.cashInTill'), value: formatMoney(cashCollected) },
+    { key: 'card', label: t('modals.zReport.cardTotalLabel'), value: formatMoney(cardCollected) },
+    { key: 'platforms', label: t('modals.zReport.platformsTotal'), value: formatMoney(platformCollected) },
+    ...(otherCollected >= 0.005
+      ? [{ key: 'other', label: t('modals.zReport.otherTender'), value: formatMoney(otherCollected) }]
+      : []),
+  ];
   const totalCashOut = expensesTotal + staffPaymentsTotal + drawerDrops + driverCashGiven;
   const totalCashInAdjustments = driverCashReturned;
-  const netAfterExpenses = storeEarnedSoFar - expensesTotal - staffPaymentsTotal;
+  const netAfterExpenses = collectedTotal - expensesTotal - staffPaymentsTotal;
   const moneyOverviewMessage = loading
     ? t('modals.zReport.closeoutLoading')
     : closeoutReady
@@ -851,9 +866,9 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     {
       key: 'earned',
       label: t('modals.zReport.actualEarned'),
-      value: formatMoney(storeEarnedSoFar),
+      value: formatMoney(collectedTotal),
       tone: 'text-emerald-600 dark:text-emerald-300',
-      helper: `${t('modals.zReport.orders', { defaultValue: 'Orders' })}: ${storeOrderCountSoFar} · ${t('modals.zReport.staff', { defaultValue: 'Staff' })}: ${totalShiftCount}`,
+      helper: `${t('modals.zReport.orders', { defaultValue: 'Orders' })}: ${totalOrders} · ${t('modals.zReport.staff', { defaultValue: 'Staff' })}: ${totalShiftCount}`,
     },
     {
       key: 'expected',
@@ -882,8 +897,8 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     ...(platformCodCollected > 0
       ? [{ key: 'platformCod', label: t('modals.zReport.platformCodSales'), value: formatMoney(platformCodCollected), tone: strongTextClass }]
       : []),
-    ...(otherCollected > 0
-      ? [{ key: 'other', label: t('common.other', { defaultValue: 'Other' }), value: formatMoney(otherCollected), tone: strongTextClass }]
+    ...(otherCollected >= 0.005
+      ? [{ key: 'other', label: t('modals.zReport.otherTender'), value: formatMoney(otherCollected), tone: strongTextClass }]
       : []),
     { key: 'out', label: t('modals.zReport.totalExpenses'), value: totalCashOut > 0 ? `-${formatMoney(totalCashOut)}` : formatMoney(0), tone: 'text-rose-600 dark:text-rose-300' },
     ...(totalCashInAdjustments > 0
@@ -905,7 +920,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     { key: 'review', label: t('modals.zReport.clarity.tabReview', { defaultValue: 'Check' }), icon: ListChecks, badge: closeoutIssueCount },
     { key: 'money', label: t('modals.zReport.clarity.tabMoney', { defaultValue: 'Money' }), icon: Banknote },
     { key: 'staff', label: t('modals.zReport.staff'), icon: Users },
-    { key: 'orders', label: t('modals.zReport.orders'), icon: Receipt, badge: totalOrders },
+    { key: 'orders', label: t('modals.zReport.orders'), icon: Receipt, badge: staffOrderDetailCount },
   ];
   const allOrderDetails = staffReportsSorted.flatMap((staff) =>
     Array.isArray(staff.ordersDetails)
@@ -1413,10 +1428,21 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                                   {t('modals.zReport.actualEarned')}
                                 </div>
                                 <div className="mt-1 break-words text-4xl font-black leading-none text-yellow-300 sm:text-5xl">
-                                  {formatMoney(storeEarnedSoFar)}
+                                  {formatMoney(collectedTotal)}
                                 </div>
                                 <div data-z-report-earned-source className={`mt-2 break-words text-xs font-black uppercase tracking-[0.08em] ${softTextClass}`}>
-                                  {t('modals.zReport.liveCurrentWindow')} · {t('modals.zReport.totalShifts')}: {totalShiftCount} · {t('common.status.active', { defaultValue: 'Active' })}: {activeShiftCount} · {t('common.status.closed', { defaultValue: 'Closed' })}: {closedShiftCount}
+                                  {t('modals.zReport.orders', { defaultValue: 'Orders' })}: {totalOrders} · {t('modals.zReport.liveCurrentWindow')} · {t('modals.zReport.totalShifts')}: {totalShiftCount} · {t('common.status.active', { defaultValue: 'Active' })}: {activeShiftCount} · {t('common.status.closed', { defaultValue: 'Closed' })}: {closedShiftCount}
+                                </div>
+                                <div data-z-report-revenue-split className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
+                                  {revenueSplitTiles.map((tile) => (
+                                    <div key={tile.key} className={`min-w-0 rounded-xl border p-2 ${dashboardTileClass}`}>
+                                      <div className={`truncate text-[11px] font-bold ${softTextClass}`}>{tile.label}</div>
+                                      <div className={`mt-0.5 truncate text-base font-black ${strongTextClass}`}>{tile.value}</div>
+                                    </div>
+                                  ))}
+                                </div>
+                                <div className={`mt-1 break-words text-[11px] font-semibold ${softTextClass}`}>
+                                  {t('modals.zReport.revenueSplitHint')}
                                 </div>
                               </div>
                             </div>

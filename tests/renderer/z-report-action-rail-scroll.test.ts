@@ -201,23 +201,24 @@ test('Round 322: the header shows a friendly date + live/past-day chip, and neve
 // INTENT flag (isUsingLiveDefaultDate && !lockDate), not the date actually displayed. The chip must be derived
 // from the SAME date shown in the header (resolvedBusinessDate) compared to the terminal-local today, so a
 // returned past zReport.date can never read as "Today". Display-only -- lockDate/submit/closeout unchanged.
-test('Round 352: the Review tab headline is live store earnings from staff check-in/check-out totals', () => {
-  assert.match(source, /const staffEarnedSoFar = staffReportsSorted\.reduce/);
-  assert.match(source, /resolveShiftEarnedTotal\(staff\)/);
-  assert.match(source, /const storeEarnedSoFar = hasStaffEarnedSoFar \? staffEarnedSoFar : totalSales;/);
-  assert.match(source, /const storeOrderCountSoFar = hasStaffEarnedSoFar \? staffOrderCountSoFar : totalOrders;/);
+// Round 352 pinned the headline to the staff check-in/check-out totals. Reversed by the founder on
+// 06/09/2026 («θέλω να δείχνει όλα τα κέρδη γιατί και αυτά πραγματικά έσοδα είναι»): the staff
+// subset silently dropped every platform-settled order (05/09 close: 428.54 / 56 shown, 629.49 / 72
+// real). The headline is now the whole day from the Z summary; the staff totals stay on the Staff
+// tab only. Full contract in z-report-headline-total-revenue.test.ts.
+test('Round 352 (reversed 06/09/2026): the Review tab headline is the whole day, not the staff-collected subset', () => {
+  assert.doesNotMatch(source, /const staffEarnedSoFar = staffReportsSorted\.reduce/);
+  assert.doesNotMatch(source, /storeEarnedSoFar/);
+  // The staff helpers survive for the Staff tab rows only.
+  assert.match(source, /formatMoney\(resolveShiftEarnedTotal\(staff\)\)/);
 
   const reviewMoney = slice(source, 'data-z-report-review-money-overview', 'paymentBlockers.length > 0');
-  assert.match(reviewMoney, /formatMoney\(storeEarnedSoFar\)/);
+  assert.match(reviewMoney, /formatMoney\(collectedTotal\)/);
   assert.match(reviewMoney, /data-z-report-earned-source/);
   assert.match(reviewMoney, /liveCurrentWindow/);
   assert.match(reviewMoney, /activeShiftCount/);
   assert.match(reviewMoney, /closedShiftCount/);
-  assert.doesNotMatch(
-    reviewMoney,
-    /formatMoney\(totalSales\)/,
-    'the first-tab money headline must not fall back to raw totalSales when staff live totals exist',
-  );
+  assert.match(reviewMoney, /data-z-report-revenue-split/);
 });
 
 test('Round 351: the day chip is derived from the displayed business date vs local today, not the live-default flag', () => {

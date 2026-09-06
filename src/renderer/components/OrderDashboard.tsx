@@ -1055,6 +1055,20 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     // session so its internal cart and pickup-customer fields cannot leak
     // from the previous order.
     const [menuSessionKey, setMenuSessionKey] = useState(0);
+    // The dashboard skeleton may replace the tree only until the first order
+    // load has finished; afterwards refreshes render in place (see the early
+    // return below) so an open MenuModal never loses its cart. The store
+    // starts idle and the parent dashboard kicks off the first load from its
+    // own effect (which runs after ours), so the ref arms on a loading ->
+    // idle transition, never on the idle mount render.
+    const hasCompletedInitialLoadRef = React.useRef(false);
+    const wasLoadingRef = React.useRef(false);
+    useEffect(() => {
+      if (wasLoadingRef.current && !isLoading) {
+        hasCompletedInitialLoadRef.current = true;
+      }
+      wasLoadingRef.current = isLoading;
+    }, [isLoading]);
     // Round 236 (Orders hub IA migration) — Room/Service flow state.
     // roomChargeContext, when set, flows into MenuModal/PaymentModal so a dine-in order can be
     // charged to the room folio (reuses the existing room-charge payment path; no second cart).
@@ -6578,13 +6592,21 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       }
     };
 
-    // Show skeleton during loading (only when shift is active)
-    if (isLoading && isShiftActive) {
+    // An order in progress must survive background refreshes. Every store
+    // operation flips `isLoading` — loadOrders after an efood «Αποδοχή», a
+    // status change, a driver assignment — and swapping the whole dashboard
+    // for the skeleton unmounted MenuModal mid-order, so the cart vanished the
+    // moment staff accepted an incoming efood order (live 06/09/2026, Το
+    // Μικρό Παρίσι). The skeleton is for the very first load only; later
+    // refreshes (and errors) render in place while order entry is open.
+    const isOrderEntryOpen = showMenuModal || showEditMenuModal;
+    if (isLoading && isShiftActive && !hasCompletedInitialLoadRef.current && !isOrderEntryOpen) {
       return <OrderDashboardSkeleton />;
     }
 
-    // Show error display if there's an error
-    if (error) {
+    // Show error display if there's an error (never over an open order draft —
+    // the failure is already toasted, and replacing the tree would drop the cart)
+    if (error && !isOrderEntryOpen) {
       return (
         <div className="p-6">
           <ErrorDisplay

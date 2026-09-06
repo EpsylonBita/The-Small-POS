@@ -254,7 +254,24 @@ export interface ZReportData {
     shiftStatus?: string;
     createdAt: string;
   }>;
-  daySummary?: { cashTotal: number; cardTotal: number; total: number; totalOrders: number };
+  /**
+   * Payment-level day totals from the Z builder: `total` = cash + card +
+   * other tender + platform online + platform COD (money actually
+   * collected), unlike `sales.totalSales` which is the order-level gross
+   * minus discounts. The Z modal headline reads this one.
+   */
+  daySummary?: {
+    cashTotal: number;
+    cardTotal: number;
+    platformOnlineTotal?: number;
+    platformCodTotal?: number;
+    total: number;
+    totalOrders: number;
+  };
+  /** Completed-payment buckets (count + total) behind `daySummary`. */
+  paymentsBreakdown?: Partial<
+    Record<'cash' | 'card' | 'other' | 'platform_online' | 'platform_cod', { count: number; total: number }>
+  >;
   period?: {
     start?: string;
     end?: string;

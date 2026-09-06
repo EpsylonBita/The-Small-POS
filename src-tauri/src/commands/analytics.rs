@@ -709,17 +709,19 @@ fn load_report_rows_for_day(
     branch_id: &str,
     date: &str,
 ) -> Result<Vec<(String, String, Option<String>, Option<String>, f64, String)>, String> {
+    // v55 dropped `orders.payment_method`; derive it from the payment rows.
+    let derived_payment_method = crate::data_helpers::DERIVED_PAYMENT_METHOD_SQL;
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             // W4b: cents-with-real-fallback shim (removed in 4e).
-            "SELECT status, created_at, payment_method, order_type,
+            "SELECT status, created_at, {derived_payment_method}, order_type,
                     COALESCE(total_amount_cents, CAST(ROUND(total_amount * 100) AS INTEGER), 0),
                     items
              FROM orders
              WHERE (?1 = '' OR branch_id = ?1)
                AND COALESCE(is_ghost, 0) = 0
-               AND substr(created_at, 1, 10) = ?2",
-        )
+               AND substr(created_at, 1, 10) = ?2"
+        ))
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map(params![branch_id, date], |row| {
@@ -2659,5 +2661,56 @@ mod dto_tests {
         assert_eq!(merged[0].menu_item_id, "m1");
         assert_eq!(merged[0].quantity, 10.0);
         assert_eq!(merged[0].revenue, 50.0);
+    }
+    // The day-report loader (hourly sales / payment-method / order-type
+    // breakdowns) selected the stored `orders.payment_method` that v55
+    // dropped, so on every till at schema >= v55 it failed with
+    // "no such column". Pin the derived form on the REAL schema.
+    #[test]
+    fn day_report_rows_derive_payment_method_from_completed_payments_after_v55() {
+        let conn = driver_earning_test_conn();
+        assert!(
+            !crate::db::column_exists(&conn, "orders", "payment_method").unwrap(),
+            "v55 must have dropped orders.payment_method — otherwise this test proves nothing"
+        );
+        let seed_order = |id: &str, created_at: &str| {
+            conn.execute(
+                "INSERT INTO orders (
+                    id, order_number, branch_id, items, total_amount, total_amount_cents,
+                    status, payment_status, order_type, created_at, updated_at
+                 ) VALUES (?1, ?1, 'branch-A', '[]', 5.0, 500, 'completed', 'paid', 'takeaway', ?2, ?2)",
+                rusqlite::params![id, created_at],
+            )
+            .expect("seed order");
+        };
+        seed_order("card-order", "2026-09-05T18:00:00Z");
+        seed_order("unpaid-order", "2026-09-05T19:00:00Z");
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, amount_cents, status, sync_status, created_at, updated_at
+             ) VALUES ('p1', 'card-order', 'card', 5.0, 500, 'completed', 'synced', datetime('now'), datetime('now'))",
+            [],
+        )
+        .expect("seed payment");
+
+        let rows = load_report_rows_for_day(&conn, "branch-A", "2026-09-05")
+            .expect("day-report loader must not read the dropped column");
+        let method_by_status: std::collections::HashMap<String, Option<String>> = rows
+            .into_iter()
+            .map(
+                |(status, created_at, method, _order_type, _total, _items)| {
+                    (format!("{status}@{created_at}"), method)
+                },
+            )
+            .collect();
+        assert_eq!(
+            method_by_status["completed@2026-09-05T18:00:00Z"].as_deref(),
+            Some("card"),
+            "method is derived from the completed payment row (the real schema CHECKs it to cash/card/other)"
+        );
+        assert_eq!(
+            method_by_status["completed@2026-09-05T19:00:00Z"].as_deref(),
+            Some("pending")
+        );
     }
 }
