@@ -8416,6 +8416,11 @@ fn materialize_remote_order(
         remote_order,
         &["special_instructions", "specialInstructions", "notes"],
     );
+    // The customer's OWN order note, read under its exact key only: the
+    // fallback chain above already consumes "notes" as a last resort for
+    // special_instructions, and a kiosk order always sets special_instructions
+    // (the routing summary), so this value was being dropped entirely.
+    let customer_notes = str_any(remote_order, &["notes"]);
     let created_at = str_any(remote_order, &["created_at", "createdAt"])
         .unwrap_or_else(|| Utc::now().to_rfc3339());
     let updated_at =
@@ -8492,7 +8497,7 @@ fn materialize_remote_order(
             tax_rate, delivery_fee, is_ghost, ghost_source, ghost_metadata,
             delivery_address_id, delivery_latitude, delivery_longitude,
             delivery_address_fingerprint, delivery_zone_id,
-            integration_environment, is_test
+            integration_environment, is_test, notes
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7,
             ?8, ?9, ?10, ?11, ?12,
@@ -8505,7 +8510,7 @@ fn materialize_remote_order(
             ?39, ?40, ?41, ?42, ?43,
             ?44, ?45, ?46, ?47,
             ?48, ?49, ?50, ?51,
-            ?52, ?53
+            ?52, ?53, ?54
         )",
         params![
             local_id,
@@ -8561,6 +8566,7 @@ fn materialize_remote_order(
             delivery_zone_id,
             integration_environment,
             if is_test { 1_i64 } else { 0_i64 },
+            customer_notes,
         ],
     )
     .map_err(|e| format!("materialize remote order: {e}"))?;
@@ -12224,6 +12230,9 @@ fn sync_remote_order_snapshot_into_local(
         remote_order,
         &["special_instructions", "specialInstructions", "notes"],
     );
+    // Exact key only — see materialize_remote_order. Without refreshing it here
+    // the note would land once and then never update.
+    let customer_notes = str_any(remote_order, &["notes"]);
     let updated_at = str_any(remote_order, &["updated_at", "updatedAt"])
         .unwrap_or_else(|| repaired_at.to_string());
     if has_outstanding_local_order_queue(conn, local_order_id) {
@@ -12383,6 +12392,7 @@ fn sync_remote_order_snapshot_into_local(
               delivery_zone_id = COALESCE(?43, delivery_zone_id),
               integration_environment = COALESCE(?47, integration_environment),
               is_test = COALESCE(?48, is_test),
+              notes = COALESCE(?49, notes),
               sync_status = 'synced',
               last_synced_at = datetime('now'),
               updated_at = COALESCE(?44, updated_at, ?45)
@@ -12436,6 +12446,7 @@ fn sync_remote_order_snapshot_into_local(
             local_order_id,
             integration_environment,
             is_test,
+            customer_notes,
         ],
     )
     .map_err(|e| format!("sync remote order snapshot into local cache: {e}"))?;

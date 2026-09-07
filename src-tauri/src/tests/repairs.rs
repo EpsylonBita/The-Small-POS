@@ -309,7 +309,7 @@ fn rewind_v79_for_upgrade(td: &TestDb) {
     let conn = td.state.conn.lock().expect("lock database");
     conn.execute_batch(
         "DROP INDEX IF EXISTS idx_parity_sync_queue_repair_aggregate_order;
-         DELETE FROM schema_version WHERE version = 79;",
+         DELETE FROM schema_version WHERE version >= 79;",
     )
     .expect("rewind v79 metadata");
     if column_exists(&conn, "parity_sync_queue", "repair_aggregate_id") {
@@ -368,7 +368,11 @@ fn migration_v78_fresh_install_creates_exact_repair_tables() {
             |row| row.get(0),
         )
         .expect("read schema version");
-    assert_eq!(version, 79, "Task 9C must install SQLite schema v79");
+    assert_eq!(
+        version,
+        i64::from(crate::db::CURRENT_SCHEMA_VERSION),
+        "Task 9C must install the current SQLite schema"
+    );
 
     for table in [
         "repair_cache",
@@ -517,7 +521,7 @@ fn migration_v79_backfills_provable_aggregates_and_quarantines_ambiguous_rows() 
             row.get(0)
         })
         .expect("read upgraded schema version");
-    assert_eq!(version, 79);
+    assert_eq!(version, i64::from(crate::db::CURRENT_SCHEMA_VERSION));
 
     let binding = |id: &str| {
         conn.query_row(
@@ -823,7 +827,7 @@ fn migration_v79_empty_schema_metadata_is_fresh_only_without_other_application_o
     drop(crate::db::init(pristine.path()).expect("empty metadata-only database is pristine"));
     assert_eq!(
         raw_schema_versions(&pristine).last().copied(),
-        Some(79),
+        Some(i64::from(crate::db::CURRENT_SCHEMA_VERSION)),
         "pristine metadata-only database must migrate normally"
     );
 

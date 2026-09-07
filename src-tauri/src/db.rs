@@ -47,7 +47,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-const CURRENT_SCHEMA_VERSION: i32 = 79;
+pub(crate) const CURRENT_SCHEMA_VERSION: i32 = 80;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -668,7 +668,34 @@ where
     if current < 79 || needs_v79_backfill {
         run_migration_tx(conn, 79, migrate_v79)?;
     }
+    if current < 80 {
+        run_migration_tx(conn, 80, migrate_v80)?;
+    }
 
+    Ok(())
+}
+
+/// Migration v80: the customer's own order note.
+///
+/// The local `orders` table has carried `delivery_notes` and
+/// `special_instructions` since v1, but never `notes` — the column the server
+/// stores a customer's order-level note in. A kiosk customer typing «χωρίς
+/// ζάχαρη» had it dropped at sync, so it could never reach the slip.
+/// Additive and idempotent; nothing reads it until sync starts filling it.
+fn migrate_v80(conn: &Connection) -> Result<(), String> {
+    if !column_exists(conn, "orders", "notes")? {
+        conn.execute("ALTER TABLE orders ADD COLUMN notes TEXT", [])
+            .map_err(|error| format!("v80 add orders.notes: {error}"))?;
+    }
+
+    // `run_migration_tx` only wraps the transaction — every migration records
+    // its own version row (see migrate_v79).
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_version (version) VALUES (80)",
+        [],
+    )
+    .map_err(|error| format!("v80 record schema_version: {error}"))?;
+    info!("Applied migration v80 (orders.notes)");
     Ok(())
 }
 
@@ -678,7 +705,7 @@ enum PreMigrationRecoveryMode {
     NativeRepairAtomicOnly,
 }
 
-const NATIVE_REPAIR_ATOMIC_MIGRATION_ALLOWLIST: &[i32] = &[56, 75, 76, 77, 78, 79];
+const NATIVE_REPAIR_ATOMIC_MIGRATION_ALLOWLIST: &[i32] = &[56, 75, 76, 77, 78, 79, 80];
 
 fn computed_pending_migrations(
     current: i32,
@@ -6663,7 +6690,7 @@ mod tests {
         let (tmp, conn) = current_file_fixture();
         conn.execute_batch(
             "DROP INDEX IF EXISTS idx_parity_sync_queue_repair_aggregate_order;
-             DELETE FROM schema_version WHERE version = 79;
+             DELETE FROM schema_version WHERE version >= 79;
              ALTER TABLE parity_sync_queue DROP COLUMN repair_aggregate_id;",
         )
         .expect("rewind file-backed fixture to v78");
@@ -7596,7 +7623,7 @@ mod tests {
     fn migration_v79_converges_premerge_private_beta_v78_with_master_v75_column() {
         let (_tmp, conn) = current_file_fixture();
         conn.execute_batch(
-            "DELETE FROM schema_version WHERE version = 79;
+            "DELETE FROM schema_version WHERE version >= 79;
              ALTER TABLE orders DROP COLUMN external_plugin_order_id;",
         )
         .expect("rewind to the pre-merge private-beta v78 shape");
@@ -7647,7 +7674,7 @@ mod tests {
 
         run_migrations(&conn).expect("advance master v75 through repair v79");
 
-        assert_eq!(max_schema_version(&conn), 79);
+        assert_eq!(max_schema_version(&conn), CURRENT_SCHEMA_VERSION);
         assert!(
             column_exists(&conn, "orders", "order_context").expect("inspect repair order context")
         );
@@ -7935,10 +7962,10 @@ mod tests {
     fn migration_v79_native_repair_atomic_only_policy_uses_computed_explicit_allowlist() {
         assert_eq!(
             computed_pending_migrations(75, true, false),
-            vec![56, 76, 77, 78, 79]
+            vec![56, 76, 77, 78, 79, 80]
         );
-        assert_eq!(computed_pending_migrations(78, false, false), vec![79]);
-        assert_eq!(computed_pending_migrations(79, false, true), vec![79]);
+        assert_eq!(computed_pending_migrations(78, false, false), vec![79, 80]);
+        assert_eq!(computed_pending_migrations(79, false, true), vec![79, 80]);
 
         assert!(native_repair_atomic_only_allowed(75, &[56, 76, 77, 78, 79]));
         assert!(native_repair_atomic_only_allowed(78, &[79]));
@@ -8488,7 +8515,7 @@ mod tests {
             "invalid row must be quarantined exactly once on clean retry",
         );
         assert_eq!(invalid_error, "REPAIR_AGGREGATE_ID_MISSING");
-        assert_eq!(max_schema_version(&conn), 79);
+        assert_eq!(max_schema_version(&conn), CURRENT_SCHEMA_VERSION);
         assert!(
             sqlite_index_exists(&conn, "idx_parity_sync_queue_repair_aggregate_order")
                 .expect("inspect committed v79 index")

@@ -262,6 +262,13 @@ pub struct OrderReceiptDoc {
     /// founder's real efood slip, order #4579, 27/08/2026).
     #[serde(default)]
     pub platform_slip: Option<PlatformSlipInfo>,
+    /// Founder 07/09: a kiosk order's customer receipt leads with the
+    /// customer's own details (name + phone, and the full address on
+    /// delivery) instead of the internal «Kiosk context/source» routing
+    /// lines. Set only by `build_order_receipt_doc` for orders whose
+    /// ghost_metadata carries a `kiosk` object; every other slip is untouched.
+    #[serde(default)]
+    pub kiosk_slip: bool,
 }
 
 /// Raw platform facts for the faithful slip — labels are the renderer's job
@@ -2355,6 +2362,27 @@ fn kitchen_order_note_lines(doc: &KitchenTicketDoc) -> Vec<String> {
     lines
 }
 
+/// Founder 07/09/2026: on the kiosk slip the ingredients should read a notch
+/// under the category and sit a little further right, so the eye separates
+/// «what was ordered» from «how it was made». 0.88 of the item text keeps them
+/// legible on 58 mm paper while staying visibly smaller.
+fn ingredient_raster_style(base: RasterTextStyle) -> RasterTextStyle {
+    RasterTextStyle {
+        size_px: base.size_px * 0.88,
+        line_height: ((base.line_height as f32) * 0.9).round() as i32,
+        ..base
+    }
+}
+
+/// The extra indent that goes with it. Non-kiosk slips keep their two spaces.
+fn ingredient_indent(kiosk_slip: bool) -> &'static str {
+    if kiosk_slip {
+        "     "
+    } else {
+        "  "
+    }
+}
+
 fn category_raster_style(base: RasterTextStyle) -> RasterTextStyle {
     RasterTextStyle {
         weight: RasterTextWeight::Bold,
@@ -2385,6 +2413,17 @@ fn total_label_text(lang: &str, total: &TotalsLine) -> String {
         }
     }
     base.to_string()
+}
+
+/// Founder rule 07/09/2026: a note attached to an ITEM prints inside braces on
+/// the kiosk customer receipt — «{Ξεροψημένη}» — with no «Σημείωση:» label and
+/// no underline. Every other slip keeps the labelled form it has always had.
+fn item_note_display(lang: &str, note: &str, kiosk_slip: bool) -> String {
+    if kiosk_slip {
+        format!("{{{note}}}")
+    } else {
+        format!("{}: {note}", receipt_label(lang, "Note"))
+    }
 }
 
 fn customization_display(
@@ -2431,7 +2470,12 @@ fn split_customizations(
     (with_items, without_items)
 }
 
-fn append_customizations_html(body: &mut String, item: &ReceiptItem, lang: &str) {
+fn append_customizations_html(
+    body: &mut String,
+    item: &ReceiptItem,
+    lang: &str,
+    show_prices: bool,
+) {
     let (with_items, without_items) = split_customizations(item);
     if with_items.is_empty() && without_items.is_empty() {
         return;
@@ -2441,7 +2485,7 @@ fn append_customizations_html(body: &mut String, item: &ReceiptItem, lang: &str)
         for customization in with_items {
             body.push_str(&format!(
                 "<div class=\"note\">+ {}</div>",
-                esc(&customization_display(lang, customization, true))
+                esc(&customization_display(lang, customization, show_prices))
             ));
         }
     }
@@ -2597,6 +2641,52 @@ fn delivery_fields<'a>(doc: &'a OrderReceiptDoc, lang: &str) -> Vec<(&'a str, &'
     fields
 }
 
+/// Founder 07/09/2026: the kiosk customer receipt opens with the CUSTOMER's
+/// own details — name and phone — and, when the order is a delivery, the full
+/// address. It used to open with «Kiosk context: …» / «Kiosk source: … -> …»,
+/// which is routing bookkeeping the customer has no use for (those still ride
+/// on the kitchen ticket, where they say which kiosk sent the order).
+///
+/// Returns an empty vec for every non-kiosk slip, so nothing else changes.
+fn kiosk_customer_block_lines<'a>(doc: &'a OrderReceiptDoc, lang: &str) -> Vec<(&'a str, &'a str)> {
+    if !doc.kiosk_slip {
+        return Vec::new();
+    }
+
+    let field = |opt: &'a Option<String>| -> Option<&'a str> {
+        opt.as_deref().map(str::trim).filter(|v| !v.is_empty())
+    };
+
+    let mut lines: Vec<(&str, &str)> = Vec::new();
+    if let Some(v) = field(&doc.customer_name) {
+        lines.push((receipt_label(lang, "Customer"), v));
+    }
+    if let Some(v) = field(&doc.customer_phone) {
+        lines.push((receipt_label(lang, "Phone"), v));
+    }
+
+    // Delivery needs the whole address, not just a contact.
+    if doc.order_type.trim().eq_ignore_ascii_case("delivery") {
+        if let Some(v) = field(&doc.delivery_address) {
+            lines.push((receipt_label(lang, "Address"), v));
+        }
+        if let Some(v) = field(&doc.delivery_city) {
+            lines.push((receipt_label(lang, "City"), v));
+        }
+        if let Some(v) = field(&doc.delivery_postal_code) {
+            lines.push((receipt_label(lang, "Postal Code"), v));
+        }
+        if let Some(v) = field(&doc.delivery_floor) {
+            lines.push((receipt_label(lang, "Floor"), v));
+        }
+        if let Some(v) = field(&doc.name_on_ringer) {
+            lines.push((receipt_label(lang, "Name on ringer"), v));
+        }
+    }
+
+    lines
+}
+
 fn delivery_slip_info_lines(doc: &OrderReceiptDoc, lang: &str) -> Vec<(String, String)> {
     let (address, city, postal, floor) = normalize_delivery_address_components(doc);
     vec![
@@ -2672,7 +2762,12 @@ fn has_payment_amount_warning(doc: &OrderReceiptDoc) -> bool {
 }
 
 /// Render item customizations using the new `item-mods` class.
-fn append_customizations_html_v2(body: &mut String, item: &ReceiptItem, lang: &str) {
+fn append_customizations_html_v2(
+    body: &mut String,
+    item: &ReceiptItem,
+    lang: &str,
+    show_prices: bool,
+) {
     let (with_items, without_items) = split_customizations(item);
     if with_items.is_empty() && without_items.is_empty() {
         return;
@@ -2681,7 +2776,7 @@ fn append_customizations_html_v2(body: &mut String, item: &ReceiptItem, lang: &s
     for customization in with_items {
         mods.push(format!(
             "+ {}",
-            esc(&customization_display(lang, customization, true))
+            esc(&customization_display(lang, customization, show_prices))
         ));
     }
     if !without_items.is_empty() {
@@ -3314,7 +3409,7 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                             money_with_currency(item.total, cur)
                         ));
                         body.push_str("</div>");
-                        append_customizations_html_v2(&mut body, item, lang);
+                        append_customizations_html_v2(&mut body, item, lang, !doc.kiosk_slip);
                         if let Some(note) = item
                             .note
                             .as_deref()
@@ -3533,7 +3628,7 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                             money(item.total)
                         ));
                         body.push_str("</div>");
-                        append_customizations_html_v2(&mut body, item, lang);
+                        append_customizations_html_v2(&mut body, item, lang, !doc.kiosk_slip);
                         if let Some(note) = item
                             .note
                             .as_deref()
@@ -3917,7 +4012,7 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                         qty(item.quantity),
                         esc(&item.name)
                     ));
-                    append_customizations_html(&mut body, item, lang);
+                    append_customizations_html(&mut body, item, lang, true);
                     if let Some(note) = item
                         .note
                         .as_deref()
@@ -4001,7 +4096,7 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                             esc(&item.name),
                             money_with_currency(item.total, cur)
                         ));
-                        append_customizations_html(&mut body, item, lang);
+                        append_customizations_html(&mut body, item, lang, !doc.kiosk_slip);
                     } else {
                         // Simple item: name + price
                         body.push_str(&format!(
@@ -5060,6 +5155,7 @@ fn emit_item_customizations_escpos(
     item: &ReceiptItem,
     width: usize,
     lang: &str,
+    show_prices: bool,
 ) {
     let (with_items, without_items) = split_customizations(item);
 
@@ -5067,7 +5163,10 @@ fn emit_item_customizations_escpos(
         for customization in with_items {
             emit_wrapped(
                 builder,
-                &format!("  + {}", customization_display(lang, customization, true)),
+                &format!(
+                    "  + {}",
+                    customization_display(lang, customization, show_prices)
+                ),
                 width,
             );
         }
@@ -6995,6 +7094,13 @@ fn render_classic_customer_raster_exact_ttf(
     );
     canvas.draw_text_line(&meta_line, BitmapAlign::Left, preset.meta_style);
     canvas.draw_rule();
+    let kiosk_customer_lines = kiosk_customer_block_lines(doc, lang);
+    if !kiosk_customer_lines.is_empty() {
+        for (label, value) in kiosk_customer_lines {
+            canvas.draw_pair(&format!("{label}:"), value, preset.contact_style);
+        }
+        canvas.draw_rule();
+    }
     if is_delivery_slip {
         for (label, value) in delivery_slip_info_lines(doc, lang) {
             canvas.draw_pair(&format!("{label}:"), &value, preset.contact_style);
@@ -7040,11 +7146,20 @@ fn render_classic_customer_raster_exact_ttf(
             preset.item_style,
         );
         let (with_items, without_items) = split_customizations(item);
+        let ingredient_style = if doc.kiosk_slip {
+            ingredient_raster_style(preset.customization_style)
+        } else {
+            preset.customization_style
+        };
+        let indent = ingredient_indent(doc.kiosk_slip);
         for customization in with_items {
             canvas.draw_wrapped(
-                &format!("  + {}", customization_display(lang, customization, true)),
+                &format!(
+                    "{indent}+ {}",
+                    customization_display(lang, customization, !doc.kiosk_slip)
+                ),
                 BitmapAlign::Left,
-                preset.customization_style,
+                ingredient_style,
             );
         }
         if !without_items.is_empty() {
@@ -7071,7 +7186,11 @@ fn render_classic_customer_raster_exact_ttf(
             .filter(|value| !value.is_empty())
         {
             canvas.draw_wrapped(
-                &format!("  _{}: {note}_", receipt_label(lang, "Note")),
+                &if doc.kiosk_slip {
+                    format!("  {}", item_note_display(lang, note, true))
+                } else {
+                    format!("  _{}: {note}_", receipt_label(lang, "Note"))
+                },
                 BitmapAlign::Left,
                 preset.customization_style,
             );
@@ -7297,6 +7416,13 @@ fn render_classic_customer_raster_exact_bitmap(
     );
     canvas.draw_body_text_line(&meta_line, BitmapAlign::Left, false, canvas.normal_scale, 0);
     canvas.draw_rule();
+    let kiosk_customer_lines = kiosk_customer_block_lines(doc, lang);
+    if !kiosk_customer_lines.is_empty() {
+        for (label, value) in kiosk_customer_lines {
+            canvas.draw_pair_body(&format!("{label}:"), value, false, canvas.normal_scale);
+        }
+        canvas.draw_rule();
+    }
     if is_delivery_slip {
         for (label, value) in delivery_slip_info_lines(doc, lang) {
             canvas.draw_pair_body(&format!("{label}:"), &value, false, canvas.normal_scale);
@@ -7347,11 +7473,21 @@ fn render_classic_customer_raster_exact_bitmap(
             canvas.normal_scale,
         );
         let (with_items, without_items) = split_customizations(item);
+        // One bitmap step under the item/category text, and a deeper indent.
+        let ingredient_scale = if doc.kiosk_slip {
+            canvas.normal_scale.saturating_sub(1).max(1)
+        } else {
+            canvas.normal_scale
+        };
+        let indent = ingredient_indent(doc.kiosk_slip);
         for customization in with_items {
             canvas.draw_left_wrapped_body(
-                &format!("  + {}", customization_display(lang, customization, true)),
+                &format!(
+                    "{indent}+ {}",
+                    customization_display(lang, customization, !doc.kiosk_slip)
+                ),
                 false,
-                canvas.normal_scale,
+                ingredient_scale,
             );
         }
         if !without_items.is_empty() {
@@ -7378,7 +7514,11 @@ fn render_classic_customer_raster_exact_bitmap(
             .filter(|value| !value.is_empty())
         {
             canvas.draw_left_wrapped_body(
-                &format!("  _{}: {note}_", receipt_label(lang, "Note")),
+                &if doc.kiosk_slip {
+                    format!("  {}", item_note_display(lang, note, true))
+                } else {
+                    format!("  _{}: {note}_", receipt_label(lang, "Note"))
+                },
                 false,
                 canvas.normal_scale,
             );
@@ -9716,20 +9856,30 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                         width,
                         style,
                     );
-                    emit_item_customizations_escpos(&mut builder, item, width, lang);
+                    emit_item_customizations_escpos(
+                        &mut builder,
+                        item,
+                        width,
+                        lang,
+                        !doc.kiosk_slip,
+                    );
                     if let Some(note) = item
                         .note
                         .as_deref()
                         .map(str::trim)
                         .filter(|v| !v.is_empty())
                     {
-                        builder.underline(1);
+                        if !doc.kiosk_slip {
+                            builder.underline(1);
+                        }
                         emit_wrapped(
                             &mut builder,
-                            &format!("  {}: {note}", receipt_label(lang, "Note")),
+                            &format!("  {}", item_note_display(lang, note, doc.kiosk_slip)),
                             width,
                         );
-                        builder.underline(0);
+                        if !doc.kiosk_slip {
+                            builder.underline(0);
+                        }
                     }
                 }
             }
@@ -10177,7 +10327,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                         width,
                         style,
                     );
-                    emit_item_customizations_escpos(&mut builder, item, width, lang);
+                    emit_item_customizations_escpos(&mut builder, item, width, lang, true);
                     if let Some(note) = item
                         .note
                         .as_deref()
@@ -10302,7 +10452,13 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     }
                     let price = money_with_currency_locale(item.total, cur, comma);
                     emit_item_line(&mut builder, &item.name, &price, width, style);
-                    emit_item_customizations_escpos(&mut builder, item, width, lang);
+                    emit_item_customizations_escpos(
+                        &mut builder,
+                        item,
+                        width,
+                        lang,
+                        !doc.kiosk_slip,
+                    );
                     if let Some(note) = item
                         .note
                         .as_deref()

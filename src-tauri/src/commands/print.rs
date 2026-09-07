@@ -4575,6 +4575,8 @@ fn build_sample_receipt_doc() -> receipt_renderer::OrderReceiptDoc {
         status_label: None,
         cancellation_reason: None,
         platform_slip: None,
+        // Split receipts and the settings sample are plain POS slips.
+        kiosk_slip: false,
     }
 }
 

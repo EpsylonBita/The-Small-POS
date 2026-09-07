@@ -5138,6 +5138,46 @@ fn kiosk_context_note_from_metadata(raw: &str) -> Option<String> {
     kiosk_context_label_from_metadata(raw).map(|label| format!("Kiosk context: {label}"))
 }
 
+/// A kiosk order is the only source that carries a `kiosk` object in
+/// ghost_metadata. The local orders table has no `source`/`platform` column, so
+/// this is the only reliable marker on the POS side.
+fn is_kiosk_order_metadata(raw: &str) -> bool {
+    serde_json::from_str::<Value>(raw)
+        .ok()
+        .and_then(|metadata| metadata.get("kiosk").cloned())
+        .is_some_and(|kiosk| kiosk.is_object())
+}
+
+/// «Kiosk context: …» and «Kiosk source: … -> …» are machine-generated routing
+/// bookkeeping. They belong on the KITCHEN ticket (they say which kiosk sent
+/// the order and to which terminal) but never on the customer's receipt, where
+/// the founder wants the customer's own details instead. The POS order screen
+/// already hides them the same way.
+fn is_internal_kiosk_routing_note(note: &str) -> bool {
+    let trimmed = note.trim_start().to_ascii_lowercase();
+    trimmed.starts_with("kiosk source:") || trimmed.starts_with("kiosk context:")
+}
+
+/// The method a kiosk customer CHOSE. A kiosk never charges — staff settle at
+/// the till — so no completed `order_payments` row ever exists and
+/// `derive_payment_method` correctly returns None. The intent is still recorded
+/// by the kiosk order route in `ghost_metadata.kiosk.paymentMethod`, so the slip
+/// can say how the customer intends to pay instead of saying nothing at all.
+fn kiosk_payment_intent(raw: &str) -> Option<String> {
+    let metadata = serde_json::from_str::<Value>(raw).ok()?;
+    let kiosk = metadata.get("kiosk")?;
+    let method = kiosk
+        .get("paymentMethod")
+        .or_else(|| kiosk.get("payment_method"))
+        .and_then(Value::as_str)?;
+
+    let normalized = method.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "cash" | "card" | "room_charge" => Some(normalized),
+        _ => None,
+    }
+}
+
 pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderReceiptDoc, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     // W6: `orders.payment_method` was dropped in v55. Derive the method
@@ -5245,7 +5285,26 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
         external_order_id,
         estimated_time_raw,
     ) = order;
-    let payment_method = derived_payment_method;
+    let is_kiosk_order = is_kiosk_order_metadata(&ghost_metadata);
+
+    // A kiosk order is settled at the till, so it has no completed payment row
+    // and `derive_payment_method` yields nothing. Fall back to the method the
+    // customer chose, which the kiosk recorded in its metadata.
+    let payment_method = if derived_payment_method.trim().is_empty() {
+        kiosk_payment_intent(&ghost_metadata).unwrap_or_default()
+    } else {
+        derived_payment_method
+    };
+
+    // Read separately rather than widening the 32-column tuple above.
+    let customer_note: String = conn
+        .query_row(
+            "SELECT COALESCE(notes, '') FROM orders WHERE id = ?1",
+            params![order_id],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_default();
+
     let menu_lookup = build_menu_category_lookup(&conn);
 
     let items: Vec<ReceiptItem> = serde_json::from_str::<Value>(&items_json)
@@ -5276,12 +5335,20 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
         .collect();
 
     let mut order_notes: Vec<String> = Vec::new();
+    // The customer's own words come first — this is what they typed.
+    push_unique_trimmed_note(&mut order_notes, Some(&customer_note));
     let kiosk_context_note = kiosk_context_note_from_metadata(&ghost_metadata);
-    push_unique_trimmed_note(&mut order_notes, kiosk_context_note.as_deref());
+    // Routing bookkeeping stays off the customer receipt (it remains on the
+    // kitchen ticket, which is where it is actually useful).
+    if !is_kiosk_order {
+        push_unique_trimmed_note(&mut order_notes, kiosk_context_note.as_deref());
+    }
     push_unique_trimmed_note(&mut order_notes, Some(&delivery_notes));
     let special_instructions =
         strip_platform_items_fallback(&special_instructions, !items.is_empty());
-    push_unique_trimmed_note(&mut order_notes, Some(&special_instructions));
+    if !(is_kiosk_order && is_internal_kiosk_routing_note(&special_instructions)) {
+        push_unique_trimmed_note(&mut order_notes, Some(&special_instructions));
+    }
 
     // THE-434 faithful slip: platform orders headline the rider's short code
     // (efood's own receipt prints «#4545» as the biggest element), so the big
@@ -5563,6 +5630,7 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
         } else {
             None
         },
+        kiosk_slip: is_kiosk_order,
     })
 }
 
@@ -5818,6 +5886,8 @@ fn build_split_receipt_doc(db: &DbState, payment_id: &str) -> Result<OrderReceip
         status_label: None,
         cancellation_reason: None,
         platform_slip: None,
+        // Split receipts and the settings sample are plain POS slips.
+        kiosk_slip: false,
     })
 }
 
@@ -15563,6 +15633,101 @@ mod tests {
 
         assert!(image.width() <= 260);
         assert!(image.height() <= 160);
+    }
+
+    /// Founder's 07/09 slip (order K#0004): the first block printed internal
+    /// routing text, the customer's own note never arrived, and the payment
+    /// method was blank because a kiosk order is settled at the till and so has
+    /// no completed payment row.
+    #[test]
+    fn test_build_order_receipt_doc_kiosk_slip_leads_with_the_customer_not_routing_text() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            let items = serde_json::json!([
+                { "name": "Γλυκιά Κρέπα", "quantity": 1, "price": 5.20 }
+            ])
+            .to_string();
+            let ghost = serde_json::json!({
+                "kiosk": { "contextLabel": "Pickup - Endrit Bashi", "paymentMethod": "cash" }
+            })
+            .to_string();
+
+            conn.execute(
+                "INSERT INTO orders (
+                    id, order_number, items, total_amount, total_amount_cents, subtotal, subtotal_cents,
+                    status, order_type, customer_name, customer_phone, notes, special_instructions,
+                    ghost_metadata, payment_status, sync_status, created_at, updated_at
+                 ) VALUES (
+                    'ord-kiosk-slip', 'K-d28cef2e-20260907-060000-0004', ?1, 5.20, 520, 5.20, 520,
+                    'pending', 'pickup', 'Endrit Bashi', '+306948128474',
+                    'Χωρίς ζάχαρη παρακαλώ',
+                    'Kiosk source: Pickup - Endrit Bashi -> Το Μικρο Παρισι',
+                    ?2, 'pending', 'pending', datetime('now'), datetime('now')
+                 )",
+                params![items, ghost],
+            )
+            .unwrap();
+        }
+
+        let doc = build_order_receipt_doc(&db, "ord-kiosk-slip").unwrap();
+
+        assert!(doc.kiosk_slip, "the kiosk marker drives the customer block");
+        assert_eq!(doc.customer_name.as_deref(), Some("Endrit Bashi"));
+        assert_eq!(doc.customer_phone.as_deref(), Some("+306948128474"));
+
+        // The customer's own words reach the slip...
+        assert!(
+            doc.order_notes.iter().any(|n| n.contains("Χωρίς ζάχαρη")),
+            "the customer's order note must reach the slip, got {:?}",
+            doc.order_notes
+        );
+        // ...and the internal routing bookkeeping does not.
+        assert!(
+            !doc.order_notes
+                .iter()
+                .any(|n| n.to_lowercase().contains("kiosk source")
+                    || n.to_lowercase().contains("kiosk context")),
+            "routing text must stay off the customer receipt, got {:?}",
+            doc.order_notes
+        );
+
+        // The method the customer chose surfaces as a payment line even though
+        // nothing is settled yet (amount unknown until staff take the money).
+        assert!(
+            doc.payments
+                .iter()
+                .any(|p| p.label.eq_ignore_ascii_case("cash")),
+            "the chosen method must reach the slip, got {:?}",
+            doc.payments.iter().map(|p| &p.label).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_build_order_receipt_doc_keeps_routing_notes_for_non_kiosk_orders() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (
+                    id, order_number, items, total_amount, total_amount_cents, subtotal, subtotal_cents,
+                    status, order_type, special_instructions, sync_status, created_at, updated_at
+                 ) VALUES (
+                    'ord-plain', 'ORD-20260907-0009', '[]', 5.00, 500, 5.00, 500,
+                    'pending', 'pickup', 'Leave at the gate', 'pending', datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .unwrap();
+        }
+
+        let doc = build_order_receipt_doc(&db, "ord-plain").unwrap();
+        assert!(!doc.kiosk_slip);
+        assert!(
+            doc.order_notes.iter().any(|n| n == "Leave at the gate"),
+            "a normal order keeps its instructions untouched, got {:?}",
+            doc.order_notes
+        );
     }
 
     /// End-to-end for the founder's 06/09 slip: the order screen listed the

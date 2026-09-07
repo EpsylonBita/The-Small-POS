@@ -761,6 +761,27 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
     if (normalizedMethod === 'split' || normalizedMethod === 'mixed') {
       return 'split';
     }
+    // A kiosk order is settled by staff at the till, so it never has a
+    // completed payment row and the derived method comes back as 'pending' —
+    // which showed the operator «Εκκρεμεί» instead of what the customer chose.
+    // The kiosk records that choice in ghost_metadata.
+    if (!normalizedMethod || normalizedMethod === 'pending') {
+      const metadata = parseOrderCustomizationCandidate(
+        displayOrder.ghost_metadata ?? displayOrder.ghostMetadata,
+      );
+      const kiosk =
+        metadata && typeof metadata === 'object' && !Array.isArray(metadata)
+          ? (metadata as Record<string, any>).kiosk
+          : null;
+      const intent = String(
+        (kiosk && (kiosk.paymentMethod ?? kiosk.payment_method)) || '',
+      )
+        .toLowerCase()
+        .trim();
+      if (intent) {
+        return intent;
+      }
+    }
     return normalizedMethod;
   })();
   const createdAt = displayOrder.created_at || displayOrder.createdAt
