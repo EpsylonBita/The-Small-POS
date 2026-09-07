@@ -5807,11 +5807,40 @@ impl RasterFonts {
         self.regular.glyph(ch).id().0 != 0 && self.bold.glyph(ch).id().0 != 0
     }
 
+    /// Test-only since 1.4.102: production draws through `sanitize_for_font`
+    /// and never refuses a slip for a missing glyph.
+    #[cfg(test)]
     fn missing_glyphs(&self, text: &str, weight: RasterTextWeight) -> usize {
         let font = self.font(weight);
         text.chars()
             .filter(|ch| !ch.is_whitespace() && font.glyph(*ch).id().0 == 0)
             .count()
+    }
+
+    /// The text as the embedded font can actually draw it.
+    ///
+    /// Live 06/09/2026 (efood #4854): a customer typed «πάρτε με τηλέφωνο 🫶»
+    /// and the whole slip came out in text mode — unreadable Greek on that
+    /// printer — because one emoji the font lacks made the raster render give
+    /// up. A missing glyph is a property of one character, not of the slip:
+    /// symbols and emoji are dropped, letters and digits the font cannot draw
+    /// become «?», and the slip stays raster. The count of characters touched
+    /// is returned so the composer can report it.
+    fn sanitize_for_font(&self, text: &str, weight: RasterTextWeight) -> (String, usize) {
+        let font = self.font(weight);
+        let mut out = String::with_capacity(text.len());
+        let mut touched = 0;
+        for ch in text.chars() {
+            if ch.is_whitespace() || font.glyph(ch).id().0 != 0 {
+                out.push(ch);
+            } else if ch.is_alphanumeric() {
+                out.push('?');
+                touched += 1;
+            } else {
+                touched += 1;
+            }
+        }
+        (out, touched)
     }
 }
 
@@ -5916,6 +5945,20 @@ impl TtfReceiptComposer {
 
     fn has_missing_glyphs(&self) -> bool {
         self.missing_glyph_count > 0
+    }
+
+    /// Characters the font could not draw were dropped or drawn as «?»; the
+    /// slip still rendered. Said once, in the log, so a recurring source (a
+    /// platform note full of emoji, a menu name in a script the font lacks)
+    /// can be found without a single slip ever falling back to text mode.
+    fn report_missing_glyphs(&self, context: &str) {
+        if self.has_missing_glyphs() {
+            tracing::warn!(
+                context,
+                characters = self.missing_glyph_count,
+                "Receipt font lacked glyphs; they were dropped or drawn as ? and the slip stayed raster"
+            );
+        }
     }
 
     /// Blit a grayscale asset at (x, y), scaled to `target_w`; returns (w, h).
@@ -6055,6 +6098,9 @@ impl TtfReceiptComposer {
 
     fn text_width(&self, text: &str, style: RasterTextStyle) -> i32 {
         let font = self.fonts.font(style.weight);
+        // Measure what will be drawn (`draw_text_at_position` sanitises the
+        // same way), so wrapping and drawing never disagree about a width.
+        let (text, _) = self.fonts.sanitize_for_font(text, style.weight);
         let scale = Scale::uniform(style.size_px.max(1.0));
         let mut width = 0.0_f32;
         let mut prev = None;
@@ -6085,9 +6131,10 @@ impl TtfReceiptComposer {
     }
 
     fn draw_text_at_position(&mut self, text: &str, start_x: i32, style: RasterTextStyle, y: i32) {
-        let text = text.trim_end();
+        let (sanitized, touched) = self.fonts.sanitize_for_font(text, style.weight);
+        self.missing_glyph_count += touched;
+        let text = sanitized.trim_end();
         let font = self.fonts.font(style.weight).clone();
-        self.missing_glyph_count += self.fonts.missing_glyphs(text, style.weight);
         let scale = Scale::uniform(style.size_px.max(1.0));
         let v_metrics = font.v_metrics(scale);
         let baseline = y as f32 + v_metrics.ascent;
@@ -7020,9 +7067,7 @@ fn render_classic_customer_raster_exact_ttf(
 
     if let Some(info) = doc.platform_slip.as_ref() {
         draw_platform_slip_ttf(&mut canvas, doc, info, cfg, lang, &cur, comma);
-        if canvas.has_missing_glyphs() {
-            return Err("embedded font missing glyphs for classic raster exact body".to_string());
-        }
+        canvas.report_missing_glyphs("classic raster exact platform slip");
         return Ok(canvas.into_cropped());
     }
 
@@ -7318,9 +7363,7 @@ fn render_classic_customer_raster_exact_ttf(
         );
     }
 
-    if canvas.has_missing_glyphs() {
-        return Err("embedded font missing glyphs for classic raster exact body".to_string());
-    }
+    canvas.report_missing_glyphs("classic raster exact body");
 
     Ok(canvas.into_cropped())
 }
@@ -8702,9 +8745,7 @@ fn render_classic_non_customer_raster_exact_ttf(
         emit_raster_common_footer(&mut canvas, cfg, lang, preset);
     }
 
-    if canvas.has_missing_glyphs() {
-        return Err("embedded font missing glyphs for classic raster exact body".to_string());
-    }
+    canvas.report_missing_glyphs("classic raster exact body");
 
     Ok(canvas.into_cropped())
 }
@@ -12223,6 +12264,83 @@ mod tests {
             ),
             0
         );
+    }
+
+    #[test]
+    fn raster_fonts_sanitize_drops_emoji_and_keeps_greek() {
+        let fonts = RasterFonts::load().expect("embedded Noto Serif fonts must load");
+        let (text, touched) = fonts.sanitize_for_font(
+            "\u{03C0}\u{03AC}\u{03C1}\u{03C4}\u{03B5} \u{03BC}\u{03B5} \u{03C4}\u{03B7}\u{03BB}\u{03AD}\u{03C6}\u{03C9}\u{03BD}\u{03BF} \u{1FAF6}",
+            RasterTextWeight::Regular,
+        );
+        assert_eq!(text.trim_end(), "\u{03C0}\u{03AC}\u{03C1}\u{03C4}\u{03B5} \u{03BC}\u{03B5} \u{03C4}\u{03B7}\u{03BB}\u{03AD}\u{03C6}\u{03C9}\u{03BD}\u{03BF}");
+        assert_eq!(touched, 1);
+
+        // A script the font has no glyphs for keeps its shape as «?», so a
+        // name is still visibly a name rather than vanishing.
+        let (text, touched) =
+            fonts.sanitize_for_font("\u{4F60}\u{597D} 12", RasterTextWeight::Bold);
+        assert_eq!(text, "?? 12");
+        assert_eq!(touched, 2);
+
+        // Everything the receipt normally carries passes through untouched.
+        let (text, touched) =
+            fonts.sanitize_for_font("Club sandwich 6,80 EUR", RasterTextWeight::Regular);
+        assert_eq!(text, "Club sandwich 6,80 EUR");
+        assert_eq!(touched, 0);
+    }
+
+    #[test]
+    fn classic_customer_raster_exact_survives_an_emoji_in_the_platform_note() {
+        // Live 06/09/2026, efood #4854: one 🫶 in the customer's note and the
+        // whole slip fell back to text mode. The raster slip must survive it.
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            language: "el".to_string(),
+            classic_customer_render_mode: ClassicCustomerRenderMode::RasterExact,
+            ..LayoutConfig::default()
+        };
+        let note = "\u{0395}\u{03C0}\u{03B5}\u{03B9}\u{03B4}\u{03AE} \u{03C4}\u{03BF} \u{03BA}\u{03BF}\u{03C5}\u{03B4}\u{03BF}\u{03CD}\u{03BD}\u{03B9} \u{03B4}\u{03B5} \u{03BB}\u{03B5}\u{03B9}\u{03C4}\u{03BF}\u{03C5}\u{03C1}\u{03B3}\u{03B5}\u{03AF} \u{03C0}\u{03AC}\u{03C1}\u{03C4}\u{03B5} \u{03BC}\u{03B5} \u{03C4}\u{03B7}\u{03BB}\u{03AD}\u{03C6}\u{03C9}\u{03BD}\u{03BF} \u{1FAF6}";
+        for platform_slip in [
+            None,
+            Some(PlatformSlipInfo {
+                plugin: "efood".to_string(),
+                external_order_id: Some("694631478".to_string()),
+                short_code: Some("4854".to_string()),
+                payment_method: Some("cod".to_string()),
+                ..PlatformSlipInfo::default()
+            }),
+        ] {
+            let doc = ReceiptDocument::OrderReceipt(OrderReceiptDoc {
+                order_number: "EFOOD-1788723255285-94631478".to_string(),
+                order_type: "delivery".to_string(),
+                created_at: "2026-09-06T19:14:00Z".to_string(),
+                customer_name: Some("\u{03A0}\u{0391}\u{039D}\u{0391}\u{0393}\u{0399}\u{03A9}\u{03A4}\u{0397}\u{03A3}".to_string()),
+                delivery_address: Some("\u{039C}\u{03B1}\u{03BA}\u{03B5}\u{03B4}\u{03BF}\u{03BD}\u{03AF}\u{03B1}\u{03C2} 61".to_string()),
+                order_notes: vec![note.to_string()],
+                items: vec![ReceiptItem {
+                    name: "\u{03A6}\u{03C4}\u{03B9}\u{03AC}\u{03BE}\u{03C4}\u{03B5} \u{03C4}\u{03B7} \u{03B4}\u{03B9}\u{03BA}\u{03AE} \u{03C3}\u{03B1}\u{03C2} \u{03B3}\u{03BB}\u{03C5}\u{03BA}\u{03B9}\u{03AC} \u{03BA}\u{03C1}\u{03AD}\u{03C0}\u{03B1} \u{1FAF6}".to_string(),
+                    quantity: 1.0,
+                    total: 6.5,
+                    ..ReceiptItem::default()
+                }],
+                platform_slip,
+                ..OrderReceiptDoc::default()
+            });
+            let out = render_escpos(&doc, &cfg);
+            assert_eq!(
+                out.body_mode,
+                EscPosBodyMode::RasterExact,
+                "a glyph the font lacks must never push the slip into text mode"
+            );
+            assert!(
+                out.warnings
+                    .iter()
+                    .all(|w| w.code != "raster_exact_fallback"),
+                "no text fallback warning: {:?}",
+                out.warnings
+            );
+        }
     }
 
     #[test]
