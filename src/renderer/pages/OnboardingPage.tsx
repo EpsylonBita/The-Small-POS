@@ -22,9 +22,18 @@ const OnboardingPage: React.FC = () => {
     const [error, setError] = useState<string | null>(null);
     const [isSubmitting, setIsSubmitting] = useState(false);
 
-    const handleLanguageSelect = (lang: SupportedLanguage) => {
-        setLanguage(lang);
-        setStep(2);
+    const handleLanguageSelect = async (lang: SupportedLanguage) => {
+        if (isSubmitting) return;
+        setIsSubmitting(true);
+        try {
+            await setLanguage(lang);
+            setStep(2);
+        } catch (error) {
+            console.warn('[Onboarding] Failed to save language:', error);
+            toast.error(t('errors.saveFailed', { defaultValue: 'Failed to save changes.' }));
+        } finally {
+            setIsSubmitting(false);
+        }
     };
 
     const handleSubmit = async (e: React.FormEvent) => {
@@ -114,6 +123,7 @@ const OnboardingPage: React.FC = () => {
                             <motion.button
                                 variants={pageMotionItem}
                                 onClick={() => handleLanguageSelect('en')}
+                                disabled={isSubmitting}
                                 className={`p-4 rounded-2xl border-2 transition-transform duration-150 active:scale-[0.98] flex items-center justify-between focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400 ${language === 'en'
                                     ? 'border-yellow-400 bg-yellow-400/15 text-yellow-200'
                                     : 'border-zinc-600 bg-zinc-900/40 text-zinc-200 active:bg-zinc-700'
@@ -125,6 +135,7 @@ const OnboardingPage: React.FC = () => {
                             <motion.button
                                 variants={pageMotionItem}
                                 onClick={() => handleLanguageSelect('el')}
+                                disabled={isSubmitting}
                                 className={`p-4 rounded-2xl border-2 transition-transform duration-150 active:scale-[0.98] flex items-center justify-between focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400 ${language === 'el'
                                     ? 'border-yellow-400 bg-yellow-400/15 text-yellow-200'
                                     : 'border-zinc-600 bg-zinc-900/40 text-zinc-200 active:bg-zinc-700'
@@ -136,6 +147,7 @@ const OnboardingPage: React.FC = () => {
                             <motion.button
                                 variants={pageMotionItem}
                                 onClick={() => handleLanguageSelect('de')}
+                                disabled={isSubmitting}
                                 className={`p-4 rounded-2xl border-2 transition-transform duration-150 active:scale-[0.98] flex items-center justify-between focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400 ${language === 'de'
                                     ? 'border-yellow-400 bg-yellow-400/15 text-yellow-200'
                                     : 'border-zinc-600 bg-zinc-900/40 text-zinc-200 active:bg-zinc-700'
@@ -147,6 +159,7 @@ const OnboardingPage: React.FC = () => {
                             <motion.button
                                 variants={pageMotionItem}
                                 onClick={() => handleLanguageSelect('fr')}
+                                disabled={isSubmitting}
                                 className={`p-4 rounded-2xl border-2 transition-transform duration-150 active:scale-[0.98] flex items-center justify-between focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400 ${language === 'fr'
                                     ? 'border-yellow-400 bg-yellow-400/15 text-yellow-200'
                                     : 'border-zinc-600 bg-zinc-900/40 text-zinc-200 active:bg-zinc-700'
@@ -158,6 +171,7 @@ const OnboardingPage: React.FC = () => {
                             <motion.button
                                 variants={pageMotionItem}
                                 onClick={() => handleLanguageSelect('it')}
+                                disabled={isSubmitting}
                                 className={`p-4 rounded-2xl border-2 transition-transform duration-150 active:scale-[0.98] flex items-center justify-between focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400 ${language === 'it'
                                     ? 'border-yellow-400 bg-yellow-400/15 text-yellow-200'
                                     : 'border-zinc-600 bg-zinc-900/40 text-zinc-200 active:bg-zinc-700'

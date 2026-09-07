@@ -16,6 +16,79 @@ const WINDOW_ZOOM_MAX: f64 = 2.0;
 
 static WINDOW_ZOOM_LEVELS: OnceLock<Mutex<HashMap<String, f64>>> = OnceLock::new();
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SystemSettingsSection {
+    Display,
+    Sound,
+    Touch,
+    Power,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SystemSettingsRequest {
+    section: SystemSettingsSection,
+}
+
+fn parse_system_settings_payload(arg0: Option<Value>) -> Result<SystemSettingsSection, String> {
+    let payload = arg0.ok_or_else(|| "Missing system settings section".to_string())?;
+    serde_json::from_value::<SystemSettingsRequest>(payload)
+        .map(|request| request.section)
+        .map_err(|_| {
+            "Unsupported system settings section; use display, sound, touch, or power".to_string()
+        })
+}
+
+// Documented Windows settings pages, never a caller-provided URI or command:
+// https://learn.microsoft.com/en-us/windows/apps/develop/launch/launch-settings
+fn system_settings_uri(section: SystemSettingsSection) -> &'static str {
+    match section {
+        SystemSettingsSection::Display => "ms-settings:display",
+        SystemSettingsSection::Sound => "ms-settings:sound",
+        SystemSettingsSection::Touch => "ms-settings:easeofaccess-mousepointer",
+        SystemSettingsSection::Power => "ms-settings:powersleep",
+    }
+}
+
+#[cfg(windows)]
+fn launch_system_settings(uri: &'static str) -> Result<(), String> {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let operation: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
+    let target: Vec<u16> = uri.encode_utf16().chain(std::iter::once(0)).collect();
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            target.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    } as isize;
+    if result <= 32 {
+        Err(format!(
+            "Could not open Windows settings (system error {result})"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn launch_system_settings(_uri: &'static str) -> Result<(), String> {
+    Err("Opening system settings is supported only on Windows".to_string())
+}
+
+#[tauri::command]
+pub async fn system_open_settings(arg0: Option<Value>) -> Result<Value, String> {
+    let section = parse_system_settings_payload(arg0)?;
+    launch_system_settings(system_settings_uri(section))?;
+    Ok(serde_json::json!({ "success": true, "section": section }))
+}
+
 fn window_zoom_levels() -> &'static Mutex<HashMap<String, f64>> {
     WINDOW_ZOOM_LEVELS.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -457,6 +530,49 @@ pub async fn window_zoom_reset(window: tauri::Window) -> Result<(), String> {
 #[cfg(test)]
 mod dto_tests {
     use super::*;
+
+    #[test]
+    fn system_settings_allowlist_maps_only_documented_pages() {
+        for (section, uri) in [
+            ("display", "ms-settings:display"),
+            ("sound", "ms-settings:sound"),
+            ("touch", "ms-settings:easeofaccess-mousepointer"),
+            ("power", "ms-settings:powersleep"),
+        ] {
+            let parsed =
+                parse_system_settings_payload(Some(serde_json::json!({ "section": section })))
+                    .expect("documented section should parse");
+            assert_eq!(system_settings_uri(parsed), uri);
+            assert_eq!(serde_json::to_value(parsed).unwrap(), section);
+        }
+    }
+
+    #[test]
+    fn system_settings_allowlist_rejects_uri_command_and_malformed_payloads() {
+        for payload in [
+            None,
+            Some(Value::Null),
+            Some(serde_json::json!("display")),
+            Some(serde_json::json!({})),
+            Some(serde_json::json!({ "section": "ms-settings:privacy-webcam" })),
+            Some(serde_json::json!({ "section": "display & calc.exe" })),
+            Some(serde_json::json!({ "section": "display\u{0000}sound" })),
+            Some(serde_json::json!({ "section": "display", "uri": "file:///C:/test.exe" })),
+            Some(serde_json::json!({ "section": "network" })),
+            Some(serde_json::json!({ "section": 1 })),
+        ] {
+            assert!(parse_system_settings_payload(payload).is_err());
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn system_settings_launch_is_explicitly_unsupported_off_windows() {
+        assert_eq!(
+            launch_system_settings(system_settings_uri(SystemSettingsSection::Display)),
+            Err("Opening system settings is supported only on Windows".to_string())
+        );
+    }
 
     #[test]
     fn parse_clipboard_text_payload_supports_string_and_object() {

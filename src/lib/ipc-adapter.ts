@@ -1314,6 +1314,8 @@ export interface PrinterConfig {
  *
  * Every method required by renderer consumers is represented here.
  */
+export type WindowsSettingsSection = 'display' | 'sound' | 'touch' | 'power';
+
 export interface PlatformBridge {
   // -- App lifecycle ---------------------------------------------------------
   app: {
@@ -1329,6 +1331,7 @@ export interface PlatformBridge {
     openExternalUrl(
       url: string,
     ): Promise<{ success: boolean; host: string; scheme: string }>;
+    openSettings(section: WindowsSettingsSection): Promise<{ success: boolean; section: WindowsSettingsSection }>;
   };
 
   // -- Auth ------------------------------------------------------------------
@@ -1725,6 +1728,7 @@ export interface PlatformBridge {
     }): Promise<any>;
     printCheckout(params: ShiftPrintCheckoutParams): Promise<IpcResult>;
     getActive(staffId: string): Promise<any>;
+    getActiveForBranch(branchId: string): Promise<any[]>;
     getById(shiftId: string): Promise<any>;
     getSyncState(shiftId: string): Promise<ShiftSyncState>;
     getActiveByTerminal(branchId: string, terminalId: string): Promise<any>;
@@ -2250,6 +2254,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   // System
   "system:get-info": "system.getInfo",
   "system:open-external-url": "system.openExternalUrl",
+  "system:open-settings": "system.openSettings",
 
   // Auth
   "auth:login": "auth.login",
@@ -2429,6 +2434,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   "shift:close": "shifts.close",
   "shift:record-satellite-handover": "shifts.recordSatelliteHandover",
   "shift:get-active": "shifts.getActive",
+  "shift:get-active-for-branch": "shifts.getActiveForBranch",
   "shift:get-by-id": "shifts.getById",
   "shift:get-sync-state": "shifts.getSyncState",
   "shift:get-active-by-terminal": "shifts.getActiveByTerminal",
@@ -2854,6 +2860,8 @@ export class TauriBridge implements PlatformBridge {
     getInfo: () => this.inv("system:get-info"),
     openExternalUrl: (url: string) =>
       this.inv("system:open-external-url", { url }),
+    openSettings: (section: WindowsSettingsSection) =>
+      this.inv("system:open-settings", { section }),
   };
 
   auth = {
@@ -3354,6 +3362,8 @@ export class TauriBridge implements PlatformBridge {
     printCheckout: (p: ShiftPrintCheckoutParams) =>
       this.inv("shift:print-checkout", p),
     getActive: (staffId: string) => this.inv("shift:get-active", staffId),
+    getActiveForBranch: (branchId: string) =>
+      this.inv("shift:get-active-for-branch", branchId),
     getById: (shiftId: string) => this.inv("shift:get-by-id", shiftId),
     getSyncState: (shiftId: string) =>
       this.inv("shift:get-sync-state", shiftId) as Promise<ShiftSyncState>,

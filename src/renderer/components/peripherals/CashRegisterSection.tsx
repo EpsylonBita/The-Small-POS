@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'react-hot-toast'
-import { getBridge } from '../../../lib'
+import { getBridge, offEvent, onEvent } from '../../../lib'
+import { requireSettingsSuccess } from '../../utils/settings-operation'
 import { renderModalPortal } from '../../utils/render-modal-portal'
 import {
   CreditCard,
@@ -33,7 +34,7 @@ type PrintMode = 'register_prints' | 'pos_sends_receipt'
 // Round 295: the cash-register switches (Auto Fiscal Print, Set-as-default, Enabled) now use the shared
 // POSGlassSwitch -- one fixed-geometry green-on/neutral-off glass switch -- so they match every other
 // Settings switch exactly. The previous local switch-track class was removed.
-type DeviceStatus = 'connected' | 'disconnected' | 'error'
+type DeviceStatus = 'connected' | 'disconnected' | 'error' | 'unknown'
 type CashRegisterSetupMode = 'rbs_network'
 
 interface TaxRate {
@@ -424,11 +425,15 @@ const invokeIPC = async (command: string, args?: unknown): Promise<any> => {
 // ============================================================
 
 const StatusIndicator: React.FC<{ status?: DeviceStatus; error?: string }> = ({ status, error }) => {
+  const { t } = useTranslation()
+  if (status === 'unknown') {
+    return <span className="text-xs liquid-glass-modal-text-muted">{t('settings.workflow.connectionUnverified', 'Connection not verified')}</span>
+  }
   if (!status || status === 'disconnected') {
     return (
       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-gray-500/20 text-gray-400">
         <XCircle className="w-3 h-3" />
-        Disconnected
+        {t('settings.workflow.disconnected', 'Disconnected')}
       </span>
     )
   }
@@ -436,14 +441,14 @@ const StatusIndicator: React.FC<{ status?: DeviceStatus; error?: string }> = ({ 
     return (
       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-red-500/20 text-red-400" aria-label={error}>
         <AlertCircle className="w-3 h-3" />
-        Error
+        {t('settings.workflow.deviceError', 'Error')}
       </span>
     )
   }
   return (
     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-green-500/20 text-green-400">
       <CheckCircle className="w-3 h-3" />
-      Connected
+      {t('settings.workflow.connected', 'Connected')}
     </span>
   )
 }
@@ -468,26 +473,71 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
   const [form, setForm] = useState<FormData>(buildEmptyForm())
   const [isSaving, setIsSaving] = useState(false)
   const [isTesting, setIsTesting] = useState<string | null>(null)
+  const [isConnecting, setIsConnecting] = useState<string | null>(null)
+  const [isPrinting, setIsPrinting] = useState<string | null>(null)
+  const [loadError, setLoadError] = useState('')
+  const [registeredConnections, setRegisteredConnections] = useState<Set<string>>(new Set())
+  const [probeResults, setProbeResults] = useState<Record<string, boolean>>({})
   const [showDevices, setShowDevices] = useState(true)
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null)
   const [fiscalPrintEnabled, setFiscalPrintEnabled] = useState(true)
 
   // Load devices
-  const loadDevices = useCallback(async () => {
+  const loadDevices = useCallback(async (invalidatedDeviceId?: string) => {
     try {
       setLoading(true)
-      const result = await invokeIPC('ecr_get_devices')
+      setLoadError('')
+      const [devicesResult, statusesResult] = await Promise.allSettled([
+        invokeIPC('ecr_get_devices'),
+        getBridge().ecr.getAllStatuses(),
+      ])
+      if (devicesResult.status === 'rejected') throw devicesResult.reason
+      const result = requireSettingsSuccess(devicesResult.value)
+      // This snapshot checks the manager's registered transports without hardware I/O.
+      const statuses = statusesResult.status === 'fulfilled' && statusesResult.value?.success === true
+        && Array.isArray(statusesResult.value.statuses) ? statusesResult.value.statuses : []
+      const connections = new Map<string, boolean>(statuses
+        .filter((status: any) => typeof status.deviceId === 'string' && typeof status.connected === 'boolean')
+        .map((status: any) => [status.deviceId, status.connected] as [string, boolean]))
+      if (invalidatedDeviceId) connections.delete(invalidatedDeviceId)
       const list = result?.devices || result?.data || []
       const normalized = Array.isArray(list)
         ? list
             .map((device) => normalizeCashRegisterDevice(device))
             .filter((device) => device.device_type === 'cash_register')
+            .map((device): ECRCashDevice => ({ ...device, status: connections.has(device.id)
+              ? connections.get(device.id) ? 'connected' : 'disconnected' : 'unknown' }))
         : []
+      setRegisteredConnections(new Set(normalized.filter(device => connections.get(device.id)).map(device => device.id)))
       setDevices(normalized)
     } catch (e) {
       console.error('Failed to load ECR cash register devices:', e)
+      setLoadError(e instanceof Error ? e.message : String(e))
     } finally {
       setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    const updateConnection = (connected: boolean) => (event: { deviceId?: string }) => {
+      if (!event?.deviceId) return
+      const id = event.deviceId
+      setRegisteredConnections(previous => {
+        const next = new Set(previous)
+        if (connected) next.add(id)
+        else next.delete(id)
+        return next
+      })
+      setDevices(previous => previous.map(device => device.id === id
+        ? { ...device, status: connected ? 'connected' : 'disconnected' } : device))
+    }
+    const connected = updateConnection(true)
+    const disconnected = updateConnection(false)
+    onEvent('ecr:event:device-connected', connected)
+    onEvent('ecr:event:device-disconnected', disconnected)
+    return () => {
+      offEvent('ecr:event:device-connected', connected)
+      offEvent('ecr:event:device-disconnected', disconnected)
     }
   }, [])
 
@@ -511,7 +561,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
     setFiscalPrintEnabled(enabled)
     try {
       const bridge = getBridge()
-      await bridge.settings.set({ category: 'terminal', key: 'fiscal_print_enabled', value: enabled })
+      requireSettingsSuccess(await bridge.settings.set({ category: 'terminal', key: 'fiscal_print_enabled', value: enabled }))
       toast.success(
         enabled
           ? t('settings.peripherals.cashRegister.fiscalPrintEnabled', 'Fiscal printing enabled')
@@ -698,13 +748,24 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
     try {
       const nativePayload = buildCashRegisterDevicePayload(form)
       if (viewMode === 'edit' && editingDeviceId) {
-        await invokeIPC('ecr_update_device', { device_id: editingDeviceId, ...nativePayload })
+        requireSettingsSuccess(await invokeIPC('ecr_update_device', { device_id: editingDeviceId, ...nativePayload }))
+        // Saved connection details do not replace an existing live transport.
+        setRegisteredConnections(previous => {
+          const next = new Set(previous)
+          next.delete(editingDeviceId)
+          return next
+        })
+        setProbeResults(previous => {
+          const next = { ...previous }
+          delete next[editingDeviceId]
+          return next
+        })
         toast.success(t('settings.peripherals.cashRegister.updated', 'Device updated'))
       } else {
-        await invokeIPC('ecr_add_device', nativePayload)
+        requireSettingsSuccess(await invokeIPC('ecr_add_device', nativePayload))
         toast.success(t('settings.peripherals.cashRegister.added', 'Device added'))
       }
-      await loadDevices()
+      await loadDevices(viewMode === 'edit' ? editingDeviceId ?? undefined : undefined)
       setViewMode('list')
       resetForm()
     } catch (e: any) {
@@ -719,7 +780,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
   const handleDeleteConfirm = async () => {
     if (!deleteConfirmId) return
     try {
-      await invokeIPC('ecr_remove_device', { device_id: deleteConfirmId })
+      requireSettingsSuccess(await invokeIPC('ecr_remove_device', { device_id: deleteConfirmId }))
       setDevices((prev) => prev.filter((d) => d.id !== deleteConfirmId))
       toast.success(t('settings.peripherals.cashRegister.deleted', 'Device deleted'))
     } catch (e: any) {
@@ -732,34 +793,52 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
 
   // Test connection
   const handleTestConnection = async (deviceId: string) => {
+    if (isTesting || isConnecting || isPrinting) return
     setIsTesting(deviceId)
     try {
       const result = await invokeIPC('ecr_test_connection', { device_id: deviceId })
-      if (result?.success) {
-        toast.success(t('settings.peripherals.cashRegister.testSuccess', 'Connection successful'))
-        setDevices((prev) =>
-          prev.map((d) => (d.id === deviceId ? { ...d, status: 'connected' as DeviceStatus } : d))
-        )
+      if (result?.success === true && result?.connected === true) {
+        toast.success(t('settings.workflow.deviceReachable', 'Device reachable'))
+        setProbeResults(previous => ({ ...previous, [deviceId]: true }))
       } else {
         toast.error(result?.error || t('settings.peripherals.cashRegister.testFailed', 'Connection failed'))
-        setDevices((prev) =>
-          prev.map((d) =>
-            d.id === deviceId
-              ? { ...d, status: 'error' as DeviceStatus, error_message: result?.error }
-              : d
-          )
-        )
+        setProbeResults(previous => ({ ...previous, [deviceId]: false }))
       }
     } catch (e: any) {
       console.error('ECR test connection failed:', e)
+      setProbeResults(previous => ({ ...previous, [deviceId]: false }))
       toast.error(e?.message || t('settings.peripherals.cashRegister.testFailed', 'Connection failed'))
     } finally {
       setIsTesting(null)
     }
   }
 
+  const handleConnect = async (deviceId: string) => {
+    if (isTesting || isConnecting || isPrinting) return
+    setIsConnecting(deviceId)
+    const disconnect = registeredConnections.has(deviceId)
+    try {
+      requireSettingsSuccess(await (disconnect
+        ? bridge.ecr.disconnectDevice(deviceId) : bridge.ecr.connectDevice(deviceId)))
+      setRegisteredConnections(previous => {
+        const next = new Set(previous)
+        if (disconnect) next.delete(deviceId)
+        else next.add(deviceId)
+        return next
+      })
+      setDevices(previous => previous.map(device => device.id === deviceId
+        ? { ...device, status: disconnect ? 'disconnected' : 'connected', error_message: undefined } : device))
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error))
+    } finally {
+      setIsConnecting(null)
+    }
+  }
+
   // Test print
   const handleTestPrint = async (deviceId: string) => {
+    if (!registeredConnections.has(deviceId) || isTesting || isConnecting || isPrinting) return
+    setIsPrinting(deviceId)
     try {
       const result = await invokeIPC('ecr_test_print', { device_id: deviceId })
       if (result?.success) {
@@ -770,6 +849,8 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
     } catch (e: any) {
       console.error('ECR test print failed:', e)
       toast.error(e?.message || t('settings.peripherals.cashRegister.testPrintFailed', 'Test print failed'))
+    } finally {
+      setIsPrinting(null)
     }
   }
 
@@ -820,7 +901,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
                 {t('settings.peripherals.cashRegister.addDevice', 'Add Device')}
               </button>
               <button
-                onClick={loadDevices}
+                onClick={() => void loadDevices()}
                 disabled={loading}
                 aria-label={t('common.refresh', 'Refresh')}
                 className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-all bg-white/10 border border-white/20 text-gray-300 active:bg-white/20"
@@ -853,6 +934,11 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
             {loading ? (
               <div className="flex items-center justify-center py-8">
                 <Loader2 className="w-6 h-6 animate-spin text-amber-400" />
+              </div>
+            ) : loadError ? (
+              <div role="alert" className="space-y-2 text-sm text-red-600 dark:text-red-300">
+                <p>{t('settings.workflow.cashDevicesLoadFailed', 'Could not load devices.')} {loadError}</p>
+                <button type="button" onClick={() => void loadDevices()} className="rounded-lg border px-3 py-2">{t('common.actions.retry', 'Retry')}</button>
               </div>
             ) : devices.length === 0 ? (
               <div className="text-center py-6">
@@ -898,14 +984,25 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
                           </div>
                         </div>
                       </div>
-                      <StatusIndicator status={device.status} error={device.error_message} />
+                      <StatusIndicator status={registeredConnections.has(device.id) ? 'connected' : device.status === 'connected' ? 'unknown' : device.status} error={device.error_message} />
                     </div>
 
                     {/* Action buttons */}
+                    <p className="text-xs liquid-glass-modal-text-muted">
+                      {t('settings.workflow.cashConnectionHelp', 'A test checks reachability only. Connect the saved device before test printing. Reconnect after changing its settings.')}
+                    </p>
+                    {probeResults[device.id] !== undefined && <p role="status" className="text-xs liquid-glass-modal-text-muted">
+                      {probeResults[device.id] ? t('settings.workflow.deviceReachable', 'Device reachable') : t('settings.workflow.deviceUnreachable', 'Device did not respond to the connection test')}
+                    </p>}
                     <div className="flex gap-1.5 pt-1">
+                      <button type="button" onClick={() => void handleConnect(device.id)} disabled={Boolean(isTesting || isConnecting || isPrinting)}
+                        className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-white/10 border liquid-glass-modal-border liquid-glass-modal-text disabled:opacity-50">
+                        {isConnecting === device.id && <Loader2 className="w-3 h-3 animate-spin" />}
+                        {registeredConnections.has(device.id) ? t('settings.workflow.disconnect', 'Disconnect') : t('settings.workflow.connect', 'Connect')}
+                      </button>
                       <button
                         onClick={() => handleTestConnection(device.id)}
-                        disabled={isTesting === device.id}
+                        disabled={Boolean(isTesting || isConnecting || isPrinting)}
                         className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all bg-amber-500/20 border border-amber-500/50 text-amber-900 dark:text-amber-200 active:bg-amber-500/30 disabled:opacity-50"
                       >
                         {isTesting === device.id ? (
@@ -917,6 +1014,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
                       </button>
                       <button
                         onClick={() => handleTestPrint(device.id)}
+                        disabled={!registeredConnections.has(device.id) || Boolean(isTesting || isConnecting || isPrinting)}
                         className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all bg-amber-500/20 border border-amber-500/50 text-amber-900 dark:text-amber-200 active:bg-amber-500/30"
                       >
                         <Printer className="w-3 h-3" />

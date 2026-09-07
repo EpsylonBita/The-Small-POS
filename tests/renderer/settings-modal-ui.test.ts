@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import { resolveTerminalConfigHealth } from '../../src/renderer/utils/terminal-config-health';
 
 const projectRoot = process.cwd();
 const modalPath = path.join(
@@ -55,9 +56,10 @@ test('ConnectionSettingsModal uses a responsive settings hub shell', () => {
   assert.match(source, /const detailScrollRef = useRef<HTMLDivElement>\(null\)/);
   assert.match(source, /ref=\{detailScrollRef\}/);
   assert.match(source, /detailScrollRef\.current\?\.scrollTo\(\{ top: 0 \}\)/);
-  // Left-rail nav-item label wrapping + hidden scrollbars on both columns + modal content padding.
+  // Left-rail wrapping and visible thin scrollbars keep both columns discoverable.
   assert.match(source, /block break-words text-sm font-semibold leading-tight/);
-  assert.match(source, /scrollbar-hide/);
+  assert.equal((source.match(/\[scrollbar-width:thin\]/g) ?? []).length, 2);
+  assert.doesNotMatch(source, /scrollbar-hide/);
   assert.match(source, /contentClassName="!overflow-hidden !p-4 sm:!p-5"/);
   // The old workbench shell identifiers are gone.
   assert.doesNotMatch(source, /data-settings-workbench/);
@@ -129,8 +131,8 @@ test('Settings detail headers use standalone yellow line icons without decorativ
   ).length;
   assert.equal(
     sectionHeaderYellowIconCount,
-    8,
-    `all eight Settings detail header icons must use standalone yellow strokes (found ${sectionHeaderYellowIconCount})`,
+    (source.match(/sectionHeader\(\s*\n\s*<\w+ className=/g) ?? []).length,
+    'every current Settings detail header icon must use standalone yellow strokes',
   );
   assert.doesNotMatch(source, /sectionHeader\(\s*\n\s*<\w+ className="h-5 w-5 text-black"/);
 });
@@ -246,8 +248,8 @@ test('Round 194: admin "This register" section is an operator-friendly overview 
 
   // 1. Plain-language status card with the sync-health tone dot.
   assert.match(admin, /data-register-status-card/);
-  assert.match(admin, /t\('settings\.deviceSetup\.overview\.statusTitle'/);
-  assert.match(admin, /t\('settings\.deviceSetup\.overview\.statusHelp'/);
+  assert.match(admin, /\{syncStatusTitle\}/);
+  assert.match(admin, /\{syncStatusHelp\}/);
   assert.match(admin, /rounded-full \$\{syncToneClass\}/);
 
   // 2. Three large readable summary tiles: register type, sync state, PIN status.
@@ -296,7 +298,9 @@ test('Round 194: admin "This register" section is an operator-friendly overview 
 
   // Capped chip rendering: the first OVERVIEW_CHIP_LIMIT labels are sliced, then mapped to soft chips.
   assert.match(overviewChips, /enabledFeatureLabels\.slice\(0, OVERVIEW_CHIP_LIMIT\)\.map\(/);
-  assert.match(overviewChips, /enabledModuleNames\.slice\(0, OVERVIEW_CHIP_LIMIT\)\.map\(/);
+  assert.match(overviewChips, /\(showAllModules \? enabledModuleNames : enabledModuleNames\.slice\(0, OVERVIEW_CHIP_LIMIT\)\)\.map\(/);
+  assert.match(overviewChips, /aria-expanded=\{showAllModules\}/);
+  assert.match(overviewChips, /onClick=\{\(\) => setShowAllModules\(value => !value\)\}/);
   assert.match(overviewChips, /rounded-full/);
 
   // The old paragraph dump (bullet join) is gone.
@@ -577,12 +581,7 @@ test('Round 195: Connection action bar gives Save a deliberate primary slot, not
   assert.doesNotMatch(connection, /group-hover:/);
 });
 
-// Round 196 (Settings → Screen & Sound accessible labels, live QA): the terminal preference controls
-// (number input, touch-sensitivity select, brightness range, audio switch, receipt auto-print switch)
-// had visible labels that were NOT programmatically bound, so the accessibility tree exposed them as
-// unnamed generic controls. The number/select/range now use id + htmlFor; the two switch checkboxes —
-// whose visible title text sits in a separate <div> from the sr-only input — use aria-labelledby
-// pointing at that visible title. No behaviour/layout/locale-key changes.
+// Runtime preferences have their own behavioral tests; this guard keeps the parent handoff explicit.
 function terminalSection(text: string): string {
   const start = text.indexOf('id="settings-section-terminal"');
   assert.notEqual(start, -1, 'terminal section must exist');
@@ -591,43 +590,14 @@ function terminalSection(text: string): string {
   return text.slice(start, end);
 }
 
-test('Round 196: terminal preference controls have programmatic accessible names', () => {
+test('Screen & Sound delegates working preferences and provides explicit destinations', () => {
   const terminal = terminalSection(source);
-
-  // 1. Screen-timeout number input: visible label bound via htmlFor + matching id on the input.
-  assert.match(terminal, /<label htmlFor="terminal-screen-timeout"[\s\S]*?t\('settings\.terminal\.screenTimeout'/);
-  assert.match(terminal, /id="terminal-screen-timeout"\s+type="number"/);
-
-  // 2. Touch-sensitivity select: label htmlFor + matching id on the <select>.
-  assert.match(terminal, /<label htmlFor="terminal-touch-sensitivity"[\s\S]*?t\('settings\.terminal\.touchSensitivity'/);
-  assert.match(terminal, /<select\s+id="terminal-touch-sensitivity"/);
-
-  // 3. Display-brightness range: label htmlFor + matching id on the range input.
-  assert.match(terminal, /<label htmlFor="terminal-display-brightness"[\s\S]*?t\('settings\.terminal\.displayBrightness'/);
-  assert.match(terminal, /id="terminal-display-brightness"\s+type="range"/);
-
-  // 4. Audio switch (Round 295: the shared POSGlassSwitch) is named by the visible title <div> via
-  //    aria-labelledby.
-  assert.match(terminal, /<div id="terminal-audio-label"[^>]*>\{t\('settings\.terminal\.audioEnabled'/);
-  assert.match(terminal, /<POSGlassSwitch aria-labelledby="terminal-audio-label" checked=\{audioEnabled\}/);
-
-  // 5. Receipt auto-print switch: same aria-labelledby pattern to its visible title.
-  assert.match(terminal, /<div id="terminal-receipt-autoprint-label"[^>]*>\{t\('settings\.terminal\.receiptAutoPrint'/);
-  assert.match(terminal, /<POSGlassSwitch aria-labelledby="terminal-receipt-autoprint-label" checked=\{receiptAutoPrint\}/);
-
-  // Behaviour preserved: the five controls keep their existing state setters. The two switches now pass the
-  // boolean straight through (onChange={setX}) instead of reading e.target.checked off a native checkbox.
-  assert.match(terminal, /setScreenTimeoutMinutes\(e\.target\.value\)/);
-  assert.match(terminal, /setTouchSensitivity\(e\.target\.value\)/);
-  assert.match(terminal, /setDisplayBrightness\(e\.target\.value\)/);
-  assert.match(terminal, /onChange=\{setAudioEnabled\}/);
-  assert.match(terminal, /onChange=\{setReceiptAutoPrint\}/);
-
-  // Touchscreen: no native title tooltip / hover utilities anywhere in the terminal section.
-  assert.doesNotMatch(terminal, /\btitle=/);
-  assert.doesNotMatch(terminal, /hover:/);
-  assert.doesNotMatch(terminal, /dark:hover:/);
-  assert.doesNotMatch(terminal, /group-hover:/);
+  assert.match(terminal, /<SettingsRuntimePreferences/);
+  assert.match(terminal, /onOpenPrinterSettings=\{\(\) => openSection\('printing'\)\}/);
+  assert.match(terminal, /onOpenSecurity=\{\(\) => openSection\('security'\)\}/);
+  assert.doesNotMatch(terminal, /terminal-screen-timeout|terminal-touch-sensitivity|terminal-display-brightness|terminal-receipt-autoprint-label/);
+  assert.doesNotMatch(terminal, /setScreenTimeoutMinutes|setTouchSensitivity|setDisplayBrightness|setReceiptAutoPrint/);
+  assert.doesNotMatch(terminal, /\btitle=|hover:|group-hover:/);
 });
 
 // Round 227 (history): the Settings switch was redesigned into a premium green/neutral glass switch.
@@ -640,21 +610,17 @@ test('Round 227/295: ConnectionSettingsModal switches use the shared POSGlassSwi
   assert.doesNotMatch(source, /sr-only peer/);
   assert.doesNotMatch(source, /<label className="relative inline-flex min-h-\[44px\] items-center justify-center cursor-pointer">/);
 
-  // Every Settings switch (audio, autoprint, session-timeout, scale, display, scanner, card-reader,
-  // loyalty) is the shared component -- 8 instances.
+  // The active hardware switches and receipt prompt retain the shared component.
+  // Unsupported preferences and the retired custom timeout are no longer controls.
   const switches = source.match(/<POSGlassSwitch\b/g) || [];
-  assert.ok(switches.length >= 8, `expected >=8 shared switches, found ${switches.length}`);
+  assert.ok(switches.length >= 4, `expected active hardware and receipt switches, found ${switches.length}`);
   assert.match(source, /import \{ LiquidGlassModal, POSGlassSwitch \} from '\.\.\/ui\/pos-glass-components'/);
 
-  // Round 295 a11y follow-up: the five hardware/peripheral switches (scale, customer display, serial
-  // scanner, card reader/MSR, loyalty/NFC) had NO accessible name after the migration. Each now has a
-  // visible title <span> carrying a stable id, and its button[role=switch] is named via aria-labelledby.
+  // The working hardware controls retain visible labels and programmatic switch names.
   const hardwareSwitches: ReadonlyArray<{ readonly id: string; readonly state: string }> = [
     { id: 'peripheral-scale-label', state: 'scaleEnabled' },
     { id: 'peripheral-display-label', state: 'displayEnabled' },
     { id: 'peripheral-scanner-label', state: 'scannerEnabled' },
-    { id: 'peripheral-card-reader-label', state: 'cardReaderEnabled' },
-    { id: 'peripheral-loyalty-reader-label', state: 'loyaltyEnabled' },
   ];
   for (const { id, state } of hardwareSwitches) {
     // The visible title span carries the id...
@@ -668,12 +634,7 @@ test('Round 227/295: ConnectionSettingsModal switches use the shared POSGlassSwi
   }
 });
 
-// Round 197 (Settings → PIN & Lock session-timeout accessible labels, live QA): the same hidden defect
-// as round 196 — the session-timeout switch was an unnamed checkbox and the timeout-minutes input an
-// unnamed (disabled-when-off) spin button. Their visible titles are sibling <span>s (not wrapping
-// <label>s), so both are bound via aria-labelledby to those titles' ids. The security section renders
-// TWO cards (PIN + session-timeout), so this guard targets the session-timeout card via its
-// data-session-timeout-card marker, never the PIN or terminal cards. No behaviour/layout change.
+// Session access is informational until the backend supports configurable expiry.
 function sessionTimeoutCard(text: string): string {
   const start = text.indexOf('data-session-timeout-card');
   assert.notEqual(start, -1, 'session-timeout card must carry the data-session-timeout-card marker');
@@ -682,31 +643,16 @@ function sessionTimeoutCard(text: string): string {
   return text.slice(start, end);
 }
 
-test('Round 197: session-timeout controls have programmatic accessible names', () => {
+test('Session settings state the fixed native limits without ineffective custom controls', () => {
   const card = sessionTimeoutCard(source);
-
-  // 1. Session-timeout switch (Round 295: the shared POSGlassSwitch) is named by its visible title <span>
-  //    via aria-labelledby.
-  assert.match(card, /<span id="session-timeout-label"[^>]*>\{t\('modals\.connectionSettings\.sessionTimeout'/);
-  assert.match(card, /<POSGlassSwitch\s+aria-labelledby="session-timeout-label"\s+checked=\{sessionTimeoutEnabled\}/);
-
-  // 2. Timeout-duration number input is named by its visible title <span> via aria-labelledby, and the
-  //    disabled-when-off behaviour is preserved exactly (name still applies while disabled).
-  assert.match(card, /<span id="session-timeout-duration-label"[^>]*>\{t\('modals\.connectionSettings\.timeoutDuration'/);
-  assert.match(card, /type="number"\s+aria-labelledby="session-timeout-duration-label"\s+value=\{sessionTimeoutMinutes\}/);
-  assert.match(card, /disabled=\{!sessionTimeoutEnabled\}/);
-
-  // Behaviour preserved: the toggle + minutes input keep their existing handlers (the switch now passes the
-  // boolean straight through to handleToggleSessionTimeout instead of via e.target.checked).
-  assert.match(card, /onChange=\{handleToggleSessionTimeout\}/);
-  assert.match(card, /setSessionTimeoutMinutes\(e\.target\.value\)/);
-  assert.match(card, /onBlur=\{handleSaveSessionTimeout\}/);
-
-  // Touchscreen: no native title tooltip / hover utilities anywhere in the session-timeout card.
-  assert.doesNotMatch(card, /\btitle=/);
-  assert.doesNotMatch(card, /hover:/);
-  assert.doesNotMatch(card, /dark:hover:/);
-  assert.doesNotMatch(card, /group-hover:/);
+  assert.match(card, /settings\.workflow\.sessionTitle/);
+  assert.match(card, /30-minute inactivity limit/);
+  assert.match(card, /maximum session duration of 2 hours/);
+  assert.match(card, /Custom auto-lock timing is not available/);
+  assert.doesNotMatch(card, /<input|<POSGlassSwitch|handleToggleSessionTimeout|handleSaveSessionTimeout/);
+  assert.doesNotMatch(source, /session_timeout_enabled|session_timeout_minutes/);
+  assert.match(card, /onClick=\{\(\) => openSection\('terminal'\)\}/);
+  assert.doesNotMatch(card, /\btitle=|hover:|group-hover:/);
 });
 
 test('settings help keys exist and are localized in every POS locale', () => {
@@ -760,8 +706,9 @@ test('language switcher buttons read accessible names from settings.display.lang
   }
   // The layout fix must not have touched the language-switch behavior or save toast.
   for (const code of ['en', 'el', 'de', 'fr', 'it']) {
-    assert.match(source, new RegExp(`setLanguage\\('${code}'\\)`), `setLanguage('${code}') wiring must remain`);
+    assert.match(source, new RegExp(`handleLanguageChange\\('${code}'\\)`), `${code} must invoke the language-change handler`);
   }
+  assert.match(source, /await setLanguage\(language\)/);
   assert.match(source, /toast\.success\(t\('modals\.connectionSettings\.languageSaved'\)\)/);
   // Portal/blur behavior preserved: the modal still renders through LiquidGlassModal.
   assert.match(source, /<LiquidGlassModal/);
@@ -836,11 +783,11 @@ const NO_TOOLTIP_CONTROLS: ReadonlyArray<{ readonly name: string; readonly marke
   { name: 'theme light', marker: "onClick={() => handleSaveTheme('light')}", aria: "aria-label={t('modals.connectionSettings.light')}" },
   { name: 'theme dark', marker: "onClick={() => handleSaveTheme('dark')}", aria: "aria-label={t('modals.connectionSettings.dark')}" },
   { name: 'theme system', marker: "onClick={() => handleSaveTheme('auto')}", aria: "aria-label={t('modals.connectionSettings.system')}" },
-  { name: 'lang en', marker: "setLanguage('en')", aria: "aria-label={t('settings.display.langEnglish')}" },
-  { name: 'lang el', marker: "setLanguage('el')", aria: "aria-label={t('settings.display.langGreek')}" },
-  { name: 'lang de', marker: "setLanguage('de')", aria: "aria-label={t('settings.display.langGerman')}" },
-  { name: 'lang fr', marker: "setLanguage('fr')", aria: "aria-label={t('settings.display.langFrench')}" },
-  { name: 'lang it', marker: "setLanguage('it')", aria: "aria-label={t('settings.display.langItalian')}" },
+  { name: 'lang en', marker: "handleLanguageChange('en')", aria: "aria-label={t('settings.display.langEnglish')}" },
+  { name: 'lang el', marker: "handleLanguageChange('el')", aria: "aria-label={t('settings.display.langGreek')}" },
+  { name: 'lang de', marker: "handleLanguageChange('de')", aria: "aria-label={t('settings.display.langGerman')}" },
+  { name: 'lang fr', marker: "handleLanguageChange('fr')", aria: "aria-label={t('settings.display.langFrench')}" },
+  { name: 'lang it', marker: "handleLanguageChange('it')", aria: "aria-label={t('settings.display.langItalian')}" },
 ];
 
 test('ConnectionSettingsModal paste/theme/language controls use aria-label, not native title tooltips', () => {
@@ -897,7 +844,7 @@ test('Round 217: runtime sync-health states are localized in every POS locale (n
   // so newly-added runtime states render localized too.
   assert.match(
     source,
-    /const syncHealthLabel = t\(`settings\.managedByAdmin\.syncHealth\.\$\{runtimeSyncHealth\}`/,
+    /const syncHealthLabel = syncHealth\.isHealthy \? t\('settings\.workflow\.configHealthyLabel'[\s\S]*?t\(`settings\.managedByAdmin\.syncHealth\.\$\{runtimeSyncHealth\}`/,
   );
   assert.match(source, /\{syncHealthLabel\}/);
 });
@@ -1004,7 +951,7 @@ test('Round 241: fiscal device icon actions use aria-labels, never native title 
   );
   assert.match(
     cashRegisterSource,
-    /onClick=\{loadDevices\}\s*disabled=\{loading\}\s*aria-label=\{t\('common\.refresh', 'Refresh'\)\}/,
+    /onClick=\{\(\) => void loadDevices\(\)\}\s*disabled=\{loading\}\s*aria-label=\{t\('common\.refresh', 'Refresh'\)\}/,
   );
   // The submodal close (X) is a centered 44x44 touch target.
   assert.match(
@@ -1081,7 +1028,8 @@ test('CallerId Step 3 follows Step 2 in normal document flow and refreshes in pa
   const step3 = callerIdSource.indexOf('callerId.serverManaged.step3');
   assert.ok(step2 > 0 && step3 > step2, 'Step 3 must render after Step 2');
   assert.match(callerIdSource, /liquid-glass-modal-footer space-y-3/);
-  assert.match(callerIdSource, /Promise\.allSettled\(\[\s*callerIdGetServerConfig\(\),\s*callerIdGetStatus\(\)/);
+  assert.match(callerIdSource, /Promise\.allSettled\(\[\s*callerIdGetServerConfig\(\),\s*refreshLocalStatus\(\)/);
+  assert.match(callerIdSource, /const refreshLocalStatus = useCallback\([\s\S]*?await callerIdGetStatus\(\)/);
 });
 
 // --- Round 280 (live QA, Greek/light): the Settings hub still forced many Greek labels into ALL-CAPS
@@ -1109,34 +1057,19 @@ test('Round 280: Settings hub left rail + This-Register overview labels are norm
   assert.match(source, /font-semibold uppercase tracking-wide text-red-600/);
 });
 
-test('Round 280: a derived isSyncHealthy boolean drives the sync dot + the dynamic status title/help', () => {
-  // A clear boolean derived from the runtime value (not parsed from a CSS class string), via a safe
-  // normalized EXACT match against the healthy set -- not a .includes() substring shortcut (Round 281).
-  assert.match(
-    source,
-    /const HEALTHY_SYNC_STATES = new Set\(\['healthy', 'online', 'ok', 'synced', 'connected', 'good', 'live'\]\)/,
-  );
-  assert.match(
-    source,
-    /const isSyncHealthy = HEALTHY_SYNC_STATES\.has\(\(runtimeSyncHealth \|\| ''\)\.trim\(\)\.toLowerCase\(\)\)/,
-  );
-  // The dot tone is derived from the boolean; the red warning is preserved when not healthy.
-  assert.match(source, /const syncToneClass = isSyncHealthy \? 'bg-green-500' : 'bg-red-500'/);
-
-  // The status-card title + help are dynamic on isSyncHealthy: healthy keeps the set-up copy, otherwise
-  // a plain warning. The stale state is not hidden, and this copy never triggers a sync.
+test('Configuration health drives status copy and tone without initiating sync', () => {
+  assert.match(source, /const syncHealth = resolveTerminalConfigHealth\(runtimeSyncHealth\)/);
+  assert.match(source, /const isSyncHealthy = syncHealth\.isHealthy/);
+  assert.match(source, /const syncToneClass =[\s\S]*?success: 'bg-green-500'[\s\S]*?warning: 'bg-amber-500'[\s\S]*?danger: 'bg-red-500'[\s\S]*?neutral: 'bg-gray-400'[\s\S]*?\[syncHealth\.tone\]/);
   const admin = adminOverviewSection(source);
-  assert.match(
-    admin,
-    /isSyncHealthy[\s\S]*?t\('settings\.deviceSetup\.overview\.statusTitle'[\s\S]*?t\('settings\.deviceSetup\.overview\.statusTitleWarning'/,
-  );
-  assert.match(
-    admin,
-    /isSyncHealthy[\s\S]*?t\('settings\.deviceSetup\.overview\.statusHelp'[\s\S]*?t\('settings\.deviceSetup\.overview\.statusHelpWarning'/,
-  );
-
-  // Behaviour preserved: the boolean is a pure derivation off runtimeSyncHealth (no sync call here).
-  assert.match(source, /\(runtimeSyncHealth \|\| ''\)\.trim\(\)\.toLowerCase\(\)/);
+  assert.match(admin, /\{syncStatusTitle\}/);
+  assert.match(admin, /\{syncStatusHelp\}/);
+  const healthStart = source.indexOf('const syncHealth =');
+  const healthEnd = source.indexOf('const sectionMeta', healthStart);
+  const healthCopy = source.slice(healthStart, healthEnd);
+  assert.match(healthCopy, /settings\.workflow\.configHealthyTitle/);
+  assert.match(healthCopy, /settings\.workflow\.configHealthyHelp/);
+  assert.doesNotMatch(healthCopy, /syncFromAdmin/);
 });
 
 // --- Round 281 (supervisor rejection of Round 280): the isSyncHealthy boolean used substring matching
@@ -1144,36 +1077,18 @@ test('Round 280: a derived isSyncHealthy boolean drives the sync dot + the dynam
 // "disconnected" and "not connected" both CONTAIN "connected". That would make the status card lie
 // again. It now normalizes (trim + lowercase) and EXACT-matches a healthy Set. ---
 
-test('Round 281: sync-health uses a normalized exact match (no .includes substring shortcut; disconnected/not connected are non-healthy)', () => {
-  // Structural: an exact-match Set against a normalized (trim + lowercase) runtime value.
-  assert.match(source, /const HEALTHY_SYNC_STATES = new Set\(\['healthy', 'online', 'ok', 'synced', 'connected', 'good', 'live'\]\)/);
-  assert.match(source, /const isSyncHealthy = HEALTHY_SYNC_STATES\.has\(\(runtimeSyncHealth \|\| ''\)\.trim\(\)\.toLowerCase\(\)\)/);
-
-  // The Round 280 substring shortcut must be gone: healthy is NOT derived via .includes() on the runtime
-  // value (that falsely matched "disconnected" / "not connected" because both contain "connected").
-  assert.doesNotMatch(source, /\.toLowerCase\(\)\.includes\(s\)/);
+test('Configuration health accepts normal polling but never treats disconnected substrings as healthy', () => {
+  assert.match(source, /resolveTerminalConfigHealth\(runtimeSyncHealth\)/);
   assert.doesNotMatch(source, /runtimeSyncHealth[\s\S]{0,160}?\.includes\(/);
-
-  // Behavioural proof: replicate the source's exact-match check and assert the classification is correct
-  // for the explicit healthy states AND the negative/unknown states (the trap cases in particular).
-  const setMatch = source.match(/const HEALTHY_SYNC_STATES = new Set\(\[([^\]]*)\]\)/);
-  assert.ok(setMatch, 'HEALTHY_SYNC_STATES set must be present');
-  const healthy = new Set(setMatch![1].split(',').map((s) => s.trim().replace(/^'|'$/g, '')));
-  const isHealthy = (raw: string): boolean => healthy.has((raw || '').trim().toLowerCase());
-
-  for (const ok of ['healthy', 'online', 'ok', 'synced', 'connected', 'good', 'live', '  Connected ', 'OK']) {
-    assert.equal(isHealthy(ok), true, `"${ok}" must be healthy`);
+  for (const value of ['polling', 'healthy', 'online', 'ok', 'synced', 'connected', 'good', 'live', '  Connected ', 'OK']) {
+    assert.equal(resolveTerminalConfigHealth(value).isHealthy, true, `${value} must be healthy`);
   }
-  for (const bad of ['disconnected', 'not connected', 'not_connected', 'offline', 'stale', 'failed', 'degraded', 'unknown', '']) {
-    assert.equal(isHealthy(bad), false, `"${bad}" must be non-healthy (warning/red)`);
+  for (const value of ['disconnected', 'not connected', 'not_connected', 'offline', 'stale', 'failed', 'degraded', 'unknown', '']) {
+    assert.equal(resolveTerminalConfigHealth(value).isHealthy, false, `${value} must not be healthy`);
   }
-
-  // Document the trap: the OLD substring approach WOULD have wrongly passed these as healthy, which is
-  // exactly the regression this exact-match guard prevents (catches it if the pattern is changed again).
-  const substringWouldFalsePositive = ['disconnected', 'not connected'].some(
-    (bad) => [...healthy].some((h) => bad.includes(h)),
-  );
-  assert.ok(substringWouldFalsePositive, 'sanity: the substring approach would wrongly pass disconnected/not connected -> exact match is required');
+  assert.equal(resolveTerminalConfigHealth('stale').tone, 'warning');
+  assert.equal(resolveTerminalConfigHealth('disconnected').tone, 'danger');
+  assert.equal(resolveTerminalConfigHealth('unknown').tone, 'neutral');
 });
 
 test('Round 280: non-healthy status title/help keys are localized in every POS locale (Greek is real Greek)', () => {
@@ -1297,49 +1212,15 @@ test('Round 290/291/295: cash-register switches use the shared POSGlassSwitch (n
 // cursor-not-allowed), not a separate slab. Behaviour (disabled gate, aria, value, onChange, onBlur,
 // min/max) and copy are unchanged. ---
 
-test('Round 292: the session-timeout duration input is shared neutral glass (no navy slab) in both states; behaviour intact', () => {
+test('Session access explanation keeps neutral glass styling and separates screen sleep from authentication', () => {
   const card = sessionTimeoutCard(source);
-
-  // Slice just the duration <input> so the palette assertions never bleed into the switch/presets.
-  const inStart = card.indexOf('aria-labelledby="session-timeout-duration-label"');
-  assert.notEqual(inStart, -1, 'the duration input must exist');
-  const inputOpen = card.lastIndexOf('<input', inStart);
-  const inputEnd = card.indexOf('/>', inStart);
-  assert.ok(inputOpen !== -1 && inputEnd !== -1, 'the duration <input> must be sliceable');
-  const input = card.slice(inputOpen, inputEnd + 2);
-
-  // Uses the shared neutral glass input family (same token as the rest of Settings, e.g. terminal-screen-timeout).
-  assert.match(input, /liquid-glass-modal-input/);
-
-  // The dark/navy disabled slab tokens are gone (and so is the dark-mode-only text-white enabled fill).
-  assert.doesNotMatch(input, /bg-gray-800\/50/);
-  assert.doesNotMatch(input, /border-gray-700/);
-  assert.doesNotMatch(input, /text-gray-500/);
-  assert.doesNotMatch(input, /\btext-white\b/);
-  // No off-theme blue/navy tokens crept in.
-  assert.doesNotMatch(input, /\b(?:bg|text|border)-(?:blue|indigo|navy|slate)-/);
-
-  // Disabled is muted neutral glass + clearly disabled (opacity + not-allowed cursor), not a different slab.
-  assert.match(input, /opacity-60 cursor-not-allowed/);
-
-  // Behaviour preserved exactly (disabled gate, aria, value, setter, save-on-blur, range).
-  assert.match(input, /type="number"/);
-  assert.match(input, /aria-labelledby="session-timeout-duration-label"/);
-  assert.match(input, /value=\{sessionTimeoutMinutes\}/);
-  assert.match(input, /onChange=\{e => setSessionTimeoutMinutes\(e\.target\.value\)\}/);
-  assert.match(input, /onBlur=\{handleSaveSessionTimeout\}/);
-  assert.match(input, /min=\{1\}/);
-  assert.match(input, /max=\{480\}/);
-  assert.match(input, /disabled=\{!sessionTimeoutEnabled\}/);
-
-  // Touch-first: no hover utilities, no native title tooltip on the input.
-  assert.doesNotMatch(input, /hover:/);
-  assert.doesNotMatch(input, /\btitle=/);
-
-  // The "min" unit label stays muted-but-readable in BOTH themes via the theme-aware token (the old fixed
-  // dark-grey text-gray-600 -- unreadable in dark mode -- is gone from the card).
-  assert.match(card, /<span className="text-sm liquid-glass-modal-text-muted">\s*\{t\('common\.minutes', 'min'\)\}/);
-  assert.doesNotMatch(card, /text-gray-600/);
+  assert.match(card, /liquid-glass-modal-text-muted/);
+  assert.match(card, /settings\.workflow\.sessionShift/);
+  assert.match(card, /Signing in again does not close the active shift/);
+  assert.match(card, /Windows screen sleep is configured separately/);
+  assert.doesNotMatch(card, /session-timeout-duration-label|setSessionTimeoutMinutes/);
+  assert.doesNotMatch(card, /bg-gray-800\/50|border-gray-700|text-gray-600/);
+  assert.doesNotMatch(card, /\b(?:bg|text|border)-(?:blue|indigo|navy|slate)-/);
 });
 
 // --- Round 293 (live QA, Greek/light, Settings > Connection): the action area read as assembled/vibecoded

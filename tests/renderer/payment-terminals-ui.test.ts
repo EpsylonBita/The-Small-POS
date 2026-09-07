@@ -227,14 +227,18 @@ test('Round 352: Add/Save is disabled until required visible fields are valid, w
   );
 
   // The submit button is gated by isSaving AND the valid-required flag (not isSaving alone).
-  assert.match(config, /type="submit"[\s\S]*?disabled=\{isSaving \|\| !requiredFieldsComplete\}/);
+  // Required fields and an in-flight save still gate submission; unsupported
+  // Bluetooth configurations add a further guard rather than bypassing either.
+  assert.match(config, /type="submit"[\s\S]*?disabled=\{isSaving \|\| bluetoothUnavailable \|\| !requiredFieldsComplete\}/);
   assert.doesNotMatch(config, /disabled=\{isSaving\}/, 'submit must not be gated by isSaving alone anymore');
 
   // handleSubmit validation/toasts remain as a safety fallback.
   assert.match(config, /if \(!name\.trim\(\)\) \{[\s\S]*?ecr\.config\.nameRequired/);
 
-  // A localized inline hint (not a native title tooltip) renders ONLY while incomplete + idle, on-palette amber.
-  assert.match(config, /\{!requiredFieldsComplete && !isSaving && \(/);
+  // A localized inline hint renders only while incomplete + idle. Unsupported
+  // Bluetooth instead explains why entering more details cannot enable Add.
+  assert.match(config, /\{!bluetoothUnavailable && !requiredFieldsComplete && !isSaving && \(/);
+  assert.match(config, /\{bluetoothUnavailable && \([\s\S]*?<p role="status"[\s\S]*?\{bluetoothUnavailableMessage\}/);
   assert.match(config, /data-terminal-required-hint/);
   assert.match(config, /t\('ecr\.config\.missingRequired'/);
   assert.match(config, /data-terminal-required-hint[\s\S]*?text-amber-700 dark:text-amber-300/);

@@ -10,7 +10,7 @@ vi.mock('../../../hooks/useBlockerRegistration', () => ({
   useBlockerRegistration: () => undefined,
 }));
 
-import { LiquidGlassModal } from '../pos-glass-components';
+import { LiquidGlassModal, POSGlassModal } from '../pos-glass-components';
 
 // jsdom performs no layout, so every element reports `offsetParent === null` and the
 // shell's visibility filter would drop all of them. Treat attached elements as visible
@@ -51,6 +51,56 @@ const settleFocusTimer = () => {
 };
 
 describe('LiquidGlassModal focus handover', () => {
+  it.each([
+    ['LiquidGlassModal', LiquidGlassModal],
+    ['POSGlassModal', POSGlassModal],
+  ] as const)('gives nested %s dialogs distinct, stable accessible names', (_name, Modal) => {
+    const Host = ({ innerTitle }: { innerTitle: string }) => (
+      <Modal isOpen onClose={vi.fn()} title="Staff">
+        <Modal isOpen onClose={vi.fn()} title={innerTitle}>
+          <button>Continue</button>
+        </Modal>
+      </Modal>
+    );
+    const { rerender } = render(<Host innerTitle="Confirm" />);
+    const outer = screen.getByRole('dialog', { name: 'Staff' });
+    const inner = screen.getByRole('dialog', { name: 'Confirm' });
+    const outerTitleId = outer.getAttribute('aria-labelledby');
+    const innerTitleId = inner.getAttribute('aria-labelledby');
+    expect(innerTitleId).not.toBe(outerTitleId);
+
+    rerender(<Host innerTitle="Confirm driver" />);
+    expect(screen.getByRole('dialog', { name: 'Staff' })).toHaveAttribute('aria-labelledby', outerTitleId);
+    expect(screen.getByRole('dialog', { name: 'Confirm driver' })).toHaveAttribute('aria-labelledby', innerTitleId);
+  });
+
+  it('keeps custom-header dialogs labelled by ariaLabel rather than a missing default title', () => {
+    render(
+      <LiquidGlassModal isOpen onClose={vi.fn()} title="Unused default title" header={<h2>Custom header</h2>} ariaLabel="Driver selection">
+        <button>Continue</button>
+      </LiquidGlassModal>,
+    );
+    expect(screen.getByRole('dialog', { name: 'Driver selection' })).not.toHaveAttribute('aria-labelledby');
+  });
+
+  it('keeps background effects paused until the last nested modal is gone', () => {
+    const Host = ({ nested }: { nested: boolean }) => (
+      <LiquidGlassModal isOpen onClose={vi.fn()} title="Staff">
+        {nested && (
+          <LiquidGlassModal isOpen onClose={vi.fn()} title="Confirm">
+            <button>Continue</button>
+          </LiquidGlassModal>
+        )}
+      </LiquidGlassModal>
+    );
+    const { rerender, unmount } = render(<React.StrictMode><Host nested /></React.StrictMode>);
+    expect(document.body).toHaveClass('pos-modal-open');
+    rerender(<React.StrictMode><Host nested={false} /></React.StrictMode>);
+    expect(document.body).toHaveClass('pos-modal-open');
+    unmount();
+    expect(document.body).not.toHaveClass('pos-modal-open');
+  });
+
   it('leaves a self-focused field alone instead of jumping to the close button', () => {
     render(
       <LiquidGlassModal isOpen onClose={vi.fn()} title="Starting amount">

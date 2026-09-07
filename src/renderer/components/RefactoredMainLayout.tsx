@@ -3,7 +3,7 @@ import { AnimatePresence } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
 import { ReceiptText } from 'lucide-react';
 
-import { BusinessCategoryDashboard } from './dashboards';
+import { BusinessCategoryDashboard } from './dashboards/BusinessCategoryDashboard';
 import { NavigationProvider } from '../contexts/navigation-context';
 import NavigationSidebar from './NavigationSidebar';
 import { ThemeSwitcher } from './ThemeSwitcher';
@@ -13,24 +13,10 @@ import { useTheme } from '../contexts/theme-context';
 import { useShift } from '../contexts/shift-context';
 import { useModules, useModuleAccess, getModuleAccessStatic } from '../contexts/module-context';
 import { isViewAccessDenied } from '../utils/module-view-access';
-import ZReportModal from './modals/ZReportModal';
+import { DeferredModal } from './ui/DeferredModal';
 import UpgradePromptModal from './modals/UpgradePromptModal';
 import { ShiftManager, ShiftManagerRef } from './ShiftManager';
 import { useEndOfDayStatus } from '../hooks/useEndOfDayStatus';
-import MenuManagementPage from '../pages/MenuManagementPage';
-import UsersPage from '../pages/UsersPage';
-import ReportsPage from '../pages/ReportsPage';
-import AnalyticsPage from '../pages/AnalyticsPage';
-import OrdersPage from '../pages/OrdersPage';
-import DeliveryZonesPage from '../pages/DeliveryZonesPage';
-import CouponsPage from '../pages/CouponsPage';
-import LoyaltyPage from '../pages/LoyaltyPage';
-import SuppliersPage from '../pages/SuppliersPage';
-import InventoryPage from '../pages/InventoryPage';
-import KitchenDisplayPage from '../pages/KitchenDisplayPage';
-import CustomerDisplayPage from '../pages/CustomerDisplayPage';
-import KioskManagementPage from '../pages/KioskManagementPage';
-import IntegrationsPage from '../pages/IntegrationsPage';
 import { getBridge, offEvent, onEvent } from '../../lib';
 import { clearSecureSession, getSecureSessionSync } from '../lib/secure-session-cache';
 import { getOfflinePageBanner } from '../services/offline-page-capabilities';
@@ -40,20 +26,36 @@ import {
   type RepairIntent,
 } from '../features/repairs/navigation';
 
-import { ExpenseModal } from './modals/ExpenseModal';
+const ExpenseModal = lazy(() => import('./modals/ExpenseModal').then(m => ({ default: m.ExpenseModal })));
+const ZReportModal = lazy(() => import('./modals/ZReportModal'));
 
-// Lazy-loaded vertical views
-const DriveThruView = lazy(() => import('../pages/verticals').then(m => ({ default: m.DriveThruView })));
-const DeliveryView = lazy(() => import('../pages/verticals').then(m => ({ default: m.DeliveryView })));
-const TablesView = lazy(() => import('../pages/verticals').then(m => ({ default: m.TablesView })));
-const ReservationsView = lazy(() => import('../pages/verticals').then(m => ({ default: m.ReservationsView })));
-const RoomsView = lazy(() => import('../pages/verticals').then(m => ({ default: m.RoomsView })));
-const HousekeepingView = lazy(() => import('../pages/verticals').then(m => ({ default: m.HousekeepingView })));
-const GuestBillingView = lazy(() => import('../pages/verticals').then(m => ({ default: m.GuestBillingView })));
-const AppointmentsView = lazy(() => import('../pages/verticals').then(m => ({ default: m.AppointmentsView })));
-const StaffScheduleView = lazy(() => import('../pages/verticals').then(m => ({ default: m.StaffScheduleView })));
-const ServiceCatalogView = lazy(() => import('../pages/verticals').then(m => ({ default: m.ServiceCatalogView })));
-const ProductCatalogView = lazy(() => import('../pages/verticals').then(m => ({ default: m.ProductCatalogView })));
+// Only load the selected page. Import verticals directly so opening tables does
+// not also load the hotel, salon and retail screens from the shared barrel.
+const MenuManagementPage = lazy(() => import('../pages/MenuManagementPage'));
+const UsersPage = lazy(() => import('../pages/UsersPage'));
+const ReportsPage = lazy(() => import('../pages/ReportsPage'));
+const AnalyticsPage = lazy(() => import('../pages/AnalyticsPage'));
+const OrdersPage = lazy(() => import('../pages/OrdersPage'));
+const DeliveryZonesPage = lazy(() => import('../pages/DeliveryZonesPage'));
+const CouponsPage = lazy(() => import('../pages/CouponsPage'));
+const LoyaltyPage = lazy(() => import('../pages/LoyaltyPage'));
+const SuppliersPage = lazy(() => import('../pages/SuppliersPage'));
+const InventoryPage = lazy(() => import('../pages/InventoryPage'));
+const KitchenDisplayPage = lazy(() => import('../pages/KitchenDisplayPage'));
+const CustomerDisplayPage = lazy(() => import('../pages/CustomerDisplayPage'));
+const KioskManagementPage = lazy(() => import('../pages/KioskManagementPage'));
+const IntegrationsPage = lazy(() => import('../pages/IntegrationsPage'));
+const DriveThruView = lazy(() => import('../pages/verticals/fast-food/DriveThruView').then(m => ({ default: m.DriveThruView })));
+const DeliveryView = lazy(() => import('../pages/verticals/fast-food/DeliveryView').then(m => ({ default: m.DeliveryView })));
+const TablesView = lazy(() => import('../pages/verticals/restaurant/TablesView').then(m => ({ default: m.TablesView })));
+const ReservationsView = lazy(() => import('../pages/verticals/restaurant/ReservationsView').then(m => ({ default: m.ReservationsView })));
+const RoomsView = lazy(() => import('../pages/verticals/hotel/RoomsView').then(m => ({ default: m.RoomsView })));
+const HousekeepingView = lazy(() => import('../pages/verticals/hotel/HousekeepingView').then(m => ({ default: m.HousekeepingView })));
+const GuestBillingView = lazy(() => import('../pages/verticals/hotel/GuestBillingView').then(m => ({ default: m.GuestBillingView })));
+const AppointmentsView = lazy(() => import('../pages/verticals/salon/AppointmentsView').then(m => ({ default: m.AppointmentsView })));
+const StaffScheduleView = lazy(() => import('../pages/verticals/salon/StaffScheduleView').then(m => ({ default: m.StaffScheduleView })));
+const ServiceCatalogView = lazy(() => import('../pages/verticals/salon/ServiceCatalogView').then(m => ({ default: m.ServiceCatalogView })));
+const ProductCatalogView = lazy(() => import('../pages/verticals/retail/ProductCatalogView').then(m => ({ default: m.ProductCatalogView })));
 const RepairsView = lazy(() => import('../features/repairs/RepairsView'));
 
 // View components
@@ -129,8 +131,8 @@ const ViewLoadingSpinner: React.FC = () => {
   const isDark = resolvedTheme === 'dark';
 
   return (
-    <div className="flex flex-col items-center justify-center h-full p-8">
-      <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-amber-400 mb-4"></div>
+    <div role="status" className="flex flex-col items-center justify-center h-full p-8">
+      <div aria-hidden="true" className="animate-spin rounded-full h-12 w-12 border-b-2 border-amber-400 mb-4"></div>
       <p className={isDark ? 'text-gray-400' : 'text-gray-600'}>
         {t('common.messages.loadingView', { defaultValue: 'Loading view...' })}
       </p>
@@ -422,7 +424,7 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
   };
 
   // View component mapping - maps module IDs to their view components
-  // Lazy-loaded vertical views are wrapped in Suspense for code splitting
+  // Optional pages and vertical views load within the content Suspense boundary.
   const VIEW_COMPONENTS: Record<string, React.ComponentType> = {
     // Core modules (not lazy-loaded as they're frequently used)
     dashboard: DashboardView,
@@ -479,7 +481,7 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
   };
 
   // Render current view based on navigation selection
-  // Wrapped in Suspense for lazy-loaded vertical views
+  // Keep the sidebar mounted while a selected page loads.
   // Route-level guard is handled by the useEffect above - no state updates here
   const renderCurrentView = () => {
     console.log('🎯 Rendering view for currentView:', currentView);
@@ -491,7 +493,11 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
       return <DashboardView />;
     }
     if (currentView === 'users' || currentView === 'customers') {
-      return <UsersPage initialSearchTerm={customerSearchTerm} />;
+      return (
+        <Suspense fallback={<ViewLoadingSpinner />}>
+          <UsersPage initialSearchTerm={customerSearchTerm} />
+        </Suspense>
+      );
     }
     if (currentView === 'repairs') {
       return (
@@ -694,8 +700,11 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
       </button>
 
       {/* Expenses Modal */}
-      <ExpenseModal isOpen={showExpenses} onClose={() => setShowExpenses(false)} />
+      <DeferredModal isOpen={showExpenses} onClose={() => setShowExpenses(false)}>
+        <ExpenseModal isOpen={showExpenses} onClose={() => setShowExpenses(false)} />
+      </DeferredModal>
       {/* Z Report Modal */}
+      <DeferredModal isOpen={showZReport} onClose={() => setShowZReport(false)}>
         <ZReportModal
           isOpen={showZReport}
           onClose={() => setShowZReport(false)}
@@ -703,6 +712,7 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
           date={defaultZReportDate}
           lockDate={!!pendingReportDate}
         />
+      </DeferredModal>
 
       {/* Shift Manager - Auto-prompts check-in and handles checkout */}
       <ShiftManager ref={shiftManagerRef} suppressAutoCheckin={isPendingLocalSubmit} />

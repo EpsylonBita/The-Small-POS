@@ -133,7 +133,7 @@ const readStoredPosition = (storageKey: string, width: number, height: number): 
 };
 
 const FloatingActionButton = React.forwardRef<HTMLButtonElement, FloatingActionButtonProps>(
-  ({ className, effect = 'animated', icon, style, disabled, movable = false, positionStorageKey, onClick, title, 'aria-label': ariaLabel, ...props }, ref) => {
+  ({ className, effect = 'static', icon, style, disabled, movable = false, positionStorageKey, onClick, title, 'aria-label': ariaLabel, ...props }, ref) => {
     // Touchscreen POS: never forward a native `title` onto the button (it renders a hover tooltip).
     // Preserve the caller's intent by falling back to the title string as the accessible name.
     const resolvedAriaLabel = ariaLabel ?? title;
@@ -394,8 +394,8 @@ const FloatingActionButton = React.forwardRef<HTMLButtonElement, FloatingActionB
           aria-label={resolvedAriaLabel}
           {...props}
         >
-          <span aria-hidden="true" className="pos-fab__light" />
-          {gradientLayers.map((layerStyle, index) => (
+          {effect === 'animated' && <span aria-hidden="true" className="pos-fab__light" />}
+          {effect === 'animated' && gradientLayers.map((layerStyle, index) => (
             <span key={`pos-fab-gradient-${index}`} aria-hidden="true" className="pos-fab__gradient-layer" style={layerStyle} />
           ))}
           <span aria-hidden="true" className="pos-fab__button-layer" />

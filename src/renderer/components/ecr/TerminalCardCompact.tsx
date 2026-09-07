@@ -131,6 +131,11 @@ export const TerminalCardCompact: React.FC<Props> = memo(
     const StatusIcon = statusInfo.icon
     const isConnected = status?.state === 'connected'
     const isConnecting = status?.state === 'connecting'
+    const bluetoothUnavailable = device.connectionType === 'bluetooth'
+    const bluetoothUnavailableMessage = t(
+      'ecr.bluetoothUnavailable',
+      'Bluetooth payment terminals are not available in this version. Use USB/Serial or Network (TCP).'
+    )
 
     return (
       <div className="rounded-2xl p-3 bg-white/5 dark:bg-gray-800/20 border liquid-glass-modal-border transition-all">
@@ -189,7 +194,8 @@ export const TerminalCardCompact: React.FC<Props> = memo(
             ) : (
               <button
                 onClick={onConnect}
-                disabled={isConnecting}
+                disabled={isConnecting || bluetoothUnavailable}
+                title={bluetoothUnavailable ? bluetoothUnavailableMessage : undefined}
                 className="p-1.5 rounded-md text-green-400 active:bg-green-500/20 transition-colors disabled:opacity-50"
                 aria-label={t('ecr.actions.connect', 'Connect')}
               >
@@ -231,6 +237,11 @@ export const TerminalCardCompact: React.FC<Props> = memo(
             </button>
           </div>
         </div>
+        {bluetoothUnavailable && (
+          <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">
+            {bluetoothUnavailableMessage}
+          </p>
+        )}
       </div>
     )
   }

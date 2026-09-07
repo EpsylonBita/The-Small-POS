@@ -1,5 +1,7 @@
 import React, {
+  lazy,
   memo,
+  Suspense,
   useState,
   useEffect,
   useCallback,
@@ -99,8 +101,6 @@ import { MODULE_IDS, useAcquiredModules } from "../hooks/useAcquiredModules";
 import { useTables } from "../hooks/useTables";
 import { useRooms } from "../hooks/useRooms";
 import { getRoomEffectiveStatus, type Room } from "../services/RoomsService";
-import { RoomsView } from "../pages/verticals/hotel/RoomsView";
-import { AppointmentsView } from "../pages/verticals/salon/AppointmentsView";
 import type { RoomChargeContext } from "./modals/PaymentModal";
 import { useModules } from "../contexts/module-context";
 import toast from "react-hot-toast";
@@ -118,6 +118,7 @@ import { useDeliveryValidation } from "../hooks/useDeliveryValidation";
 import { useResolvedPosIdentity } from "../hooks/useResolvedPosIdentity";
 import { useTerminalSettings } from "../hooks/useTerminalSettings";
 import { useKioskOrderAutoPrint, isKioskOrder } from "../hooks/useKioskOrderAutoPrint";
+import { isAppAudioEnabled, playAppAudioFile, playAppAudioTones, useAppAudioEnabled } from "../services/appAudio";
 import {
   resolveCallerIdOrderSelection,
   subscribeToCallerIdOrderIntents,
@@ -195,6 +196,9 @@ import {
 import {
   enqueueTableSessionOpen,
 } from "../utils/tableSessionOfflineQueue";
+
+const RoomsView = lazy(() => import('../pages/verticals/hotel/RoomsView').then(m => ({ default: m.RoomsView })));
+const AppointmentsView = lazy(() => import('../pages/verticals/salon/AppointmentsView').then(m => ({ default: m.AppointmentsView })));
 
 const INCOMING_ORDER_ALERT_SOUND_URL = new URL(
   "../assets/sounds/incoming-order.mp3",
@@ -1209,7 +1213,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     const tableGridScrollRef = useRef<HTMLDivElement>(null);
     const alertTimeoutRef = useRef<number | null>(null);
     const alertingOrderIdRef = useRef<string | null>(null);
-    const activeAlertAudioRef = useRef<HTMLAudioElement | null>(null);
+    const activeAlertAudioRef = useRef<(() => void) | null>(null);
+    const appAudioEnabled = useAppAudioEnabled();
     const shiftRefreshArmedRef = useRef(false);
     const splitPaymentCompletedRef = useRef<SplitPaymentResult | null>(null);
     const splitCloseRecoveryRef = useRef(false);
@@ -1631,72 +1636,17 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
     // Auto-open approval panel for external pending orders (queue)
     const playFallbackExternalOrderAlert = useCallback(() => {
-      try {
-        const AudioCtx =
-          window.AudioContext ||
-          (window as unknown as { webkitAudioContext?: typeof AudioContext })
-            .webkitAudioContext;
-        if (!AudioCtx) return;
-        const ctx = new AudioCtx();
-        const oscillator = ctx.createOscillator();
-        const gain = ctx.createGain();
-        oscillator.type = "sine";
-        oscillator.frequency.value = 880;
-        gain.gain.value = 0.18;
-        oscillator.connect(gain);
-        gain.connect(ctx.destination);
-        if (ctx.state === "suspended") {
-          void ctx.resume();
-        }
-        oscillator.start();
-        setTimeout(() => {
-          oscillator.stop();
-          ctx.close();
-        }, 450);
-      } catch (error) {
-        console.warn(
-          "[OrderDashboard] Failed to play order alert sound:",
-          error,
-        );
-      }
+      activeAlertAudioRef.current = playAppAudioTones(
+        [{ frequency: 880, start: 0, duration: 0.45 }], 0.18,
+      );
     }, []);
 
     const playExternalOrderAlert = useCallback(() => {
-      try {
-        activeAlertAudioRef.current?.pause();
-        activeAlertAudioRef.current = null;
-
-        const audio = new Audio(INCOMING_ORDER_ALERT_SOUND_URL);
-        audio.preload = "auto";
-        audio.volume = 0.9;
-        activeAlertAudioRef.current = audio;
-        audio.addEventListener(
-          "ended",
-          () => {
-            if (activeAlertAudioRef.current === audio) {
-              activeAlertAudioRef.current = null;
-            }
-          },
-          { once: true },
-        );
-
-        void audio.play().catch((error) => {
-          if (activeAlertAudioRef.current === audio) {
-            activeAlertAudioRef.current = null;
-          }
-          console.warn(
-            "[OrderDashboard] Failed to play incoming order MP3, using fallback beep:",
-            error,
-          );
-          playFallbackExternalOrderAlert();
-        });
-      } catch (error) {
-        console.warn(
-          "[OrderDashboard] Failed to prepare incoming order MP3, using fallback beep:",
-          error,
-        );
-        playFallbackExternalOrderAlert();
-      }
+      activeAlertAudioRef.current?.();
+      activeAlertAudioRef.current = playAppAudioFile(INCOMING_ORDER_ALERT_SOUND_URL, {
+        volume: 0.9,
+        onError: playFallbackExternalOrderAlert,
+      });
     }, [playFallbackExternalOrderAlert]);
 
     const startAlertLoop = useCallback(
@@ -1709,7 +1659,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         alertingOrderIdRef.current = orderId;
 
         const tick = () => {
-          if (alertingOrderIdRef.current !== orderId) {
+          if (alertingOrderIdRef.current !== orderId || !isAppAudioEnabled()) {
             return;
           }
           playExternalOrderAlert();
@@ -1730,7 +1680,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         alertTimeoutRef.current = null;
       }
       alertingOrderIdRef.current = null;
-      activeAlertAudioRef.current?.pause();
+      activeAlertAudioRef.current?.();
       activeAlertAudioRef.current = null;
     }, []);
 
@@ -1767,7 +1717,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         showApprovalPanel && !isViewOnlyMode
           ? selectedOrderForApproval?.id
           : null;
-      if (!activeOrderId) {
+      if (!activeOrderId || !appAudioEnabled) {
         stopAlertLoop();
         return;
       }
@@ -1779,6 +1729,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         startAlertLoop(activeOrderId);
       }
     }, [
+      appAudioEnabled,
       showApprovalPanel,
       isViewOnlyMode,
       selectedOrderForApproval,
@@ -7256,7 +7207,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           >
             {/* Round 237: the Rooms tab is browse-only — no preset. The New Order check-in /
                 reservation flows run in the focused workflow modal below, not via this tab. */}
-            <RoomsView embedded />
+            <Suspense fallback={<div role="status" className="p-8">{t('common.loading')}</div>}>
+              <RoomsView embedded />
+            </Suspense>
           </div>
         ) : activeTab === "services" && hasServicesModule ? (
           /* Services hub (Round 236) — embedded AppointmentsView with its availability check intact. */
@@ -7267,10 +7220,12 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                 : "border-white/10 bg-slate-950/45"
             }`}
           >
-            <AppointmentsView
-              embedded
-              openCreateSignal={servicesOpenCreateSignal}
-            />
+            <Suspense fallback={<div role="status" className="p-8">{t('common.loading')}</div>}>
+              <AppointmentsView
+                embedded
+                openCreateSignal={servicesOpenCreateSignal}
+              />
+            </Suspense>
           </div>
         ) : (
           /* Orders Grid - shown for Orders/Delivered/Canceled tabs */

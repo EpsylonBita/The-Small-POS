@@ -905,11 +905,9 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
                     warn!("Startup: main window not found for shell decorations assertion");
                 }
 
-                // Tills run for days with a tiny, quiet JS heap, so the
-                // unified major GC starves and Blink-side garbage accumulates
-                // without bound (measured: blink_gc 490MB→33MB on one forced
-                // collection). Periodically ask WebView2 to collect.
-                memory_trim::spawn_periodic_trim(app.handle().clone());
+                // Keep full responsiveness while the POS is active; lower
+                // WebView2's memory target only while its window is inactive.
+                memory_trim::start_activity_policy(app.handle().clone());
             }
 
             let app_data_dir = app.path().app_data_dir().map_err(|e| {
@@ -1300,6 +1298,7 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             commands::runtime::app_get_shutdown_status,
             commands::runtime::system_get_info,
             commands::runtime::system_open_external_url,
+            commands::system_ui::system_open_settings,
             // Auth
             commands::auth::auth_login,
             commands::auth::auth_logout,
@@ -1460,6 +1459,7 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             commands::shifts::shift_open,
             commands::shifts::shift_close,
             commands::shifts::shift_get_active,
+            commands::shifts::shift_get_active_for_branch,
             commands::shifts::shift_record_satellite_handover,
             commands::shifts::shift_get_by_id,
             commands::shifts::shift_get_sync_state,

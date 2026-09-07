@@ -24,6 +24,7 @@ import {
   X
 } from 'lucide-react';
 import { useTheme } from '../contexts/theme-context';
+import { playAppAudioFile, useAppAudioEnabled } from '../services/appAudio';
 import { toast } from 'react-hot-toast';
 import {
   getBridge,
@@ -313,6 +314,7 @@ const KitchenDisplayPage: React.FC = () => {
   const [stationFilter, setStationFilter] = useState<string>('all');
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
   const [soundEnabled, setSoundEnabled] = useState(true);
+  useAppAudioEnabled();
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isRealtimeConnected, setIsRealtimeConnected] = useState(false);
@@ -735,7 +737,7 @@ const KitchenDisplayPage: React.FC = () => {
 
       // Note: fetchFromApi wraps responses in { success, data, status }
       if (result?.success && result?.data?.success) {
-        if (soundEnabled) new Audio('/sounds/bump.mp3').play().catch(() => {});
+        if (soundEnabled) playAppAudioFile('/sounds/bump.mp3');
         toast.success(t('kitchen.orderBumped', 'Order updated'));
         // Only refetch if not already removed (ready case already handled optimistically)
         if (newStatus !== 'ready') {

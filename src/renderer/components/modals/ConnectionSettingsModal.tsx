@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'react-hot-toast'
 import { posApiGet } from '../../utils/api-helpers'
@@ -25,7 +25,10 @@ import {
   refreshTerminalCredentialCache,
   updateTerminalCredentialCache,
 } from '../../services/terminal-credentials';
-import { getBridge, type DiagnosticsAboutInfo } from '../../../lib';
+import { getBridge, offEvent, onEvent, type DiagnosticsAboutInfo } from '../../../lib';
+import { resolveTerminalConfigHealth } from '../../utils/terminal-config-health';
+import { requireSettingsSuccess } from '../../utils/settings-operation';
+import { SettingsRuntimePreferences } from '../settings/SettingsRuntimePreferences';
 import {
   decodeConnectionString,
   looksLikeRawApiKey,
@@ -144,19 +147,22 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
   const [isResetting, setIsResetting] = useState(false)
 
   // Session timeout settings
-  const [sessionTimeoutEnabled, setSessionTimeoutEnabled] = useState(false)
-  const [sessionTimeoutMinutes, setSessionTimeoutMinutes] = useState('15')
   const [ghostModeFeatureEnabled, setGhostModeFeatureEnabled] = useState(false)
-  const [screenTimeoutMinutes, setScreenTimeoutMinutes] = useState('5')
-  const [touchSensitivity, setTouchSensitivity] = useState('medium')
-  const [audioEnabled, setAudioEnabled] = useState(true)
-  const [receiptAutoPrint, setReceiptAutoPrint] = useState(true)
   const [receiptPrintPromptEnabled, setReceiptPrintPromptEnabled] = useState(false)
-  const [displayBrightness, setDisplayBrightness] = useState('80')
   const [pinResetRequired, setPinResetRequired] = useState(false)
   const [runtimeTerminalId, setRuntimeTerminalId] = useState('')
   const [runtimeAdminUrl, setRuntimeAdminUrl] = useState('')
-  const [runtimeSyncHealth, setRuntimeSyncHealth] = useState('offline')
+  const [runtimeSyncHealth, setRuntimeSyncHealth] = useState('unknown')
+  const [isSyncingSettings, setIsSyncingSettings] = useState(false)
+  const [showAllModules, setShowAllModules] = useState(false)
+  const [hardwareAction, setHardwareAction] = useState<string | null>(null)
+  const [hardwareActionError, setHardwareActionError] = useState('')
+  const [settingsLoaded, setSettingsLoaded] = useState(false)
+  const [settingsLoadFailed, setSettingsLoadFailed] = useState(false)
+  const [settingsLoadAttempt, setSettingsLoadAttempt] = useState(0)
+  const [hardwareBaseline, setHardwareBaseline] = useState<string | null>(null)
+  const [showDiscardChanges, setShowDiscardChanges] = useState(false)
+  const [savingLanguage, setSavingLanguage] = useState(false)
   const [activeSettingsSection, setActiveSettingsSection] = useState<SettingsSectionId>('admin')
   // Right detail pane: reset its scroll to the top whenever the active section
   // changes so a new section always starts at its header, instead of inheriting
@@ -166,6 +172,8 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
 
   const [aboutData, setAboutData] = useState<DiagnosticsAboutInfo | null>(null)
   const [aboutCopied, setAboutCopied] = useState(false)
+  const [aboutError, setAboutError] = useState(false)
+  const [aboutRetry, setAboutRetry] = useState(0)
   // Peripheral settings state
   const [scaleEnabled, setScaleEnabled] = useState(false)
   const [scalePort, setScalePort] = useState('COM3')
@@ -184,10 +192,74 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
   const { runWithPrivilegedConfirmation, confirmationModal } =
     usePrivilegedActionConfirmation()
 
-  const { status: hardwareStatus } = useHardwareManager()
+  const { status: hardwareStatus, refresh: refreshHardware, loading: hardwareLoading, error: hardwareError } = useHardwareManager(isOpen)
+
+  const hardwareSignature = JSON.stringify({ scaleEnabled, scalePort, scaleBaudRate, scaleProtocol,
+    displayEnabled, displayConnectionType, displayPort, displayBaudRate, displayTcpPort,
+    scannerEnabled, scannerPort, scannerBaudRate, cardReaderEnabled, loyaltyEnabled })
+  const hardwareDirty = hardwareBaseline !== null && hardwareBaseline !== hardwareSignature
+  useEffect(() => {
+    if (settingsLoaded && hardwareBaseline === null) setHardwareBaseline(hardwareSignature)
+  }, [settingsLoaded, hardwareBaseline, hardwareSignature])
+
+  const handleClose = () => {
+    if (hardwareAction || savingLanguage) return
+    if (hardwareDirty) setShowDiscardChanges(true)
+    else onClose()
+  }
+
+  const runHardwareAction = async (action: string, operation: () => Promise<unknown>) => {
+    if (hardwareAction) return
+    setHardwareAction(action)
+    setHardwareActionError('')
+    try {
+      requireSettingsSuccess(await operation())
+    } catch (error) {
+      console.warn('[ConnectionSettings] Hardware action failed:', error)
+      setHardwareActionError(getErrorMessage(error, t('settings.peripherals.actionFailed', 'Action failed')))
+      toast.error(t('settings.peripherals.actionFailed', 'Action failed'))
+    } finally {
+      await refreshHardware()
+      setHardwareAction(null)
+    }
+  }
+
+  const handleLanguageChange = async (language: 'en' | 'el' | 'de' | 'fr' | 'it') => {
+    if (savingLanguage || language === currentLanguage) return
+    setSavingLanguage(true)
+    try {
+      await setLanguage(language)
+      toast.success(t('modals.connectionSettings.languageSaved'))
+    } catch (error) {
+      console.warn('[ConnectionSettings] Language save failed:', error)
+      toast.error(t('settings.workflow.saveFailed', { defaultValue: 'Could not save this setting. Please try again.' }))
+    } finally {
+      setSavingLanguage(false)
+    }
+  }
+
+  const applyRuntimeConfig = useCallback((config: any) => {
+    if (!config || typeof config !== 'object') return
+    if (typeof config.terminal_id === 'string') setRuntimeTerminalId(config.terminal_id)
+    if (typeof config.admin_dashboard_url === 'string') setRuntimeAdminUrl(config.admin_dashboard_url)
+    if (typeof config.sync_health === 'string') setRuntimeSyncHealth(config.sync_health)
+  }, [])
 
   useEffect(() => {
     if (!isOpen) return
+    const update = (payload: any) => applyRuntimeConfig(payload?.config ?? payload)
+    onEvent('terminal-config-updated', update)
+    return () => offEvent('terminal-config-updated', update)
+  }, [isOpen, applyRuntimeConfig])
+
+  useEffect(() => {
+    if (!isOpen) return
+    let cancelled = false
+    setSettingsLoaded(false)
+    setSettingsLoadFailed(false)
+    setRuntimeSyncHealth('unknown')
+    setHardwareBaseline(null)
+    setShowDiscardChanges(false)
     setConnectionCode('')
     const lsTerminal = getCachedTerminalCredentials().terminalId || ''
     setTerminalId(lsTerminal)
@@ -211,69 +283,14 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
       }
     })()
 
-    // Load session timeout settings from main process
-    const loadSecuritySettings = async () => {
-      try {
-        let remoteGhostFeatureEnabled: boolean | null = null
-        try {
-          try {
-            await bridge.terminalConfig.syncFromAdmin()
-          } catch (nativeSyncError) {
-            console.warn('[ConnectionSettings] Native admin terminal sync failed (non-fatal):', nativeSyncError)
-          }
-
-          const resolvedCreds = await refreshTerminalCredentialCache()
-          const resolvedTerminalId = (resolvedCreds.terminalId || '').trim()
-          const storedAdminUrl = normalizeAdminDashboardUrl(
-            (
-              (await bridge.settings.getAdminUrl()) ||
-              localStorage.getItem('admin_dashboard_url') ||
-              ''
-            ).toString()
-          )
-
-          if (resolvedTerminalId && storedAdminUrl) {
-            const settingsResult = await posApiGet(`/pos/settings/${encodeURIComponent(resolvedTerminalId)}`)
-            const payload: any = settingsResult?.data
-            const rawRemoteGhostFeature =
-              payload?.ghost_mode_feature_enabled ??
-              payload?.settings?.terminal?.ghost_mode_feature_enabled ??
-              payload?.terminal?.ghost_mode_feature_enabled ??
-              payload?.enabled_features?.ghost_mode
-            if (rawRemoteGhostFeature !== undefined && rawRemoteGhostFeature !== null) {
-              remoteGhostFeatureEnabled = parseBooleanSetting(rawRemoteGhostFeature)
-              await bridge.settings.updateLocal({
-                settingType: 'terminal',
-                settings: { ghost_mode_feature_enabled: remoteGhostFeatureEnabled },
-              })
-            }
-          } else {
-            await bridge.terminalConfig.refresh()
-          }
-        } catch (refreshError) {
-          console.warn('[ConnectionSettings] Failed to refresh terminal settings before loading security settings:', refreshError)
-        }
-
-        const ghostFeature = remoteGhostFeatureEnabled !== null
-          ? remoteGhostFeatureEnabled
-          : await bridge.settings.get('terminal', 'ghost_mode_feature_enabled')
-        const enabled = await bridge.settings.get('system', 'session_timeout_enabled')
-        const minutes = await bridge.settings.get('system', 'session_timeout_minutes')
-        const enabledNormalized = parseBooleanSetting(enabled)
-        const minutesParsed = Number(minutes)
-        setGhostModeFeatureEnabled(parseBooleanSetting(ghostFeature))
-        setSessionTimeoutEnabled(enabledNormalized)
-        setSessionTimeoutMinutes(String(Number.isFinite(minutesParsed) && minutesParsed > 0 ? minutesParsed : 15))
-      } catch (e) {
-        console.warn('Failed to load security settings:', e)
-      }
-    }
+    // Read the local snapshot immediately; refresh is an explicit user action.
     const loadLocalTerminalSettings = async () => {
       try {
         const [localSettings, runtimeConfig] = await Promise.all([
           bridge.settings.getLocal(),
           bridge.terminalConfig.getFullConfig().catch(() => null),
         ])
+        if (cancelled) return
 
         const settingsMap = (localSettings && typeof localSettings === 'object')
           ? localSettings as Record<string, any>
@@ -284,26 +301,9 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
 
         setRuntimeTerminalId(parseStringSetting(runtime.terminal_id, parseStringSetting(settingsMap?.terminal?.terminal_id, '')))
         setRuntimeAdminUrl(parseStringSetting(runtime.admin_dashboard_url, parseStringSetting(settingsMap?.terminal?.admin_dashboard_url, '')))
-        setRuntimeSyncHealth(parseStringSetting(runtime.sync_health, 'offline'))
+        setRuntimeSyncHealth(parseStringSetting(runtime.sync_health, 'unknown'))
 
-        setDisplayBrightness(String(parseNumberSetting(
-          getNestedSetting(settingsMap, 'ui', 'display_brightness') ?? getNestedSetting(settingsMap, 'terminal', 'display_brightness'),
-          80
-        )))
-        setScreenTimeoutMinutes(String(parseNumberSetting(
-          getNestedSetting(settingsMap, 'ui', 'screen_timeout') ?? getNestedSetting(settingsMap, 'terminal', 'screen_timeout'),
-          5
-        )))
-        setTouchSensitivity(parseStringSetting(
-          getNestedSetting(settingsMap, 'ui', 'touch_sensitivity') ?? getNestedSetting(settingsMap, 'terminal', 'touch_sensitivity'),
-          'medium'
-        ))
-        setAudioEnabled(parseBooleanSetting(
-          getNestedSetting(settingsMap, 'ui', 'audio_enabled') ?? getNestedSetting(settingsMap, 'terminal', 'audio_enabled')
-        ))
-        setReceiptAutoPrint(parseBooleanSetting(
-          getNestedSetting(settingsMap, 'ui', 'receipt_auto_print') ?? getNestedSetting(settingsMap, 'terminal', 'receipt_auto_print')
-        ))
+        setGhostModeFeatureEnabled(parseBooleanSetting(getNestedSetting(settingsMap, 'terminal', 'ghost_mode_feature_enabled')))
         setReceiptPrintPromptEnabled(parseBooleanSetting(
           getNestedSetting(settingsMap, 'receipt', 'ask_before_print') ??
           getNestedSetting(settingsMap, 'ui', 'receipt_ask_before_print') ??
@@ -367,14 +367,17 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
         setLoyaltyEnabled(parseBooleanSetting(
           getNestedSetting(settingsMap, 'peripherals', 'loyalty_card_reader') ?? getNestedSetting(settingsMap, 'hardware', 'loyalty_card_reader')
         ))
+        setSettingsLoaded(true)
       } catch (error) {
+        if (cancelled) return
+        setSettingsLoadFailed(true)
         console.warn('[ConnectionSettings] Failed to load local terminal settings:', error)
       }
     }
 
-    void loadSecuritySettings()
     void loadLocalTerminalSettings()
-  }, [isOpen])
+    return () => { cancelled = true }
+  }, [isOpen, settingsLoadAttempt])
 
   useEffect(() => {
     if (!isOpen) return
@@ -398,12 +401,15 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
 
   // Lazy-load about info when the Info section becomes active
   useEffect(() => {
-    if (activeSettingsSection !== 'about' || aboutData) return
+    if (!isOpen || activeSettingsSection !== 'about' || aboutData) return
+    let cancelled = false
+    setAboutError(false)
     bridge.diagnostics
       .getAbout()
-      .then((data) => setAboutData(data))
-      .catch((err: unknown) => console.error('Failed to load about info:', err))
-  }, [activeSettingsSection, aboutData, bridge.diagnostics])
+      .then((data) => { if (!cancelled) setAboutData(requireSettingsSuccess(data)) })
+      .catch((err: unknown) => { if (!cancelled) setAboutError(true); console.error('Failed to load about info:', err) })
+    return () => { cancelled = true }
+  }, [isOpen, activeSettingsSection, aboutData, aboutRetry, bridge.diagnostics])
 
   const handleCopyAboutInfo = async () => {
     if (!aboutData) return
@@ -415,10 +421,11 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
       `Rust: ${aboutData.rustVersion}`,
     ].join('\n')
     try {
-      await navigator.clipboard.writeText(text)
+      try { await navigator.clipboard.writeText(text) }
+      catch { await bridge.clipboard.writeText(text) }
       setAboutCopied(true)
       setTimeout(() => setAboutCopied(false), 2000)
-    } catch { /* fallback */ }
+    } catch { toast.error(t('settings.workflow.copyFailed', { defaultValue: 'Could not copy device information. Please try again.' })) }
   }
 
   // Navigation: the left rail selects which section is shown. Each section now
@@ -481,19 +488,19 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
 
     try {
       console.log('[ConnectionSettings] Updating terminal credentials...')
-      localStorage.removeItem('activeShift')
-      localStorage.removeItem('staff')
-
-      await bridge.settings.updateTerminalCredentials({
+      requireSettingsSuccess(await bridge.settings.updateTerminalCredentials({
         terminalId: nextTerminalId,
         apiKey: nextApiKey,
         adminUrl: normalizedAdminDashboardUrl,
         adminDashboardUrl: normalizedAdminDashboardUrl,
         supabaseUrl: nextSupabaseUrl,
         supabaseAnonKey: nextSupabaseAnonKey,
-      })
-      const syncResult = await bridge.terminalConfig.syncFromAdmin()
+      }))
+      localStorage.removeItem('activeShift')
+      localStorage.removeItem('staff')
+      const syncResult = requireSettingsSuccess(await bridge.terminalConfig.syncFromAdmin())
       const runtimeConfig = syncResult?.data?.config
+      applyRuntimeConfig(runtimeConfig)
 
       localStorage.setItem('admin_dashboard_url', normalizedAdminDashboardUrl)
       updateTerminalCredentialCache({
@@ -519,12 +526,12 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
   }
 
   const handleManualPolicySync = async () => {
+    if (isSyncingSettings) return
+    setIsSyncingSettings(true)
     try {
-      const syncResult: any = await bridge.terminalConfig.syncFromAdmin()
-      const runtimeConfig = syncResult?.data?.config || syncResult?.config || {}
-      setRuntimeTerminalId(parseStringSetting(runtimeConfig?.terminal_id, runtimeTerminalId))
-      setRuntimeAdminUrl(parseStringSetting(runtimeConfig?.admin_dashboard_url, runtimeAdminUrl))
-      setRuntimeSyncHealth(parseStringSetting(runtimeConfig?.sync_health, runtimeSyncHealth))
+      const syncResult: any = requireSettingsSuccess(await bridge.terminalConfig.syncFromAdmin())
+      const runtimeConfig = syncResult?.data?.config || syncResult?.config || await bridge.terminalConfig.getFullConfig()
+      applyRuntimeConfig(runtimeConfig)
 
       const localSettings = await bridge.settings.getLocal()
       const settingsMap = (localSettings && typeof localSettings === 'object')
@@ -536,6 +543,8 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
     } catch (error: any) {
       console.error('[ConnectionSettings] Failed to sync settings:', error)
       toast.error(error?.message || t('settings.deviceSetup.syncFailed', 'Could not sync settings'))
+    } finally {
+      setIsSyncingSettings(false)
     }
   }
 
@@ -549,9 +558,9 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
       return
     }
     try {
-      await bridge.auth.setupPin({
+      requireSettingsSuccess(await bridge.auth.setupPin({
         staffPin: pin
-      })
+      }))
     } catch (e) {
       console.warn('Failed to persist secure PIN hash to main process:', e)
       toast.error(t('modals.connectionSettings.pinSaveError', { defaultValue: 'Failed to save PIN' }))
@@ -563,48 +572,16 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
     setEditingPin(false)
   }
 
-  const handleSaveTerminalPreferences = async () => {
-    const timeoutMinutes = parseInt(screenTimeoutMinutes, 10)
-    const brightnessValue = parseInt(displayBrightness, 10)
-
-    if (Number.isNaN(timeoutMinutes) || timeoutMinutes < 1 || timeoutMinutes > 120) {
-      toast.error(t('settings.terminal.invalidTimeout', 'Screen timeout must be between 1 and 120 minutes'))
-      return
-    }
-
-    if (Number.isNaN(brightnessValue) || brightnessValue < 10 || brightnessValue > 100) {
-      toast.error(t('settings.terminal.invalidBrightness', 'Brightness must be between 10 and 100'))
-      return
-    }
-
-    try {
-      await bridge.settings.updateLocal({
-        settingType: 'ui',
-        settings: {
-          display_brightness: brightnessValue,
-          screen_timeout: timeoutMinutes,
-          touch_sensitivity: touchSensitivity,
-          audio_enabled: audioEnabled,
-          receipt_auto_print: receiptAutoPrint,
-        }
-      })
-      toast.success(t('settings.terminal.saved', 'Terminal preferences saved'))
-    } catch (error) {
-      console.error('[ConnectionSettings] Failed to save terminal preferences:', error)
-      toast.error(t('settings.terminal.saveFailed', 'Failed to save terminal preferences'))
-    }
-  }
-
   const handleReceiptPrintPromptToggle = async (enabled: boolean) => {
     const previous = receiptPrintPromptEnabled
     setReceiptPrintPromptEnabled(enabled)
     try {
-      await bridge.settings.updateLocal({
+      requireSettingsSuccess(await bridge.settings.updateLocal({
         settingType: 'receipt',
         settings: {
           ask_before_print: enabled,
         }
-      })
+      }))
       toast.success(t('settings.printer.receiptPromptSaved', 'Receipt print prompt setting saved'))
     } catch (error) {
       setReceiptPrintPromptEnabled(previous)
@@ -614,41 +591,11 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
   }
 
   const handleSaveTheme = (newTheme: 'light' | 'dark' | 'auto') => {
-    setTheme(newTheme)
-    toast.success(t('modals.connectionSettings.themeUpdated'))
-  }
-
-  const handleToggleSessionTimeout = async (enabled: boolean) => {
     try {
-      await bridge.settings.updateLocal({
-        settingType: 'system',
-        settings: { session_timeout_enabled: enabled }
-      })
-      setSessionTimeoutEnabled(enabled)
-      toast.success(enabled
-        ? t('modals.connectionSettings.sessionTimeoutEnabled', 'Session timeout enabled')
-        : t('modals.connectionSettings.sessionTimeoutDisabled', 'Session timeout disabled'))
-    } catch (e) {
-      console.error('Failed to toggle session timeout:', e)
-      toast.error(t('modals.connectionSettings.sessionTimeoutError', 'Failed to update session timeout'))
-    }
-  }
-
-  const handleSaveSessionTimeout = async () => {
-    const minutes = parseInt(sessionTimeoutMinutes, 10)
-    if (isNaN(minutes) || minutes < 1 || minutes > 480) {
-      toast.error(t('modals.connectionSettings.sessionTimeoutInvalid', 'Timeout must be 1-480 minutes'))
-      return
-    }
-    try {
-      await bridge.settings.updateLocal({
-        settingType: 'system',
-        settings: { session_timeout_minutes: minutes }
-      })
-      toast.success(t('modals.connectionSettings.sessionTimeoutSaved', { minutes }) || `Session timeout set to ${minutes} minutes`)
-    } catch (e) {
-      console.error('Failed to save session timeout:', e)
-      toast.error(t('modals.connectionSettings.sessionTimeoutError', 'Failed to save session timeout'))
+      setTheme(newTheme)
+      toast.success(t('modals.connectionSettings.themeUpdated'))
+    } catch {
+      toast.error(t('settings.workflow.saveFailed', { defaultValue: 'Could not save this setting. Please try again.' }))
     }
   }
 
@@ -857,18 +804,24 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
   ]
     .filter(Boolean)
     .join(' - ')
-  const syncHealthLabel = t(`settings.managedByAdmin.syncHealth.${runtimeSyncHealth}`, {
+  const syncHealth = resolveTerminalConfigHealth(runtimeSyncHealth)
+  const syncHealthLabel = syncHealth.isHealthy ? t('settings.workflow.configHealthyLabel', 'Settings up to date') : t(`settings.managedByAdmin.syncHealth.${runtimeSyncHealth}`, {
     defaultValue: runtimeSyncHealth,
   })
-  // Derived sync-health boolean from the runtime value (not a CSS class string): healthy => the
-  // existing "set up" status copy + a green dot; otherwise (offline / stale / failed / degraded /
-  // disconnected / not_connected / unknown / ...) => a plain warning title/help + a red dot.
-  // Visual-only -- this never triggers a sync. The runtime value is normalized (trimmed + lowercased)
-  // and matched EXACTLY against the healthy set -- never via substring .includes(), which would wrongly
-  // mark "disconnected" / "not connected" as healthy (both contain the substring "connected").
-  const HEALTHY_SYNC_STATES = new Set(['healthy', 'online', 'ok', 'synced', 'connected', 'good', 'live'])
-  const isSyncHealthy = HEALTHY_SYNC_STATES.has((runtimeSyncHealth || '').trim().toLowerCase())
-  const syncToneClass = isSyncHealthy ? 'bg-green-500' : 'bg-red-500'
+  const isSyncHealthy = syncHealth.isHealthy
+  const syncToneClass = ({ success: 'bg-green-500', warning: 'bg-amber-500', danger: 'bg-red-500', neutral: 'bg-gray-400' })[syncHealth.tone]
+  const syncStatusTitle = isSyncHealthy
+    ? t('settings.workflow.configHealthyTitle', 'Settings are up to date')
+    : syncHealth.state === 'stale'
+      ? t('settings.workflow.configStaleTitle', 'Settings need refreshing')
+      : syncHealth.state === 'unknown'
+        ? t('settings.workflow.configUnknownTitle', 'Checking settings status')
+        : t('settings.workflow.configProblemTitle', 'Settings sync needs attention')
+  const syncStatusHelp = isSyncHealthy
+    ? t('settings.workflow.configHealthyHelp', 'This till has a recent settings snapshot. Orders and device connections have their own status.')
+    : syncHealth.state === 'unknown'
+      ? t('settings.workflow.configUnknownHelp', 'The settings status is not available yet. You can refresh it below.')
+      : t('settings.workflow.configProblemHelp', 'Refresh settings below. If this fails, open Connection and check the connection details with your administrator.')
   // Plain-language title + one-line description for each area. Reused by the
   // right-column row list and by the detail header. 'admin' is surfaced as the
   // left "This register" card rather than a row.
@@ -965,7 +918,9 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
     <>
     <LiquidGlassModal
       isOpen={isOpen}
-      onClose={onClose}
+      onClose={handleClose}
+      closeMode="request"
+      closeDisabled={Boolean(hardwareAction) || savingLanguage}
       ariaLabel={t('modals.connectionSettings.title')}
       header={
         <div className="liquid-glass-modal-header">
@@ -976,7 +931,8 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
             </p>
           </div>
           <button
-            onClick={onClose}
+            onClick={handleClose}
+            disabled={Boolean(hardwareAction) || savingLanguage}
             className="liquid-glass-modal-close"
             aria-label={t('common.actions.close', 'Close')}
           >
@@ -1014,7 +970,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
               active row carries the single yellow accent. */}
           <nav
             aria-label={t('modals.connectionSettings.title')}
-            className="min-h-0 space-y-3 overflow-y-auto overflow-x-hidden pr-0 scrollbar-hide lg:pr-1"
+            className="min-h-0 space-y-3 overflow-y-auto overflow-x-hidden pr-1 [scrollbar-width:thin] lg:pr-2"
           >
             {settingsNavGroups.map((group) => (
               <div key={group.id} className="space-y-1">
@@ -1054,7 +1010,11 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
           </nav>
 
           {/* Right column — the active section body. */}
-          <div ref={detailScrollRef} className="min-h-0 space-y-3 overflow-y-auto overflow-x-hidden pr-0 scrollbar-hide lg:pr-1">
+          <div ref={detailScrollRef} className="min-h-0 space-y-3 overflow-y-auto overflow-x-hidden pr-1 [scrollbar-width:thin] lg:pr-2">
+          {settingsLoadFailed && <div role="alert" className="rounded-xl border border-amber-500/40 p-3 space-y-2">
+            <p className="text-sm liquid-glass-modal-text">{t('settings.workflow.deviceLoadFailed', { defaultValue: 'Could not read saved device settings. Retry before changing device connections.' })}</p>
+            <button type="button" onClick={() => setSettingsLoadAttempt(value => value + 1)} className={liquidGlassModalButton('secondary', 'md')}>{t('common.retry', 'Retry')}</button>
+          </div>}
         {activeSettingsSection === 'admin' && (
         <div
           id="settings-section-admin"
@@ -1081,14 +1041,10 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                 </span>
                 <div className="min-w-0">
                   <div className="font-semibold liquid-glass-modal-text">
-                    {isSyncHealthy
-                      ? t('settings.deviceSetup.overview.statusTitle', 'This register is set up')
-                      : t('settings.deviceSetup.overview.statusTitleWarning', 'Sync needs attention')}
+                    {syncStatusTitle}
                   </div>
                   <div className="text-xs liquid-glass-modal-text-muted">
-                    {isSyncHealthy
-                      ? t('settings.deviceSetup.overview.statusHelp', 'Everything this register can do is shown below in plain words.')
-                      : t('settings.deviceSetup.overview.statusHelpWarning', 'Run sync to refresh this register before changing devices or payment settings.')}
+                    {syncStatusHelp}
                   </div>
                   <div className="mt-1.5 inline-flex items-center gap-1.5 text-xs liquid-glass-modal-text-muted">
                     <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${syncToneClass}`} />
@@ -1099,10 +1055,11 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
               <button
                 data-register-sync-action
                 onClick={handleManualPolicySync}
+                disabled={isSyncingSettings}
                 className={liquidGlassModalButton('primary', 'sm') + ' inline-flex shrink-0 items-center justify-center gap-2'}
               >
                 <Wifi className="h-4 w-4 shrink-0" />
-                {t('settings.deviceSetup.syncButton', 'Sync settings')}
+                {isSyncingSettings ? t('settings.workflow.syncing', 'Syncing…') : t('settings.deviceSetup.syncButton', 'Sync settings')}
               </button>
             </div>
           </div>
@@ -1166,6 +1123,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
               OVERVIEW_CHIP_LIMIT localized labels as soft rounded chips, then a "+N more" summary chip
               (no unlimited wall of pills, no paragraph dump). enabledModuleNames is still built via
               resolveNavigationLabel; no data is dropped, only the display is condensed. */}
+          <p className="text-xs liquid-glass-modal-text-muted">{t('settings.workflow.capabilitiesHelp', { defaultValue: 'Permissions and available areas are managed by your administrator.' })}</p>
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             <div
               data-register-allowed-actions
@@ -1224,7 +1182,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
               </div>
               {enabledModuleNames.length ? (
                 <div className="mt-2 flex flex-wrap gap-1.5">
-                  {enabledModuleNames.slice(0, OVERVIEW_CHIP_LIMIT).map((label, index) => (
+                  {(showAllModules ? enabledModuleNames : enabledModuleNames.slice(0, OVERVIEW_CHIP_LIMIT)).map((label, index) => (
                     <span
                       key={`${label}-${index}`}
                       className="inline-flex items-center rounded-full border border-green-500/30 bg-green-500/10 px-2.5 py-1 text-xs font-medium text-green-900 dark:text-green-100"
@@ -1233,11 +1191,11 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                     </span>
                   ))}
                   {enabledModuleNames.length > OVERVIEW_CHIP_LIMIT ? (
-                    <span className="inline-flex items-center rounded-full border liquid-glass-modal-border bg-white/5 px-2.5 py-1 text-xs font-semibold liquid-glass-modal-text-muted dark:bg-black/20">
-                      {t('settings.deviceSetup.overview.moreCount', '+{{count}} more', {
+                    <button type="button" aria-expanded={showAllModules} onClick={() => setShowAllModules(value => !value)} className="inline-flex min-h-[44px] items-center rounded-full border liquid-glass-modal-border bg-white/5 px-2.5 py-1 text-xs font-semibold liquid-glass-modal-text-muted dark:bg-black/20">
+                      {showAllModules ? t('settings.workflow.showLess', { defaultValue: 'Show fewer' }) : t('settings.deviceSetup.overview.moreCount', '+{{count}} more', {
                         count: enabledModuleNames.length - OVERVIEW_CHIP_LIMIT,
                       })}
-                    </span>
+                    </button>
                   ) : null}
                 </div>
               ) : (
@@ -1347,9 +1305,10 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
               )}
               <button
                 onClick={handleManualPolicySync}
+                disabled={isSyncingSettings}
                 className={liquidGlassModalButton('secondary', 'md') + ' inline-flex min-h-[44px] flex-1 items-center justify-center text-center leading-tight'}
               >
-                {t('settings.deviceSetup.syncButton', 'Sync settings')}
+                {isSyncingSettings ? t('common.loading', 'Loading...') : t('settings.deviceSetup.syncButton', 'Sync settings')}
               </button>
             </div>
             <div data-connection-primary-action className="flex justify-center">
@@ -1479,10 +1438,8 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
             </div>
             <div className="flex items-center gap-2">
               <button
-                onClick={() => {
-                  setLanguage('en')
-                  toast.success(t('modals.connectionSettings.languageSaved'))
-                }}
+                disabled={savingLanguage}
+                onClick={() => void handleLanguageChange('en')}
                 className={`px-3 py-2 rounded-lg transition-all font-medium text-sm inline-flex items-center justify-center text-center ${currentLanguage === 'en'
                   ? 'bg-yellow-400/25 border-2 border-yellow-400 text-yellow-900 dark:text-yellow-200'
                   : 'bg-white/10 border border-gray-600 active:bg-white/20 text-gray-400'
@@ -1492,10 +1449,8 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                 EN
               </button>
               <button
-                onClick={() => {
-                  setLanguage('el')
-                  toast.success(t('modals.connectionSettings.languageSaved'))
-                }}
+                disabled={savingLanguage}
+                onClick={() => void handleLanguageChange('el')}
                 className={`px-3 py-2 rounded-lg transition-all font-medium text-sm inline-flex items-center justify-center text-center ${currentLanguage === 'el'
                   ? 'bg-yellow-400/25 border-2 border-yellow-400 text-yellow-900 dark:text-yellow-200'
                   : 'bg-white/10 border border-gray-600 active:bg-white/20 text-gray-400'
@@ -1505,10 +1460,8 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                 EL
               </button>
               <button
-                onClick={() => {
-                  setLanguage('de')
-                  toast.success(t('modals.connectionSettings.languageSaved'))
-                }}
+                disabled={savingLanguage}
+                onClick={() => void handleLanguageChange('de')}
                 className={`px-3 py-2 rounded-lg transition-all font-medium text-sm inline-flex items-center justify-center text-center ${currentLanguage === 'de'
                   ? 'bg-yellow-400/25 border-2 border-yellow-400 text-yellow-900 dark:text-yellow-200'
                   : 'bg-white/10 border border-gray-600 active:bg-white/20 text-gray-400'
@@ -1518,10 +1471,8 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                 DE
               </button>
               <button
-                onClick={() => {
-                  setLanguage('fr')
-                  toast.success(t('modals.connectionSettings.languageSaved'))
-                }}
+                disabled={savingLanguage}
+                onClick={() => void handleLanguageChange('fr')}
                 className={`px-3 py-2 rounded-lg transition-all font-medium text-sm inline-flex items-center justify-center text-center ${currentLanguage === 'fr'
                   ? 'bg-yellow-400/25 border-2 border-yellow-400 text-yellow-900 dark:text-yellow-200'
                   : 'bg-white/10 border border-gray-600 active:bg-white/20 text-gray-400'
@@ -1531,10 +1482,8 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                 FR
               </button>
               <button
-                onClick={() => {
-                  setLanguage('it')
-                  toast.success(t('modals.connectionSettings.languageSaved'))
-                }}
+                disabled={savingLanguage}
+                onClick={() => void handleLanguageChange('it')}
                 className={`px-3 py-2 rounded-lg transition-all font-medium text-sm inline-flex items-center justify-center text-center ${currentLanguage === 'it'
                   ? 'bg-yellow-400/25 border-2 border-yellow-400 text-yellow-900 dark:text-yellow-200'
                   : 'bg-white/10 border border-gray-600 active:bg-white/20 text-gray-400'
@@ -1547,199 +1496,24 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
           </div>
         </div>
 
-        <div className="rounded-2xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-black/10 px-4 py-4 space-y-4 transition-all">
-          {sectionHeader(
-            <Monitor className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" />,
-            t('settings.terminal.title', 'Terminal'),
-            t('settings.terminal.helpText', 'Local UX and operator preferences for this device'),
-          )}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label htmlFor="terminal-screen-timeout" className="block text-xs font-medium mb-2 liquid-glass-modal-text-muted">
-                {t('settings.terminal.screenTimeout', 'Screen timeout (minutes)')}
-              </label>
-              <input
-                id="terminal-screen-timeout"
-                type="number"
-                min={1}
-                max={120}
-                value={screenTimeoutMinutes}
-                onChange={e => setScreenTimeoutMinutes(e.target.value)}
-                className="liquid-glass-modal-input"
-              />
-            </div>
-            <div>
-              <label htmlFor="terminal-touch-sensitivity" className="block text-xs font-medium mb-2 liquid-glass-modal-text-muted">
-                {t('settings.terminal.touchSensitivity', 'Touch sensitivity')}
-              </label>
-              <select
-                id="terminal-touch-sensitivity"
-                value={touchSensitivity}
-                onChange={e => setTouchSensitivity(e.target.value)}
-                className="liquid-glass-modal-input"
-              >
-                <option value="low">{t('settings.terminal.touchLow', 'Low')}</option>
-                <option value="medium">{t('settings.terminal.touchMedium', 'Medium')}</option>
-                <option value="high">{t('settings.terminal.touchHigh', 'High')}</option>
-              </select>
-            </div>
-            <div className="md:col-span-2">
-              <label htmlFor="terminal-display-brightness" className="block text-xs font-medium mb-2 liquid-glass-modal-text-muted">
-                {t('settings.terminal.displayBrightness', 'Display brightness')}
-              </label>
-              <div className="flex items-center gap-3">
-                <input
-                  id="terminal-display-brightness"
-                  type="range"
-                  min={10}
-                  max={100}
-                  step={5}
-                  value={displayBrightness}
-                  onChange={e => setDisplayBrightness(e.target.value)}
-                  className="flex-1 accent-yellow-500"
-                />
-                <div className="w-16 text-right text-sm liquid-glass-modal-text">{displayBrightness}%</div>
-              </div>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <div className="flex items-center justify-between rounded-2xl border liquid-glass-modal-border bg-white/5 px-3 py-3">
-              <div>
-                <div id="terminal-audio-label" className="font-medium liquid-glass-modal-text">{t('settings.terminal.audioEnabled', 'Audio enabled')}</div>
-                <div className="text-xs liquid-glass-modal-text-muted">{t('settings.terminal.audioHelp', 'Play UI sounds on this device')}</div>
-              </div>
-              <POSGlassSwitch aria-labelledby="terminal-audio-label" checked={audioEnabled} onChange={setAudioEnabled} />
-            </div>
-            <div className="flex items-center justify-between rounded-2xl border liquid-glass-modal-border bg-white/5 px-3 py-3">
-              <div>
-                <div id="terminal-receipt-autoprint-label" className="font-medium liquid-glass-modal-text">{t('settings.terminal.receiptAutoPrint', 'Auto-print receipts')}</div>
-                <div className="text-xs liquid-glass-modal-text-muted">{t('settings.terminal.receiptAutoPrintHelp', 'Automatically print after successful checkout')}</div>
-              </div>
-              <POSGlassSwitch aria-labelledby="terminal-receipt-autoprint-label" checked={receiptAutoPrint} onChange={setReceiptAutoPrint} />
-            </div>
-          </div>
-
-          <div className="pt-2 border-t liquid-glass-modal-border">
-            <button
-              onClick={handleSaveTerminalPreferences}
-              className={SAVE_BTN_MD}
-            >
-              {t('settings.terminal.saveButton', 'Save Terminal Preferences')}
-            </button>
-          </div>
-        </div>
+        <SettingsRuntimePreferences onOpenPrinterSettings={() => openSection('printing')} onOpenSecurity={() => openSection('security')} />
         </>
         )}
 
-        {/* Security Settings - Session Timeout */}
+        {/* Native sessions expire independently of display/power preferences. */}
         {activeSettingsSection === 'security' && (
-        <div data-session-timeout-card className="rounded-2xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-black/10 px-4 py-4 space-y-4 transition-all">
-          {sectionHeader(
-            <Timer className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" />,
-            t('modals.connectionSettings.security', 'Security'),
-            sessionTimeoutEnabled
-              ? (t('modals.connectionSettings.sessionTimeoutStatus', { minutes: sessionTimeoutMinutes }) || `Auto-logout after ${sessionTimeoutMinutes} min`)
-              : t('modals.connectionSettings.sessionTimeoutOff', 'Session timeout disabled'),
-          )}
-
-          {/* Session Timeout Toggle */}
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex items-center gap-3 flex-1 min-w-0">
-              <div className="text-left min-w-0">
-                <span id="session-timeout-label" className="font-medium block liquid-glass-modal-text">{t('modals.connectionSettings.sessionTimeout', 'Session Timeout')}</span>
-                <span className="text-xs liquid-glass-modal-text-muted">{t('modals.connectionSettings.sessionTimeoutHelp', 'Auto-logout after inactivity')}</span>
-              </div>
-            </div>
-            <POSGlassSwitch
-              aria-labelledby="session-timeout-label"
-              checked={sessionTimeoutEnabled}
-              onChange={handleToggleSessionTimeout}
-            />
+          <div data-session-timeout-card className="rounded-2xl border liquid-glass-modal-border bg-white/5 px-4 py-4 space-y-3 dark:bg-black/10">
+            {sectionHeader(
+              <Timer className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" />,
+              t('settings.workflow.sessionTitle', 'Session access'),
+              t('settings.workflow.sessionHelp', 'The POS requires your PIN again when the authenticated session expires.'),
+            )}
+            <p className="text-sm liquid-glass-modal-text-muted">{t('settings.workflow.sessionLimits', 'This version uses a 30-minute inactivity limit and a maximum session duration of 2 hours. Custom auto-lock timing is not available.')}</p>
+            <p className="text-xs liquid-glass-modal-text-muted">{t('settings.workflow.sessionShift', 'Signing in again does not close the active shift. Windows screen sleep is configured separately under Screen & Sound.')}</p>
+            <button type="button" onClick={() => openSection('terminal')} className={liquidGlassModalButton('secondary', 'sm')}>
+              {t('settings.settingsHub.sections.terminal.label', 'Screen & Sound')}
+            </button>
           </div>
-
-          <div className="flex items-center justify-between gap-3 pt-3 border-t liquid-glass-modal-border">
-            <div className="flex items-center gap-3 flex-1 min-w-0">
-              <div className="text-left min-w-0">
-                <span className="font-medium block liquid-glass-modal-text">
-                  {t('modals.connectionSettings.ghostMode', 'Ghost Mode')}
-                </span>
-                <span className="text-xs liquid-glass-modal-text-muted">
-                  {ghostModeFeatureEnabled
-                    ? t(
-                        'modals.connectionSettings.ghostModeHelp',
-                        'Use manual item code X with price 1 to arm ghost mode for the current cart only.'
-                      )
-                    : t(
-                        'settings.deviceSetup.ghostModeOff',
-                        'Ghost Mode is turned off for this register.'
-                      ) + (terminalId?.trim() ? ` (${terminalId.trim()})` : '')}
-                </span>
-              </div>
-            </div>
-            <span
-              className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold ${
-                ghostModeFeatureEnabled
-                  ? 'bg-yellow-400/15 text-yellow-800 dark:text-yellow-200'
-                  : 'bg-black/10 text-black/50 dark:bg-white/10 dark:text-white/50'
-              }`}
-            >
-              {ghostModeFeatureEnabled
-                ? t('modals.connectionSettings.available', 'Available')
-                : t('modals.connectionSettings.unavailable', 'Unavailable')}
-            </span>
-          </div>
-
-          {/* Timeout Duration */}
-          <div className="flex items-center justify-between gap-3 pt-3 border-t liquid-glass-modal-border">
-            <div className="text-left min-w-0">
-              <span id="session-timeout-duration-label" className="font-medium block liquid-glass-modal-text">{t('modals.connectionSettings.timeoutDuration', 'Timeout Duration')}</span>
-              <span className="text-xs liquid-glass-modal-text-muted">{t('modals.connectionSettings.timeoutRange', '1-480 minutes')}</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <input
-                type="number"
-                aria-labelledby="session-timeout-duration-label"
-                value={sessionTimeoutMinutes}
-                onChange={e => setSessionTimeoutMinutes(e.target.value)}
-                onBlur={handleSaveSessionTimeout}
-                min={1}
-                max={480}
-                disabled={!sessionTimeoutEnabled}
-                className={`liquid-glass-modal-input w-20 text-center ${
-                  sessionTimeoutEnabled ? '' : 'opacity-60 cursor-not-allowed'
-                }`}
-              />
-              <span className="text-sm liquid-glass-modal-text-muted">
-                {t('common.minutes', 'min')}
-              </span>
-            </div>
-          </div>
-
-          {/* Quick presets */}
-          {sessionTimeoutEnabled && (
-            <div className="flex items-center gap-2 pt-2">
-              <span className="text-xs liquid-glass-modal-text-muted mr-2">{t('common.presets', 'Presets')}:</span>
-              {[5, 15, 30, 60].map((mins) => (
-                <button
-                  key={mins}
-                  onClick={() => {
-                    setSessionTimeoutMinutes(String(mins));
-                    // Auto-save after a short delay
-                    setTimeout(handleSaveSessionTimeout, 100);
-                  }}
-                  className={`px-3 py-1 text-sm rounded-lg transition-all inline-flex items-center justify-center ${
-                    sessionTimeoutMinutes === String(mins)
-                      ? 'bg-yellow-500/30 border border-yellow-400 text-yellow-300'
-                      : 'bg-white/10 border border-gray-600 text-gray-300 active:bg-white/20'
-                  }`}
-                >
-                  {mins}m
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
         )}
 
         {/* Database Management */}
@@ -1942,6 +1716,14 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
           )}
           <div className="space-y-4">
 
+              <p className="text-sm liquid-glass-modal-text-muted">{t('settings.workflow.hardwareHelp', { defaultValue: 'Save connection details, then connect each device. Saving alone does not connect hardware.' })}</p>
+              {hardwareDirty && <p role="status" className="text-sm text-amber-700 dark:text-amber-200">{t('settings.workflow.pendingChanges', { defaultValue: 'Unsaved device changes' })}</p>}
+              {hardwareError && <p role="alert" className="text-sm text-red-700 dark:text-red-300">{t('settings.workflow.hardwareUnknown', { defaultValue: 'Device status is unavailable. Refresh to check the connection.' })}</p>}
+              {hardwareActionError && <p role="alert" className="text-sm text-red-700 dark:text-red-300">{hardwareActionError}</p>}
+              <button type="button" disabled={hardwareLoading || Boolean(hardwareAction)} onClick={() => void refreshHardware()} className={liquidGlassModalButton('secondary', 'md')}>
+                <RefreshCw className={hardwareLoading ? 'h-4 w-4 animate-spin' : 'h-4 w-4'} />
+                {t('settings.workflow.hardwareRefresh', { defaultValue: 'Refresh device status' })}
+              </button>
               {/* --- Weighing Scale --- */}
               <div className="rounded-2xl border liquid-glass-modal-border bg-white/5 px-4 py-3 space-y-3 dark:bg-black/10">
                 <div className="flex items-center justify-between">
@@ -1955,7 +1737,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                   </div>
                   <POSGlassSwitch aria-labelledby="peripheral-scale-label" checked={scaleEnabled} onChange={setScaleEnabled} />
                 </div>
-                {scaleEnabled && (
+                {(scaleEnabled || hardwareStatus?.scale?.connected) && (
                   <div className="grid grid-cols-2 gap-3 pl-1">
                     <div>
                       <label className={`block text-xs font-medium mb-1 liquid-glass-modal-text-muted`}>{t('settings.peripherals.scale.port', 'COM Port')}</label>
@@ -1980,15 +1762,8 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                     </div>
                     <div className="flex items-end">
                       <button
-                        onClick={async () => {
-                          try {
-                            if (hardwareStatus?.scale?.connected) {
-                              await bridge.hardware.scaleDisconnect()
-                            } else {
-                              await bridge.hardware.scaleConnect({ port: scalePort, baud: Number(scaleBaudRate), protocol: scaleProtocol })
-                            }
-                          } catch (e) { console.error('Scale action failed:', e); toast.error(t('settings.peripherals.actionFailed', 'Action failed')) }
-                        }}
+                        disabled={Boolean(hardwareAction) || hardwareLoading || !settingsLoaded}
+                        onClick={() => void runHardwareAction('scale', () => hardwareStatus?.scale?.connected ? bridge.hardware.scaleDisconnect() : bridge.hardware.scaleConnect({ port: scalePort, baud: Number(scaleBaudRate), protocol: scaleProtocol }))}
                         className={`w-full px-3 py-2 rounded-lg text-sm font-medium transition-all inline-flex items-center justify-center ${
                           hardwareStatus?.scale?.connected
                             ? 'bg-red-500/20 border border-red-500/50 text-red-300 active:bg-red-500/30'
@@ -2017,7 +1792,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                   </div>
                   <POSGlassSwitch aria-labelledby="peripheral-display-label" checked={displayEnabled} onChange={setDisplayEnabled} />
                 </div>
-                {displayEnabled && (
+                {(displayEnabled || hardwareStatus?.customerDisplay?.connected) && (
                   <div className="grid grid-cols-2 gap-3 pl-1">
                     <div>
                       <label className={`block text-xs font-medium mb-1 liquid-glass-modal-text-muted`}>{t('settings.peripherals.display.connectionType', 'Connection Type')}</label>
@@ -2049,20 +1824,8 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                     )}
                     <div className="flex items-end">
                       <button
-                        onClick={async () => {
-                          try {
-                            if (hardwareStatus?.customerDisplay?.connected) {
-                              await bridge.hardware.displayDisconnect()
-                            } else {
-                              await bridge.hardware.displayConnect({
-                                connectionType: displayConnectionType,
-                                target: displayPort,
-                                portNumber: displayConnectionType === 'network' ? Number(displayTcpPort) : undefined,
-                                baudRate: displayConnectionType === 'serial' ? Number(displayBaudRate) : undefined,
-                              })
-                            }
-                          } catch (e) { console.error('Display action failed:', e); toast.error(t('settings.peripherals.actionFailed', 'Action failed')) }
-                        }}
+                        disabled={Boolean(hardwareAction) || hardwareLoading || !settingsLoaded}
+                        onClick={() => void runHardwareAction('display', () => hardwareStatus?.customerDisplay?.connected ? bridge.hardware.displayDisconnect() : bridge.hardware.displayConnect({ connectionType: displayConnectionType, target: displayPort, portNumber: displayConnectionType === 'network' ? Number(displayTcpPort) : undefined, baudRate: displayConnectionType === 'serial' ? Number(displayBaudRate) : undefined }))}
                         className={`w-full px-3 py-2 rounded-lg text-sm font-medium transition-all inline-flex items-center justify-center ${
                           hardwareStatus?.customerDisplay?.connected
                             ? 'bg-red-500/20 border border-red-500/50 text-red-300 active:bg-red-500/30'
@@ -2092,7 +1855,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                   <POSGlassSwitch aria-labelledby="peripheral-scanner-label" checked={scannerEnabled} onChange={setScannerEnabled} />
                 </div>
                 <p className={`text-xs liquid-glass-modal-text-muted -mt-1`}>{t('settings.peripherals.scanner.keyboardNote', 'Keyboard-wedge scanners work automatically — no configuration needed')}</p>
-                {scannerEnabled && (
+                {(scannerEnabled || hardwareStatus?.serialScanner?.connected) && (
                   <div className="grid grid-cols-2 gap-3 pl-1">
                     <div>
                       <label className={`block text-xs font-medium mb-1 liquid-glass-modal-text-muted`}>{t('settings.peripherals.scanner.port', 'COM Port')}</label>
@@ -2109,15 +1872,8 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                     </div>
                     <div className="col-span-2">
                       <button
-                        onClick={async () => {
-                          try {
-                            if (hardwareStatus?.serialScanner?.connected) {
-                              await bridge.hardware.scannerSerialStop()
-                            } else {
-                              await bridge.hardware.scannerSerialStart({ port: scannerPort, baud: Number(scannerBaudRate) })
-                            }
-                          } catch (e) { console.error('Scanner action failed:', e); toast.error(t('settings.peripherals.actionFailed', 'Action failed')) }
-                        }}
+                        disabled={Boolean(hardwareAction) || hardwareLoading || !settingsLoaded}
+                        onClick={() => void runHardwareAction('scanner', () => hardwareStatus?.serialScanner?.connected ? bridge.hardware.scannerSerialStop() : bridge.hardware.scannerSerialStart({ port: scannerPort, baud: Number(scannerBaudRate) }))}
                         className={`w-full px-3 py-2 rounded-lg text-sm font-medium transition-all inline-flex items-center justify-center ${
                           hardwareStatus?.serialScanner?.connected
                             ? 'bg-red-500/20 border border-red-500/50 text-red-300 active:bg-red-500/30'
@@ -2137,16 +1893,16 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
               <div className="rounded-2xl border liquid-glass-modal-border bg-white/5 px-4 py-3 space-y-2 dark:bg-black/10">
                 <div className="flex items-center justify-between">
                   <span id="peripheral-card-reader-label" className={`font-medium text-sm liquid-glass-modal-text`}>{t('settings.peripherals.cardReader.title', 'Card Reader (MSR)')}</span>
-                  <POSGlassSwitch aria-labelledby="peripheral-card-reader-label" checked={cardReaderEnabled} onChange={setCardReaderEnabled} />
+                  <span className="text-xs liquid-glass-modal-text-muted">{t('settings.workflow.unavailable', { defaultValue: 'Unavailable' })}</span>
                 </div>
-                <p className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.peripherals.cardReader.plugAndPlay', 'Magnetic stripe readers work via keyboard input — plug and play')}</p>
+                <p className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.workflow.unsupportedMsr', { defaultValue: 'Magnetic card readers are not supported by this version. Use Card Machines for card payments.' })}</p>
               </div>
 
               {/* --- Loyalty / NFC Reader --- */}
               <div className="rounded-2xl border liquid-glass-modal-border bg-white/5 px-4 py-3 space-y-2 dark:bg-black/10">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <span id="peripheral-loyalty-reader-label" className={`font-medium text-sm liquid-glass-modal-text`}>{t('settings.peripherals.loyaltyReader.title', 'Loyalty / NFC Reader')}</span>
+                    <span id="peripheral-loyalty-reader-label" className={`font-medium text-sm liquid-glass-modal-text`}>{t('settings.workflow.loyaltyInput', { defaultValue: 'Loyalty card keyboard input' })}</span>
                     {hardwareStatus?.loyaltyReader?.connected && (
                       <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-500/20 text-green-400">
                         {t('settings.peripherals.scanner.running', 'Running')}
@@ -2155,25 +1911,21 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                   </div>
                   <POSGlassSwitch aria-labelledby="peripheral-loyalty-reader-label" checked={loyaltyEnabled} onChange={setLoyaltyEnabled} />
                 </div>
-                <p className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.peripherals.loyaltyReader.tapNote', 'NFC readers work via keyboard input — tap card to detect')}</p>
+                <p className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.workflow.loyaltyInputHelp', { defaultValue: 'For readers that type the card number like a keyboard. Running means the input listener is active; it does not confirm that an NFC device is connected.' })}</p>
               </div>
 
               <div className="border-t liquid-glass-modal-border" />
 
-              {/* --- Cash Register / Fiscal Printer --- */}
-              <CashRegisterSection setupIntent={cashRegisterSetupIntent} />
-
-              <div className="border-t liquid-glass-modal-border" />
-
-              {/* --- Caller ID / VoIP --- */}
-              <CallerIdSection />
-
               {/* Save Peripherals Button */}
               <div className="pt-2 border-t liquid-glass-modal-border">
                 <button
+                  disabled={Boolean(hardwareAction) || !settingsLoaded || !hardwareDirty}
                   onClick={async () => {
+                    if (hardwareAction) return
+                    setHardwareAction('save')
+                    setHardwareActionError('')
                     try {
-                      await Promise.all([
+                      const results = await Promise.allSettled([
                         bridge.settings.updateLocal({
                           settingType: 'scale',
                           settings: {
@@ -2209,10 +1961,18 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                           }
                         }),
                       ])
-                      toast.success(t('settings.peripherals.saved', 'Peripheral settings saved'))
+                      for (const result of results) {
+                        if (result.status === 'rejected') throw result.reason
+                        requireSettingsSuccess(result.value)
+                      }
+                      setHardwareBaseline(hardwareSignature)
+                      toast.success(t('settings.workflow.hardwareSaved', { defaultValue: 'Device settings saved. Use Connect to apply them to each device.' }))
                     } catch (e) {
                       console.error('Failed to save hardware settings:', e)
+                      setHardwareActionError(getErrorMessage(e, t('settings.peripherals.saveFailed', 'Failed to save peripheral settings')))
                       toast.error(t('settings.peripherals.saveFailed', 'Failed to save peripheral settings'))
+                    } finally {
+                      setHardwareAction(null)
                     }
                   }}
                   className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-green-500 bg-green-600 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-green-600/30 transition-transform duration-150 active:scale-[0.98] active:bg-green-700"
@@ -2220,6 +1980,16 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                   {t('settings.peripherals.saveButton', 'Save peripherals')}
                 </button>
               </div>
+
+
+              {/* --- Cash Register / Fiscal Printer --- */}
+              <CashRegisterSection setupIntent={cashRegisterSetupIntent} />
+
+              <div className="border-t liquid-glass-modal-border" />
+
+              {/* --- Caller ID / VoIP --- */}
+              <CallerIdSection />
+
 
           </div>
         </div>
@@ -2349,7 +2119,10 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
             </>
           ) : (
             <div className="py-4 text-center">
-              <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-yellow-500 mx-auto" />
+              {aboutError ? <div role="alert" className="space-y-3">
+                <p>{t('settings.workflow.aboutLoadFailed', { defaultValue: 'Could not load device information.' })}</p>
+                <button type="button" onClick={() => setAboutRetry(value => value + 1)} className={liquidGlassModalButton('secondary', 'md')}>{t('common.retry', 'Retry')}</button>
+              </div> : <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-yellow-500 mx-auto" />}
             </div>
           )}
         </div>
@@ -2360,6 +2133,17 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
       )}
 
     </LiquidGlassModal>
+
+    <ConfirmDialog
+      isOpen={showDiscardChanges}
+      onClose={() => setShowDiscardChanges(false)}
+      onConfirm={() => { setShowDiscardChanges(false); onClose() }}
+      title={t('settings.workflow.pendingChanges', { defaultValue: 'Unsaved device changes' })}
+      message={t('settings.workflow.unsavedHelp', { defaultValue: 'Device connection details have not been saved. Save them before leaving, or discard your changes.' })}
+      confirmText={t('settings.workflow.discardChanges', { defaultValue: 'Discard changes' })}
+      cancelText={t('settings.workflow.keepEditing', { defaultValue: 'Keep editing' })}
+      variant="warning"
+    />
 
     {/* Sub-modals rendered outside LiquidGlassModal for independent viewport positioning */}
     {showPrinterSettingsModal && (

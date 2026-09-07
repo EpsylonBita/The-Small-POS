@@ -240,29 +240,38 @@ async function extractPdfTokens(file: File): Promise<SupplierPdfTextToken[]> {
     pdfjsLib.GlobalWorkerOptions.workerSrc = workerModule.default;
   }
   const data = new Uint8Array(await file.arrayBuffer());
-  const pdf = await pdfjsLib.getDocument({
+  const loadingTask = pdfjsLib.getDocument({
     data,
     disableWorker: typeof window === 'undefined',
     useSystemFonts: true,
-  } as any).promise;
-  const tokens: SupplierPdfTextToken[] = [];
+  } as any);
+  try {
+    const pdf = await loadingTask.promise;
+    const tokens: SupplierPdfTextToken[] = [];
 
-  for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
-    const page = await pdf.getPage(pageNumber);
-    const content = await page.getTextContent();
-    for (const item of content.items) {
-      if (!('str' in item) || !item.str.trim()) continue;
-      const transform = item.transform as number[];
-      tokens.push({
-        page: pageNumber,
-        text: item.str.trim(),
-        x: transform[4] || 0,
-        y: transform[5] || 0,
-      });
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      const page = await pdf.getPage(pageNumber);
+      try {
+        const content = await page.getTextContent();
+        for (const item of content.items) {
+          if (!('str' in item) || !item.str.trim()) continue;
+          const transform = item.transform as number[];
+          tokens.push({
+            page: pageNumber,
+            text: item.str.trim(),
+            x: transform[4] || 0,
+            y: transform[5] || 0,
+          });
+        }
+      } finally {
+        page.cleanup();
+      }
     }
-  }
 
-  return tokens;
+    return tokens;
+  } finally {
+    await loadingTask.destroy();
+  }
 }
 
 export async function extractSupplierImportFile(file: File): Promise<SupplierImportParsedFile> {

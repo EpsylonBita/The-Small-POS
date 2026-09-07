@@ -80,41 +80,54 @@ export async function readCaptureOriginal(captureId: string): Promise<Uint8Array
  */
 export async function rasterizePdf(bytes: Uint8Array): Promise<RenderedCapturePage[]> {
   const pdfjsLib = await loadPdfjs();
-  const pdf = await pdfjsLib.getDocument({
+  const loadingTask = pdfjsLib.getDocument({
     // A fresh copy: pdf.js transfers ownership of the buffer it is handed, and
     // the caller still needs these bytes for the text-layer fast path.
     data: new Uint8Array(bytes),
     useSystemFonts: true,
-  } as never).promise;
+  } as never);
 
-  const pages: RenderedCapturePage[] = [];
-  const pageCount = Math.min(pdf.numPages, MAX_CAPTURE_PAGES);
+  try {
+    const pdf = await loadingTask.promise;
+    const pages: RenderedCapturePage[] = [];
+    const pageCount = Math.min(pdf.numPages, MAX_CAPTURE_PAGES);
 
-  for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
-    const page = await pdf.getPage(pageNumber);
-    const base = page.getViewport({ scale: 1 });
-    const longestEdge = Math.max(base.width, base.height) || 1;
-    const scale = Math.min(RENDER_MAX_EDGE / longestEdge, 4);
-    const viewport = page.getViewport({ scale });
+    for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
+      const page = await pdf.getPage(pageNumber);
+      const canvas = document.createElement('canvas');
+      try {
+        const base = page.getViewport({ scale: 1 });
+        const longestEdge = Math.max(base.width, base.height) || 1;
+        const scale = Math.min(RENDER_MAX_EDGE / longestEdge, 4);
+        const viewport = page.getViewport({ scale });
 
-    const canvas = document.createElement('canvas');
-    canvas.width = Math.max(1, Math.floor(viewport.width));
-    canvas.height = Math.max(1, Math.floor(viewport.height));
-    const context = canvas.getContext('2d');
-    if (!context) {
-      throw new Error('Canvas is unavailable for PDF rendering');
+        canvas.width = Math.max(1, Math.floor(viewport.width));
+        canvas.height = Math.max(1, Math.floor(viewport.height));
+        const context = canvas.getContext('2d');
+        if (!context) {
+          throw new Error('Canvas is unavailable for PDF rendering');
+        }
+
+        await page.render({ canvasContext: context, viewport, canvas } as never).promise;
+
+        pages.push({
+          pageIndex: pageNumber - 1,
+          mime: RENDER_MIME,
+          data: dataUrlToBase64(canvas.toDataURL(RENDER_MIME, RENDER_QUALITY)),
+        });
+      } finally {
+        // Release the bitmap before allocating the next page's canvas.
+        canvas.width = 0;
+        canvas.height = 0;
+        page.cleanup();
+      }
     }
 
-    await page.render({ canvasContext: context, viewport, canvas } as never).promise;
-
-    pages.push({
-      pageIndex: pageNumber - 1,
-      mime: RENDER_MIME,
-      data: dataUrlToBase64(canvas.toDataURL(RENDER_MIME, RENDER_QUALITY)),
-    });
+    return pages;
+  } finally {
+    // The loading task owns the worker, including when opening the PDF fails.
+    await loadingTask.destroy();
   }
-
-  return pages;
 }
 
 /**
@@ -191,12 +204,16 @@ export async function renderCaptureDocument(captureId: string): Promise<void> {
   let pageOverflow = false;
   try {
     const pdfjsLib = await loadPdfjs();
-    const probe = await pdfjsLib.getDocument({
+    const probeTask = pdfjsLib.getDocument({
       data: new Uint8Array(bytes),
       useSystemFonts: true,
-    } as never).promise;
-    pageOverflow = probe.numPages > MAX_CAPTURE_PAGES;
-    await probe.destroy();
+    } as never);
+    try {
+      const probe = await probeTask.promise;
+      pageOverflow = probe.numPages > MAX_CAPTURE_PAGES;
+    } finally {
+      await probeTask.destroy();
+    }
 
     pages = await rasterizePdf(bytes);
   } catch (error) {

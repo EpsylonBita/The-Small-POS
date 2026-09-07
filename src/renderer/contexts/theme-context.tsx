@@ -37,18 +37,35 @@ interface ThemeProviderProps {
   children: ReactNode
 }
 
-export const ThemeProvider: React.FC<ThemeProviderProps> = ({ children }) => {
-  const [theme, setTheme] = useState<Theme>('auto')
-  const [resolvedTheme, setResolvedTheme] = useState<ResolvedTheme>('dark')
+const getTimeBasedTheme = (): ResolvedTheme => {
+  const hour = new Date().getHours()
+  return (hour >= 6 && hour < 18) ? 'light' : 'dark'
+}
 
-  // Function to determine theme based on time
-  const getTimeBasedTheme = (): ResolvedTheme => {
-    const now = new Date()
-    const hour = now.getHours()
-    
-    // Light theme from 6 AM to 6 PM (18:00), dark theme otherwise
-    return (hour >= 6 && hour < 18) ? 'light' : 'dark'
+const readInitialTheme = (): Theme => {
+  try {
+    const savedTheme = localStorage.getItem('pos-theme')
+    if (savedTheme === 'light' || savedTheme === 'dark' || savedTheme === 'auto') {
+      return savedTheme
+    }
+  } catch (error) {
+    console.warn('[Theme] Could not read saved theme:', error)
   }
+  return 'auto'
+}
+
+export const ThemeProvider: React.FC<ThemeProviderProps> = ({ children }) => {
+  const [theme, setThemeState] = useState<Theme>(readInitialTheme)
+  const [resolvedTheme, setResolvedTheme] = useState<ResolvedTheme>(() =>
+    theme === 'auto' ? getTimeBasedTheme() : theme,
+  )
+
+  // A caller may show success only after the preference has been persisted.
+  // Let storage errors reach the action handler; keep the visible theme intact.
+  const setTheme = React.useCallback((nextTheme: Theme): void => {
+    localStorage.setItem('pos-theme', nextTheme)
+    setThemeState(nextTheme)
+  }, [])
 
   // In auto mode, theme only changes at 06:00 and 18:00 local time.
   // Schedule a one-shot timer for the next boundary instead of polling.
@@ -98,19 +115,6 @@ export const ThemeProvider: React.FC<ThemeProviderProps> = ({ children }) => {
     return () => {
       if (timeout) clearTimeout(timeout)
     }
-  }, [theme])
-
-  // Load theme from localStorage on mount
-  useEffect(() => {
-    const savedTheme = localStorage.getItem('pos-theme') as Theme
-    if (savedTheme && ['light', 'dark', 'auto'].includes(savedTheme)) {
-      setTheme(savedTheme)
-    }
-  }, [])
-
-  // Save theme to localStorage when it changes
-  useEffect(() => {
-    localStorage.setItem('pos-theme', theme)
   }, [theme])
 
   // Apply resolved theme to document root for CSS (.dark selectors)

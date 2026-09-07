@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import React, { lazy, Suspense, useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { HashRouter, Routes, Route } from "react-router-dom";
 import { Toaster, toast } from "react-hot-toast";
 import { AlertTriangle } from "lucide-react";
@@ -7,19 +7,14 @@ import { ShiftProvider, useShift } from "./contexts/shift-context";
 import { I18nProvider, useI18n } from "./contexts/i18n-context";
 import { ModuleProvider } from "./contexts/module-context";
 import { BarcodeScannerProvider } from "./contexts/barcode-scanner-context";
-import RefactoredMainLayout from "./components/RefactoredMainLayout";
-import NewOrderPage from "./pages/NewOrderPage";
-import CustomerDisplayPage from "./pages/CustomerDisplayPage";
-import KitchenDisplayPage from "./pages/KitchenDisplayPage";
 import LoginPage from "./pages/LoginPage";
-import OnboardingPage from "./pages/OnboardingPage";
 import { ErrorBoundary } from "./components/error/ErrorBoundary";
 import { ScreenCaptureControlRequestModal } from "./components/ScreenCaptureControlRequestModal";
 import { SyncNotificationManager } from "./components/SyncNotificationManager";
 import { CaptureNotificationManager } from "./components/CaptureNotificationManager";
 import { SyncStatusIndicator } from "./components/SyncStatusIndicator";
 import { CallerIdCustomerSearchModalHost } from "./components/callerid/CallerIdCustomerSearchModalHost";
-import ConnectionSettingsModal from "./components/modals/ConnectionSettingsModal";
+import { DeferredModal } from "./components/ui/DeferredModal";
 import SyncRecoveryModal, {
   type SyncRecoveryOpenContext,
 } from "./components/recovery/SyncRecoveryModal";
@@ -82,6 +77,20 @@ import {
   resolveTerminalAuthPausePresentation,
   resolveTerminalResetPresentation,
 } from "./utils/terminal-lifecycle";
+
+// Route code stays local in the Tauri bundle but is evaluated only when used.
+// Background listeners remain outside these Suspense boundaries.
+const RefactoredMainLayout = lazy(() => import('./components/RefactoredMainLayout'));
+const NewOrderPage = lazy(() => import('./pages/NewOrderPage'));
+const CustomerDisplayPage = lazy(() => import('./pages/CustomerDisplayPage'));
+const KitchenDisplayPage = lazy(() => import('./pages/KitchenDisplayPage'));
+const OnboardingPage = lazy(() => import('./pages/OnboardingPage'));
+const ConnectionSettingsModal = lazy(() => import('./components/modals/ConnectionSettingsModal'));
+
+function PageLoading() {
+  const { t } = useI18n();
+  return <div role="status" className="flex h-full items-center justify-center p-8">{t('app.loading')}</div>;
+}
 
 const INVALID_SESSION_IDENTITY_VALUES = new Set([
   '',
@@ -632,7 +641,9 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
         <ThemeProvider>
           <FullscreenAwareLayout>
             <PageLoadMotion animationKey="onboarding" className="h-full min-h-0">
-              <OnboardingPage />
+              <Suspense fallback={<PageLoading />}>
+                <OnboardingPage />
+              </Suspense>
             </PageLoadMotion>
           </FullscreenAwareLayout>
         </ThemeProvider>
@@ -1526,7 +1537,9 @@ function AppContent() {
           <HashRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
             <div className="h-screen w-screen overflow-hidden bg-black">
               <PageLoadMotion animationKey={externalDisplayKind} className="h-full w-full">
-                <ExternalDisplayPage />
+                <Suspense fallback={<PageLoading />}>
+                  <ExternalDisplayPage />
+                </Suspense>
               </PageLoadMotion>
             </div>
             <Toaster
@@ -1626,55 +1639,59 @@ function AppContent() {
 
 
 
-            <Routes>
-              <Route
-                path="/"
-                element={
-                  <RefactoredMainLayout
-                    onLogout={handleLogout}
-                    onOpenConnectionSettings={openConnectionSettings}
-                  />
-                }
-              />
-              <Route
-                path="/dashboard"
-                element={
-                  <RefactoredMainLayout
-                    onLogout={handleLogout}
-                    onOpenConnectionSettings={openConnectionSettings}
-                  />
-                }
-              />
-              <Route
-                path="/new-order"
-                element={
-                  <PageLoadMotion animationKey="new-order" className="h-full min-h-0">
-                    <NewOrderPage />
-                  </PageLoadMotion>
-                }
-              />
-              <Route
-                path="*"
-                element={
-                  <RefactoredMainLayout
-                    onLogout={handleLogout}
-                    onOpenConnectionSettings={openConnectionSettings}
-                  />
-                }
-              />
-            </Routes>
+            <Suspense fallback={<PageLoading />}>
+              <Routes>
+                <Route
+                  path="/"
+                  element={
+                    <RefactoredMainLayout
+                      onLogout={handleLogout}
+                      onOpenConnectionSettings={openConnectionSettings}
+                    />
+                  }
+                />
+                <Route
+                  path="/dashboard"
+                  element={
+                    <RefactoredMainLayout
+                      onLogout={handleLogout}
+                      onOpenConnectionSettings={openConnectionSettings}
+                    />
+                  }
+                />
+                <Route
+                  path="/new-order"
+                  element={
+                    <PageLoadMotion animationKey="new-order" className="h-full min-h-0">
+                      <NewOrderPage />
+                    </PageLoadMotion>
+                  }
+                />
+                <Route
+                  path="*"
+                  element={
+                    <RefactoredMainLayout
+                      onLogout={handleLogout}
+                      onOpenConnectionSettings={openConnectionSettings}
+                    />
+                  }
+                />
+              </Routes>
+            </Suspense>
 
             <CallerIdCustomerSearchModalHost
               request={callerIdCustomerSearch}
               onClose={closeCallerIdCustomerSearch}
             />
 
-            <ConnectionSettingsModal
-              isOpen={showConnectionSettings}
-              initialSection={connectionSettingsInitialSection}
-              onCheckForUpdates={openUpdateCheck}
-              onClose={closeConnectionSettings}
-            />
+            <DeferredModal isOpen={showConnectionSettings} onClose={closeConnectionSettings}>
+              <ConnectionSettingsModal
+                isOpen={showConnectionSettings}
+                initialSection={connectionSettingsInitialSection}
+                onCheckForUpdates={openUpdateCheck}
+                onClose={closeConnectionSettings}
+              />
+            </DeferredModal>
 
             <SyncRecoveryModal
               isOpen={showSyncRecoveryModal}

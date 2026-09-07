@@ -1,9 +1,11 @@
-import React, { memo, useMemo } from 'react';
+import React, { lazy, memo, Suspense, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useModules } from '../../contexts/module-context';
 import { FoodDashboard } from './FoodDashboard';
-import { ServiceDashboard } from './ServiceDashboard';
-import { ProductDashboard } from './ProductDashboard';
 import type { BusinessType } from '../../../shared/types/organization';
+
+const ServiceDashboard = lazy(() => import('./ServiceDashboard').then(m => ({ default: m.ServiceDashboard })));
+const ProductDashboard = lazy(() => import('./ProductDashboard').then(m => ({ default: m.ProductDashboard })));
 
 // Define BusinessCategory locally to avoid import issues
 type BusinessCategory = 'food' | 'service' | 'product';
@@ -86,6 +88,7 @@ export const BusinessCategoryDashboard = memo<BusinessCategoryDashboardProps>(({
   overrideCategory,
 }) => {
   const { businessType: contextBusinessType } = useModules();
+  const { t } = useTranslation();
 
   // Determine which business type to use
   const effectiveBusinessType = overrideBusinessType || contextBusinessType;
@@ -98,18 +101,15 @@ export const BusinessCategoryDashboard = memo<BusinessCategoryDashboardProps>(({
     return getBusinessCategory(effectiveBusinessType);
   }, [overrideCategory, effectiveBusinessType]);
 
-  // Render the appropriate dashboard based on category
-  switch (category) {
-    case 'food':
-      return <FoodDashboard className={className} />;
-    case 'service':
-      return <ServiceDashboard className={className} />;
-    case 'product':
-      return <ProductDashboard className={className} />;
-    default:
-      // Fallback to food dashboard
-      return <FoodDashboard className={className} />;
-  }
+  const Dashboard = category === 'service'
+    ? ServiceDashboard
+    : category === 'product' ? ProductDashboard : FoodDashboard;
+
+  return (
+    <Suspense fallback={<div role="status" className="flex h-full items-center justify-center p-8">{t('common.loading')}</div>}>
+      <Dashboard className={className} />
+    </Suspense>
+  );
 });
 
 BusinessCategoryDashboard.displayName = 'BusinessCategoryDashboard';

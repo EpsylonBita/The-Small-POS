@@ -342,15 +342,18 @@ export function evaluateCachedCatalogOffers(
 export async function validateCatalogOffers(params: {
   catalogType: CatalogType;
   cartItems: OfferEvaluationCartItem[];
+  /** Skip obsolete background work after an IPC/network response arrives. */
+  isCancelled?: () => boolean;
 }): Promise<CatalogOfferEvaluationResult | null> {
-  const { catalogType, cartItems } = params;
-  if (cartItems.length === 0) {
+  const { catalogType, cartItems, isCancelled } = params;
+  if (cartItems.length === 0 || isCancelled?.()) {
     return null;
   }
 
   if (!isBrowser()) {
     const bridge = getBridge();
     const response = await bridge.branchData.getCatalogOffers({ catalog_type: catalogType });
+    if (isCancelled?.()) return null;
     if (!response.success) {
       throw new Error(response.error || 'Failed to load catalog offers');
     }
@@ -367,6 +370,7 @@ export async function validateCatalogOffers(params: {
     catalog_type: catalogType,
     cart_items: cartItems,
   });
+  if (isCancelled?.()) return null;
 
   if (!response.success) {
     throw new Error(response.error || 'Failed to validate catalog offers');

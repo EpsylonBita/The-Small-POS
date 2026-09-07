@@ -66,6 +66,7 @@ type MenuModalCartItem = MenuCartItem & {
   combo_type?: string;
   combo_items?: unknown[];
   category_id?: string | null;
+  category_name?: string | null;
   categoryId?: string | null;
   category?: { id?: string | null } | string | null;
 } & Partial<OfferRewardLineMetadata>;
@@ -456,6 +457,10 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const [ghostModeArmed, setGhostModeArmed] = useState(false);
   const [ghostModeArmedAt, setGhostModeArmedAt] = useState<string | null>(null);
   const [categories, setCategories] = useState<Array<{id: string, name: string, icon?: string}>>([]);
+  const categoryNamesById = React.useMemo(
+    () => new Map(categories.map((category) => [category.id, category.name])),
+    [categories],
+  );
   const [menuItemsForCategoryTabs, setMenuItemsForCategoryTabs] = useState<MenuItem[]>([]);
   const [isMenuCatalogLoading, setIsMenuCatalogLoading] = useState(false);
   const [menuCatalogError, setMenuCatalogError] = useState<string | null>(null);
@@ -1383,9 +1388,12 @@ export const MenuModal: React.FC<MenuModalProps> = ({
 
   // Load categories on mount
   useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
     const loadCategories = async () => {
       try {
         const categoriesData = await menuService.getMenuCategories();
+        if (cancelled) return;
 
         // Helper to get category icon
         const getCategoryIcon = (name: string): string => {
@@ -1428,6 +1436,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
 
         setCategories(uniqueCategories);
       } catch (error) {
+        if (cancelled) return;
         console.error('Error loading categories in MenuModal:', error);
         // Fallback to default categories
         setCategories([
@@ -1436,10 +1445,28 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       }
     };
 
-    if (isOpen) {
-      loadCategories();
-    }
+    void loadCategories();
+    return () => { cancelled = true; };
   }, [isOpen]);
+
+  // Category labels are display/receipt metadata, not a prerequisite for a
+  // product tap. Enrich only rows still in the current cart when the existing
+  // category loader finishes; never recreate a removed or edited row.
+  useEffect(() => {
+    if (!isOpen || categoryNamesById.size === 0) return;
+    setCartItems((current) => {
+      let changed = false;
+      const next = current.map((item) => {
+        if (item.categoryName || item.category_name) return item;
+        const categoryId = readCustomizationString(item.category_id, item.categoryId, item.category);
+        const categoryName = categoryNamesById.get(categoryId);
+        if (!categoryName) return item;
+        changed = true;
+        return { ...item, categoryName };
+      });
+      return changed ? next : current;
+    });
+  }, [isOpen, categoryNamesById]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -1818,6 +1845,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         const evaluation = await validateCatalogOffers({
           catalogType: 'menu',
           cartItems: menuOfferValidationItems,
+          isCancelled: () => cancelled || offerValidationRequestIdRef.current !== requestId,
         });
 
         if (cancelled || offerValidationRequestIdRef.current !== requestId) {
@@ -2028,50 +2056,14 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     maxLoyaltyRedeemablePoints,
   ]);
 
-  const handleAddToCart = async (item: any, quantity: number, customizations: any[], notes: string) => {
-    // Get category ID from the item, or fallback to selected category
-    const itemCategoryId = item.category_id || item.categoryId || item.category;
-
-    console.log('[handleAddToCart] Starting category lookup:', {
-      itemName: item.name,
-      itemCategoryId,
-      selectedCategory,
-      categoriesCount: categories.length
-    });
-
-    // Look up category name - try multiple strategies:
-    // 1. First try the item's category_id from local categories state
-    // 2. Then try the currently selected category (which is the category tab the user is on)
-    // 3. Finally, fetch categories from service if not found (race condition fallback)
-    let categoryName: string | null = null;
-
-    // Strategy 1: Look up by item's category_id in local state
-    if (itemCategoryId && categories.length > 0) {
-      categoryName = categories.find(cat => cat.id === itemCategoryId)?.name || null;
-      console.log('[handleAddToCart] Strategy 1 result:', categoryName);
-    }
-
-    // Strategy 2: Use selected category if it's a real category (not "all" or "featured")
-    if (!categoryName && selectedCategory && selectedCategory !== 'all' && selectedCategory !== 'featured') {
-      categoryName = categories.find(cat => cat.id === selectedCategory)?.name || null;
-      console.log('[handleAddToCart] Strategy 2 result:', categoryName);
-    }
-
-    // Strategy 3: If categories state is empty or lookup failed, fetch from service
-    if (!categoryName && itemCategoryId) {
-      try {
-        const freshCategories = await menuService.getMenuCategories();
-        const foundCategory = freshCategories.find((cat: any) => cat.id === itemCategoryId);
-        if (foundCategory) {
-          categoryName = foundCategory.name || foundCategory.name_en || null;
-          console.log('[handleAddToCart] Strategy 3 result:', categoryName);
-        }
-      } catch (error) {
-        console.error('Failed to fetch categories for category name lookup:', error);
-      }
-    }
-
-    console.log('[handleAddToCart] Final categoryName:', categoryName);
+  const handleAddToCart = (item: any, quantity: number, customizations: any[], notes: string) => {
+    const itemCategoryId = readCustomizationString(
+      item.category_id, item.categoryId, item.category?.id, item.category,
+      editingCartItem?.category_id,
+    ) || (selectedCategory !== 'all' && selectedCategory !== 'featured' ? selectedCategory : '');
+    const categoryName = categoryNamesById.get(itemCategoryId) || readCustomizationString(
+      item.categoryName, item.category_name, item.category?.name, editingCartItem?.categoryName,
+    ) || null;
 
     // Ensure item has required properties
     // Use order-type-specific price: three-tier pricing (pickup, delivery, dine-in)
@@ -2134,6 +2126,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         editingCartItem?.orderItemId ??
         editingCartItem?.order_item_id,
       menuItemId: item.id, // Store original menu item ID for editing
+      category_id: itemCategoryId || undefined,
       name: item.name || 'Unknown Item',
       price: pricePerItem, // Price per unit (base + customizations) - used for display
       quantity: itemQuantity,
@@ -2158,8 +2151,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   };
 
   // Quick add handler for non-customizable items (skips modal, adds directly to cart)
-  const handleQuickAdd = async (item: any, quantity: number) => {
-    await handleAddToCart(item, quantity, [], '');
+  const handleQuickAdd = (item: any, quantity: number) => {
+    handleAddToCart(item, quantity, [], '');
     setMenuSearchQuery('');
     setTimeout(() => menuSearchRef.current?.focus(), 50);
   };

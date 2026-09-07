@@ -19,8 +19,13 @@ const source = readFileSync(componentsPath, 'utf8');
 
 // (1) Both POSGlassModal and LiquidGlassModal viewport roots carry data-liquid-glass-modal-viewport.
 test('both glass modal viewport roots are marked with data-liquid-glass-modal-viewport', () => {
-  const marked = source.match(/className="liquid-glass-modal-viewport" data-liquid-glass-modal-viewport/g) || [];
+  // Class expressions may add the opaque variant, but each root must keep both
+  // the viewport class and the accessibility-isolation marker.
+  const marked = source.match(/<div\b[^>]*\bdata-liquid-glass-modal-viewport(?=[\s>])[^>]*>/g) || [];
   assert.equal(marked.length, 2, 'both POSGlassModal and LiquidGlassModal viewport roots must carry the marker');
+  for (const viewport of marked) {
+    assert.match(viewport, /className=(?:"liquid-glass-modal-viewport"|\{cn\('liquid-glass-modal-viewport',)/);
+  }
 
   // The marker name is centralised in one constant that the skip-check reads.
   assert.match(source, /const MODAL_VIEWPORT_ATTR = 'data-liquid-glass-modal-viewport'/);
@@ -65,7 +70,7 @@ test('background isolation ref-counts modals and restores previous aria-hidden/i
   // The app is only un-hidden once the LAST glass modal releases.
   assert.match(
     source,
-    /releaseBackgroundIsolation = \(\): void => \{[\s\S]*?if \(backgroundIsolationCount === 0\) \{\s*restoreBackgroundIsolation\(\)/,
+    /releaseBackgroundIsolation = \(\): void => \{[\s\S]*?if \(backgroundIsolationCount === 0\) \{\s*document\.body\.classList\.remove\('pos-modal-open'\)\s*restoreBackgroundIsolation\(\)/,
   );
 
   // Each touched element's ORIGINAL state is captured exactly once (never overwritten by a 2nd modal).

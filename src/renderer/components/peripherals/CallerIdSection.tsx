@@ -4,7 +4,7 @@
  * Line/device configuration belongs to the Admin Dashboard. This terminal only
  * displays its safe projection and the state of the native UDP listener.
  */
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'react-hot-toast'
 import {
@@ -133,12 +133,32 @@ const CallerIdSection: React.FC = () => {
   const [serverError, setServerError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
+  const [localStatusError, setLocalStatusError] = useState<string | null>(null)
+  const statusRequest = useRef(0)
+
+  const refreshLocalStatus = useCallback(async (): Promise<boolean> => {
+    const request = ++statusRequest.current
+    try {
+      const nextStatus = await callerIdGetStatus()
+      if (request !== statusRequest.current) return false
+      setStatus(nextStatus)
+      setLocalStatusError(null)
+      return true
+    } catch (error) {
+      if (request !== statusRequest.current) return false
+      // Losing access to status does not stop the production listener.
+      // Clear the old green display instead of presenting it as current.
+      setStatus(null)
+      setLocalStatusError(error instanceof Error ? error.message : String(error))
+      return false
+    }
+  }, [])
 
   const refreshState = useCallback(async (): Promise<boolean> => {
     setRefreshing(true)
     const [configResult, statusResult] = await Promise.allSettled([
       callerIdGetServerConfig(),
-      callerIdGetStatus(),
+      refreshLocalStatus(),
     ])
 
     if (configResult.status === 'fulfilled') {
@@ -155,29 +175,22 @@ const CallerIdSection: React.FC = () => {
       )
     }
 
-    if (statusResult.status === 'fulfilled') {
-      setStatus(statusResult.value)
-    }
-
     setLoading(false)
     setRefreshing(false)
-    return configResult.status === 'fulfilled' && statusResult.status === 'fulfilled'
-  }, [t])
+    return configResult.status === 'fulfilled' && statusResult.status === 'fulfilled' && statusResult.value
+  }, [t, refreshLocalStatus])
 
   useEffect(() => {
     void refreshState()
   }, [refreshState])
 
   useEffect(() => {
-    const interval = setInterval(async () => {
-      try {
-        setStatus(await callerIdGetStatus())
-      } catch {
-        // The manual refresh keeps the visible error path under operator control.
-      }
-    }, 5000)
-    return () => clearInterval(interval)
-  }, [])
+    const interval = setInterval(() => { void refreshLocalStatus() }, 5000)
+    return () => {
+      clearInterval(interval)
+      statusRequest.current += 1
+    }
+  }, [refreshLocalStatus])
 
   const handleRefresh = useCallback(async () => {
     const refreshed = await refreshState()
@@ -191,8 +204,8 @@ const CallerIdSection: React.FC = () => {
     } else {
       toast.error(
         t(
-          'settings.peripherals.callerId.serverManaged.loadFailed',
-          'Could not load the central Caller ID configuration.',
+          'settings.workflow.callerRefreshFailed',
+          'Could not refresh Caller ID status. Check the details below.',
         ),
       )
     }
@@ -223,7 +236,7 @@ const CallerIdSection: React.FC = () => {
         </div>
         <div className="flex items-center gap-2">
           <span className={`text-xs font-medium ${statusTone(status)}`}>
-            {t(
+            {localStatusError ? t('settings.workflow.unavailable', 'Unavailable') : t(
               `settings.peripherals.callerId.status.${statusLabel(status)}`,
               statusLabel(status),
             )}
@@ -375,6 +388,9 @@ const CallerIdSection: React.FC = () => {
         ) : null}
       </section>
 
+      {localStatusError && <div role="alert" className="liquid-glass-modal-error rounded-2xl border p-3 text-xs">
+        {t('settings.workflow.callerStatusFailed', 'Local Caller ID status is unavailable. Refresh to check again.')} {localStatusError}
+      </div>}
       {(status?.error || status?.reason) ? (
         <div className="liquid-glass-modal-error flex items-start gap-2 rounded-2xl border p-3" role="alert">
           <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0" />
@@ -405,7 +421,7 @@ const CallerIdSection: React.FC = () => {
               {t('settings.peripherals.callerId.serverManaged.readinessTitle', 'Local readiness')}
             </p>
             <p className="liquid-glass-modal-text-muted text-xs">
-              {listening
+              {localStatusError ? t('settings.workflow.callerStatusFailed', 'Local Caller ID status is unavailable. Refresh to check again.') : listening
                 ? t(
                     'settings.peripherals.callerId.serverManaged.listening',
                     'The local FXO listener is running and waiting for incoming calls.',

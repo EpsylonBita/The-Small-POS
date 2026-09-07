@@ -13,6 +13,11 @@ import elTableCheck from './overlays/el.table-check.json';
 import deTableCheck from './overlays/de.table-check.json';
 import frTableCheck from './overlays/fr.table-check.json';
 import itTableCheck from './overlays/it.table-check.json';
+import enSettingsWorkflow from './overlays/en.settings-workflow.json';
+import elSettingsWorkflow from './overlays/el.settings-workflow.json';
+import deSettingsWorkflow from './overlays/de.settings-workflow.json';
+import frSettingsWorkflow from './overlays/fr.settings-workflow.json';
+import itSettingsWorkflow from './overlays/it.settings-workflow.json';
 import enSupport from './support/en.json';
 import elSupport from './support/el.json';
 import deSupport from './support/de.json';
@@ -43,9 +48,9 @@ function mergeLocaleBundle(base: unknown, extension: unknown): unknown {
 }
 
 export const localeBundles = {
-  en: mergeLocaleBundle(mergeLocaleBundle(mergeLocaleBundle(enBase, enHotfix), enTableCheck), { support: enSupport }) as LocaleBundle,
-  el: mergeLocaleBundle(mergeLocaleBundle(mergeLocaleBundle(elBase, elHotfix), elTableCheck), { support: elSupport }) as LocaleBundle,
-  de: mergeLocaleBundle(mergeLocaleBundle(mergeLocaleBundle(deBase, deHotfix), deTableCheck), { support: deSupport }) as LocaleBundle,
-  fr: mergeLocaleBundle(mergeLocaleBundle(mergeLocaleBundle(frBase, frHotfix), frTableCheck), { support: frSupport }) as LocaleBundle,
-  it: mergeLocaleBundle(mergeLocaleBundle(mergeLocaleBundle(itBase, itHotfix), itTableCheck), { support: itSupport }) as LocaleBundle,
+  en: mergeLocaleBundle(mergeLocaleBundle(mergeLocaleBundle(mergeLocaleBundle(enBase, enHotfix), enTableCheck), { support: enSupport }), enSettingsWorkflow) as LocaleBundle,
+  el: mergeLocaleBundle(mergeLocaleBundle(mergeLocaleBundle(mergeLocaleBundle(elBase, elHotfix), elTableCheck), { support: elSupport }), elSettingsWorkflow) as LocaleBundle,
+  de: mergeLocaleBundle(mergeLocaleBundle(mergeLocaleBundle(mergeLocaleBundle(deBase, deHotfix), deTableCheck), { support: deSupport }), deSettingsWorkflow) as LocaleBundle,
+  fr: mergeLocaleBundle(mergeLocaleBundle(mergeLocaleBundle(mergeLocaleBundle(frBase, frHotfix), frTableCheck), { support: frSupport }), frSettingsWorkflow) as LocaleBundle,
+  it: mergeLocaleBundle(mergeLocaleBundle(mergeLocaleBundle(mergeLocaleBundle(itBase, itHotfix), itTableCheck), { support: itSupport }), itSettingsWorkflow) as LocaleBundle,
 } as const;

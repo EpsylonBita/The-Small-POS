@@ -1414,6 +1414,39 @@ pub fn get_active(db: &DbState, staff_id: &str) -> Result<Value, String> {
     )
 }
 
+/// Read one branch-scoped snapshot for the staff picker, across its terminals.
+/// The local DB belongs to one terminal identity (staff_shifts has no org column).
+/// Newest rows come first so callers retain get_active's newest-per-staff rule.
+pub fn get_active_for_branch(db: &DbState, branch_id: &str) -> Result<Value, String> {
+    if branch_id.trim().is_empty() {
+        return Err("Missing branchId".into());
+    }
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT * FROM staff_shifts WHERE branch_id = ?1 AND status = 'active'
+             ORDER BY check_in_time DESC",
+        )
+        .map_err(|e| e.to_string())?;
+    let col_names: Vec<String> = stmt
+        .column_names()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let rows = stmt
+        .query_map(params![branch_id], |row| {
+            let mut obj = serde_json::Map::new();
+            for (i, name) in col_names.iter().enumerate() {
+                obj.insert(name.clone(), row_value_at(row, i));
+            }
+            Ok(Value::Object(obj))
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(Value::Array(rows))
+}
+
 /// Get the active shift for a specific branch + terminal (strict match).
 pub fn get_active_by_terminal(
     db: &DbState,
@@ -4777,6 +4810,74 @@ mod tests {
             conn: std::sync::Mutex::new(conn),
             db_path: std::path::PathBuf::from(":memory:"),
         }
+    }
+
+    #[test]
+    fn test_get_active_for_branch_scopes_snapshot_and_preserves_terminal_rows() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            for (id, staff, branch, terminal, status, time) in [
+                (
+                    "older",
+                    "staff-e",
+                    "branch-a",
+                    "main",
+                    "active",
+                    "2026-09-07T08:00:00Z",
+                ),
+                (
+                    "newer",
+                    "staff-a",
+                    "branch-a",
+                    "main",
+                    "active",
+                    "2026-09-07T09:00:00Z",
+                ),
+                (
+                    "satellite",
+                    "staff-b",
+                    "branch-a",
+                    "satellite",
+                    "active",
+                    "2026-09-07T10:00:00Z",
+                ),
+                (
+                    "closed",
+                    "staff-c",
+                    "branch-a",
+                    "main",
+                    "closed",
+                    "2026-09-07T11:00:00Z",
+                ),
+                (
+                    "other-branch",
+                    "staff-d",
+                    "branch-b",
+                    "other",
+                    "active",
+                    "2026-09-07T12:00:00Z",
+                ),
+            ] {
+                conn.execute(
+                    "INSERT INTO staff_shifts (id, staff_id, branch_id, terminal_id, role_type, status,
+                        check_in_time, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, 'driver', ?5, ?6, ?6, ?6)",
+                    params![id, staff, branch, terminal, status, time],
+                )
+                .unwrap();
+            }
+        }
+        let snapshot = get_active_for_branch(&db, "branch-a").unwrap();
+        let rows = snapshot.as_array().unwrap();
+        let ids: Vec<_> = rows.iter().map(|row| row["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["satellite", "newer", "older"]);
+        assert_eq!(rows[0]["terminal_id"], "satellite");
+        assert_eq!(
+            get_active_for_branch(&db, "missing").unwrap(),
+            serde_json::json!([])
+        );
+        assert!(get_active_for_branch(&db, " ").is_err());
     }
 
     #[test]

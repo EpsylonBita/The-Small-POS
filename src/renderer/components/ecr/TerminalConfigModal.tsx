@@ -78,6 +78,11 @@ export const TerminalConfigModal: React.FC<Props> = ({
 
   const [isSaving, setIsSaving] = useState(false)
   const showLegacyGenericOption = device?.protocol === 'generic' || protocol === 'generic'
+  const bluetoothUnavailable = connectionType === 'bluetooth'
+  const bluetoothUnavailableMessage = t(
+    'ecr.bluetoothUnavailable',
+    'Bluetooth payment terminals are not available in this version. Use USB/Serial or Network (TCP).'
+  )
 
   // Initialize form values
   useEffect(() => {
@@ -151,6 +156,11 @@ export const TerminalConfigModal: React.FC<Props> = ({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
 
+    if (bluetoothUnavailable) {
+      toast.error(bluetoothUnavailableMessage)
+      return
+    }
+
     if (!name.trim()) {
       toast.error(t('ecr.config.nameRequired', 'Terminal name is required'))
       return
@@ -159,17 +169,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
     // Build connection details
     let connectionDetails: Record<string, unknown> = { type: connectionType }
 
-    if (connectionType === 'bluetooth') {
-      if (!btAddress.trim()) {
-        toast.error(t('ecr.config.btAddressRequired', 'Bluetooth address is required'))
-        return
-      }
-      connectionDetails = {
-        type: 'bluetooth',
-        address: btAddress,
-        channel: btChannel,
-      }
-    } else if (connectionType === 'serial_usb') {
+    if (connectionType === 'serial_usb') {
       if (!serialPort.trim()) {
         toast.error(t('ecr.config.serialPortRequired', 'Serial port is required'))
         return
@@ -247,7 +247,12 @@ export const TerminalConfigModal: React.FC<Props> = ({
         <div className="px-8 py-4 border-t liquid-glass-modal-border bg-white/85 dark:bg-black/55 backdrop-blur-xl shadow-[0_-8px_24px_rgba(0,0,0,0.18)]">
           {/* Round 352: a calm inline hint (amber, on-palette) explains what is missing while Add is disabled.
               Only shown when required fields are incomplete and not saving, so the footer never feels crowded. */}
-          {!requiredFieldsComplete && !isSaving && (
+          {bluetoothUnavailable && (
+            <p role="status" className="mb-2 text-xs font-medium text-amber-700 dark:text-amber-300">
+              {bluetoothUnavailableMessage}
+            </p>
+          )}
+          {!bluetoothUnavailable && !requiredFieldsComplete && !isSaving && (
             <p
               data-terminal-required-hint
               className="mb-2 text-xs font-medium text-amber-700 dark:text-amber-300"
@@ -266,7 +271,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
             <button
               type="submit"
               form="terminal-config-form"
-              disabled={isSaving || !requiredFieldsComplete}
+              disabled={isSaving || bluetoothUnavailable || !requiredFieldsComplete}
               className="inline-flex items-center justify-center px-6 py-2 rounded-xl bg-green-600 active:bg-green-700 text-white font-medium border border-green-600 shadow-sm shadow-green-600/25 transition-colors active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isSaving
@@ -307,7 +312,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
                 className="w-full px-4 py-2 rounded-xl bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-amber-500 focus:border-transparent"
               >
                 <option value="serial_usb">USB/Serial</option>
-                <option value="bluetooth">Bluetooth</option>
+                <option value="bluetooth" disabled>{t('ecr.bluetoothUnavailableOption', 'Bluetooth (unavailable)')}</option>
                 <option value="network">Network (TCP)</option>
               </select>
             </div>

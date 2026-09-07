@@ -2,12 +2,19 @@ import React from 'react';
 import { Sun, Moon } from 'lucide-react';
 import { useTheme } from '../contexts/theme-context';
 import { useI18n } from '../contexts/i18n-context';
+import { toast } from 'react-hot-toast';
 
 export default function ThemeToggle() {
     const { theme, setTheme, resolvedTheme } = useTheme();
     const { t } = useI18n();
     const isDark = resolvedTheme === 'dark';
-    const cycle = () => setTheme(theme === 'auto' ? 'dark' : theme === 'dark' ? 'light' : 'auto');
+    const cycle = () => {
+        try {
+            setTheme(theme === 'auto' ? 'dark' : theme === 'dark' ? 'light' : 'auto');
+        } catch {
+            toast.error(t('errors.saveFailed'));
+        }
+    };
     const label = theme === 'auto' ? (
         <span className="text-xs font-semibold">A</span>
     ) : resolvedTheme === 'dark' ? (

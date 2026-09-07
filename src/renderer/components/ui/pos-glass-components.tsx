@@ -102,12 +102,14 @@ const restoreBackgroundIsolation = (): void => {
 
 const acquireBackgroundIsolation = (): void => {
   backgroundIsolationCount += 1
+  document.body.classList.add('pos-modal-open')
   applyBackgroundIsolation()
 }
 
 const releaseBackgroundIsolation = (): void => {
   backgroundIsolationCount = Math.max(0, backgroundIsolationCount - 1)
   if (backgroundIsolationCount === 0) {
+    document.body.classList.remove('pos-modal-open')
     restoreBackgroundIsolation()
   }
 }
@@ -395,6 +397,7 @@ export const POSGlassModal: React.FC<POSGlassModalProps> = ({
   const { t } = useI18n();
   const previousOverflowRef = React.useRef<string>('');
   const blockerId = React.useId();
+  const titleId = React.useId();
   const blockerMetadata = React.useMemo(
     () => ({
       size,
@@ -459,11 +462,11 @@ export const POSGlassModal: React.FC<POSGlassModalProps> = ({
         className={cn('liquid-glass-modal-shell p-6', sizeClasses[size], className)}
         role="dialog"
         aria-modal="true"
-        aria-labelledby={title ? 'modal-title' : undefined}
+        aria-labelledby={title ? titleId : undefined}
       >
         {title && (
           <div className="flex items-center justify-between mb-4">
-            <h2 id="modal-title" className="text-2xl font-bold pos-glass-text-primary">
+            <h2 id={titleId} className="text-2xl font-bold pos-glass-text-primary">
               {title}
             </h2>
             <button
@@ -563,6 +566,8 @@ export const POSGlassModal: React.FC<POSGlassModalProps> = ({
  * Props for the LiquidGlassModal component
  */
 interface LiquidGlassModalProps {
+  /** Disable backdrop sampling for frequently used, dense POS workflows. */
+  blur?: boolean;
   /**
    * Controls the visibility of the modal
    * @required
@@ -707,6 +712,7 @@ const getFocusableElements = (container: HTMLElement): HTMLElement[] => {
 
 export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
   isOpen,
+  blur = true,
   onClose,
   title,
   children,
@@ -751,6 +757,7 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
   const [isClosing, setIsClosing] = React.useState(false)
   const [mounted, setMounted] = React.useState(isServerRender ? isOpen : false)
   const blockerId = React.useId()
+  const titleId = React.useId()
   const blockerMetadata = React.useMemo(
     () => ({
       size,
@@ -1047,7 +1054,7 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
   const showDefaultHeader = !header && !!title;
 
   const modalContent = (
-    <div className="liquid-glass-modal-viewport" data-liquid-glass-modal-viewport>
+    <div className={cn('liquid-glass-modal-viewport', !blur && 'liquid-glass-modal-viewport--solid')} data-liquid-glass-modal-viewport>
       {/* Backdrop */}
       <div
         ref={backdropRef}
@@ -1062,7 +1069,7 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
         className={cn('liquid-glass-modal-shell flex flex-col', sizeClasses[size], isClosing && 'leaving', className)}
         role="dialog"
         aria-modal="true"
-        aria-labelledby={showDefaultHeader ? 'liquid-glass-modal-title' : undefined}
+        aria-labelledby={showDefaultHeader ? titleId : undefined}
         aria-label={!showDefaultHeader ? (ariaLabel || title) : undefined}
         tabIndex={-1}
         onAnimationEnd={handleAnimationEnd}
@@ -1072,7 +1079,7 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
         {showDefaultHeader && (
           <div className="liquid-glass-modal-header">
             <h2
-              id="liquid-glass-modal-title"
+              id={titleId}
               className="liquid-glass-modal-title"
             >
               {title}

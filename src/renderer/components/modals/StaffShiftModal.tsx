@@ -491,6 +491,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
   // Track active shifts per staff
   const [staffActiveShifts, setStaffActiveShifts] = useState<Map<string, any>>(new Map());
+  const staffLoadGeneration = useRef(0);
+  const staffLoadEnabled = useRef(false);
   // Unit oversight (founder 27/08): shifts running on THIS register's satellite
   // terminals (waiter phones) — shown among the checked-in staff with their
   // terminal and live totals. Closing them from here lands with the
@@ -1078,6 +1080,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
   // Load staff when modal opens in checkin mode
   useEffect(() => {
+    staffLoadEnabled.current = isOpen && mode === 'checkin';
+    // The cancelled session cannot clear this shared flag in its finally block.
+    // Reset it here so a direct checkout open cannot inherit a cancelled load.
+    setLoading(false);
     console.log('[StaffShiftModal] useEffect triggered:', { isOpen, mode });
     if (isOpen && mode === 'checkin') {
       console.log('[StaffShiftModal] Calling loadStaff()...');
@@ -1113,6 +1119,12 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       setError('');
       setSuccess('');
     }
+    // IPC cannot be aborted once dispatched. Invalidate every continuation,
+    // including the cache and directory, before closing or opening a new session.
+    return () => {
+      staffLoadEnabled.current = false;
+      staffLoadGeneration.current += 1;
+    };
   }, [isOpen, mode]);
 
   useEffect(() => {
@@ -1240,24 +1252,19 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     }
   }, [canRecordInlineExpenses]);
 
-  // Load active shifts for each staff member to show status and sort
-  const loadActiveShiftsForStaff = async (staffList: StaffMember[]) => {
-    console.log('[loadActiveShiftsForStaff] Starting for', staffList.length, 'staff members');
+  // One local snapshot serves both cached and refreshed staff lists. Keep
+  // cross-terminal rows so satellite shifts retain their existing behavior.
+  const loadActiveShiftsForBranch = async (branchId: string, isCurrent: () => boolean) => {
+    const result = await bridge.shifts.getActiveForBranch(branchId);
+    if (!isCurrent()) return;
+    const shifts = Array.isArray(result) ? result : [];
     const map = new Map<string, any>();
-    for (const s of staffList) {
-      try {
-        const result = await bridge.shifts.getActive(s.id);
-        // IPC handlers wrap response in { success: true, data: ... }
-        // So we need to check result.data, not just result
-        const shift = result?.data || result;
-        const hasActiveShift = shift && typeof shift === 'object' && shift.status === 'active';
-        debugLog('[loadActiveShiftsForStaff] Staff:', s.name, 'ID:', s.id, 'Result:', result, 'Shift:', hasActiveShift ? 'ACTIVE' : 'null');
-        if (hasActiveShift) map.set(s.id, shift);
-      } catch (e) {
-        console.warn('[loadActiveShiftsForStaff] Failed to fetch active shift for', s.id, e);
+    for (const shift of shifts) {
+      // The query sorts newest first, matching the previous per-staff LIMIT 1.
+      if (shift?.status === 'active' && shift.staff_id && !map.has(shift.staff_id)) {
+        map.set(shift.staff_id, shift);
       }
     }
-    console.log('[loadActiveShiftsForStaff] Final map size:', map.size, 'Active staff IDs:', Array.from(map.keys()));
     setStaffActiveShifts(map);
   };
 
@@ -1310,19 +1317,33 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   };
 
   const loadStaff = async () => {
+    if (!staffLoadEnabled.current) return;
+    const generation = ++staffLoadGeneration.current;
+    const isCurrent = () => staffLoadEnabled.current && generation === staffLoadGeneration.current;
+    let releasedLoading = false;
+    const releaseLoading = () => {
+      // A background refresh must not clear a PIN/check-in action's loading flag.
+      if (isCurrent() && !releasedLoading) {
+        releasedLoading = true;
+        setLoading(false);
+      }
+    };
     setLoading(true);
     setError('');
     setStaffAuthMetadataStatus('available');
     let branchId: string | undefined;
+    let cachedStaff: StaffMember[] = [];
+    let activeShiftsPromise: Promise<void> | undefined;
     try {
       // Determine branch for this terminal; prefer settings hook, then IPC
       // 1) Try hook-provided settings (fast path)
       branchId = getSetting?.('terminal', 'branch_id') as string | undefined;
 
       // 2) Try terminal config getter for a specific setting (existing, stable handler)
-      if (!branchId) {
+      if (!branchId && isCurrent()) {
         try {
           const val = await bridge.terminalConfig.getSetting('terminal', 'branch_id');
+          if (!isCurrent()) return;
           if (val) branchId = val as string;
         } catch (e) {
           console.warn('[StaffShiftModal] terminalConfig.getSetting fallback failed:', e);
@@ -1330,9 +1351,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       }
 
       // 2b) Try local settings store (legacy SettingsService)
-      if (!branchId) {
+      if (!branchId && isCurrent()) {
         try {
           const local = (await bridge.settings.get()) as unknown as SettingsResult;
+          if (!isCurrent()) return;
           const flat = local?.['terminal.branch_id'] ?? local?.terminal?.branch_id;
           if (flat) branchId = flat as string;
         } catch (e) {
@@ -1341,15 +1363,17 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       }
 
       // 3) Try direct branch id getter
-      if (!branchId) {
+      if (!branchId && isCurrent()) {
         try {
           const bid = await bridge.terminalConfig.getBranchId();
+          if (!isCurrent()) return;
           if (bid) branchId = bid as string;
         } catch (e) {
           console.warn('[StaffShiftModal] terminalConfig.getBranchId failed (non-fatal):', e);
         }
       }
 
+      if (!isCurrent()) return;
       // Require branch scoping: if missing, abort with clear message
       if (!branchId) {
         console.warn('[StaffShiftModal] No branchId available; aborting staff fetch');
@@ -1357,6 +1381,9 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       }
 
       console.log('[loadStaff] Using branchId:', branchId);
+      activeShiftsPromise = loadActiveShiftsForBranch(branchId, isCurrent).catch((e) => {
+        if (isCurrent()) console.warn('[StaffShiftModal] Active shifts load failed:', e);
+      });
 
       // Offline-first: optimistic cache read renders the staff list
       // immediately from local SQLite (sub-100ms), then the network fetch
@@ -1366,22 +1393,18 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       // `persistStaffAuthCache` after every successful network fetch, so
       // any returning user has a hot cache.
       try {
-        const cachedStaff = await loadCachedStaffAuth(branchId);
+        cachedStaff = await loadCachedStaffAuth(branchId);
+        if (!isCurrent()) return;
         if (cachedStaff.length > 0) {
           console.log('[loadStaff] Optimistic render from cache:', cachedStaff.length, 'staff');
           setAvailableStaff([...cachedStaff]);
           // Show the modal as ready while the network refresh runs.
-          setLoading(false);
-          // Best-effort: hydrate active shifts from local DB so role badges
-          // are correct on the optimistic render. Failures are non-fatal —
-          // the network refresh below will reconcile.
-          void loadActiveShiftsForStaff(cachedStaff).catch((e) => {
-            console.warn('[StaffShiftModal] Cached active-shift load failed (non-fatal):', e);
-          });
+          releaseLoading();
         }
       } catch (cacheError) {
         console.warn('[StaffShiftModal] Cached staff auth load failed (non-fatal):', cacheError);
       }
+      if (!isCurrent()) return;
 
       const today = new Date();
       const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
@@ -1405,6 +1428,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         end_date: dateStr,
         branch_id: branchId,
       });
+      if (!isCurrent()) return;
 
       if (!result?.success) {
         throw new Error(result?.error || 'Failed to fetch staff schedule');
@@ -1426,12 +1450,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       let cachedStaffAuthById = new Map<string, StaffMember>();
       if (!authMetadataAvailable) {
         setStaffAuthMetadataStatus('missing');
-        try {
-          const cachedStaff = await loadCachedStaffAuth(branchId);
-          cachedStaffAuthById = new Map(cachedStaff.map((member) => [member.id, member]));
-        } catch (cacheError) {
-          console.warn('[StaffShiftModal] Failed to load cached staff auth directory for merge:', cacheError);
-        }
+        cachedStaffAuthById = new Map(cachedStaff.map((member) => [member.id, member]));
       }
 
       const normalizedStaffList: StaffMember[] = rawStaffList
@@ -1464,20 +1483,16 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       } else {
         console.warn('[StaffShiftModal] Admin staff-schedule response is missing POS auth metadata; preserving existing local auth cache');
       }
+      if (!isCurrent()) return;
       console.log('[loadStaff] Final staff list:', normalizedStaffList.map(s => ({ name: s.name, rolesCount: s.roles?.length })));
 
       // Create a new array reference to trigger React re-render
       setAvailableStaff([...normalizedStaffList]);
 
-      // Run loadActiveShiftsForStaff and the (already-in-flight) directory
-      // refresh in parallel. Both are non-blocking for staff-list rendering;
-      // doing them concurrently shaves another ~1s off the cold-open path.
-      // We use Promise.all so a failure in one path doesn't cancel the other
-      // (each has its own try/catch wrapper).
+      // Reuse the already-running local snapshot; the network staff refresh
+      // does not change local shifts and must not repeat the same DB work.
       await Promise.all([
-        loadActiveShiftsForStaff(normalizedStaffList).catch((e) => {
-          console.warn('Active shifts load failed', e);
-        }),
+        activeShiftsPromise,
         // Fetch cross-terminal busy state so the "Ready to check in" list
         // can gray out staff who are already on a shift on another terminal.
         // Non-fatal — if the endpoint is unreachable (offline, old admin
@@ -1486,6 +1501,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         // reject duplicate check-ins. The promise was started above in
         // parallel with the staff-schedule fetch.
         refreshDirectoryPromise.then((directoryResult: any) => {
+          if (!isCurrent()) return;
           if (directoryResult?.success && Array.isArray(directoryResult.staff)) {
             const myTerminalId = (directoryResult.currentTerminalId ?? '').trim();
             const busy = new Map<string, { terminalName: string; role: string }>();
@@ -1528,28 +1544,28 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         }),
       ]);
     } catch (err) {
+      if (!isCurrent()) return;
       console.error('Failed to load staff:', err);
-      if (branchId) {
+      // A parallel directory refresh may have filled an initially empty cache.
+      // Retry only on this cold/error path; warm refreshes reuse their first read.
+      if (cachedStaff.length === 0 && branchId) {
         try {
-          const cachedStaff = await loadCachedStaffAuth(branchId);
-          if (cachedStaff.length > 0) {
-            console.log('[StaffShiftModal] Loaded cached staff auth directory for offline check-in');
-            setAvailableStaff([...cachedStaff]);
-            setError('');
-            try {
-              await loadActiveShiftsForStaff(cachedStaff);
-            } catch (activeShiftError) {
-              console.warn('Active shifts load from cache failed', activeShiftError);
-            }
-            return;
-          }
+          cachedStaff = await loadCachedStaffAuth(branchId);
+          if (!isCurrent()) return;
+          if (cachedStaff.length > 0) setAvailableStaff(cachedStaff);
         } catch (cacheError) {
-          console.warn('[StaffShiftModal] Failed to load cached staff auth directory:', cacheError);
+          console.warn('[StaffShiftModal] Staff cache fallback failed:', cacheError);
         }
+      }
+      if (!isCurrent()) return;
+      if (cachedStaff.length > 0) {
+        // The cached list is already visible; do not reload it or its shifts.
+        await activeShiftsPromise;
+        return;
       }
       setError(err instanceof Error ? err.message : t('modals.staffShift.failedToLoad'));
     } finally {
-      setLoading(false);
+      releaseLoading();
     }
   };
 
@@ -3699,7 +3715,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   const checkoutMutedTextClass = 'text-sm text-slate-600 dark:text-slate-300/80';
   const checkInSurfaceClass = 'rounded-[28px] border border-slate-300/80 bg-white p-4 shadow-[0_18px_40px_rgba(15,23,42,0.08)] dark:border-white/10 dark:bg-white/[0.04] dark:shadow-[0_18px_40px_rgba(2,6,23,0.28)]';
   const checkInInsetSurfaceClass = 'rounded-[24px] border border-slate-300/70 bg-slate-100/80 p-3 shadow-[0_10px_24px_rgba(15,23,42,0.05)] dark:border-white/10 dark:bg-black/25 dark:shadow-none';
-  const checkInFooterClass = 'sticky bottom-0 z-10 mt-3 border-t border-slate-300/80 bg-white/95 px-1 pt-3 backdrop-blur-xl dark:border-white/10 dark:bg-[#071018]/95';
+  const checkInFooterClass = 'sticky bottom-0 z-10 mt-3 border-t border-slate-300/80 bg-white px-1 pt-3 dark:border-white/10 dark:bg-[#071018]';
   const checkInEyebrowClass = 'text-xs font-semibold text-slate-500 dark:text-slate-400';
   const checkInMutedTextClass = 'text-sm text-slate-600 dark:text-slate-300/80';
 
@@ -5250,7 +5266,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     const summaryPresentation = getRolePresentation(summaryRoleName);
 
     return (
-      <motion.div layout className={checkInSurfaceClass}>
+      <motion.div className={checkInSurfaceClass}>
         <div className="flex items-start justify-between gap-4">
           <div className="min-w-0">
             <div className={checkInEyebrowClass}>{t('modals.staffShift.selectedStaffLabel')}</div>
@@ -5400,7 +5416,6 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
                       return (
                         <motion.button
-                          layout
                           key={staffMember.id}
                           onClick={() => {
                             void handleStaffSelect(staffMember);
@@ -5534,7 +5549,6 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
                       return (
                         <motion.button
-                          layout
                           key={staffMember.id}
                           onClick={() => {
                             void handleStaffSelect(staffMember);
@@ -5726,7 +5740,6 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
                   return (
                     <motion.button
-                      layout
                       key={role.role_id}
                       disabled={isRoleLockedByCashierFirstGate}
                       onClick={() => {
@@ -6043,6 +6056,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   return (
     <>
       <LiquidGlassModal
+        blur={effectiveMode !== 'checkin'}
         isOpen={isOpen}
         onClose={handleModalClose}
         title={effectiveMode === 'checkin' ? t('modals.staffShift.checkIn') : t('modals.staffShift.checkOut')}

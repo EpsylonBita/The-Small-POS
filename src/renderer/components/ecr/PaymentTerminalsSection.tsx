@@ -336,10 +336,12 @@ const ecrAPI = {
   updateDevice: async (
     deviceId: string,
     updates: Partial<ECRDevice>
-  ): Promise<ECRDevice | null> => {
+  ): Promise<ECRDevice> => {
     const result: any = await getBridge().ecr.updateDevice(deviceId, updates)
-    if (result?.success === false) return null
-    return (result?.device ?? result ?? null) as ECRDevice | null
+    if (!result || result.success === false) {
+      throw new Error(result?.error || 'Failed to update device')
+    }
+    return (result.device ?? result) as ECRDevice
   },
   removeDevice: async (deviceId: string): Promise<boolean> => {
     const result: any = await getBridge().ecr.removeDevice(deviceId)
@@ -469,9 +471,11 @@ export const PaymentTerminalsSection: React.FC<Props> = ({
       ])
       setDevices(deviceList)
       setStatuses(deviceStatuses)
+      return true
     } catch (err) {
       console.error('Failed to fetch ECR devices:', err)
       toast.error(t('ecr.errors.fetchFailed', 'Failed to load payment terminals'))
+      return false
     } finally {
       setLoading(false)
     }
@@ -546,8 +550,9 @@ export const PaymentTerminalsSection: React.FC<Props> = ({
   const handleRefresh = useCallback(async () => {
     setIsRefreshing(true)
     try {
-      await fetchData()
-      toast.success(t('ecr.refreshSuccess', 'Terminals refreshed'))
+      if (await fetchData()) {
+        toast.success(t('ecr.refreshSuccess', 'Terminals refreshed'))
+      }
     } catch {
       toast.error(t('ecr.refreshError', 'Failed to refresh'))
     } finally {
@@ -556,7 +561,12 @@ export const PaymentTerminalsSection: React.FC<Props> = ({
   }, [fetchData, t])
 
   const handleConnect = useCallback(
-    async (deviceId: string) => {
+    async (device: ECRDevice) => {
+      if (device.connectionType === 'bluetooth') {
+        toast.error(t('ecr.bluetoothUnavailable', 'Bluetooth payment terminals are not available in this version. Use USB/Serial or Network (TCP).'))
+        return
+      }
+      const deviceId = device.id
       try {
         setStatuses((prev) => ({
           ...prev,
@@ -860,7 +870,7 @@ export const PaymentTerminalsSection: React.FC<Props> = ({
                     key={device.id}
                     device={device}
                     status={statuses[device.id]}
-                    onConnect={() => handleConnect(device.id)}
+                    onConnect={() => handleConnect(device)}
                     onDisconnect={() => handleDisconnect(device.id)}
                     onEdit={() => handleEdit(device)}
                     onDelete={() => handleDelete(device.id)}

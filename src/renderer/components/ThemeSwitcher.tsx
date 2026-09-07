@@ -2,13 +2,18 @@ import React from 'react';
 import { Sun, Moon } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../contexts/theme-context';
+import { toast } from 'react-hot-toast';
 
 export const ThemeSwitcher: React.FC = () => {
   const { t } = useTranslation();
   const { resolvedTheme, setTheme } = useTheme();
 
   const handleToggle = () => {
-    setTheme(resolvedTheme === 'light' ? 'dark' : 'light');
+    try {
+      setTheme(resolvedTheme === 'light' ? 'dark' : 'light');
+    } catch {
+      toast.error(t('errors.saveFailed'));
+    }
   };
 
   return (

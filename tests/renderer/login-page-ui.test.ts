@@ -109,7 +109,8 @@ test('ThemeToggle has aria-label, no native title, and no hover utilities (touch
 
   // Cycle behaviour + visible A / Sun / Moon states are unchanged.
   assert.match(source, /onClick=\{cycle\}/);
-  assert.match(source, /const cycle = \(\) => setTheme\(theme === 'auto' \? 'dark' : theme === 'dark' \? 'light' : 'auto'\);/);
+  // Keep the same cycle while surfacing a failed durable theme save.
+  assert.match(source, /const cycle = \(\) => \{\s*try \{\s*setTheme\(theme === 'auto' \? 'dark' : theme === 'dark' \? 'light' : 'auto'\);\s*\} catch \{\s*toast\.error\(t\('errors\.saveFailed'\)\);\s*\}\s*\};/);
   assert.match(source, /<span className="text-xs font-semibold">A<\/span>/);
   assert.match(source, /<Moon className="h-5 w-5" \/>/);
   assert.match(source, /<Sun className="h-5 w-5" \/>/);

@@ -1,5 +1,5 @@
 import React from 'react';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 // Render-instrumentation probe for the shared modal shell. The mock preserves
@@ -119,6 +119,11 @@ vi.mock('../../../utils/api-helpers', () => ({
   posApiPost: vi.fn(async () => ({ success: false })),
 }));
 
+vi.mock('../../../utils/catalog-offers', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../utils/catalog-offers')>()),
+  validateCatalogOffers: vi.fn(async () => null),
+}));
+
 // The real getBridge() returns a stable singleton, and MenuModal depends on
 // that: `bridge.loyalty` sits in an effect dependency array, so a mock that
 // fabricates a fresh bridge per call re-arms that effect on every render and
@@ -145,13 +150,32 @@ vi.mock('../../menu/MenuCategoryTabs', () => ({
   MenuCategoryTabs: () => <div data-testid="menu-category-tabs" />,
 }));
 vi.mock('../../menu/MenuItemGrid', () => ({
-  MenuItemGrid: () => <div data-testid="menu-item-grid" />,
+  MenuItemGrid: ({ onQuickAdd }: any) => (
+    <div data-testid="menu-item-grid">
+      <button onClick={() => onQuickAdd({
+        id: 'espresso', name: 'Espresso', category_id: 'coffee',
+        price: 8, pickup_price: 3, delivery_price: 4,
+      }, 2)}>Add espresso</button>
+    </div>
+  ),
 }));
 vi.mock('../../menu/MenuCart', () => ({
-  MenuCart: () => <div data-testid="menu-cart" />,
+  MenuCart: ({ cartItems, onRemoveItem, onEditItem }: any) => (
+    <div data-testid="menu-cart">
+      {cartItems.map((item: any) => (
+        <div key={item.id}>
+          <span>{item.name} × {item.quantity} = {item.totalPrice} [{item.categoryName || ''}]</span>
+          <button onClick={() => onRemoveItem(item.id)}>Remove {item.name}</button>
+          <button onClick={() => onEditItem(item)}>Edit {item.name}</button>
+        </div>
+      ))}
+    </div>
+  ),
 }));
 vi.mock('../../menu/MenuItemModal', () => ({
-  MenuItemModal: () => null,
+  MenuItemModal: ({ menuItem, onAddToCart }: any) => (
+    <button onClick={() => onAddToCart(menuItem, 3, [], 'edited')}>Save edited item</button>
+  ),
 }));
 vi.mock('../../menu/ComboChoiceModal', () => ({
   ComboChoiceModal: () => null,
@@ -164,6 +188,7 @@ vi.mock('../LoyaltyRedeemModal', () => ({
 }));
 
 import { MenuModal } from '../MenuModal';
+import { menuService } from '../../../services/MenuService';
 
 const baseProps = {
   onClose: vi.fn(),
@@ -204,5 +229,74 @@ describe('MenuModal closed-state mount gating', () => {
     view.rerender(<MenuModal {...baseProps} isOpen={false} />);
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(lgmRenderSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('MenuModal immediate product taps', () => {
+  afterEach(() => {
+    cleanup();
+    vi.mocked(menuService.getMenuCategories).mockReset().mockResolvedValue([]);
+    vi.mocked(menuService.getMenuItemById).mockReset().mockResolvedValue(null);
+  });
+
+  it('shows the priced item before slow categories arrive, then fills its label without another request', async () => {
+    let resolveCategories!: (value: any[]) => void;
+    vi.mocked(menuService.getMenuCategories).mockReturnValue(new Promise((resolve) => {
+      resolveCategories = resolve;
+    }));
+    render(<MenuModal {...baseProps} isOpen />);
+    fireEvent.click(screen.getByRole('button', { name: 'Add espresso' }));
+    expect(screen.getByText('Espresso × 2 = 6 []')).toBeInTheDocument();
+    expect(menuService.getMenuCategories).toHaveBeenCalledTimes(1);
+
+    await act(async () => { resolveCategories([{ id: 'coffee', name: 'Coffee' }]); });
+    expect(screen.getByText('Espresso × 2 = 6 [Coffee]')).toBeInTheDocument();
+  });
+
+  it('does not resurrect a removed item when category loading finishes', async () => {
+    let resolveCategories!: (value: any[]) => void;
+    vi.mocked(menuService.getMenuCategories).mockReturnValue(new Promise((resolve) => {
+      resolveCategories = resolve;
+    }));
+    render(<MenuModal {...baseProps} isOpen />);
+    fireEvent.click(screen.getByRole('button', { name: 'Add espresso' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Remove Espresso' }));
+    await act(async () => { resolveCategories([{ id: 'coffee', name: 'Coffee' }]); });
+    expect(screen.getByTestId('menu-cart')).not.toHaveTextContent('Espresso');
+  });
+
+  it('ignores categories from a closed session after the menu reopens', async () => {
+    let resolveOldCategories!: (value: any[]) => void;
+    vi.mocked(menuService.getMenuCategories)
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveOldCategories = resolve; }))
+      .mockResolvedValue([{ id: 'coffee', name: 'Current coffee' }] as any);
+    const view = render(<MenuModal {...baseProps} isOpen />);
+    view.rerender(<MenuModal {...baseProps} isOpen={false} />);
+    view.rerender(<MenuModal {...baseProps} isOpen />);
+    await act(async () => {});
+    fireEvent.click(screen.getByRole('button', { name: 'Add espresso' }));
+    await act(async () => { resolveOldCategories([{ id: 'coffee', name: 'Obsolete coffee' }]); });
+    fireEvent.click(screen.getByRole('button', { name: 'Add espresso' }));
+    expect(screen.getAllByText('Espresso × 2 = 6 [Current coffee]')).toHaveLength(2);
+    expect(screen.getByTestId('menu-cart')).not.toHaveTextContent('Obsolete');
+  });
+
+  it('keeps the edited quantity and price when late categories enrich the replacement row', async () => {
+    let resolveCategories!: (value: any[]) => void;
+    vi.mocked(menuService.getMenuCategories).mockReturnValue(new Promise((resolve) => {
+      resolveCategories = resolve;
+    }));
+    vi.mocked(menuService.getMenuItemById).mockResolvedValue({
+      id: 'espresso', name: 'Espresso', category_id: 'coffee', price: 8, pickup_price: 3,
+    });
+    render(<MenuModal {...baseProps} isOpen />);
+    fireEvent.click(screen.getByRole('button', { name: 'Add espresso' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Espresso' }));
+    // This child stub renders inline instead of in its real modal portal.
+    fireEvent.click(await screen.findByRole('button', { name: 'Save edited item', hidden: true }));
+    expect(screen.getByText('Espresso × 3 = 9 []')).toBeInTheDocument();
+    await act(async () => { resolveCategories([{ id: 'coffee', name: 'Coffee' }]); });
+    expect(screen.getByText('Espresso × 3 = 9 [Coffee]')).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: 'Remove Espresso' })).toHaveLength(1);
   });
 });

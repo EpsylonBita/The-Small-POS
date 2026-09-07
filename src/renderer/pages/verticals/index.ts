@@ -1,5 +1,6 @@
 // Vertical-specific view components barrel export
-// This file allows lazy-loading all vertical views from a single entry point
+// Compatibility exports. Lazy routes should import each view directly so that
+// opening one vertical does not load all other verticals.
 
 // Fast-food vertical
 export { DriveThruView } from './fast-food/DriveThruView';

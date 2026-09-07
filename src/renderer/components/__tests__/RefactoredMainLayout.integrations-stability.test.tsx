@@ -1,17 +1,18 @@
 import React from 'react'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
   integrationMounts: 0,
   integrationUnmounts: 0,
+  loadedPages: [] as string[],
 }))
 
 vi.mock('framer-motion', () => ({
   AnimatePresence: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }))
 
-vi.mock('../dashboards', () => ({
+vi.mock('../dashboards/BusinessCategoryDashboard', () => ({
   BusinessCategoryDashboard: () => <div>Dashboard</div>,
 }))
 
@@ -21,9 +22,11 @@ vi.mock('../../contexts/navigation-context', () => ({
 
 vi.mock('../NavigationSidebar', () => ({
   default: ({ onViewChange }: { onViewChange: (view: string) => void }) => (
-    <button type="button" onClick={() => onViewChange('plugin_integrations')}>
-      Plugins
-    </button>
+    <>
+      <button type="button" onClick={() => onViewChange('plugin_integrations')}>Plugins</button>
+      <button type="button" onClick={() => onViewChange('customers')}>Customers</button>
+      <button type="button" onClick={() => onViewChange('tables')}>Tables</button>
+    </>
   ),
 }))
 
@@ -41,6 +44,10 @@ vi.mock('../ui/PageLoadMotion', () => ({
 
 vi.mock('../../contexts/theme-context', () => ({
   useTheme: () => ({ resolvedTheme: 'light' }),
+}))
+
+vi.mock('../../contexts/i18n-context', () => ({
+  useI18n: () => ({ t: (key: string) => key }),
 }))
 
 vi.mock('../../contexts/shift-context', () => ({
@@ -73,9 +80,15 @@ vi.mock('../../hooks/useEndOfDayStatus', () => ({
 }))
 
 vi.mock('../../pages/MenuManagementPage', () => ({ default: () => null }))
-vi.mock('../../pages/UsersPage', () => ({ default: () => null }))
+vi.mock('../../pages/UsersPage', () => {
+  mocks.loadedPages.push('customers')
+  return { default: () => <div>Customer directory</div> }
+})
 vi.mock('../../pages/ReportsPage', () => ({ default: () => null }))
-vi.mock('../../pages/AnalyticsPage', () => ({ default: () => null }))
+vi.mock('../../pages/AnalyticsPage', () => {
+  mocks.loadedPages.push('analytics')
+  return { default: () => null }
+})
 vi.mock('../../pages/OrdersPage', () => ({ default: () => null }))
 vi.mock('../../pages/DeliveryZonesPage', () => ({ default: () => null }))
 vi.mock('../../pages/CouponsPage', () => ({ default: () => null }))
@@ -85,18 +98,29 @@ vi.mock('../../pages/InventoryPage', () => ({ default: () => null }))
 vi.mock('../../pages/KitchenDisplayPage', () => ({ default: () => null }))
 vi.mock('../../pages/CustomerDisplayPage', () => ({ default: () => null }))
 vi.mock('../../pages/KioskManagementPage', () => ({ default: () => null }))
+vi.mock('../../pages/verticals/restaurant/TablesView', () => {
+  mocks.loadedPages.push('tables')
+  return { TablesView: () => <div>Restaurant tables</div> }
+})
+vi.mock('../../pages/verticals/hotel/RoomsView', () => {
+  mocks.loadedPages.push('rooms')
+  return { RoomsView: () => null }
+})
 
-vi.mock('../../pages/IntegrationsPage', () => ({
-  default: () => {
-    React.useEffect(() => {
-      mocks.integrationMounts += 1
-      return () => {
-        mocks.integrationUnmounts += 1
-      }
-    }, [])
-    return <div>Integrations stateful view</div>
-  },
-}))
+vi.mock('../../pages/IntegrationsPage', () => {
+  mocks.loadedPages.push('integrations')
+  return {
+    default: () => {
+      React.useEffect(() => {
+        mocks.integrationMounts += 1
+        return () => {
+          mocks.integrationUnmounts += 1
+        }
+      }, [])
+      return <div>Integrations stateful view</div>
+    },
+  }
+})
 
 vi.mock('../../../lib', () => ({
   onEvent: vi.fn(),
@@ -127,9 +151,24 @@ vi.mock('../modals/ExpenseModal', () => ({
 import { RefactoredMainLayout } from '../RefactoredMainLayout'
 
 describe('Integrations view stability', () => {
+  afterEach(cleanup)
   beforeEach(() => {
     mocks.integrationMounts = 0
     mocks.integrationUnmounts = 0
+  })
+
+  it('loads optional pages only on navigation and keeps customer loading inside the layout', async () => {
+    render(<RefactoredMainLayout />)
+
+    expect(mocks.loadedPages).toEqual([])
+    expect(screen.getByText('Dashboard')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Customers' }))
+    expect(screen.getByRole('button', { name: 'Plugins' })).toBeInTheDocument()
+    await screen.findByText('Customer directory')
+    expect(mocks.loadedPages).toEqual(['customers'])
+    fireEvent.click(screen.getByRole('button', { name: 'Tables' }))
+    await screen.findByText('Restaurant tables')
+    expect(mocks.loadedPages).toEqual(['customers', 'tables'])
   })
 
   it('preserves the mounted Integrations page across unrelated parent renders', async () => {

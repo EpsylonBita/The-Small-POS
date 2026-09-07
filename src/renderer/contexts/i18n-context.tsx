@@ -10,11 +10,41 @@ type SupportedLanguage = 'en' | 'el' | 'de' | 'fr' | 'it'
 
 interface I18nContextType {
   language: string
-  setLanguage: (lang: SupportedLanguage) => void
+  setLanguage: (lang: SupportedLanguage) => Promise<void>
   t: TFunction
 }
 
 const I18nContext = createContext<I18nContextType | undefined>(undefined)
+
+const assertLanguageSaved = (result: { success?: boolean; error?: unknown } | null | undefined) => {
+  if (result?.success === false) {
+    throw new Error(typeof result.error === 'string' ? result.error : 'Failed to save language')
+  }
+}
+
+const readCachedLanguage = (): string | null => {
+  try {
+    return localStorage.getItem('language')
+  } catch (error) {
+    console.warn('[i18n-context] Language cache unavailable:', error)
+    return null
+  }
+}
+
+const cacheLanguage = (language: string): void => {
+  try {
+    localStorage.setItem('language', language)
+  } catch (error) {
+    // Native settings remain durable even when WebView storage is unavailable.
+    console.warn('[i18n-context] Could not cache language:', error)
+    try {
+      // A stale cache otherwise wins over the newly saved native value next start.
+      localStorage.removeItem('language')
+    } catch {
+      // Storage may be entirely blocked; startup can still read native settings.
+    }
+  }
+}
 
 interface I18nProviderProps {
   children: ReactNode
@@ -40,7 +70,7 @@ const I18nProviderContent: React.FC<{ children: ReactNode }> = ({ children }) =>
         // Get language from main process database
         const dbLanguage = await bridge.settings.getLanguage()
         // Get language from localStorage
-        const localLanguage = localStorage.getItem('language')
+        const localLanguage = readCachedLanguage()
 
         console.log(`[i18n-context] Sync check - localStorage: "${localLanguage}", database: "${dbLanguage}"`)
 
@@ -48,20 +78,21 @@ const I18nProviderContent: React.FC<{ children: ReactNode }> = ({ children }) =>
         if (localLanguage && ['en', 'el', 'de', 'fr', 'it'].includes(localLanguage) && localLanguage !== dbLanguage) {
           console.log(`[i18n-context] Syncing localStorage language "${localLanguage}" to database`)
           const result = await bridge.settings.setLanguage(localLanguage)
+          assertLanguageSaved(result)
           console.log(`[i18n-context] Sync to database result:`, result)
           // Update i18n instance to match
           if (i18nInstance.language !== localLanguage) {
-            i18nInstance.changeLanguage(localLanguage)
+            await i18nInstance.changeLanguage(localLanguage)
             setLanguageState(localLanguage)
           }
         } else if (dbLanguage && ['en', 'el', 'de', 'fr', 'it'].includes(dbLanguage)) {
           // Database has the authoritative value, sync to localStorage and i18n
-          localStorage.setItem('language', dbLanguage)
           if (i18nInstance.language !== dbLanguage) {
-            i18nInstance.changeLanguage(dbLanguage)
+            await i18nInstance.changeLanguage(dbLanguage)
             setLanguageState(dbLanguage)
             console.log(`[i18n-context] Synced from database to: "${dbLanguage}"`)
           }
+          cacheLanguage(dbLanguage)
         }
       } catch (e) {
         console.warn('[i18n-context] Failed to sync language:', e)
@@ -70,23 +101,25 @@ const I18nProviderContent: React.FC<{ children: ReactNode }> = ({ children }) =>
     syncLanguage()
   }, [bridge.settings, i18nInstance])
 
-  const setLanguage = async (lang: SupportedLanguage) => {
+  const setLanguage = async (lang: SupportedLanguage): Promise<void> => {
+    const previousLanguage = i18nInstance.language
+    const result = await bridge.settings.setLanguage(lang)
+    assertLanguageSaved(result)
+
     try {
-      console.log(`[i18n-context] setLanguage called with: "${lang}"`);
-      // Save to localStorage (for renderer process)
-      localStorage.setItem('language', lang);
-      console.log(`[i18n-context] Saved to localStorage: "${lang}"`);
-      // Save to database (for main process)
-      console.log(`[i18n-context] Calling settings:set-language via bridge with: "${lang}"`)
-      const result = await bridge.settings.setLanguage(lang)
-      console.log(`[i18n-context] Bridge result:`, result)
-    } catch (e) {
-      console.warn('Failed to save language:', e);
+      await i18nInstance.changeLanguage(lang)
+    } catch (error) {
+      // Avoid keeping a new native preference when translation activation failed.
+      try {
+        assertLanguageSaved(await bridge.settings.setLanguage(previousLanguage))
+      } catch (rollbackError) {
+        console.warn('[i18n-context] Could not restore previous language:', rollbackError)
+      }
+      throw error
     }
-    // Update i18n instance
-    i18nInstance.changeLanguage(lang);
-    setLanguageState(lang);
-    console.log(`[i18n-context] Language state updated to: "${lang}"`);
+
+    cacheLanguage(lang)
+    setLanguageState(lang)
   }
 
   const contextValue: I18nContextType = {

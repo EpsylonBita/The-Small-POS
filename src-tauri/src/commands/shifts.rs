@@ -765,6 +765,15 @@ pub async fn shift_get_active(
 }
 
 #[tauri::command]
+pub async fn shift_get_active_for_branch(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+) -> Result<serde_json::Value, String> {
+    let payload = parse_branch_payload(arg0)?;
+    shift_service::get_active_for_branch(&db, &payload.branch_id)
+}
+
+#[tauri::command]
 pub async fn shift_get_by_id(
     arg0: Option<serde_json::Value>,
     db: tauri::State<'_, db::DbState>,
