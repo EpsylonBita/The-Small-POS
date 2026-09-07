@@ -2355,6 +2355,14 @@ fn order_note_lines(doc: &OrderReceiptDoc) -> Vec<String> {
     lines
 }
 
+/// Founder 07/09/2026: on the kiosk slip the order-level note leads with `***`
+/// and carries no underline markers. The `_..._` form was reaching the paper as
+/// literal underscores — «_Σημείωση: Θα περάσω σε 15'_» — because this text is
+/// drawn, not marked up. Every other slip keeps the labelled, underlined form.
+fn kiosk_order_note_display(lang: &str, note: &str) -> String {
+    format!("***{}: {note}", receipt_label(lang, "Note"))
+}
+
 fn kitchen_order_note_lines(doc: &KitchenTicketDoc) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     push_unique_line(&mut lines, doc.delivery_notes.as_deref());
@@ -2685,6 +2693,21 @@ fn kiosk_customer_block_lines<'a>(doc: &'a OrderReceiptDoc, lang: &str) -> Vec<(
     }
 
     lines
+}
+
+/// Founder 07/09/2026: a kiosk DELIVERY slip printed the address twice — once in
+/// the customer block and again under a «ΠΑΡΑΔΟΣΗ» heading, which also repeated
+/// the order type the meta line already states. Whatever the customer block
+/// carried, it carried the whole address, so the second section is pure
+/// repetition and is dropped.
+///
+/// Deliberately keyed off the block ACTUALLY being non-empty rather than off
+/// `kiosk_slip` alone: an order with neither contact nor address prints no
+/// customer block, and suppressing the delivery section there would lose the
+/// address altogether. False for every non-kiosk slip.
+fn kiosk_block_covers_delivery(doc: &OrderReceiptDoc, lang: &str) -> bool {
+    doc.order_type.trim().eq_ignore_ascii_case("delivery")
+        && !kiosk_customer_block_lines(doc, lang).is_empty()
 }
 
 fn delivery_slip_info_lines(doc: &OrderReceiptDoc, lang: &str) -> Vec<(String, String)> {
@@ -7095,18 +7118,19 @@ fn render_classic_customer_raster_exact_ttf(
     canvas.draw_text_line(&meta_line, BitmapAlign::Left, preset.meta_style);
     canvas.draw_rule();
     let kiosk_customer_lines = kiosk_customer_block_lines(doc, lang);
+    let kiosk_covers_delivery = kiosk_block_covers_delivery(doc, lang);
     if !kiosk_customer_lines.is_empty() {
         for (label, value) in kiosk_customer_lines {
             canvas.draw_pair(&format!("{label}:"), value, preset.contact_style);
         }
         canvas.draw_rule();
     }
-    if is_delivery_slip {
+    if is_delivery_slip && !kiosk_covers_delivery {
         for (label, value) in delivery_slip_info_lines(doc, lang) {
             canvas.draw_pair(&format!("{label}:"), &value, preset.contact_style);
         }
         canvas.draw_rule();
-    } else if render_delivery_block {
+    } else if render_delivery_block && !kiosk_covers_delivery {
         canvas.draw_text_line(
             receipt_label(lang, "DELIVERY"),
             BitmapAlign::Left,
@@ -7119,15 +7143,19 @@ fn render_classic_customer_raster_exact_ttf(
         canvas.draw_rule();
     }
     let order_notes = order_note_lines(doc);
-    for note in &order_notes {
-        canvas.draw_wrapped(
-            &format!("_{}: {note}_", receipt_label(lang, "Note")),
-            BitmapAlign::Left,
-            preset.customization_style,
-        );
-    }
-    if !order_notes.is_empty() {
-        canvas.draw_rule();
+    // The kiosk slip prints this BELOW the items instead — see after the item
+    // loop. The note is about the order the customer just read, not a preamble.
+    if !doc.kiosk_slip {
+        for note in &order_notes {
+            canvas.draw_wrapped(
+                &format!("_{}: {note}_", receipt_label(lang, "Note")),
+                BitmapAlign::Left,
+                preset.customization_style,
+            );
+        }
+        if !order_notes.is_empty() {
+            canvas.draw_rule();
+        }
     }
 
     canvas.draw_text_line(&items_label_upper, BitmapAlign::Left, preset.section_style);
@@ -7197,6 +7225,17 @@ fn render_classic_customer_raster_exact_ttf(
         }
     }
     canvas.draw_rule();
+
+    if doc.kiosk_slip && !order_notes.is_empty() {
+        for note in &order_notes {
+            canvas.draw_wrapped(
+                &kiosk_order_note_display(lang, note),
+                BitmapAlign::Left,
+                preset.customization_style,
+            );
+        }
+        canvas.draw_rule();
+    }
 
     let mut emphasized_total: Option<&TotalsLine> = None;
     for total in &doc.totals {
@@ -7417,18 +7456,19 @@ fn render_classic_customer_raster_exact_bitmap(
     canvas.draw_body_text_line(&meta_line, BitmapAlign::Left, false, canvas.normal_scale, 0);
     canvas.draw_rule();
     let kiosk_customer_lines = kiosk_customer_block_lines(doc, lang);
+    let kiosk_covers_delivery = kiosk_block_covers_delivery(doc, lang);
     if !kiosk_customer_lines.is_empty() {
         for (label, value) in kiosk_customer_lines {
             canvas.draw_pair_body(&format!("{label}:"), value, false, canvas.normal_scale);
         }
         canvas.draw_rule();
     }
-    if is_delivery_slip {
+    if is_delivery_slip && !kiosk_covers_delivery {
         for (label, value) in delivery_slip_info_lines(doc, lang) {
             canvas.draw_pair_body(&format!("{label}:"), &value, false, canvas.normal_scale);
         }
         canvas.draw_rule();
-    } else if render_delivery_block {
+    } else if render_delivery_block && !kiosk_covers_delivery {
         canvas.draw_text_line(
             receipt_label(lang, "DELIVERY"),
             BitmapAlign::Left,
@@ -7443,15 +7483,18 @@ fn render_classic_customer_raster_exact_bitmap(
         canvas.draw_rule();
     }
     let order_notes = order_note_lines(doc);
-    for note in &order_notes {
-        canvas.draw_left_wrapped_body(
-            &format!("_{}: {note}_", receipt_label(lang, "Note")),
-            false,
-            canvas.normal_scale,
-        );
-    }
-    if !order_notes.is_empty() {
-        canvas.draw_rule();
+    // See the TTF path: the kiosk slip prints this below the items.
+    if !doc.kiosk_slip {
+        for note in &order_notes {
+            canvas.draw_left_wrapped_body(
+                &format!("_{}: {note}_", receipt_label(lang, "Note")),
+                false,
+                canvas.normal_scale,
+            );
+        }
+        if !order_notes.is_empty() {
+            canvas.draw_rule();
+        }
     }
 
     canvas.draw_text_line(
@@ -7525,6 +7568,17 @@ fn render_classic_customer_raster_exact_bitmap(
         }
     }
     canvas.draw_rule();
+
+    if doc.kiosk_slip && !order_notes.is_empty() {
+        for note in &order_notes {
+            canvas.draw_left_wrapped_body(
+                &kiosk_order_note_display(lang, note),
+                false,
+                canvas.normal_scale,
+            );
+        }
+        canvas.draw_rule();
+    }
 
     for total in &doc.totals {
         let raw_label = total_label_text(lang, total);
@@ -14756,5 +14810,64 @@ mod tests {
                 .any(|warning| warning.code == "logo_text_fallback"),
             "expected logo fallback warning when logo is enabled without a source"
         );
+    }
+
+    /// Founder 07/09/2026: the order note reached the paper as
+    /// «_Σημείωση: Θα περάσω σε 15'_» — the underline markers are drawn, not
+    /// interpreted, on this slip. It leads with *** instead, and only here.
+    #[test]
+    fn kiosk_order_note_leads_with_stars_and_drops_the_underscores() {
+        let rendered = kiosk_order_note_display("el", "Θα περάσω σε 15'");
+
+        assert!(
+            rendered.starts_with("***"),
+            "expected the kiosk marker, got {rendered}"
+        );
+        assert!(
+            !rendered.contains('_'),
+            "underscores must not reach the paper, got {rendered}"
+        );
+        assert!(rendered.ends_with("Θα περάσω σε 15'"), "got {rendered}");
+    }
+
+    /// The delivery block is dropped only when the customer block above really
+    /// carried the address — never for another slip type, and never when there
+    /// was nothing to print, which would lose the address entirely.
+    #[test]
+    fn kiosk_delivery_block_is_dropped_only_when_the_customer_block_covered_it() {
+        let kiosk_delivery = OrderReceiptDoc {
+            kiosk_slip: true,
+            order_type: "delivery".to_string(),
+            customer_name: Some("Endrit Bashi".to_string()),
+            delivery_address: Some("Κωνσταντινουπόλεως 62".to_string()),
+            ..OrderReceiptDoc::default()
+        };
+        assert!(kiosk_block_covers_delivery(&kiosk_delivery, "el"));
+
+        // Same order, but not a kiosk slip: efood/delivery prints are untouched.
+        let platform_delivery = OrderReceiptDoc {
+            kiosk_slip: false,
+            ..kiosk_delivery.clone()
+        };
+        assert!(!kiosk_block_covers_delivery(&platform_delivery, "el"));
+
+        // A kiosk pickup has no delivery section to repeat in the first place.
+        let kiosk_pickup = OrderReceiptDoc {
+            order_type: "pickup".to_string(),
+            ..kiosk_delivery.clone()
+        };
+        assert!(!kiosk_block_covers_delivery(&kiosk_pickup, "el"));
+
+        // Nothing to show above: the delivery section must still print, or the
+        // address disappears from the slip altogether.
+        let kiosk_delivery_without_contact = OrderReceiptDoc {
+            kiosk_slip: true,
+            order_type: "delivery".to_string(),
+            ..OrderReceiptDoc::default()
+        };
+        assert!(!kiosk_block_covers_delivery(
+            &kiosk_delivery_without_contact,
+            "el"
+        ));
     }
 }
