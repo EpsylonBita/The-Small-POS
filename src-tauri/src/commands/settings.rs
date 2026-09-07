@@ -1900,8 +1900,9 @@ async fn validate_terminal_binding_candidate(payload: &Value) -> Result<Value, S
     let requested_terminal_id =
         payload_terminal_id_for_switch(payload).ok_or("Missing terminal ID")?;
     let admin_url = payload_admin_url_for_switch(payload).ok_or("Missing Admin Dashboard URL")?;
-    let path = format!("/api/pos/settings/{requested_terminal_id}");
-    let response = api::fetch_from_admin(&admin_url, &api_key, &path, "GET", None).await?;
+    let response =
+        api::fetch_candidate_terminal_settings(&admin_url, &api_key, &requested_terminal_id)
+            .await?;
     let organization_id = crate::extract_org_id_from_terminal_settings_response(&response)
         .ok_or("Admin terminal settings missing authoritative organization binding")?;
     let branch_id = crate::extract_branch_id_from_terminal_settings_response(&response)
@@ -1920,7 +1921,7 @@ async fn validate_terminal_binding_candidate(payload: &Value) -> Result<Value, S
     let authenticated_terminal_id = source_terminal
         .as_deref()
         .or(response_terminal_id.as_deref())
-        .unwrap_or(requested_terminal_id.as_str());
+        .ok_or("Admin terminal settings missing authoritative terminal binding")?;
     if authenticated_terminal_id != requested_terminal_id {
         return Err("Admin terminal settings returned mismatched terminal binding".to_string());
     }
@@ -6812,6 +6813,300 @@ mod dto_tests {
             read_terminal_transition_journal(&database.state),
             Err("TERMINAL_TRANSITION_JOURNAL_INVALID".to_string())
         );
+    }
+
+    fn onboarding_existing_binding() -> (
+        crate::tests::fake_keyring::Guard,
+        crate::tests::harness::TestDb,
+    ) {
+        let entries = [
+            ("terminal_id", REPAIR_TERMINAL),
+            ("pos_api_key", "previous-fixture-key"),
+            ("admin_dashboard_url", "https://old.example.com"),
+            ("organization_id", REPAIR_ORG),
+            ("branch_id", REPAIR_BRANCH),
+        ];
+        let keyring = crate::tests::fake_keyring::install_seeded(entries);
+        let database = crate::tests::harness::TestDb::open();
+        {
+            let connection = database.state.conn.lock().unwrap();
+            for (key, value) in entries.iter().filter(|(key, _)| *key != "pos_api_key") {
+                crate::db::set_setting(&connection, "terminal", key, value).unwrap();
+            }
+        }
+        seed_interleaved_old_scope_generic_rows(&database);
+        (keyring, database)
+    }
+
+    fn onboarding_state_snapshot(
+        database: &crate::tests::harness::TestDb,
+    ) -> (
+        std::collections::BTreeMap<String, String>,
+        serde_json::Value,
+        i64,
+        i64,
+    ) {
+        let credentials = crate::tests::fake_keyring::all_keys()
+            .into_iter()
+            .map(|key| {
+                let value = crate::storage::get_credential_strict(&key)
+                    .unwrap()
+                    .unwrap();
+                (key, value.to_string())
+            })
+            .collect();
+        let connection = database.state.conn.lock().unwrap();
+        (
+            credentials,
+            crate::db::get_all_settings(&connection),
+            connection
+                .query_row("SELECT COUNT(*) FROM orders", [], |row| row.get(0))
+                .unwrap(),
+            connection
+                .query_row("SELECT COUNT(*) FROM parity_sync_queue", [], |row| {
+                    row.get(0)
+                })
+                .unwrap(),
+        )
+    }
+
+    async fn onboarding_response_server(
+        status: u16,
+        location: Option<&str>,
+    ) -> (String, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let location = location
+            .map(|url| format!("Location: {url}\r\n"))
+            .unwrap_or_default();
+        let task = tokio::spawn(async move {
+            // This task serves synthetic HTTP only; it never accesses keyring state.
+            tokio::time::timeout(std::time::Duration::from_secs(5), async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = vec![0; 8192];
+                let mut used = 0;
+                while !request[..used].windows(4).any(|part| part == b"\r\n\r\n") {
+                    let read = stream.read(&mut request[used..]).await.unwrap();
+                    assert!(read > 0, "request ended before headers");
+                    used += read;
+                }
+                let body = r#"{"error":"candidate rejected"}"#;
+                let response = format!(
+                    "HTTP/1.1 {status} Test\r\n{location}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+                String::from_utf8(request[..used].to_vec()).unwrap()
+            }).await.expect("candidate request must reach the loopback server")
+        });
+        (url, task)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn onboarding_candidate_validates_with_empty_managed_credentials_without_publishing() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let database = crate::tests::harness::TestDb::open();
+        let server = crate::tests::fake_http::MockServer::new(
+            serde_json::json!({
+                "terminal_id": REBIND_NEW_TERMINAL,
+                "organization_id": REBIND_NEW_ORG,
+                "branch_id": REBIND_NEW_BRANCH,
+            })
+            .to_string(),
+        );
+        let candidate = validate_terminal_binding_candidate(&serde_json::json!({
+            "terminalId": REBIND_NEW_TERMINAL,
+            "apiKey": "test-candidate-key",
+            "adminDashboardUrl": server.url,
+        }))
+        .await
+        .expect("fresh onboarding must validate before managed credentials exist");
+
+        assert_eq!(candidate["terminalId"], REBIND_NEW_TERMINAL);
+        assert_eq!(candidate["organizationId"], REBIND_NEW_ORG);
+        assert_eq!(candidate["branchId"], REBIND_NEW_BRANCH);
+        let requests = server.recorded();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(requests[0].path, "/api/pos/settings/replacement-terminal");
+        assert_eq!(
+            requests[0].header("x-terminal-id"),
+            Some(REBIND_NEW_TERMINAL)
+        );
+        assert_eq!(
+            requests[0].header("x-pos-api-key"),
+            Some("test-candidate-key")
+        );
+        assert_eq!(
+            requests[0].header("x-pos-client-version"),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        assert!(requests[0].body.is_empty());
+        for key in [
+            "terminal_id",
+            "pos_api_key",
+            "admin_dashboard_url",
+            "organization_id",
+            "branch_id",
+        ] {
+            assert!(crate::storage::get_credential_strict(key)
+                .unwrap()
+                .is_none());
+        }
+        let connection = database.state.conn.lock().expect("inspect fresh database");
+        for key in [
+            TERMINAL_CONNECTION_REBIND_PENDING_KEY,
+            TERMINAL_CONNECTION_REBIND_CANDIDATE_KEY,
+        ] {
+            assert!(crate::db::get_setting(&connection, "sync", key).is_none());
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn onboarding_candidate_uses_new_identity_while_preserving_existing_binding() {
+        let (_keyring, database) = onboarding_existing_binding();
+        let before = onboarding_state_snapshot(&database);
+        let server = crate::tests::fake_http::MockServer::new(
+            serde_json::json!({
+                "terminal_id": REBIND_NEW_TERMINAL,
+                "organization_id": REBIND_NEW_ORG,
+                "branch_id": REBIND_NEW_BRANCH,
+            })
+            .to_string(),
+        );
+        let candidate = validate_terminal_binding_candidate(&serde_json::json!({
+            "terminalId": REBIND_NEW_TERMINAL,
+            "apiKey": "test-fixture-key",
+            "adminDashboardUrl": server.url,
+            "organizationId": REPAIR_ORG,
+            "branchId": REPAIR_BRANCH,
+        }))
+        .await
+        .expect("candidate validation must not reuse the previous terminal header");
+        assert_eq!(candidate["organizationId"], REBIND_NEW_ORG);
+        assert_eq!(candidate["branchId"], REBIND_NEW_BRANCH);
+        let requests = server.recorded();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].header("x-terminal-id"),
+            Some(REBIND_NEW_TERMINAL)
+        );
+        assert_eq!(
+            requests[0].header("x-pos-api-key"),
+            Some("test-fixture-key")
+        );
+        assert_eq!(onboarding_state_snapshot(&database), before);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn onboarding_candidate_rejects_unverified_bindings_without_mutating_existing_state() {
+        let (_keyring, database) = onboarding_existing_binding();
+        let before = onboarding_state_snapshot(&database);
+        let valid = serde_json::json!({
+            "terminal_id": REBIND_NEW_TERMINAL,
+            "organization_id": REBIND_NEW_ORG,
+            "branch_id": REBIND_NEW_BRANCH,
+        });
+        for (field, value, expected) in [
+            (
+                "terminal_id",
+                serde_json::json!(REPAIR_TERMINAL),
+                "mismatched terminal binding",
+            ),
+            (
+                "source_terminal_id",
+                serde_json::json!(REPAIR_TERMINAL),
+                "mismatched terminal binding",
+            ),
+            (
+                "terminal_id",
+                serde_json::Value::Null,
+                "missing authoritative terminal binding",
+            ),
+            (
+                "organization_id",
+                serde_json::Value::Null,
+                "missing authoritative organization binding",
+            ),
+            (
+                "branch_id",
+                serde_json::json!("not-a-uuid"),
+                "invalid tenant binding",
+            ),
+        ] {
+            let mut response = valid.clone();
+            response[field] = value;
+            let server = crate::tests::fake_http::MockServer::new(response.to_string());
+            let error = validate_terminal_binding_candidate(&serde_json::json!({
+                "terminalId": REBIND_NEW_TERMINAL,
+                "apiKey": "test-fixture-key",
+                "adminDashboardUrl": server.url,
+            }))
+            .await
+            .expect_err("unverified candidate must not be published");
+            assert!(error.contains(expected), "{field}: {error}");
+            assert_eq!(server.count(), 1);
+            assert_eq!(onboarding_state_snapshot(&database), before);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn onboarding_candidate_preserves_source_identity_for_main_mobile_and_shared_modes() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        for (terminal_type, mode, owner) in [
+            ("main", "main_isolated", REBIND_NEW_TERMINAL),
+            ("mobile_waiter", "main_isolated", REPAIR_TERMINAL),
+            ("main", "legacy_branch_shared", REBIND_NEW_TERMINAL),
+        ] {
+            let server = crate::tests::fake_http::MockServer::new(
+                serde_json::json!({
+                    "source_terminal_id": REBIND_NEW_TERMINAL,
+                    "owner_terminal_id": owner,
+                    "terminal_type": terminal_type,
+                    "pos_operating_mode": mode,
+                    "organization_id": REBIND_NEW_ORG,
+                    "branch_id": REBIND_NEW_BRANCH,
+                })
+                .to_string(),
+            );
+            let candidate = validate_terminal_binding_candidate(&serde_json::json!({
+                "terminalId": REBIND_NEW_TERMINAL,
+                "apiKey": "test-fixture-key",
+                "adminDashboardUrl": server.url,
+            }))
+            .await
+            .expect("server source identity is authoritative, not its parent");
+            assert_eq!(candidate["terminalId"], REBIND_NEW_TERMINAL);
+            assert!(crate::tests::fake_keyring::is_empty());
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn onboarding_candidate_http_rejections_and_redirects_preserve_existing_state() {
+        let (_keyring, database) = onboarding_existing_binding();
+        let before = onboarding_state_snapshot(&database);
+        let redirect_target = crate::tests::fake_http::MockServer::new("{}");
+        for status in [401, 403, 500, 307] {
+            let (url, server) =
+                onboarding_response_server(status, Some(&redirect_target.url)).await;
+            let error = validate_terminal_binding_candidate(&serde_json::json!({
+                "terminalId": REBIND_NEW_TERMINAL,
+                "apiKey": "test-fixture-key",
+                "adminDashboardUrl": url,
+            }))
+            .await
+            .expect_err("failed server validation must not publish credentials");
+            assert!(error.contains(&format!("HTTP {status}")), "{error}");
+            let request = server.await.unwrap().to_ascii_lowercase();
+            assert!(request.contains("x-terminal-id: replacement-terminal\r\n"));
+            assert_eq!(
+                redirect_target.count(),
+                0,
+                "candidate credentials followed a redirect"
+            );
+            assert_eq!(onboarding_state_snapshot(&database), before);
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../../lib', () => ({
@@ -34,7 +34,11 @@ vi.mock('react-hot-toast', () => ({
 }));
 
 vi.mock('framer-motion', () => ({
+  useReducedMotion: () => true,
   motion: {
+    span: ({ children, animate: _animate, transition: _transition, ...props }: React.HTMLAttributes<HTMLSpanElement> & Record<string, unknown>) => (
+      <span {...props}>{children}</span>
+    ),
     div: ({ children, variants: _variants, initial: _initial, animate: _animate, ...props }: React.HTMLAttributes<HTMLDivElement> & Record<string, unknown>) => (
       <div {...props}>{children}</div>
     ),
@@ -55,6 +59,9 @@ import OnboardingPage from '../OnboardingPage';
 describe('OnboardingPage theme scope', () => {
   it('keeps the Local Recovery panel inside the page dark-theme scope', () => {
     render(<OnboardingPage />);
+
+    expect(screen.queryByText('Local Recovery')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Restore an existing terminal/ }));
 
     const recovery = screen.getByText('Local Recovery');
     const onboardingRoot = recovery.closest('.modern-scrollbar');

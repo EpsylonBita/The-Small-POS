@@ -17,7 +17,11 @@ test('OnboardingPage uses touch-first yellow setup styling without mojibake', ()
   assert.match(source, /bg-yellow-400 text-black font-semibold/);
   assert.match(source, /rounded-3xl/);
   assert.match(source, /rounded-2xl/);
-  assert.match(source, /defaultValue: 'Fran\\u00e7ais'/);
+  assert.match(source, /name: 'Français'/);
+  assert.match(source, /useReducedMotion/);
+  assert.match(source, /aria-expanded=\{recoveryOpen\}/);
+  assert.match(source, /htmlFor="onboarding-connection-code"/);
+  assert.doesNotMatch(source, /animate-spin|animate-pulse|backdrop-blur/);
   assert.doesNotMatch(source, /hover:/);
   assert.doesNotMatch(source, /bg-blue-|text-blue-|border-blue-|ring-blue-|focus:ring-blue/);
   assert.doesNotMatch(source, /FranÃ|Â|â|ð|�/);

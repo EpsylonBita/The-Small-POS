@@ -539,6 +539,53 @@ fn resolve_terminal_id(api_key: &str) -> Result<String, AdminFetchError> {
     Ok(terminal_id)
 }
 
+/// Validate an unpublished connection tuple against its own settings endpoint.
+///
+/// Onboarding cannot use the runtime transport: that transport requires an
+/// already-published managed terminal ID. Keep this exception limited to one
+/// GET, with no credential-store access, arbitrary path/body, or redirects.
+/// The caller must verify the returned terminal and tenant binding before
+/// publishing anything. Ordinary runtime fetches still use resolve_terminal_id.
+pub(crate) async fn fetch_candidate_terminal_settings(
+    admin_url: &str,
+    api_key: &str,
+    terminal_id: &str,
+) -> Result<Value, String> {
+    let base = resolve_admin_base(admin_url).map_err(|error| error.to_string())?;
+    if terminal_id.trim().is_empty() || matches!(terminal_id, "." | "..") {
+        return Err("Invalid candidate terminal ID".to_string());
+    }
+    let mut endpoint = url::Url::parse(&base).map_err(|_| "Invalid admin URL origin")?;
+    endpoint
+        .path_segments_mut()
+        .map_err(|_| "Invalid admin URL origin")?
+        .clear()
+        .extend(["api", "pos", "settings", terminal_id]);
+    // Pairing is rare; its dedicated client prevents a redirect from forwarding
+    // the candidate API key to another endpoint or origin.
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| format!("build candidate reqwest Client: {error}"))?;
+    let mut response = pos_request(&client, Method::GET, endpoint.as_str())
+        .timeout(DEFAULT_TIMEOUT)
+        .header("X-POS-API-Key", api_key)
+        .header("x-terminal-id", terminal_id)
+        .header("Content-Type", "application/json")
+        .send()
+        .await
+        .map_err(|error| friendly_error(&base, &error))?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = read_capped_error_body(&mut response).await;
+        return Err(admin_http_error_from_body(status, &body).to_string());
+    }
+    read_success_json(response)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 /// Read an error response body, capped at 64 KB.
 ///
 /// Preserves validation details for diagnostics and sync queue visibility,
@@ -822,6 +869,77 @@ pub async fn fetch_raw_from_admin_detailed(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn onboarding_candidate_does_not_relax_runtime_terminal_authentication() {
+        let server = crate::tests::fake_http::MockServer::new("{}");
+        {
+            let _keyring = crate::tests::fake_keyring::install_empty();
+            let error = fetch_from_admin(
+                &server.url,
+                "fixture-key",
+                "/api/pos/settings/new-terminal",
+                "GET",
+                None,
+            )
+            .await
+            .expect_err("normal runtime fetch still requires managed identity");
+            assert_eq!(error, "Terminal not configured: missing terminal_id");
+        }
+        {
+            let _keyring =
+                crate::tests::fake_keyring::install_seeded([("terminal_id", "old-terminal")]);
+            let connection =
+                json!({"key": "fixture-key", "tid": "new-terminal", "url": server.url}).to_string();
+            let error = fetch_from_admin(
+                &server.url,
+                &connection,
+                "/api/pos/settings/new-terminal",
+                "GET",
+                None,
+            )
+            .await
+            .expect_err("normal runtime fetch still rejects conflicting connection tuples");
+            assert_eq!(error, "TERMINAL_CONNECTION_TUPLE_CONFLICT");
+        }
+        assert_eq!(
+            server.count(),
+            0,
+            "runtime authentication failures must occur before HTTP"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn onboarding_candidate_transport_confines_identity_to_one_settings_path_segment() {
+        let server = crate::tests::fake_http::MockServer::new("{}");
+        fetch_candidate_terminal_settings(&server.url, "fixture-key", "candidate/../other?x#y")
+            .await
+            .expect("candidate ID must be encoded as one path segment");
+        let requests = server.recorded();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(
+            requests[0].path,
+            "/api/pos/settings/candidate%2F..%2Fother%3Fx%23y"
+        );
+        for terminal_id in ["", ".", ".."] {
+            assert!(
+                fetch_candidate_terminal_settings(&server.url, "fixture-key", terminal_id)
+                    .await
+                    .is_err()
+            );
+        }
+        let error =
+            fetch_candidate_terminal_settings("http://192.0.2.1", "fixture-key", "candidate")
+                .await
+                .expect_err("candidate transport must retain the HTTPS boundary");
+        assert!(error.contains("Refusing non-local plain HTTP"));
+        assert_eq!(
+            server.count(),
+            1,
+            "invalid candidate requests must not reach HTTP"
+        );
+    }
 
     #[test]
     fn pos_request_applies_the_packaged_version_header() {

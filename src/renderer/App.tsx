@@ -278,17 +278,23 @@ async function enrichSessionUserWithOrganization(userData: any): Promise<any> {
   };
 }
 
-function ConfigGuard({ children }: { children: React.ReactNode }) {
+export function ConfigGuard({ children }: { children: React.ReactNode }) {
   const { t } = useI18n();
   const bridge = getBridge();
   const [isConfigured, setIsConfigured] = useState<boolean | null>(null);
+  const configuredState = useRef<boolean | null>(null);
+  const updateConfiguredState = useCallback((configured: boolean) => {
+    // Native lifecycle events can arrive in the same React batch as a reset.
+    configuredState.current = configured;
+    setIsConfigured(configured);
+  }, []);
 
   // Check configuration status on startup and sync credentials to in-memory cache
   useEffect(() => {
     const checkConfiguration = async () => {
       if (isBrowser()) {
         // Non-native environment (dev), assume configured
-        setIsConfigured(true);
+        updateConfiguredState(true);
         return;
       }
       try {
@@ -321,7 +327,7 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
         
         console.log('[ConfigGuard] Parsed: configured=%s, reason=%s', isConfiguredValue, reason);
         setConfiguredTerminalHint(Boolean(isConfiguredValue));
-        setIsConfigured(isConfiguredValue);
+        updateConfiguredState(isConfiguredValue);
         console.log('[ConfigGuard] isConfigured set to:', isConfiguredValue);
 
         // If not configured, ensure we clear any stale session data
@@ -391,12 +397,12 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
           fallbackConfigured,
         });
         setConfiguredTerminalHint(fallbackConfigured);
-        setIsConfigured(fallbackConfigured);
+        updateConfiguredState(fallbackConfigured);
       }
     };
 
     checkConfiguration();
-  }, [bridge.settings, bridge.terminalConfig]);
+  }, [bridge.settings, bridge.terminalConfig, updateConfiguredState]);
 
   // Listen for app:reset event (remote wipe / terminal deleted)
   useEffect(() => {
@@ -418,7 +424,7 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
       clearTerminalCredentialCache();
       setConfiguredTerminalHint(false);
 
-      setIsConfigured(false);
+      updateConfiguredState(false);
 
       toast.error(presentation.message, {
         duration: 8000,
@@ -431,10 +437,13 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
     return () => {
       offEvent('app:reset', handleReset);
     };
-  }, [t]);
+  }, [t, updateConfiguredState]);
 
   useEffect(() => {
     const handleTerminalAuthPaused = (data: any) => {
+      // A failed onboarding request reports its own error and retry action.
+      // An auth-pause event is not evidence that initial setup succeeded.
+      if (configuredState.current !== true) return;
       console.warn('[ConfigGuard] Remote auth paused due to terminal identity drift:', data);
 
       const presentation = resolveTerminalAuthPausePresentation(data ?? {}, t as never);
@@ -445,7 +454,6 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
       }
 
       setConfiguredTerminalHint(true);
-      setIsConfigured(true);
 
       const cached = getCachedTerminalCredentials();
       setSupabaseContext({
@@ -572,7 +580,7 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
       if (organizationId) {
         updateTerminalCredentialCache({ organizationId });
       }
-      setConfiguredTerminalHint(true);
+      if (configuredState.current === true) setConfiguredTerminalHint(true);
       const cached = getCachedTerminalCredentials();
       setSupabaseContext({
         terminalId: cached.terminalId || undefined,
@@ -607,7 +615,7 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
       if (data?.organization_id) {
         updateTerminalCredentialCache({ organizationId: data.organization_id });
       }
-      setConfiguredTerminalHint(true);
+      if (configuredState.current === true) setConfiguredTerminalHint(true);
       const cached = getCachedTerminalCredentials();
       setSupabaseContext({
         terminalId: cached.terminalId || undefined,
