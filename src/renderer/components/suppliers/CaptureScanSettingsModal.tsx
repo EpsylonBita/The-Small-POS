@@ -99,6 +99,9 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
   const [devices, setDevices] = useState<ScannerDevice[]>([]);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
+  // The driver's own words for the failure, shown under the sentence so the
+  // next "it did not answer" can be read off the screen instead of a log file.
+  const [problemDetail, setProblemDetail] = useState<string | null>(null);
   const [testImage, setTestImage] = useState<string | null>(null);
   const [friendlyName, setFriendlyName] = useState('');
   const [makeDefault, setMakeDefault] = useState(true);
@@ -147,6 +150,7 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
     if (isOpen) return;
     setStep({ kind: 'list' });
     setProblem(null);
+    setProblemDetail(null);
     setTestImage(null);
     setFolderArrived(false);
     setConfirmForgetId(null);
@@ -217,12 +221,14 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
   const startScannerFlow = useCallback(async () => {
     setBusy(true);
     setProblem(null);
+    setProblemDetail(null);
     setStep({ kind: 'pick_scanner' });
     try {
       const outcome = await listScanners();
       if (!outcome.ok) {
         setDevices([]);
         setProblem(t(deviceKey(outcome.code), t('suppliers.capture.device.device_error', 'The scanner did not answer. Check it is on and connected.')));
+        setProblemDetail(outcome.detail ?? null);
         return;
       }
       setDevices(outcome.devices);
@@ -235,12 +241,14 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
     async (device: ScannerDevice) => {
       setBusy(true);
       setProblem(null);
+      setProblemDetail(null);
       setTestImage(null);
       setStep({ kind: 'test_scanner', device });
       try {
         const outcome = await testScanner(device.deviceId);
         if (!outcome.ok) {
           setProblem(t(deviceKey(outcome.code), t('suppliers.capture.device.device_error', 'The scanner did not answer. Check it is on and connected.')));
+          setProblemDetail(outcome.detail ?? null);
           return;
         }
         setTestImage(await getCaptureTestPreview(outcome.path));
@@ -273,6 +281,7 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
   const addWatchedFolder = useCallback(async () => {
     setBusy(true);
     setProblem(null);
+    setProblemDetail(null);
     try {
       const { open } = await import('@tauri-apps/plugin-dialog');
       const picked = await open({ directory: true, multiple: false });
@@ -675,7 +684,14 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
               }`}
             >
               <AlertCircle className="h-4 w-4 shrink-0" />
-              <span>{problem}</span>
+              <span className="min-w-0 flex-1">
+                {problem}
+                {problemDetail && (
+                  <span className="mt-1 block break-words text-xs opacity-80" data-testid="capture-problem-detail">
+                    {t('suppliers.capture.settings.problemDetail', 'What the scanner said: {{detail}}', { detail: problemDetail })}
+                  </span>
+                )}
+              </span>
             </div>
           )}
 
@@ -693,6 +709,7 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
               onClick={() => {
                 setStep({ kind: 'list' });
                 setProblem(null);
+                setProblemDetail(null);
                 setTestImage(null);
               }}
               className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-4 text-sm font-semibold ${secondaryButtonClass}`}

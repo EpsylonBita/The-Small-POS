@@ -5584,6 +5584,7 @@
         "looking": "Looking for machines…",
         "noDevices": "We could not find a scanner here.",
         "noDevicesHint": "No problem — most machines can save scans straight into a folder. Point us at that folder instead.",
+        "problemDetail": "What the scanner said: {{detail}}",
         "testing": "We asked it for one test page. Here it is:",
         "testInProgress": "Scanning a test page…",
         "testImageAlt": "Test page",

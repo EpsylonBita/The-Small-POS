@@ -283,7 +283,18 @@ export interface ScannerDevice {
  */
 export type ScannerOutcome<T> =
   | ({ ok: true } & T)
-  | { ok: false; code: string };
+  | {
+      ok: false;
+      code: string;
+      /**
+       * What the driver actually said — "decode scanned page: The image format
+       * Bmp is not supported", "the scanner produced no page", a Windows error
+       * code. Live 06/09/2026 this was logged and thrown away, and the screen
+       * blamed the cable for a scan that had physically happened. It is shown
+       * under the plain sentence, never instead of it.
+       */
+      detail?: string;
+    };
 
 function toOutcome<T extends object>(
   result: CommandEnvelope,
@@ -292,7 +303,12 @@ function toOutcome<T extends object>(
   if (result.success === true) {
     return { ok: true, ...extract(result) };
   }
-  return { ok: false, code: typeof result.code === 'string' ? result.code : 'device_error' };
+  const detail = typeof result.detail === 'string' ? result.detail.trim() : '';
+  return {
+    ok: false,
+    code: typeof result.code === 'string' ? result.code : 'device_error',
+    ...(detail ? { detail } : {}),
+  };
 }
 
 /** Scanners this terminal can see. An empty list is a success, not an error. */

@@ -651,10 +651,10 @@ impl WiaHost {
         self.starts.load(Ordering::SeqCst)
     }
 
-    /// Discovered scanners (R2.1).
+    /// Discovered scanners (R2.1), the entry that scans first.
     pub fn list_devices(&self) -> Result<Vec<ScannerDeviceInfo>, ScanError> {
         match self.execute(HostRequest::List)? {
-            HostReply::Devices(devices) => Ok(devices),
+            HostReply::Devices(devices) => Ok(order_for_picker(devices)),
             other => Err(unexpected_reply(&other)),
         }
     }
@@ -943,6 +943,23 @@ pub fn is_escl_scanner(device_id: &str) -> bool {
 /// "the scanner did not answer".
 pub fn is_scanner_device(device_type: i32, device_id: &str) -> bool {
     is_scanner_device_type(device_type) || is_escl_scanner(device_id)
+}
+
+/// The order the picker shows discovered scanners in: driverless eSCL entries
+/// first, everything else after, otherwise as discovered.
+///
+/// Live 06/09/2026 at the till (HP DeskJet Ink Advantage 3788 over the LAN):
+/// the device appears twice, as documented on `is_scanner_device`, and the WSD
+/// entry (`Type = 1`) that lists first is the one that cannot scan the glass —
+/// picking it ends in "the scanner produced no page". The eSCL entry is the
+/// one that scans. A person picks the first row that names their printer, so
+/// the row that works has to be that row.
+pub fn order_for_picker(devices: Vec<ScannerDeviceInfo>) -> Vec<ScannerDeviceInfo> {
+    let (mut escl, mut rest): (Vec<_>, Vec<_>) = devices
+        .into_iter()
+        .partition(|device| is_escl_scanner(&device.device_id));
+    escl.append(&mut rest);
+    escl
 }
 
 #[cfg(windows)]
@@ -1847,6 +1864,62 @@ mod tests {
         // Device ids are not case-normalised by Windows.
         assert!(is_escl_scanner(r"swd\escl\807a6605-07cc-d481"));
         assert!(is_escl_scanner(r"SWD\ESCL\807a6605-07cc-d481"));
+    }
+
+    #[test]
+    fn discovery_lists_the_escl_entry_before_the_wsd_twin() {
+        // The founder's till, 06/09/2026: WIA enumerated the WSD entry first,
+        // the person picked it, and the test scan ended in "no page". The eSCL
+        // twin is the one that scans, so it is the first row of the picker.
+        let discovered = vec![
+            ScannerDeviceInfo {
+                device_id: REAL_WSD_SCANNER_ID.to_string(),
+                name: "HPB9C03B (HP DeskJet 3700 series)".to_string(),
+            },
+            ScannerDeviceInfo {
+                device_id: REAL_ESCL_ID.to_string(),
+                name: "HP DeskJet 3700 series [B9C03B]".to_string(),
+            },
+        ];
+        let ordered = order_for_picker(discovered);
+        assert_eq!(ordered[0].device_id, REAL_ESCL_ID);
+        assert_eq!(ordered[1].device_id, REAL_WSD_SCANNER_ID);
+
+        // Stable for everyone else: two plain scanners keep their order.
+        let plain = vec![
+            ScannerDeviceInfo {
+                device_id: "{A}\\0000".to_string(),
+                name: "A".to_string(),
+            },
+            ScannerDeviceInfo {
+                device_id: "{B}\\0000".to_string(),
+                name: "B".to_string(),
+            },
+        ];
+        let kept = order_for_picker(plain);
+        assert_eq!(kept[0].name, "A");
+        assert_eq!(kept[1].name, "B");
+    }
+
+    #[test]
+    fn a_bmp_or_tiff_transfer_normalizes_like_a_png() {
+        // Live 06/09/2026: the HP DeskJet Ink Advantage 3788 answered every
+        // eSCL transfer with BMP, and the build had no BMP decoder — so a scan
+        // that physically happened ended in "The image format Bmp is not
+        // supported". A driver that ignores the requested format is the normal
+        // case, not the exception; every format WIA can hand back must decode.
+        for format in [image::ImageFormat::Bmp, image::ImageFormat::Tiff] {
+            let bytes = encode(format);
+            let jpeg = normalize_to_jpeg(&bytes)
+                .unwrap_or_else(|e| panic!("{format:?} must normalize: {e}"));
+            let decoded = image::load_from_memory(&jpeg).expect("normalized page decodes");
+            assert_eq!(decoded.width(), 2);
+            assert_eq!(decoded.height(), 2);
+            assert_eq!(
+                image::guess_format(&jpeg).expect("guess"),
+                image::ImageFormat::Jpeg
+            );
+        }
     }
 
     #[test]

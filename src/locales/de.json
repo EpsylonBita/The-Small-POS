@@ -5584,6 +5584,7 @@
         "looking": "Suche nach Geräten…",
         "noDevices": "Wir haben hier keinen Scanner gefunden.",
         "noDevicesHint": "Kein Problem — die meisten Geräte legen Scans direkt in einen Ordner. Zeigen Sie uns stattdessen diesen Ordner.",
+        "problemDetail": "Was der Scanner gemeldet hat: {{detail}}",
         "testing": "Wir haben eine Testseite angefordert. Hier ist sie:",
         "testInProgress": "Testseite wird gescannt…",
         "testImageAlt": "Testseite",

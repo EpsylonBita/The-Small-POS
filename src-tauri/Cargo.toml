@@ -1,6 +1,6 @@
 [package]
 name = "the-small-pos"
-version = "1.4.100"
+version = "1.4.101"
 description = "The Small POS - Desktop point-of-sale (Tauri v2)"
 authors = ["The Small Team <dev@thesmall.app>"]
 edition = "2021"
@@ -45,7 +45,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
 ring = "0.17"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# bmp + tiff: what a WIA driver hands back when it ignores the requested
+# format. Live 06/09/2026, HP DeskJet Ink Advantage 3788 over eSCL: every
+# scan came back BMP and failed "The image format Bmp is not supported".
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "tiff"] }
 font8x8 = { version = "0.3", default-features = false, features = ["unicode"] }
 rusttype = "0.9"
 

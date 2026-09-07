@@ -5584,6 +5584,7 @@
         "looking": "Recherche des machines…",
         "noDevices": "Nous n'avons trouvé aucun scanner ici.",
         "noDevicesHint": "Pas de souci — la plupart des machines enregistrent les scans directement dans un dossier. Indiquez-nous plutôt ce dossier.",
+        "problemDetail": "Ce que le scanner a répondu : {{detail}}",
         "testing": "Nous lui avons demandé une page de test. La voici :",
         "testInProgress": "Scan d'une page de test…",
         "testImageAlt": "Page de test",
