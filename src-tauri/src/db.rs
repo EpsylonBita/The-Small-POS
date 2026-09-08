@@ -47,7 +47,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-pub(crate) const CURRENT_SCHEMA_VERSION: i32 = 80;
+pub(crate) const CURRENT_SCHEMA_VERSION: i32 = 81;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -671,17 +671,55 @@ where
     if current < 80 {
         run_migration_tx(conn, 80, migrate_v80)?;
     }
+    if current < 81 {
+        run_migration_tx(conn, 81, migrate_v81)?;
+    }
 
     Ok(())
 }
 
-/// Migration v80: the customer's own order note.
-///
-/// The local `orders` table has carried `delivery_notes` and
-/// `special_instructions` since v1, but never `notes` — the column the server
-/// stores a customer's order-level note in. A kiosk customer typing «χωρίς
-/// ζάχαρη» had it dropped at sync, so it could never reach the slip.
-/// Additive and idempotent; nothing reads it until sync starts filling it.
+/// Migration v81: durable table/check and item ownership for payment mirrors.
+fn migrate_v81(conn: &Connection) -> Result<(), String> {
+    for (table, column, kind) in [
+        ("order_payments", "table_session_id", "TEXT"),
+        ("order_payments", "seat_number", "INTEGER"),
+        ("payment_items", "order_item_id", "TEXT"),
+    ] {
+        if !column_exists(conn, table, column)? {
+            conn.execute(
+                &format!("ALTER TABLE {table} ADD COLUMN {column} {kind}"),
+                [],
+            )
+            .map_err(|error| format!("v81 add {table}.{column}: {error}"))?;
+        }
+    }
+    // Recover only explicit payment ownership from its durable queue payload.
+    // The order's current table is unsafe: a split order spans several checks.
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_payment_table_session
+             ON order_payments(order_id, table_session_id);
+         UPDATE order_payments AS p SET
+           table_session_id = COALESCE(table_session_id, (
+             SELECT COALESCE(json_extract(q.data, '$.tableSessionId'), json_extract(q.data, '$.table_session_id'))
+             FROM parity_sync_queue q WHERE q.table_name = 'payments' AND q.record_id = p.id
+               AND json_valid(q.data) ORDER BY q.created_at DESC LIMIT 1)),
+           seat_number = COALESCE(seat_number, (
+             SELECT COALESCE(json_extract(q.data, '$.seatNumber'), json_extract(q.data, '$.seat_number'))
+             FROM parity_sync_queue q WHERE q.table_name = 'payments' AND q.record_id = p.id
+               AND json_valid(q.data) ORDER BY q.created_at DESC LIMIT 1));
+         UPDATE payment_items AS pi SET order_item_id = (
+           SELECT COALESCE(json_extract(i.value, '$.order_item_id'), json_extract(i.value, '$.orderItemId'))
+           FROM parity_sync_queue q, json_each(CASE WHEN json_valid(q.data) THEN q.data ELSE '{}' END, '$.items') i
+           WHERE q.table_name = 'payments' AND q.record_id = pi.payment_id
+             AND COALESCE(json_extract(i.value, '$.itemIndex'), json_extract(i.value, '$.item_index')) = pi.item_index
+           ORDER BY q.created_at DESC LIMIT 1)
+         WHERE order_item_id IS NULL;
+         INSERT OR IGNORE INTO schema_version (version) VALUES (81);"
+    ).map_err(|error| format!("v81 preserve table payment identity: {error}"))?;
+    Ok(())
+}
+
+/// Migration v80: the customer's own order note, distinct from delivery notes.
 fn migrate_v80(conn: &Connection) -> Result<(), String> {
     if !column_exists(conn, "orders", "notes")? {
         conn.execute("ALTER TABLE orders ADD COLUMN notes TEXT", [])
@@ -705,7 +743,7 @@ enum PreMigrationRecoveryMode {
     NativeRepairAtomicOnly,
 }
 
-const NATIVE_REPAIR_ATOMIC_MIGRATION_ALLOWLIST: &[i32] = &[56, 75, 76, 77, 78, 79, 80];
+const NATIVE_REPAIR_ATOMIC_MIGRATION_ALLOWLIST: &[i32] = &[56, 75, 76, 77, 78, 79, 80, 81];
 
 fn computed_pending_migrations(
     current: i32,
@@ -7962,10 +8000,17 @@ mod tests {
     fn migration_v79_native_repair_atomic_only_policy_uses_computed_explicit_allowlist() {
         assert_eq!(
             computed_pending_migrations(75, true, false),
-            vec![56, 76, 77, 78, 79, 80]
+            vec![56, 76, 77, 78, 79, 80, 81]
         );
-        assert_eq!(computed_pending_migrations(78, false, false), vec![79, 80]);
-        assert_eq!(computed_pending_migrations(79, false, true), vec![79, 80]);
+        assert_eq!(
+            computed_pending_migrations(78, false, false),
+            vec![79, 80, 81]
+        );
+        assert_eq!(
+            computed_pending_migrations(79, false, true),
+            vec![79, 80, 81]
+        );
+        assert!(native_repair_atomic_only_allowed(80, &[81]));
 
         assert!(native_repair_atomic_only_allowed(75, &[56, 76, 77, 78, 79]));
         assert!(native_repair_atomic_only_allowed(78, &[79]));
@@ -8995,53 +9040,14 @@ mod tests {
 
     #[test]
     fn test_migrations_repair_missing_v56_after_later_versions_applied() {
-        let (_tmp, conn) = file_db();
+        // Use an actual later schema, with only the historical v56 gap removed.
+        // A partial hand-written schema hides dependencies of later migrations.
+        let (_tmp, conn) = current_file_fixture();
         conn.execute_batch(
-            "
-            CREATE TABLE schema_version (
-                version INTEGER PRIMARY KEY,
-                applied_at TEXT DEFAULT (datetime('now'))
-            );
-            INSERT INTO schema_version (version) VALUES (58);
-
-            CREATE TABLE local_settings (
-                id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
-                setting_category TEXT NOT NULL,
-                setting_key TEXT NOT NULL,
-                setting_value TEXT NOT NULL,
-                last_sync TEXT DEFAULT '',
-                created_at TEXT DEFAULT (datetime('now')),
-                updated_at TEXT DEFAULT (datetime('now')),
-                UNIQUE(setting_category, setting_key)
-            );
-
-            CREATE TABLE orders (
-                id TEXT PRIMARY KEY
-            );
-
-            CREATE TABLE parity_sync_queue (
-                id              TEXT PRIMARY KEY,
-                table_name      TEXT NOT NULL,
-                record_id       TEXT NOT NULL,
-                operation       TEXT NOT NULL CHECK (operation IN ('INSERT', 'UPDATE', 'DELETE')),
-                data            TEXT NOT NULL,
-                organization_id TEXT NOT NULL,
-                created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-                attempts        INTEGER NOT NULL DEFAULT 0,
-                last_attempt    TEXT,
-                error_message   TEXT,
-                next_retry_at   TEXT,
-                retry_delay_ms  INTEGER NOT NULL DEFAULT 1000,
-                priority        INTEGER NOT NULL DEFAULT 0,
-                module_type     TEXT NOT NULL DEFAULT 'orders',
-                conflict_strategy TEXT NOT NULL DEFAULT 'server-wins',
-                version         INTEGER NOT NULL DEFAULT 1,
-                status          TEXT NOT NULL DEFAULT 'pending'
-                    CHECK (status IN ('pending', 'processing', 'failed', 'conflict'))
-            );
-            ",
+            "ALTER TABLE parity_sync_queue DROP COLUMN claim_generation;
+            DELETE FROM schema_version WHERE version = 56;",
         )
-        .expect("seed schema with v56 gap");
+        .expect("seed a historical v56 gap in a later database");
 
         run_migrations(&conn).expect("migrations should repair v56 gap");
 

@@ -160,16 +160,16 @@ test('menu modal cards and cart keep the compact glass layout', () => {
   assert.doesNotMatch(cartSource, /: 'bg-blue-600 text-white hover:bg-blue-700 hover:scale-\[1\.02\]'/);
 });
 
-test('menu modal keeps search in the title bar and cards expose hold preview details', () => {
+test('menu modal keeps search below the wrapping title and cards expose hold preview details', () => {
   const cardSource = readFileSync(itemCardPath, 'utf8');
   const gridSource = readFileSync(itemGridPath, 'utf8');
   const modalSource = readFileSync(menuModalPath, 'utf8');
 
-  // Title is shrinkable + truncating (no longer flex-shrink-0) so a long edit title
-  // can't push the centered modal off the viewport.
-  assert.match(modalSource, /liquid-glass-modal-title text-xl flex items-center gap-2 min-w-0/);
+  // Long edit titles wrap and search has a full-width second row.
+  assert.match(modalSource, /liquid-glass-modal-title text-xl flex flex-wrap items-center gap-2 min-w-0/);
+  assert.match(modalSource, /whitespace-normal break-words/);
   assert.match(modalSource, /ref=\{menuSearchRef\}/);
-  assert.match(modalSource, /min-w-\[14rem\] max-w-2xl flex-1/);
+  assert.match(modalSource, /relative min-w-0 col-span-2 row-start-2/);
   assert.match(modalSource, /focus:border-yellow-400\/70 focus:outline-none focus:ring-1 focus:ring-yellow-400/);
   // Round 251: the selected-customer pill + icon are now green semantic (was blue); blue guards below.
   assert.match(modalSource, /border border-green-500\/40 bg-transparent px-3 py-1\.5 text-sm text-white/);

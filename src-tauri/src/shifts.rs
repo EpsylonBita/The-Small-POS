@@ -196,6 +196,11 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
     let role_type = str_field(payload, "roleType")
         .or_else(|| str_field(payload, "role_type"))
         .unwrap_or_else(|| "cashier".to_string());
+    let role_type = match role_type.trim().to_ascii_lowercase().as_str() {
+        "waiter" => "server".to_string(),
+        role @ ("cashier" | "manager" | "driver" | "kitchen" | "server") => role.to_string(),
+        _ => return Err("UNSUPPORTED_SHIFT_ROLE".to_string()),
+    };
     let staff_name = str_field(payload, "staffName").or_else(|| str_field(payload, "staff_name"));
     let requested_opening_cash = num_field(payload, "openingCash")
         .or_else(|| num_field(payload, "opening_cash"))
@@ -886,7 +891,7 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                  LEFT JOIN order_payments op ON op.order_id = o.id
                  WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
                    AND op.method = 'cash'
-                   AND op.status = 'completed'
+                   AND op.status IN ('completed', 'refunded')
                    AND COALESCE(o.is_ghost, 0) = 0
                    AND COALESCE(o.is_test, 0) = 0
                    AND LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'canceled')
@@ -905,7 +910,7 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                  LEFT JOIN order_payments op ON op.order_id = o.id
                  WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
                    AND op.method = 'card'
-                   AND op.status = 'completed'
+                   AND op.status IN ('completed', 'refunded')
                    AND COALESCE(o.is_ghost, 0) = 0
                    AND COALESCE(o.is_test, 0) = 0
                    AND LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'canceled')
@@ -1231,27 +1236,8 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         }
 
         // Compute staff earnings for this shift (all role types)
-        let (order_count, total_sales, shift_cash_sales, shift_card_sales): (i64, f64, f64, f64) =
-            conn.query_row(
-                &format!(
-                    "SELECT
-                    COUNT(DISTINCT o.id),
-                    COALESCE(SUM(o.total_amount), 0),
-                    COALESCE(SUM(CASE WHEN op.method = 'cash' THEN op.amount ELSE 0 END), 0),
-                    COALESCE(SUM(CASE WHEN op.method = 'card' THEN op.amount ELSE 0 END), 0)
-                 FROM orders o
-                 LEFT JOIN order_payments op ON op.order_id = o.id AND op.status = 'completed'
-                 WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
-                   AND COALESCE(o.is_ghost, 0) = 0
-                   AND COALESCE(o.is_test, 0) = 0
-                   AND o.status NOT IN ('cancelled', 'canceled')
-                   AND {order_financial_expr} >= ?2
-                   AND {order_financial_expr} <= ?3"
-                ),
-                params![shift_id, shift_check_in_time, now],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .unwrap_or((0, 0.0, 0.0, 0.0));
+        let (order_count, shift_cash_sales, shift_card_sales, total_sales) =
+            compute_shift_close_totals(&conn, &shift_id, &role_type, &shift_check_in_time, &now)?;
 
         // Update the shift record (W4c dual-write: 7 monetary columns mirror).
         // Note: `closing_cash_to_persist_cents`, `expected_cents`, `variance_cents`
@@ -1756,9 +1742,9 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
          FROM order_payments op
          JOIN orders o ON o.id = op.order_id
          WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
-           AND op.status = 'completed'
+           AND op.status IN ('completed', 'refunded')
            AND COALESCE(o.is_ghost, 0) = 0
-           AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
+           AND o.status NOT IN ('cancelled', 'canceled')
            {}
            AND {order_financial_expr} >= ?2
            AND (?3 IS NULL OR {order_financial_expr} <= ?3)
@@ -1794,6 +1780,15 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
         rows.iter().filter(|r| f(r)).map(|r| r.2).sum()
     };
 
+    let summary_now = Utc::now().to_rfc3339();
+    let (order_count, _, _, order_sales) = compute_shift_close_totals(
+        &conn,
+        shift_id,
+        &role_type,
+        &check_in_time,
+        shift_end_param.unwrap_or(&summary_now),
+    )?;
+
     let breakdown = serde_json::json!({
         "instore": {
             "cashTotal": sum_by(&|r| is_instore(&r.0) && r.1 == "cash"),
@@ -1810,8 +1805,8 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
         "overall": {
             "cashTotal": sum_by(&|r| r.1 == "cash"),
             "cardTotal": sum_by(&|r| r.1 == "card"),
-            "totalCount": count_by(&|_| true),
-            "totalAmount": sum_by(&|_| true),
+            "totalCount": order_count,
+            "totalAmount": order_sales,
         }
     });
 
@@ -2770,33 +2765,42 @@ pub(crate) fn recompute_closed_cashier_shift_financial_snapshot(
         reconciled_cash_sales,
         reconciled_card_sales,
         reconciled_total_sales,
-    ) = compute_shift_payment_totals_in_window(
+    ) = compute_shift_close_totals(
         conn,
         shift_id,
         &role_type,
-        Some(check_in_time.as_str()),
-        Some(check_out_time.as_str()),
+        check_in_time.as_str(),
+        check_out_time.as_str(),
     )?;
 
     // W4b-ii: cents-with-real-fallback shim (removed in 4e).
     let reconciled_refunds: f64 = conn
-        .query_row(
-            &format!(
-                "SELECT COALESCE(SUM(COALESCE(pa.amount_cents, CAST(ROUND(pa.amount * 100) AS INTEGER))), 0)
+                .query_row(
+                    &format!(
+                        "SELECT COALESCE(SUM(COALESCE(pa.amount_cents, CAST(ROUND(pa.amount * 100) AS INTEGER))), 0)
                  FROM orders o
                  JOIN payment_adjustments pa ON pa.order_id = o.id
                  LEFT JOIN order_payments op ON op.id = pa.payment_id
-                 WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
-                   AND pa.adjustment_type = 'refund'
+                 WHERE pa.adjustment_type = 'refund'
+                   AND COALESCE(pa.refund_method, 'cash') = 'cash'
                    AND COALESCE(o.is_ghost, 0) = 0
-                   AND {order_financial_expr} >= ?2
-                   AND {order_financial_expr} <= ?3"
-            ),
-            params![shift_id, check_in_time, check_out_time],
-            |row| row.get::<_, i64>(0).map(|c| Cents::new(c).to_f64_dp2()),
-        )
-        .unwrap_or(0.0);
-
+                   AND (
+                        (COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
+                         AND LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'canceled')
+                         AND {order_financial_expr} >= ?2
+                         AND {order_financial_expr} <= ?3)
+                     OR (pa.cash_handler = 'cashier_drawer'
+                         AND (COALESCE(op.staff_shift_id, o.staff_shift_id) IS NULL
+                              OR COALESCE(op.staff_shift_id, o.staff_shift_id) <> ?1
+                              OR LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'canceled'))
+                         AND pa.created_at >= ?2
+                         AND pa.created_at <= ?3)
+                   )"
+                    ),
+                    params![shift_id, check_in_time, check_out_time],
+                    |row| row.get::<_, i64>(0).map(|c| Cents::new(c).to_f64_dp2()),
+                )
+                .unwrap_or(0.0);
     let reconciled_expenses: f64 = conn
         .query_row(
             "SELECT COALESCE(SUM(COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER))), 0)
@@ -3753,6 +3757,45 @@ fn role_order_type_filter_sql(role_type: &str, order_alias: &str) -> String {
         "server" => format!("AND COALESCE({order_alias}.order_type, 'dine-in') != 'delivery'"),
         _ => String::new(),
     }
+}
+
+/// Collections are gross: refund payouts are deducted separately by the drawer.
+/// Group before summing order totals so split payments never multiply a sale.
+fn compute_shift_close_totals(
+    conn: &rusqlite::Connection,
+    shift_id: &str,
+    role_type: &str,
+    window_start: &str,
+    window_end: &str,
+) -> Result<(i64, f64, f64, f64), String> {
+    let financial_expr = business_day::order_financial_timestamp_expr("o");
+    let sql = format!(
+        "SELECT COUNT(*), COALESCE(SUM(cash), 0), COALESCE(SUM(card), 0), COALESCE(SUM(total), 0)
+         FROM (
+             SELECT o.id,
+                 MAX(COALESCE(o.total_amount_cents, CAST(ROUND(o.total_amount * 100) AS INTEGER), 0)) AS total,
+                 SUM(CASE WHEN op.method = 'cash' THEN COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0) ELSE 0 END) AS cash,
+                 SUM(CASE WHEN op.method = 'card' THEN COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0) ELSE 0 END) AS card
+             FROM orders o
+             LEFT JOIN order_payments op ON op.order_id = o.id AND op.status IN ('completed', 'refunded')
+             WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
+                 AND COALESCE(o.is_ghost, 0) = 0 AND COALESCE(o.is_test, 0) = 0
+                 AND o.status NOT IN ('cancelled', 'canceled')
+                 {}
+                 AND {financial_expr} >= ?2 AND {financial_expr} <= ?3
+             GROUP BY o.id
+         )",
+        role_order_type_filter_sql(role_type, "o")
+    );
+    conn.query_row(&sql, params![shift_id, window_start, window_end], |row| {
+        Ok((
+            row.get(0)?,
+            Cents::new(row.get::<_, i64>(1)?).to_f64_dp2(),
+            Cents::new(row.get::<_, i64>(2)?).to_f64_dp2(),
+            Cents::new(row.get::<_, i64>(3)?).to_f64_dp2(),
+        ))
+    })
+    .map_err(|error| format!("query shift close totals: {error}"))
 }
 
 fn compute_shift_payment_totals_in_window(
@@ -5335,6 +5378,18 @@ mod tests {
         assert_eq!(result["success"], true);
         assert_eq!(result["expected"], 149.91);
         assert_eq!(result["variance"], 0.0);
+        let conn = db.conn.lock().unwrap();
+        let recalculated = recompute_closed_cashier_shift_financial_snapshot(
+            &conn,
+            &shift_id,
+            &Utc::now().to_rfc3339(),
+        )
+        .unwrap();
+        assert_eq!(
+            recalculated,
+            (149.91, 0.0),
+            "staff payout correction must preserve card-refund and paying-drawer scope"
+        );
     }
 
     /// Z-17/08 forensics defect 4: on clean nights the closing count carries
@@ -5832,6 +5887,146 @@ mod tests {
         assert_eq!(payload["borrowed_starting_amount_cents"], 4000);
         assert_eq!(payload["reportDate"], actual_report_date.unwrap());
         assert_eq!(payload["periodStartAt"], actual_period_start_at.unwrap());
+    }
+
+    #[test]
+    fn workflow_audit_cashier_refund_and_split_payment_close_exactly_once() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        let shift_id = open_shift(&db, &serde_json::json!({
+            "staffId": "audit-cashier", "branchId": "audit-branch", "terminalId": "audit-terminal",
+            "roleType": "cashier", "openingCash": 100.0,
+        })).unwrap()["shiftId"].as_str().unwrap().to_string();
+        {
+            let conn = db.conn.lock().unwrap();
+            let now = Utc::now().to_rfc3339();
+            for (id, amount, kind) in [
+                ("audit-edited", 4.0, "pickup"),
+                ("audit-table", 30.0, "dine-in"),
+            ] {
+                conn.execute("INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents,
+                    status, payment_status, order_type, staff_shift_id, branch_id, created_at, updated_at)
+                    VALUES (?1, ?1, '[]', ?2, ?3, 'completed', 'paid', ?4, ?5, 'audit-branch', ?6, ?6)",
+                    params![id, amount, Cents::round_half_even(amount).as_i64(), kind, shift_id, now]).unwrap();
+            }
+            for (id, order, method, amount, status, tip) in [
+                (
+                    "audit-original",
+                    "audit-edited",
+                    "card",
+                    4.0,
+                    "completed",
+                    0.0,
+                ),
+                ("audit-extra", "audit-edited", "cash", 4.0, "refunded", 0.0),
+                (
+                    "audit-table-cash",
+                    "audit-table",
+                    "cash",
+                    15.0,
+                    "completed",
+                    0.0,
+                ),
+                (
+                    "audit-table-card",
+                    "audit-table",
+                    "card",
+                    15.0,
+                    "completed",
+                    2.0,
+                ),
+            ] {
+                conn.execute(
+                    "INSERT INTO order_payments (id, order_id, method, amount, amount_cents,
+                    status, staff_shift_id, tip_amount, tip_amount_cents, created_at, updated_at)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
+                    params![
+                        id,
+                        order,
+                        method,
+                        amount,
+                        Cents::round_half_even(amount).as_i64(),
+                        status,
+                        shift_id,
+                        tip,
+                        Cents::round_half_even(tip).as_i64(),
+                        now
+                    ],
+                )
+                .unwrap();
+            }
+            conn.execute(
+                "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type,
+                amount, amount_cents, reason, refund_method, cash_handler, created_at, updated_at)
+                VALUES ('audit-refund', 'audit-extra', 'audit-edited', 'refund', 4.0, 400,
+                    'quantity reduced', 'cash', 'cashier_drawer', ?1, ?1)",
+                params![now],
+            )
+            .unwrap();
+        }
+        let summary = get_shift_summary(&db, &shift_id).unwrap();
+        assert_eq!(summary["breakdown"]["instore"]["cashTotal"], 19.0);
+        assert_eq!(summary["cashRefunds"], 4.0);
+        assert_eq!(summary["breakdown"]["overall"]["totalAmount"], 34.0);
+        assert_eq!(summary["breakdown"]["overall"]["totalCount"], 2);
+        let result = close_shift(
+            &db,
+            &serde_json::json!({"shiftId": shift_id, "closingCash": 115.0}),
+        )
+        .unwrap();
+        assert_eq!(result["expected"], 115.0);
+        assert_eq!(result["variance"], 0.0);
+        let conn = db.conn.lock().unwrap();
+        let amounts: (i64, i64, i64) = conn
+            .query_row(
+                "SELECT total_sales_amount_cents, expected_cash_amount_cents,
+            cash_variance_cents FROM staff_shifts WHERE id = ?1",
+                params![shift_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(amounts, (3400, 11500, 0));
+        let drawer: (i64, i64) = conn
+            .query_row(
+                "SELECT expected_amount_cents, variance_amount_cents
+            FROM cash_drawer_sessions WHERE staff_shift_id = ?1",
+                params![shift_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(drawer, (11500, 0));
+        let recalculated = recompute_closed_cashier_shift_financial_snapshot(
+            &conn,
+            &shift_id,
+            &Utc::now().to_rfc3339(),
+        )
+        .unwrap();
+        assert_eq!(recalculated, (115.0, 0.0));
+    }
+
+    #[test]
+    fn workflow_audit_waiter_alias_opens_canonical_server_shift() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        open_shift(
+            &db,
+            &serde_json::json!({"staffId": "audit-cashier", "branchId": "audit-branch",
+            "terminalId": "audit-terminal", "roleType": "cashier", "openingCash": 100.0}),
+        )
+        .unwrap();
+        let result = open_shift(
+            &db,
+            &serde_json::json!({"staffId": "audit-waiter", "branchId": "audit-branch",
+            "terminalId": "audit-terminal", "roleType": "waiter", "startingAmount": 5.0}),
+        )
+        .unwrap();
+        let conn = db.conn.lock().unwrap();
+        let (role, opening, cashier): (String, i64, Option<String>) = conn.query_row(
+            "SELECT role_type, opening_cash_amount_cents, transferred_to_cashier_shift_id FROM staff_shifts WHERE id = ?1",
+            params![result["shiftId"].as_str().unwrap()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+        assert_eq!(role, "server");
+        assert_eq!(opening, 500);
+        assert!(cashier.is_some());
     }
 
     #[test]

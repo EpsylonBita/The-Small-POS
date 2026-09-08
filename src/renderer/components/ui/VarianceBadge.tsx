@@ -1,6 +1,7 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { AlertCircle, CheckCircle } from 'lucide-react';
+import { formatCurrency } from '../../utils/format';
 
 interface VarianceBadgeProps {
     variance: number;
@@ -39,7 +40,7 @@ export const VarianceBadge: React.FC<VarianceBadgeProps> = ({
         negative: 'bg-red-500/20 text-red-700 dark:text-red-300 border-red-500/50 animate-pulse' // #b91c1c / #fca5a5
     };
 
-    const formattedAmount = `${variance < 0 ? '-' : (variance > 0 ? '+' : '')}$${Math.abs(variance).toFixed(2)}`;
+    const formattedAmount = `${variance < 0 ? '-' : (variance > 0 ? '+' : '')}${formatCurrency(Math.abs(variance))}`;
 
     const statusLabel = isBalanced
         ? t('modals.staffShift.varianceBalanced')

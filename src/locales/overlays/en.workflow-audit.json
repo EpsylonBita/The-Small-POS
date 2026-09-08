@@ -1,0 +1,20 @@
+{
+  "orderDashboard": {
+    "paymentMethodAdjustedOrder": "This order has a refund or void. Its payment methods cannot be changed. Open the payment history to review the adjustment."
+  },
+  "tableCheckManager": {
+    "messages": {
+      "mergeCompatibleChecks": "Occupied tables can be merged when they contain parts of the same order. Checks from different orders must stay separate."
+    }
+  },
+  "sync": {
+    "healthModal": {
+      "problems": {
+        "syncFailed": "Synchronization has failed. Open Recovery to see which records need attention."
+      },
+      "recommendations": {
+        "openRecovery": "Open Recovery and review the failed record before retrying."
+      }
+    }
+  }
+}

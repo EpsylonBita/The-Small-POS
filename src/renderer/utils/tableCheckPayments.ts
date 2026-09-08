@@ -1,4 +1,6 @@
 export interface TableCheckPaidItemRecord {
+  order_item_id?: string | null;
+  orderItemId?: string | null;
   itemIndex?: number;
   item_index?: number;
   itemAmount?: number;
@@ -142,7 +144,9 @@ const allocationUnitPrice = (
     return metadataTotal / quantity;
   }
 
-  return itemLineUnitPrice(item, quantity);
+  // The item total belongs to its original quantity, not the quantity allocated
+  // to this check. Dividing a 3 x 10 line by a 1-item allocation invents 30/unit.
+  return itemLineUnitPrice(item, Math.max(1, moneyNumber(item.quantity) || 1));
 };
 
 function applyAllocationPricing(
@@ -273,6 +277,43 @@ export function mergeRemoteTableCheckItemsWithLocalAdjustments(
       id: remoteItem.id,
     };
   });
+}
+
+/** Reapply allocation ownership after decorating server items with local prices. */
+export function hydrateTableCheckItems(
+  remoteItems: TableCheckMergeableItem[],
+  localItems: TableCheckMergeableItem[],
+  allocations: TableCheckAllocationLike[],
+): TableCheckMergeableItem[] {
+  const hasAllocations = allocations.some(row => Boolean(row.order_item_id));
+  const scoped = hasAllocations ? scopeTableCheckItemsToActiveAllocations(remoteItems, allocations) : remoteItems;
+  if (hasAllocations && scoped.length === 0) return [];
+  const merged = mergeRemoteTableCheckItemsWithLocalAdjustments(scoped, localItems);
+  return hasAllocations ? scopeTableCheckItemsToActiveAllocations(merged, allocations) : merged;
+}
+
+export function paymentBelongsToTableSession(
+  payment: Record<string, unknown>, sessionId: string, ownerSessionId?: string | null,
+  absorbedSessionIds: string[] = [],
+): boolean {
+  const attributedSession = payment.table_session_id ?? payment.tableSessionId;
+  // Legacy untagged payments belong only to the order's owning session, never
+  // to every destination that received part of that order.
+  return attributedSession
+    ? attributedSession === sessionId || (ownerSessionId === sessionId && absorbedSessionIds.includes(String(attributedSession)))
+    : Boolean(ownerSessionId && ownerSessionId === sessionId);
+}
+
+export function tablePaymentIdentityKeys(payment: Record<string, unknown>): string[] {
+  const metadata = asRecord(payment.metadata);
+  return [payment.id, payment.remote_payment_id, payment.remotePaymentId, metadata.local_payment_id]
+    .filter((value): value is string => typeof value === 'string' && value.length > 0);
+}
+
+/** Remote receipts and their local mirrors represent one collection of money. */
+export function mergeTableCheckPayments<T extends Record<string, unknown>>(remote: T[], local: T[]): T[] {
+  const remoteKeys = new Set(remote.flatMap(tablePaymentIdentityKeys));
+  return [...remote, ...local.filter(row => !tablePaymentIdentityKeys(row).some(key => remoteKeys.has(key)))];
 }
 
 export function resolveTableCheckItemDiscount(item: TableCheckDiscountableItem): number {
@@ -416,7 +457,8 @@ export function buildUnpaidAmountByItemId<T extends { id: string }>(
 
   for (const paidItem of paidItemRecords) {
     const itemIndex = Number(paidItem.itemIndex ?? paidItem.item_index ?? -1);
-    const item = Number.isInteger(itemIndex) && itemIndex >= 0 ? items[itemIndex] : null;
+    const sourceId = paidItem.order_item_id ?? paidItem.orderItemId;
+    const item = sourceId ? items.find(candidate => candidate.id === sourceId) : Number.isInteger(itemIndex) && itemIndex >= 0 ? items[itemIndex] : null;
     if (!item) {
       continue;
     }

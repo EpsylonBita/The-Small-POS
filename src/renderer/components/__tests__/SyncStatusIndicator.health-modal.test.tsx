@@ -200,6 +200,23 @@ describe('SyncStatusIndicator Health Status modal contract', () => {
     ).toBeInTheDocument()
   })
 
+  it('prioritizes a failed payment over printer setup even when the financial mirror still reports zero', async () => {
+    bridge.diagnostics.getSystemHealth.mockResolvedValue({
+      ...HEALTHY_SYSTEM_HEALTH,
+      parityQueueStatus: { failed: 1 },
+      financialQueueStatus: { totalFailed: 0, failedPaymentItems: 0 },
+      printerStatus: { configured: false, profileCount: 0, recentJobs: [] },
+    })
+    queueBridge.listItems.mockResolvedValue([
+      queueItem({ tableName: 'payments', nextRetryAt: '2026-01-13T14:01:00.000Z' }),
+    ])
+    renderHealthModal()
+    expect(await screen.findByText(i18n.t('sync.healthModal.problems.failedPayments'))).toBeInTheDocument()
+    expect(screen.queryByText(i18n.t('sync.healthModal.problems.printerNotConfigured'))).not.toBeInTheDocument()
+    expect(document.body).not.toHaveTextContent(i18n.t('sync.healthModal.failure.nextRetryValue', { value: '' }).trim())
+    expect(screen.getByRole('button', { name: i18n.t('sync.dashboard.openRecovery') })).toBeInTheDocument()
+  })
+
   it('renders operator-facing Health Status copy from the active Greek locale', async () => {
     await act(async () => {
       await i18n.changeLanguage('el')
@@ -501,7 +518,7 @@ describe('SyncStatusIndicator Health Status modal contract', () => {
   })
 
   it('formats the next retry timestamp with the active POS locale', async () => {
-    const retryAt = '2026-01-13T15:04:05.000Z'
+    const retryAt = new Date(Date.now() + 60_000).toISOString()
     const originalToLocaleString = Date.prototype.toLocaleString
     vi.spyOn(Date.prototype, 'toLocaleString').mockImplementation(function (
       this: Date,
@@ -515,7 +532,7 @@ describe('SyncStatusIndicator Health Status modal contract', () => {
       await i18n.changeLanguage('el')
     })
     queueBridge.listItems.mockResolvedValue([
-      queueItem({ nextRetryAt: retryAt }),
+      queueItem({ status: 'pending', nextRetryAt: retryAt }),
     ])
     renderHealthModal()
 

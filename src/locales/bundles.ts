@@ -1,3 +1,23 @@
+import enShiftWorkflow from './overlays/en.shift-workflow-fixes.json';
+import elShiftWorkflow from './overlays/el.shift-workflow-fixes.json';
+import deShiftWorkflow from './overlays/de.shift-workflow-fixes.json';
+import frShiftWorkflow from './overlays/fr.shift-workflow-fixes.json';
+import itShiftWorkflow from './overlays/it.shift-workflow-fixes.json';
+import enRoomWorkflow from './overlays/en.room-workflow-fixes.json';
+import elRoomWorkflow from './overlays/el.room-workflow-fixes.json';
+import deRoomWorkflow from './overlays/de.room-workflow-fixes.json';
+import frRoomWorkflow from './overlays/fr.room-workflow-fixes.json';
+import itRoomWorkflow from './overlays/it.room-workflow-fixes.json';
+import enScheduleWorkflow from './overlays/en.schedule-workflow-fixes.json';
+import elScheduleWorkflow from './overlays/el.schedule-workflow-fixes.json';
+import deScheduleWorkflow from './overlays/de.schedule-workflow-fixes.json';
+import frScheduleWorkflow from './overlays/fr.schedule-workflow-fixes.json';
+import itScheduleWorkflow from './overlays/it.schedule-workflow-fixes.json';
+import enWorkflowAudit from './overlays/en.workflow-audit.json';
+import elWorkflowAudit from './overlays/el.workflow-audit.json';
+import deWorkflowAudit from './overlays/de.workflow-audit.json';
+import frWorkflowAudit from './overlays/fr.workflow-audit.json';
+import itWorkflowAudit from './overlays/it.workflow-audit.json';
 import enBase from './en.json';
 import elBase from './el.json';
 import deBase from './de.json';
@@ -52,10 +72,13 @@ function mergeLocaleBundle(base: unknown, extension: unknown): unknown {
   return merged;
 }
 
+const mergeLocaleLayers = (...layers: unknown[]): LocaleBundle =>
+  layers.reduce(mergeLocaleBundle) as LocaleBundle;
+
 export const localeBundles = {
-  en: mergeLocaleBundle(mergeLocaleBundle(mergeLocaleBundle(mergeLocaleBundle(mergeLocaleBundle(enBase, enHotfix), enTableCheck), { support: enSupport }), enSettingsWorkflow), enOnboarding) as LocaleBundle,
-  el: mergeLocaleBundle(mergeLocaleBundle(mergeLocaleBundle(mergeLocaleBundle(mergeLocaleBundle(elBase, elHotfix), elTableCheck), { support: elSupport }), elSettingsWorkflow), elOnboarding) as LocaleBundle,
-  de: mergeLocaleBundle(mergeLocaleBundle(mergeLocaleBundle(mergeLocaleBundle(mergeLocaleBundle(deBase, deHotfix), deTableCheck), { support: deSupport }), deSettingsWorkflow), deOnboarding) as LocaleBundle,
-  fr: mergeLocaleBundle(mergeLocaleBundle(mergeLocaleBundle(mergeLocaleBundle(mergeLocaleBundle(frBase, frHotfix), frTableCheck), { support: frSupport }), frSettingsWorkflow), frOnboarding) as LocaleBundle,
-  it: mergeLocaleBundle(mergeLocaleBundle(mergeLocaleBundle(mergeLocaleBundle(mergeLocaleBundle(itBase, itHotfix), itTableCheck), { support: itSupport }), itSettingsWorkflow), itOnboarding) as LocaleBundle,
+  en: mergeLocaleLayers(enBase, enHotfix, enTableCheck, { support: enSupport }, enSettingsWorkflow, enOnboarding, enShiftWorkflow, enRoomWorkflow, enScheduleWorkflow, enWorkflowAudit),
+  el: mergeLocaleLayers(elBase, elHotfix, elTableCheck, { support: elSupport }, elSettingsWorkflow, elOnboarding, elShiftWorkflow, elRoomWorkflow, elScheduleWorkflow, elWorkflowAudit),
+  de: mergeLocaleLayers(deBase, deHotfix, deTableCheck, { support: deSupport }, deSettingsWorkflow, deOnboarding, deShiftWorkflow, deRoomWorkflow, deScheduleWorkflow, deWorkflowAudit),
+  fr: mergeLocaleLayers(frBase, frHotfix, frTableCheck, { support: frSupport }, frSettingsWorkflow, frOnboarding, frShiftWorkflow, frRoomWorkflow, frScheduleWorkflow, frWorkflowAudit),
+  it: mergeLocaleLayers(itBase, itHotfix, itTableCheck, { support: itSupport }, itSettingsWorkflow, itOnboarding, itShiftWorkflow, itRoomWorkflow, itScheduleWorkflow, itWorkflowAudit),
 } as const;

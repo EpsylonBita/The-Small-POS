@@ -127,7 +127,9 @@ export function flattenStoredCustomizations(customizations: unknown): FlattenedC
   }
 
   // Object map keyed by ingredient id/name (synced-order shape).
-  return Object.values(record).flatMap((entry) => flattenEntry(entry, false));
+  return Object.entries(record)
+    .filter(([key]) => key !== '_meta')
+    .flatMap(([, entry]) => flattenEntry(entry, false));
 }
 
 /**

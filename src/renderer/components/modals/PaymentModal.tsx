@@ -522,6 +522,18 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       initialFocusRef={currentStep === 'cash_input' ? cashInputRef : undefined}
       onEnterKey={handleModalEnter}
       enterKeyEnabled={!isProcessingPayment && !isFeatureLoading && canSubmitWithEnter}
+      footer={currentStep === 'cash_input' ? (
+        <div className="liquid-glass-modal-border flex gap-3 border-t px-6 py-4">
+          <button onClick={handleBackToPaymentSelection} disabled={isProcessingPayment}
+            className="liquid-glass-modal-button flex-1 font-medium liquid-glass-modal-text">
+            {t('common.actions.back', 'Back')}
+          </button>
+          <button onClick={handleCashPaymentComplete} disabled={!hasEnoughCash || isProcessingPayment}
+            className={`liquid-glass-modal-button flex-1 font-medium ${cashInputVisualClasses.completeButton} ${!hasEnoughCash || isProcessingPayment ? 'cursor-not-allowed opacity-50' : ''}`}>
+            {isProcessingPayment ? t('modals.payment.processing') : t('modals.payment.completeCash', 'Complete')}
+          </button>
+        </div>
+      ) : undefined}
     >
       {/* Content */}
       <div>
@@ -891,26 +903,6 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
               </div>
             )}
 
-            <div className="flex gap-3">
-              <button
-                onClick={handleBackToPaymentSelection}
-                disabled={isProcessingPayment}
-                className="liquid-glass-modal-button flex-1 font-medium bg-gray-500/20 active:bg-gray-500/30 liquid-glass-modal-text"
-              >
-                {t('common.actions.back', 'Back')}
-              </button>
-              <button
-                onClick={handleCashPaymentComplete}
-                disabled={!hasEnoughCash || isProcessingPayment}
-                className={`liquid-glass-modal-button flex-1 font-medium ${
-                  hasEnoughCash && !isProcessingPayment
-                    ? cashInputVisualClasses.completeButton
-                    : `${cashInputVisualClasses.completeButton} cursor-not-allowed opacity-50`
-                }`}
-              >
-                {isProcessingPayment ? t('modals.payment.processing') : t('modals.payment.completeCash', 'Complete')}
-              </button>
-            </div>
           </div>
         )}
       </div>

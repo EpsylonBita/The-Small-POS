@@ -170,16 +170,16 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
       closeOnBackdrop={false}
       closeOnEscape={false}
       footer={(
-        <div className="liquid-glass-modal-border flex items-center justify-between gap-3 border-t pt-4">
+        <div className="liquid-glass-modal-border flex flex-wrap items-center justify-between gap-3 border-t pt-4">
           <div className="text-sm liquid-glass-modal-text-muted">
             {t('modals.refund.requiredAmount', { defaultValue: 'Required refund' })}:{' '}
-            <span className="font-semibold text-orange-300">&euro;{totalRequired.toFixed(2)}</span>
+            <span className="font-semibold text-orange-800 dark:text-orange-300">&euro;{totalRequired.toFixed(2)}</span>
             {' • '}
             {t('splitPayment.assigned', { defaultValue: 'Assigned' })}:{' '}
             <span className="font-semibold liquid-glass-modal-text">&euro;{allocatedTotal.toFixed(2)}</span>
             {' • '}
             {t('splitPayment.remaining', { defaultValue: 'Remaining' })}:{' '}
-            <span className={`font-semibold ${Math.abs(remainingAmount) <= 0.01 ? 'text-emerald-300' : 'text-amber-300'}`}>
+            <span className={`font-semibold ${Math.abs(remainingAmount) <= 0.01 ? 'text-emerald-800 dark:text-emerald-300' : 'text-amber-800 dark:text-amber-300'}`}>
               &euro;{remainingAmount.toFixed(2)}
             </span>
           </div>
@@ -187,7 +187,7 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
             type="button"
             onClick={() => void handleConfirm()}
             disabled={isSubmitting}
-            className="rounded-xl border border-orange-500/30 bg-orange-500/15 px-5 py-2.5 text-sm font-semibold text-orange-300 transition-colors active:bg-orange-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+            className="rounded-xl border border-orange-500/30 bg-orange-500/15 px-5 py-2.5 text-sm font-semibold text-orange-800 dark:text-orange-300 transition-colors active:bg-orange-500/20 disabled:cursor-not-allowed disabled:opacity-60"
           >
             {isSubmitting
               ? t('common.loading', { defaultValue: 'Processing...' })
@@ -200,9 +200,9 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
         <div className="space-y-4">
           <div className="rounded-2xl border border-amber-500/20 bg-amber-500/10 p-4">
             <div className="flex items-start gap-3">
-              <AlertTriangle className="mt-0.5 h-5 w-5 text-amber-300" />
+              <AlertTriangle className="mt-0.5 h-5 w-5 text-amber-800 dark:text-amber-300" />
               <div className="space-y-1">
-                <h3 className="text-sm font-semibold text-amber-200">
+                <h3 className="text-sm font-semibold text-amber-900 dark:text-amber-200">
                   {totalReduced
                     ? t('modals.refund.editSettlementReducedRequired', {
                         defaultValue: 'This edit reduces a paid order and requires a recorded refund',
@@ -211,7 +211,7 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
                         defaultValue: 'This edit leaves the order overpaid and requires a recorded refund',
                       })}
                 </h3>
-                <p className="text-sm text-amber-100/80">
+                <p className="text-sm text-amber-900 dark:text-amber-100/80">
                   {orderNumber
                     ? `#${orderNumber} • `
                     : ''}
@@ -219,14 +219,14 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
                     defaultValue: 'Choose exactly how the refunded amount was settled before the order edit can finish.',
                   })}
                 </p>
-                <p className="text-xs text-amber-100/70">
+                <p className="text-xs text-amber-800 dark:text-amber-100/70">
                   {t('modals.refund.originalVsNext', {
                     defaultValue: 'Order total changed from €{{from}} to €{{to}}',
                     from: preview.originalTotal.toFixed(2),
                     to: preview.nextTotal.toFixed(2),
                   })}
                 </p>
-                <p className="text-xs text-amber-100/70">
+                <p className="text-xs text-amber-800 dark:text-amber-100/70">
                   {t('modals.refund.netPaidAfterRefunds', {
                     defaultValue: 'Paid after previous refunds: €{{amount}}',
                     amount: preview.paidTotal.toFixed(2),

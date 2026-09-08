@@ -20,6 +20,8 @@ import { useAppointments } from '../../../hooks/useAppointments';
 import { useTables } from '../../../hooks/useTables';
 import { useRooms } from '../../../hooks/useRooms';
 import { formatTableDisplayNumber } from '../../../utils/table-display';
+import { RoomCheckinModal, RoomReservationModal } from '../../../components/modals/RoomStayWorkflowModals';
+import { reservationWallDateTime, roomStayNights } from '../../../utils/room-workflow';
 import { buildReservationTimelineSlots } from '../../../utils/reservationTimeline';
 import { formatCurrency, formatDate, formatTime } from '../../../utils/format';
 import { addLocalDays, parseLocalDateString, startOfLocalDay, toLocalDateString } from '../../../utils/date';
@@ -140,6 +142,7 @@ export const ReservationsView: React.FC = memo(() => {
     return 'tables';
   });
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [roomWorkflow, setRoomWorkflow] = useState<{ reservation: Reservation; mode: 'arrival' | 'edit' } | null>(null);
   const [isCreating, setIsCreating] = useState(false);
   const [selectedReservation, setSelectedReservation] = useState<Reservation | null>(null);
   const [isDetailsLoading, setIsDetailsLoading] = useState(false);
@@ -203,7 +206,7 @@ export const ReservationsView: React.FC = memo(() => {
     (activeTab !== 'rooms' ||
       (Boolean(createForm.roomId.trim()) &&
         Boolean(createForm.checkInDate) &&
-        Boolean(createForm.checkOutDate)));
+        roomStayNights(createForm.checkInDate, createForm.checkOutDate) > 0));
 
   // Auto-select tab based on available modules
   useEffect(() => {
@@ -306,7 +309,7 @@ export const ReservationsView: React.FC = memo(() => {
   // Room inventory (same authenticated source as the Rooms grid) so the Δωμάτια create
   // form can offer a real room selector instead of a raw room-id text input. Gated on the
   // rooms module via branchId so table/service-only orgs never fetch room inventory.
-  const { rooms } = useRooms({
+  const { rooms, refetch: refetchRooms, updateStatus: updateRoomStatus } = useRooms({
     branchId: hasRoomsModule ? branchId || '' : '',
     organizationId: hasRoomsModule ? effectiveOrgId || '' : '',
     enableRealtime: false,
@@ -404,8 +407,8 @@ export const ReservationsView: React.FC = memo(() => {
   const statusLabels: Record<ReservationStatus, string> = {
     confirmed: t('reservationsView.status.confirmed', { defaultValue: 'Confirmed' }),
     pending: t('reservationsView.status.pending', { defaultValue: 'Pending' }),
-    seated: t('reservationsView.status.seated', { defaultValue: 'Seated' }),
-    completed: t('reservationsView.status.completed', { defaultValue: 'Completed' }),
+    seated: activeTab === 'rooms' ? t('roomWorkflow.staying') : t('reservationsView.status.seated', { defaultValue: 'Seated' }),
+    completed: activeTab === 'rooms' ? t('roomWorkflow.departed') : t('reservationsView.status.completed', { defaultValue: 'Completed' }),
     no_show: t('reservationsView.status.no_show', { defaultValue: 'No Show' }),
     cancelled: t('reservationsView.status.cancelled', { defaultValue: 'Cancelled' }),
   };
@@ -439,6 +442,16 @@ export const ReservationsView: React.FC = memo(() => {
   }, [selectedDate]);
 
   const handleStatusChange = useCallback(async (reservationId: string, status: ReservationStatus) => {
+    const target = reservations.find((item) => item.id === reservationId) || selectedReservation;
+    if (target?.roomId && status === 'seated') {
+      if (!rooms.some((room) => room.id === target.roomId)) {
+        toast.error(t('roomsView.toasts.roomNotFound'));
+        return;
+      }
+      setRoomWorkflow({ reservation: target, mode: 'arrival' });
+      setSelectedReservation(null);
+      return;
+    }
     const updated = await updateStatus(reservationId, status);
     if (!updated) return;
 
@@ -449,7 +462,7 @@ export const ReservationsView: React.FC = memo(() => {
         setSelectedReservation(refreshed);
       }
     }
-  }, [updateStatus, selectedReservation?.id, branchId, effectiveOrgId]);
+  }, [updateStatus, selectedReservation, reservations, rooms, branchId, effectiveOrgId, t]);
 
   const openReservationDetails = useCallback(async (reservationId: string) => {
     setIsDetailsLoading(true);
@@ -474,8 +487,8 @@ export const ReservationsView: React.FC = memo(() => {
       return;
     }
 
-    if (activeTab === 'rooms' && (!createForm.roomId.trim() || !createForm.checkInDate || !createForm.checkOutDate)) {
-      toast.error(t('reservationsView.validation.roomRequired', { defaultValue: 'Room, check-in date and check-out date are required' }));
+    if (activeTab === 'rooms' && (!createForm.roomId.trim() || !roomStayNights(createForm.checkInDate, createForm.checkOutDate))) {
+      toast.error(t('roomWorkflow.invalidDates'));
       return;
     }
 
@@ -486,7 +499,7 @@ export const ReservationsView: React.FC = memo(() => {
       customerEmail: createForm.customerEmail.trim() || undefined,
       partySize,
       reservationDate: activeTab === 'rooms' ? createForm.checkInDate : createForm.reservationDate,
-      reservationTime: activeTab === 'rooms' ? '15:00' : createForm.reservationTime,
+      reservationTime: createForm.reservationTime,
       durationMinutes: Number.isFinite(durationMinutes) && durationMinutes > 0 ? durationMinutes : 90,
       tableId: activeTab === 'tables' ? createForm.tableId.trim() || undefined : undefined,
       roomId: activeTab === 'rooms' ? createForm.roomId.trim() || undefined : undefined,
@@ -713,7 +726,7 @@ export const ReservationsView: React.FC = memo(() => {
   const timeSlots = useMemo(
     () =>
       buildReservationTimelineSlots(
-        filteredReservations.map((res) => new Date(res.reservationDatetime).getHours()),
+        filteredReservations.map((res) => new Date(reservationWallDateTime(res)).getHours()),
       ),
     [filteredReservations],
   );
@@ -725,7 +738,7 @@ export const ReservationsView: React.FC = memo(() => {
     timeSlots.forEach((hour) => { grouped[hour] = []; });
 
     filteredReservations.forEach((res) => {
-      const hour = new Date(res.reservationDatetime).getHours();
+      const hour = new Date(reservationWallDateTime(res)).getHours();
       if (!Number.isInteger(hour) || hour < 0 || hour > 23) {
         return;
       }
@@ -746,13 +759,14 @@ export const ReservationsView: React.FC = memo(() => {
       actions.push({ label: t('reservationsView.actions.confirm', { defaultValue: 'Confirm' }), status: 'confirmed', variant: 'primary' });
     }
     if (reservation.status === 'confirmed') {
-      actions.push({ label: t('reservationsView.actions.seat', { defaultValue: 'Seat' }), status: 'seated', variant: 'success' });
+      actions.push({ label: reservation.roomId ? t('roomWorkflow.arrival') : t('reservationsView.actions.seat', { defaultValue: 'Seat' }), status: 'seated', variant: 'success' });
     }
     if (reservation.status === 'seated') {
-      actions.push({ label: t('reservationsView.actions.complete', { defaultValue: 'Complete' }), status: 'completed', variant: 'primary' });
+      actions.push({ label: reservation.roomId ? t('roomWorkflow.departure') : t('reservationsView.actions.complete', { defaultValue: 'Complete' }), status: 'completed', variant: 'primary' });
     }
     if (['pending', 'confirmed'].includes(reservation.status)) {
       actions.push({ label: t('reservationsView.actions.noShow', { defaultValue: 'No Show' }), status: 'no_show', variant: 'danger' });
+      actions.push({ label: t('roomWorkflow.cancelBooking'), status: 'cancelled', variant: 'danger' });
     }
 
     return actions;
@@ -901,7 +915,7 @@ export const ReservationsView: React.FC = memo(() => {
           </motion.div>
           <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
             <div className={`text-sm text-green-500`}>
-              {t('reservationsView.stats.seated', { defaultValue: 'Seated' })}
+              {activeTab === 'rooms' ? t('roomWorkflow.staying') : t('reservationsView.stats.seated', { defaultValue: 'Seated' })}
             </div>
             <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{visibleStats.seated}</div>
           </motion.div>
@@ -1136,7 +1150,7 @@ export const ReservationsView: React.FC = memo(() => {
                       <div className="flex items-center gap-4 text-sm">
                         <span className="flex items-center gap-1">
                           <Clock className="w-4 h-4" />
-                          {formatTime(res.reservationDatetime, { hour: '2-digit', minute: '2-digit' })}
+                          {formatTime(reservationWallDateTime(res), { hour: '2-digit', minute: '2-digit' })}
                         </span>
                         <span className="flex items-center gap-1">
                           <Users className="w-4 h-4" />
@@ -1309,8 +1323,10 @@ export const ReservationsView: React.FC = memo(() => {
                 />
               </label>
               <label className="flex flex-col gap-1">
-                <span className={fieldLabelClass}>{t('reservationsView.form.customerPhone', { defaultValue: 'Customer phone' })}</span>
+                <span className={fieldLabelClass}>{t('reservationsView.form.customerPhone', { defaultValue: 'Customer phone' })} *</span>
                 <input
+                  required
+                  type="tel"
                   value={createForm.customerPhone}
                   onChange={(event) => setCreateForm((prev) => ({ ...prev, customerPhone: event.target.value }))}
                   placeholder={t('reservationsView.form.customerPhone', { defaultValue: 'Customer phone' })}
@@ -1337,7 +1353,7 @@ export const ReservationsView: React.FC = memo(() => {
                   className={modalInputClass}
                 />
               </label>
-              <label className="flex flex-col gap-1">
+              {activeTab !== 'rooms' && <label className="flex flex-col gap-1">
                 <span className={fieldLabelClass}>{t('reservationsView.form.reservationDate', { defaultValue: 'Reservation date' })}</span>
                 <input
                   value={createForm.reservationDate}
@@ -1345,7 +1361,7 @@ export const ReservationsView: React.FC = memo(() => {
                   type="date"
                   className={modalInputClass}
                 />
-              </label>
+              </label>}
               <label className="flex flex-col gap-1">
                 <span className={fieldLabelClass}>{t('reservationsView.form.reservationTime', { defaultValue: 'Reservation time' })}</span>
                 <input
@@ -1452,6 +1468,14 @@ export const ReservationsView: React.FC = memo(() => {
               />
             </label>
 
+            {activeTab === 'rooms' && <p className="my-3 rounded-xl border border-current/20 p-3 text-sm" aria-live="polite">
+              {roomStayNights(createForm.checkInDate, createForm.checkOutDate) > 0
+                ? t('roomWorkflow.costPreview', {
+                    nights: roomStayNights(createForm.checkInDate, createForm.checkOutDate),
+                    rate: formatCurrency(rooms.find((room) => room.id === createForm.roomId)?.ratePerNight || 0),
+                    total: formatCurrency(roomStayNights(createForm.checkInDate, createForm.checkOutDate) * (rooms.find((room) => room.id === createForm.roomId)?.ratePerNight || 0)),
+                  }) : t('roomWorkflow.invalidDates')}
+            </p>}
             <div className="mt-4 flex justify-end gap-2">
               <button
                 onClick={() => setShowCreateModal(false)}
@@ -1638,10 +1662,8 @@ export const ReservationsView: React.FC = memo(() => {
                     {t('reservationsView.when', { defaultValue: 'Date & Time' })}
                   </div>
                   <div className={`font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>
-                    {/* Use the same normalized datetime as list/timeline so the same
-                        reservation shows the same local time everywhere (the raw
-                        reservationDate/reservationTime fields can be UTC/service values). */}
-                    {formatDate(selectedReservation.reservationDatetime)} {formatTime(selectedReservation.reservationDatetime, { hour: '2-digit', minute: '2-digit' })}
+                    {/* Display the branch's recorded wall time, independently of this PC's timezone. */}
+                    {formatDate(reservationWallDateTime(selectedReservation))} {formatTime(reservationWallDateTime(selectedReservation), { hour: '2-digit', minute: '2-digit' })}
                   </div>
                   <div className={`text-sm ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>
                     {selectedReservation.partySize} {t('reservationsView.guests', { defaultValue: 'guests' })}
@@ -1662,6 +1684,10 @@ export const ReservationsView: React.FC = memo(() => {
                     {t('reservationsView.quickActions', { defaultValue: 'Quick Actions' })}
                   </div>
                   <div className="flex flex-wrap gap-2">
+                    {selectedReservation.roomId && ['pending', 'confirmed'].includes(selectedReservation.status) && <button type="button" className="rounded-xl bg-yellow-400 px-3 py-2 text-black" onClick={() => {
+                      if (!rooms.some((room) => room.id === selectedReservation.roomId)) { toast.error(t('roomsView.toasts.roomNotFound')); return; }
+                      setRoomWorkflow({ reservation: selectedReservation, mode: 'edit' }); setSelectedReservation(null);
+                    }}>{t('roomWorkflow.editBooking')}</button>}
                     {getQuickActions(selectedReservation).map((action) => (
                       <button
                         key={action.status}
@@ -1715,6 +1741,12 @@ export const ReservationsView: React.FC = memo(() => {
           </div>
         </div>
       )}
+      {roomWorkflow && (() => {
+        const room = rooms.find((item) => item.id === roomWorkflow.reservation.roomId);
+        if (!room) return <div role="alert">{t('roomsView.toasts.roomNotFound')} <button type="button" onClick={() => setRoomWorkflow(null)}>{t('common.actions.close', { defaultValue: 'Close' })}</button></div>;
+        const props = { room, reservation: roomWorkflow.reservation, branchId: branchId || '', organizationId: effectiveOrgId || '', updateRoomStatus, refetchRooms, onClose: () => setRoomWorkflow(null), onCompleted: () => { setRoomWorkflow(null); void refetch(); void refetchRooms(); } };
+        return roomWorkflow.mode === 'arrival' ? <RoomCheckinModal {...props} /> : <RoomReservationModal rooms={rooms} {...props} />;
+      })()}
     </motion.div>
   );
 });

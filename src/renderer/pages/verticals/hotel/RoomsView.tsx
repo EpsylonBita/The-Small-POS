@@ -5,19 +5,19 @@
  * Features: Check-in, Reservations, Payment processing, Mobile responsive
  */
 
-import React, { memo, useState, useEffect, useCallback, useMemo, useRef, useId } from 'react';
+import React, { memo, useState, useEffect, useMemo, useRef, useId } from 'react';
 import { renderModalPortal } from '../../../utils/render-modal-portal';
 import { useTranslation } from 'react-i18next';
 import { motion } from 'framer-motion';
 import toast from 'react-hot-toast';
 import { useTheme } from '../../../contexts/theme-context';
 import { useModules } from '../../../contexts/module-context';
-import { useSystemClock } from '../../../hooks/useSystemClock';
 import { useRooms } from '../../../hooks/useRooms';
 import { formatCurrency, formatDate } from '../../../utils/format';
-import { addLocalDays, toLocalDateString } from '../../../utils/date';
+import { toLocalDateString } from '../../../utils/date';
+import { roomWorkflowError } from '../../../utils/room-workflow';
 import { reservationsService } from '../../../services/ReservationsService';
-import { offlineRoomCheckin } from '../../../services/offline-mutations';
+import { RoomCheckinModal, RoomReservationModal, RoomStaySelectorModal } from '../../../components/modals/RoomStayWorkflowModals';
 import { posApiFetch, posApiPost } from '../../../utils/api-helpers';
 import {
   folioChargesEndpoint,
@@ -26,7 +26,6 @@ import {
   type FolioChargeType,
   type FolioPaymentMethod,
 } from '../../../utils/guest-billing';
-import { OrderService } from '../../../../services/OrderService';
 import { 
   Bed, RefreshCw, Users, Wrench, Sparkles, Calendar, X, 
   CreditCard, Receipt, Clock, User, Phone, Mail, DollarSign,
@@ -52,29 +51,6 @@ const statusConfig: Record<RoomStatus, { color: string; bgClass: string; icon: t
 
 type ModalType = 'none' | 'checkin' | 'reservation' | 'checkoutPayment' | 'charge' | 'action' | 'chooseCreate';
 
-interface GuestInfo {
-  name: string;
-  phone: string;
-  email: string;
-  idNumber: string;
-}
-
-interface CheckinData {
-  guestInfo: GuestInfo;
-  roomId: string;
-  nights: number;
-  paymentMethod: 'cash' | 'card' | 'transfer';
-  totalAmount: number;
-}
-
-interface ReservationData {
-  guestInfo: GuestInfo;
-  roomId: string;
-  checkInDate: string;
-  checkOutDate: string;
-  notes: string;
-}
-
 interface CheckoutPaymentData {
   room: Room;
   folioId: string;
@@ -94,12 +70,6 @@ interface FolioChargeData {
   notes: string;
 }
 
-interface RoomCheckinApiResponse {
-  success: boolean;
-  error?: string;
-  idempotentReplay?: boolean;
-}
-
 interface RoomCheckoutApiResponse {
   success: boolean;
   error?: string;
@@ -110,29 +80,6 @@ interface RoomCheckoutApiResponse {
   housekeepingError?: string | null;
   completedReservationIds?: string[];
 }
-
-const generateClientRequestId = (): string => {
-  if (typeof globalThis.crypto?.randomUUID === 'function') {
-    return globalThis.crypto.randomUUID();
-  }
-
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (token) => {
-    const random = Math.floor(Math.random() * 16);
-    const value = token === 'x' ? random : (random & 0x3) | 0x8;
-    return value.toString(16);
-  });
-};
-
-const getDefaultReservationDates = (base: Date) => ({
-  checkInDate: toLocalDateString(base),
-  checkOutDate: toLocalDateString(addLocalDays(base, 1)),
-});
-
-const mapPaymentMethod = (method: 'cash' | 'card' | 'transfer'): 'cash' | 'card' | 'digital' => {
-  if (method === 'cash') return 'cash';
-  if (method === 'card') return 'card';
-  return 'digital';
-};
 
 const getRoomGuestName = (room: Room): string | null =>
   room.activeFolio?.guestName || room.currentGuestName || null;
@@ -176,9 +123,7 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const { organizationId, isModuleEnabled } = useModules();
-  const now = useSystemClock();
   const isDark = resolvedTheme === 'dark';
-  const reservationDefaultDates = useMemo(() => getDefaultReservationDates(now), [now]);
 
   const [branchId, setBranchId] = useState<string | null>(null);
   const [localOrgId, setLocalOrgId] = useState<string | null>(null);
@@ -199,28 +144,12 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
     typeof navigator === 'undefined' ? true : navigator.onLine,
   );
   
-  // Check-in form state
-  const [checkinData, setCheckinData] = useState<CheckinData>({
-    guestInfo: { name: '', phone: '', email: '', idNumber: '' },
-    roomId: '',
-    nights: 1,
-    paymentMethod: 'cash',
-    totalAmount: 0,
-  });
-  
-  // Reservation form state
-  const [reservationData, setReservationData] = useState<ReservationData>({
-    guestInfo: { name: '', phone: '', email: '', idNumber: '' },
-    roomId: '',
-    ...getDefaultReservationDates(new Date()),
-    notes: '',
-  });
-  const [reservationDatesFollowClock, setReservationDatesFollowClock] = useState(true);
+  const [checkinData, setCheckinData] = useState({ roomId: '' });
+  const [reservationData, setReservationData] = useState({ roomId: '' });
   const [checkoutPaymentData, setCheckoutPaymentData] = useState<CheckoutPaymentData | null>(null);
   const [folioChargeData, setFolioChargeData] = useState<FolioChargeData | null>(null);
 
   const hasGuestBilling = isModuleEnabled('guest_billing' as any);
-  const hasOrders = isModuleEnabled('orders' as any);
   const hasReservations = isModuleEnabled('reservations' as any);
 
   useEffect(() => {
@@ -328,25 +257,11 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
   };
 
   const openCheckinModal = (room?: Room) => {
-    if (room) {
-      setCheckinData(prev => ({
-        ...prev,
-        roomId: room.id,
-        totalAmount: (room.ratePerNight || 0) * prev.nights,
-      }));
-    }
+    setCheckinData({ roomId: room?.id || '' });
     setModalType('checkin');
   };
-
   const openReservationModal = (room?: Room) => {
-    const defaults = getDefaultReservationDates(new Date());
-    setReservationDatesFollowClock(true);
-    setReservationData(prev => ({
-      ...prev,
-      roomId: room ? room.id : prev.roomId,
-      checkInDate: defaults.checkInDate,
-      checkOutDate: defaults.checkOutDate,
-    }));
+    setReservationData({ roomId: room?.id || '' });
     setModalType('reservation');
   };
 
@@ -359,207 +274,21 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
     setStatusFilter(hubPreset === 'checkin' ? 'reserved' : 'available');
   }, [hubPresetSignal, hubPreset]);
 
-  useEffect(() => {
-    if (modalType !== 'reservation' || !reservationDatesFollowClock) return;
-
-    setReservationData((prev) => {
-      if (
-        prev.checkInDate === reservationDefaultDates.checkInDate &&
-        prev.checkOutDate === reservationDefaultDates.checkOutDate
-      ) {
-        return prev;
-      }
-
-      return {
-        ...prev,
-        checkInDate: reservationDefaultDates.checkInDate,
-        checkOutDate: reservationDefaultDates.checkOutDate,
-      };
-    });
-  }, [modalType, reservationDatesFollowClock, reservationDefaultDates.checkInDate, reservationDefaultDates.checkOutDate]);
-
-  const handleCheckin = async () => {
-    if (!checkinData.roomId || !checkinData.guestInfo.name) return;
-
-    try {
-      if (!branchId || !effectiveOrgId) {
-        toast.error(t('roomsView.toasts.missingContext', { defaultValue: 'Missing branch or organization context' }));
-        return;
-      }
-
-      // Look up from the full branch set, not the grid-filtered rooms, so an active grid
-      // search/filter for a different room cannot break the check-in submit lookup.
-      const selectedRoom = allRooms.find((room) => room.id === checkinData.roomId);
-      if (!selectedRoom) {
-        toast.error(t('roomsView.toasts.roomNotFound', { defaultValue: 'Selected room not found' }));
-        return;
-      }
-
-      const now = new Date();
-      const checkInDate = toLocalDateString(now);
-      const checkOutDate = toLocalDateString(addLocalDays(now, checkinData.nights));
-      const reservationTime = now.toTimeString().slice(0, 5);
-
-      if (hasGuestBilling) {
-        const request = {
-          guestName: checkinData.guestInfo.name,
-          guestPhone: checkinData.guestInfo.phone || null,
-          guestEmail: checkinData.guestInfo.email || null,
-          checkInDate,
-          checkOutDate,
-          partySize: selectedRoom.capacity || 1,
-          notes: checkinData.guestInfo.idNumber
-            ? `Guest ID: ${checkinData.guestInfo.idNumber}`
-            : null,
-          clientRequestId: generateClientRequestId(),
-        };
-
-        if (isOnline) {
-          const response = await posApiFetch<RoomCheckinApiResponse>(
-            `/pos/rooms/${encodeURIComponent(selectedRoom.id)}/checkin`,
-            {
-              method: 'POST',
-              body: JSON.stringify(request),
-            },
-          );
-
-          if (!response.success || response.data?.success === false) {
-            throw new Error(response.error || response.data?.error || 'Failed to check in room');
-          }
-        } else {
-          await offlineRoomCheckin({
-            roomId: selectedRoom.id,
-            organizationId: effectiveOrgId,
-            branchId,
-            ...request,
-          });
-          toast.success(t('roomsView.toasts.checkinQueued', { defaultValue: 'Check-in queued for sync' }));
-        }
-      } else {
-        let reservationCreated = false;
-        if (hasReservations) {
-          reservationsService.setContext(branchId, effectiveOrgId);
-          const reservation = await reservationsService.createReservation({
-            customerName: checkinData.guestInfo.name,
-            customerPhone: checkinData.guestInfo.phone || '',
-            customerEmail: checkinData.guestInfo.email || undefined,
-            partySize: selectedRoom.capacity || 1,
-            reservationDate: checkInDate,
-            reservationTime,
-            roomId: selectedRoom.id,
-            roomNumber: selectedRoom.roomNumber,
-            checkInDate,
-            checkOutDate,
-            notes: checkinData.guestInfo.idNumber
-              ? `ID: ${checkinData.guestInfo.idNumber}`
-              : undefined,
-          });
-          await reservationsService.updateStatus(reservation.id, 'seated');
-          reservationCreated = true;
-        }
-
-        const checkinStatusUpdated = await updateStatus(checkinData.roomId, 'occupied');
-        if (!checkinStatusUpdated) {
-          throw new Error('Failed to update room status to occupied');
-        }
-
-        if (hasOrders) {
-          try {
-            await createFallbackReceiptOrder({
-              room: selectedRoom,
-              guestName: checkinData.guestInfo.name,
-              guestPhone: checkinData.guestInfo.phone || undefined,
-              description: `Room ${selectedRoom.roomNumber} check-in (${checkinData.nights} night${checkinData.nights > 1 ? 's' : ''})`,
-              amount: Number(checkinData.totalAmount) || 0,
-              paymentMethod: checkinData.paymentMethod,
-              notes: checkinData.guestInfo.idNumber ? `Guest ID: ${checkinData.guestInfo.idNumber}` : undefined,
-            });
-          } catch (billingError) {
-            console.error('Fallback check-in receipt failed:', billingError);
-            toast.error(t('roomsView.toasts.checkinReceiptFailed', { defaultValue: 'Check-in completed, but receipt failed' }));
-          }
-        } else if (!reservationCreated) {
-          toast.success(t('roomsView.toasts.checkinNoReceipt', { defaultValue: 'Room checked in without a reservation or receipt' }));
-        }
-      }
-
-      await refetch();
-      setCheckinData({
-        guestInfo: { name: '', phone: '', email: '', idNumber: '' },
-        roomId: '',
-        nights: 1,
-        paymentMethod: 'cash',
-        totalAmount: 0,
-      });
-      setModalType('none');
-      setActionRoom(null);
-      toast.success(t('roomsView.toasts.checkinSuccess', { defaultValue: 'Check-in completed successfully' }));
-    } catch (error) {
-      console.error('Failed to complete check-in:', error);
-      toast.error(error instanceof Error ? error.message : t('roomsView.toasts.checkinFailed', { defaultValue: 'Failed to complete check-in' }));
-    }
-  };
-
-  const handleReservation = async () => {
-    if (!reservationData.roomId || !reservationData.guestInfo.name) return;
-    
-    try {
-      if (!hasReservations) {
-        toast.error(t('roomsView.toasts.reservationsModuleRequired', { defaultValue: 'Reservations module is required to create room reservations' }));
-        return;
-      }
-
-      // Get the selected room for room number
-      // Full branch set (not grid-filtered) so the reservation submit lookup is filter-proof.
-      const selectedRoom = allRooms.find(r => r.id === reservationData.roomId);
-      
-      // Set context for reservations service
-      reservationsService.setContext(branchId || '', effectiveOrgId || '');
-      
-      // Create reservation record in database
-      await reservationsService.createReservation({
-        customerName: reservationData.guestInfo.name,
-        customerPhone: reservationData.guestInfo.phone || '',
-        customerEmail: reservationData.guestInfo.email || undefined,
-        partySize: selectedRoom?.capacity || 2,
-        reservationDate: reservationData.checkInDate,
-        reservationTime: '14:00', // Default check-in time
-        roomId: reservationData.roomId,
-        roomNumber: selectedRoom?.roomNumber,
-        checkInDate: reservationData.checkInDate,
-        checkOutDate: reservationData.checkOutDate,
-        notes: reservationData.notes || undefined,
-      });
-      
-      if (reservationData.checkInDate === toLocalDateString()) {
-        await updateStatus(reservationData.roomId, 'reserved');
-      }
-      
-      toast.success(t('roomsView.toasts.reservationCreated', { defaultValue: 'Reservation created successfully' }));
-      
-      // Reset and close
-      const defaults = getDefaultReservationDates(new Date());
-      setReservationDatesFollowClock(true);
-      setReservationData({
-        guestInfo: { name: '', phone: '', email: '', idNumber: '' },
-        roomId: '',
-        checkInDate: defaults.checkInDate,
-        checkOutDate: defaults.checkOutDate,
-        notes: '',
-      });
-      setModalType('none');
-    } catch (error) {
-      console.error('Failed to create reservation:', error);
-      toast.error(t('roomsView.toasts.reservationFailed', { defaultValue: 'Failed to create reservation' }));
-    }
-  };
-
   const completeCheckoutLocally = async (room: Room): Promise<boolean> => {
     if (hasGuestBilling && room.activeFolio) {
       toast.error(t('roomsView.toasts.folioCheckoutOffline', { defaultValue: 'Folio checkout requires an online connection' }));
       return false;
     }
 
+    if (hasReservations) {
+      reservationsService.setContext(branchId || '', effectiveOrgId || '');
+      const reservation = await reservationsService.getActiveRoomReservation(room.id, toLocalDateString());
+      if (reservation?.status === 'seated') {
+        await reservationsService.updateStatus(reservation.id, 'completed');
+        await refetch();
+        return true;
+      }
+    }
     const updated = await updateStatus(room.id, 'cleaning');
     if (!updated) {
       throw new Error('Failed to update room status to cleaning');
@@ -638,7 +367,7 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
       await submitRoomCheckout(actionRoom);
     } catch (error) {
       console.error('Failed to checkout room:', error);
-      toast.error(error instanceof Error ? error.message : t('roomsView.toasts.checkoutFailed', { defaultValue: 'Failed to complete checkout' }));
+      toast.error(roomWorkflowError(error, t));
     }
   };
 
@@ -747,70 +476,8 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
   // Create/check-in/reservation selector options: derive from the full branch room set
   // (allRooms), filtered only by effective availability — NOT from the grid-filtered rooms,
   // so a staff search/status/floor filter on the grid never hides selectable rooms.
-  const availableRooms = allRooms.filter(r => getRoomEffectiveStatus(r) === 'available');
 
-  const createFallbackReceiptOrder = useCallback(async (params: {
-    room: Room;
-    guestName: string;
-    guestPhone?: string;
-    description: string;
-    amount: number;
-    paymentMethod: 'cash' | 'card' | 'transfer';
-    notes?: string;
-  }) => {
-    if (params.amount <= 0) {
-      return null;
-    }
 
-    const orderService = OrderService.getInstance();
-    const order = await orderService.createOrder({
-      customer_name: params.guestName,
-      customer_phone: params.guestPhone || undefined,
-      items: [
-        {
-          id: `hotel-${params.room.id}-${Date.now()}`,
-          name: params.description,
-          quantity: 1,
-          price: params.amount,
-          notes: params.notes || undefined,
-        } as any,
-      ],
-      total_amount: params.amount,
-      subtotal: params.amount,
-      status: 'completed',
-      order_type: 'pickup',
-      payment_status: 'completed',
-      payment_method: mapPaymentMethod(params.paymentMethod),
-      notes: params.notes || params.description,
-    } as any);
-
-    if (order?.id) {
-      await bridge.payments.printReceipt(order.id, 'customer');
-    }
-
-    return order;
-  }, [bridge]);
-
-  // Calculate total for check-in
-  const updateCheckinTotal = useCallback((nights: number, roomId: string) => {
-    // The check-in selector lists rooms from the full branch set, so resolve the rate from
-    // allRooms too — a grid filter must not zero out the total for a selectable room.
-    const room = allRooms.find(r => r.id === roomId);
-    const rate = room?.ratePerNight || 0;
-    setCheckinData(prev => ({ ...prev, nights, totalAmount: rate * nights }));
-  }, [allRooms]);
-
-  if (!branchId || !effectiveOrgId) {
-    return (
-      <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className={`h-full flex flex-col items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-        <Bed className="w-16 h-16 mb-4 opacity-30" />
-        <p className="text-lg">{t('roomsView.noBranch', { defaultValue: 'Please select a branch to view rooms' })}</p>
-        <p className="text-xs mt-2 opacity-60">
-          {!branchId ? 'Missing: branch_id' : ''} {!effectiveOrgId ? 'Missing: organization_id' : ''}
-        </p>
-      </motion.div>
-    );
-  }
 
   return (
     <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className="h-full flex flex-col p-3 sm:p-4 overflow-hidden">
@@ -1228,261 +895,15 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
         </Modal>
       )}
 
-      {/* Check-in Modal */}
-      {modalType === 'checkin' && (
-        <Modal title={t('roomsView.newCheckin', { defaultValue: 'New Check-in' })} onClose={() => setModalType('none')} isDark={isDark} size="lg">
-          <div className="space-y-4">
-            {/* Room Selection */}
-            <div>
-              <label className={`block text-sm font-medium mb-1.5 ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>
-                {t('roomsView.selectRoom', { defaultValue: 'Select Room' })}
-              </label>
-              <select
-                value={checkinData.roomId}
-                onChange={(e) => {
-                  setCheckinData(prev => ({ ...prev, roomId: e.target.value }));
-                  updateCheckinTotal(checkinData.nights, e.target.value);
-                }}
-                className={`w-full px-3 py-2.5 rounded-xl text-sm ${
-                  isDark ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-200 text-gray-900'
-                } border focus:ring-2 focus:ring-yellow-400`}
-              >
-                <option value="">{t('roomsView.chooseRoom', { defaultValue: 'Choose a room...' })}</option>
-                {availableRooms.map(room => (
-                  <option key={room.id} value={room.id}>
-                    {t('roomsView.roomOption', { number: room.roomNumber, type: translateRoomType(t, room.roomType), rate: formatMoney(room.ratePerNight || 0), defaultValue: 'Room {{number}} - {{type}} ({{rate}}/night)' })}
-                  </option>
-                ))}
-              </select>
-            </div>
+      {(modalType === 'checkin' || modalType === 'reservation') && (() => {
+        const selected = allRooms.find((item) => item.id === (modalType === 'checkin' ? checkinData.roomId : reservationData.roomId));
+        const close = () => { setModalType('none'); setActionRoom(null); };
+        const props = { branchId: branchId || '', organizationId: effectiveOrgId || '', updateRoomStatus: updateStatus, refetchRooms: refetch, onClose: close, onCompleted: close };
+        return selected
+          ? modalType === 'checkin' ? <RoomCheckinModal key={selected.id} room={selected} {...props} /> : <RoomReservationModal key={selected.id} room={selected} {...props} />
+          : <RoomStaySelectorModal isOpen variant={modalType} rooms={allRooms} onClose={close} onSelectRoom={(selectedRoom) => modalType === 'checkin' ? openCheckinModal(selectedRoom) : openReservationModal(selectedRoom)} />;
+      })()}
 
-            {/* Guest Info */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <InputField
-                icon={<User className="w-4 h-4" />}
-                label={t('roomsView.guestName', { defaultValue: 'Guest Name' })}
-                value={checkinData.guestInfo.name}
-                onChange={(v) => setCheckinData(prev => ({ ...prev, guestInfo: { ...prev.guestInfo, name: v } }))}
-                isDark={isDark}
-                required
-              />
-              <InputField
-                icon={<Phone className="w-4 h-4" />}
-                label={t('roomsView.phone', { defaultValue: 'Phone' })}
-                value={checkinData.guestInfo.phone}
-                onChange={(v) => setCheckinData(prev => ({ ...prev, guestInfo: { ...prev.guestInfo, phone: v } }))}
-                isDark={isDark}
-              />
-              <InputField
-                icon={<Mail className="w-4 h-4" />}
-                label={t('roomsView.email', { defaultValue: 'Email' })}
-                type="email"
-                value={checkinData.guestInfo.email}
-                onChange={(v) => setCheckinData(prev => ({ ...prev, guestInfo: { ...prev.guestInfo, email: v } }))}
-                isDark={isDark}
-              />
-              <InputField
-                icon={<CreditCard className="w-4 h-4" />}
-                label={t('roomsView.idNumber', { defaultValue: 'ID Number' })}
-                value={checkinData.guestInfo.idNumber}
-                onChange={(v) => setCheckinData(prev => ({ ...prev, guestInfo: { ...prev.guestInfo, idNumber: v } }))}
-                isDark={isDark}
-              />
-            </div>
-
-            {/* Stay Duration */}
-            <div>
-              <label className={`block text-sm font-medium mb-1.5 ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>
-                {t('roomsView.numberOfNights', { defaultValue: 'Number of Nights' })}
-              </label>
-              <input
-                type="number"
-                min="1"
-                value={checkinData.nights}
-                onChange={(e) => {
-                  const nights = parseInt(e.target.value) || 1;
-                  updateCheckinTotal(nights, checkinData.roomId);
-                }}
-                className={`w-full px-3 py-2.5 rounded-xl text-sm ${
-                  isDark ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-200 text-gray-900'
-                } border focus:ring-2 focus:ring-yellow-400`}
-              />
-            </div>
-
-            {!hasGuestBilling && hasOrders && (
-              <div>
-                <label className={`block text-sm font-medium mb-1.5 ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>
-                  {t('roomsView.paymentMethod', { defaultValue: 'Payment Method' })}
-                </label>
-                <div className="grid grid-cols-3 gap-2">
-                  {(['cash', 'card', 'transfer'] as const).map(method => (
-                    <button
-                      key={method}
-                      onClick={() => setCheckinData(prev => ({ ...prev, paymentMethod: method }))}
-                      className={`py-2.5 px-3 rounded-xl text-sm font-medium capitalize transition-all ${
-                        checkinData.paymentMethod === method
-                          ? 'bg-yellow-400 text-black'
-                          : isDark ? 'bg-gray-700 text-gray-300 active:bg-gray-600' : 'bg-gray-100 text-gray-600 active:bg-gray-200'
-                      }`}
-                    >
-                      {t(`roomsView.paymentMethods.${method}`, { defaultValue: method })}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Total */}
-            <div className={`p-4 rounded-2xl ${isDark ? 'bg-gray-700' : 'bg-gray-100'}`}>
-              <div className="flex items-center justify-between">
-                <span className={`text-sm ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>
-                  {hasGuestBilling ? t('roomsView.estimatedStayCharge', { defaultValue: 'Estimated Stay Charge' }) : t('roomsView.totalAmount', { defaultValue: 'Total Amount' })}
-                </span>
-                <span className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>
-                  {formatMoney(checkinData.totalAmount)}
-                </span>
-              </div>
-            </div>
-
-            {/* Actions */}
-            <div className="flex gap-3 pt-2">
-              <button
-                onClick={() => setModalType('none')}
-                className={`flex-1 py-3 rounded-xl font-medium ${
-                  isDark ? 'bg-gray-700 text-gray-300 active:bg-gray-600' : 'bg-gray-100 text-gray-600 active:bg-gray-200'
-                }`}
-              >
-                {t('common.actions.cancel', { defaultValue: 'Cancel' })}
-              </button>
-              <button
-                onClick={handleCheckin}
-                disabled={!checkinData.roomId || !checkinData.guestInfo.name}
-                className="flex-1 py-3 rounded-xl font-medium bg-emerald-600 text-white active:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {t('roomsView.completeCheckin', { defaultValue: 'Complete Check-in' })}
-              </button>
-            </div>
-          </div>
-        </Modal>
-      )}
-
-      {/* Reservation Modal */}
-      {modalType === 'reservation' && (
-        <Modal title={t('roomsView.newReservation', { defaultValue: 'New Reservation' })} onClose={() => setModalType('none')} isDark={isDark} size="lg">
-          <div className="space-y-4">
-            {/* Room Selection */}
-            <div>
-              <label className={`block text-sm font-medium mb-1.5 ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>
-                {t('roomsView.selectRoom', { defaultValue: 'Select Room' })}
-              </label>
-              <select
-                value={reservationData.roomId}
-                onChange={(e) => setReservationData(prev => ({ ...prev, roomId: e.target.value }))}
-                className={`w-full px-3 py-2.5 rounded-xl text-sm ${
-                  isDark ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-200 text-gray-900'
-                } border focus:ring-2 focus:ring-yellow-400`}
-              >
-                <option value="">{t('roomsView.chooseRoom', { defaultValue: 'Choose a room...' })}</option>
-                {availableRooms.map(room => (
-                  <option key={room.id} value={room.id}>
-                    {t('roomsView.roomOption', { number: room.roomNumber, type: translateRoomType(t, room.roomType), rate: formatMoney(room.ratePerNight || 0), defaultValue: 'Room {{number}} - {{type}} ({{rate}}/night)' })}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {/* Guest Info */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <InputField
-                icon={<User className="w-4 h-4" />}
-                label={t('roomsView.guestName', { defaultValue: 'Guest Name' })}
-                value={reservationData.guestInfo.name}
-                onChange={(v) => setReservationData(prev => ({ ...prev, guestInfo: { ...prev.guestInfo, name: v } }))}
-                isDark={isDark}
-                required
-              />
-              <InputField
-                icon={<Phone className="w-4 h-4" />}
-                label={t('roomsView.phone', { defaultValue: 'Phone' })}
-                value={reservationData.guestInfo.phone}
-                onChange={(v) => setReservationData(prev => ({ ...prev, guestInfo: { ...prev.guestInfo, phone: v } }))}
-                isDark={isDark}
-              />
-            </div>
-
-            {/* Dates */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div>
-                <label className={`block text-sm font-medium mb-1.5 ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>
-                  {t('roomsView.checkInDate', { defaultValue: 'Check-in Date' })}
-                </label>
-                <input
-                  type="date"
-                  value={reservationData.checkInDate}
-                  onChange={(e) => {
-                    setReservationDatesFollowClock(false);
-                    setReservationData(prev => ({ ...prev, checkInDate: e.target.value }));
-                  }}
-                  className={`w-full px-3 py-2.5 rounded-xl text-sm ${
-                    isDark ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-200 text-gray-900'
-                  } border focus:ring-2 focus:ring-yellow-400`}
-                />
-              </div>
-              <div>
-                <label className={`block text-sm font-medium mb-1.5 ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>
-                  {t('roomsView.checkOutDate', { defaultValue: 'Check-out Date' })}
-                </label>
-                <input
-                  type="date"
-                  value={reservationData.checkOutDate}
-                  onChange={(e) => {
-                    setReservationDatesFollowClock(false);
-                    setReservationData(prev => ({ ...prev, checkOutDate: e.target.value }));
-                  }}
-                  className={`w-full px-3 py-2.5 rounded-xl text-sm ${
-                    isDark ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-200 text-gray-900'
-                  } border focus:ring-2 focus:ring-yellow-400`}
-                />
-              </div>
-            </div>
-
-            {/* Notes */}
-            <div>
-              <label className={`block text-sm font-medium mb-1.5 ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>
-                {t('roomsView.notes', { defaultValue: 'Notes' })}
-              </label>
-              <textarea
-                value={reservationData.notes}
-                onChange={(e) => setReservationData(prev => ({ ...prev, notes: e.target.value }))}
-                rows={3}
-                className={`w-full px-3 py-2.5 rounded-xl text-sm ${
-                  isDark ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-200 text-gray-900'
-                } border focus:ring-2 focus:ring-yellow-400 resize-none`}
-                placeholder={t('roomsView.notesPlaceholder', { defaultValue: 'Special requests, notes...' })}
-              />
-            </div>
-
-            {/* Actions */}
-            <div className="flex gap-3 pt-2">
-              <button
-                onClick={() => setModalType('none')}
-                className={`flex-1 py-3 rounded-xl font-medium ${
-                  isDark ? 'bg-gray-700 text-gray-300 active:bg-gray-600' : 'bg-gray-100 text-gray-600 active:bg-gray-200'
-                }`}
-              >
-                {t('common.actions.cancel', { defaultValue: 'Cancel' })}
-              </button>
-              <button
-                onClick={handleReservation}
-                disabled={!reservationData.roomId || !reservationData.guestInfo.name}
-                className="flex-1 py-3 rounded-2xl font-medium bg-emerald-500 text-white active:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {t('roomsView.createReservation', { defaultValue: 'Create Reservation' })}
-              </button>
-            </div>
-          </div>
-        </Modal>
-      )}
     </motion.div>
   );
 });

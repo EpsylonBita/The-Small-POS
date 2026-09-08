@@ -111,7 +111,7 @@ test('add-shift modal closes on Escape via the topmost-dialog gate, not while sa
     viewSource,
     /ref=\{createDialogRef\}\s*role="dialog"\s*aria-modal="true"\s*aria-labelledby=\{createTitleId\}/,
   );
-  assert.match(viewSource, /<h3 id=\{createTitleId\}[^>]*>\{t\('staffSchedule\.addShift', 'Add Shift'\)\}/);
+  assert.match(viewSource, /<h3 id=\{createTitleId\}[^>]*>\{t\(confirmDelete \? 'staffSchedule\.workflow\.delete' : editingShiftId \? 'staffSchedule\.workflow\.edit' : 'staffSchedule\.addShift'/);
 
   // Escape effect: gated on createModalOpen + not saving, topmost-gated against the panel,
   // routed to the close-only state reset (no create).
@@ -157,12 +157,14 @@ test('week preview modal closes on Escape via the same topmost-dialog close-only
 });
 
 test('creating a shift optimistically updates the current week without waiting for a manual refresh', () => {
-  // handleCreateShift inserts an optimistic shift from the create payload BEFORE the
+  // handleCreateShift inserts the durably saved shift BEFORE the
   // post-create refetch, so the grid/stats update immediately even when the Tauri
   // read-after-write is momentarily stale.
   const createFn = viewSource.match(/const handleCreateShift = async \(\) => \{[\s\S]*?\n  \};/);
   assert.ok(createFn, 'handleCreateShift not found');
-  assert.match(createFn[0], /const optimisticShift: ScheduleShift = \{/);
+  assert.match(createFn[0], /id: editingShiftId \|\| crypto\.randomUUID\(\)/);
+  assert.match(createFn[0], /let saved: ScheduleShift;/);
+  assert.match(createFn[0], /saved = \{ \.\.\.response\.shift, pending_sync: response\.queued \}/);
   assert.match(createFn[0], /staff_id: createStaffId,/);
   assert.match(createFn[0], /start_time: startIso,/);
   assert.match(createFn[0], /end_time: endIso,/);
@@ -181,19 +183,19 @@ test('the schedule grid renders the merged optimistic+server shifts, not raw ser
   assert.match(viewSource, /const displayShifts = useMemo<ScheduleShift\[\]>\(/);
   assert.match(viewSource, /for \(const shift of displayShifts\)/);
   assert.doesNotMatch(viewSource, /for \(const shift of shifts\) \{/);
-  // Optimistic shifts already reflected by the server are filtered out (no duplicates).
-  assert.match(
-    viewSource,
-    /optimisticShifts\.filter\(shift => !serverIdentities\.has\(getShiftIdentity\(shift\)\)\)/,
-  );
+  // Stable IDs let pending edits replace old server rows and deletes hide them.
+  assert.match(viewSource, /const byId = new Map\(shifts\.map\(shift => \[shift\.id, shift\]\)\)/);
+  assert.match(viewSource, /if \(pending\.deleted\) byId\.delete\(pending\.id\);/);
+  assert.match(viewSource, /else byId\.set\(pending\.id, pending\);/);
+  assert.match(viewSource, /return \[\.\.\.byId\.values\(\)\];/);
 });
 
 test('a successful fetch reconciles (prunes) optimistic shifts the server now returns', () => {
   // Once a later fetch includes the created shift, the optimistic copy is dropped so
   // it never lingers or double-renders, while still-unsynced ones survive.
-  assert.match(viewSource, /const serverIdentities = new Set\(serverShifts\.map\(getShiftIdentity\)\)/);
-  assert.match(
-    viewSource,
-    /setOptimisticShifts\(prev =>\s*prev\.length === 0\s*\? prev\s*: prev\.filter\(shift => !serverIdentities\.has\(getShiftIdentity\(shift\)\)\),?\s*\)/,
-  );
+  assert.match(viewSource, /setOptimisticShifts\(prev => prev\.filter\(pending => pending\.deleted/);
+  assert.match(viewSource, /\? serverShifts\.some\(row => row\.id === pending\.id\)/);
+  assert.match(viewSource, /: !serverShifts\.some\(row => row\.id === pending\.id && getShiftIdentity\(row\) === getShiftIdentity\(pending\)/);
+  assert.match(viewSource, /getShiftEndValue\(row\) === getShiftEndValue\(pending\)/);
+  assert.match(viewSource, /\(row\.notes \|\| ''\) === \(pending\.notes \|\| ''\)/);
 });

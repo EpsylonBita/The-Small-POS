@@ -4428,6 +4428,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           order,
           nextItems,
           targetOrderType,
+          Number(getSetting<number | string>('tax', 'tax_rate_percentage', 24)),
         );
 
         const orderUpdates: Partial<EditSettlementOrderUpdates> = {
@@ -4526,7 +4527,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           orderUpdates,
         };
       },
-      [],
+      [getSetting],
     );
 
     const openEditSettlementCollectionPrompt = useCallback(
@@ -5839,6 +5840,11 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
     const localizePaymentMethodEditError = (error: unknown) => {
       const rawMessage = extractOrderDashboardErrorMessage(error) || "";
+      if (rawMessage.includes("PAYMENT_METHOD_EDIT_ADJUSTED_ORDER_NOT_EDITABLE")) {
+        return t("orderDashboard.paymentMethodAdjustedOrder", {
+          defaultValue: "This order has a refund or void. Its payment methods cannot be changed. Open the payment history to review the adjustment.",
+        });
+      }
       if (rawMessage.includes("PAYMENT_METHOD_EDIT_TARGET_NOT_FOUND")) {
         return t("orderDashboard.paymentMethodEditUnavailable");
       }
@@ -5869,7 +5875,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         const route = await loadPaymentEditRoute(bridge, editablePaymentOrder);
         if (route.kind === "blocked") {
           showPaymentMethodEditError(
-            t("orderDashboard.paymentMethodEditUnavailable"),
+            route.reason === "adjusted"
+              ? localizePaymentMethodEditError("PAYMENT_METHOD_EDIT_ADJUSTED_ORDER_NOT_EDITABLE")
+              : t("orderDashboard.paymentMethodEditUnavailable"),
           );
           return;
         }

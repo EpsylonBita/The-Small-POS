@@ -13,6 +13,8 @@ import {
   Eye,
   FileText,
   Plus,
+  Pencil,
+  Trash2,
   RefreshCw,
   Upload,
   UserCheck,
@@ -21,11 +23,11 @@ import {
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { getBridge, isBrowser } from '../../../../lib';
-import { posApiGet, posApiPost } from '../../../utils/api-helpers';
+import { posApiGet, posApiPost, posApiPatch, posApiFetch } from '../../../utils/api-helpers';
 import { formatDate, formatTime } from '../../../utils/format';
 import { translateRoleName } from '../../../utils/role-labels';
 import { useTerminalSettings } from '../../../hooks/useTerminalSettings';
-import { offlineCreateStaffShift } from '../../../services/offline-mutations';
+import { offlineCreateStaffShift, offlineUpdateStaffShift, offlineDeleteStaffShift } from '../../../services/offline-mutations';
 import {
   importStaffScheduleFile,
   STAFF_SCHEDULE_IMPORT_ACCEPT,
@@ -60,6 +62,8 @@ interface StaffMember {
 
 interface ScheduleShift {
   id: string;
+  deleted?: boolean;
+  pending_sync?: boolean;
   staffId?: string;
   staff_id?: string;
   staffName?: string;
@@ -114,6 +118,7 @@ interface WeeklyShift {
   start: Date;
   end: Date | null;
   status: string;
+  pendingSync?: boolean;
 }
 
 interface ImportRunningShift {
@@ -264,6 +269,8 @@ export const StaffScheduleView: React.FC = memo(() => {
   const [createEndMinute, setCreateEndMinute] = useState('00');
   const [createNotes, setCreateNotes] = useState('');
   const [creatingShift, setCreatingShift] = useState(false);
+  const [editingShiftId, setEditingShiftId] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const [publishingErgani, setPublishingErgani] = useState(false);
   const [hasErganiPlugin, setHasErganiPlugin] = useState(false);
   const [erganiPublishStatus, setErganiPublishStatus] = useState<string | null>(null);
@@ -331,12 +338,10 @@ export const StaffScheduleView: React.FC = memo(() => {
         setShifts(serverShifts);
         // Drop optimistic shifts the server now reflects so they don't linger; keep
         // any the (possibly stale) read hasn't surfaced yet so the grid stays current.
-        const serverIdentities = new Set(serverShifts.map(getShiftIdentity));
-        setOptimisticShifts(prev =>
-          prev.length === 0
-            ? prev
-            : prev.filter(shift => !serverIdentities.has(getShiftIdentity(shift))),
-        );
+        setOptimisticShifts(prev => prev.filter(pending => pending.deleted
+          ? serverShifts.some(row => row.id === pending.id)
+          : !serverShifts.some(row => row.id === pending.id && getShiftIdentity(row) === getShiftIdentity(pending)
+            && getShiftEndValue(row) === getShiftEndValue(pending) && (row.notes || '') === (pending.notes || ''))));
       } else {
         setError(response.error || payload.error || t('staffSchedule.errors.loadFailed', 'Failed to fetch staff data'));
       }
@@ -451,12 +456,12 @@ export const StaffScheduleView: React.FC = memo(() => {
   // freshly created shift stays visible across the immediate (possibly stale)
   // refetch. Deduped by staff + start so a synced shift never renders twice.
   const displayShifts = useMemo<ScheduleShift[]>(() => {
-    if (optimisticShifts.length === 0) {
-      return shifts;
+    const byId = new Map(shifts.map(shift => [shift.id, shift]));
+    for (const pending of optimisticShifts) {
+      if (pending.deleted) byId.delete(pending.id);
+      else byId.set(pending.id, pending);
     }
-    const serverIdentities = new Set(shifts.map(getShiftIdentity));
-    const pending = optimisticShifts.filter(shift => !serverIdentities.has(getShiftIdentity(shift)));
-    return pending.length === 0 ? shifts : [...shifts, ...pending];
+    return [...byId.values()];
   }, [shifts, optimisticShifts]);
 
   const weeklyShifts = useMemo<WeeklyShift[]>(() => {
@@ -494,6 +499,7 @@ export const StaffScheduleView: React.FC = memo(() => {
         start,
         end: getShiftEnd(shift),
         status: normalizeStatus(shift.status),
+        pendingSync: shift.pending_sync,
       });
     }
 
@@ -564,6 +570,8 @@ export const StaffScheduleView: React.FC = memo(() => {
   };
 
   const openCreateModal = (day: Date, staffId = '') => {
+    setEditingShiftId(null);
+    setConfirmDelete(false);
     setCreateModalDate(new Date(day));
     setCreateStaffId(staffId);
     const dayValue = toDateInputValue(day);
@@ -575,6 +583,42 @@ export const StaffScheduleView: React.FC = memo(() => {
     setCreateEndMinute('00');
     setCreateNotes('');
     setCreateModalOpen(true);
+  };
+
+  const openEditModal = (shift: WeeklyShift, deleting = false) => {
+    const original = [...optimisticShifts, ...shifts].find(row => row.id === shift.id);
+    if (!original || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(shift.id)) {
+      toast.error(t('staffSchedule.workflow.identityPending', 'Wait for this schedule to sync, then refresh before editing.'));
+      return;
+    }
+    openCreateModal(shift.start, shift.staffId);
+    setEditingShiftId(shift.id);
+    setCreateStartHour(pad(shift.start.getHours()));
+    setCreateStartMinute(pad(shift.start.getMinutes()));
+    if (shift.end) {
+      setCreateEndDate(toDateInputValue(shift.end));
+      setCreateEndHour(pad(shift.end.getHours()));
+      setCreateEndMinute(pad(shift.end.getMinutes()));
+    }
+    setCreateNotes(original.notes || '');
+    setConfirmDelete(deleting);
+  };
+
+  const handleDeleteShift = async () => {
+    if (!editingShiftId || creatingShift) return;
+    setCreatingShift(true);
+    try {
+      if (isBrowser()) {
+        const result = await posApiFetch<{ success?: boolean; error?: string }>('/api/pos/staff-schedule', {
+          method: 'DELETE', body: JSON.stringify({ shift_id: editingShiftId }),
+        });
+        if (!result.success || result.data?.success === false) throw new Error(result.error || result.data?.error || 'Failed to delete shift');
+      } else await offlineDeleteStaffShift({ shift_id: editingShiftId });
+      setOptimisticShifts(prev => [...prev.filter(row => row.id !== editingShiftId), { id: editingShiftId, deleted: true }]);
+      toast.success(isBrowser() ? t('staffSchedule.workflow.deleted', 'Shift deleted') : t('staffSchedule.savedLocallyQueued', 'Saved locally and queued'));
+      setCreateModalOpen(false);
+    } catch (error) { toast.error(error instanceof Error ? error.message : t('staffSchedule.workflow.saveFailed', 'Could not save the schedule. Try again.')); }
+    finally { setCreatingShift(false); }
   };
 
   const closeCreateModal = () => {
@@ -676,51 +720,29 @@ export const StaffScheduleView: React.FC = memo(() => {
 
     try {
       setCreatingShift(true);
-      if (isBrowser()) {
-        const response = await posApiPost<{ success?: boolean; error?: string }>('/pos/staff-schedule', {
-          staff_id: createStaffId,
-          start_time: startIso,
-          end_time: endIso,
-          notes: createNotes.trim() || null,
-          status: 'scheduled',
-        });
-
-        const failed = !response.success || response.data?.success === false;
-        if (failed) {
-          throw new Error(response.error || response.data?.error || 'Failed to create shift');
-        }
-      } else {
-        await offlineCreateStaffShift({
-          staff_id: createStaffId,
-          start_time: startIso,
-          end_time: endIso,
-          notes: createNotes.trim() || null,
-          status: 'scheduled',
-          branch_id: branchId || undefined,
-        });
-      }
-
-      // Optimistically surface the new shift immediately. The post-create refetch
-      // below can read before the write is visible (Tauri read-after-write lag);
-      // this keeps the current week, stats, and unscheduled list correct without a
-      // manual refresh, and is reconciled/pruned once the server returns the row.
-      const optimisticShift: ScheduleShift = {
-        id: `optimistic-${createStaffId}-${startIso}`,
-        staff_id: createStaffId,
-        start_time: startIso,
-        end_time: endIso,
-        status: 'scheduled',
-        notes: createNotes.trim() || undefined,
+      const previous = editingShiftId ? [...optimisticShifts, ...shifts].find(row => row.id === editingShiftId) : undefined;
+      const payload = {
+        id: editingShiftId || crypto.randomUUID(), ...(editingShiftId ? { shift_id: editingShiftId } : {}),
+        staff_id: createStaffId, start_time: startIso, end_time: endIso,
+        break_start: previous?.breakStart || previous?.break_start || null,
+        break_end: previous?.breakEnd || previous?.break_end || null,
+        notes: createNotes.trim() || null, status: 'scheduled', branch_id: branchId || undefined,
       };
-      setOptimisticShifts(prev => {
-        const identity = getShiftIdentity(optimisticShift);
-        const deduped = prev.filter(shift => getShiftIdentity(shift) !== identity);
-        return [...deduped, optimisticShift];
-      });
+      let saved: ScheduleShift;
+      if (isBrowser()) {
+        const response = await (editingShiftId ? posApiPatch : posApiPost)<{ success?: boolean; shift?: ScheduleShift; error?: string }>('/api/pos/staff-schedule', payload);
+        if (!response.success || response.data?.success === false || !response.data?.shift?.id) throw new Error(response.error || response.data?.error || 'Failed to save shift');
+        saved = response.data.shift;
+      } else {
+        const response = await (editingShiftId ? offlineUpdateStaffShift : offlineCreateStaffShift)(payload);
+        if (!response.shift?.id) throw new Error('Failed to save shift identity');
+        saved = { ...response.shift, pending_sync: response.queued } as unknown as ScheduleShift;
+      }
+      setOptimisticShifts(prev => [...prev.filter(row => row.id !== saved.id), saved]);
 
       toast.success(
         isBrowser()
-          ? t('staffSchedule.shiftCreated', 'Shift created')
+          ? t(editingShiftId ? 'staffSchedule.workflow.updated' : 'staffSchedule.shiftCreated', editingShiftId ? 'Shift updated' : 'Shift created')
           : t('staffSchedule.savedLocallyQueued', 'Saved locally and queued'),
       );
       setCreateModalOpen(false);
@@ -1312,6 +1334,11 @@ export const StaffScheduleView: React.FC = memo(() => {
                               style={{ borderLeftColor: shift.roleColor }}
                             >
                               <p className="text-sm font-semibold leading-tight">{shift.staffName}</p>
+                              {shift.pendingSync && <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">{t('staffSchedule.savedLocallyQueued', 'Saved locally and queued')}</p>}
+                              {['scheduled', 'cancelled'].includes(shift.status) && <div className="mt-2 flex gap-2">
+                                <button type="button" className="min-h-10 rounded-xl border px-3" onClick={() => openEditModal(shift)} aria-label={t('staffSchedule.workflow.edit', 'Edit shift')}><Pencil className="h-4 w-4" /></button>
+                                <button type="button" className="min-h-10 rounded-xl border px-3 text-red-600 dark:text-red-300" onClick={() => openEditModal(shift, true)} aria-label={t('staffSchedule.workflow.delete', 'Delete shift')}><Trash2 className="h-4 w-4" /></button>
+                              </div>}
                               <p className={`mt-1 inline-flex items-center gap-1 text-xs capitalize ${mutedTextClass}`}>
                                 <Briefcase className="h-3 w-3" />
                                 {shift.roleLabel}
@@ -1506,7 +1533,7 @@ export const StaffScheduleView: React.FC = memo(() => {
           >
             <div className={`flex items-start justify-between gap-3 shrink-0 border-b ${isDark ? 'border-zinc-800' : 'border-gray-200'} p-5 md:p-6`}>
               <div>
-                <h3 id={createTitleId} className="text-2xl font-semibold">{t('staffSchedule.addShift', 'Add Shift')}</h3>
+                <h3 id={createTitleId} className="text-2xl font-semibold">{t(confirmDelete ? 'staffSchedule.workflow.delete' : editingShiftId ? 'staffSchedule.workflow.edit' : 'staffSchedule.addShift', confirmDelete ? 'Delete shift' : editingShiftId ? 'Edit shift' : 'Add Shift')}</h3>
                 <p className={`text-sm mt-1 ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
                   {formatDate(createModalDate, { weekday: 'long', day: '2-digit', month: 'short' })}
                 </p>
@@ -1521,7 +1548,8 @@ export const StaffScheduleView: React.FC = memo(() => {
               </button>
             </div>
 
-            <div className="flex-1 min-h-0 overflow-y-auto scrollbar-hide space-y-4 p-5 md:p-6">
+            <fieldset disabled={confirmDelete || creatingShift} className="flex-1 min-h-0 overflow-y-auto scrollbar-hide space-y-4 p-5 md:p-6">
+              {confirmDelete && <p role="alert" className="rounded-xl border border-red-400 p-3 text-red-700 dark:text-red-300">{t('staffSchedule.workflow.deleteConfirm', 'Delete this planned shift? Review the staff member and times below before confirming.')}</p>}
               <label className="block">
                 <span className={`text-sm font-medium ${isDark ? 'text-zinc-300' : 'text-gray-700'}`}>
                   {t('staffSchedule.fields.staff', 'Staff')}
@@ -1668,7 +1696,7 @@ export const StaffScheduleView: React.FC = memo(() => {
                   className={`mt-1 resize-none ${inputClass}`}
                 />
               </label>
-            </div>
+            </fieldset>
 
             <div className={`flex items-center justify-end gap-3 shrink-0 border-t ${isDark ? 'border-zinc-800' : 'border-gray-200'} p-5 md:p-6`}>
               <button
@@ -1683,11 +1711,11 @@ export const StaffScheduleView: React.FC = memo(() => {
               </button>
               <button
                 type="button"
-                onClick={handleCreateShift}
+                onClick={confirmDelete ? handleDeleteShift : handleCreateShift}
                 disabled={creatingShift}
                 className={primaryButtonClass}
               >
-                {creatingShift ? t('common.actions.saving', 'Saving...') : t('staffSchedule.createProgram', 'Create shift')}
+                {creatingShift ? t('common.actions.saving', 'Saving...') : confirmDelete ? t('staffSchedule.workflow.confirmDelete', 'Confirm deletion') : t(editingShiftId ? 'staffSchedule.workflow.updatedAction' : 'staffSchedule.createProgram', editingShiftId ? 'Save changes' : 'Create shift')}
               </button>
             </div>
           </div>

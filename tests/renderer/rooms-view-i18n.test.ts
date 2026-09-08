@@ -8,6 +8,9 @@ const viewSource = readFileSync(
   'utf8',
 );
 
+const workflowSource = readFileSync(path.join(process.cwd(), 'src/renderer/components/modals/RoomStayWorkflowModals.tsx'), 'utf8');
+const roomSources = viewSource + '\n' + workflowSource;
+
 const locale = (language: string) =>
   JSON.parse(readFileSync(path.join(process.cwd(), 'src', 'locales', `${language}.json`), 'utf8'));
 
@@ -70,16 +73,16 @@ test('RoomsView hub preset is one-shot and the embedded grid hides the native sc
 
 test('RoomsView routes its app-owned strings through i18n', () => {
   // Representative strings that were hardcoded English are now translated.
-  assert.match(viewSource, /t\('roomsView\.stats\.total', \{ defaultValue: 'Total' \}\)/);
-  assert.match(viewSource, /t\('roomsView\.searchPlaceholder', \{ defaultValue: 'Search room or guest\.\.\.' \}\)/);
-  assert.match(viewSource, /t\('roomsView\.newCheckin', \{ defaultValue: 'New Check-in' \}\)/);
-  assert.match(viewSource, /t\('roomsView\.newReservation', \{ defaultValue: 'New Reservation' \}\)/);
-  assert.match(viewSource, /t\('roomsView\.completeCheckin'/);
-  assert.match(viewSource, /t\('roomsView\.createReservation'/);
-  assert.match(viewSource, /t\('roomsView\.actions\.checkin'/);
-  assert.match(viewSource, /t\('roomsView\.toasts\.checkinSuccess'/);
-  assert.match(viewSource, /roomsView\.paymentMethods\.\$\{method\}/);
-  assert.match(viewSource, /roomsView\.chargeTypes\.\$\{type\}/);
+  assert.match(roomSources, /t\('roomsView\.stats\.total', \{ defaultValue: 'Total' \}\)/);
+  assert.match(roomSources, /t\('roomsView\.searchPlaceholder', \{ defaultValue: 'Search room or guest\.\.\.' \}\)/);
+  assert.match(roomSources, /t\('roomsView\.newCheckin', \{ defaultValue: 'New Check-in' \}\)/);
+  assert.match(roomSources, /t\('roomsView\.newReservation', \{ defaultValue: 'New Reservation' \}\)/);
+  assert.match(roomSources, /t\('roomsView\.completeCheckin'/);
+  assert.match(roomSources, /t\('roomsView\.createReservation'/);
+  assert.match(roomSources, /t\('roomsView\.actions\.checkin'/);
+  assert.match(roomSources, /t\('roomsView\.toasts\.checkinSuccess'/);
+  assert.match(roomSources, /roomsView\.paymentMethods\.\$\{method\}/);
+  assert.match(roomSources, /roomsView\.chargeTypes\.\$\{type\}/);
 
   // No leftover hardcoded literals for the high-visibility controls.
   assert.doesNotMatch(viewSource, /label="Total"/);
@@ -239,12 +242,11 @@ test('RoomsView create-choice modal is portaled (blur/high-z) with separate chec
   }
 });
 
-test('RoomsView room-option labels show formatted money, not the raw ratePerNight', () => {
-  // The room picker showed "(145/night)" instead of formatted money like the rest
-  // of the Rooms UI. The rate must pass through formatMoney before interpolation.
-  assert.doesNotMatch(viewSource, /rate: room\.ratePerNight\b/);
-  const formatted = viewSource.match(/rate: formatMoney\(room\.ratePerNight \|\| 0\)/g) || [];
-  assert.ok(formatted.length >= 2, `both room-option lists must format the rate (found ${formatted.length})`);
+test('RoomsView room-option labels use the shared currency-formatted picker', () => {
+  assert.match(viewSource, /<RoomStaySelectorModal[\s\S]*?rooms=\{allRooms\}/);
+  assert.doesNotMatch(workflowSource, /rate: room\.ratePerNight\b/);
+  assert.match(workflowSource, /formatCurrency\(room\.ratePerNight \|\| 0\)/);
+
 });
 
 test('RoomsView money uses the locale-aware currency helper, not hardcoded "$"', () => {
@@ -257,7 +259,7 @@ test('RoomsView money uses the locale-aware currency helper, not hardcoded "$"',
   assert.doesNotMatch(viewSource, /\$\{actionRoom\.ratePerNight\}/);
   assert.doesNotMatch(viewSource, /\$\{checkinData\.totalAmount\.toFixed/);
   assert.match(viewSource, /\{formatMoney\(actionRoom\.ratePerNight\)\}/);
-  assert.match(viewSource, /\{formatMoney\(checkinData\.totalAmount\)\}/);
+  assert.match(workflowSource, /\{formatCurrency\(totalAmount\)\}/);
 });
 
 test('RoomsView localizes room-type slugs through translateRoomType (cards, detail, selectors)', () => {
@@ -269,7 +271,7 @@ test('RoomsView localizes room-type slugs through translateRoomType (cards, deta
   assert.match(viewSource, /return typeof localized === 'string' && localized \? localized : raw;/);
 
   // Every room-type render goes through the helper: card, detail modal, both selectors.
-  const localized = viewSource.match(/translateRoomType\(t, /g) || [];
+  const localized = roomSources.match(/translateRoomType\(t, /g) || [];
   assert.ok(localized.length >= 4, `expected >=4 translateRoomType usages, found ${localized.length}`);
   // No raw room-type renders survive.
   assert.doesNotMatch(viewSource, /\{room\.roomType\}/);
@@ -425,7 +427,7 @@ test('Round 429: Rooms reservation controls stay on the yellow/amber system with
   assert.match(viewSource, /reserved: \{ color: 'text-yellow-500', bgClass: 'bg-yellow-500\/10 border-yellow-500\/30'/);
   assert.match(viewSource, /label=\{t\('roomsView\.newReservation'[\s\S]*?color="amber"/);
   assert.match(viewSource, /label=\{t\('roomsView\.actions\.reserve'[\s\S]*?color="amber"/);
-  assert.match(viewSource, /className="flex-1 py-3 rounded-2xl font-medium bg-emerald-500 text-white active:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed"/);
+  assert.match(workflowSource, /bg-emerald-600[\s\S]*?active:scale-95[\s\S]*?disabled:cursor-not-allowed/);
   assert.match(viewSource, /className=\{`px-3 py-1\.5 rounded-2xl text-xs sm:text-sm font-medium transition-transform active:scale-95/);
   assert.match(viewSource, /className=\{`px-3 py-1\.5 rounded-2xl text-xs sm:text-sm \$\{/);
   assert.match(viewSource, /className=\{`h-9 w-9 rounded-full inline-flex items-center justify-center transition-transform active:scale-95/);
@@ -464,29 +466,15 @@ test('useRooms exposes both the filtered grid rooms and the unfiltered allRooms 
   assert.match(hookSource, /filtered = filtered\.filter\(r => getRoomEffectiveStatus\(r\) === statusFilter\)/);
 });
 
-test('RoomsView action room selectors + submit lookups use the unfiltered allRooms, not the filtered grid rooms', () => {
-  // The view destructures allRooms from the hook.
+test('RoomsView shared room selectors and selected-room forms use unfiltered allRooms', () => {
   assert.match(viewSource, /const \{ rooms, allRooms,[^}]*\} = useRooms\(/);
-
-  // The selector option source is derived from allRooms (filtered only by effective status).
-  assert.match(viewSource, /const availableRooms = allRooms\.filter\(r => getRoomEffectiveStatus\(r\) === 'available'\);/);
-  assert.doesNotMatch(viewSource, /const availableRooms = rooms\.filter\(/);
-  // The check-in and reservation modals render options from availableRooms.
-  assert.ok(
-    (viewSource.match(/\{availableRooms\.map\(room =>/g) || []).length >= 2,
-    'both the check-in and reservation selectors should list availableRooms',
-  );
-
-  // Selected-room submit lookups (check-in + reservation) resolve from allRooms.
-  assert.match(viewSource, /const selectedRoom = allRooms\.find\(\(room\) => room\.id === checkinData\.roomId\);/);
-  assert.match(viewSource, /const selectedRoom = allRooms\.find\(r => r\.id === reservationData\.roomId\);/);
-  // The check-in total rate lookup also resolves from allRooms (filter can't zero the total).
-  assert.match(viewSource, /const room = allRooms\.find\(r => r\.id === roomId\);/);
-  // No action-path lookup falls back to the filtered grid rooms anymore.
-  assert.doesNotMatch(viewSource, /const selectedRoom = rooms\.find\(/);
-
-  // The visible grid grouping STILL uses the filtered rooms (grid stays filtered).
+  assert.match(viewSource, /<RoomStaySelectorModal[\s\S]*?rooms=\{allRooms\}/);
+  assert.match(viewSource, /const selected = allRooms\.find/);
+  assert.match(viewSource, /<RoomCheckinModal[^>]*room=\{selected\}/);
+  assert.match(viewSource, /<RoomReservationModal[^>]*room=\{selected\}/);
+  assert.doesNotMatch(viewSource, /const selected = rooms\.find/);
   assert.match(viewSource, /const floorRooms = rooms\.filter\(r => r\.floor === floor\);/);
+
 });
 
 // Round 254 (live QA, 1282x802, Greek/dark, Orders hub -> Rooms tab): the search placeholder was

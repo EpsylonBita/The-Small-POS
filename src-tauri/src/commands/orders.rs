@@ -12,6 +12,24 @@ use crate::{
     resolve_order_id, storage, sync, value_f64, value_i64, value_str, write_local_json,
 };
 
+/// Apply only authoritative table/check identity after a server move or merge.
+#[tauri::command]
+pub fn orders_apply_table_session_snapshot(
+    arg0: Option<Value>,
+    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
+) -> Result<Value, String> {
+    let payload = arg0.ok_or("Missing table session snapshot")?;
+    let result = {
+        let conn = db.conn.lock().map_err(|error| error.to_string())?;
+        crate::sync_queue::apply_table_session_snapshot(&conn, &payload)?
+    };
+    if result.get("applied").and_then(Value::as_bool) == Some(true) {
+        let _ = app.emit("order_realtime_update", &result);
+    }
+    Ok(result)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct OrderUpdateStatusPayload {

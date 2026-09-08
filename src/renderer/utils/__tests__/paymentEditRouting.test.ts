@@ -3,6 +3,16 @@ import { describe, expect, it, vi } from 'vitest';
 import { loadPaymentEditRoute, routePaymentEdit } from '../paymentEditRouting';
 
 describe('routePaymentEdit', () => {
+  it.each([
+    { id: 'returned', method: 'cash', status: 'refunded', amount: 4 },
+    { id: 'partial-refund', method: 'card', status: 'completed', amount: 8, refundedAmount: 4 },
+    { id: 'void', method: 'cash', status: 'voided', amount: 4 },
+  ])('explains why an adjusted ledger cannot change tender: $id', (adjusted) => {
+    expect(routePaymentEdit(
+      { status: 'pending', paymentStatus: 'paid' },
+      [{ id: 'paid', method: 'card', status: 'completed', amount: 4 }, adjusted],
+    )).toEqual({ kind: 'blocked', reason: 'adjusted' });
+  });
   it('routes a non-cancelled pending order with no payment rows to missing-payment collection', () => {
     expect(
       routePaymentEdit(

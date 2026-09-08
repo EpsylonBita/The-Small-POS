@@ -1,0 +1,20 @@
+{
+  "orderDashboard": {
+    "paymentMethodAdjustedOrder": "Diese Bestellung enthält eine Erstattung oder Stornierung. Die Zahlungsarten können nicht geändert werden. Prüfen Sie den Zahlungsverlauf."
+  },
+  "tableCheckManager": {
+    "messages": {
+      "mergeCompatibleChecks": "Belegte Tische können zusammengeführt werden, wenn sie Teile derselben Bestellung enthalten. Rechnungen verschiedener Bestellungen bleiben getrennt."
+    }
+  },
+  "sync": {
+    "healthModal": {
+      "problems": {
+        "syncFailed": "Die Synchronisierung ist fehlgeschlagen. Öffnen Sie die Wiederherstellung, um betroffene Einträge zu prüfen."
+      },
+      "recommendations": {
+        "openRecovery": "Öffnen Sie die Wiederherstellung und prüfen Sie den fehlgeschlagenen Eintrag vor einem erneuten Versuch."
+      }
+    }
+  }
+}

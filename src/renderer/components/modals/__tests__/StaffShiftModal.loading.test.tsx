@@ -6,10 +6,12 @@ const { bridge, translation } = vi.hoisted(() => ({
   translation: { t: (key: string, fallback?: string | { defaultValue?: string }) =>
     typeof fallback === 'string' ? fallback : fallback?.defaultValue ?? key },
   bridge: {
+    sessionStaff: null as null | { staffId: string; branchId: string; terminalId: string },
+    terminalConfig: { getTerminalId: vi.fn(async () => 'terminal-a'), getBranchId: vi.fn(async () => 'branch-a'), getOrganizationId: vi.fn(async () => 'org-a') },
     settings: { get: vi.fn(), updateLocal: vi.fn() },
     staffAuth: { refreshDirectory: vi.fn(), verifyCheckInPin: vi.fn() },
     staffSchedule: { list: vi.fn() },
-    shifts: { getActive: vi.fn(), getActiveForBranch: vi.fn() },
+    shifts: { getActive: vi.fn(), getActiveForBranch: vi.fn(), getCheckInEligibility: vi.fn(), getActiveCashierByTerminal: vi.fn(), open: vi.fn() },
   },
 }));
 
@@ -20,7 +22,7 @@ vi.mock('../../../contexts/i18n-context', () => ({
   useI18n: () => ({ language: 'en', setLanguage: vi.fn(), t: translation.t }),
 }));
 vi.mock('../../../contexts/shift-context', () => ({
-  useShift: () => ({ staff: null, activeShift: null, isShiftActive: false,
+  useShift: () => ({ staff: bridge.sessionStaff, activeShift: null, isShiftActive: false,
     refreshActiveShift: vi.fn(), setStaff: vi.fn(), setActiveShiftImmediate: vi.fn() }),
 }));
 vi.mock('../../../hooks/useTerminalSettings', () => {
@@ -63,6 +65,7 @@ const props = { isOpen: true, onClose: vi.fn(), mode: 'checkin' as const };
 describe('StaffShiftModal staff loading', () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    bridge.sessionStaff = null;
     bridge.settings.get.mockResolvedValue(JSON.stringify({ branch_id: 'branch-a', staff: cached }));
     bridge.settings.updateLocal.mockResolvedValue({ success: true });
     bridge.staffAuth.refreshDirectory.mockResolvedValue({ success: true, currentTerminalId: 'terminal-a', staff: [] });
@@ -71,6 +74,9 @@ describe('StaffShiftModal staff loading', () => {
       { id: 'shift-b', staff_id: 'b', branch_id: 'branch-a', status: 'active', role_type: 'driver' },
     ]);
     bridge.staffSchedule.list.mockResolvedValue(schedule(cached));
+    bridge.terminalConfig.getTerminalId.mockResolvedValue('terminal-a');
+    bridge.terminalConfig.getBranchId.mockResolvedValue('branch-a');
+    bridge.terminalConfig.getOrganizationId.mockResolvedValue('org-a');
   });
   afterEach(cleanup);
 
@@ -166,5 +172,28 @@ describe('StaffShiftModal staff loading', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
     await act(async () => cache.resolve(''));
     expect(bridge.staffSchedule.list).not.toHaveBeenCalled();
+  });
+
+  it('normalizes an authenticated waiter role before opening a shift and preserves native errors', async () => {
+    bridge.sessionStaff = { staffId: 'manager', branchId: 'branch-a', terminalId: 'terminal-a' };
+    const waiter = { ...member('waiter-a', 'Ana Waiter'), role_name: 'waiter', roles: [
+      { role_id: 'waiter-role', role_name: 'waiter', role_display_name: 'Waiter', is_primary: true },
+    ] };
+    bridge.settings.get.mockResolvedValue(JSON.stringify({ branch_id: 'branch-a', staff: [waiter] }));
+    bridge.staffSchedule.list.mockResolvedValue(schedule([waiter]));
+    bridge.staffAuth.verifyCheckInPin.mockResolvedValue({ success: true });
+    bridge.shifts.getCheckInEligibility.mockResolvedValue({ requiresCashierFirst: false });
+    bridge.shifts.getActiveCashierByTerminal.mockResolvedValue({ id: 'cashier-shift' });
+    bridge.shifts.open.mockRejectedValue('The cashier shift was closed. Open a cashier shift first.');
+    render(<StaffShiftModal {...props} />);
+    fireEvent.click(await screen.findByText('Ana Waiter'));
+    const digit = await screen.findByRole('button', { name: '1', exact: true });
+    for (let i = 0; i < 4; i += 1) fireEvent.click(digit);
+    fireEvent.click(screen.getByRole('button', { name: 'modals.staffShift.continue' }));
+    fireEvent.click(await screen.findByRole('button', { name: /waiter/i }));
+    expect(bridge.shifts.open).not.toHaveBeenCalled();
+    fireEvent.click(await screen.findByRole('button', { name: 'modals.staffShift.skipCash' }));
+    await waitFor(() => expect(bridge.shifts.open).toHaveBeenCalledWith(expect.objectContaining({ roleType: 'server' })));
+    await screen.findByText('The cashier shift was closed. Open a cashier shift first.');
   });
 });

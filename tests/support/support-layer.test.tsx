@@ -2063,23 +2063,27 @@ test('RoomsService preserves effective room status and active folio payloads', (
 
 test('RoomsView uses the room-stay endpoints for folio check-in and checkout', () => {
   const source = readRoomsViewSource();
+  const checkinSource = readFileSync(path.join(process.cwd(), 'src/renderer/components/modals/RoomStayWorkflowModals.tsx'), 'utf8');
 
   assert.match(source, /isModuleEnabled\('guest_billing' as any\)/);
-  assert.match(source, /offlineRoomCheckin\(/);
-  assert.match(source, /\/pos\/rooms\/\$\{encodeURIComponent\(selectedRoom\.id\)\}\/checkin/);
+  assert.match(source, /<RoomCheckinModal/);
+  assert.match(checkinSource, /offlineRoomCheckin\(/);
+  assert.match(checkinSource, /\/pos\/rooms\/\$\{encodeURIComponent\(room\.id\)\}\/checkin/);
   assert.match(source, /\/pos\/rooms\/\$\{encodeURIComponent\(room\.id\)\}\/checkout/);
   assert.match(source, /parseFolioCheckoutOutstanding\(/);
   assert.match(source, /folioPaymentsEndpoint\(/);
 });
 
-test('RoomsView fallback receipt is gated to rooms without guest billing and orders-owned orgs', () => {
+test('room arrival without guest billing records occupancy and never invents a paid receipt', () => {
   const source = readRoomsViewSource();
+  const checkinSource = readFileSync(path.join(process.cwd(), 'src/renderer/components/modals/RoomStayWorkflowModals.tsx'), 'utf8');
 
-  assert.match(source, /const hasGuestBilling = isModuleEnabled\('guest_billing' as any\)/);
-  assert.match(source, /const hasOrders = isModuleEnabled\('orders' as any\)/);
-  assert.match(source, /if \(hasGuestBilling\) \{/);
-  assert.match(source, /if \(hasOrders\) \{[\s\S]*createFallbackReceiptOrder\(/);
-  assert.match(source, /else if \(!reservationCreated\) \{/);
+  assert.match(checkinSource, /const hasGuestBilling = isModuleEnabled\('guest_billing' as any\)/);
+  assert.match(checkinSource, /if \(!hasGuestBilling && !hasReservations\)/);
+  assert.match(checkinSource, /if \(hasGuestBilling\) \{/);
+  assert.match(checkinSource, /await reservationsService\.arriveRoomReservation\(current\.id\)/);
+  assert.match(checkinSource, /!hasGuestBilling &&[\s\S]*roomWorkflow\.noBillingNotice/);
+  assert.doesNotMatch(source + checkinSource, /createFallbackReceiptOrder|createHotelBillingOrder/);
 });
 
 test('RoomsView checkout cannot construct the old stay billing order', () => {

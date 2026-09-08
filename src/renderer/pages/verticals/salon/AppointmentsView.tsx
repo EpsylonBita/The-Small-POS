@@ -418,7 +418,11 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
           (availabilityPayload.unavailable || []).find(
             (entry) => entry?.staffId === formData.staffId,
           )?.reason || 'Staff is not available for the selected slot';
-        toast.error(unavailableReason);
+        toast.error(unavailableReason === 'Not scheduled to work'
+          ? t('appointments.workflow.notScheduled', 'No synced work shift covers this time. Add or adjust the staff schedule and wait for it to sync.')
+          : unavailableReason === 'Time slot is in the past'
+            ? t('appointments.workflow.pastSlot', 'Choose a future time.')
+            : t('appointments.workflow.unavailable', 'Unavailable'));
         return;
       }
 
@@ -1007,7 +1011,9 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
   const [calendarDate, setCalendarDate] = useState<Date>(resolveInitialModalDate);
   const [selectedDay, setSelectedDay] = useState<Date | null>(resolveInitialModalDate);
   const [timePeriod, setTimePeriod] = useState<'morning' | 'afternoon' | 'evening'>('morning');
-  const [existingAppointments, setExistingAppointments] = useState<{ staffId: string; startTime: string; endTime: string; status: string }[]>([]);
+  const [availableSlots, setAvailableSlots] = useState<string[]>([]);
+  const [availabilityError, setAvailabilityError] = useState(false);
+  const [availabilityRefresh, setAvailabilityRefresh] = useState(0);
   const [loadingSlots, setLoadingSlots] = useState(false);
 
   // Ref + stable title id so the portaled modal declares labelled dialog semantics and
@@ -1085,82 +1091,41 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
     return slots;
   }, [timePeriod]);
 
-  // Fetch appointments for selected day
+  // One authoritative grid includes shifts, breaks, qualification, conflicts and past-time checks.
   useEffect(() => {
-    const fetchDayAppointments = async () => {
-      if (!selectedDay || !branchId) return;
-      setLoadingSlots(true);
-      try {
-        const yyyy = selectedDay.getFullYear();
-        const mm = String(selectedDay.getMonth() + 1).padStart(2, '0');
-        const dd = String(selectedDay.getDate()).padStart(2, '0');
-        const date = `${yyyy}-${mm}-${dd}`;
+    let disposed = false;
+    setAvailableSlots([]);
+    setAvailabilityError(false);
+    setFormData(prev => ({ ...prev, startTime: '' }));
+    const service = servicesList.find(item => item.id === formData.serviceId);
+    if (!selectedDay || !branchId || !formData.staffId || !service) {
+      setLoadingSlots(false);
+      return;
+    }
+    setLoadingSlots(true);
+    const start = new Date(selectedDay);
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(start);
+    end.setDate(end.getDate() + 1);
+    const query = new URLSearchParams({ start_time: start.toISOString(), end_time: end.toISOString(),
+      staff_id: formData.staffId, service_id: service.id, slot_duration_minutes: String(service.duration) });
+    void posApiGet<{ success?: boolean; availableSlots?: string[] }>(`/api/pos/staff-schedule/check?${query}`)
+      .then(result => {
+        if (disposed) return;
+        if (!result.success || result.data?.success === false || !Array.isArray(result.data?.availableSlots)) throw new Error('Availability unavailable');
+        setAvailableSlots(result.data.availableSlots);
+      })
+      .catch(() => { if (!disposed) setAvailabilityError(true); })
+      .finally(() => { if (!disposed) setLoadingSlots(false); });
+    return () => { disposed = true; };
+  }, [selectedDay, branchId, formData.staffId, formData.serviceId, servicesList, setFormData, availabilityRefresh]);
 
-        const result = isBrowser()
-          ? await posApiGet<{ success?: boolean; appointments?: any[]; error?: string }>(
-              `/api/pos/appointments?date=${encodeURIComponent(date)}${formData.staffId ? `&staff_id=${encodeURIComponent(formData.staffId)}` : ''}`,
-            )
-          : await bridge.appointments.list({
-              date,
-              staff_id: formData.staffId || undefined,
-            });
-
-        if (!result.success) {
-          throw new Error(result.error || 'Failed to fetch appointments for selected day');
-        }
-
-        const payload = (result.data ?? {}) as {
-          success?: boolean;
-          appointments?: Array<{
-            staff_id: string;
-            start_time: string;
-            end_time: string;
-            status: string;
-          }>;
-          error?: string;
-        };
-
-        if (payload.success === false) {
-          throw new Error(payload.error || 'Failed to fetch appointments for selected day');
-        }
-
-        const rows = Array.isArray(payload.appointments) ? payload.appointments : [];
-        setExistingAppointments(
-          rows
-            .filter((appointment) => !['cancelled', 'no_show'].includes(appointment.status))
-            .map((appointment) => ({
-              staffId: appointment.staff_id,
-              startTime: appointment.start_time,
-              endTime: appointment.end_time,
-              status: appointment.status,
-            })),
-        );
-      } catch (err) {
-        console.error('Failed to fetch day appointments:', err);
-      } finally {
-        setLoadingSlots(false);
-      }
-    };
-    fetchDayAppointments();
-  }, [selectedDay, branchId, bridge, formData.staffId]);
-
-  // Check if time slot is booked
   const isTimeSlotBooked = (time: string): boolean => {
-    if (!selectedDay || !formData.staffId) return false;
-    const service = servicesList.find(s => s.id === formData.serviceId);
-    const duration = service?.duration || 30;
-    
-    const [h, m] = time.split(':').map(Number);
-    const slotStart = new Date(selectedDay);
-    slotStart.setHours(h, m, 0, 0);
-    const slotEnd = new Date(slotStart.getTime() + duration * 60 * 1000);
-    
-    return existingAppointments.some(apt => {
-      if (apt.staffId !== formData.staffId) return false;
-      const aptStart = new Date(apt.startTime);
-      const aptEnd = new Date(apt.endTime);
-      return slotStart < aptEnd && slotEnd > aptStart;
-    });
+    if (!selectedDay || !formData.staffId || loadingSlots || availabilityError) return true;
+    const [hour, minute] = time.split(':').map(Number);
+    const start = new Date(selectedDay);
+    start.setHours(hour, minute, 0, 0);
+    return start <= new Date() || !availableSlots.includes(start.toISOString());
   };
 
   const handleDateSelect = (day: Date) => {
@@ -1467,6 +1432,8 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
                 ))}
               </div>
 
+              {availabilityError && <div role="alert" className="text-sm text-red-600 dark:text-red-300"><p>{t('appointments.workflow.availabilityUnavailable', 'Availability could not be checked. Check the connection and try again.')}</p><button type="button" className="mt-2 min-h-10 rounded-xl border px-3" onClick={() => setAvailabilityRefresh(value => value + 1)}>{t('common.actions.retry', 'Try again')}</button></div>}
+              {!loadingSlots && !availabilityError && availableSlots.length === 0 && <p className="text-sm">{t('appointments.workflow.noSlots', 'No available times for this staff member and service. Check the synced schedule or choose another day.')}</p>}
               {loadingSlots && <p className={`text-xs ${isDark ? 'text-zinc-500' : 'text-gray-500'}`}>{t('appointments.modal.loadingSlots', 'Loading...')}</p>}
 
               <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 xl:grid-cols-5 gap-2 max-h-56 overflow-y-auto pr-1 scrollbar-hide">
@@ -1496,7 +1463,7 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
 
               <div className={`flex gap-4 text-xs ${isDark ? 'text-zinc-500' : 'text-gray-500'}`}>
                 <span className="flex items-center gap-1"><span className={`w-3 h-3 rounded border ${isDark ? 'bg-zinc-800 border-zinc-600' : 'bg-white border-gray-300'}`} /> {t('appointments.modal.availability.available', 'Available')}</span>
-                <span className="flex items-center gap-1"><span className="w-3 h-3 bg-red-100 border border-red-200 rounded" /> {t('appointments.modal.availability.booked', 'Booked')}</span>
+                <span className="flex items-center gap-1"><span className="w-3 h-3 bg-red-100 border border-red-200 rounded" /> {t('appointments.workflow.unavailable', 'Unavailable')}</span>
               </div>
             </div>
           ) : null}

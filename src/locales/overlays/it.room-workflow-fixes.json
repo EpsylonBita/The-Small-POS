@@ -1,0 +1,24 @@
+{
+  "roomWorkflow": {
+    "phoneRequired": "Inserisci il nome e il numero di telefono dell’ospite.",
+    "invalidDates": "Scegli una data di arrivo valida e una partenza successiva.",
+    "unavailable": "La camera non è disponibile per queste date. Scegli un’altra camera o modifica le date.",
+    "checkoutRequired": "Apri Camere, seleziona la camera e scegli Check-out per verificare il conto e completare la partenza.",
+    "checkinRequired": "Apri Arrivo per completare il check-in e creare il conto della camera.",
+    "moduleRequired": "Questo terminale non dispone del modulo richiesto. Chiedi a un amministratore di attivarlo.",
+    "reservationRequired": "Crea una prenotazione della camera prima di registrare l’arrivo.",
+    "locked": "Il soggiorno è già iniziato o terminato. La prenotazione può essere modificata prima dell’arrivo.",
+    "connectionError": "Connessione non disponibile. Lascia aperta questa finestra e riprova quando sei connesso.",
+    "saveFailed": "La modifica non è stata salvata. I dati sono conservati. Riprova o controlla la prenotazione prima di crearne un’altra.",
+    "loadingBooking": "Caricamento prenotazione della camera…",
+    "resumeBooking": "Continua la prenotazione {{number}}",
+    "noBillingNotice": "Solo arrivo: non verranno registrati pagamenti o addebiti del soggiorno. Un conto camera richiede Guest Billing.",
+    "costPreview": "{{nights}} notti × {{rate}} = {{total}} costo stimato del soggiorno",
+    "editBooking": "Modifica camera / date",
+    "staying": "In soggiorno",
+    "departed": "Partiti",
+    "arrival": "Arrivo",
+    "departure": "Partenza",
+    "cancelBooking": "Annulla prenotazione"
+  }
+}

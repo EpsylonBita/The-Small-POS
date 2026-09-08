@@ -1,0 +1,24 @@
+{
+  "roomWorkflow": {
+    "phoneRequired": "Enter the guest's name and phone number.",
+    "invalidDates": "Choose a valid arrival date and a later departure date.",
+    "unavailable": "This room is unavailable for these dates. Choose another room or change the dates.",
+    "checkoutRequired": "Open Rooms, select the room and choose Checkout to review the account and complete departure.",
+    "checkinRequired": "Open Arrival to complete the room check-in and create its account.",
+    "moduleRequired": "This terminal does not have the required module. Ask an administrator to enable it.",
+    "reservationRequired": "Create a room reservation before checking the guest in.",
+    "locked": "This stay has already started or ended. You can edit a booking before arrival.",
+    "connectionError": "Connection unavailable. Keep this window open and retry when connected.",
+    "saveFailed": "The change could not be saved. Your details are retained. Retry or check the reservation before creating another.",
+    "loadingBooking": "Loading the room's reservation…",
+    "resumeBooking": "Continuing reservation {{number}}",
+    "noBillingNotice": "Arrival only: no payment or stay charge will be recorded. A room account requires Guest Billing.",
+    "costPreview": "{{nights}} nights × {{rate}} = {{total}} estimated stay cost",
+    "editBooking": "Edit room / dates",
+    "staying": "Staying",
+    "departed": "Departed",
+    "arrival": "Arrival",
+    "departure": "Departure",
+    "cancelBooking": "Cancel reservation"
+  }
+}

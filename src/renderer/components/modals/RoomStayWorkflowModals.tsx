@@ -7,16 +7,14 @@
  * These are purpose-built, self-contained modules — NOT `RoomsView` and NOT its `hubPreset` path:
  *   - `RoomStaySelectorModal`: a compact glass picker of just the eligible rooms (reserved for
  *     check-in, available for reservation), with a clear empty state and no hub chrome.
- *   - `RoomCheckinModal` / `RoomReservationModal`: the check-in / reservation form for the chosen
- *     room. They reuse the existing `roomsView.*` field/toast i18n keys and call the same backend
- *     services as the Rooms-tab forms, so behaviour stays at parity with `RoomsView` (the sibling
- *     implementation that still owns the standalone Rooms page).
+ *   - `RoomCheckinModal` / `RoomReservationModal`: shared check-in / reservation forms for
+ *     the chosen room, used by the Rooms page, Reservations and the order dashboard.
  *
  * Glass blur, portal, Escape and focus-trap come from `LiquidGlassModal`. Controls are touch-first
  * (active:scale, generous hit targets) with no hover-only affordances.
  */
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import toast from 'react-hot-toast';
 import { BedDouble, CalendarPlus, UserCheck, User, Phone, Mail, CreditCard } from 'lucide-react';
@@ -25,11 +23,10 @@ import { formatCurrency } from '../../utils/format';
 import { toLocalDateString, addLocalDays } from '../../utils/date';
 import { posApiFetch } from '../../utils/api-helpers';
 import { offlineRoomCheckin } from '../../services/offline-mutations';
-import { reservationsService } from '../../services/ReservationsService';
+import { reservationsService, type Reservation } from '../../services/ReservationsService';
+import { roomStayNights, roomWorkflowError } from '../../utils/room-workflow';
 import { useModules } from '../../contexts/module-context';
 import { getRoomEffectiveStatus, type Room, type RoomStatus } from '../../services/RoomsService';
-import { OrderService } from '../../../services/OrderService';
-import { getBridge } from '../../../lib';
 
 type RoomStayVariant = 'checkin' | 'reservation';
 
@@ -44,12 +41,6 @@ const generateClientRequestId = (): string => {
     const value = token === 'x' ? random : (random & 0x3) | 0x8;
     return value.toString(16);
   });
-};
-
-const mapPaymentMethod = (method: 'cash' | 'card' | 'transfer'): 'cash' | 'card' | 'digital' => {
-  if (method === 'cash') return 'cash';
-  if (method === 'card') return 'card';
-  return 'digital';
 };
 
 // Localize known room-type slugs (standard/deluxe/suite/...), preserving genuinely custom names.
@@ -247,7 +238,8 @@ const GlassInput: React.FC<{
   onChange: (v: string) => void;
   type?: string;
   required?: boolean;
-}> = ({ icon, label, value, onChange, type = 'text', required }) => (
+  readOnly?: boolean;
+}> = ({ icon, label, value, onChange, type = 'text', required, readOnly }) => (
   <div>
     <label className="liquid-glass-modal-text-muted mb-1.5 block text-sm font-medium">
       {label} {required && <span className="text-red-400">*</span>}
@@ -258,6 +250,9 @@ const GlassInput: React.FC<{
       )}
       <input
         type={type}
+        aria-label={label}
+        required={required}
+        readOnly={readOnly}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         className={icon ? `${fieldClass} pl-9` : fieldClass}
@@ -287,6 +282,8 @@ const RoomChip: React.FC<{ room: Room; subtitle?: string | null }> = ({ room, su
 
 interface RoomStayFormBaseProps {
   room: Room;
+  reservation?: Reservation;
+  rooms?: Room[];
   branchId: string;
   organizationId: string;
   /** From the dashboard's useRooms instance, so room status + lists stay in sync. */
@@ -298,9 +295,9 @@ interface RoomStayFormBaseProps {
 
 export const RoomCheckinModal: React.FC<RoomStayFormBaseProps> = ({
   room,
+  reservation: initialReservation,
   branchId,
   organizationId,
-  updateRoomStatus,
   refetchRooms,
   onClose,
   onCompleted,
@@ -308,7 +305,6 @@ export const RoomCheckinModal: React.FC<RoomStayFormBaseProps> = ({
   const { t } = useTranslation();
   const { isModuleEnabled } = useModules();
   const hasGuestBilling = isModuleEnabled('guest_billing' as any);
-  const hasOrders = isModuleEnabled('orders' as any);
   const hasReservations = isModuleEnabled('reservations' as any);
 
   const [name, setName] = useState(() => roomGuestName(room) || '');
@@ -316,45 +312,45 @@ export const RoomCheckinModal: React.FC<RoomStayFormBaseProps> = ({
   const [email, setEmail] = useState('');
   const [idNumber, setIdNumber] = useState('');
   const [nights, setNights] = useState(1);
-  const [paymentMethod, setPaymentMethod] = useState<'cash' | 'card' | 'transfer'>('cash');
   const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
+  const [requestId] = useState(generateClientRequestId);
+  const bookingRef = useRef<Reservation | null>(initialReservation || null);
+  const [booking, setBooking] = useState<Reservation | null>(initialReservation || null);
+  const requiresPhone = hasReservations && !booking;
+  const [loadingBooking, setLoadingBooking] = useState(hasReservations);
+  const [failure, setFailure] = useState('');
+  const hydrateBooking = (value: Reservation | null) => {
+    bookingRef.current = value;
+    setBooking(value);
+    if (value) {
+      setName(value.customerName); setPhone(value.customerPhone); setEmail(value.customerEmail || '');
+      setNights(roomStayNights(value.checkInDate || '', value.checkOutDate || '') || 1);
+    }
+  };
+  useEffect(() => {
+    let disposed = false;
+    if (!hasReservations) { setLoadingBooking(false); return; }
+    reservationsService.setContext(branchId, organizationId);
+    setLoadingBooking(true);
+    const load = initialReservation
+      ? Promise.resolve(initialReservation)
+      : reservationsService.getActiveRoomReservation(room.id, toLocalDateString());
+    void load.then((value) => { if (!disposed) hydrateBooking(value); })
+      .catch((error) => { if (!disposed) setFailure(roomWorkflowError(error, t)); })
+      .finally(() => { if (!disposed) setLoadingBooking(false); });
+    return () => { disposed = true; };
+  }, [room.id, branchId, organizationId, hasReservations, initialReservation, t]);
 
   const totalAmount = useMemo(
     () => (room.ratePerNight || 0) * Math.max(1, nights),
     [room.ratePerNight, nights],
   );
 
-  const createFallbackReceiptOrder = async () => {
-    if (totalAmount <= 0) return;
-    const orderService = OrderService.getInstance();
-    const description = `Room ${room.roomNumber} check-in (${nights} night${nights > 1 ? 's' : ''})`;
-    const order = await orderService.createOrder({
-      customer_name: name,
-      customer_phone: phone || undefined,
-      items: [
-        {
-          id: `hotel-${room.id}-${Date.now()}`,
-          name: description,
-          quantity: 1,
-          price: totalAmount,
-          notes: idNumber ? `Guest ID: ${idNumber}` : undefined,
-        } as any,
-      ],
-      total_amount: totalAmount,
-      subtotal: totalAmount,
-      status: 'completed',
-      order_type: 'pickup',
-      payment_status: 'completed',
-      payment_method: mapPaymentMethod(paymentMethod),
-      notes: idNumber ? `Guest ID: ${idNumber}` : description,
-    } as any);
-    if (order?.id) {
-      await getBridge().payments.printReceipt(order.id, 'customer');
-    }
-  };
-
   const handleCheckin = async () => {
-    if (!name.trim() || submitting) return;
+    if (!name.trim() || submittingRef.current || loadingBooking) return;
+    if (requiresPhone && !phone.trim()) { setFailure(t('roomWorkflow.phoneRequired')); return; }
+    if (!hasGuestBilling && !hasReservations) { setFailure(t('roomWorkflow.reservationRequired')); return; }
     if (!branchId || !organizationId) {
       toast.error(
         t('roomsView.toasts.missingContext', { defaultValue: 'Missing branch or organization context' }),
@@ -362,16 +358,22 @@ export const RoomCheckinModal: React.FC<RoomStayFormBaseProps> = ({
       return;
     }
 
+    submittingRef.current = true;
     setSubmitting(true);
+    setFailure('');
     try {
       const now = new Date();
-      const checkInDate = toLocalDateString(now);
-      const checkOutDate = toLocalDateString(addLocalDays(now, Math.max(1, nights)));
+      const checkInDate = bookingRef.current?.checkInDate || toLocalDateString(now);
+      const checkOutDate = bookingRef.current?.checkOutDate || toLocalDateString(addLocalDays(now, Math.max(1, nights)));
       const reservationTime = now.toTimeString().slice(0, 5);
       // Resolve connectivity at submit time so a mid-session change is honoured.
       const isOnline = typeof navigator === 'undefined' ? true : navigator.onLine;
 
       if (hasGuestBilling) {
+        if (bookingRef.current?.status === 'pending') {
+          const confirmed = await reservationsService.updateStatus(bookingRef.current.id, 'confirmed');
+          hydrateBooking(confirmed);
+        }
         const request = {
           guestName: name,
           guestPhone: phone || null,
@@ -380,7 +382,8 @@ export const RoomCheckinModal: React.FC<RoomStayFormBaseProps> = ({
           checkOutDate,
           partySize: room.capacity || 1,
           notes: idNumber ? `Guest ID: ${idNumber}` : null,
-          clientRequestId: generateClientRequestId(),
+          clientRequestId: bookingRef.current?.id || requestId,
+          expectedReservationId: bookingRef.current?.id || null,
         };
 
         if (isOnline) {
@@ -396,62 +399,37 @@ export const RoomCheckinModal: React.FC<RoomStayFormBaseProps> = ({
           toast.success(t('roomsView.toasts.checkinQueued', { defaultValue: 'Check-in queued for sync' }));
         }
       } else {
-        let reservationCreated = false;
-        if (hasReservations) {
-          reservationsService.setContext(branchId, organizationId);
-          const reservation = await reservationsService.createReservation({
-            customerName: name,
-            customerPhone: phone || '',
-            customerEmail: email || undefined,
-            partySize: room.capacity || 1,
-            reservationDate: checkInDate,
-            reservationTime,
-            roomId: room.id,
-            roomNumber: room.roomNumber,
-            checkInDate,
-            checkOutDate,
+        if (!isOnline) throw new Error('offline');
+        reservationsService.setContext(branchId, organizationId);
+        // A timeout after create must resume the booking that now owns the dates.
+        let current = bookingRef.current || await reservationsService.getActiveRoomReservation(room.id, checkInDate);
+        if (current && !bookingRef.current) {
+          hydrateBooking(current);
+          setFailure(t('roomWorkflow.resumeBooking', { number: current.reservationNumber }));
+          return;
+        }
+        if (!current) {
+          current = await reservationsService.createReservation({
+            reservationType: 'room', customerName: name.trim(), customerPhone: phone.trim(),
+            customerEmail: email || undefined, partySize: room.capacity || 1,
+            reservationDate: checkInDate, reservationTime, roomId: room.id,
+            roomNumber: room.roomNumber, checkInDate, checkOutDate,
             notes: idNumber ? `ID: ${idNumber}` : undefined,
           });
-          await reservationsService.updateStatus(reservation.id, 'seated');
-          reservationCreated = true;
         }
-
-        const occupied = await updateRoomStatus(room.id, 'occupied');
-        if (!occupied) {
-          throw new Error('Failed to update room status to occupied');
-        }
-
-        if (hasOrders) {
-          try {
-            await createFallbackReceiptOrder();
-          } catch (billingError) {
-            console.error('Fallback check-in receipt failed:', billingError);
-            toast.error(
-              t('roomsView.toasts.checkinReceiptFailed', {
-                defaultValue: 'Check-in completed, but receipt failed',
-              }),
-            );
-          }
-        } else if (!reservationCreated) {
-          toast.success(
-            t('roomsView.toasts.checkinNoReceipt', {
-              defaultValue: 'Room checked in without a reservation or receipt',
-            }),
-          );
-        }
+        // Retain before the next await: failed confirmation/arrival never creates another booking.
+        hydrateBooking(current);
+        await reservationsService.arriveRoomReservation(current.id);
       }
 
-      await refetchRooms();
+      void Promise.resolve(refetchRooms()).catch(() => undefined);
       toast.success(t('roomsView.toasts.checkinSuccess', { defaultValue: 'Check-in completed successfully' }));
       onCompleted();
     } catch (error) {
       console.error('Failed to complete check-in:', error);
-      toast.error(
-        error instanceof Error
-          ? error.message
-          : t('roomsView.toasts.checkinFailed', { defaultValue: 'Failed to complete check-in' }),
-      );
+      setFailure(roomWorkflowError(error, t));
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   };
@@ -459,7 +437,7 @@ export const RoomCheckinModal: React.FC<RoomStayFormBaseProps> = ({
   return (
     <LiquidGlassModal
       isOpen
-      onClose={onClose}
+      onClose={() => { if (!submitting) onClose(); }}
       title={t('roomsView.newCheckin', { defaultValue: 'New Check-in' })}
       className="!max-w-lg"
       closeOnBackdrop={!submitting}
@@ -467,6 +445,9 @@ export const RoomCheckinModal: React.FC<RoomStayFormBaseProps> = ({
     >
       <div className="space-y-4 p-1">
         <RoomChip room={room} subtitle={translateRoomType(t, room.roomType)} />
+        {loadingBooking && <p role="status">{t('roomWorkflow.loadingBooking')}</p>}
+        {booking && <p className="text-sm">{t('roomWorkflow.resumeBooking', { number: booking.reservationNumber })} · {booking.checkInDate} – {booking.checkOutDate}</p>}
+        {failure && <p role="alert" className="rounded-xl border border-red-500/40 p-3 text-red-500">{failure}</p>}
 
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <GlassInput
@@ -474,6 +455,7 @@ export const RoomCheckinModal: React.FC<RoomStayFormBaseProps> = ({
             label={t('roomsView.guestName', { defaultValue: 'Guest Name' })}
             value={name}
             onChange={setName}
+            readOnly={Boolean(booking)}
             required
           />
           <GlassInput
@@ -481,6 +463,8 @@ export const RoomCheckinModal: React.FC<RoomStayFormBaseProps> = ({
             label={t('roomsView.phone', { defaultValue: 'Phone' })}
             value={phone}
             onChange={setPhone}
+            readOnly={Boolean(booking)}
+            required={requiresPhone}
           />
           <GlassInput
             icon={<Mail className="h-4 w-4" />}
@@ -488,13 +472,14 @@ export const RoomCheckinModal: React.FC<RoomStayFormBaseProps> = ({
             type="email"
             value={email}
             onChange={setEmail}
+            readOnly={Boolean(booking)}
           />
-          <GlassInput
+          {(hasGuestBilling || !booking) && <GlassInput
             icon={<CreditCard className="h-4 w-4" />}
             label={t('roomsView.idNumber', { defaultValue: 'ID Number' })}
             value={idNumber}
             onChange={setIdNumber}
-          />
+          />}
         </div>
 
         <div>
@@ -503,6 +488,7 @@ export const RoomCheckinModal: React.FC<RoomStayFormBaseProps> = ({
           </label>
           <input
             type="number"
+            disabled={Boolean(booking)}
             min={1}
             value={nights}
             onChange={(e) => setNights(Math.max(1, parseInt(e.target.value, 10) || 1))}
@@ -510,35 +496,11 @@ export const RoomCheckinModal: React.FC<RoomStayFormBaseProps> = ({
           />
         </div>
 
-        {!hasGuestBilling && hasOrders && (
-          <div>
-            <label className="liquid-glass-modal-text-muted mb-1.5 block text-sm font-medium">
-              {t('roomsView.paymentMethod', { defaultValue: 'Payment Method' })}
-            </label>
-            <div className="grid grid-cols-3 gap-2">
-              {(['cash', 'card', 'transfer'] as const).map((method) => (
-                <button
-                  key={method}
-                  type="button"
-                  onClick={() => setPaymentMethod(method)}
-                  className={`rounded-xl px-3 py-3 text-sm font-medium capitalize transition-transform duration-150 active:scale-95 ${
-                    paymentMethod === method
-                      ? 'bg-yellow-400 text-black'
-                      : 'liquid-glass-modal-button liquid-glass-modal-text'
-                  }`}
-                >
-                  {t(`roomsView.paymentMethods.${method}`, { defaultValue: method })}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
+        {!hasGuestBilling && <p className="rounded-xl border border-amber-500/40 p-3 text-sm">{t('roomWorkflow.noBillingNotice')}</p>}
 
         <div className="liquid-glass-modal-inset flex items-center justify-between rounded-2xl p-4">
           <span className="liquid-glass-modal-text-muted text-sm">
-            {hasGuestBilling
-              ? t('roomsView.estimatedStayCharge', { defaultValue: 'Estimated Stay Charge' })
-              : t('roomsView.totalAmount', { defaultValue: 'Total Amount' })}
+            {t('roomsView.estimatedStayCharge', { defaultValue: 'Estimated Stay Charge' })}
           </span>
           <span className="liquid-glass-modal-text text-2xl font-bold">{formatCurrency(totalAmount)}</span>
         </div>
@@ -555,7 +517,7 @@ export const RoomCheckinModal: React.FC<RoomStayFormBaseProps> = ({
           <button
             type="button"
             onClick={handleCheckin}
-            disabled={!name.trim() || submitting}
+            disabled={!name.trim() || (requiresPhone && !phone.trim()) || submitting || loadingBooking}
             className="flex-1 rounded-xl border border-emerald-500 bg-emerald-600 py-3 font-medium text-white transition-transform duration-150 active:scale-95 disabled:bg-zinc-400/20 disabled:text-zinc-400 disabled:border-zinc-400/30 disabled:shadow-none disabled:cursor-not-allowed disabled:active:scale-100"
           >
             {t('roomsView.completeCheckin', { defaultValue: 'Complete Check-in' })}
@@ -572,9 +534,10 @@ export const RoomCheckinModal: React.FC<RoomStayFormBaseProps> = ({
 
 export const RoomReservationModal: React.FC<RoomStayFormBaseProps> = ({
   room,
+  reservation,
+  rooms,
   branchId,
   organizationId,
-  updateRoomStatus,
   refetchRooms,
   onClose,
   onCompleted,
@@ -591,15 +554,22 @@ export const RoomReservationModal: React.FC<RoomStayFormBaseProps> = ({
     };
   }, []);
 
-  const [name, setName] = useState(() => roomGuestName(room) || '');
-  const [phone, setPhone] = useState('');
-  const [checkInDate, setCheckInDate] = useState(defaults.checkInDate);
-  const [checkOutDate, setCheckOutDate] = useState(defaults.checkOutDate);
-  const [notes, setNotes] = useState('');
+  const [name, setName] = useState(() => reservation?.customerName || roomGuestName(room) || '');
+  const [phone, setPhone] = useState(reservation?.customerPhone || '');
+  const [checkInDate, setCheckInDate] = useState(reservation?.checkInDate || defaults.checkInDate);
+  const [checkOutDate, setCheckOutDate] = useState(reservation?.checkOutDate || defaults.checkOutDate);
+  const [notes, setNotes] = useState(reservation?.notes || '');
+  const [selectedRoomId, setSelectedRoomId] = useState(room.id);
+  const selectedRoom = rooms?.find((item) => item.id === selectedRoomId) || room;
+  const nights = roomStayNights(checkInDate, checkOutDate);
+  const [failure, setFailure] = useState('');
+  const requestPending = useRef(false);
   const [submitting, setSubmitting] = useState(false);
 
   const handleReservation = async () => {
-    if (!name.trim() || submitting) return;
+    if (requestPending.current) return;
+    if (!name.trim() || !phone.trim()) { setFailure(t('roomWorkflow.phoneRequired')); return; }
+    if (!nights) { setFailure(t('roomWorkflow.invalidDates')); return; }
     if (!hasReservations) {
       toast.error(
         t('roomsView.toasts.reservationsModuleRequired', {
@@ -609,33 +579,36 @@ export const RoomReservationModal: React.FC<RoomStayFormBaseProps> = ({
       return;
     }
 
+    requestPending.current = true;
     setSubmitting(true);
+    setFailure('');
     try {
       reservationsService.setContext(branchId || '', organizationId || '');
-      await reservationsService.createReservation({
+      const input = {
         customerName: name,
         customerPhone: phone || '',
-        partySize: room.capacity || 2,
+        partySize: reservation?.partySize || selectedRoom.capacity || 2,
         reservationDate: checkInDate,
-        reservationTime: '14:00',
-        roomId: room.id,
-        roomNumber: room.roomNumber,
+        reservationTime: reservation?.reservationTime?.slice(0, 5) || '14:00',
+        roomId: selectedRoom.id,
+        roomNumber: selectedRoom.roomNumber,
         checkInDate,
         checkOutDate,
         notes: notes || undefined,
-      });
+      };
+      if (reservation) await reservationsService.updateReservationDetails(reservation.id, input);
+      else await reservationsService.createReservation({ ...input, reservationType: 'room' });
 
-      if (checkInDate === toLocalDateString()) {
-        await updateRoomStatus(room.id, 'reserved');
-      }
-
-      await refetchRooms();
-      toast.success(t('roomsView.toasts.reservationCreated', { defaultValue: 'Reservation created successfully' }));
+      void Promise.resolve(refetchRooms()).catch(() => undefined);
+      toast.success(reservation
+        ? t('common.messages.changesSaved', { defaultValue: 'Changes saved successfully' })
+        : t('roomsView.toasts.reservationCreated', { defaultValue: 'Reservation created successfully' }));
       onCompleted();
     } catch (error) {
       console.error('Failed to create reservation:', error);
-      toast.error(t('roomsView.toasts.reservationFailed', { defaultValue: 'Failed to create reservation' }));
+      setFailure(roomWorkflowError(error, t));
     } finally {
+      requestPending.current = false;
       setSubmitting(false);
     }
   };
@@ -643,14 +616,16 @@ export const RoomReservationModal: React.FC<RoomStayFormBaseProps> = ({
   return (
     <LiquidGlassModal
       isOpen
-      onClose={onClose}
-      title={t('roomsView.newReservation', { defaultValue: 'New Reservation' })}
+      onClose={() => { if (!submitting) onClose(); }}
+      title={reservation ? t('roomWorkflow.editBooking') : t('roomsView.newReservation', { defaultValue: 'New Reservation' })}
       className="!max-w-lg"
       closeOnBackdrop={!submitting}
       closeOnEscape={!submitting}
     >
       <div className="space-y-4 p-1">
-        <RoomChip room={room} subtitle={translateRoomType(t, room.roomType)} />
+        <RoomChip room={selectedRoom} subtitle={translateRoomType(t, selectedRoom.roomType)} />
+        {rooms && <label className="block text-sm">{t('roomsView.selectRoom')}<select className={fieldClass} value={selectedRoomId} onChange={(event) => setSelectedRoomId(event.target.value)}>{rooms.map((option) => <option key={option.id} value={option.id}>{option.roomNumber}</option>)}</select></label>}
+        {failure && <p role="alert" className="rounded-xl border border-red-500/40 p-3 text-red-500">{failure}</p>}
 
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <GlassInput
@@ -665,6 +640,7 @@ export const RoomReservationModal: React.FC<RoomStayFormBaseProps> = ({
             label={t('roomsView.phone', { defaultValue: 'Phone' })}
             value={phone}
             onChange={setPhone}
+            required
           />
         </div>
 
@@ -675,6 +651,7 @@ export const RoomReservationModal: React.FC<RoomStayFormBaseProps> = ({
             </label>
             <input
               type="date"
+              aria-label={t('roomsView.checkInDate', { defaultValue: 'Check-in Date' })}
               value={checkInDate}
               onChange={(e) => setCheckInDate(e.target.value)}
               className={fieldClass}
@@ -686,6 +663,8 @@ export const RoomReservationModal: React.FC<RoomStayFormBaseProps> = ({
             </label>
             <input
               type="date"
+              aria-label={t('roomsView.checkOutDate', { defaultValue: 'Check-out Date' })}
+              min={checkInDate}
               value={checkOutDate}
               onChange={(e) => setCheckOutDate(e.target.value)}
               className={fieldClass}
@@ -706,6 +685,10 @@ export const RoomReservationModal: React.FC<RoomStayFormBaseProps> = ({
           />
         </div>
 
+        <div className="liquid-glass-modal-inset rounded-xl p-4" aria-live="polite">
+          {nights ? t('roomWorkflow.costPreview', { nights, rate: formatCurrency(selectedRoom.ratePerNight || 0), total: formatCurrency(nights * (selectedRoom.ratePerNight || 0)) }) : t('roomWorkflow.invalidDates')}
+        </div>
+
         <div className="flex gap-3 pt-1">
           <button
             type="button"
@@ -718,10 +701,10 @@ export const RoomReservationModal: React.FC<RoomStayFormBaseProps> = ({
           <button
             type="button"
             onClick={handleReservation}
-            disabled={!name.trim() || submitting}
+            disabled={!name.trim() || !phone.trim() || !nights || submitting}
             className="flex-1 rounded-xl border border-emerald-500 bg-emerald-600 py-3 font-medium text-white transition-transform duration-150 active:scale-95 disabled:bg-zinc-400/20 disabled:text-zinc-400 disabled:border-zinc-400/30 disabled:shadow-none disabled:cursor-not-allowed disabled:active:scale-100"
           >
-            {t('roomsView.createReservation', { defaultValue: 'Create Reservation' })}
+            {reservation ? t('common.actions.save', { defaultValue: 'Save' }) : t('roomsView.createReservation', { defaultValue: 'Create Reservation' })}
           </button>
         </div>
       </div>

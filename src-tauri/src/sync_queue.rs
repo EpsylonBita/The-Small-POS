@@ -5346,6 +5346,56 @@ pub fn mark_failure(
     })
 }
 
+/// A queue failure must not leave its payment mirror looking like an active
+/// network request. Also repairs mirrors left behind by older application runs.
+fn reconcile_payment_queue_mirrors(conn: &Connection, item_id: Option<&str>) -> Result<(), String> {
+    let owner = semantic_generic_nonfinancial_owner_predicate("q");
+    let query = format!("SELECT p.id, q.status, q.attempts, q.error_message, q.next_retry_at FROM order_payments p
+        JOIN parity_sync_queue q ON q.id = (SELECT latest.id FROM parity_sync_queue latest
+          WHERE latest.table_name = 'payments' AND latest.record_id = p.id ORDER BY latest.created_at DESC LIMIT 1)
+        WHERE {owner} AND (?1 IS NULL OR q.id = ?1)");
+    let mut statement = conn.prepare(&query).map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![item_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    drop(statement);
+    for (id, status, attempts, error, next_retry) in rows {
+        let state = match status.as_str() {
+            "processing" => "syncing",
+            "failed" | "conflict" => "failed",
+            _ if error
+                .as_deref()
+                .is_some_and(|reason| reason.starts_with("Waiting for parent order")) =>
+            {
+                "waiting_parent"
+            }
+            _ => "pending",
+        };
+        let sync_status = if state == "failed" {
+            "failed"
+        } else {
+            "pending"
+        };
+        let next_retry = if state == "failed" { None } else { next_retry };
+        conn.execute("UPDATE order_payments SET sync_state = ?1, sync_status = ?2, sync_retry_count = ?3, sync_last_error = ?4, sync_next_retry_at = ?6
+            WHERE id = ?5 AND (sync_state <> ?1 OR sync_status <> ?2 OR sync_retry_count <> ?3 OR sync_last_error IS NOT ?4 OR sync_next_retry_at IS NOT ?6)",
+            params![state, sync_status, attempts, error, id, next_retry]).map_err(|error| error.to_string())?;
+    }
+    conn.execute(&format!("UPDATE parity_sync_queue AS q SET next_retry_at = NULL WHERE q.table_name = 'payments' AND q.status IN ('failed', 'conflict') AND q.next_retry_at IS NOT NULL AND {owner} AND (?1 IS NULL OR q.id = ?1)"), params![item_id])
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 fn mark_failure_in_transaction(
     conn: &Connection,
     item_id: &str,
@@ -5390,7 +5440,7 @@ fn mark_failure_in_transaction(
         let terminal_sql = format!(
             "UPDATE parity_sync_queue
                  SET status = 'failed', attempts = ?1, last_attempt = ?2,
-                     error_message = ?3
+                     error_message = ?3, next_retry_at = NULL
                  WHERE id = ?4
                    AND status = 'processing'
                    AND claim_generation = ?5
@@ -5432,6 +5482,7 @@ fn mark_failure_in_transaction(
                 "Sync queue item exhausted max retries, marked as failed"
             );
         }
+        reconcile_payment_queue_mirrors(conn, Some(item_id))?;
         return Ok(MarkFailureOutcome {
             applied: true,
             transitioned_to_dead_letter: true,
@@ -5486,6 +5537,7 @@ fn mark_failure_in_transaction(
         }
     }
 
+    reconcile_payment_queue_mirrors(conn, Some(item_id))?;
     Ok(MarkFailureOutcome {
         applied: true,
         transitioned_to_dead_letter: false,
@@ -5535,7 +5587,9 @@ pub fn mark_rate_limited(
             "Wave 10 H8: mark_rate_limited no-op — claim_generation mismatch"
         );
     }
-
+    if rows_affected > 0 {
+        reconcile_payment_queue_mirrors(conn, Some(item_id))?;
+    }
     Ok(())
 }
 
@@ -5596,6 +5650,7 @@ pub fn mark_deferred(
             reason,
             "parity_sync_queue deferral cap reached; item escalated to conflict"
         );
+        reconcile_payment_queue_mirrors(conn, Some(item_id))?;
         return Ok(());
     }
 
@@ -5625,7 +5680,9 @@ pub fn mark_deferred(
             "Wave 10 H8: mark_deferred (reschedule) no-op — claim_generation mismatch"
         );
     }
-
+    if rows_affected > 0 {
+        reconcile_payment_queue_mirrors(conn, Some(item_id))?;
+    }
     Ok(())
 }
 
@@ -5914,6 +5971,13 @@ fn prepare_request(conn: &Connection, item: &SyncQueueItem) -> Result<RequestPre
         "restaurant_table_sessions" => {
             prepare_table_session_request(conn, item, &payload, terminal_id.as_str())
         }
+        // The schedule collection accepts shift_id in JSON even for DELETE.
+        "salon_staff_shifts" => Ok(RequestPreparation::Ready(RequestSpec {
+            endpoint: "/api/pos/staff-schedule".to_string(),
+            method: resolve_http_method(item),
+            body: Some(item.data.clone()),
+            terminal_id,
+        })),
         "room_checkins" => prepare_room_checkin_request(item, &payload, terminal_id.as_str()),
         "po_receipts" => prepare_po_receipt_request(item, &payload, terminal_id.as_str()),
         "supplier_import_commits" => {
@@ -7401,6 +7465,38 @@ fn prepare_room_checkin_request(
         "clientRequestId".to_string(),
         Value::String(client_request_id),
     );
+    // Null means an explicit walk-in; absence is a legacy capture. Preserve
+    // that distinction and never turn a malformed booking ID into a walk-in.
+    let mut expected_reservation: Option<Value> = None;
+    for key in ["expected_reservation_id", "expectedReservationId"] {
+        if let Some(value) = payload.get(key) {
+            let normalized = if value.is_null() {
+                Value::Null
+            } else if let Some(id) = value
+                .as_str()
+                .and_then(|id| Uuid::parse_str(id.trim()).ok())
+            {
+                Value::String(id.to_string())
+            } else {
+                return Ok(RequestPreparation::Failed {
+                    reason: "Room check-in has an invalid expected_reservation_id".to_string(),
+                });
+            };
+            if expected_reservation
+                .as_ref()
+                .is_some_and(|prior| prior != &normalized)
+            {
+                return Ok(RequestPreparation::Failed {
+                    reason: "Room check-in has conflicting expected_reservation_id aliases"
+                        .to_string(),
+                });
+            }
+            expected_reservation = Some(normalized);
+        }
+    }
+    if let Some(expected_reservation) = expected_reservation {
+        body.insert("expectedReservationId".to_string(), expected_reservation);
+    }
     // Optional capture fields are queued as explicit nulls; the server
     // schema accepts nullable+optional, so only concrete values are sent.
     if let Some(guest_email) = string_field(payload, &["guest_email", "guestEmail"]) {
@@ -8021,6 +8117,118 @@ fn extract_response_number(response: Option<&Value>, paths: &[&str]) -> Option<f
     None
 }
 
+/// Apply only authoritative table ownership to a local order. Allocated session
+/// items/totals are projections, never replacements for the full source order.
+pub(crate) fn apply_table_session_snapshot(
+    conn: &Connection,
+    payload: &Value,
+) -> Result<Value, String> {
+    let session = payload
+        .get("session")
+        .or_else(|| payload.pointer("/data/session"))
+        .unwrap_or(payload);
+    let order = session.get("order");
+    let remote_order_id = order
+        .and_then(|value| string_field(value, &["id"]))
+        .or_else(|| string_field(session, &["active_order_id"]));
+    let Some(remote_order_id) = remote_order_id else {
+        return Ok(serde_json::json!({"success": true, "applied": false}));
+    };
+    let local_hint = string_field(payload, &["localOrderId", "local_order_id"]);
+    let local_order_id: Option<String> = conn.query_row(
+        "SELECT id FROM orders WHERE (id = ?1 OR supabase_id = ?1 OR (id = ?2 AND (supabase_id IS NULL OR TRIM(supabase_id) = '')))
+         AND LOWER(TRIM(COALESCE(order_context, ''))) <> 'repair_settlement' LIMIT 1",
+        params![remote_order_id, local_hint], |row| row.get(0),
+    ).optional().map_err(|error| format!("table snapshot order lookup: {error}"))?;
+    let Some(local_order_id) = local_order_id else {
+        return Ok(serde_json::json!({"success": true, "applied": false}));
+    };
+    let owner_session = order.and_then(|value| string_field(value, &["table_session_id"]));
+    let Some(owner_session) = owner_session else {
+        return Ok(serde_json::json!({"success": true, "applied": false}));
+    };
+    if !is_uuid(&owner_session) {
+        return Err("Invalid authoritative table session ID".to_string());
+    }
+    let table_id = order.and_then(|value| string_field(value, &["table_id"]));
+    let table_number =
+        order.and_then(|value| string_field(value, &["table_display_number", "table_number"]));
+    let guest_count = order
+        .and_then(|value| value.get("guest_count"))
+        .and_then(Value::as_i64);
+    let mut merged_ids: Vec<String> = session
+        .pointer("/metadata/merged_session_ids")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|value| is_uuid(value))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    // Payments captured before the session-open response use this durable
+    // local alias. Canonicalizing the order must canonicalize those receipts
+    // and their queued payloads in the same transaction.
+    merged_ids.push(format!("local-table-session:{local_order_id}"));
+    conn.execute_batch("SAVEPOINT table_session_snapshot")
+        .map_err(|error| error.to_string())?;
+    let result = (|| -> Result<(), String> {
+        conn.execute(
+            "UPDATE orders SET table_session_id = ?1, table_id = COALESCE(?2, table_id), table_number = COALESCE(?3, table_number), guest_count = COALESCE(?4, guest_count), updated_at = datetime('now') WHERE id = ?5",
+            params![owner_session, table_id, table_number, guest_count, local_order_id],
+        ).map_err(|error| format!("table snapshot identity update: {error}"))?;
+        if string_field(session, &["id"]).as_deref() == Some(owner_session.as_str()) {
+            for merged_id in &merged_ids {
+                conn.execute("UPDATE order_payments SET table_session_id = ?1 WHERE order_id = ?2 AND table_session_id = ?3",
+                    params![owner_session, local_order_id, merged_id]).map_err(|error| format!("table snapshot payment ownership: {error}"))?;
+            }
+            if !merged_ids.is_empty() {
+                let mut statement = conn.prepare("SELECT id, data FROM parity_sync_queue WHERE table_name = 'payments' AND record_id IN (SELECT id FROM order_payments WHERE order_id = ?1)").map_err(|error| error.to_string())?;
+                let rows = statement
+                    .query_map(params![local_order_id], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })
+                    .map_err(|error| error.to_string())?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| error.to_string())?;
+                drop(statement);
+                for (id, raw) in rows {
+                    let mut data: Value =
+                        serde_json::from_str(&raw).map_err(|error| error.to_string())?;
+                    if string_field(&data, &["tableSessionId", "table_session_id"])
+                        .is_some_and(|id| merged_ids.contains(&id))
+                    {
+                        data["tableSessionId"] = Value::String(owner_session.clone());
+                        data["table_session_id"] = Value::String(owner_session.clone());
+                        // Fence an in-flight acknowledgement of the old session;
+                        // retry the same payment ID against its authoritative owner.
+                        conn.execute("UPDATE parity_sync_queue SET data = ?1,
+                            claim_generation = claim_generation + CASE WHEN status = 'processing' THEN 1 ELSE 0 END,
+                            next_retry_at = CASE WHEN status = 'processing' THEN NULL ELSE next_retry_at END,
+                            status = CASE WHEN status = 'processing' THEN 'pending' ELSE status END
+                            WHERE id = ?2", params![data.to_string(), id]).map_err(|error| error.to_string())?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => conn
+            .execute_batch("RELEASE table_session_snapshot")
+            .map_err(|error| error.to_string())?,
+        Err(error) => {
+            let _ = conn.execute_batch(
+                "ROLLBACK TO table_session_snapshot; RELEASE table_session_snapshot",
+            );
+            return Err(error);
+        }
+    }
+    Ok(serde_json::json!({"success": true, "applied": true, "orderId": local_order_id}))
+}
+
 fn apply_success(
     conn: &Connection,
     item: &SyncQueueItem,
@@ -8227,6 +8435,9 @@ fn apply_success(
             }
         }
         "restaurant_table_sessions" => {
+            if let Some(response) = response {
+                apply_table_session_snapshot(conn, response)?;
+            }
             // Capture the remote (Supabase) session UUID minted by the open
             // INSERT and persist it onto the related local order so a later
             // close/update row keyed by `local-table-session:{localOrderId}`
@@ -9036,6 +9247,7 @@ where
                     let _ = recover_stale_processing_items_renderer_safe(&db)?;
                 }
             }
+            reconcile_payment_queue_mirrors(&db, None)?;
             let _ = cleanup_superseded_synced_order_status_updates(&db)?;
             if visibility == QueueProcessVisibility::InternalAll {
                 let mut remaining_requeue_budget = MAX_AUTO_REQUEUE_ITEMS_PER_CYCLE;
@@ -9612,11 +9824,12 @@ where
                             }
                             db.execute(
                                 "UPDATE parity_sync_queue
-                                 SET status = 'failed'
+                                 SET status = 'failed', next_retry_at = NULL
                                  WHERE id = ?1 AND claim_generation = ?2",
                                 params![item.id, item.claim_generation],
                             )
                             .map_err(|e| format!("mark client error failed: {e}"))?;
+                            reconcile_payment_queue_mirrors(db, Some(&item.id))?;
                             Ok((false, Some(failure)))
                         })?
                     };
@@ -9806,6 +10019,7 @@ where
         && batch_block.is_none();
     let telemetry = {
         let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+        reconcile_payment_queue_mirrors(&db, None)?;
         telemetry.finish(&db, processed, failed, conflicts, visibility)?
     };
 
@@ -11865,6 +12079,247 @@ mod tests {
                 other => panic!("unexpected transfer prep: {other:?}"),
             };
         assert_eq!(transfer_body["events"][0]["event_type"], "shift_transfer");
+    }
+
+    fn seed_workflow_table_payment(conn: &Connection) -> String {
+        seed_terminal_context(conn);
+        conn.execute_batch("INSERT INTO orders (id, supabase_id, items, total_amount, status, sync_status, table_number, created_at, updated_at)
+            VALUES ('workflow-order', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '[{\"id\":\"line\",\"quantity\":3}]', 30, 'pending', 'synced', 'T01', datetime('now'), datetime('now'));
+            INSERT INTO order_payments (id, order_id, method, amount, amount_cents, currency, status, sync_status, sync_state, table_session_id, created_at, updated_at)
+            VALUES ('workflow-payment', 'workflow-order', 'cash', 10, 1000, 'EUR', 'completed', 'pending', 'syncing', '11111111-1111-4111-8111-111111111111', datetime('now'), datetime('now'));"
+        ).expect("seed workflow payment");
+        enqueue_test_item(
+            conn,
+            "payments",
+            "INSERT",
+            "workflow-payment",
+            json!({
+                "paymentId": "workflow-payment", "orderId": "workflow-order", "amount": 10,
+                "method": "cash", "tableSessionId": "11111111-1111-4111-8111-111111111111"
+            }),
+        )
+    }
+
+    #[test]
+    fn table_snapshot_moves_identity_without_replacing_full_order_and_fences_merged_payment() {
+        let conn = test_connection();
+        let queue_id = seed_workflow_table_payment(&conn);
+        conn.execute("UPDATE parity_sync_queue SET status = 'processing', claim_generation = 7 WHERE id = ?1", [&queue_id]).unwrap();
+        let owner = "22222222-2222-4222-8222-222222222222";
+        let mut snapshot = json!({"session": {
+            "id": "33333333-3333-4333-8333-333333333333", "primary_table_id": "TB01",
+            "order": {"id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "table_session_id": owner,
+                "table_id": "table-T02", "table_display_number": "T02", "total_amount": 10,
+                "order_items": [{"id": "line", "quantity": 1}]}
+        }});
+        apply_table_session_snapshot(&conn, &snapshot).unwrap();
+        let stored: (String, String, f64, String) = conn.query_row("SELECT table_session_id, table_number, total_amount, items FROM orders WHERE id = 'workflow-order'", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).unwrap();
+        assert_eq!(
+            (&stored.0, stored.1.as_str(), stored.2),
+            (&owner.to_string(), "T02", 30.0)
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&stored.3).unwrap()[0]["quantity"],
+            3
+        );
+        snapshot["session"]["id"] = json!(owner);
+        snapshot["session"]["metadata"] =
+            json!({"merged_session_ids": ["11111111-1111-4111-8111-111111111111"]});
+        apply_table_session_snapshot(&conn, &snapshot).unwrap();
+        let (status, generation, raw): (String, i64, String) = conn
+            .query_row(
+                "SELECT status, claim_generation, data FROM parity_sync_queue WHERE id = ?1",
+                [&queue_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((status.as_str(), generation), ("pending", 8));
+        let body: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(body["tableSessionId"], owner);
+        assert_eq!(body["table_session_id"], owner);
+        assert_eq!(
+            conn.query_row(
+                "SELECT table_session_id FROM order_payments WHERE id = 'workflow-payment'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            owner
+        );
+        mark_success(&conn, &queue_id, 7).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE id = ?1",
+                [&queue_id],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn table_snapshot_does_not_mutate_protected_repair_order_or_payment() {
+        let conn = test_connection();
+        let queue_id = seed_workflow_table_payment(&conn);
+        conn.execute(
+            "UPDATE orders SET order_context = 'repair_settlement' WHERE id = 'workflow-order'",
+            [],
+        )
+        .unwrap();
+        let prior = full_queue_row_fingerprint(&conn, &queue_id);
+        let owner = "22222222-2222-4222-8222-222222222222";
+        let result = apply_table_session_snapshot(&conn, &json!({"session": {
+            "id": owner, "metadata": {"merged_session_ids": ["11111111-1111-4111-8111-111111111111"]},
+            "order": {"id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "table_session_id": owner}
+        }})).unwrap();
+        assert_eq!(result["applied"], false);
+        assert_eq!(full_queue_row_fingerprint(&conn, &queue_id), prior);
+        assert!(conn
+            .query_row(
+                "SELECT table_session_id FROM orders WHERE id = 'workflow-order'",
+                [],
+                |row| row.get::<_, Option<String>>(0)
+            )
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            conn.query_row(
+                "SELECT table_session_id FROM order_payments WHERE id = 'workflow-payment'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "11111111-1111-4111-8111-111111111111"
+        );
+    }
+
+    #[test]
+    fn table_snapshot_canonicalizes_offline_payment_session_alias() {
+        let conn = test_connection();
+        let queue_id = seed_workflow_table_payment(&conn);
+        let alias = "local-table-session:workflow-order";
+        conn.execute(
+            "UPDATE orders SET table_session_id = ?1 WHERE id = 'workflow-order'",
+            [alias],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE order_payments SET table_session_id = ?1 WHERE id = 'workflow-payment'",
+            [alias],
+        )
+        .unwrap();
+        conn.execute("UPDATE parity_sync_queue SET data = json_set(data, '$.tableSessionId', ?1) WHERE id = ?2", params![alias, queue_id]).unwrap();
+        let owner = "22222222-2222-4222-8222-222222222222";
+        apply_table_session_snapshot(&conn, &json!({"session": {
+            "id": owner, "order": {"id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "table_session_id": owner}
+        }})).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT table_session_id FROM order_payments WHERE id = 'workflow-payment'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            owner
+        );
+        let raw: String = conn
+            .query_row(
+                "SELECT data FROM parity_sync_queue WHERE id = ?1",
+                [&queue_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let payload: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(payload["tableSessionId"], owner);
+        assert_eq!(payload["table_session_id"], owner);
+    }
+
+    #[test]
+    fn payment_queue_mirror_tracks_backoff_parent_wait_terminal_and_retry() {
+        let conn = test_connection();
+        let queue_id = seed_workflow_table_payment(&conn);
+        conn.execute("UPDATE parity_sync_queue SET status = 'processing', claim_generation = 7 WHERE id = ?1", [&queue_id]).unwrap();
+        mark_failure(&conn, &queue_id, "HTTP_503_SERVER_ERROR", 7).unwrap();
+        let read = || {
+            conn.query_row("SELECT sync_state, sync_retry_count, sync_last_error, sync_next_retry_at FROM order_payments WHERE id = 'workflow-payment'", [], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, Option<String>>(3)?))).unwrap()
+        };
+        assert_eq!(read().0, "pending");
+        assert_eq!(read().1, 1);
+        assert!(read().3.is_some());
+        mark_deferred(&conn, &queue_id, "Waiting for parent order sync", 7).unwrap();
+        assert_eq!(read().0, "waiting_parent");
+        conn.execute("UPDATE parity_sync_queue SET status = 'failed', error_message = 'HTTP_422_CLIENT_ERROR' WHERE id = ?1", [&queue_id]).unwrap();
+        reconcile_payment_queue_mirrors(&conn, None).unwrap();
+        assert_eq!(read().0, "failed");
+        assert_eq!(read().2.as_deref(), Some("HTTP_422_CLIENT_ERROR"));
+        assert!(read().3.is_none());
+        assert!(conn
+            .query_row(
+                "SELECT next_retry_at FROM parity_sync_queue WHERE id = ?1",
+                [&queue_id],
+                |row| row.get::<_, Option<String>>(0)
+            )
+            .unwrap()
+            .is_none());
+        conn.execute("UPDATE parity_sync_queue SET status = 'pending', attempts = 0, error_message = NULL WHERE id = ?1", [&queue_id]).unwrap();
+        reconcile_payment_queue_mirrors(&conn, Some(&queue_id)).unwrap();
+        assert_eq!(read(), ("pending".to_string(), 0, None, None));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn payment_422_is_terminal_in_queue_and_payment_mirror() {
+        let conn = test_connection();
+        let queue_id = seed_workflow_table_payment(&conn);
+        let conn = std::sync::Arc::new(std::sync::Mutex::new(conn));
+        let (base_url, _requests, server) = spawn_mock_http_server(vec![MockResponse::json(
+            422,
+            r#"{"error":"Payment validation rejected"}"#,
+        )])
+        .await;
+        let result = process_queue(&conn, &base_url, "api-key").await.unwrap();
+        server.await.unwrap();
+        assert_eq!(result.failed, 1);
+        let db = conn.lock().unwrap();
+        assert_eq!(
+            db.query_row(
+                "SELECT status, next_retry_at FROM parity_sync_queue WHERE id = ?1",
+                [&queue_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            )
+            .unwrap(),
+            ("failed".to_string(), None)
+        );
+        assert_eq!(db.query_row("SELECT sync_state, sync_last_error, sync_next_retry_at FROM order_payments WHERE id = 'workflow-payment'", [], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))).unwrap(), ("failed".to_string(), "HTTP_422_CLIENT_ERROR".to_string(), None));
+    }
+
+    #[test]
+    fn salon_staff_shift_dispatch_preserves_stable_identity_and_delete_body() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        let id = "44444444-4444-4444-8444-444444444444";
+        for (operation, method) in [
+            ("INSERT", Method::POST),
+            ("UPDATE", Method::PATCH),
+            ("DELETE", Method::DELETE),
+        ] {
+            let payload = if operation == "DELETE" {
+                json!({"shift_id": id})
+            } else {
+                json!({"id": id, "shift_id": id, "staff_id": "staff-1", "start_time": "2026-09-08T10:00:00Z"})
+            };
+            let item = queue_item("salon_staff_shifts", operation, id, payload.clone());
+            let RequestPreparation::Ready(request) = prepare_request(&conn, &item).unwrap() else {
+                panic!("staff schedule request not ready");
+            };
+            assert_eq!(request.endpoint, "/api/pos/staff-schedule");
+            assert_eq!(request.method, method);
+            assert_eq!(
+                serde_json::from_str::<Value>(request.body.as_ref().unwrap()).unwrap(),
+                payload
+            );
+        }
     }
 
     #[test]
@@ -19317,6 +19772,35 @@ mod tests {
     }
 
     #[test]
+    fn prepare_room_checkin_request_preserves_expected_reservation_identity() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        for alias in ["expected_reservation_id", "expectedReservationId"] {
+            for identity in [Value::Null, json!("4112057f-4000-4000-8000-000000000001")] {
+                let mut payload = room_checkin_capture_payload();
+                payload[alias] = identity.clone();
+                let item = queue_item("room_checkins", "INSERT", ROOM_CHECKIN_REPLAY_KEY, payload);
+                let RequestPreparation::Ready(spec) = prepare_request(&conn, &item).unwrap() else {
+                    panic!("valid booking capture must be ready");
+                };
+                let body: Value = serde_json::from_str(spec.body.as_deref().unwrap()).unwrap();
+                assert_eq!(body.get("expectedReservationId"), Some(&identity));
+                assert_eq!(body["clientRequestId"], ROOM_CHECKIN_REPLAY_KEY);
+                assert!(body.get("expected_reservation_id").is_none());
+            }
+            for invalid in [json!(""), json!("not-a-booking-id"), json!(42)] {
+                let mut payload = room_checkin_capture_payload();
+                payload[alias] = invalid;
+                let item = queue_item("room_checkins", "INSERT", ROOM_CHECKIN_REPLAY_KEY, payload);
+                assert!(matches!(
+                    prepare_request(&conn, &item).unwrap(),
+                    RequestPreparation::Failed { .. }
+                ));
+            }
+        }
+    }
+
+    #[test]
     fn prepare_room_checkin_request_omits_null_optionals_and_preflights_room_id() {
         let conn = test_connection();
         seed_terminal_context(&conn);
@@ -19440,6 +19924,8 @@ mod tests {
         seed_terminal_context(&conn);
 
         let queue_id = enqueue_room_checkin_test_item(&conn);
+        let expected_reservation = "4112057f-4000-4000-8000-000000000001";
+        conn.execute("UPDATE parity_sync_queue SET data = json_set(data, '$.expected_reservation_id', ?1) WHERE id = ?2", params![expected_reservation, queue_id]).unwrap();
 
         let conn = std::sync::Mutex::new(conn);
         // 200 idempotentReplay is what the server answers when this
@@ -19469,6 +19955,7 @@ mod tests {
         assert_eq!(body["checkInDate"], "2026-06-12");
         assert_eq!(body["checkOutDate"], "2026-06-14");
         assert_eq!(body["clientRequestId"], ROOM_CHECKIN_REPLAY_KEY);
+        assert_eq!(body["expectedReservationId"], expected_reservation);
 
         let remaining: i64 = conn
             .lock()

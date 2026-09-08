@@ -46,6 +46,23 @@ describe('PaymentModal close lifecycle', () => {
     vi.restoreAllMocks();
   });
 
+  it('keeps cash completion outside scrolling content and submits the entered amount once', async () => {
+    const onPaymentComplete = vi.fn().mockResolvedValue(undefined);
+    render(<PaymentModal isOpen onClose={vi.fn()} orderTotal={18.5}
+      onPaymentComplete={onPaymentComplete} allowTips={false} />);
+    fireEvent.click(screen.getByRole('button', { name: /CASH/ }));
+    const complete = screen.getByRole('button', { name: 'Complete' });
+    expect(complete.closest('.liquid-glass-modal-content')).toBeNull();
+    expect(complete).toBeDisabled();
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '20,00' } });
+    expect(complete).toBeEnabled();
+    fireEvent.click(complete);
+    await waitFor(() => expect(onPaymentComplete).toHaveBeenCalledTimes(1));
+    expect(onPaymentComplete).toHaveBeenCalledWith(expect.objectContaining({
+      method: 'cash', amount: 18.5, cashReceived: 20, change: 1.5,
+    }));
+  });
+
   it('blocks every close path while processing and lets the header close normally afterward', async () => {
     vi.spyOn(document, 'hasFocus').mockReturnValue(true);
     const onClose = vi.fn();

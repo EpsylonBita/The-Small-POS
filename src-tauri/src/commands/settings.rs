@@ -640,23 +640,51 @@ fn restore_single_credential(key: &str, value: Option<&str>) -> Result<(), Strin
 
 fn renderer_settings_snapshot(db: &db::DbState) -> Result<Value, String> {
     let conn = db.conn.lock().map_err(|error| error.to_string())?;
-    let mut all = db::get_all_settings(&conn);
-    drop(conn);
-    if let Some(categories) = all.as_object_mut() {
-        for (category, value) in categories.iter_mut() {
-            if let Some(settings) = value.as_object_mut() {
-                settings.retain(|key, _| !crate::is_sensitive_setting_path(category, key));
-            }
+    // These categories contain operational data, not configuration. Filter in
+    // SQL so neither Rust nor every settings consumer copies the full customer,
+    // delivery and API caches. Scoped settings_get reads remain unchanged.
+    let mut statement = conn
+        .prepare(
+            "SELECT setting_category, setting_key, setting_value FROM local_settings
+         WHERE setting_category NOT IN ('local', 'staff_auth_cache')
+         ORDER BY setting_category, setting_key",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    let mut categories = serde_json::Map::new();
+    for row in rows {
+        let (category, key, value) = row.map_err(|error| error.to_string())?;
+        if crate::is_sensitive_setting_path(&category, &key)
+            || category
+                .split_once('.')
+                .is_some_and(|(cat, key)| crate::is_sensitive_setting_path(cat, key))
+        {
+            continue;
         }
-        categories.retain(|key, _| {
-            key.split_once('.')
-                .map(|(category, setting_key)| {
-                    !crate::is_sensitive_setting_path(category, setting_key)
-                })
-                .unwrap_or(true)
-        });
+        let settings = categories
+            .entry(category)
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(settings) = settings.as_object_mut() {
+            settings.insert(key, Value::String(value));
+        }
     }
-    Ok(all)
+    Ok(Value::Object(categories))
+}
+
+fn configuration_updated_keys(updates: &[(String, String, String)]) -> Vec<String> {
+    updates
+        .iter()
+        .filter(|(category, _, _)| !matches!(category.as_str(), "local" | "staff_auth_cache"))
+        .map(|(category, key, _)| format!("{category}.{key}"))
+        .collect()
 }
 
 fn value_to_settings_string(value: &Value) -> String {
@@ -3098,6 +3126,10 @@ pub async fn settings_set(
         &[(category.clone(), key.clone(), value.clone())],
     )?;
 
+    if matches!(category.as_str(), "local" | "staff_auth_cache") {
+        return Ok(serde_json::json!({ "success": true }));
+    }
+
     let full_key = format!("{category}.{key}");
     app.emit("settings_update", serde_json::json!({ "key": full_key }))
         .map_err(|error| error.to_string())?;
@@ -3121,10 +3153,12 @@ pub async fn settings_update_local(
     let normalized_updates = updates;
     apply_generic_settings_and_credentials_checked(&db, &normalized_updates)?;
 
-    let updated_keys: Vec<String> = normalized_updates
-        .iter()
-        .map(|(cat, key, _)| format!("{cat}.{key}"))
-        .collect();
+    let updated_keys = configuration_updated_keys(&normalized_updates);
+    // Saving a cache is not a terminal configuration change. In particular,
+    // opening the staff picker must not refresh every identity/module consumer.
+    if updated_keys.is_empty() {
+        return Ok(serde_json::json!({ "success": true }));
+    }
     app.emit(
         "settings_update",
         serde_json::json!({ "updated": updated_keys.clone() }),
@@ -3237,9 +3271,18 @@ pub async fn update_settings(
     let updates = normalize_dotted_settings_updates(&payload)?;
     apply_generic_settings_and_credentials_checked(&db, &updates)?;
     let updated = updates.len();
-    app.emit("settings_update", serde_json::json!({ "updated": updated }))
+    let configuration_keys = configuration_updated_keys(&updates);
+    if !configuration_keys.is_empty() {
+        app.emit(
+            "settings_update",
+            serde_json::json!({ "updated": configuration_keys.len() }),
+        )
         .map_err(|error| error.to_string())?;
-    if updates.iter().any(|(_, key, _)| key.contains("permission")) {
+    }
+    if configuration_keys
+        .iter()
+        .any(|key| key.contains("permission"))
+    {
         app.emit(
             "staff_permission_update",
             serde_json::json!({ "updated": true }),
@@ -4466,6 +4509,80 @@ mod dto_tests {
         let encoded = serde_json::to_string(&projected).expect("encode projection");
         assert!(!encoded.contains(PRIVATE_SENTINEL));
         assert_eq!(projected["printer"]["paper_width"], serde_json::json!("80"));
+    }
+
+    #[test]
+    fn renderer_settings_projection_does_not_copy_operational_caches() {
+        let database = crate::tests::harness::TestDb::open();
+        let cache = "x".repeat(16 * 1024 * 1024);
+        {
+            let connection = database.state.conn.lock().expect("seed cache");
+            crate::db::set_setting(&connection, "local", "customer_cache_v1", &cache)
+                .expect("seed customer data");
+            crate::db::set_setting(
+                &connection,
+                "staff_auth_cache",
+                "branch-test",
+                "staff-directory",
+            )
+            .expect("seed staff data");
+            crate::db::set_setting(&connection, "printer", "paper_width", "80")
+                .expect("seed configuration");
+        }
+        let projected = super::renderer_settings_snapshot(&database.state).expect("settings");
+        let bytes = serde_json::to_vec(&projected)
+            .expect("encode settings")
+            .len();
+        assert!(
+            bytes < 8_192,
+            "configuration response grew to {bytes} bytes with a large cache"
+        );
+        assert!(projected.get("local").is_none());
+        assert!(projected.get("staff_auth_cache").is_none());
+        assert_eq!(projected["printer"]["paper_width"], "80");
+        let connection = database.state.conn.lock().expect("check retained cache");
+        assert_eq!(
+            crate::db::get_setting(&connection, "local", "customer_cache_v1")
+                .unwrap()
+                .len(),
+            cache.len()
+        );
+        assert_eq!(
+            crate::db::get_setting(&connection, "staff_auth_cache", "branch-test").as_deref(),
+            Some("staff-directory")
+        );
+    }
+
+    #[test]
+    fn configuration_notifications_exclude_cache_writes_and_keep_real_changes() {
+        let cache_updates = vec![
+            (
+                "local".to_string(),
+                "customer_cache_v1".to_string(),
+                "cached".to_string(),
+            ),
+            (
+                "staff_auth_cache".to_string(),
+                "branch-test".to_string(),
+                "staff".to_string(),
+            ),
+        ];
+        assert!(super::configuration_updated_keys(&cache_updates).is_empty());
+        let mut mixed = cache_updates;
+        mixed.push((
+            "general".to_string(),
+            "language".to_string(),
+            "el".to_string(),
+        ));
+        mixed.push((
+            "printer".to_string(),
+            "paper_width".to_string(),
+            "80".to_string(),
+        ));
+        assert_eq!(
+            super::configuration_updated_keys(&mixed),
+            vec!["general.language", "printer.paper_width"]
+        );
     }
 
     #[test]

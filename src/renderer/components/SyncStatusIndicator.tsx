@@ -146,6 +146,7 @@ type HealthProblemCode =
   | 'printerUnavailable'
   | 'printerNotConfigured'
   | 'syncWaiting'
+  | 'syncFailed'
   | 'ready'
   | 'shiftInactive';
 type HealthRecommendedActionCode =
@@ -158,6 +159,7 @@ type HealthRecommendedActionCode =
   | 'startShift'
   | 'checkConnection'
   | 'configurePrinter'
+  | 'openRecovery'
   | 'useNormally'
   | 'startShiftWhenReady';
 type SimpleServiceStatus = {
@@ -276,7 +278,8 @@ const buildVisibleParityFailure = (
     title: tableLabel,
     recordId,
     status: normalizeOperatorSyncStatus(status),
-    nextRetryAt: item.nextRetryAt,
+    nextRetryAt: ['pending', 'retrying'].includes(status) &&
+      item.nextRetryAt && toTimestamp(item.nextRetryAt)! > Date.now() ? item.nextRetryAt : null,
   };
 };
 
@@ -302,14 +305,19 @@ const buildSimpleHealthSummary = ({
   syncStatus,
   supportStatus,
   isShiftActive,
+  parityItems,
 }: {
   health: DiagnosticsSystemHealth | null;
   syncStatus: SyncStatus;
   supportStatus: SimpleServiceStatus['support'];
   isShiftActive: boolean;
+  parityItems: SyncQueueItem[];
 }): SimpleHealthSummary => {
   const backlog = countBacklog(health);
-  const failedFinancialItems =
+  const failedFinancialItems = parityItems.filter((item) =>
+    ['payments', 'payment_adjustments'].includes(item.tableName) &&
+    ['failed', 'conflict'].includes(item.status),
+  ).length ||
     (health?.financialQueueStatus?.totalFailed ?? 0) ||
     (health?.financialQueueStatus?.failedPaymentItems ?? 0) ||
     syncStatus.failedPaymentItems;
@@ -321,6 +329,7 @@ const buildSimpleHealthSummary = ({
     typeof health?.isOnline === 'boolean' ? health.isOnline : syncStatus.isOnline;
   const syncFailed =
     failedFinancialItems > 0 ||
+    parityItems.some((item) => ['failed', 'conflict'].includes(item.status)) ||
     invalidOrders > 0 ||
     (health?.parityQueueStatus?.failed ?? 0) > 0 ||
     (health?.parityQueueStatus?.conflicts ?? 0) > 0 ||
@@ -350,8 +359,8 @@ const buildSimpleHealthSummary = ({
       canContinueOrders: isShiftActive,
       guidance: isShiftActive ? 'canContinueOrders' : 'contactSupportBeforeOrders',
       recommendedActions: isShiftActive
-        ? ['keepOpen', 'doNotClearData', 'contactSupport']
-        : ['keepOpen', 'doNotClearData', 'contactSupportBeforeOrders'],
+        ? ['openRecovery', 'doNotClearData', 'contactSupport']
+        : ['openRecovery', 'doNotClearData', 'contactSupportBeforeOrders'],
       problem:
         failedFinancialItems > 0
           ? 'failedPayments'
@@ -373,14 +382,18 @@ const buildSimpleHealthSummary = ({
       state: 'attention',
       canContinueOrders: isShiftActive,
       guidance,
-      recommendedActions: isShiftActive
+      recommendedActions: syncFailed
+        ? ['openRecovery', 'keepOpen', 'doNotClearData']
+        : isShiftActive
         ? printerNeedsSetup
           ? ['keepTakingOrders', 'keepOpen', 'configurePrinter']
           : ['keepTakingOrders', 'keepOpen', 'checkInternet']
         : printerNeedsSetup
           ? ['startShift', 'keepOpen', 'configurePrinter']
           : ['startShift', 'keepOpen', 'checkConnection'],
-      problem: !isOnline
+      problem: syncFailed
+        ? 'syncFailed'
+        : !isOnline
         ? 'offline'
         : printerNeedsSetup
           ? 'printerNotConfigured'
@@ -1564,6 +1577,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
       syncStatus,
       supportStatus: 'not_sent',
       isShiftActive,
+      parityItems: recoveryParityItems,
     });
     const supportStatus: SimpleServiceStatus['support'] = incidentReport?.success
       ? 'notified'
@@ -1578,8 +1592,9 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
       syncStatus,
       supportStatus,
       isShiftActive,
+      parityItems: recoveryParityItems,
     });
-  }, [incidentReport, isShiftActive, syncStatus, systemHealth]);
+  }, [incidentReport, isShiftActive, syncStatus, systemHealth, recoveryParityItems]);
   const localizedHealthSummary = useMemo(() => {
     const stateKey =
       simpleHealthSummary.state === 'support_needed'
@@ -1619,7 +1634,9 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
 
   const totalPending =
     syncStatus.pendingItems + financialPendingCount + parityPendingCount;
-  const nextRetryAt = syncStatus.oldestNextRetryAt ?? queueFailure?.nextRetryAt ?? null;
+  const rawNextRetryAt = syncStatus.oldestNextRetryAt ?? queueFailure?.nextRetryAt;
+  const nextRetryAt = rawNextRetryAt && toTimestamp(rawNextRetryAt)! > Date.now()
+    ? rawNextRetryAt : null;
   const hasInvalidOrders = (systemHealth?.invalidOrders?.count ?? 0) > 0;
   const advancedIssueCount =
     sharedRecoveryIssues.length +
@@ -2117,7 +2134,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                 <span className="font-semibold">{t('sync.blocker.status')}:</span>{' '}
                 <span className="font-mono">{queueFailure.status}</span>
               </div>
-              {queueFailure.nextRetryAt && (
+              {hasScheduledRetryableQueueFailure && queueFailure.nextRetryAt && (
                 <div className="text-xs font-semibold text-amber-700 dark:text-amber-300">
                   {t('sync.blocker.nextRetry')}: {new Date(queueFailure.nextRetryAt).toLocaleTimeString()}
                 </div>

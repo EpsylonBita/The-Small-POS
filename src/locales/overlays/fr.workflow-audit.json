@@ -1,0 +1,20 @@
+{
+  "orderDashboard": {
+    "paymentMethodAdjustedOrder": "Cette commande comporte un remboursement ou une annulation de paiement. Les modes de paiement ne peuvent pas être modifiés. Consultez l’historique des paiements."
+  },
+  "tableCheckManager": {
+    "messages": {
+      "mergeCompatibleChecks": "Les tables occupées peuvent être réunies si elles contiennent des parties de la même commande. Les additions de commandes différentes doivent rester séparées."
+    }
+  },
+  "sync": {
+    "healthModal": {
+      "problems": {
+        "syncFailed": "La synchronisation a échoué. Ouvrez la récupération pour vérifier les éléments concernés."
+      },
+      "recommendations": {
+        "openRecovery": "Ouvrez la récupération et vérifiez l’élément en échec avant de réessayer."
+      }
+    }
+  }
+}

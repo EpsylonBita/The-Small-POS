@@ -715,7 +715,11 @@ pub async fn branch_data_get_staff_schedule(
         query.push(format!("role={role}"));
     }
     let path = format!("/api/pos/staff-schedule?{}", query.join("&"));
-    fetch_branch_scoped_payload(&db, &branch_id, CACHE_KEY_STAFF_SCHEDULE, &scope_key, path).await
+    let mut response =
+        fetch_branch_scoped_payload(&db, &branch_id, CACHE_KEY_STAFF_SCHEDULE, &scope_key, path)
+            .await?;
+    super::offline_mutations::overlay_pending_staff_schedule(&db, &branch_id, &mut response)?;
+    Ok(response)
 }
 
 #[tauri::command]

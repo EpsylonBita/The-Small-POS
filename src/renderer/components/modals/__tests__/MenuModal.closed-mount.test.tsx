@@ -165,6 +165,7 @@ vi.mock('../../menu/MenuCart', () => ({
       {cartItems.map((item: any) => (
         <div key={item.id}>
           <span>{item.name} × {item.quantity} = {item.totalPrice} [{item.categoryName || ''}]</span>
+          <span data-testid="cart-customizations">{JSON.stringify(item.customizations)}</span>
           <button onClick={() => onRemoveItem(item.id)}>Remove {item.name}</button>
           <button onClick={() => onEditItem(item)}>Edit {item.name}</button>
         </div>
@@ -229,6 +230,21 @@ describe('MenuModal closed-state mount gating', () => {
     view.rerender(<MenuModal {...baseProps} isOpen={false} />);
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(lgmRenderSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('MenuModal stored customization metadata', () => {
+  afterEach(cleanup);
+  it('keeps actual ingredients while ignoring _meta when reopening an order', async () => {
+    render(<MenuModal {...baseProps} isOpen editMode editOrderId="qa-meta" initialCartItems={[
+      { id: 'coffee', name: 'Espresso', quantity: 1, price: 4, customizations: {
+        milk: { ingredient: { id: 'milk', name: 'Milk', price: 0 }, quantity: 1 },
+        _meta: { product_name: 'Espresso', category_id: null, line_kind: 'item' },
+      } },
+    ]} />);
+    await waitFor(() => expect(screen.getByTestId('cart-customizations')).toHaveTextContent('Milk'));
+    expect(screen.getByTestId('cart-customizations')).not.toHaveTextContent('Unknown');
+    expect(screen.getByTestId('cart-customizations')).not.toHaveTextContent('product_name');
   });
 });
 

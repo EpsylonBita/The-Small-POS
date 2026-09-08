@@ -91,6 +91,18 @@ export function offlineCreateStaffShift(payload: Record<string, unknown>) {
   )
 }
 
+export function offlineUpdateStaffShift(payload: Record<string, unknown>) {
+  return invokeOffline<{ shift: Record<string, unknown>; queueId: string; queued: boolean }>(
+    'offline:staff-shift-update', payload, 'Failed to update shift offline',
+  )
+}
+
+export function offlineDeleteStaffShift(payload: { shift_id: string }) {
+  return invokeOffline<{ shift: Record<string, unknown>; queueId: string; queued: boolean }>(
+    'offline:staff-shift-delete', payload, 'Failed to delete shift offline',
+  )
+}
+
 export function offlineUpdateDriveThruStatus(payload: Record<string, unknown>) {
   return invokeOffline<{ order?: Record<string, unknown>; queueId: string; queued: boolean }>(
     'offline:drive-thru-update-status',

@@ -1,5 +1,5 @@
 import React from 'react';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({ setLanguage: vi.fn(), toastError: vi.fn() }));
@@ -36,10 +36,14 @@ it('waits for language persistence before advancing to terminal connection', asy
 });
 
 it('stays on language selection and reports a failed save', async () => {
-  mocks.setLanguage.mockRejectedValue(new Error('native save failed'));
+  let reject!: (error: Error) => void;
+  mocks.setLanguage.mockImplementation(() => new Promise<void>((_, fail) => { reject = fail; }));
   render(<OnboardingPage />);
   fireEvent.click(screen.getByRole('button', { name: 'English' }));
-  await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith('Failed to save changes.'));
+  expect(screen.getByRole('button', { name: 'English' })).toBeDisabled();
+  // Await the rejected save and React's resulting commit, not the toast side effect.
+  await act(async () => { reject(new Error('native save failed')); });
+  expect(mocks.toastError).toHaveBeenCalledWith('Failed to save changes.');
   expect(screen.getByRole('heading', { name: 'Select Language' })).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'English' })).not.toBeDisabled();
 });

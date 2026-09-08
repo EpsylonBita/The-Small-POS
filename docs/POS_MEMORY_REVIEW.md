@@ -135,3 +135,119 @@ native bridge or validate a real payment.
 Bundle reduction targets startup parsing/evaluation; it is not evidence of a
 particular RAM reduction. The earlier Windows executable/ZIP predates this
 follow-up and does not contain these frontend changes.
+
+## Shop follow-up on 1.4.104 — 2026-09-08
+
+The user reported 1,128.2 MB for the six-process WebView2 Manager group after
+starting the shop PC. This is a startup/interaction report, not evidence that
+memory accumulated over a long uninterrupted session.
+
+During read-only RustDesk inspection at approximately 10:51 shop time, Task
+Manager was in the foreground and the POS dashboard was behind it. The POS
+showed no active shift and zero orders in its visible tabs. Task Manager showed:
+
+- Native The Small POS process: 67.3 MB.
+- WebView2 Manager group: approximately 43.8–45.9 MB.
+- Expanded group at 45.9 MB: The Small POS content 23.9 MB, browser manager
+  7.0 MB, GPU 5.7 MB, network utility 1.8 MB, crash handler 1.7 MB, storage
+  utility 0.8 MB. The expanded labels identify this group with the POS.
+
+No application restart, reinstall, data deletion or order mutation was performed.
+These are Task Manager memory-column observations; no private-commit or JS-heap
+measurement was captured from the shop. In this release, sustained loss of focus
+requests WebView2's Low memory target after 30 seconds. Therefore, the background
+figures cannot establish lower active allocations or rule out a retained-memory
+problem.
+
+### Active-window reproduction
+
+The POS window was temporarily moved to the right so Task Manager's process
+memory column remained visible while the POS retained focus. Only the staff
+selection modal was opened using Start Shift, then dismissed with Escape; no
+staff member/PIN was selected, no shift was started and no order was entered.
+Three successive open/close cycles reproduced increasing content-process memory:
+
+| Observation | WebView2 POS content | WebView2 GPU |
+| --- | ---: | ---: |
+| Active dashboard before first open | about 39 MB | 23.5 MB |
+| First open, settled observation | 491.6 MB | 44.4 MB |
+| After first close | 455.9 MB | 77.7 MB |
+| Second open, later observation | 834.2 MB | 59.1 MB |
+| After second close | 833.4 MB | 92.0 MB |
+| Third open | about 1,249 MB | 61.8 MB |
+| After third close | about 1,248 MB | 83.4 MB |
+| Later idle dashboard, still focused, approximately 10:58 | 1,225.6 MB | 55.4 MB |
+
+The native process remained approximately 65–69 MB during these observations.
+These are individual-process values, not the grouped total in the user's
+screenshot. Open durations and observation intervals were not identical; this
+is a qualitative reproduction, not a controlled allocation benchmark.
+
+The reproduction confirms rising active working-set memory associated with
+repeated modal use, retained after close. It does not yet identify whether the
+content process retains JS objects, DOM/native resources, rendering caches or
+other allocations. A heap/native-allocation profile is still needed. Do not
+interpret the low background measurement as a fix or attribute the issue solely
+to the separate GPU process. No installation change was made during this
+measurement. The subsequent source changes are recorded below.
+
+Both machines were subsequently verified through file metadata and SHA-256:
+1.4.104, 40,182,784 bytes, SHA-256
+`D6D4436A17CBB0DA7A58374B7DCB3DF583807F35D64499BCACA0FB7E3A84A40F`.
+Both run WebView2 152.0.4191.66. The laptop reports Intel UHD Graphics driver
+31.0.101.4502; the shop reports Intel Graphics driver 32.0.101.7076. The differing
+driver is an observation, not an established cause.
+
+Installer inspection: ordinary update preserves credentials. The uninstall hook
+deletes managed credentials only when Delete App Data is selected outside update
+mode; an actual uninstall also removes the installer-owned Caller ID firewall
+rule. A reinstall is not an established remedy for the reported memory usage.
+
+### Configuration payload investigation and source correction
+
+The user also reported a visible loading step before the shop staff list, while
+the laptop displays staff immediately. Read-only SQLite queries captured only
+counts, lengths and cache metadata, without exporting customer or staff records:
+
+| Local storage observation | Laptop | Shop |
+| --- | ---: | ---: |
+| Sum of setting-value lengths | approximately 122 KB | 16,571,840 |
+| Operational `local` category | approximately 110 KB | 16,561,120 |
+| Staff cache bytes / staff count | 10,289 / 16 | 7,172 / 12 |
+| Local orders count at observation | 3 | 0 |
+
+The staff cache exists in both installations. The shop's large category contains
+customer, delivery-validation, address-candidate and cached API responses.
+The configuration response previously included all of these records. Multiple
+settings/identity/audio consumers consequently received large unrelated strings.
+Saving the staff cache also emitted terminal-configuration notifications, which
+triggered identity/module/audio refresh paths. Additionally, useTerminalSettings
+replaced its configuration with the notification's `{updated: [...]}` metadata,
+discarding branch identity and forcing later fallback lookups.
+
+Changes in source:
+
+- Bulk configuration reads filter `local` and `staff_auth_cache` in SQL before
+  loading values. Targeted cache reads, SQLite persistence, credentials, offline
+  data and orders are preserved; no migration or data deletion is involved.
+- Cache-only generic setting writes do not emit global configuration events.
+  Mixed writes still announce real configuration changes.
+- The settings hook ignores old cache notifications, reloads authoritative
+  configuration for actual changes and rejects obsolete asynchronous responses.
+
+A real SQLite regression fixture with a 16 MiB cache failed before the change:
+the configuration response was 16,777,334 bytes. Its corrected acceptance check
+requires a response below 8 KiB while proving both caches remain readable.
+Three initial hook regressions also failed before correction: cache notification
+erased branch identity, real changes were not reloaded, and response ordering was
+not handled. These demonstrate specific defects, not a measured post-fix shop
+working set. The corrected executable still needs the same active-window shop
+test before claiming the 1.2 GB observation is resolved.
+
+Fresh verification for this correction: 85 native settings tests passed,
+including the large-cache projection and mixed configuration/cache notification
+cases; 30 renderer tests passed across settings updates, staff loading, onboarding
+identity and app audio. TypeScript checking and the production frontend build
+passed. The existing large-chunk build warning and three unrelated native
+unused-code warnings remain. These measurements preceded release 1.4.105;
+they do not represent an installed measurement of the corrected build.

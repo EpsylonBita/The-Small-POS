@@ -117,18 +117,19 @@ test('Round 350: New Reservation form has selected-room chip, required guest nam
   const form = modals.slice(start);
 
   // Selected room chip + the New Reservation heading.
-  assert.match(form, /title=\{t\('roomsView\.newReservation'/);
-  assert.match(form, /<RoomChip room=\{room\}/);
+  assert.match(form, /title=\{reservation \? t\('roomWorkflow\.editBooking'\) : t\('roomsView\.newReservation'/);
+  assert.match(form, /<RoomChip room=\{(?:selectedRoom|room)\}/);
 
-  // Guest name is required; other fields (phone, dates, notes) are present but optional.
+  // Guest name and phone are required; departure must follow arrival.
   assert.match(form, /label=\{t\('roomsView\.guestName'[\s\S]*?\n\s*required/);
 
   // Cancel = red destructive glass; Create = emerald, DISABLED until a name is entered (no submit on empty).
   assert.match(form, /border border-red-400\/40 bg-red-500\/15[\s\S]*?text-red-300/);
-  assert.match(form, /disabled=\{!name\.trim\(\) \|\| submitting\}\s*\n\s*className="flex-1 rounded-xl border border-emerald-500 bg-emerald-600/);
+  assert.match(form, /disabled=\{!name\.trim\(\) \|\| [^\n]+submitting[^\n]*\}\s*\n\s*className="flex-1 rounded-xl border border-emerald-500 bg-emerald-600/);
   assert.match(form, /t\('roomsView\.createReservation'/);
   // The submit handler also fails closed on an empty name.
-  assert.match(form, /if \(!name\.trim\(\) \|\| submitting\) return;/);
+  assert.match(form, /if \(!name\.trim\(\) \|\| !phone\.trim\(\)\)/);
+  assert.match(form, /if \(!nights\)/);
 });
 
 test('Round 350: New Check-in form mirrors the required-name + red-cancel/green-create contract', () => {
@@ -138,10 +139,10 @@ test('Round 350: New Check-in form mirrors the required-name + red-cancel/green-
   const form = modals.slice(start, end);
 
   assert.match(form, /title=\{t\('roomsView\.newCheckin'/);
-  assert.match(form, /<RoomChip room=\{room\}/);
+  assert.match(form, /<RoomChip room=\{(?:selectedRoom|room)\}/);
   assert.match(form, /label=\{t\('roomsView\.guestName'[\s\S]*?\n\s*required/);
   assert.match(form, /border border-red-400\/40 bg-red-500\/15[\s\S]*?text-red-300/);
-  assert.match(form, /disabled=\{!name\.trim\(\) \|\| submitting\}\s*\n\s*className="flex-1 rounded-xl border border-emerald-500 bg-emerald-600/);
+  assert.match(form, /disabled=\{!name\.trim\(\) \|\| [^\n]+submitting[^\n]*\}\s*\n\s*className="flex-1 rounded-xl border border-emerald-500 bg-emerald-600/);
   assert.match(form, /t\('roomsView\.completeCheckin'/);
 });
 
@@ -152,7 +153,7 @@ test('Round 350: room workflow modals are touch-first (no hover/group-hover/nati
   // any other native title= tooltip is forbidden. (subtitle= is unaffected -- no \b before its "title".)
   assert.doesNotMatch(
     modals,
-    /\btitle=\{(?!title\}|t\('roomsView\.new)/,
+    /<(?:button|input|select|textarea|div)\b[^>]*\btitle=/,
     'no native title= tooltip allowed (only LiquidGlassModal heading props)',
   );
 });

@@ -1,0 +1,20 @@
+{
+  "orderDashboard": {
+    "paymentMethodAdjustedOrder": "Questo ordine contiene un rimborso o un annullamento. I metodi di pagamento non possono essere modificati. Consulta la cronologia dei pagamenti."
+  },
+  "tableCheckManager": {
+    "messages": {
+      "mergeCompatibleChecks": "I tavoli occupati possono essere uniti se contengono parti dello stesso ordine. I conti di ordini diversi devono restare separati."
+    }
+  },
+  "sync": {
+    "healthModal": {
+      "problems": {
+        "syncFailed": "La sincronizzazione non è riuscita. Apri il ripristino per verificare gli elementi interessati."
+      },
+      "recommendations": {
+        "openRecovery": "Apri il ripristino e controlla l’elemento non riuscito prima di riprovare."
+      }
+    }
+  }
+}

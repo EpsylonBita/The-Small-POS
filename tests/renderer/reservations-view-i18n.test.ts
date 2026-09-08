@@ -281,7 +281,7 @@ test('Reservations timeline range is dynamic, not a hardcoded 11-22 window', () 
   );
   assert.match(
     viewSource,
-    /buildReservationTimelineSlots\(\s*filteredReservations\.map\(\(res\) => new Date\(res\.reservationDatetime\)\.getHours\(\)\),?\s*\)/,
+    /buildReservationTimelineSlots\(\s*filteredReservations\.map\(\(res\) => new Date\(reservationWallDateTime\(res\)\)\.getHours\(\)\),?\s*\)/,
   );
 });
 
@@ -293,13 +293,13 @@ test('Reservations timeline grouping creates hour buckets on demand and never dr
 });
 
 // Regression contract for the details Date & Time mismatch (2026-06-21 review): the
-// details panel rendered raw reservationDate + reservationTime (UTC/service values),
-// so the same reservation showed a different time (19:00:00) than list/timeline (21:00).
-test('Reservations details Date & Time uses the normalized reservationDatetime, not raw fields', () => {
+// All surfaces share the branch business date/time, not the terminal timezone conversion.
+// Runtime room-workflow tests also verify that entered 19:00 remains 19:00.
+test('Reservations details uses the same branch wall time as list and timeline', () => {
   // Details formats the same normalized datetime list/timeline use.
   assert.match(
     viewSource,
-    /\{formatDate\(selectedReservation\.reservationDatetime\)\} \{formatTime\(selectedReservation\.reservationDatetime, \{ hour: '2-digit', minute: '2-digit' \}\)\}/,
+    /\{formatDate\(reservationWallDateTime\(selectedReservation\)\)\} \{formatTime\(reservationWallDateTime\(selectedReservation\), \{ hour: '2-digit', minute: '2-digit' \}\)\}/,
   );
   // The raw reservationDate + reservationTime concatenation is gone.
   assert.doesNotMatch(
@@ -311,11 +311,11 @@ test('Reservations details Date & Time uses the normalized reservationDatetime, 
 test('Reservations list, timeline, and details share the same datetime formatting source', () => {
   // List and timeline format the time from reservationDatetime.
   assert.ok(
-    (viewSource.match(/formatTime\(res\.reservationDatetime, \{ hour: '2-digit', minute: '2-digit' \}\)/g) || []).length >= 1,
+    (viewSource.match(/formatTime\(reservationWallDateTime\(res\), \{ hour: '2-digit', minute: '2-digit' \}\)/g) || []).length >= 1,
     'list/timeline must format time from reservationDatetime',
   );
   // Details uses the same reservationDatetime field (not the raw reservationTime string).
-  assert.match(viewSource, /formatTime\(selectedReservation\.reservationDatetime, \{ hour: '2-digit', minute: '2-digit' \}\)/);
+  assert.match(viewSource, /formatTime\(reservationWallDateTime\(selectedReservation\), \{ hour: '2-digit', minute: '2-digit' \}\)/);
 });
 
 test('useReservations routes all toasts through i18n (no hardcoded English / raw status enum)', () => {
@@ -323,8 +323,7 @@ test('useReservations routes all toasts through i18n (no hardcoded English / raw
   assert.match(hookSource, /const \{ t \} = useTranslation\(\);/);
   // Success + error toasts use keys.
   assert.match(hookSource, /t\('reservationsView\.toasts\.created'/);
-  assert.match(hookSource, /t\('reservationsView\.toasts\.createFailed'/);
-  assert.match(hookSource, /t\('reservationsView\.toasts\.updateStatusFailed'/);
+  assert.match(hookSource, /roomWorkflowError\(err, t\)/);
   assert.match(hookSource, /t\('reservationsView\.toasts\.tableAssigned'/);
   assert.match(hookSource, /t\('reservationsView\.toasts\.assignTableFailed'/);
   // Status uses explicit per-status keys, never raw enum concatenation.
@@ -466,7 +465,7 @@ test('Reservations room create uses a room selector populated from room inventor
   // Room inventory comes from the shared useRooms hook (same source as the Rooms grid),
   // gated on the rooms module so non-rooms orgs do not fetch it.
   assert.match(viewSource, /import \{ useRooms \} from '\.\.\/\.\.\/\.\.\/hooks\/useRooms';/);
-  assert.match(viewSource, /const \{ rooms \} = useRooms\(\{[\s\S]*?branchId: hasRoomsModule \? branchId \|\| '' : '',/);
+  assert.match(viewSource, /const \{ rooms,[^}]*\} = useRooms\(\{[\s\S]*?branchId: hasRoomsModule \? branchId \|\| '' : '',/);
 
   // The room field is a <select> bound to createForm.roomId; options carry the internal
   // room id as the value and a staff-facing label as the visible text.
@@ -490,7 +489,7 @@ test('Reservations room create uses a room selector populated from room inventor
   // Validation still requires the selected room + check-in/out, and the payload sends roomId.
   assert.match(
     viewSource,
-    /activeTab === 'rooms' && \(!createForm\.roomId\.trim\(\) \|\| !createForm\.checkInDate \|\| !createForm\.checkOutDate\)/,
+    /activeTab === 'rooms' && \(!createForm\.roomId\.trim\(\) \|\| !roomStayNights\(createForm\.checkInDate, createForm\.checkOutDate\)\)/,
   );
   assert.match(viewSource, /roomId: activeTab === 'rooms' \? createForm\.roomId\.trim\(\) \|\| undefined : undefined/);
 
@@ -562,7 +561,7 @@ test('Reservations create modal uses light glass and disables Create until requi
   assert.match(viewSource, /const modalScrimClass = `absolute inset-0 backdrop-blur-xl \$\{isDark \? 'bg-black\/55' : 'bg-black\/30'\}`/);
   assert.match(viewSource, /const isCreateReservationReady =[\s\S]*?Boolean\(createForm\.customerName\.trim\(\)\)[\s\S]*?Boolean\(createForm\.customerPhone\.trim\(\)\)/);
   assert.match(viewSource, /Number\.isFinite\(createPartySize\)[\s\S]*?createPartySize > 0/);
-  assert.match(viewSource, /activeTab !== 'rooms' \|\|[\s\S]*?Boolean\(createForm\.roomId\.trim\(\)\)[\s\S]*?Boolean\(createForm\.checkInDate\)[\s\S]*?Boolean\(createForm\.checkOutDate\)/);
+  assert.match(viewSource, /activeTab !== 'rooms' \|\|[\s\S]*?Boolean\(createForm\.roomId\.trim\(\)\)[\s\S]*?Boolean\(createForm\.checkInDate\)[\s\S]*?roomStayNights\(createForm\.checkInDate, createForm\.checkOutDate\) > 0/);
 
   const createButton = viewSource.slice(
     viewSource.indexOf('onClick={() => void handleCreateReservation()}'),

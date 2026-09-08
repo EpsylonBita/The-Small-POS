@@ -216,60 +216,6 @@ where
     Ok(())
 }
 
-fn patch_branch_cache_rows<F>(
-    db: &db::DbState,
-    branch_id: &str,
-    cache_key: &str,
-    mut patcher: F,
-) -> Result<(), String>
-where
-    F: FnMut(&str, &mut Value) -> bool,
-{
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT scope_key, payload_json
-             FROM branch_ops_cache
-             WHERE branch_id = ?1 AND cache_key = ?2",
-        )
-        .map_err(|e| format!("prepare branch cache query: {e}"))?;
-    let rows = stmt
-        .query_map(params![branch_id, cache_key], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(|e| format!("query branch cache rows: {e}"))?;
-    let row_values = rows.filter_map(Result::ok).collect::<Vec<_>>();
-    drop(stmt);
-
-    for (scope_key, payload_json) in row_values {
-        let mut payload = serde_json::from_str::<Value>(&payload_json)
-            .map_err(|e| format!("parse cache: {e}"))?;
-        if !patcher(&scope_key, &mut payload) {
-            continue;
-        }
-        let updated_payload =
-            serde_json::to_string(&payload).map_err(|e| format!("serialize cache: {e}"))?;
-        conn.execute(
-            "UPDATE branch_ops_cache
-             SET payload_json = ?1,
-                 synced_at = ?2,
-                 version = ?3
-             WHERE branch_id = ?4 AND cache_key = ?5 AND scope_key = ?6",
-            params![
-                updated_payload,
-                now_rfc3339(),
-                format!("offline:{}", Uuid::new_v4()),
-                branch_id,
-                cache_key,
-                scope_key
-            ],
-        )
-        .map_err(|e| format!("update branch cache row: {e}"))?;
-    }
-
-    Ok(())
-}
-
 fn write_menu_section(db: &db::DbState, section: &str, payload: &[Value]) -> Result<(), String> {
     let json_str = serde_json::to_string(&Value::Array(payload.to_vec()))
         .map_err(|e| format!("serialize menu section {section}: {e}"))?;
@@ -900,14 +846,246 @@ pub async fn offline_appointment_update_status(
     }))
 }
 
-fn patch_staff_schedule_cache(db: &db::DbState, branch: &str, shift: &Value) -> Result<(), String> {
-    patch_branch_cache_rows(db, branch, "staff_schedule", |_scope_key, payload| {
-        let Some(shifts) = get_array_mut_path(payload, &["shifts"]) else {
-            return false;
-        };
-        upsert_array_record(shifts, shift);
-        true
-    })
+fn mutate_staff_schedule_locally(
+    db: &db::DbState,
+    payload: &Value,
+    operation: &str,
+) -> Result<Value, String> {
+    let branch = storage::get_credential("branch_id").unwrap_or_else(|| branch_id(db, payload));
+    if branch.trim().is_empty() {
+        return Err("Missing branch id".to_string());
+    }
+    let id =
+        read_string(payload, &["shift_id", "id"]).unwrap_or_else(|| Uuid::new_v4().to_string());
+    Uuid::parse_str(&id).map_err(|_| {
+        "Refresh this schedule before editing it: its server identity is not available".to_string()
+    })?;
+    let now = now_rfc3339();
+    let mut shift = payload.clone();
+    let object = shift
+        .as_object_mut()
+        .ok_or("Shift payload must be an object")?;
+    object.insert("id".into(), json!(id));
+    object.insert("shift_id".into(), json!(id));
+    object.insert("branch_id".into(), json!(branch));
+    object.insert(
+        "organization_id".into(),
+        json!(organization_id(db, &json!({}))),
+    );
+    object.insert("updated_at".into(), json!(now));
+    if operation != "DELETE" {
+        let staff = read_string(payload, &["staff_id", "staffId"]).ok_or("Missing staff_id")?;
+        let start =
+            read_string(payload, &["start_time", "startTime"]).ok_or("Missing start_time")?;
+        let end = read_string(payload, &["end_time", "endTime"]).ok_or("Missing end_time")?;
+        let start_date =
+            chrono::DateTime::parse_from_rfc3339(&start).map_err(|_| "Invalid start time")?;
+        let end_date =
+            chrono::DateTime::parse_from_rfc3339(&end).map_err(|_| "Invalid end time")?;
+        if end_date <= start_date {
+            return Err("End time must be after start time".into());
+        }
+        object.insert("staff_id".into(), json!(staff));
+        object.insert("start_time".into(), json!(start));
+        object.insert("end_time".into(), json!(end));
+        object.insert(
+            "status".into(),
+            json!(read_string(payload, &["status"]).unwrap_or_else(|| "scheduled".into())),
+        );
+    }
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    conn.execute_batch("SAVEPOINT staff_schedule_mutation")
+        .map_err(|e| e.to_string())?;
+    let result = (|| {
+        let queue_id = enqueue_parity_item(
+            &conn,
+            "salon_staff_shifts",
+            &id,
+            operation,
+            &shift,
+            "salon",
+            "manual",
+        )?;
+        let mut statement = conn.prepare("SELECT scope_key, payload_json FROM branch_ops_cache WHERE branch_id = ?1 AND cache_key = 'staff_schedule'").map_err(|e| e.to_string())?;
+        let cached = statement
+            .query_map(params![branch], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        drop(statement);
+        for (scope, encoded) in cached {
+            let mut cached_payload: Value =
+                serde_json::from_str(&encoded).map_err(|e| e.to_string())?;
+            if let Some(rows) = get_array_mut_path(&mut cached_payload, &["shifts"]) {
+                if operation == "DELETE" {
+                    rows.retain(|row| row.get("id").and_then(Value::as_str) != Some(&id));
+                } else {
+                    upsert_array_record(rows, &shift);
+                }
+                conn.execute("UPDATE branch_ops_cache SET payload_json = ?1, version = ?2 WHERE branch_id = ?3 AND cache_key = 'staff_schedule' AND scope_key = ?4",
+                    params![cached_payload.to_string(), format!("offline:{queue_id}"), branch, scope]).map_err(|e| e.to_string())?;
+            }
+        }
+        Ok(
+            json!({ "success": true, "data": { "shift": shift, "queueId": queue_id, "queued": true, "deleted": operation == "DELETE" } }),
+        )
+    })();
+    match result {
+        Ok(value) => {
+            conn.execute_batch("RELEASE staff_schedule_mutation")
+                .map_err(|e| e.to_string())?;
+            Ok(value)
+        }
+        Err(error) => {
+            let _ = conn.execute_batch(
+                "ROLLBACK TO staff_schedule_mutation; RELEASE staff_schedule_mutation",
+            );
+            Err(error)
+        }
+    }
+}
+
+pub(crate) fn overlay_pending_staff_schedule(
+    db: &db::DbState,
+    branch: &str,
+    payload: &mut Value,
+) -> Result<(), String> {
+    let organization = organization_id(db, &json!({}));
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let mut statement = conn
+        .prepare(
+            "SELECT operation, record_id, data FROM parity_sync_queue
+        WHERE table_name = 'salon_staff_shifts' AND organization_id = ?1
+          AND status IN ('pending', 'processing', 'failed', 'conflict') ORDER BY created_at, rowid",
+        )
+        .map_err(|e| e.to_string())?;
+    let pending = statement
+        .query_map(params![organization], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    let Some(shifts) = get_array_mut_path(payload, &["data", "shifts"]) else {
+        return Ok(());
+    };
+    for (operation, id, encoded) in pending {
+        let mut row: Value = serde_json::from_str(&encoded).map_err(|e| e.to_string())?;
+        if read_string(&row, &["branch_id", "branchId"]).as_deref() != Some(branch) {
+            continue;
+        }
+        if operation == "DELETE" {
+            shifts.retain(|shift| shift.get("id").and_then(Value::as_str) != Some(id.as_str()));
+        } else {
+            let object = row
+                .as_object_mut()
+                .ok_or("Invalid pending staff schedule")?;
+            object.insert("id".into(), json!(id));
+            object.insert("pending_sync".into(), json!(true));
+            upsert_array_record(shifts, &row);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod schedule_workflow_tests {
+    use super::*;
+
+    fn identity() -> crate::tests::fake_keyring::Guard {
+        crate::tests::fake_keyring::install_seeded([
+            ("organization_id", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+            ("branch_id", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+            ("terminal_id", "schedule-terminal"),
+        ])
+    }
+
+    #[test]
+    fn schedule_workflow_keeps_uuid_and_pending_edits_after_restart_and_stale_fetch() {
+        let _keyring = identity();
+        let database = crate::tests::harness::TestDb::open();
+        let payload = json!({ "staff_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc", "start_time": "2026-09-08T06:00:00Z", "end_time": "2026-09-08T14:00:00Z" });
+        let created = mutate_staff_schedule_locally(&database.state, &payload, "INSERT").unwrap();
+        let mut shift = created["data"]["shift"].clone();
+        let id = shift["id"].as_str().unwrap().to_string();
+        assert!(Uuid::parse_str(&id).is_ok());
+        shift["end_time"] = json!("2026-09-08T15:00:00Z");
+        mutate_staff_schedule_locally(&database.state, &shift, "UPDATE").unwrap();
+        let restarted = database.restart();
+        let mut stale =
+            json!({ "success": true, "data": { "shifts": [created["data"]["shift"]] } });
+        overlay_pending_staff_schedule(
+            &restarted.state,
+            "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            &mut stale,
+        )
+        .unwrap();
+        assert_eq!(stale["data"]["shifts"].as_array().unwrap().len(), 1);
+        assert_eq!(stale["data"]["shifts"][0]["id"], id);
+        assert_eq!(
+            stale["data"]["shifts"][0]["end_time"],
+            "2026-09-08T15:00:00Z"
+        );
+        mutate_staff_schedule_locally(&restarted.state, &json!({"shift_id": id}), "DELETE")
+            .unwrap();
+        overlay_pending_staff_schedule(
+            &restarted.state,
+            "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            &mut stale,
+        )
+        .unwrap();
+        assert_eq!(stale["data"]["shifts"], json!([]));
+        let conn = restarted.state.conn.lock().unwrap();
+        let ids: Vec<String> = conn
+            .prepare(
+                "SELECT record_id FROM parity_sync_queue WHERE table_name = 'salon_staff_shifts'",
+            )
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(!ids.is_empty());
+        assert!(ids.iter().all(|queued_id| queued_id == &id));
+    }
+
+    #[test]
+    fn schedule_workflow_cache_failure_rolls_back_queued_mutation() {
+        let _keyring = identity();
+        let database = crate::tests::harness::TestDb::open();
+        database.state.conn.lock().unwrap().execute("INSERT INTO branch_ops_cache (branch_id, cache_key, scope_key, synced_at, payload_json)
+            VALUES ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'staff_schedule', 'week', '2026-09-08', 'invalid-json')", []).unwrap();
+        let result = mutate_staff_schedule_locally(
+            &database.state,
+            &json!({ "staff_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc", "start_time": "2026-09-08T06:00:00Z", "end_time": "2026-09-08T14:00:00Z" }),
+            "INSERT",
+        );
+        assert!(result.is_err());
+        let count: i64 = database
+            .state
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM parity_sync_queue", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+}
+
+fn emit_staff_schedule_mutation(app: &tauri::AppHandle, result: &Value) {
+    let _ = app.emit(
+        "staff_schedule_updated",
+        result.get("data").cloned().unwrap_or(Value::Null),
+    );
+    emit_queue_hint(app, "salon");
 }
 
 #[tauri::command]
@@ -917,59 +1095,37 @@ pub async fn offline_staff_shift_create(
     db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<Value, String> {
+    let result = mutate_staff_schedule_locally(&db, &object_payload(arg0, arg1)?, "INSERT")?;
+    emit_staff_schedule_mutation(&app, &result);
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn offline_staff_shift_update(
+    arg0: Option<Value>,
+    arg1: Option<Value>,
+    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
+) -> Result<Value, String> {
     let payload = object_payload(arg0, arg1)?;
-    let branch = branch_id(&db, &payload);
-    if branch.trim().is_empty() {
-        return Err("Missing branch id".to_string());
-    }
-    let now = now_rfc3339();
-    let shift = json!({
-        "id": temp_id("shift"),
-        "staff_id": read_string(&payload, &["staff_id", "staffId"]).ok_or_else(|| "Missing staff_id".to_string())?,
-        "start_time": read_string(&payload, &["start_time", "startTime"]).ok_or_else(|| "Missing start_time".to_string())?,
-        "end_time": read_string(&payload, &["end_time", "endTime"]).ok_or_else(|| "Missing end_time".to_string())?,
-        "break_start": read_string(&payload, &["break_start", "breakStart"]),
-        "break_end": read_string(&payload, &["break_end", "breakEnd"]),
-        "notes": read_string(&payload, &["notes"]),
-        "status": read_string(&payload, &["status"]).unwrap_or_else(|| "scheduled".to_string()),
-        "branch_id": branch,
-        "organization_id": organization_id(&db, &payload),
-        "created_at": now,
-        "updated_at": now,
-    });
-    patch_staff_schedule_cache(&db, &branch, &shift)?;
+    read_string(&payload, &["shift_id", "id"]).ok_or("Missing shift id")?;
+    let result = mutate_staff_schedule_locally(&db, &payload, "UPDATE")?;
+    emit_staff_schedule_mutation(&app, &result);
+    Ok(result)
+}
 
-    let queue_id = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        enqueue_parity_item(
-            &conn,
-            "salon_staff_shifts",
-            shift.get("id").and_then(Value::as_str).unwrap_or_default(),
-            "INSERT",
-            &payload,
-            "salon",
-            "manual",
-        )?
-    };
-
-    let _ = app.emit(
-        "staff_schedule_updated",
-        json!({
-            "shift": shift,
-            "queued": true,
-            "queueId": queue_id,
-        }),
-    );
-    emit_queue_hint(&app, "salon");
-
-    Ok(json!({
-        "success": true,
-        "data": {
-            "shift": shift,
-            "queueId": queue_id,
-            "queued": true,
-        }
-    }))
+#[tauri::command]
+pub async fn offline_staff_shift_delete(
+    arg0: Option<Value>,
+    arg1: Option<Value>,
+    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
+) -> Result<Value, String> {
+    let payload = object_payload(arg0, arg1)?;
+    read_string(&payload, &["shift_id", "id"]).ok_or("Missing shift id")?;
+    let result = mutate_staff_schedule_locally(&db, &payload, "DELETE")?;
+    emit_staff_schedule_mutation(&app, &result);
+    Ok(result)
 }
 
 fn patch_drive_thru_cache(
@@ -1141,6 +1297,20 @@ fn capture_room_checkin(db: &db::DbState, payload: &Value) -> Result<Value, Stri
         .ok_or_else(|| "Missing check-out date".to_string())?;
     let client_request_id = read_string(payload, &["clientRequestId", "client_request_id"])
         .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let expected_reservation_id = match payload
+        .get("expectedReservationId")
+        .or_else(|| payload.get("expected_reservation_id"))
+        .filter(|value| !value.is_null())
+    {
+        Some(value) => {
+            let id = value
+                .as_str()
+                .ok_or_else(|| "Invalid expected reservation id".to_string())?;
+            Uuid::parse_str(id).map_err(|_| "Invalid expected reservation id".to_string())?;
+            Some(id.to_string())
+        }
+        None => None,
+    };
 
     let updated_room = patch_rooms_cache(db, &room_id, "occupied")?;
 
@@ -1154,6 +1324,7 @@ fn capture_room_checkin(db: &db::DbState, payload: &Value) -> Result<Value, Stri
         "party_size": read_i64(payload, &["partySize", "party_size"]),
         "notes": read_string(payload, &["notes"]),
         "client_request_id": client_request_id.clone(),
+        "expected_reservation_id": expected_reservation_id,
         "organization_id": organization_id(db, payload),
         "branch_id": branch_id(db, payload),
     });
@@ -1889,6 +2060,49 @@ mod offline_room_checkin_tests {
         assert_eq!(table_name, "room_checkins");
         assert_eq!(operation, "INSERT");
         assert_eq!(status, "pending");
+    }
+
+    #[test]
+    fn room_checkin_preserves_expected_reservation_identity_for_both_aliases() {
+        let reservation_id = "5e0e7c6a-9f1d-4d5c-8a3b-2f4f6f8d9a1b";
+        for field in ["expectedReservationId", "expected_reservation_id"] {
+            let db = test_db_state();
+            let mut payload = base_payload();
+            payload[field] = json!(reservation_id);
+            payload["client_request_id"] = json!(reservation_id);
+
+            capture_room_checkin(&db, &payload).expect("capture intended booking");
+
+            let (_, record_id, _, data, _, _, _, _) = read_queue_row(&db);
+            let queued: Value = serde_json::from_str(&data).expect("persistent payload");
+            assert_eq!(record_id, reservation_id);
+            assert_eq!(queued["expected_reservation_id"], reservation_id);
+            assert_eq!(queued["client_request_id"], reservation_id);
+        }
+    }
+
+    #[test]
+    fn room_checkin_rejects_invalid_expected_identity_before_cache_or_queue_changes() {
+        let db = test_db_state();
+        seed_rooms_cache(&db, "/api/pos/rooms");
+        for invalid in [json!(""), json!("not-a-uuid"), json!(42)] {
+            let mut payload = base_payload();
+            payload["expectedReservationId"] = invalid;
+            assert_eq!(
+                capture_room_checkin(&db, &payload).expect_err("invalid identity must fail"),
+                "Invalid expected reservation id"
+            );
+        }
+        let (cached, _) =
+            read_cached_admin_get_response(&db, "/api/pos/rooms").expect("existing rooms cache");
+        assert_eq!(room_status(&cached, "room-1"), "available");
+        let conn = db.conn.lock().expect("db lock");
+        let queued: i64 = conn
+            .query_row("SELECT COUNT(*) FROM parity_sync_queue", [], |row| {
+                row.get(0)
+            })
+            .expect("count queue rows");
+        assert_eq!(queued, 0);
     }
 
     #[test]

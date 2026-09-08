@@ -29,7 +29,7 @@ fn load_payment_items_for_payment(
             // still has NULL cents. Shim removed in 4e.
             "SELECT item_index, item_name, item_quantity,
                     COALESCE(item_amount_cents, CAST(ROUND(item_amount * 100) AS INTEGER), 0),
-                    created_at
+                    created_at, order_item_id
              FROM payment_items
              WHERE payment_id = ?1
              ORDER BY item_index ASC, created_at ASC",
@@ -43,14 +43,18 @@ fn load_payment_items_for_payment(
             // integer). 4d-cleanup removes the float key after admin
             // switches to cents.
             let item_amount_cents = row.get::<_, i64>(3)?;
-            Ok(serde_json::json!({
+            let mut item = serde_json::json!({
                 "itemIndex": row.get::<_, i32>(0)?,
                 "itemName": row.get::<_, String>(1)?,
                 "itemQuantity": row.get::<_, i32>(2)?,
                 "itemAmount": Cents::new(item_amount_cents).to_f64_dp2(),
                 "item_amount_cents": item_amount_cents,
                 "createdAt": row.get::<_, String>(4)?,
-            }))
+            });
+            if let Some(id) = row.get::<_, Option<String>>(5)? {
+                item["order_item_id"] = Value::String(id);
+            }
+            Ok(item)
         })
         .map_err(|e| format!("query payment_items lookup: {e}"))?;
 
@@ -372,6 +376,7 @@ fn resolve_checkout_cashier_repair_context(
 
 #[derive(Clone, Debug)]
 struct PaymentItemInput {
+    order_item_id: Option<String>,
     item_index: i32,
     item_name: String,
     item_quantity: i32,
@@ -483,6 +488,13 @@ fn parse_payment_items(payload: &Value) -> Vec<PaymentItemInput> {
             items
                 .iter()
                 .map(|item_val| PaymentItemInput {
+                    order_item_id: item_val
+                        .get("order_item_id")
+                        .or_else(|| item_val.get("orderItemId"))
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty())
+                        .map(ToString::to_string),
                     item_index: item_val
                         .get("itemIndex")
                         .or_else(|| item_val.get("item_index"))
@@ -523,12 +535,16 @@ fn build_payment_items_json(items: &[PaymentItemInput]) -> Option<Value> {
         items
             .iter()
             .map(|item| {
-                serde_json::json!({
+                let mut value = serde_json::json!({
                     "itemIndex": item.item_index,
                     "itemName": item.item_name,
                     "itemQuantity": item.item_quantity,
                     "itemAmount": item.item_amount,
-                })
+                });
+                if let Some(id) = &item.order_item_id {
+                    value["order_item_id"] = Value::String(id.clone());
+                }
+                value
             })
             .collect(),
     ))
@@ -1400,11 +1416,11 @@ pub(crate) fn record_payment_in_connection(
             tip_recipient_staff_id, tip_recipient_staff_shift_id,
             payment_origin, terminal_device_id,
             remote_payment_id, idempotency_key, staff_id, staff_shift_id, sync_status,
-            sync_state, created_at, updated_at
+            sync_state, created_at, updated_at, table_session_id, seat_number
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, 'completed', ?7, ?8, ?9, ?10,
             ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21,
-            ?22, ?23, ?24, ?25, ?26, ?27, ?28
+            ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30
         )",
         params![
             payment_id,
@@ -1435,6 +1451,8 @@ pub(crate) fn record_payment_in_connection(
             sync_state,
             created_at,
             updated_at,
+            input.table_session_id,
+            input.seat_number,
         ],
     )
     .map_err(|e| format!("insert payment: {e}"))?;
@@ -1444,8 +1462,8 @@ pub(crate) fn record_payment_in_connection(
         // W4c dual-write: populate `item_amount_cents` alongside REAL.
         let item_amount_cents = Cents::round_half_even(item.item_amount).as_i64();
         conn.execute(
-            "INSERT INTO payment_items (id, payment_id, order_id, item_index, item_name, item_quantity, item_amount, item_amount_cents)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO payment_items (id, payment_id, order_id, item_index, item_name, item_quantity, item_amount, item_amount_cents, order_item_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 item_id,
                 payment_id,
@@ -1455,6 +1473,7 @@ pub(crate) fn record_payment_in_connection(
                 item.item_quantity,
                 item.item_amount,
                 item_amount_cents,
+                item.order_item_id,
             ],
         )
         .map_err(|e| format!("insert payment item: {e}"))?;
@@ -2104,6 +2123,8 @@ pub(crate) fn build_payment_sync_payload_for_payment(
         Option<String>,
         Option<String>,
         Option<String>,
+        Option<String>,
+        Option<i64>,
     );
 
     let (
@@ -2125,6 +2146,8 @@ pub(crate) fn build_payment_sync_payload_for_payment(
         tip_recipient_role,
         tip_recipient_staff_id,
         tip_recipient_staff_shift_id,
+        table_session_id,
+        seat_number,
     ): PaymentSyncRow = conn
         .query_row(
             // W4b: cols 2 (amount), 4 (cash_received), 5 (change_given),
@@ -2141,7 +2164,7 @@ pub(crate) fn build_payment_sync_payload_for_payment(
                     COALESCE(payment_origin, 'manual'), remote_payment_id, idempotency_key, terminal_device_id,
                     staff_id, staff_shift_id,
                     COALESCE(tip_amount_cents, CAST(ROUND(tip_amount * 100) AS INTEGER), 0),
-                    tip_recipient_role, tip_recipient_staff_id, tip_recipient_staff_shift_id
+                    tip_recipient_role, tip_recipient_staff_id, tip_recipient_staff_shift_id, table_session_id, seat_number
              FROM order_payments
              WHERE id = ?1",
             params![payment_id],
@@ -2167,6 +2190,8 @@ pub(crate) fn build_payment_sync_payload_for_payment(
                     row.get(15)?,
                     row.get(16)?,
                     row.get(17)?,
+                    row.get(18)?,
+                    row.get(19)?,
                 ))
             },
         )
@@ -2187,6 +2212,10 @@ pub(crate) fn build_payment_sync_payload_for_payment(
         "canonical_payment_id": remote_payment_id,
         "idempotency_key": idempotency_key,
         "orderId": order_id,
+        "tableSessionId": table_session_id,
+        "table_session_id": table_session_id,
+        "seatNumber": seat_number,
+        "seat_number": seat_number,
         "method": method,
         "amount": amount,
         "amount_cents": Cents::round_half_even(amount).as_i64(),
@@ -2745,6 +2774,10 @@ type PaymentRow = (
     String,
     String,
     f64,
+    Option<String>,
+    Option<i64>,
+    f64,
+    Option<String>,
 );
 
 fn load_order_payment_rows(conn: &Connection, order_id: &str) -> Result<Vec<Value>, String> {
@@ -2769,7 +2802,9 @@ fn load_order_payment_rows(conn: &Connection, order_id: &str) -> Result<Vec<Valu
                         FROM payment_adjustments pa
                         WHERE pa.payment_id = op.id
                           AND pa.adjustment_type = 'refund'
-                    ), 0)
+                    ), 0), op.table_session_id, op.seat_number,
+                    COALESCE(op.tip_amount_cents, CAST(ROUND(op.tip_amount * 100) AS INTEGER), 0),
+                    op.remote_payment_id
              FROM order_payments op
              WHERE op.order_id = ?1
              ORDER BY op.created_at DESC",
@@ -2802,6 +2837,10 @@ fn load_order_payment_rows(conn: &Connection, order_id: &str) -> Result<Vec<Valu
                 row.get::<_, String>(18)?,
                 row.get::<_, String>(19)?,
                 Cents::new(row.get::<_, i64>(20)?).to_f64_dp2(),
+                row.get(21)?,
+                row.get(22)?,
+                Cents::new(row.get::<_, i64>(23)?).to_f64_dp2(),
+                row.get(24)?,
             ))
         })
         .map_err(|error| error.to_string())?
@@ -2842,6 +2881,11 @@ fn load_order_payment_rows(conn: &Connection, order_id: &str) -> Result<Vec<Valu
                 "createdAt": row.18,
                 "updatedAt": row.19,
                 "refundedAmount": row.20,
+                "tableSessionId": row.21,
+                "table_session_id": row.21,
+                "seatNumber": row.22,
+                "tipAmount": row.23,
+                "remotePaymentId": row.24,
                 "remainingRefundable": remaining_refundable,
                 "items": items,
             }))
@@ -2917,7 +2961,8 @@ pub fn get_paid_items(db: &DbState, order_id: &str) -> Result<Value, String> {
         .prepare(
             "SELECT pi.id, pi.payment_id, pi.order_id, pi.item_index,
                     pi.item_name, pi.item_quantity, pi.item_amount, pi.created_at,
-                    op.method AS payment_method, op.status AS payment_status
+                    op.method AS payment_method, op.status AS payment_status,
+                    pi.order_item_id, op.table_session_id
              FROM payment_items pi
              JOIN order_payments op ON op.id = pi.payment_id
              WHERE pi.order_id = ?1 AND op.status = 'completed'
@@ -2938,6 +2983,8 @@ pub fn get_paid_items(db: &DbState, order_id: &str) -> Result<Value, String> {
                 "createdAt": row.get::<_, String>(7)?,
                 "paymentMethod": row.get::<_, String>(8)?,
                 "paymentStatus": row.get::<_, String>(9)?,
+                "order_item_id": row.get::<_, Option<String>>(10)?,
+                "table_session_id": row.get::<_, Option<String>>(11)?,
             }))
         })
         .map_err(|e| e.to_string())?;
@@ -4434,6 +4481,88 @@ mod tests {
         assert_eq!(arr[0]["cashReceived"], 30.0);
         assert_eq!(arr[0]["changeGiven"], 5.0);
         assert_eq!(arr[0]["id"], payment_id);
+    }
+
+    #[test]
+    fn workflow_audit_table_payment_preserves_session_item_and_tip_identity() {
+        let tmp = crate::tests::harness::TempDir::new();
+        let db_path = tmp.path().join("payment-upgrade.db");
+        let conn = Connection::open(&db_path).unwrap();
+        crate::db::run_migrations_for_test(&conn);
+        let db = DbState {
+            conn: std::sync::Mutex::new(conn),
+            db_path,
+        };
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (id, items, order_type, total_amount, total_amount_cents, status)
+                 VALUES ('qa-table-payment', '[]', 'dine-in', 20, 2000, 'pending')", [],
+            ).unwrap();
+        }
+        let session_id = "4112057f-4000-4000-8000-000000000001";
+        let source_item_id = "4112057f-4000-4000-8000-000000000002";
+        db.conn.lock().unwrap().execute(
+            "INSERT INTO staff_shifts (id,staff_id,role_type,check_in_time,status,created_at,updated_at)
+             VALUES ('qa-tip-shift','qa-cashier','cashier',datetime('now'),'active',datetime('now'),datetime('now'))", [],
+        ).unwrap();
+        record_payment(
+            &db,
+            &serde_json::json!({
+                "orderId": "qa-table-payment", "method": "card", "amount": 10,
+                "tipAmount": 2, "tableSessionId": session_id, "seatNumber": 2,
+                "tipRecipientStaffShiftId": "qa-tip-shift",
+                "items": [{"itemIndex": 0, "itemName": "QA", "itemQuantity": 1,
+                           "itemAmount": 10, "order_item_id": source_item_id}]
+            }),
+        )
+        .unwrap();
+        let payments = get_order_payments(&db, "qa-table-payment").unwrap();
+        assert_eq!(payments[0]["tableSessionId"], session_id);
+        assert_eq!(payments[0]["seatNumber"], 2);
+        assert_eq!(payments[0]["tipAmount"], 2.0);
+        assert_eq!(payments[0]["items"][0]["order_item_id"], source_item_id);
+        let paid_items = get_paid_items(&db, "qa-table-payment").unwrap();
+        assert_eq!(paid_items[0]["table_session_id"], session_id);
+        assert_eq!(paid_items[0]["order_item_id"], source_item_id);
+        let conn = db.conn.lock().unwrap();
+        let queued: String = conn
+            .query_row(
+                "SELECT data FROM parity_sync_queue WHERE table_name='payments' AND record_id=?1",
+                params![payments[0]["id"].as_str().unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let queued: Value = serde_json::from_str(&queued).unwrap();
+        assert_eq!(queued["items"][0]["order_item_id"], source_item_id);
+        let rebuilt: Value = serde_json::from_str(
+            &build_payment_sync_payload_for_payment(&conn, payments[0]["id"].as_str().unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(rebuilt["tableSessionId"], session_id);
+        assert_eq!(rebuilt["seatNumber"], 2);
+        assert_eq!(rebuilt["items"][0]["order_item_id"], source_item_id);
+
+        // Upgrade a real pre-v81 shape, then rerun the migration after restart.
+        conn.execute_batch(
+            "DROP INDEX idx_payment_table_session;
+            ALTER TABLE order_payments DROP COLUMN table_session_id;
+            ALTER TABLE order_payments DROP COLUMN seat_number;
+            ALTER TABLE payment_items DROP COLUMN order_item_id;
+            DELETE FROM schema_version WHERE version = 81;",
+        )
+        .unwrap();
+        crate::db::run_migrations_for_test(&conn);
+        crate::db::run_migrations_for_test(&conn);
+        let restored: Value = serde_json::from_str(
+            &build_payment_sync_payload_for_payment(&conn, payments[0]["id"].as_str().unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(restored["tableSessionId"], session_id);
+        assert_eq!(restored["seatNumber"], 2);
+        assert_eq!(restored["items"][0]["order_item_id"], source_item_id);
     }
 
     #[test]

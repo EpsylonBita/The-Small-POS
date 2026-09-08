@@ -204,7 +204,9 @@ const flattenCustomizationInput = (customizations: any): any[] => {
     return [];
   }
 
-  return Object.values(parsed).flatMap((entry) => flattenCustomizationEntry(entry));
+  return Object.entries(parsed)
+    .filter(([key]) => key !== '_meta')
+    .flatMap(([, entry]) => flattenCustomizationEntry(entry));
 };
 
 const buildIngredientLookup = (ingredients: Ingredient[]): IngredientLookup =>
@@ -2518,24 +2520,21 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         header={
           <div className="flex flex-col gap-1 px-5 py-2.5 border-b border-white/10 flex-shrink-0 min-w-0">
             {/* Main row: Title + Customer + Close */}
-            <div className="flex items-center justify-between gap-4 w-full min-w-0">
+            <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 w-full min-w-0">
               <h2
-                className="liquid-glass-modal-title text-xl flex items-center gap-2 min-w-0"
+                className="liquid-glass-modal-title text-xl flex flex-wrap items-center gap-2 min-w-0"
                 title={getModalTitle()}
               >
-                {/* Long edit titles truncate (with a hover tooltip) instead of
-                    forcing the header wider than the viewport, which clipped the
-                    centered modal off the left edge. */}
-                <span className="truncate">{getModalTitle()}</span>
+                <span className="whitespace-normal break-words">{getModalTitle()}</span>
                 {editMode && (
-                  <span className="flex-shrink-0 whitespace-nowrap text-xs font-medium text-amber-400 bg-amber-500/20 px-2 py-0.5 rounded-full">
+                  <span className="flex-shrink-0 whitespace-normal text-xs font-medium text-amber-800 dark:text-amber-300 bg-amber-500/20 px-2 py-0.5 rounded-full">
                     <Pencil className="w-3 h-3 inline mr-1" />
                     {t('modals.menu.editModeMessage') || 'Editing'}
                   </span>
                 )}
               </h2>
 
-              <div className="relative min-w-[14rem] max-w-2xl flex-1">
+              <div className="relative min-w-0 col-span-2 row-start-2">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
                 <input
                   ref={menuSearchRef}
@@ -2544,7 +2543,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                   value={menuSearchQuery}
                   onChange={(e) => setMenuSearchQuery(e.target.value)}
                   placeholder={t('menu.search', { defaultValue: 'Search menu items...' })}
-                  className="h-10 w-full rounded-xl border border-white/15 bg-white/[0.08] pl-9 pr-9 text-sm text-white placeholder-gray-400 backdrop-blur-md focus:border-yellow-400/70 focus:outline-none focus:ring-1 focus:ring-yellow-400"
+                  className="liquid-glass-modal-input h-10 w-full rounded-xl pl-9 pr-9 text-sm focus:border-yellow-400/70 focus:outline-none focus:ring-1 focus:ring-yellow-400"
                 />
                 {menuSearchQuery && (
                   <button
@@ -2557,7 +2556,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                 )}
               </div>
 
-              <div className="flex items-center gap-3 min-w-0 flex-shrink-0">
+              <div className="flex items-center gap-3 min-w-0 flex-shrink-0 col-start-2 row-start-1">
                 {/* Customer info chip or Add Customer button */}
                 <div className="min-w-0">
                   {orderType === 'delivery' && selectedCustomer ? (

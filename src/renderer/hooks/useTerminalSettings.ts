@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { getBridge, offEvent, onEvent } from '../../lib'
 import type { TerminalSettings } from '../../lib/ipc-adapter'
 
@@ -14,61 +14,72 @@ export function useTerminalSettings() {
   const [settings, setSettings] = useState<TerminalSettings>({})
   const [loading, setLoading] = useState<boolean>(true)
   const [error, setError] = useState<string | null>(null)
+  const loadGeneration = useRef(0)
 
   useEffect(() => {
     let mounted = true
     let retryTimer: ReturnType<typeof setTimeout> | undefined
 
-    // A mount racing app startup (DB still migrating/locking) can see this
-    // invoke fail or return an empty map — and nothing ever heals it: the
-    // 'terminal-settings-updated' event this hook listens for has no Rust
-    // emitter today, so one bad first load meant an empty settings map for
-    // the whole session (live symptom: the order card's map pin lost its
-    // store origin and degraded to a pin-only search). Retry with backoff
-    // until a non-empty map arrives.
+    // Retry a startup race with the DB without losing a previously loaded
+    // configuration. A newer notification must win over an older IPC response.
     const load = async (attempt = 0) => {
+      if (retryTimer !== undefined) clearTimeout(retryTimer)
+      const generation = ++loadGeneration.current
+      const isCurrent = () => mounted && generation === loadGeneration.current
       try {
         if (attempt === 0) setLoading(true)
         setError(null)
         const s = await bridge.terminalConfig.getSettings()
-        if (!mounted) return
+        if (!isCurrent()) return
         setSettings(s || {})
         if ((!s || Object.keys(s).length === 0) && attempt < 5) {
           retryTimer = setTimeout(() => load(attempt + 1), 2000 * (attempt + 1))
         }
       } catch (e: any) {
-        if (!mounted) return
+        if (!isCurrent()) return
         setError(e?.message || 'Failed to load terminal settings')
         if (attempt < 5) {
           retryTimer = setTimeout(() => load(attempt + 1), 2000 * (attempt + 1))
         }
       } finally {
-        if (mounted) setLoading(false)
+        if (isCurrent()) setLoading(false)
       }
     }
 
     load()
 
     const handleTerminalSettingsUpdated = (data: any) => {
-      if (mounted) setSettings(data || {})
+      // Older native builds announce cache writes through the same channel.
+      // These do not change configuration and must not trigger bulk reads.
+      const updated = Array.isArray(data?.updated) ? data.updated :
+        typeof data?.key === 'string' ? [data.key] : null
+      if (Array.isArray(updated) && updated.length > 0 && updated.every(
+        (key: unknown) => typeof key === 'string' &&
+          (key.startsWith('local.') || key.startsWith('staff_auth_cache.'))
+      )) return
+      // Native events contain changed key names, not the settings themselves.
+      // Replacing settings with { updated: [...] } used to erase branch identity.
+      if (mounted) void load()
     }
     onEvent('terminal-settings-updated', handleTerminalSettingsUpdated)
 
     return () => {
       mounted = false
+      loadGeneration.current += 1
       if (retryTimer !== undefined) clearTimeout(retryTimer)
       offEvent('terminal-settings-updated', handleTerminalSettingsUpdated)
     }
   }, [bridge])
 
   const refresh = useCallback(async () => {
+    const generation = ++loadGeneration.current
     try {
       const res = await bridge.terminalConfig.refresh()
       let latestSettings: TerminalSettings | undefined
 
       if ((res as any)?.success !== false) {
         latestSettings = await bridge.terminalConfig.getSettings()
-        setSettings(latestSettings || {})
+        if (generation === loadGeneration.current) setSettings(latestSettings || {})
       }
 
       if (res && typeof res === 'object' && !Array.isArray(res)) {
@@ -78,8 +89,10 @@ export function useTerminalSettings() {
       return { success: true, data: res, settings: latestSettings }
     } catch (e: any) {
       const out = { success: false, error: e?.message || 'Failed to refresh terminal settings' }
-      setError(out.error)
+      if (generation === loadGeneration.current) setError(out.error)
       return out
+    } finally {
+      if (generation === loadGeneration.current) setLoading(false)
     }
   }, [bridge])
 
@@ -106,4 +119,3 @@ export function useTerminalSettings() {
 }
 
 export default useTerminalSettings
-

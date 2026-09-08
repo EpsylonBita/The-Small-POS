@@ -5,10 +5,11 @@
  * Provides data fetching, mutations, and real-time updates.
  */
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 import { offEvent, onEvent } from '../../lib';
+import { roomWorkflowError } from '../utils/room-workflow';
 import {
   reservationsService,
   Reservation,
@@ -55,6 +56,7 @@ export function useReservations({
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [internalFilters, setFilters] = useState<ReservationFilters>(externalFilters || {});
+  const requestSequence = useRef(0);
 
   // Use external filters if provided, otherwise use internal
   const filters = externalFilters || internalFilters;
@@ -70,6 +72,7 @@ export function useReservations({
   const fetchReservations = useCallback(async (options: { silent?: boolean } = {}) => {
     const { silent = false } = options;
     if (!branchId) return;
+    const request = ++requestSequence.current;
 
     if (!silent) {
       setIsLoading(true);
@@ -78,19 +81,19 @@ export function useReservations({
 
     try {
       const data = await reservationsService.fetchReservations(filters);
-      setReservations(data);
+      if (request === requestSequence.current) setReservations(data);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to fetch reservations';
-      if (!silent) {
+      if (!silent && request === requestSequence.current) {
         setError(message);
       }
       console.error('Error fetching reservations:', err);
     } finally {
-      if (!silent) {
+      if (request === requestSequence.current) {
         setIsLoading(false);
       }
     }
-  }, [branchId, filters.dateFrom, filters.dateTo, filters.statusFilter, filters.searchTerm]);
+  }, [branchId, organizationId, filters.dateFrom, filters.dateTo, filters.statusFilter, filters.searchTerm, filters.kind]);
 
   // Initial fetch and refetch on filter changes
   useEffect(() => {
@@ -172,7 +175,7 @@ export function useReservations({
       
       return reservation;
     } catch (err) {
-      const message = err instanceof Error ? err.message : t('reservationsView.toasts.createFailed', { defaultValue: 'Failed to create reservation' });
+      const message = roomWorkflowError(err, t);
       toast.error(message);
       return null;
     }
@@ -199,7 +202,7 @@ export function useReservations({
       toast.success(t(`reservationsView.toasts.status.${status}`, { defaultValue: `Reservation ${status}` }));
       return true;
     } catch (err) {
-      const message = err instanceof Error ? err.message : t('reservationsView.toasts.updateStatusFailed', { defaultValue: 'Failed to update status' });
+      const message = roomWorkflowError(err, t);
       toast.error(message);
       return false;
     }

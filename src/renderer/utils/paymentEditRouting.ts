@@ -8,7 +8,7 @@ export interface EditablePaymentRouteRow {
 }
 
 export type PaymentEditRoute =
-  | { kind: 'blocked' }
+  | { kind: 'blocked'; reason?: 'adjusted' }
   | { kind: 'collect-missing' }
   | {
       kind: 'edit-existing';
@@ -37,6 +37,8 @@ interface PaymentEditRowLike {
   status?: unknown;
   amount?: unknown;
   transactionRef?: unknown;
+  refundedAmount?: unknown;
+  refunded_amount?: unknown;
 }
 
 const normalized = (value: unknown): string =>
@@ -93,6 +95,15 @@ export function routePaymentEdit(
 
   if (paymentStatus === 'partially_paid') {
     return { kind: 'collect-missing' };
+  }
+
+  // The native ledger forbids rewriting tender history after an adjustment.
+  // Check all rows, including refunded rows filtered out of the editable list.
+  if (paymentRows.some((row) =>
+    ['refunded', 'voided'].includes(normalized(row.status)) ||
+    Number(row.refundedAmount ?? row.refunded_amount ?? 0) > 0,
+  )) {
+    return { kind: 'blocked', reason: 'adjusted' };
   }
 
   if (completedPayments.length > 0) {

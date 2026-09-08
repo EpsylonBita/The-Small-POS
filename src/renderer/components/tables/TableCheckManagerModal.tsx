@@ -37,7 +37,10 @@ import {
 import {
   buildUnpaidAmountByItemId,
   applyTableCheckOrderLevelDiscount,
-  mergeRemoteTableCheckItemsWithLocalAdjustments,
+  hydrateTableCheckItems,
+  paymentBelongsToTableSession,
+  mergeTableCheckPayments,
+  tablePaymentIdentityKeys,
   resolveTableCheckOrderTotal,
   resolveTableCheckItemDiscount,
   scopeTableCheckItemsToActiveAllocations,
@@ -132,12 +135,16 @@ interface TableSessionDetails {
   balance?: TableSessionBalance;
   order?: {
     id: string;
+    table_id?: string | null;
+    table_number?: string | number | null;
+    table_session_id?: string | null;
     order_number?: string | null;
     total_amount?: number | string | null;
     payment_status?: string | null;
     order_items?: TableSessionOrderItem[];
   } | null;
   items?: TableSessionAllocation[];
+  payments?: PaymentHistoryRecord[];
   tables?: Array<{
     table_id?: string | null;
     role?: string | null;
@@ -314,6 +321,11 @@ const emitTableSessionBalanceUpdate = (
 };
 
 const localSessionIdPrefix = 'local-table-session:';
+const applyLocalTableSessionSnapshot = async (session: TableSessionDetails, localOrderId?: string) => {
+  if (session.id.startsWith(localSessionIdPrefix)) return;
+  const result = await getBridge().invoke('orders:apply-table-session-snapshot', { session, localOrderId });
+  if (result?.success === false) throw new Error(result.error || 'Failed to save table ownership locally');
+};
 const glassSurfaceClass =
   'rounded-xl border liquid-glass-modal-border bg-white/55 shadow-[0_14px_36px_rgba(15,23,42,0.08)] backdrop-blur-xl dark:bg-black/20 dark:shadow-[0_18px_42px_rgba(2,6,23,0.35)]';
 const glassSubtleSurfaceClass =
@@ -480,7 +492,7 @@ const mergeSessionWithLocalOrder = (
   const shouldDecorateScopedItemsWithLocalOrder =
     hasLocalOrderItems && (!hasRemoteAllocationScope || scopedRemoteOrderItems.length > 0);
   const mergedOrderItems = shouldDecorateScopedItemsWithLocalOrder
-    ? mergeRemoteTableCheckItemsWithLocalAdjustments(scopedRemoteOrderItems, localOrderItemsForDisplay) as TableSessionOrderItem[]
+    ? hydrateTableCheckItems(remoteOrderItems, localOrderItemsForDisplay, remoteAllocations) as TableSessionOrderItem[]
     : scopedRemoteOrderItems;
   const useLocalAllocations = hasLocalOrderItems && !hasRemoteAllocationScope && scopedRemoteOrderItems.length === 0;
   const remoteItemsWereScoped = hasRemoteAllocationScope && scopedRemoteOrderItems.length !== remoteOrderItems.length;
@@ -491,10 +503,10 @@ const mergeSessionWithLocalOrder = (
 
   // An order-level discount lives on the order total, not the per-line prices, so
   // the raw scoped line sum would resurrect the pre-discount subtotal. Prefer the
-  // local (canonical charged) order total, fall back to the remote session total,
-  // and distribute it across the scoped lines. applyTableCheckOrderLevelDiscount is
+  // allocated session total for an explicit split, and distribute it across
+  // the scoped lines. applyTableCheckOrderLevelDiscount is
   // idempotent, so this is a no-op when the lines already carry the discount.
-  const authoritativeOrderTotal = localTotal > 0 ? localTotal : remoteTotal;
+  const authoritativeOrderTotal = hasRemoteAllocationScope ? remoteTotal : localTotal > 0 ? localTotal : remoteTotal;
   const discountedOrderItems = (
     hasRemoteAllocationScope
       ? applyTableCheckOrderLevelDiscount(mergedOrderItems || [], authoritativeOrderTotal)
@@ -957,7 +969,7 @@ const SecondarySheet: React.FC<SecondarySheetProps> = ({
 
 export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
   isOpen,
-  table,
+  table: selectedTable,
   tables,
   onClose,
   onAddItems,
@@ -972,6 +984,9 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
     [t],
   );
   const translatedItemFallback = tr('labels.item', 'Item');
+  const [movedTableId, setMovedTableId] = useState<string | null>(null);
+  useEffect(() => { setMovedTableId(null); }, [selectedTable?.id]);
+  const table = tables.find(candidate => candidate.id === movedTableId) || selectedTable;
   const [session, setSession] = useState<TableSessionDetails | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -1044,6 +1059,10 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
     () => tables.filter(candidate => candidate.id !== table?.id && candidate.status === 'available'),
     [table?.id, tables],
   );
+  const mergeTables = useMemo(() => tables.filter(candidate =>
+    candidate.id !== table?.id && candidate.tableSessionId !== session?.id &&
+    (candidate.status === 'available' || candidate.status === 'occupied'),
+  ), [table?.id, tables, session?.id]);
   const sessionMetadata = useMemo<Record<string, unknown>>(
     () => (session?.metadata && typeof session.metadata === 'object' ? session.metadata : {}),
     [session?.metadata],
@@ -1066,7 +1085,8 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
     const map = new Map<string, number>();
     for (const paidItem of paidItemRecords) {
       const itemIndex = Number(paidItem.itemIndex ?? paidItem.item_index ?? -1);
-      const item = Number.isInteger(itemIndex) && itemIndex >= 0 ? orderItems[itemIndex] : null;
+      const sourceId = paidItem.order_item_id ?? paidItem.orderItemId;
+      const item = sourceId ? orderItems.find(candidate => candidate.id === sourceId) : Number.isInteger(itemIndex) && itemIndex >= 0 ? orderItems[itemIndex] : null;
       if (!item) {
         continue;
       }
@@ -1160,7 +1180,28 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
     }
 
     setIsLoading(true);
+    let localPaymentSnapshot: { payments: PaymentHistoryRecord[]; paidItems: PaidItemRecord[] } = { payments: [], paidItems: [] };
     const applySession = (nextSession: TableSessionDetails) => {
+      const ownerSessionId = nextSession.order?.table_session_id || (localOrder as any)?.table_session_id || (localOrder as any)?.tableSessionId;
+      const absorbedSessionIds = [
+        ...(Array.isArray(nextSession.metadata?.merged_session_ids) ? nextSession.metadata.merged_session_ids.filter((id): id is string => typeof id === 'string') : []),
+        ...(localOrder?.id ? [`${localSessionIdPrefix}${localOrder.id}`] : []),
+      ];
+      const scopedPayments = mergeTableCheckPayments(nextSession.payments || [], localPaymentSnapshot.payments)
+        .filter(payment => paymentBelongsToTableSession(payment, nextSession.id, ownerSessionId, absorbedSessionIds))
+        .map(payment => ({ ...payment, method: payment.method || String(payment.payment_method || '') }));
+      const paymentIds = new Set(scopedPayments.flatMap(tablePaymentIdentityKeys));
+      setPaymentHistory(scopedPayments);
+      setPaidItemRecords(localPaymentSnapshot.paidItems.filter(item => paymentIds.has(String(item.paymentId ?? item.payment_id ?? ''))));
+      if (Array.isArray(nextSession.payments) && (scopedPayments.length > 0 || nextSession.items?.some(item => item.order_item_id))) {
+        const receiptPaid = Number(scopedPayments.reduce((sum, payment) => sum + paymentRecordAmount(payment), 0).toFixed(2));
+        const receiptTips = Number(scopedPayments.reduce((sum, payment) => sum + paymentRecordTip(payment), 0).toFixed(2));
+        const total = Number(nextSession.balance?.order_total ?? 0);
+        const due = Math.max(0, Number((total - receiptPaid).toFixed(2)));
+        // Session-tagged unsynced local receipts remain visible after reopening.
+        nextSession = { ...nextSession, balance: { ...nextSession.balance, paid_total: receiptPaid, tip_total: receiptTips,
+          outstanding_balance: due, payment_status: due <= 0.005 ? 'paid' : receiptPaid > 0 ? 'partially_paid' : 'pending' } };
+      }
       setSession(nextSession);
       const covers = normalizeGuestCount(nextSession.guest_count || table.guestCount || 1);
       setGuestCount(covers);
@@ -1204,12 +1245,10 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
 
       // Local payment snapshot — time-bounded too; on hang/failure use an empty
       // snapshot so the check still loads.
-      const localPaymentSnapshot = await resolveWithTimeout(
+      localPaymentSnapshot = await resolveWithTimeout(
         fetchLocalPaymentSnapshot(localOrder?.id),
         { payments: [], paidItems: [] },
       );
-      setPaymentHistory(localPaymentSnapshot.payments);
-      setPaidItemRecords(localPaymentSnapshot.paidItems);
 
       let sessionId = table.tableSessionId;
       if (!sessionId) {
@@ -1297,6 +1336,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
         throw new Error(detailResult.error || tr('errors.loadCheckFailed', 'Failed to load table check'));
       }
 
+      await applyLocalTableSessionSnapshot(detailResult.data.session, localOrder?.id);
       applySession(mergeSessionWithLocalOrder(table, detailResult.data.session, localOrder || null, translatedItemFallback));
     } catch (error) {
       if (localFallback) {
@@ -1546,9 +1586,18 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       if (!result.success || result.data?.success === false) {
         throw new Error(result.error || result.data?.error || tr('errors.sessionUpdateFailed', 'Table session update failed'));
       }
-      setSession(result.data?.session || session);
+      const nextSession = result.data?.session || session;
+      await applyLocalTableSessionSnapshot(nextSession);
+      setSession(nextSession);
       toast.success(successMessage);
       closeSecondaryModal();
+      if (body.action === 'move_table' && nextSession.primary_table_id) {
+        emitCompatEvent('table-session-settled', { tableId: table?.id, tableSessionId: session.id, releaseStatus: 'available' });
+        emitTableSessionBalanceUpdate(nextSession.primary_table_id, nextSession);
+        setMovedTableId(nextSession.primary_table_id);
+        await Promise.all([Promise.resolve(onRefreshTables()), Promise.resolve(onRefreshOrders())]);
+        return;
+      }
       await refreshAll();
     } catch (error) {
       console.error('[TableCheckManagerModal] Session update failed:', error);
@@ -1980,7 +2029,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       client_event_id: `pos-tauri-table-item-transfer-${session.id}-${Date.now()}`,
     };
     try {
-      const result = await posApiPost<{ success?: boolean; source_session?: TableSessionDetails; error?: string }>(
+      const result = await posApiPost<{ success?: boolean; source_session?: TableSessionDetails; target_session?: TableSessionDetails; error?: string }>(
         `/api/pos/table-sessions/${encodeURIComponent(session.id)}/items/transfer`,
         transferPayload,
       );
@@ -1990,7 +2039,8 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       const nextSourceSession = result.data?.source_session || session;
       setSession(nextSourceSession);
       emitTableSessionBalanceUpdate(table?.id, nextSourceSession, nextSourceSession.guest_count ?? table?.guestCount);
-      emitTargetTransferBalanceUpdate(targetTableId, Number((itemUnitPrice(selectedTransferItem) * requestedQuantity).toFixed(2)));
+      if (result.data?.target_session) emitTableSessionBalanceUpdate(targetTableId, result.data.target_session);
+      else emitTargetTransferBalanceUpdate(targetTableId, Number((itemUnitPrice(selectedTransferItem) * requestedQuantity).toFixed(2)));
       toast.success(tr('messages.itemMoved', 'Item moved to target table'));
       closeSecondaryModal();
       await refreshAll();
@@ -2055,8 +2105,9 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
 
     try {
       let nextSourceSession: TableSessionDetails | null = null;
+      let nextTargetSession: TableSessionDetails | null = null;
       for (const payload of transferPayloads) {
-        const result = await posApiPost<{ success?: boolean; source_session?: TableSessionDetails; error?: string }>(
+        const result = await posApiPost<{ success?: boolean; source_session?: TableSessionDetails; target_session?: TableSessionDetails; error?: string }>(
           `/api/pos/table-sessions/${encodeURIComponent(session.id)}/items/transfer`,
           payload,
         );
@@ -2064,13 +2115,15 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
           throw new Error(result.error || result.data?.error || tr('errors.itemTransferFailed', 'Item transfer failed'));
         }
         nextSourceSession = result.data?.source_session || nextSourceSession;
+        nextTargetSession = result.data?.target_session || nextTargetSession;
       }
 
       if (nextSourceSession) {
         setSession(nextSourceSession);
         emitTableSessionBalanceUpdate(table?.id, nextSourceSession, nextSourceSession.guest_count ?? table?.guestCount);
       }
-      emitTargetTransferBalanceUpdate(
+      if (nextTargetSession) emitTableSessionBalanceUpdate(targetTableId, nextTargetSession);
+      else emitTargetTransferBalanceUpdate(
         targetTableId,
         Number(batchUnpaidItemEntries.reduce((sum, entry) => {
           return sum + itemUnitPrice(entry.item) * entry.itemQuantity;
@@ -2999,11 +3052,12 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                 <TableDestinationPicker
                   value={mergeTableId}
                   onChange={setMergeTableId}
-                  options={availableTables}
+                  options={mergeTables}
                   optionLabel={(candidate) => tr('labels.tableNumber', 'Table {{number}}', { number: formatTableDisplayNumber(candidate.tableNumber) })}
                   emptyLabel={tr('labels.selectTable', 'Select table')}
                   labelledBy="table-check-merge-target"
                 />
+                <p className="mt-2 text-sm liquid-glass-modal-text-muted">{tr('messages.mergeCompatibleChecks', 'Occupied tables can be merged when they contain parts of the same order. Checks from different orders must stay separate.')}</p>
               </FieldGroup>
               <ActionButton
                 onClick={() => mergeTableId && void patchSession(

@@ -112,6 +112,7 @@ export interface ReservationFilters {
   statusFilter?: ReservationStatus | 'all';
   searchTerm?: string;
   kind?: 'all' | 'table' | 'room';
+  roomId?: string;
 }
 
 export interface ReservationStats {
@@ -527,6 +528,7 @@ class ReservationsService {
               status,
               search,
               kind: filters?.kind,
+              room_id: filters?.roomId,
             }),
           ),
         );
@@ -551,6 +553,7 @@ class ReservationsService {
           status,
           search,
           kind: filters?.kind,
+          room_id: filters?.roomId,
         });
 
         if (response.error) {
@@ -589,6 +592,30 @@ class ReservationsService {
       console.error('[ReservationsService] Failed to fetch reservation:', formatError(error));
       return null;
     }
+  }
+
+  /** Resume the booking that owns this stay; network failure must not look like no booking. */
+  async getActiveRoomReservation(roomId: string, date: string): Promise<Reservation | null> {
+    const response = await this.listReservations({ room_id: roomId, kind: 'room' });
+    if (response.error) throw new Error(response.error);
+    const rows = response.reservations.map(transformFromAPI).filter((r) =>
+      r.roomId === roomId && ['pending', 'confirmed', 'seated'].includes(r.status)
+      && r.checkInDate && r.checkOutDate && r.checkInDate <= date && r.checkOutDate > date);
+    if (rows.length > 1) throw new Error('ROOM_UNAVAILABLE');
+    return rows[0] || null;
+  }
+
+  /** Every retry reloads authoritative status and advances only legal transitions. */
+  async arriveRoomReservation(reservationId: string): Promise<Reservation> {
+    const response = await this.getReservation(reservationId);
+    if (response.error || !response.reservation) throw new Error(response.error || 'Reservation not found');
+    let reservation = transformFromAPI(response.reservation);
+    if (!reservation.roomId) throw new Error('ROOM_RESERVATION_REQUIRED');
+    if (reservation.status === 'pending') reservation = await this.updateStatus(reservation.id, 'confirmed');
+    if (reservation.status === 'confirmed' || reservation.status === 'seated') {
+      return this.updateStatus(reservation.id, 'seated');
+    }
+    throw new Error('TERMINAL_RESERVATION');
   }
 
   async createReservation(data: CreateReservationDto): Promise<Reservation> {

@@ -8592,15 +8592,28 @@ fn replace_local_payment_items(
     items: Option<&Value>,
     created_at: &str,
 ) -> Result<(), String> {
+    let Some(item_rows) = items.and_then(Value::as_array) else {
+        return Ok(());
+    };
+    let prior_item_ids: std::collections::HashMap<i32, String> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT item_index, order_item_id FROM payment_items
+            WHERE payment_id = ?1 AND order_item_id IS NOT NULL",
+            )
+            .map_err(|e| format!("read prior payment item identity: {e}"))?;
+        let rows = stmt
+            .query_map(params![local_payment_id], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<_, _>>().map_err(|e| e.to_string())?
+    };
     conn.execute(
         "DELETE FROM payment_items WHERE payment_id = ?1",
         params![local_payment_id],
     )
     .map_err(|e| format!("clear local payment items: {e}"))?;
-
-    let Some(item_rows) = items.and_then(Value::as_array) else {
-        return Ok(());
-    };
 
     for (fallback_index, item) in item_rows.iter().enumerate() {
         let item_index = item
@@ -8630,8 +8643,8 @@ fn replace_local_payment_items(
         conn.execute(
             "INSERT INTO payment_items (
                 id, payment_id, order_id, item_index, item_name,
-                item_quantity, item_amount, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                item_quantity, item_amount, created_at, order_item_id, item_amount_cents
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 Uuid::new_v4().to_string(),
                 local_payment_id,
@@ -8641,6 +8654,9 @@ fn replace_local_payment_items(
                 item_quantity,
                 item_amount,
                 created_at,
+                str_any(item, &["order_item_id", "orderItemId"])
+                    .or_else(|| prior_item_ids.get(&item_index).cloned()),
+                Cents::round_half_even(item_amount).as_i64(),
             ],
         )
         .map_err(|e| format!("insert local payment item: {e}"))?;
@@ -10220,6 +10236,39 @@ fn local_order_has_completed_payment_rows(
     .map_err(|e| format!("check local completed payment rows: {e}"))
 }
 
+fn apply_remote_payment_table_identity(
+    conn: &Connection,
+    payment_id: &str,
+    remote: &Value,
+) -> Result<(), String> {
+    let metadata = remote.get("metadata").unwrap_or(&Value::Null);
+    let session_id = str_any(remote, &["table_session_id", "tableSessionId"])
+        .or_else(|| str_any(metadata, &["table_session_id", "tableSessionId"]));
+    let seat = remote
+        .get("seat_number")
+        .or_else(|| remote.get("seatNumber"))
+        .or_else(|| metadata.get("seat_number"))
+        .and_then(Value::as_i64);
+    let tip = num_any(remote, &["tip_amount", "tipAmount"])
+        .or_else(|| num_any(metadata, &["tip_amount", "tipAmount"]));
+    // Older server snapshots omit these fields. Absence must not erase local
+    // check ownership or tips, while a supplied zero tip is authoritative.
+    conn.execute(
+        "UPDATE order_payments SET table_session_id = COALESCE(?1, table_session_id),
+            seat_number = COALESCE(?2, seat_number), tip_amount = COALESCE(?3, tip_amount),
+            tip_amount_cents = COALESCE(?4, tip_amount_cents) WHERE id = ?5",
+        params![
+            session_id,
+            seat,
+            tip,
+            tip.map(|v| Cents::round_half_even(v).as_i64()),
+            payment_id
+        ],
+    )
+    .map_err(|error| format!("preserve remote table payment identity: {error}"))?;
+    Ok(())
+}
+
 fn hydrate_local_payment_from_remote(
     conn: &Connection,
     local_order_id: &str,
@@ -10232,6 +10281,7 @@ fn hydrate_local_payment_from_remote(
     items: Option<&Value>,
     created_at: &str,
     updated_at: &str,
+    remote_payment: &Value,
 ) -> Result<usize, String> {
     ensure_generic_order_recovery_allowed(conn, local_order_id)?;
     // W4c dual-write: the remote-payment-mirror UPDATE writes a new
@@ -10259,6 +10309,7 @@ fn hydrate_local_payment_from_remote(
         ],
     )
     .map_err(|e| format!("update remote payment mirror: {e}"))?;
+    apply_remote_payment_table_identity(conn, local_payment_id, remote_payment)?;
     mark_local_payment_applied(conn, local_payment_id, updated_at, Some(remote_payment_id))?;
     replace_local_payment_items(conn, local_payment_id, local_order_id, items, created_at)?;
     payments::recompute_order_payment_state(conn, local_order_id, updated_at, local_payment_id)?;
@@ -10405,6 +10456,7 @@ fn sync_remote_payment_into_local_with_context(
             items,
             &created_at,
             &updated_at,
+            remote_payment,
         )?;
         return Ok(Some(build_synced_remote_payment_mirror(
             &local_order_id,
@@ -10445,6 +10497,7 @@ fn sync_remote_payment_into_local_with_context(
                 items,
                 &created_at,
                 &updated_at,
+                remote_payment,
             )?;
             return Ok(Some(build_synced_remote_payment_mirror(
                 &local_order_id,
@@ -10490,6 +10543,7 @@ fn sync_remote_payment_into_local_with_context(
             items,
             &created_at,
             &updated_at,
+            remote_payment,
         )?;
         return Ok(Some(build_synced_remote_payment_mirror(
             &local_order_id,
@@ -10553,6 +10607,7 @@ fn sync_remote_payment_into_local_with_context(
             items,
             &created_at,
             &updated_at,
+            remote_payment,
         )?;
         return Ok(Some(build_synced_remote_payment_mirror(
             &local_order_id,
@@ -10598,6 +10653,7 @@ fn sync_remote_payment_into_local_with_context(
                 items,
                 &created_at,
                 &updated_at,
+                remote_payment,
             )?;
             return Ok(Some(build_synced_remote_payment_mirror(
                 &local_order_id,
@@ -10629,6 +10685,7 @@ fn sync_remote_payment_into_local_with_context(
     let recorded = payments::record_payment_in_connection(conn, &input, &options)
         .map_err(|e| format!("insert remote payment mirror: {e}"))?;
 
+    apply_remote_payment_table_identity(conn, &recorded.payment_id, remote_payment)?;
     Ok(Some(build_synced_remote_payment_mirror(
         &local_order_id,
         &recorded.payment_id,
@@ -24054,6 +24111,9 @@ mod tests {
             "id": "payment-remote-2",
             "order_id": "remote-paid-order-2",
             "amount": 5.5,
+            "table_session_id": "qa-session-a",
+            "seat_number": 3,
+            "tip_amount": 2,
             "payment_method": "card",
             "external_transaction_id": "txn-remote-2",
             "currency": "EUR",
@@ -24064,7 +24124,8 @@ mod tests {
                     "item_index": 0,
                     "item_name": "Cappuccino",
                     "item_quantity": 1,
-                    "item_amount": 5.5
+                    "item_amount": 5.5,
+                    "order_item_id": "qa-source-item"
                 }
             ]
         });
@@ -24103,6 +24164,31 @@ mod tests {
             )
             .unwrap();
         assert_eq!(item_count, 1);
+        // Repeated and older snapshots must not erase durable check/item identity.
+        let mut sparse = remote_payment.clone();
+        sparse.as_object_mut().unwrap().remove("items");
+        sparse.as_object_mut().unwrap().remove("table_session_id");
+        sparse.as_object_mut().unwrap().remove("tip_amount");
+        sync_remote_payment_into_local(&conn, &sparse).unwrap();
+        let mut legacy_items = remote_payment.clone();
+        legacy_items["items"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("order_item_id");
+        sync_remote_payment_into_local(&conn, &legacy_items).unwrap();
+        let (session, seat, tip, item): (String, i64, i64, String) = conn
+            .query_row(
+                "SELECT op.table_session_id, op.seat_number, op.tip_amount_cents, pi.order_item_id
+             FROM order_payments op JOIN payment_items pi ON pi.payment_id = op.id
+             WHERE op.order_id = ?1",
+                params![local_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (session.as_str(), seat, tip, item.as_str()),
+            ("qa-session-a", 3, 200, "qa-source-item")
+        );
     }
 
     #[test]

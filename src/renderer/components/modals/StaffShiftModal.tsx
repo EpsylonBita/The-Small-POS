@@ -11,6 +11,7 @@ import { LiquidGlassModal, POSGlassBadge, POSGlassCard } from '../ui/pos-glass-c
 import { POSGlassTooltip } from '../ui/POSGlassTooltip';
 import { VarianceBadge } from '../ui/VarianceBadge';
 import { formatTime, formatCurrency } from '../../utils/format';
+import { normalizeShiftRole, type StaffShiftRole } from '../../utils/shift-role';
 import { formatMoneyInputWithCents, parseMoneyInputValue } from '../../utils/moneyInput';
 import { calculateDriverReturn } from '../../utils/driver-checkout';
 import { toLocalDateString } from '../../utils/date';
@@ -122,7 +123,6 @@ const STAFF_AUTH_CACHE_VERSION = 1;
 const ERGANI_PLUGIN_ID = 'ergani_digital_schedule';
 
 type CheckInStep = 'select-staff' | 'enter-pin' | 'select-role' | 'enter-cash';
-type StaffShiftRole = 'cashier' | 'manager' | 'driver' | 'kitchen' | 'server';
 type MotionDirection = 1 | -1;
 
 interface RolePresentation {
@@ -395,8 +395,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   };
 
   const getRolePresentation = (roleName?: string | null): RolePresentation => {
-    const normalized = (roleName || '').trim().toLowerCase() as StaffShiftRole;
-    return ROLE_PRESENTATIONS[normalized] ?? FALLBACK_ROLE_PRESENTATION;
+    const normalized = normalizeShiftRole(roleName);
+    return normalized ? ROLE_PRESENTATIONS[normalized] : FALLBACK_ROLE_PRESENTATION;
   };
 
   const getStaffRoles = (member?: StaffMember | null): StaffRole[] => {
@@ -422,7 +422,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   };
 
   const getCheckInRoleHelper = (roleName: string): string => {
-    switch ((roleName || '').trim().toLowerCase()) {
+    switch (normalizeShiftRole(roleName)) {
       case 'cashier':
         return t('modals.staffShift.cashierRoleHelper');
       case 'driver':
@@ -2189,11 +2189,12 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   const finishPinVerification = async (
     branchId: string,
     terminalId: string,
-    staffRole: StaffShiftRole,
+    staffRole: string,
   ) => {
     const eligibility = await loadCheckInEligibility(branchId, terminalId);
     setCheckInEligibility(eligibility);
-    setRoleType(staffRole);
+    const normalizedRole = normalizeShiftRole(staffRole);
+    if (normalizedRole) setRoleType(normalizedRole);
     navigateCheckInStep('select-role');
     setError('');
   };
@@ -2256,7 +2257,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         );
 
         if (legacyProbe.success) {
-          const staffRole = selectedStaff.role_name as 'cashier' | 'manager' | 'driver' | 'kitchen' | 'server';
+          const staffRole = selectedStaff.role_name;
           await finishPinVerification(branchId, terminalId, staffRole);
           return;
         }
@@ -2291,7 +2292,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         });
 
         if (authSucceeded) {
-          const staffRole = selectedStaff.role_name as 'cashier' | 'manager' | 'driver' | 'kitchen' | 'server';
+          const staffRole = selectedStaff.role_name;
           await finishPinVerification(branchId, terminalId, staffRole);
           return; // done
         }
@@ -2326,7 +2327,12 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     }
   };
 
-  const handleRoleSelect = async (role: StaffShiftRole) => {
+  const handleRoleSelect = async (roleName: string) => {
+    const role = normalizeShiftRole(roleName);
+    if (!role) {
+      setError(t('modals.staffShift.unsupportedShiftRole', { defaultValue: 'This role cannot open a POS shift. Ask your manager to assign a supported POS role.' }));
+      return;
+    }
     if (cashierFirstGateActive && role !== 'cashier') {
       setError(
         t('modals.staffShift.cashierFirstCheckInRequired'),
@@ -2551,7 +2557,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         setError(result.error || t('modals.staffShift.openShiftFailed'));
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : t('modals.staffShift.openShiftFailed'));
+      const message = extractErrorMessage(err, t('modals.staffShift.openShiftFailed'));
+      setError(message === 'UNSUPPORTED_SHIFT_ROLE'
+        ? t('modals.staffShift.unsupportedShiftRole', { defaultValue: 'This role cannot open a POS shift. Ask your manager to assign a supported POS role.' })
+        : message);
     } finally {
       setLoading(false);
     }
@@ -2789,9 +2798,9 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       if (result.success) {
         setCheckoutPaymentBlockers([]);
         const variance = result?.variance ?? result?.data?.variance ?? 0;
-        const varianceText = variance >= 0
-          ? `Overage: €${variance.toFixed(2)}`
-          : `Shortage: €${Math.abs(variance).toFixed(2)}`;
+        const varianceText = t(variance >= 0 ? 'shiftManager.overage' : 'shiftManager.shortage', {
+          amount: formatCurrency(Math.abs(variance)),
+        });
         // Check for cashier logic to populate items
         const isCashier = effectiveShift.role_type === 'cashier';
         if (isCashier) {
@@ -5743,9 +5752,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       key={role.role_id}
                       disabled={isRoleLockedByCashierFirstGate}
                       onClick={() => {
-                        void handleRoleSelect(
-                          role.role_name as 'cashier' | 'manager' | 'driver' | 'kitchen' | 'server',
-                        );
+                        void handleRoleSelect(role.role_name);
                       }}
                       className={`group w-full rounded-[24px] border p-4 text-left transition-all ${
                         isRoleLockedByCashierFirstGate

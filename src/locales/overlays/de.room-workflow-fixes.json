@@ -1,0 +1,24 @@
+{
+  "roomWorkflow": {
+    "phoneRequired": "Name und Telefonnummer des Gastes eingeben.",
+    "invalidDates": "Ein gültiges Anreisedatum und eine spätere Abreise wählen.",
+    "unavailable": "Das Zimmer ist für diese Daten nicht verfügbar. Ein anderes Zimmer oder andere Daten wählen.",
+    "checkoutRequired": "Öffnen Sie Zimmer, wählen Sie das Zimmer und dann Check-out, um das Konto zu prüfen und die Abreise abzuschließen.",
+    "checkinRequired": "Anreise öffnen, um den Check-in abzuschließen und das Zimmerkonto anzulegen.",
+    "moduleRequired": "Diesem Terminal fehlt das benötigte Modul. Bitten Sie einen Administrator, es zu aktivieren.",
+    "reservationRequired": "Vor dem Check-in eine Zimmerreservierung erstellen.",
+    "locked": "Der Aufenthalt hat bereits begonnen oder ist beendet. Buchungen können vor der Anreise bearbeitet werden.",
+    "connectionError": "Keine Verbindung. Dieses Fenster offen lassen und nach Wiederherstellung erneut versuchen.",
+    "saveFailed": "Die Änderung wurde nicht gespeichert. Die Eingaben bleiben erhalten. Erneut versuchen oder die Reservierung vor einer Neuanlage prüfen.",
+    "loadingBooking": "Zimmerreservierung wird geladen…",
+    "resumeBooking": "Reservierung {{number}} fortsetzen",
+    "noBillingNotice": "Nur Anreise: Es wird keine Zahlung oder Übernachtungsgebühr erfasst. Ein Zimmerkonto erfordert Guest Billing.",
+    "costPreview": "{{nights}} Nächte × {{rate}} = {{total}} geschätzte Aufenthaltskosten",
+    "editBooking": "Zimmer / Daten ändern",
+    "staying": "Anwesend",
+    "departed": "Abgereist",
+    "arrival": "Anreise",
+    "departure": "Abreise",
+    "cancelBooking": "Reservierung stornieren"
+  }
+}

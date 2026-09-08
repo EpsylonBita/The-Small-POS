@@ -93,17 +93,17 @@ test('MenuModal header cannot horizontally clip the full/edit modal off the view
   // viewport, so a long edit title pushed the modal off the left edge (clipped title,
   // first category tab, and first product column).
 
-  // The non-shrinking title class is gone; the title is shrinkable + truncates with a
-  // hover tooltip, and the edit badge stays non-shrinking beside it.
+  // Long titles and the edit badge wrap within the bounded first grid column.
   assert.doesNotMatch(source, /liquid-glass-modal-title text-xl flex-shrink-0/);
-  assert.match(source, /className="liquid-glass-modal-title text-xl flex items-center gap-2 min-w-0"/);
+  assert.match(source, /className="liquid-glass-modal-title text-xl flex flex-wrap items-center gap-2 min-w-0"/);
   assert.match(source, /title=\{getModalTitle\(\)\}/);
-  assert.match(source, /<span className="truncate">\{getModalTitle\(\)\}<\/span>/);
-  assert.match(source, /flex-shrink-0 whitespace-nowrap[\s\S]*?editModeMessage/);
+  assert.match(source, /<span className="whitespace-normal break-words">\{getModalTitle\(\)\}<\/span>/);
+  assert.match(source, /flex-shrink-0 whitespace-normal[\s\S]*?editModeMessage/);
 
   // The header flex chain can shrink below its content so it never forces the shell wide.
   assert.match(source, /flex flex-col gap-1 px-5 py-2\.5 border-b border-white\/10 flex-shrink-0 min-w-0/);
-  assert.match(source, /flex items-center justify-between gap-4 w-full min-w-0/);
+  assert.match(source, /grid grid-cols-\[minmax\(0,1fr\)_auto\] items-center gap-3 w-full min-w-0/);
+  assert.match(source, /col-span-2 row-start-2/);
 
   // The close control is always reachable (never the clipped element).
   assert.match(source, /liquid-glass-modal-button p-2 min-h-0 min-w-0 flex-shrink-0/);

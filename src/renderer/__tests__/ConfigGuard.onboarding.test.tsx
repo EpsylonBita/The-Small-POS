@@ -101,7 +101,9 @@ afterEach(cleanup);
 
 async function openOnboarding() {
   render(<ConfigGuard><div>Operational POS</div></ConfigGuard>);
-  fireEvent.click(await screen.findByRole('button', { name: 'English' }));
+  // The real onboarding screen is lazy-loaded. A cold full-suite transform
+  // can exceed Testing Library's 1s default without an application failure.
+  fireEvent.click(await screen.findByRole('button', { name: 'English' }, { timeout: 5000 }));
   const input = await screen.findByRole('textbox');
   fireEvent.change(input, { target: { value: validCode } });
   return input;
