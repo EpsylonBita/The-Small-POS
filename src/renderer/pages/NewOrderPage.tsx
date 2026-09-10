@@ -36,6 +36,7 @@ import {
   reconcileOutstandingPaymentAttempt,
 } from '../utils/splitCheckoutRecovery';
 import { resolveDeliveryFee } from '../utils/delivery-fee';
+import { mergeCustomerInfoModalSave } from '../utils/customerInfoModalMerge';
 import {
   resolveCanonicalCustomerAddress,
   withMaterializedCustomerAddresses,
@@ -404,22 +405,11 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
     setShowMenuModal(true);
   };
 
-  // Handler for saving customer info from modal
+  // Handler for saving customer info from modal. The modal only edits
+  // street, floor, ringer name, and coordinates, so city/postal/email/notes
+  // must be carried over from the previously stored customer info.
   const handleCustomerInfoSave = (info: any) => {
-    // Update local state
-    setCustomerInfo({
-      name: info.name,
-      phone: info.phone,
-      email: info.email,
-      address: {
-        street: info.address || '',
-        city: '', // info.address is single string in modal often, might need parsing or just store as street
-        postalCode: '',
-        floor_number: info.floor_number || '',
-        name_on_ringer: info.name_on_ringer || '',
-        coordinates: info.coordinates
-      }
-    });
+    setCustomerInfo((prev) => mergeCustomerInfoModalSave(prev, info));
 
     // Close customer info modal and open menu modal
     setShowCustomerInfoModal(false);
@@ -1393,6 +1383,10 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
                 const resolvedAddress =
                   resolveCanonicalCustomerAddress(existingCustomer);
                 return {
+                  ...existingCustomer,
+                  coordinates: resolvedAddress ? resolvedAddress.coordinates : existingCustomer.coordinates,
+                  latitude: resolvedAddress ? resolvedAddress.latitude : existingCustomer.latitude,
+                  longitude: resolvedAddress ? resolvedAddress.longitude : existingCustomer.longitude,
                   id: existingCustomer.id,
                   phone: existingCustomer.phone || existingCustomer.phone_number || '',
                   name: existingCustomer.name,

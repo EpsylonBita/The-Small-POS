@@ -16984,6 +16984,11 @@ mod tests {
         }
         let order = build_order_receipt_doc(&db, "pickup-customer").unwrap();
         let split = build_split_receipt_doc(&db, "pickup-split").unwrap();
+        let raster_cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            classic_customer_render_mode: ClassicCustomerRenderMode::RasterExact,
+            ..LayoutConfig::default()
+        };
         for doc in [order, split] {
             assert_eq!(doc.customer_name.as_deref(), Some("Alex Customer"));
             assert_eq!(doc.customer_phone.as_deref(), Some("6912345678"));
@@ -16992,12 +16997,37 @@ mod tests {
                 .iter()
                 .any(|note| note == "Collect at 18:30"));
             let html = receipt_renderer::render_html(
-                &ReceiptDocument::OrderReceipt(doc),
+                &ReceiptDocument::OrderReceipt(doc.clone()),
                 &LayoutConfig::default(),
             );
             assert!(html.contains("Alex Customer"));
             assert!(html.contains("6912345678"));
             assert!(html.contains("Collect at 18:30"));
+
+            // The physical (classic raster) print path had its own bug: it
+            // never drew the saved customer name/phone for pickup orders.
+            // Prove the actual rendered bytes grow when the name/phone are
+            // present versus a stripped copy of the exact same order/split
+            // document, on the code path terminals actually print from.
+            let with_customer = receipt_renderer::render_escpos(
+                &ReceiptDocument::OrderReceipt(doc.clone()),
+                &raster_cfg,
+            );
+            let mut stripped = doc.clone();
+            stripped.customer_name = None;
+            stripped.customer_phone = None;
+            let without_customer = receipt_renderer::render_escpos(
+                &ReceiptDocument::OrderReceipt(stripped),
+                &raster_cfg,
+            );
+            assert_eq!(
+                with_customer.body_mode,
+                receipt_renderer::EscPosBodyMode::RasterExact
+            );
+            assert!(
+                with_customer.bytes.len() > without_customer.bytes.len(),
+                "saved pickup customer must grow the printed raster bytes"
+            );
         }
     }
 

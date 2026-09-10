@@ -38,6 +38,33 @@
         "busy": "Die Plattform ist ausgelastet. Versuchen Sie es in Kürze erneut.",
         "outcomeUnknown": "Status unbekannt. Aktualisieren Sie, um erneut zu prüfen.",
         "outsideHours": "Online, aber außerhalb der geplanten Bestellzeiten — empfängt keine Bestellungen."
+      },
+      "sound": {
+        "title": "Signalton für Bestellungen",
+        "help": "Wählen Sie den Ton für neue Plattformbestellungen, die an dieser Kasse bestätigt werden müssen.",
+        "mutedNote": "Der App-Ton ist stummgeschaltet. Die Vorschau und akustische Hinweise sind erst nach dem Einschalten wieder verfügbar.",
+        "preview": "Anhören",
+        "stop": "Stoppen",
+        "chooseFile": "Datei auswählen…",
+        "fileHelp": "MP3 oder WAV, bis zu 5 MB und 30 Sekunden lang.",
+        "options": {
+          "custom": "Importiert: {{name}}"
+        },
+        "presets": {
+          "default": "Neue Bestellung (Standard)",
+          "spiderman": "Spider-Man",
+          "onePiece": "One Piece",
+          "superMario": "Super Mario"
+        },
+        "errors": {
+          "invalidType": "Dieses Audioformat wird nicht unterstützt. Wählen Sie eine MP3- oder WAV-Datei.",
+          "tooLarge": "Die Datei ist zu groß. Wählen Sie eine Datei mit höchstens 5 MB.",
+          "tooLong": "Die Aufnahme ist zu lang. Wählen Sie eine Aufnahme mit höchstens 30 Sekunden.",
+          "decodeFailed": "Die Audiodatei konnte nicht gelesen werden. Wählen Sie eine andere Datei.",
+          "saveFailed": "Der Ton konnte nicht gespeichert werden. Die bisherige Auswahl bleibt aktiv.",
+          "noImportedClip": "Es ist keine importierte Aufnahme zur Auswahl verfügbar.",
+          "cancelled": "Import abgebrochen. Die bisherige Auswahl bleibt aktiv."
+        }
       }
     }
   }

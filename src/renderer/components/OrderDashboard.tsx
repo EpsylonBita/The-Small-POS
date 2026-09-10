@@ -12,6 +12,7 @@ import { useOrderStore } from "../hooks/useOrderStore";
 import { useShift } from "../contexts/shift-context";
 import type { OrderItem } from "../types/orders";
 import type { Customer, CustomerInfo } from "../types/customer";
+import { mergeCustomerInfoModalSave } from "../utils/customerInfoModalMerge";
 import OrderGrid from "./OrderGrid";
 import OrderTabsBar, { type TabId } from "./OrderTabsBar";
 import BulkActionsBar from "./BulkActionsBar";
@@ -118,7 +119,8 @@ import { useDeliveryValidation } from "../hooks/useDeliveryValidation";
 import { useResolvedPosIdentity } from "../hooks/useResolvedPosIdentity";
 import { useTerminalSettings } from "../hooks/useTerminalSettings";
 import { useKioskOrderAutoPrint, isKioskOrder } from "../hooks/useKioskOrderAutoPrint";
-import { isAppAudioEnabled, playAppAudioFile, playAppAudioTones, useAppAudioEnabled } from "../services/appAudio";
+import { isAppAudioEnabled, playAppAudioTones, useAppAudioEnabled } from "../services/appAudio";
+import { playSelectedPlatformSound } from "../services/platformNotificationSound";
 import {
   resolveCallerIdOrderSelection,
   subscribeToCallerIdOrderIntents,
@@ -200,10 +202,6 @@ import {
 const RoomsView = lazy(() => import('../pages/verticals/hotel/RoomsView').then(m => ({ default: m.RoomsView })));
 const AppointmentsView = lazy(() => import('../pages/verticals/salon/AppointmentsView').then(m => ({ default: m.AppointmentsView })));
 
-const INCOMING_ORDER_ALERT_SOUND_URL = new URL(
-  "../assets/sounds/incoming-order.mp3",
-  import.meta.url,
-).href;
 const INCOMING_ORDER_ALERT_REPEAT_MS = 30_000;
 
 interface OrderDashboardProps {
@@ -1635,17 +1633,19 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     }, []);
 
     // Auto-open approval panel for external pending orders (queue)
-    const playFallbackExternalOrderAlert = useCallback(() => {
-      activeAlertAudioRef.current = playAppAudioTones(
-        [{ frequency: 880, start: 0, duration: 0.45 }], 0.18,
-      );
-    }, []);
+    // Returns its stop handle (rather than assigning activeAlertAudioRef
+    // itself) so playSelectedPlatformSound keeps sole ownership of the one
+    // stop function the caller holds through the whole fallback chain.
+    const playFallbackExternalOrderAlert = useCallback(
+      () => playAppAudioTones([{ frequency: 880, start: 0, duration: 0.45 }], 0.18),
+      [],
+    );
 
     const playExternalOrderAlert = useCallback(() => {
       activeAlertAudioRef.current?.();
-      activeAlertAudioRef.current = playAppAudioFile(INCOMING_ORDER_ALERT_SOUND_URL, {
+      activeAlertAudioRef.current = playSelectedPlatformSound({
         volume: 0.9,
-        onError: playFallbackExternalOrderAlert,
+        onFallbackToTones: playFallbackExternalOrderAlert,
       });
     }, [playFallbackExternalOrderAlert]);
 
@@ -3145,21 +3145,11 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         "[handleNewOrderCustomerInfoSave] Called with info:",
         JSON.stringify(info, null, 2),
       );
-      // Update local state
-      const customerInfoData = {
-        name: info.name,
-        phone: info.phone,
-        email: info.email,
-        address: {
-          street: info.address || "",
-          city: "", // info.address is single string in modal often, might need parsing or just store as street
-          postalCode: "",
-          floor_number: info.floor_number || "",
-          name_on_ringer: info.name_on_ringer || "",
-          coordinates: info.coordinates,
-        },
-        notes: "",
-      };
+      // Update local state. The customer info modal only edits street,
+      // floor, ringer name, and coordinates — city/postal/email/notes are
+      // not fields on that modal, so they must be carried over from the
+      // previously stored customer info rather than blanked out.
+      const customerInfoData = mergeCustomerInfoModalSave(customerInfo, info);
       debugLog(
         "[handleNewOrderCustomerInfoSave] Setting customerInfo:",
         JSON.stringify(customerInfoData, null, 2),

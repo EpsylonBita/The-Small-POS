@@ -38,6 +38,33 @@
         "busy": "La plateforme est occupée. Réessayez dans un instant.",
         "outcomeUnknown": "Statut inconnu. Actualisez pour vérifier à nouveau.",
         "outsideHours": "En ligne, mais hors des horaires de commande prévus — ne reçoit pas de commandes."
+      },
+      "sound": {
+        "title": "Son des alertes de commande",
+        "help": "Choisissez le son joué sur cette caisse lorsqu’une nouvelle commande de plateforme attend une validation.",
+        "mutedNote": "Le son de l’application est désactivé. L’écoute et les alertes sonores seront disponibles après sa réactivation.",
+        "preview": "Écouter",
+        "stop": "Arrêter",
+        "chooseFile": "Choisir un fichier…",
+        "fileHelp": "MP3 ou WAV, jusqu’à 5 Mo et 30 secondes.",
+        "options": {
+          "custom": "Importé : {{name}}"
+        },
+        "presets": {
+          "default": "Nouvelle commande (par défaut)",
+          "spiderman": "Spider-Man",
+          "onePiece": "One Piece",
+          "superMario": "Super Mario"
+        },
+        "errors": {
+          "invalidType": "Ce format audio n’est pas pris en charge. Choisissez un fichier MP3 ou WAV.",
+          "tooLarge": "Le fichier est trop volumineux. Choisissez un fichier de 5 Mo maximum.",
+          "tooLong": "L’extrait est trop long. Choisissez un extrait de 30 secondes maximum.",
+          "decodeFailed": "Le fichier audio n’a pas pu être lu. Choisissez un autre fichier.",
+          "saveFailed": "Le choix du son n’a pas pu être enregistré. Le choix précédent reste actif.",
+          "noImportedClip": "Aucun extrait importé n’est disponible.",
+          "cancelled": "Importation annulée. Le choix précédent reste actif."
+        }
       }
     }
   }

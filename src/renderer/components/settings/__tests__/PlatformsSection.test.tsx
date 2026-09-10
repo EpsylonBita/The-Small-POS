@@ -62,15 +62,35 @@ describe('PlatformsSection', () => {
     await screen.findByText('No delivery platforms connected');
   });
 
-  it('shows an unsupported platform with a disabled switch and its reason', async () => {
+  it('shows a disabled switch reflecting the known open state for an uncontrollable platform', async () => {
+    posApiGet.mockResolvedValue({
+      success: true,
+      data: { success: true, platforms: [makePlatform({ controllable: false, open: true, reason: null })] },
+    });
+    render(<PlatformsSection />);
+    await waitFor(() => expect(screen.getByRole('switch')).toBeDisabled());
+  });
+
+  it('shows explanatory text instead of an off-looking switch for an unknown, uncontrollable platform', async () => {
     posApiGet.mockResolvedValue({
       success: true,
       data: { success: true, platforms: [makePlatform({ controllable: false, open: null, reason: 'unsupported' })] },
     });
     render(<PlatformsSection />);
-    await waitFor(() => expect(screen.getByRole('switch')).toBeDisabled());
-    expect(screen.getByText('This platform cannot be opened or closed from here.')).toBeInTheDocument();
+    await screen.findByText('This platform cannot be opened or closed from here.');
+    // Unknown must never be represented as a closed/off switch.
+    expect(screen.queryByRole('switch')).not.toBeInTheDocument();
     expect(screen.getByText('Unknown')).toBeInTheDocument();
+  });
+
+  it('shows unknown without inventing a connection failure when the server gives no reason', async () => {
+    posApiGet.mockResolvedValue({
+      success: true,
+      data: { success: true, platforms: [makePlatform({ controllable: false, open: null, reason: null })] },
+    });
+    render(<PlatformsSection />);
+    await screen.findByText('Unknown');
+    expect(screen.queryByRole('switch')).not.toBeInTheDocument();
   });
 
   it('offers explicit Open/Close actions for a controllable platform in an unknown state', async () => {

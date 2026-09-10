@@ -4,6 +4,7 @@ import { Store, RefreshCw, Loader2, AlertTriangle, WifiOff } from 'lucide-react'
 import { posApiGet, posApiPost } from '../../utils/api-helpers'
 import { POSGlassSwitch } from '../ui/pos-glass-components'
 import { liquidGlassModalButton } from '../../styles/designSystem'
+import { PlatformNotificationSoundSettings } from './PlatformNotificationSoundSettings'
 
 export interface Platform {
   plugin_id: string
@@ -327,6 +328,8 @@ export const PlatformsSection: React.FC = () => {
         )}
       </p>
 
+      <PlatformNotificationSoundSettings />
+
       {!isOnline && (
         <div className="flex items-start gap-3 rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3">
           <WifiOff className="mt-0.5 h-5 w-5 shrink-0 text-amber-500" />
@@ -428,7 +431,7 @@ export const PlatformsSection: React.FC = () => {
                     )}
                   </div>
 
-                  {!platform.controllable ? (
+                  {!platform.controllable && platform.open === null ? null : !platform.controllable ? (
                     <POSGlassSwitch
                       aria-labelledby={`platform-${platform.plugin_id}-label`}
                       checked={false}

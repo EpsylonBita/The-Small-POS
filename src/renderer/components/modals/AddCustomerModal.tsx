@@ -517,8 +517,8 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             (addr: any) => addr.id === initialCustomer.editAddressId
           );
           if (addressToEdit) {
-            const storedCoordinates = hasDeliveryPro ? getStoredCoordinates(addressToEdit) : null;
-            const storedDetails = hasDeliveryPro ? getStoredAddressSelectionDetails(addressToEdit) : null;
+            const storedCoordinates = getStoredCoordinates(addressToEdit);
+            const storedDetails = getStoredAddressSelectionDetails(addressToEdit);
             setFormData({
               phone: initialCustomer.phone || '',
               phoneCountryCode: normalizePhoneCountryCode(initialCustomer.phone_country_code),
@@ -529,7 +529,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
               city: addressToEdit.city || '',
               postalCode: addressToEdit.postal_code || '',
               floorNumber: addressToEdit.floor_number || '',
-              notes: addressToEdit.notes || '',
+              notes: addressToEdit.delivery_notes ?? addressToEdit.notes ?? '',
             });
             setAddressCoordinates(storedCoordinates);
             setSelectedAddressDetails(storedDetails);
@@ -565,8 +565,8 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
           });
         } else {
           // Edit mode - prefill all fields
-          const storedCoordinates = hasDeliveryPro ? getStoredCoordinates(initialCustomer) : null;
-          const storedDetails = hasDeliveryPro ? getStoredAddressSelectionDetails(initialCustomer) : null;
+          const storedCoordinates = getStoredCoordinates(initialCustomer);
+          const storedDetails = getStoredAddressSelectionDetails(initialCustomer);
           setFormData({
             phone: initialCustomer.phone || '',
             phoneCountryCode: normalizePhoneCountryCode(initialCustomer.phone_country_code),
@@ -639,6 +639,9 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
     : formData.address.trim();
 
   const handleInputChange = (field: string, value: string) => {
+    if ((field === 'city' || field === 'postalCode') && value !== formData[field]) {
+      clearAddressValidation(formData.address);
+    }
     setFormData(prev => ({ ...prev, [field]: value }));
     // Clear error when user starts typing
     if (errors[field]) {
@@ -939,8 +942,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         ? (validationForSubmit || deliveryValidationResult)
         : null;
       // Persist the exact selected suggestion point first (Google/OSM details), then fallback.
-      const persistedCoords = hasDeliveryPro
-        && !parsedAddressInput.shouldSkipZoneValidation
+      const persistedCoords = !parsedAddressInput.shouldSkipZoneValidation
         ? (selectedAddressDetails?.coordinates || addressCoordinates || activeValidation?.coordinates || null)
         : null;
       const validatedAt = hasDeliveryPro && activeValidation ? new Date().toISOString() : null;
@@ -979,7 +981,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             name_on_ringer: formData.nameOnRinger.trim() || null,
             address_type: 'delivery',
             is_default: false,
-            coordinates: hasDeliveryPro ? persistedCoords : null,
+            coordinates: persistedCoords,
             latitude: persistedCoords?.lat ?? null,
             longitude: persistedCoords?.lng ?? null,
             ...(validationMetadata ?? {}),
@@ -1047,7 +1049,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             floor_number: formData.floorNumber ? formData.floorNumber.trim() : null,
             notes: formData.notes ? formData.notes.trim() : null,
             name_on_ringer: formData.nameOnRinger ? formData.nameOnRinger.trim() : null,
-            coordinates: hasDeliveryPro ? persistedCoords : null,
+            coordinates: persistedCoords,
             latitude: persistedCoords?.lat ?? null,
             longitude: persistedCoords?.lng ?? null,
             customer_id: initialCustomer.id,
@@ -1073,7 +1075,9 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             const updatedAddress = result.data;
             // Update the addresses array with the edited address
             const updatedAddresses = initialCustomer.addresses?.map((addr: any) =>
-              addr.id === initialCustomer.editAddressId ? { ...addr, ...updatedAddress } : addr
+              addr.id === initialCustomer.editAddressId
+                ? { ...addr, ...updatedAddress, notes: formData.notes.trim(), delivery_notes: formData.notes.trim() }
+                : addr
             ) || [];
 
             // Return the customer with updated addresses
@@ -1112,7 +1116,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             notes: formData.notes ? formData.notes.trim() : undefined,
             name_on_ringer: formData.nameOnRinger ? formData.nameOnRinger.trim() : undefined,
             // Pass coordinates if available
-            coordinates: hasDeliveryPro ? persistedCoords : null,
+            coordinates: persistedCoords,
             latitude: persistedCoords?.lat ?? null,
             longitude: persistedCoords?.lng ?? null,
             delivery_validation: validationMetadata,

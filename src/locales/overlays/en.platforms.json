@@ -38,6 +38,33 @@
         "busy": "The platform is busy. Try again shortly.",
         "outcomeUnknown": "Status unknown. Refresh to check again.",
         "outsideHours": "Online, but outside the scheduled ordering hours — not receiving orders."
+      },
+      "sound": {
+        "title": "Order alert sound",
+        "help": "Choose the sound played on this register when a new platform order needs approval.",
+        "mutedNote": "App sound is muted, so preview is unavailable. Alerts will resume when sound is re-enabled.",
+        "preview": "Preview",
+        "stop": "Stop",
+        "chooseFile": "Choose file…",
+        "fileHelp": "MP3 or WAV, up to 5 MB and 30 seconds long.",
+        "options": {
+          "custom": "Imported: {{name}}"
+        },
+        "presets": {
+          "default": "Incoming order (default)",
+          "spiderman": "Spider-Man",
+          "onePiece": "One Piece",
+          "superMario": "Super Mario"
+        },
+        "errors": {
+          "invalidType": "That file isn't a supported audio format. Choose an MP3 or WAV file.",
+          "tooLarge": "That file is too large. Choose a file under 5 MB.",
+          "tooLong": "That clip is too long. Choose a clip under 30 seconds.",
+          "decodeFailed": "That file could not be read as audio. Choose a different file.",
+          "saveFailed": "Could not save the sound choice. The previous selection is still active.",
+          "noImportedClip": "No imported clip is available to select.",
+          "cancelled": "Import cancelled. The previous selection is still active."
+        }
       }
     }
   }

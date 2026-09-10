@@ -38,6 +38,33 @@
         "busy": "La piattaforma è occupata. Riprova a breve.",
         "outcomeUnknown": "Stato sconosciuto. Aggiorna per controllare di nuovo.",
         "outsideHours": "Online, ma fuori dagli orari di ordinazione previsti — non riceve ordini."
+      },
+      "sound": {
+        "title": "Suono di avviso degli ordini",
+        "help": "Scegli il suono riprodotto su questa cassa quando un nuovo ordine da una piattaforma richiede conferma.",
+        "mutedNote": "L’audio dell’app è disattivato. L’anteprima e gli avvisi sonori torneranno disponibili quando lo riattivi.",
+        "preview": "Ascolta",
+        "stop": "Interrompi",
+        "chooseFile": "Scegli file…",
+        "fileHelp": "MP3 o WAV, fino a 5 MB e 30 secondi.",
+        "options": {
+          "custom": "Importato: {{name}}"
+        },
+        "presets": {
+          "default": "Nuovo ordine (predefinito)",
+          "spiderman": "Spider-Man",
+          "onePiece": "One Piece",
+          "superMario": "Super Mario"
+        },
+        "errors": {
+          "invalidType": "Questo formato audio non è supportato. Scegli un file MP3 o WAV.",
+          "tooLarge": "Il file è troppo grande. Scegli un file di massimo 5 MB.",
+          "tooLong": "La clip è troppo lunga. Scegli una clip di massimo 30 secondi.",
+          "decodeFailed": "Impossibile leggere il file audio. Scegli un altro file.",
+          "saveFailed": "Impossibile salvare il suono. La selezione precedente resta attiva.",
+          "noImportedClip": "Nessuna clip importata disponibile.",
+          "cancelled": "Importazione annullata. La selezione precedente resta attiva."
+        }
       }
     }
   }

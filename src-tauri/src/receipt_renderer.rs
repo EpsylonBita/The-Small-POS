@@ -2710,6 +2710,28 @@ fn kiosk_block_covers_delivery(doc: &OrderReceiptDoc, lang: &str) -> bool {
         && !kiosk_customer_block_lines(doc, lang).is_empty()
 }
 
+/// Saved customer name/phone for any non-delivery, non-kiosk slip (pickup,
+/// dine-in, takeaway). Delivery and kiosk slips already carry the contact
+/// through their own blocks, so callers only consult this once those are
+/// confirmed empty. Returns an empty vec when no contact is saved so no
+/// customer block prints at all.
+fn pickup_customer_block_lines<'a>(
+    doc: &'a OrderReceiptDoc,
+    lang: &str,
+) -> Vec<(&'a str, &'a str)> {
+    let field = |opt: &'a Option<String>| -> Option<&'a str> {
+        opt.as_deref().map(str::trim).filter(|v| !v.is_empty())
+    };
+    let mut lines: Vec<(&str, &str)> = Vec::new();
+    if let Some(v) = field(&doc.customer_name) {
+        lines.push((receipt_label(lang, "Customer"), v));
+    }
+    if let Some(v) = field(&doc.customer_phone) {
+        lines.push((receipt_label(lang, "Phone"), v));
+    }
+    lines
+}
+
 fn delivery_slip_info_lines(doc: &OrderReceiptDoc, lang: &str) -> Vec<(String, String)> {
     let (address, city, postal, floor) = normalize_delivery_address_components(doc);
     vec![
@@ -7165,7 +7187,7 @@ fn render_classic_customer_raster_exact_ttf(
     let kiosk_customer_lines = kiosk_customer_block_lines(doc, lang);
     let kiosk_covers_delivery = kiosk_block_covers_delivery(doc, lang);
     if !kiosk_customer_lines.is_empty() {
-        for (label, value) in kiosk_customer_lines {
+        for (label, value) in &kiosk_customer_lines {
             canvas.draw_pair(&format!("{label}:"), value, preset.contact_style);
         }
         canvas.draw_rule();
@@ -7186,6 +7208,14 @@ fn render_classic_customer_raster_exact_ttf(
             canvas.draw_pair(&format!("{label}:"), value, preset.contact_style);
         }
         canvas.draw_rule();
+    } else if kiosk_customer_lines.is_empty() {
+        let pickup_customer_lines = pickup_customer_block_lines(doc, lang);
+        if !pickup_customer_lines.is_empty() {
+            for (label, value) in pickup_customer_lines {
+                canvas.draw_pair(&format!("{label}:"), value, preset.contact_style);
+            }
+            canvas.draw_rule();
+        }
     }
     let order_notes = order_note_lines(doc);
     // The kiosk slip prints this BELOW the items instead — see after the item
@@ -7501,7 +7531,7 @@ fn render_classic_customer_raster_exact_bitmap(
     let kiosk_customer_lines = kiosk_customer_block_lines(doc, lang);
     let kiosk_covers_delivery = kiosk_block_covers_delivery(doc, lang);
     if !kiosk_customer_lines.is_empty() {
-        for (label, value) in kiosk_customer_lines {
+        for (label, value) in &kiosk_customer_lines {
             canvas.draw_pair_body(&format!("{label}:"), value, false, canvas.normal_scale);
         }
         canvas.draw_rule();
@@ -7524,6 +7554,14 @@ fn render_classic_customer_raster_exact_bitmap(
             canvas.draw_pair_body(&format!("{label}:"), value, false, canvas.normal_scale);
         }
         canvas.draw_rule();
+    } else if kiosk_customer_lines.is_empty() {
+        let pickup_customer_lines = pickup_customer_block_lines(doc, lang);
+        if !pickup_customer_lines.is_empty() {
+            for (label, value) in pickup_customer_lines {
+                canvas.draw_pair_body(&format!("{label}:"), value, false, canvas.normal_scale);
+            }
+            canvas.draw_rule();
+        }
     }
     let order_notes = order_note_lines(doc);
     // See the TTF path: the kiosk slip prints this below the items.
@@ -14901,6 +14939,121 @@ mod tests {
             with_fields.height() > base.height(),
             "delivery block should increase raster receipt height"
         );
+    }
+
+    fn pickup_receipt_docs_for_customer_block_parity(
+    ) -> (OrderReceiptDoc, OrderReceiptDoc, OrderReceiptDoc) {
+        // Same order_number/created_at on all three so the customer_name/phone
+        // fields are the only variable feeding the rendered output.
+        let base = OrderReceiptDoc {
+            order_number: "S-20".to_string(),
+            order_type: "pickup".to_string(),
+            created_at: "2026-03-09T18:00:00Z".to_string(),
+            ..OrderReceiptDoc::default()
+        };
+        let named = OrderReceiptDoc {
+            customer_name: Some("Maria Papadopoulou".to_string()),
+            customer_phone: Some("6900000001".to_string()),
+            ..base.clone()
+        };
+        let whitespace_only = OrderReceiptDoc {
+            customer_name: Some("   ".to_string()),
+            customer_phone: Some("".to_string()),
+            ..base.clone()
+        };
+        (base, named, whitespace_only)
+    }
+
+    #[test]
+    fn raster_exact_ttf_pickup_receipt_grows_when_saved_customer_name_is_present() {
+        // Regression: the classic raster (physical print) path only drew the
+        // saved customer name on delivery and kiosk slips. A pickup order
+        // with a name attached via "Add Customer" printed nothing to call
+        // the customer by, even though HTML previews already rendered it.
+        let (base, named, whitespace_only) = pickup_receipt_docs_for_customer_block_parity();
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            classic_customer_render_mode: ClassicCustomerRenderMode::RasterExact,
+            ..LayoutConfig::default()
+        };
+
+        let base_img =
+            render_classic_customer_raster_exact_ttf(&ReceiptDocument::OrderReceipt(base), &cfg)
+                .expect("base pickup preview should render");
+        let named_img =
+            render_classic_customer_raster_exact_ttf(&ReceiptDocument::OrderReceipt(named), &cfg)
+                .expect("pickup preview with saved customer should render");
+        let whitespace_img = render_classic_customer_raster_exact_ttf(
+            &ReceiptDocument::OrderReceipt(whitespace_only),
+            &cfg,
+        )
+        .expect("pickup preview with blank customer fields should render");
+
+        assert!(
+            named_img.height() > base_img.height(),
+            "pickup customer block should increase raster receipt height"
+        );
+        assert_eq!(
+            whitespace_img, base_img,
+            "whitespace-only saved contact must not print an empty customer block"
+        );
+    }
+
+    #[test]
+    fn raster_exact_bitmap_pickup_receipt_grows_when_saved_customer_name_is_present() {
+        let (base, named, whitespace_only) = pickup_receipt_docs_for_customer_block_parity();
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            classic_customer_render_mode: ClassicCustomerRenderMode::RasterExact,
+            ..LayoutConfig::default()
+        };
+
+        let base_img =
+            render_classic_customer_raster_exact_bitmap(&ReceiptDocument::OrderReceipt(base), &cfg)
+                .expect("base pickup preview should render");
+        let named_img = render_classic_customer_raster_exact_bitmap(
+            &ReceiptDocument::OrderReceipt(named),
+            &cfg,
+        )
+        .expect("pickup preview with saved customer should render");
+        let whitespace_img = render_classic_customer_raster_exact_bitmap(
+            &ReceiptDocument::OrderReceipt(whitespace_only),
+            &cfg,
+        )
+        .expect("pickup preview with blank customer fields should render");
+
+        assert!(
+            named_img.height() > base_img.height(),
+            "pickup customer block should increase bitmap raster receipt height"
+        );
+        assert_eq!(
+            whitespace_img, base_img,
+            "whitespace-only saved contact must not print an empty customer block"
+        );
+    }
+
+    #[test]
+    fn pickup_customer_block_lines_returns_name_and_phone_for_non_delivery_non_kiosk_orders() {
+        let doc = OrderReceiptDoc {
+            order_type: "pickup".to_string(),
+            customer_name: Some("Maria Papadopoulou".to_string()),
+            customer_phone: Some("6900000001".to_string()),
+            ..OrderReceiptDoc::default()
+        };
+        let lines = pickup_customer_block_lines(&doc, "en");
+        assert_eq!(
+            lines,
+            vec![("Customer", "Maria Papadopoulou"), ("Phone", "6900000001")]
+        );
+    }
+
+    #[test]
+    fn pickup_customer_block_lines_is_empty_when_no_customer_is_saved() {
+        let doc = OrderReceiptDoc {
+            order_type: "pickup".to_string(),
+            ..OrderReceiptDoc::default()
+        };
+        assert!(pickup_customer_block_lines(&doc, "en").is_empty());
     }
 
     #[test]

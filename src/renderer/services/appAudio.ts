@@ -82,7 +82,7 @@ export function useAppAudioEnabled(): boolean {
 
 export function playAppAudioFile(
   url: string,
-  options: { volume?: number; onError?: (error: unknown) => void } = {},
+  options: { volume?: number; onError?: (error: unknown) => void; onEnded?: () => void } = {},
 ): StopAudio {
   if (!isAppAudioEnabled()) return () => {};
   let audio: HTMLAudioElement | undefined;
@@ -92,10 +92,16 @@ export function playAppAudioFile(
     stopped = true;
     playing.delete(stop);
     if (audio) {
-      audio.removeEventListener('ended', stop);
+      audio.removeEventListener('ended', handleEnded);
       audio.pause();
       audio.removeAttribute('src');
     }
+  };
+  // Distinct from stop() so a caller-driven stop (mute, replace) never fires
+  // onEnded; only a natural end of playback does.
+  const handleEnded = () => {
+    stop();
+    options.onEnded?.();
   };
   const failed = (error: unknown) => {
     if (stopped) return;
@@ -106,7 +112,7 @@ export function playAppAudioFile(
     audio = new Audio(url);
     audio.preload = 'auto';
     audio.volume = options.volume ?? 0.9;
-    audio.addEventListener('ended', stop, { once: true });
+    audio.addEventListener('ended', handleEnded, { once: true });
     playing.add(stop);
     void audio.play().catch(failed);
   } catch (error) {
