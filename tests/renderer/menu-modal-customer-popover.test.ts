@@ -66,24 +66,26 @@ test('pickup customer popover close key is translated in every POS locale', () =
   assert.notEqual(loadLocale('el').common.actions.close, en, 'el common.actions.close must be translated');
 });
 
-test('hasCustomerInfo counts locally entered pickup name/phone (chip shows after saving)', () => {
+test('hasCustomerInfo counts the current pickup/dine-in chip name or phone (chip shows after saving)', () => {
   const block = source.match(/const hasCustomerInfo = !!\([\s\S]*?\);/);
   assert.ok(block, 'hasCustomerInfo declaration not found');
-  assert.match(block[0], /pickupCustomerName && pickupCustomerName\.trim\(\)/);
-  assert.match(block[0], /pickupCustomerPhone && pickupCustomerPhone\.trim\(\)/);
+  assert.match(block[0], /customerChipName \|\| customerChipPhone/);
 });
 
-test('customer/table chip label falls back to selectedCustomer so it never renders icon-only', () => {
-  // A dine-in pseudo-customer (e.g. "Table #TB02") arrives via selectedCustomer
-  // after the modal opens, so the chip must fall back to it when the locally
-  // initialized pickup fields are empty - otherwise hasCustomerInfo is true but
-  // the chip shows only the User icon with no text.
-  assert.match(source, /const customerChipName = pickupCustomerName \|\| selectedCustomer\?\.name \|\| '';/);
+test('customer/table chip label derives from the pickup draft for pickup, selectedCustomer otherwise, with no stale fallback', () => {
+  // customerChipName/Phone are orderType-scoped: pickup reads only the locally entered
+  // pickup draft, everything else reads only selectedCustomer (e.g. "Table #TB02" for
+  // dine-in). Neither branch falls back to the other, so clearing the pickup draft
+  // cannot revive a stale selectedCustomer contact.
   assert.match(
     source,
-    /const customerChipPhone =\s*pickupCustomerPhone \|\| selectedCustomer\?\.phone \|\| selectedCustomer\?\.phone_number \|\| '';/,
+    /const customerChipName = orderType === 'pickup'\s*\n\s*\? pickupCustomerName\.trim\(\) : selectedCustomer\?\.name \|\| '';/,
   );
-  // The hasCustomerInfo chip renders the fallback-aware label, not the raw pickup-only pair.
+  assert.match(
+    source,
+    /const customerChipPhone = orderType === 'pickup'\s*\n\s*\? pickupCustomerPhone\.trim\(\) : selectedCustomer\?\.phone_number \|\| selectedCustomer\?\.phone \|\| '';/,
+  );
+  // The hasCustomerInfo chip renders the derived chip label, not a raw pickup-only pair.
   assert.match(source, /\{customerChipName \|\| customerChipPhone\}/);
   assert.doesNotMatch(source, /\{pickupCustomerName \|\| pickupCustomerPhone\}/);
 });
@@ -110,8 +112,12 @@ test('MenuModal header cannot horizontally clip the full/edit modal off the view
 
   // The customer chips are width-bounded and truncate so a long name/phone can't
   // expand the header past the viewport. The older blue customer chip is gone;
-  // both populated customer states now use the green customer accent.
-  assert.match(source, /bg-green-500\/20[\s\S]*?max-w-\[16rem\]/);
+  // both populated customer states now use the green customer accent, and the
+  // saved-pickup/dine-in chip's accent is theme-aware (dark vs light tones).
+  assert.match(
+    source,
+    /max-w-\[16rem\][\s\S]*?resolvedTheme === 'dark'[\s\S]*?bg-green-500\/20 text-green-300 border-green-500\/30[\s\S]*?bg-green-100 text-green-800 border-green-300/,
+  );
   assert.match(source, /border-green-500\/40[\s\S]*?max-w-\[16rem\]/);
   assert.doesNotMatch(source, /border-blue-500\/40/);
 

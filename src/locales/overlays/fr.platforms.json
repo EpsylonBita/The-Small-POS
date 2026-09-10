@@ -1,0 +1,44 @@
+{
+  "settings": {
+    "settingsHub": {
+      "sections": {
+        "platforms": {
+          "label": "Plateformes",
+          "detail": "Statut des plateformes de livraison"
+        }
+      }
+    },
+    "platforms": {
+      "title": "Plateformes de livraison",
+      "helpText": "Ouvrir ou fermer les plateformes de livraison connectées pour ce commerce",
+      "refresh": "Actualiser",
+      "loading": "Chargement des plateformes...",
+      "loadFailed": "Impossible de charger les plateformes",
+      "empty": "Aucune plateforme de livraison connectée",
+      "emptyHelp": "Connectez une plateforme de livraison depuis le tableau de bord d'administration pour la gérer ici.",
+      "offline": "Cette caisse est hors ligne. Reconnectez-vous pour ouvrir ou fermer des plateformes.",
+      "uncertain": "Impossible de confirmer le résultat. Actualisez pour vérifier l'état actuel.",
+      "open": "Ouvrir",
+      "close": "Fermer",
+      "manualClosureNote": "Vous pouvez rouvrir une plateforme ici à tout moment. Si efood reste fermé, il rouvre à la première ouverture de caisse après le prochain rapport Z.",
+      "acceptingOrders": "Reçoit des commandes",
+      "notAcceptingOrders": "Ne reçoit pas de commandes actuellement",
+      "lastKnown": "Dernier état connu : {{status}}",
+      "status": {
+        "open": "Ouvert",
+        "closed": "Fermé",
+        "unknown": "Inconnu"
+      },
+      "reason": {
+        "moduleDisabled": "Un module requis n’est pas activé sur cette caisse.",
+        "unsupported": "Cette plateforme ne peut pas être ouverte ou fermée depuis ici.",
+        "wrongTerminal": "Gérez cette plateforme depuis la caisse à laquelle elle est assignée.",
+        "productionNotConnected": "Cette plateforme n'est pas encore connectée à un commerce en production.",
+        "providerUnavailable": "La plateforme est temporairement indisponible.",
+        "busy": "La plateforme est occupée. Réessayez dans un instant.",
+        "outcomeUnknown": "Statut inconnu. Actualisez pour vérifier à nouveau.",
+        "outsideHours": "En ligne, mais hors des horaires de commande prévus — ne reçoit pas de commandes."
+      }
+    }
+  }
+}

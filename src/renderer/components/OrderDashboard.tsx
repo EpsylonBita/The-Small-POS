@@ -3900,6 +3900,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           order_type: tableOrderType,
           ...tableOrderCreateFields
         } = tableOrderFields;
+        const isPickupOrder = !isTableOrder &&
+          (selectedOrderType || orderData.orderType || orderType || "pickup") === "pickup";
         const persistedCustomerName = isTableOrder
           ? pickMeaningfulOrderCustomerName(
               orderData.customer?.name,
@@ -3907,7 +3909,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
               customerInfo?.name,
               existingCustomer?.name,
             )
-          : selectedOrderType === "pickup"
+          : isPickupOrder
             ? pickMeaningfulOrderCustomerName(
                 orderData.customer?.name,
                 orderData.customer?.full_name,
@@ -3934,11 +3936,13 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           customerId: persistedCustomerId,
           customer_name: persistedCustomerName ?? undefined,
           customer_phone:
-            orderData.customer?.phone_number ||
-            orderData.customer?.phone ||
-            customerInfo?.phone ||
-            existingCustomer?.phone ||
-            "",
+            isPickupOrder
+              ? orderData.customer?.phone_number ?? orderData.customer?.phone ?? ""
+              : orderData.customer?.phone_number ||
+                orderData.customer?.phone ||
+                customerInfo?.phone ||
+                existingCustomer?.phone ||
+                "",
           items: normalizePosOrderItems(orderData.items || []),
           total_amount: total,
           subtotal: subtotal,

@@ -5,7 +5,7 @@ import { posApiGet } from '../../utils/api-helpers'
 import { resolveNavigationLabel } from '../../utils/i18nLabels'
 import { useTheme } from '../../contexts/theme-context'
 import { useI18n } from '../../contexts/i18n-context'
-import { Wifi, Lock, Palette, Globe, Sun, Moon, Monitor, Database, Printer, Eye, EyeOff, Clipboard, Timer, CreditCard, Cable, Settings, Info, Copy, Check, Wrench, AlertTriangle, ChevronDown, RefreshCw, Smartphone } from 'lucide-react'
+import { Wifi, Lock, Palette, Globe, Sun, Moon, Monitor, Database, Printer, Eye, EyeOff, Clipboard, Timer, CreditCard, Cable, Settings, Info, Copy, Check, Wrench, AlertTriangle, ChevronDown, RefreshCw, Smartphone, Store } from 'lucide-react'
 import { inputBase, liquidGlassModalButton } from '../../styles/designSystem';
 import { LiquidGlassModal, POSGlassSwitch } from '../ui/pos-glass-components';
 import PrinterSettingsModal from './PrinterSettingsModal';
@@ -13,6 +13,7 @@ import CashRegisterSection, { type CashRegisterSetupIntent } from '../peripheral
 import CallerIdSection from '../peripherals/CallerIdSection';
 import { PaymentTerminalsSection } from '../ecr/PaymentTerminalsSection';
 import { WaiterDevicesSection } from '../settings/WaiterDevicesSection';
+import { PlatformsSection } from '../settings/PlatformsSection';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { useHardwareManager } from '../../hooks/useHardwareManager';
 import { usePrivilegedActionConfirmation } from '../../hooks/usePrivilegedActionConfirmation';
@@ -73,6 +74,7 @@ type SettingsSectionId =
   | 'printing'
   | 'payments'
   | 'waiter_devices'
+  | 'platforms'
   | 'about'
 
 const parseBooleanSetting = (value: unknown): boolean => {
@@ -862,6 +864,10 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
       label: t('settings.settingsHub.sections.waiter_devices.label', 'Waiter Devices'),
       detail: t('settings.settingsHub.sections.waiter_devices.detail', 'Mobile waiter access'),
     },
+    platforms: {
+      label: t('settings.settingsHub.sections.platforms.label', 'Platforms'),
+      detail: t('settings.settingsHub.sections.platforms.detail', 'Delivery platform status'),
+    },
     about: {
       label: t('settings.settingsHub.sections.about.label', 'Info'),
       detail: t('settings.settingsHub.sections.about.detail', 'App version'),
@@ -873,6 +879,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
   const settingsNav: Array<{ id: SettingsSectionId; icon: React.ReactNode }> = [
     { id: 'admin', icon: <Settings className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" /> },
     { id: 'connection', icon: <Wifi className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" /> },
+    { id: 'platforms', icon: <Store className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" /> },
     { id: 'printing', icon: <Printer className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" /> },
     { id: 'payments', icon: <CreditCard className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" /> },
     { id: 'waiter_devices', icon: <Smartphone className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300" /> },
@@ -892,7 +899,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
   // (the server enforces the same rule with 403 WAITER_MGMT_MAIN_ONLY).
   const isMainTerminal = terminalType === 'main'
   const settingsNavGroups: Array<{ id: 'daily' | 'device' | 'system'; items: SettingsSectionId[] }> = [
-    { id: 'daily', items: ['admin', 'connection'] },
+    { id: 'daily', items: ['admin', 'connection', 'platforms'] },
     {
       id: 'device',
       items: (['printing', 'payments', 'waiter_devices', 'hardware', 'terminal'] as SettingsSectionId[]).filter(
@@ -2069,6 +2076,11 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
         {/* Waiter Devices Section — main terminal manages its mobile_waiter unit */}
         {activeSettingsSection === 'waiter_devices' && isMainTerminal && (
           <WaiterDevicesSection />
+        )}
+
+        {/* Platforms Section — connected delivery platforms, open/close switches */}
+        {isOpen && activeSettingsSection === 'platforms' && (
+          <PlatformsSection />
         )}
 
         {/* About Section */}

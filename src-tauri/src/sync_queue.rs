@@ -6140,14 +6140,33 @@ fn prepare_shift_request(
             )
         });
 
+    let event_type = shift_event_type(item, payload);
+    let mut data = payload.clone();
+    // This intent is recomputed at dispatch, never blindly replayed from the
+    // queue. Financial history still syncs after close, but cannot reopen efood.
+    if let Some(fields) = data.as_object_mut() {
+        fields.insert(
+            "efoodDayStartEligible".to_string(),
+            Value::Bool(
+                event_type == "shift_open"
+                    && crate::shifts::efood_day_start_eligible(
+                        conn,
+                        &shift_id,
+                        &branch_id,
+                        terminal_id,
+                        payload,
+                    ),
+            ),
+        );
+    }
     let body = serde_json::json!({
         "terminal_id": terminal_id,
         "branch_id": branch_id,
         "events": [{
-            "event_type": shift_event_type(item, payload),
+            "event_type": event_type,
             "shift_id": shift_id,
             "idempotency_key": idempotency_key,
-            "data": payload,
+            "data": data,
         }],
     });
 
@@ -12025,6 +12044,7 @@ mod tests {
         assert_eq!(body["events"][0]["event_type"], "shift_open");
         assert_eq!(body["events"][0]["shift_id"], "shift-1");
         assert_eq!(body["events"][0]["data"]["roleType"], "driver");
+        assert_eq!(body["events"][0]["data"]["efoodDayStartEligible"], false);
         assert!(
             body["events"][0]["idempotency_key"]
                 .as_str()

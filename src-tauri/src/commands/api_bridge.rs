@@ -198,6 +198,10 @@ fn is_cacheable_admin_get(method: &str, path: &str) -> bool {
         && route.starts_with("/api/pos/")
         && !route.contains("/api/pos/auth")
         && !route.contains("/api/pos/updates")
+        // Platform availability must be live: a cached open/closed value can
+        // mislead the operator after another device changes the shop status.
+        && route != "/api/pos/platforms"
+        && !route.starts_with("/api/pos/platforms/")
         && !is_caller_id_admin_route(path)
         && !is_repair_admin_route(path)
         && !is_delta_cursor_admin_get(path)
@@ -1133,6 +1137,20 @@ mod dto_tests {
         ));
         assert!(!is_cacheable_admin_get("POST", "/api/pos/suppliers"));
         assert!(!is_cacheable_admin_get("GET", "/api/admin/users"));
+    }
+
+    #[test]
+    fn platform_availability_is_never_offline_cacheable() {
+        for path in [
+            "/api/pos/platforms",
+            "/api/pos/platforms/",
+            "/api/pos/platforms?refresh=1",
+            "/api/pos/platforms#status",
+            "/api/pos/platforms/efood",
+        ] {
+            assert!(!is_cacheable_admin_get("GET", path));
+        }
+        assert!(is_cacheable_admin_get("GET", "/api/pos/integrations"));
     }
 
     #[test]

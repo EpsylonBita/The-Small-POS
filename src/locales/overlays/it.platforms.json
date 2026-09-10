@@ -1,0 +1,44 @@
+{
+  "settings": {
+    "settingsHub": {
+      "sections": {
+        "platforms": {
+          "label": "Piattaforme",
+          "detail": "Stato delle piattaforme di consegna"
+        }
+      }
+    },
+    "platforms": {
+      "title": "Piattaforme di consegna",
+      "helpText": "Apri o chiudi le piattaforme di consegna collegate per questo negozio",
+      "refresh": "Aggiorna",
+      "loading": "Caricamento piattaforme...",
+      "loadFailed": "Impossibile caricare le piattaforme",
+      "empty": "Nessuna piattaforma di consegna collegata",
+      "emptyHelp": "Collega una piattaforma di consegna dal pannello di amministrazione per gestirla qui.",
+      "offline": "Questa cassa è offline. Riconnettiti per aprire o chiudere le piattaforme.",
+      "uncertain": "Impossibile confermare il risultato. Aggiorna per controllare lo stato attuale.",
+      "open": "Apri",
+      "close": "Chiudi",
+      "manualClosureNote": "Puoi riaprire una piattaforma qui in qualsiasi momento. Se efood resta chiuso, si riapre alla prima apertura della cassa dopo il prossimo rapporto Z.",
+      "acceptingOrders": "Riceve ordini",
+      "notAcceptingOrders": "Non riceve ordini in questo momento",
+      "lastKnown": "Ultimo stato noto: {{status}}",
+      "status": {
+        "open": "Aperto",
+        "closed": "Chiuso",
+        "unknown": "Sconosciuto"
+      },
+      "reason": {
+        "moduleDisabled": "Un modulo richiesto non è abilitato su questa cassa.",
+        "unsupported": "Questa piattaforma non può essere aperta o chiusa da qui.",
+        "wrongTerminal": "Gestisci questa piattaforma dalla cassa a cui è assegnata.",
+        "productionNotConnected": "Questa piattaforma non è ancora collegata a un negozio attivo.",
+        "providerUnavailable": "La piattaforma è temporaneamente non disponibile.",
+        "busy": "La piattaforma è occupata. Riprova a breve.",
+        "outcomeUnknown": "Stato sconosciuto. Aggiorna per controllare di nuovo.",
+        "outsideHours": "Online, ma fuori dagli orari di ordinazione previsti — non riceve ordini."
+      }
+    }
+  }
+}

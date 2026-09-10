@@ -7,6 +7,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 // Closed-mount guarantee under test: while MenuModal has isOpen=false it
 // early-returns null, so LiquidGlassModal must never render at all.
 const { lgmRenderSpy } = vi.hoisted(() => ({ lgmRenderSpy: vi.fn() }));
+const { themeState } = vi.hoisted(() => ({ themeState: { resolvedTheme: 'light' } }));
+
+vi.mock('../../../contexts/theme-context', () => ({ useTheme: () => themeState }));
 
 vi.mock('../../ui/pos-glass-components', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../ui/pos-glass-components')>();
@@ -160,8 +163,9 @@ vi.mock('../../menu/MenuItemGrid', () => ({
   ),
 }));
 vi.mock('../../menu/MenuCart', () => ({
-  MenuCart: ({ cartItems, onRemoveItem, onEditItem }: any) => (
+  MenuCart: ({ cartItems, onRemoveItem, onEditItem, onCheckout }: any) => (
     <div data-testid="menu-cart">
+      <button onClick={onCheckout}>Checkout</button>
       {cartItems.map((item: any) => (
         <div key={item.id}>
           <span>{item.name} × {item.quantity} = {item.totalPrice} [{item.categoryName || ''}]</span>
@@ -182,7 +186,13 @@ vi.mock('../../menu/ComboChoiceModal', () => ({
   ComboChoiceModal: () => null,
 }));
 vi.mock('../PaymentModal', () => ({
-  PaymentModal: () => null,
+  PaymentModal: ({ isOpen, onPaymentComplete, onSplitPayment, onClose }: any) => isOpen ? (
+    <div>
+      <button onClick={() => onPaymentComplete({ method: 'cash', amount: 6 })}>Pay cash</button>
+      <button onClick={() => onSplitPayment(null)}>Split payment</button>
+      <button onClick={onClose}>Back to menu</button>
+    </div>
+  ) : null,
 }));
 vi.mock('../LoyaltyRedeemModal', () => ({
   LoyaltyRedeemModal: () => null,
@@ -314,5 +324,100 @@ describe('MenuModal immediate product taps', () => {
     await act(async () => { resolveCategories([{ id: 'coffee', name: 'Coffee' }]); });
     expect(screen.getByText('Espresso × 3 = 9 [Coffee]')).toBeInTheDocument();
     expect(screen.getAllByRole('button', { name: 'Remove Espresso' })).toHaveLength(1);
+  });
+});
+
+describe('MenuModal pickup customer checkout', () => {
+  afterEach(() => {
+    cleanup();
+    themeState.resolvedTheme = 'light';
+  });
+
+  const editCustomer = (name: string, phone: string, notes: string) => {
+    fireEvent.change(screen.getByPlaceholderText('Name'), { target: { value: name } });
+    fireEvent.change(screen.getByPlaceholderText('Phone'), { target: { value: phone } });
+    fireEvent.change(screen.getByPlaceholderText('Notes'), { target: { value: notes } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save', hidden: true }));
+  };
+
+  it.each(['Pay cash', 'Split payment'])('persists an anonymous pickup with %s', async (payment) => {
+    const complete = vi.fn(async () => true);
+    render(<MenuModal {...baseProps} isOpen selectedCustomer={null} onOrderComplete={complete} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Add Customer' }));
+    editCustomer(' Alice ', ' 2101234567 ', ' Call on arrival ');
+    const chip = screen.getByRole('button', { name: /Alice.*2101234567/ });
+    expect(chip).toHaveClass('text-green-800', 'bg-green-100');
+    fireEvent.click(screen.getByRole('button', { name: 'Add espresso' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Checkout' }));
+    fireEvent.click(await screen.findByRole('button', { name: payment, hidden: true }));
+    await waitFor(() => expect(complete).toHaveBeenCalledTimes(1));
+    expect(complete.mock.calls[0][0]).toMatchObject({
+      customer: { name: 'Alice', phone: '2101234567', phone_number: '2101234567', notes: 'Call on arrival' },
+      notes: 'Call on arrival',
+      orderType: 'pickup',
+    });
+    expect(complete.mock.calls[0][0].customer).not.toHaveProperty('id');
+  });
+
+  it.each(['Pay cash', 'Split payment'])('keeps the registered customer immutable and fields cleared with %s', async (payment) => {
+    const customer = Object.freeze({ id: 'customer-1', name: 'Alice', full_name: 'Alice', phone: '111', phone_number: '111', notes: 'Old note' });
+    const complete = vi.fn(async () => true);
+    const view = render(<MenuModal {...baseProps} isOpen selectedCustomer={customer} onOrderComplete={complete} />);
+    fireEvent.click(screen.getByRole('button', { name: /Alice.*111/ }));
+    editCustomer('', '', '');
+    view.rerender(<MenuModal {...baseProps} isOpen selectedCustomer={{ ...customer }} onOrderComplete={complete} />);
+    expect(screen.getByRole('button', { name: 'Add Customer' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Alice.*111/ })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Add espresso' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Checkout' }));
+    fireEvent.click(await screen.findByRole('button', { name: payment, hidden: true }));
+    await waitFor(() => expect(complete).toHaveBeenCalledTimes(1));
+    expect(complete.mock.calls[0][0]).toMatchObject({
+      customer: { id: 'customer-1', name: '', full_name: '', phone: '', phone_number: '', notes: '' },
+      notes: '',
+    });
+    expect(customer).toMatchObject({ name: 'Alice', phone: '111', notes: 'Old note' });
+  });
+
+  it('keeps pickup details after cancelling payment, then clears them for the next order', async () => {
+    const view = render(<MenuModal {...baseProps} isOpen selectedCustomer={null} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Add Customer' }));
+    editCustomer('Alice', '111', 'Call first');
+    fireEvent.click(screen.getByRole('button', { name: 'Add espresso' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Checkout' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Back to menu', hidden: true }));
+    fireEvent.click(await screen.findByRole('button', { name: /Alice.*111/ }));
+    expect(screen.getByPlaceholderText('Notes')).toHaveValue('Call first');
+    view.rerender(<MenuModal {...baseProps} isOpen={false} selectedCustomer={null} />);
+    view.rerender(<MenuModal {...baseProps} isOpen selectedCustomer={null} />);
+    expect(screen.queryByPlaceholderText('Name')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Add Customer' }));
+    expect(screen.getByPlaceholderText('Name')).toHaveValue('');
+    expect(screen.getByPlaceholderText('Phone')).toHaveValue('');
+    expect(screen.getByPlaceholderText('Notes')).toHaveValue('');
+  });
+
+  it('resets for customer identity and edit-order changes without clobbering ongoing typing', () => {
+    const customer = { id: 'customer-1', name: 'Alice', phone_number: '111', notes: 'Saved note' };
+    const props = { ...baseProps, editMode: true, editOrderId: 'order-1', selectedCustomer: customer };
+    const view = render(<MenuModal {...props} isOpen />);
+    fireEvent.click(screen.getByRole('button', { name: /Alice.*111/ }));
+    fireEvent.change(screen.getByPlaceholderText('Name'), { target: { value: 'Typed name' } });
+    view.rerender(<MenuModal {...props} isOpen selectedCustomer={{ ...customer }} />);
+    expect(screen.getByPlaceholderText('Name')).toHaveValue('Typed name');
+    view.rerender(<MenuModal {...props} isOpen editOrderId="order-2" />);
+    expect(screen.getByPlaceholderText('Name')).toHaveValue('Alice');
+    view.rerender(<MenuModal {...props} isOpen editOrderId="order-2" selectedCustomer={{ id: 'customer-2', name: 'Bob' }} />);
+    expect(screen.getByPlaceholderText('Name')).toHaveValue('Bob');
+    expect(screen.getByPlaceholderText('Phone')).toHaveValue('');
+    view.rerender(<MenuModal {...props} isOpen editOrderId="order-2" selectedCustomer={null} />);
+    expect(screen.getByPlaceholderText('Name')).toHaveValue('');
+    expect(screen.getByPlaceholderText('Notes')).toHaveValue('');
+  });
+
+  it('uses the dark-theme foreground for a phone-only pickup chip', () => {
+    themeState.resolvedTheme = 'dark';
+    render(<MenuModal {...baseProps} isOpen selectedCustomer={{ phone: '111' }} />);
+    expect(screen.getByRole('button', { name: '111' })).toHaveClass('text-green-300', 'bg-green-500/20');
   });
 });

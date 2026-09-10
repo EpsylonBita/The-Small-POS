@@ -232,6 +232,7 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
     // rides on the success response so the UI can confront the cashier at
     // the exact moment the discrepancy is still explainable.
     let mut drawer_continuity_warning: Option<serde_json::Value> = None;
+    let mut is_day_start = false;
 
     let result = (|| -> Result<(), String> {
         // Re-check inside the transaction: this is the authoritative
@@ -253,6 +254,10 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         }
 
         let check_in_eligibility = resolve_check_in_eligibility(&conn, &branch_id, &terminal_id)?;
+        // Derive this from the same Z-period guard as cashier-first check-in,
+        // inside the transaction; a renderer flag is not authoritative.
+        is_day_start = role_type.trim().eq_ignore_ascii_case("cashier")
+            && check_in_eligibility.requires_cashier_first();
         if !role_type.trim().eq_ignore_ascii_case("cashier")
             && check_in_eligibility.requires_cashier_first()
         {
@@ -270,12 +275,18 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         let responsible_cashier_shift_id = responsible_cashier_assignment
             .as_ref()
             .map(|(cashier_shift_id, _)| cashier_shift_id.clone());
+        // On a pristine terminal the pre-insert boundary is the epoch sentinel.
+        // Once this first shift exists, the normal fallback resolves to `now`.
+        // Persist that same boundary so the queued day-start remains current.
+        let period_start_at =
+            if business_day::is_epoch_timestamp(&check_in_eligibility.business_day_start_at) {
+                now.clone()
+            } else {
+                check_in_eligibility.business_day_start_at.clone()
+            };
         let shift_business_day = ShiftBusinessDayContext {
-            report_date: business_day::report_date_for_business_window(
-                &check_in_eligibility.business_day_start_at,
-                &now,
-            ),
-            period_start_at: check_in_eligibility.business_day_start_at.clone(),
+            report_date: business_day::report_date_for_business_window(&period_start_at, &now),
+            period_start_at,
         };
 
         // W4c dual-write: every monetary REAL column gets its `_cents` sibling.
@@ -286,8 +297,8 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                 check_in_time, report_date, period_start_at,
                 opening_cash_amount, opening_cash_amount_cents,
                 status, calculation_version, transferred_to_cashier_shift_id,
-                sync_status, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'active', 2, ?12, 'pending', ?13, ?13)",
+                sync_status, created_at, updated_at, is_day_start
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'active', 2, ?12, 'pending', ?13, ?13, ?14)",
             params![
                 shift_id,
                 staff_id,
@@ -302,6 +313,7 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                 opening_cash_cents,
                 responsible_cashier_shift_id,
                 now,
+                is_day_start,
             ],
         )
         .map_err(|e| format!("insert shift: {e}"))?;
@@ -424,7 +436,7 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         // (same admin endpoint the legacy drain hit). idempotency_key is now
         // read from staff_shifts.idempotency_key (v47/v49) instead of the
         // volatile per-enqueue UUID (C17).
-        let sync_payload = build_shift_open_sync_payload(
+        let mut sync_payload = build_shift_open_sync_payload(
             &shift_id,
             &staff_id,
             staff_name.as_deref(),
@@ -443,6 +455,8 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                 .as_ref()
                 .map(|(_, drawer_id)| drawer_id.as_str()),
         );
+
+        sync_payload["isDayStart"] = Value::Bool(is_day_start);
 
         sync_queue::enqueue_payload_item(
             &conn,
@@ -476,6 +490,7 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
     let mut response = serde_json::json!({
         "success": true,
         "shiftId": shift_id,
+        "isDayStart": is_day_start,
         "message": format!("Shift opened for {} ({})", staff_id, role_type)
     });
     if let Some(warning) = drawer_continuity_warning {
@@ -3531,6 +3546,36 @@ fn role_returns_cash(role_type: &str) -> bool {
     matches!(role_type, "driver" | "server")
 }
 
+/// Only a still-open first cashier in the current Z window may cause an
+/// external shop-open side effect. Missing/legacy data fails closed while the
+/// ordinary shift record remains eligible for financial synchronization.
+pub(crate) fn efood_day_start_eligible(
+    conn: &Connection,
+    shift_id: &str,
+    branch_id: &str,
+    terminal_id: &str,
+    payload: &Value,
+) -> bool {
+    if payload.get("isDayStart").and_then(Value::as_bool) != Some(true) {
+        return false;
+    }
+    let Some(period) = payload.get("periodStartAt").and_then(Value::as_str) else {
+        return false;
+    };
+    if period != business_day::resolve_period_start(conn, branch_id, None) {
+        return false;
+    }
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM staff_shifts
+         WHERE id = ?1 AND branch_id = ?2 AND terminal_id = ?3
+           AND role_type = 'cashier' AND status = 'active'
+           AND is_day_start = 1 AND period_start_at = ?4)",
+        params![shift_id, branch_id, terminal_id, period],
+        |row| row.get::<_, bool>(0),
+    )
+    .unwrap_or(false)
+}
+
 fn resolve_check_in_eligibility(
     conn: &rusqlite::Connection,
     branch_id: &str,
@@ -5796,6 +5841,135 @@ mod tests {
         .expect("non-cashier should open after cashier");
 
         assert!(result["shiftId"].as_str().is_some());
+        assert_eq!(result["isDayStart"], false);
+    }
+
+    #[test]
+    fn test_efood_day_start_bootstrap_without_previous_z_report() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        let first = open_shift(
+            &db,
+            &serde_json::json!({
+                "staffId": "first", "branchId": "branch-1", "terminalId": "term-1",
+                "roleType": "cashier", "openingCash": 0,
+            }),
+        )
+        .unwrap();
+        let id = first["shiftId"].as_str().unwrap();
+        let payload = load_latest_shift_sync_payload(&db, "INSERT", id);
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(payload["periodStartAt"], payload["checkInTime"]);
+        assert!(efood_day_start_eligible(
+            &conn, id, "branch-1", "term-1", &payload
+        ));
+    }
+
+    #[test]
+    fn test_efood_day_start_requires_first_live_cashier_in_current_z_period() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        set_business_day_start(&db, "2026-03-22T08:00:00Z");
+        let first = open_shift(
+            &db,
+            &serde_json::json!({
+                "staffId": "first", "branchId": "branch-1", "terminalId": "term-1",
+                "roleType": "cashier", "openingCash": 0,
+            }),
+        )
+        .unwrap();
+        let first_id = first["shiftId"].as_str().unwrap();
+        assert_eq!(first["isDayStart"], true);
+        let payload = load_latest_shift_sync_payload(&db, "INSERT", first_id);
+        assert_eq!(payload["isDayStart"], true);
+        assert_eq!(payload["periodStartAt"], "2026-03-22T08:00:00Z");
+        {
+            let conn = db.conn.lock().unwrap();
+            assert!(efood_day_start_eligible(
+                &conn, first_id, "branch-1", "term-1", &payload
+            ));
+            assert!(!efood_day_start_eligible(
+                &conn, first_id, "other", "term-1", &payload
+            ));
+            assert!(!efood_day_start_eligible(
+                &conn, first_id, "branch-1", "other", &payload
+            ));
+            assert!(!efood_day_start_eligible(
+                &conn,
+                first_id,
+                "branch-1",
+                "term-1",
+                &serde_json::json!({})
+            ));
+            conn.execute(
+                "UPDATE staff_shifts SET status = 'closed' WHERE id = ?1",
+                params![first_id],
+            )
+            .unwrap();
+            assert!(!efood_day_start_eligible(
+                &conn, first_id, "branch-1", "term-1", &payload
+            ));
+        }
+        // Another shift (including an untrusted renderer flag) cannot reopen efood.
+        let second = open_shift(
+            &db,
+            &serde_json::json!({
+                "staffId": "second", "branchId": "branch-1", "terminalId": "term-1",
+                "roleType": "cashier", "openingCash": 0, "isDayStart": true,
+            }),
+        )
+        .unwrap();
+        assert_eq!(second["isDayStart"], false);
+        let second_id = second["shiftId"].as_str().unwrap();
+        let mut forged = load_latest_shift_sync_payload(&db, "INSERT", second_id);
+        forged["isDayStart"] = Value::Bool(true);
+        let conn = db.conn.lock().unwrap();
+        assert!(!efood_day_start_eligible(
+            &conn, second_id, "branch-1", "term-1", &forged
+        ));
+        // An old queued open must stay ineligible after a Z rollover, even if
+        // a stale local record is still active.
+        conn.execute(
+            "UPDATE staff_shifts SET status = 'active' WHERE id = ?1",
+            params![first_id],
+        )
+        .unwrap();
+        db::set_setting(
+            &conn,
+            "system",
+            "last_z_report_timestamp",
+            "2026-03-23T08:00:00Z",
+        )
+        .unwrap();
+        assert!(!efood_day_start_eligible(
+            &conn, first_id, "branch-1", "term-1", &payload
+        ));
+        conn.execute(
+            "UPDATE staff_shifts SET status = 'closed', check_in_time = '2026-03-22T10:00:00Z'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let next_day = open_shift(
+            &db,
+            &serde_json::json!({
+                "staffId": "next-day", "branchId": "branch-1", "terminalId": "term-1",
+                "roleType": "cashier", "openingCash": 0,
+            }),
+        )
+        .unwrap();
+        assert_eq!(next_day["isDayStart"], true);
+        let next_id = next_day["shiftId"].as_str().unwrap();
+        let next_payload = load_latest_shift_sync_payload(&db, "INSERT", next_id);
+        assert_eq!(next_payload["periodStartAt"], "2026-03-23T08:00:00Z");
+        let conn = db.conn.lock().unwrap();
+        assert!(efood_day_start_eligible(
+            &conn,
+            next_id,
+            "branch-1",
+            "term-1",
+            &next_payload
+        ));
     }
 
     #[test]

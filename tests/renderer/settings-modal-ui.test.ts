@@ -71,7 +71,7 @@ test('ConnectionSettingsModal uses a responsive settings hub shell', () => {
 test('ConnectionSettingsModal exposes navigable settings sections via the hub left rail', () => {
   // Grouped left-rail navigation (daily / device / system) over the section ids.
   assert.match(source, /const settingsNavGroups: Array<\{ id: 'daily' \| 'device' \| 'system'; items: SettingsSectionId\[\] \}>/);
-  assert.match(source, /\{ id: 'daily', items: \['admin', 'connection'\] \}/);
+  assert.match(source, /\{ id: 'daily', items: \['admin', 'connection', 'platforms'\] \}/);
   assert.match(source, /items: \(\['printing', 'payments', 'waiter_devices', 'hardware', 'terminal'\] as SettingsSectionId\[\]\)\.filter\(/);
   assert.match(source, /\(id\) => id !== 'waiter_devices' \|\| isMainTerminal/);
   assert.match(source, /\{ id: 'system', items: \['security', 'database', 'about'\] \}/);
@@ -83,12 +83,12 @@ test('ConnectionSettingsModal exposes navigable settings sections via the hub le
   assert.match(source, /aria-current=\{isActive \? 'page' : undefined\}/);
 
   // Each section body renders directly, gated by the active section (no setShow* visibility booleans).
-  for (const section of ['admin', 'connection', 'terminal', 'security', 'database', 'hardware', 'printing', 'payments', 'waiter_devices', 'about']) {
+  for (const section of ['admin', 'connection', 'platforms', 'terminal', 'security', 'database', 'hardware', 'printing', 'payments', 'waiter_devices', 'about']) {
     assert.match(source, new RegExp(`activeSettingsSection === '${section}'`), `section ${section} must render conditionally`);
   }
   // admin is surfaced as the "This register" status label; the rest use hub section labels.
   assert.match(source, /settings\.settingsHub\.status\.register/);
-  for (const section of ['connection', 'terminal', 'security', 'database', 'hardware', 'printing', 'payments', 'waiter_devices', 'about']) {
+  for (const section of ['connection', 'platforms', 'terminal', 'security', 'database', 'hardware', 'printing', 'payments', 'waiter_devices', 'about']) {
     assert.match(source, new RegExp(`settings\\.settingsHub\\.sections\\.${section}\\.label`), `${section} needs a hub section label`);
   }
 
@@ -106,7 +106,7 @@ test('Settings left-rail icons are standalone yellow line icons without decorati
   const navBlock = source.slice(navStart, navEnd);
 
   const yellowIconCount = (navBlock.match(/className="h-5 w-5 shrink-0 text-yellow-600 dark:text-yellow-300"/g) ?? []).length;
-  assert.equal(yellowIconCount, 10, `all ten Settings nav icons must use standalone yellow strokes (found ${yellowIconCount})`);
+  assert.equal(yellowIconCount, 11, `all eleven Settings nav icons must use standalone yellow strokes (found ${yellowIconCount})`);
   assert.doesNotMatch(navBlock, /text-black/);
 
   const navRenderStart = source.indexOf('aria-current={isActive');

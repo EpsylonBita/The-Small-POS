@@ -20,6 +20,7 @@ import { useDeliveryValidation } from '../../hooks/useDeliveryValidation';
 import { useAcquiredModules, MODULE_IDS } from '../../hooks/useAcquiredModules';
 import { useKdsLiveDraftSync } from '../../hooks/useKdsLiveDraftSync';
 import { useShift } from '../../contexts/shift-context';
+import { useTheme } from '../../contexts/theme-context';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { renderModalPortal } from '../../utils/render-modal-portal';
 import toast from 'react-hot-toast';
@@ -48,6 +49,7 @@ import {
 } from '../../utils/saved-address-geolocation';
 import { isLegacyFallbackAddress } from '../../utils/customer-addresses';
 import { resolvePersistedCustomerId } from '../../utils/persisted-customer-id';
+import { buildPickupOrderDetails, pickupCustomerIdentity, readPickupCustomerDraft } from '../../utils/pickup-customer';
 import { resolveCouponErrorKey, COUPON_ERROR_FALLBACKS } from '../../utils/couponErrors';
 import { shouldBypassPaymentForTableOrder } from '../../utils/tableOrderFlow';
 import { posApiPost } from '../../utils/api-helpers';
@@ -425,6 +427,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     isValidating: isValidatingDeliveryFee,
   } = useDeliveryValidation({ debounceMs: 0 });
   const { staff } = useShift();
+  const { resolvedTheme } = useTheme();
   // The weekly window already counts today's live orders, so with the short
   // refresh cadence the ranking follows the day's waves without letting one
   // early-morning sale displace the week's true bestsellers.
@@ -530,9 +533,31 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
   const discardDialogRef = useRef<HTMLDivElement>(null);
   const discardTitleId = useId();
-  const [pickupCustomerName, setPickupCustomerName] = useState(selectedCustomer?.name || '');
-  const [pickupCustomerPhone, setPickupCustomerPhone] = useState(selectedCustomer?.phone || selectedCustomer?.phone_number || '');
-  const [pickupCustomerNotes, setPickupCustomerNotes] = useState(selectedCustomer?.notes || '');
+  const [pickupCustomerDraft, setPickupCustomerDraft] = useState(() => readPickupCustomerDraft(selectedCustomer));
+  const { name: pickupCustomerName, phone: pickupCustomerPhone, notes: pickupCustomerNotes } = pickupCustomerDraft;
+  const pickupFormSessionRef = useRef<string | null>(null);
+  const pickupFormSession = JSON.stringify([
+    editMode ? ['edit', editOrderId, editSupabaseId] : ['new'],
+    orderType,
+    pickupCustomerIdentity(selectedCustomer),
+  ]);
+  useEffect(() => {
+    if (!isOpen) {
+      pickupFormSessionRef.current = null;
+      setShowCustomerPopover(false);
+      return;
+    }
+    if (pickupFormSessionRef.current === pickupFormSession) return;
+    pickupFormSessionRef.current = pickupFormSession;
+    setPickupCustomerDraft(readPickupCustomerDraft(selectedCustomer));
+  }, [isOpen, pickupFormSession, selectedCustomer]);
+
+  // Payment hides only the menu surface; isOpen stays true and the draft
+  // survives that transition. Both checkout paths use this immutable snapshot.
+  const checkoutCustomerDetails = React.useMemo(() => orderType === 'pickup'
+    ? buildPickupOrderDetails(selectedCustomer, pickupCustomerDraft)
+    : { customer: selectedCustomer, notes: '' },
+  [orderType, selectedCustomer, pickupCustomerDraft]);
 
   // Escape closes ONLY the customer details popover. The popover renders with
   // role="dialog" above the MenuModal, so MenuModal's own Escape handler already
@@ -599,23 +624,11 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     };
   }, [showDiscardConfirm]);
 
-  const hasCustomerInfo = !!(
-    (selectedCustomer?.name && selectedCustomer.name.trim()) ||
-    (selectedCustomer?.phone && selectedCustomer.phone.trim()) ||
-    (selectedCustomer?.phone_number && selectedCustomer.phone_number.trim()) ||
-    (pickupCustomerName && pickupCustomerName.trim()) ||
-    (pickupCustomerPhone && pickupCustomerPhone.trim())
-  );
-
-  // Display-only label for the customer/table chip. Prefer locally entered pickup
-  // fields, but fall back to the selectedCustomer the flow supplies (e.g. the
-  // dine-in "Table #TB02" pseudo-customer that arrives after the modal opens).
-  // Without this fallback the chip could pass hasCustomerInfo yet render icon-only
-  // because the local pickup state was initialized empty. Read-only: it never
-  // overwrites user-edited pickup fields.
-  const customerChipName = pickupCustomerName || selectedCustomer?.name || '';
-  const customerChipPhone =
-    pickupCustomerPhone || selectedCustomer?.phone || selectedCustomer?.phone_number || '';
+  const customerChipName = orderType === 'pickup'
+    ? pickupCustomerName.trim() : selectedCustomer?.name || '';
+  const customerChipPhone = orderType === 'pickup'
+    ? pickupCustomerPhone.trim() : selectedCustomer?.phone_number || selectedCustomer?.phone || '';
+  const hasCustomerInfo = !!(customerChipName || customerChipPhone);
 
   useKdsLiveDraftSync({
     enabled: !editMode,
@@ -623,7 +636,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     cartItems,
     orderType,
     customerName: orderType === 'pickup'
-      ? (pickupCustomerName || selectedCustomer?.name || null)
+      ? (pickupCustomerName.trim() || null)
       : (selectedCustomer?.name || null),
   });
 
@@ -2350,10 +2363,9 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         const completionResult = await onOrderComplete({
           items: cartItems,
           total: discountedSubtotal,
-          customer: selectedCustomer,
+          ...checkoutCustomerDetails,
           address: selectedAddress || null, // Explicitly pass null if undefined
           orderType,
-          notes: '', // Could be enhanced to collect order notes
           paymentData,
           discountPercentage: currentDiscountPercentage,
           discountAmount: currentManualDiscountAmount,
@@ -2429,10 +2441,9 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       const completionResult = await onOrderComplete({
         items: cartItems,
         total: discountedSubtotal,
-        customer: selectedCustomer,
+        ...checkoutCustomerDetails,
         address: selectedAddress || null,
         orderType,
-        notes: '',
         paymentData: {
           method: 'pending',
           status: 'pending',
@@ -2567,7 +2578,11 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                   ) : hasCustomerInfo ? (
                     <button
                       onClick={() => setShowCustomerPopover(true)}
-                      className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-sm bg-green-500/20 text-green-300 border border-green-500/30 active:bg-green-500/30 transition-colors max-w-[16rem]"
+                      className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-sm border active:bg-green-500/30 transition-colors max-w-[16rem] ${
+                        resolvedTheme === 'dark'
+                          ? 'bg-green-500/20 text-green-300 border-green-500/30'
+                          : 'bg-green-100 text-green-800 border-green-300'
+                      }`}
                     >
                       <User className="w-3.5 h-3.5 flex-shrink-0" />
                       <span className="truncate">
@@ -2824,7 +2839,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
               <input
                 type="text"
                 value={pickupCustomerName}
-                onChange={(e) => setPickupCustomerName(e.target.value)}
+                onChange={(e) => setPickupCustomerDraft(current => ({ ...current, name: e.target.value }))}
                 placeholder={t('modals.menu.customerName', { defaultValue: 'Name' })}
                 className="liquid-glass-modal-input w-full"
                 autoFocus
@@ -2832,27 +2847,19 @@ export const MenuModal: React.FC<MenuModalProps> = ({
               <input
                 type="tel"
                 value={pickupCustomerPhone}
-                onChange={(e) => setPickupCustomerPhone(e.target.value)}
+                onChange={(e) => setPickupCustomerDraft(current => ({ ...current, phone: e.target.value }))}
                 placeholder={t('modals.menu.customerPhone', { defaultValue: 'Phone' })}
                 className="liquid-glass-modal-input w-full"
               />
               <input
                 type="text"
                 value={pickupCustomerNotes}
-                onChange={(e) => setPickupCustomerNotes(e.target.value)}
+                onChange={(e) => setPickupCustomerDraft(current => ({ ...current, notes: e.target.value }))}
                 placeholder={t('modals.menu.customerNotes', { defaultValue: 'Notes' })}
                 className="liquid-glass-modal-input w-full"
               />
               <button
-                onClick={() => {
-                  if (selectedCustomer) {
-                    selectedCustomer.name = pickupCustomerName;
-                    selectedCustomer.phone = pickupCustomerPhone;
-                    selectedCustomer.phone_number = pickupCustomerPhone;
-                    selectedCustomer.notes = pickupCustomerNotes;
-                  }
-                  setShowCustomerPopover(false);
-                }}
+                onClick={() => setShowCustomerPopover(false)}
                 className="liquid-glass-modal-button liquid-glass-modal-success w-full"
               >
                 {t('common.actions.save', { defaultValue: 'Save' })}

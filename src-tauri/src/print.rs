@@ -5692,6 +5692,7 @@ fn build_split_receipt_doc(db: &DbState, payment_id: &str) -> Result<OrderReceip
         customer_phone,
         items_json,
         total_amount,
+        special_instructions,
     ): (
         String,
         String,
@@ -5702,11 +5703,13 @@ fn build_split_receipt_doc(db: &DbState, payment_id: &str) -> Result<OrderReceip
         String,
         String,
         f64,
+        String,
     ) = conn
         .query_row(
             "SELECT COALESCE(NULLIF(display_order_number, ''), order_number, ''), COALESCE(order_type, ''), COALESCE(status, ''),
                     COALESCE(created_at, ''), COALESCE(table_number, ''), COALESCE(customer_name, ''),
-                    COALESCE(customer_phone, ''), COALESCE(items, '[]'), COALESCE(total_amount, 0)
+                    COALESCE(customer_phone, ''), COALESCE(items, '[]'), COALESCE(total_amount, 0),
+                    COALESCE(special_instructions, '')
              FROM orders WHERE id = ?1",
             params![order_id],
             |row| {
@@ -5720,6 +5723,7 @@ fn build_split_receipt_doc(db: &DbState, payment_id: &str) -> Result<OrderReceip
                     row.get(6)?,
                     row.get(7)?,
                     row.get(8)?,
+                    row.get(9)?,
                 ))
             },
         )
@@ -5850,6 +5854,9 @@ fn build_split_receipt_doc(db: &DbState, payment_id: &str) -> Result<OrderReceip
 
     // Add a note indicating this is a split payment receipt
     let mut order_notes = Vec::new();
+    let special_instructions =
+        strip_platform_items_fallback(&special_instructions, !items.is_empty());
+    push_unique_trimmed_note(&mut order_notes, Some(&special_instructions));
     let split_note = format!("Split Payment ({:.2} of {:.2} total)", amount, total_amount);
     order_notes.push(split_note);
     if discount_amount > 0.0 {
@@ -16944,6 +16951,54 @@ mod tests {
             doc.items.first().and_then(|item| item.note.as_deref()),
             Some("Well done | No sugar")
         );
+    }
+
+    #[test]
+    fn test_pickup_customer_prints_on_order_and_split_receipts() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (
+                    id, order_number, items, total_amount, total_amount_cents,
+                    subtotal, subtotal_cents, status, order_type, customer_name,
+                    customer_phone, special_instructions, sync_status, created_at, updated_at
+                 ) VALUES (
+                    'pickup-customer', 'PICKUP-1', '[]', 10, 1000, 10, 1000,
+                    'completed', 'pickup', 'Alex Customer', '6912345678',
+                    'Collect at 18:30', 'pending', datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO order_payments (
+                    id, order_id, method, amount, amount_cents, status, created_at, updated_at
+                 ) VALUES (
+                    'pickup-split', 'pickup-customer', 'cash', 5, 500,
+                    'completed', datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .unwrap();
+        }
+        let order = build_order_receipt_doc(&db, "pickup-customer").unwrap();
+        let split = build_split_receipt_doc(&db, "pickup-split").unwrap();
+        for doc in [order, split] {
+            assert_eq!(doc.customer_name.as_deref(), Some("Alex Customer"));
+            assert_eq!(doc.customer_phone.as_deref(), Some("6912345678"));
+            assert!(doc
+                .order_notes
+                .iter()
+                .any(|note| note == "Collect at 18:30"));
+            let html = receipt_renderer::render_html(
+                &ReceiptDocument::OrderReceipt(doc),
+                &LayoutConfig::default(),
+            );
+            assert!(html.contains("Alex Customer"));
+            assert!(html.contains("6912345678"));
+            assert!(html.contains("Collect at 18:30"));
+        }
     }
 
     #[test]

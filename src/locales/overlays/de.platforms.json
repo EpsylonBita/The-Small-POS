@@ -1,0 +1,44 @@
+{
+  "settings": {
+    "settingsHub": {
+      "sections": {
+        "platforms": {
+          "label": "Plattformen",
+          "detail": "Status der Lieferplattformen"
+        }
+      }
+    },
+    "platforms": {
+      "title": "Lieferplattformen",
+      "helpText": "Verbundene Lieferplattformen für dieses Geschäft öffnen oder schließen",
+      "refresh": "Aktualisieren",
+      "loading": "Plattformen werden geladen...",
+      "loadFailed": "Plattformen konnten nicht geladen werden",
+      "empty": "Keine Lieferplattformen verbunden",
+      "emptyHelp": "Verbinden Sie eine Lieferplattform im Admin-Dashboard, um sie hier zu verwalten.",
+      "offline": "Diese Kasse ist offline. Verbinden Sie sich erneut, um Plattformen zu öffnen oder zu schließen.",
+      "uncertain": "Das Ergebnis konnte nicht bestätigt werden. Aktualisieren Sie, um den aktuellen Status zu prüfen.",
+      "open": "Öffnen",
+      "close": "Schließen",
+      "manualClosureNote": "Sie können eine Plattform hier jederzeit wieder öffnen. Bleibt efood geschlossen, öffnet es bei der ersten Kassenöffnung nach dem nächsten Z-Bericht automatisch.",
+      "acceptingOrders": "Empfängt Bestellungen",
+      "notAcceptingOrders": "Empfängt derzeit keine Bestellungen",
+      "lastKnown": "Zuletzt bekannt: {{status}}",
+      "status": {
+        "open": "Geöffnet",
+        "closed": "Geschlossen",
+        "unknown": "Unbekannt"
+      },
+      "reason": {
+        "moduleDisabled": "Ein erforderliches Modul ist auf dieser Kasse nicht aktiviert.",
+        "unsupported": "Diese Plattform kann von hier aus nicht geöffnet oder geschlossen werden.",
+        "wrongTerminal": "Verwalten Sie diese Plattform über die zugewiesene Kasse.",
+        "productionNotConnected": "Diese Plattform ist noch nicht mit einem Live-Geschäft verbunden.",
+        "providerUnavailable": "Die Plattform ist vorübergehend nicht verfügbar.",
+        "busy": "Die Plattform ist ausgelastet. Versuchen Sie es in Kürze erneut.",
+        "outcomeUnknown": "Status unbekannt. Aktualisieren Sie, um erneut zu prüfen.",
+        "outsideHours": "Online, aber außerhalb der geplanten Bestellzeiten — empfängt keine Bestellungen."
+      }
+    }
+  }
+}

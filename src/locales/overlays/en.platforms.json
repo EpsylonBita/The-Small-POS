@@ -1,0 +1,44 @@
+{
+  "settings": {
+    "settingsHub": {
+      "sections": {
+        "platforms": {
+          "label": "Platforms",
+          "detail": "Delivery platform status"
+        }
+      }
+    },
+    "platforms": {
+      "title": "Delivery Platforms",
+      "helpText": "Open or close connected delivery platforms for this store",
+      "refresh": "Refresh",
+      "loading": "Loading platforms...",
+      "loadFailed": "Could not load platforms",
+      "empty": "No delivery platforms connected",
+      "emptyHelp": "Connect a delivery platform from the admin dashboard to manage it here.",
+      "offline": "This register is offline. Reconnect to open or close platforms.",
+      "uncertain": "Could not confirm the result. Refresh to check the current status.",
+      "open": "Open",
+      "close": "Close",
+      "manualClosureNote": "You can reopen a platform here at any time. If efood stays closed, it reopens at the first register opening after the next Z report.",
+      "acceptingOrders": "Receiving orders",
+      "notAcceptingOrders": "Not receiving orders right now",
+      "lastKnown": "Last known: {{status}}",
+      "status": {
+        "open": "Open",
+        "closed": "Closed",
+        "unknown": "Unknown"
+      },
+      "reason": {
+        "moduleDisabled": "A required module is not enabled on this register.",
+        "unsupported": "This platform cannot be opened or closed from here.",
+        "wrongTerminal": "Manage this platform from its assigned register.",
+        "productionNotConnected": "This platform is not connected to a live store yet.",
+        "providerUnavailable": "The platform is temporarily unavailable.",
+        "busy": "The platform is busy. Try again shortly.",
+        "outcomeUnknown": "Status unknown. Refresh to check again.",
+        "outsideHours": "Online, but outside the scheduled ordering hours — not receiving orders."
+      }
+    }
+  }
+}
