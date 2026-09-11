@@ -169,6 +169,7 @@ const expectNoCredentialSurface = () => {
 
 describe('BOX card is Admin-Dashboard-managed on the till', () => {
   beforeEach(() => {
+    vi.spyOn(document, 'hasFocus').mockReturnValue(true)
     localStorage.clear()
     localStorage.setItem('admin_dashboard_url', 'https://admin.example/')
     mocks.openExternalUrl.mockReset()
@@ -287,5 +288,28 @@ describe('BOX card is Admin-Dashboard-managed on the till', () => {
     await screen.findByText('Glovo')
     expect(screen.getByRole('switch')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Open Admin Dashboard' })).not.toBeInTheDocument()
+  })
+
+  it('manual refresh updates direct enable state and the separate legacy reporting flag together', async () => {
+    let enabled = true
+    mocks.posApiGet.mockImplementation(async (path: string) => path === '/pos/integrations'
+      ? { success: true, data: { integrations: [
+        { plugin_id: 'fiscalization_gr', provider: 'fiscalization_gr', name: 'AADE Direct', is_purchased: true, is_enabled: enabled, status: 'connected', read_only_admin_setup: true,
+          settings: { environment: enabled ? 'test' : 'production' }, environment: 'production' },
+        { plugin_id: 'mydata', provider: 'mydata', name: 'MyData', is_purchased: true, status: 'connected' },
+      ] } }
+      : { success: true, data: { config: { mode: 'provider', status: 'connected' }, provider_status: { is_enabled: enabled } } })
+    render(<IntegrationsPage />)
+    await screen.findByText('AADE Direct')
+    expect(cardInfo('AADE Direct').getByText('Connected')).toBeInTheDocument()
+    expect(cardInfo('AADE Direct').getByText('Environment: Test')).toBeInTheDocument()
+    expect(cardInfo('AADE Direct').queryByText(/Receipts are sent/)).not.toBeInTheDocument()
+    expect(screen.getByText('Receipts are sent to the tax office (AADE) automatically.')).toBeInTheDocument()
+    enabled = false
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+    await waitFor(() => expect(cardInfo('AADE Direct').getByText('Not Connected')).toBeInTheDocument())
+    expect(cardInfo('AADE Direct').getByText('Environment: Live')).toBeInTheDocument()
+    expect(screen.queryByText('Receipts are sent to the tax office (AADE) automatically.')).not.toBeInTheDocument()
+    expect(mocks.posApiGet.mock.calls.filter(([path]) => path === '/pos/mydata/config')).toHaveLength(2)
   })
 })

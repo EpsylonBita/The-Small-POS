@@ -29,6 +29,7 @@
     "panels": { "partsEmpty": "Noch keine geplanten Teile, Arbeiten oder Gebühren.", "estimateEmpty": "Noch kein Kostenvoranschlag erstellt.", "timelineEmpty": "Noch keine Verlaufsereignisse.", "photosEmpty": "Keine Anhangsmetadaten verfügbar.", "conflictsTitle": "Synchronisierungskonflikte", "conflictsEmpty": "Keine Reparaturkonflikte zu prüfen." },
     "messages": { "readyQueued": "Der Status „Abholbereit“ ist zur Synchronisierung vorgemerkt.", "noNotificationSent": "Es wurde noch keine Kundenbenachrichtigung gesendet.", "offline": "Offline-Änderungen bleiben bis zur erneuten Verbindung dieses Terminals vorgemerkt.", "onlineActionRequired": "Diese Aktion erfordert eine Online-Serverprüfung.", "activeShiftRequired": "Starten Sie eine Mitarbeiterschicht, um Reparaturdaten und Aktionen zu laden.", "selectorOnline": "Die Kunden- und Gerätesuche erfordert eine native Online-Verbindung. Bereits ausgewählte kanonische Kunden und Geräte können weiterhin offline übermittelt werden.", "createUnavailable": "Zum Erstellen von Reparaturen sind eine aktive Schicht und die Berechtigung zum Erstellen erforderlich.", "conflictResolutionUnavailable": "Die Konfliktlösung erfordert eine aktive Schicht, eine native Online-Verbindung und die Berechtigung zum Aktualisieren.", "submitInProgress": "Die Reparatur wird gespeichert. Schließen ist vorübergehend deaktiviert.", "finalDiagnosisOnline": "Die endgültige Diagnose erfordert eine Online-Prüfung; Entwürfe können offline vorgemerkt werden.", "estimateOnline": "Kostenvoranschläge und Freigaben erfordern eine Online-Serverprüfung.", "estimateNeedsLines": "Fügen Sie mindestens eine geplante Position hinzu, bevor Sie einen Kostenvoranschlag erstellen.", "photoOneShot": "Das ausgewählte Foto wird einmal gelesen und an die verschlüsselte native Ablage übergeben; der Renderer speichert es nicht.", "photoUnavailable": "Foto-Staging erfordert geladene Einstellungen, Reparaturberechtigung, bekannten Verbindungsstatus und eine aktive Schicht.", "attachmentTypeInvalid": "Dieser Dateityp ist laut Reparatureinstellungen nicht zulässig.", "attachmentTooLarge": "Dieses Foto überschreitet die Größenbegrenzung für Reparaturanhänge.", "attachmentInvalid": "Wählen Sie ein nicht leeres, laut Reparatureinstellungen zulässiges Foto.", "attachmentStageFailed": "Das Foto konnte nicht vorgemerkt werden.", "attachmentOpenFailed": "Der Anhang konnte nicht sicher geöffnet werden.", "loadFailed": "Reparaturen konnten nicht geladen werden.", "commandFailed": "Die Reparaturänderung konnte nicht gespeichert werden.", "assignmentUnavailable": "Die Selbstzuweisung erfordert eine kanonische Mitarbeiteridentität und die Berechtigung zur Reparaturzuweisung.", "settingsUnavailable": "Die Reparaturannahme bleibt deaktiviert, bis verbindliche oder zwischengespeicherte Einstellungen verfügbar sind.", "invalidIntake": "Prüfen Sie die Annahmedaten und versuchen Sie es erneut.", "customerSearchFailed": "Die Kundensuche konnte nicht abgeschlossen werden.", "deviceLoadFailed": "Die Kundengeräte konnten nicht geladen werden.", "deviceCreateFailed": "Das Gerät konnte nicht gespeichert werden.", "secureIdUnavailable": "Sichere Gerätekennungen sind nicht verfügbar. Starten Sie die Anwendung neu, bevor Sie eine Reparatur erstellen." },
     "locked": { "communication": "Customer Messaging ist in diesem Private-Beta-Build nicht aktiviert.", "money": "Reparaturzahlungen, Erstattungen, Fiskalisierung und Auslieferung bleiben gesperrt, bis der typisierte native Geldtransport verfügbar ist.", "approvalTransition": "Der Status Freigegeben wird nur über die protokollierte Freigabeaktion unter Kostenvoranschlag & Freigabe erreicht.", "assignment": "Zuweisungsänderungen bleiben gesperrt, bis eine bereichsgebundene, reparatursichere Personalprojektion verfügbar ist.", "stockReversal": "Die Bestandsrücknahme bleibt gesperrt, weil der native Arbeitsbereich die ursprüngliche Bewegungsreferenz nicht bereitstellt.", "catalog": "Produkt- und Dienstleistungssuche bleibt gesperrt, bis eine reparatursichere native Nur-Lese-Projektion verfügbar ist.", "attachmentOpen": "Vorhandene Anhänge können erst mit signiertem nativen Abruf geöffnet werden.", "printing": "Reparaturdruck bleibt gesperrt, bis die typisierte native Druckwarteschlange verfügbar ist." },
+    "money": { "readiness": { "loading": "Fiskalische Bereitschaft wird geprüft…", "retry": "Erneut versuchen", "nonFiscalInfo": "myDATA ist optional. Reparaturzahlungen können auch ohne das Plugin erfasst werden.", "setupRequired": "Die fiskalische Einrichtung dieser Filiale ist unvollständig.", "countryRequired": "Vor dieser Aktion ist ein Filialland erforderlich.", "providerRequired": "Für fiskalische Aktionen ist ein Fiskalanbieter erforderlich.", "certificationRequired": "Für fiskalische Aktionen ist eine Fiskalzertifizierung erforderlich.", "transportUnavailable": "Die Übermittlung von Fiskaldokumenten ist für diese Integration nicht verfügbar.", "statusUnavailable": "Die fiskalische Bereitschaft konnte nicht ermittelt werden." } },
     "a11y": { "resultsUpdated": "{{count}} Reparaturergebnisse verfügbar.", "currentRepair": "Aktuelle Reparatur: {{number}}", "tabHint": "Wechseln Sie mit der linken und rechten Pfeiltaste zwischen den Tabs.", "statusLabel": "Reparaturstatus: {{status}}" }
   },
   "common": {
@@ -7350,6 +7351,50 @@
       "baudRate": "Baudrate",
       "serialPortRequired": "Serieller Port ist für die USB-Verbindung erforderlich",
       "bluetoothAddressRequired": "Bluetooth-Adresse ist erforderlich",
+      "localSettingsUnavailable": "Lokale Kasseneinstellungen konnten nicht geladen werden. Einrichtung schließen und erneut versuchen.",
+      "bluetoothUnavailable": "Direktes Bluetooth ist auf diesem POS nicht verfügbar. Verwenden Sie vom Hersteller unterstütztes LAN oder eine serielle Verbindung.",
+      "bluetoothOptionUnavailable": "Bluetooth — nicht verfügbar",
+      "physicalConnectionHelp": "LAN wird bevorzugt. CAP Driver steuert die Verbindung: TCP, UDP oder COM im Windows-Dienst des Herstellers wählen und die entsprechende Geräte-IP verwenden. Direktes Bluetooth ist nicht verfügbar.",
+      "capTcpProbe": "Bekannten TCP-ERP-Port vor der Verbindung prüfen (Port erforderlich; für UDP oder COM deaktiviert lassen)",
+      "capOptionalPort": "Die CAP-Driver-LAN-Einrichtung benötigt die Geräte-IP. ERP-Port leer lassen, außer bei aktiviertem TCP-Test oder ausdrücklicher Portangabe des Herstellers.",
+      "protocolUnavailable": "Für die Einrichtung einer Fiskalkasse nicht verfügbar",
+      "capAdvanced": "Erweiterte CAP-Driver-Einstellungen",
+      "capServiceHelp": "Der installierte Herstellerdienst muss laufen. Ein-/Ausgabeordner und Kodierung müssen übereinstimmen. Der Test druckt einen X-Bericht ohne Abschluss; Unterstützung für das genaue Modell und die Firmware beim Hersteller bestätigen.",
+      "capSettingsInvalid": "CAP-Ordner, Dienst, Kodierung, Zeitlimit (5000–300000 ms), Zahlungsarten-Codes (1–20) und EFT-Index (1–99) prüfen.",
+      "capSettings": {
+        "capturePath": "Eingabeordner",
+        "outputPath": "Ausgabeordner",
+        "serviceName": "Windows-Dienstname",
+        "fileEncoding": "Kodierung der Befehlsdateien",
+        "transactionTimeoutMs": "Zeitlimit (ms)",
+        "cashPaymentCode": "Barzahlungscode",
+        "cardPaymentCode": "Kartenzahlungscode",
+        "eftPosIndex": "EFT-POS-Index"
+      },
+      "capSetup": {
+        "checking": "Installierte RBS-Unterstützung wird geprüft…",
+        "unsupported": "Die Einrichtung der RBS-Unterstützung ist unter Windows verfügbar.",
+        "failed": "Prüfung oder Installationsaktion konnte nicht abgeschlossen werden. Aktualisieren und erneut versuchen.",
+        "running": "Der RBS-Dienst läuft. Verbindungsdaten prüfen, dann die Kasse verbinden und testen.",
+        "stopped": "RBS-Unterstützung ist installiert. Verbindungseinrichtung öffnen, Herstellerdienst starten und aktualisieren.",
+        "missing": "RBS-Unterstützung ist nicht installiert. Offizielles Installationsprogramm öffnen und Einrichtung abschließen.",
+        "installerOpened": "Installationsprogramm geöffnet. Windows-Schritte abschließen und aktualisieren. Die Kasse ist noch nicht verifiziert.",
+        "errorCode": "Support-Code",
+        "opening": "Offizielle Einrichtung wird geöffnet…",
+        "openSetup": "Verbindungseinrichtung öffnen",
+        "install": "RBS-Unterstützung installieren",
+        "refresh": "Support-Status aktualisieren"
+      },
+      "discovery": {
+        "find": "Kasse suchen",
+        "searching": "Kassen in diesem LAN werden gesucht…",
+        "help": "Die Suche prüft nur das lokale Netzwerk. Die Auswahl einer IP verbindet oder verifiziert keine Kasse und ändert nicht die CAP-Driver-Dienstkonfiguration.",
+        "failed": "Dieses LAN konnte nicht durchsucht werden. Erneut versuchen oder die Geräte-IP manuell eingeben.",
+        "empty": "Keine RBS/MAT-Kasse gefunden. Netzwerkverbindung prüfen oder IP manuell eingeben.",
+        "select": "Auswählen"
+      },
+      "capTargetMismatch": "Das Ziel des CAP-Dienstes ist unbekannt oder weicht vom Formular ab. Verbindungseinrichtung öffnen, diese IP oder diesen COM-Port im Herstellerdienst einstellen und den Support-Status aktualisieren.",
+      "capServiceTarget": "Ziel des Herstellerdienstes",
       "configSaved": "MyData-Konfiguration gespeichert",
       "dashboardBanner": {
         "title": "Die myDATA-Einrichtung erfolgt im Admin-Dashboard",

@@ -7,6 +7,10 @@ const integrationsSource = readFileSync(
   path.join(process.cwd(), 'src', 'renderer', 'pages', 'IntegrationsPage.tsx'),
   'utf8',
 );
+const deviceSetupSource = readFileSync(
+  path.join(process.cwd(), 'src', 'renderer', 'utils', 'mydata-device-setup.ts'),
+  'utf8',
+);
 const ordersCommandSource = readFileSync(
   path.join(process.cwd(), 'src-tauri', 'src', 'commands', 'orders.rs'),
   'utf8',
@@ -39,10 +43,11 @@ test('MyData fiscal-device setup supports LAN and performs a native protocol tes
     /'usb_serial'\s*\|\s*'bluetooth'\s*\|\s*'network'/,
     'MyData connection type must include network',
   );
-  assert.match(integrationsSource, /bridge\.ecr\.(addDevice|updateDevice)/);
-  assert.match(integrationsSource, /bridge\.ecr\.connectDevice/);
-  assert.match(integrationsSource, /bridge\.ecr\.testConnection/);
-  assert.match(integrationsSource, /protocol_handshake/);
+  assert.match(integrationsSource, /await verifyAndSaveMyDataDevice\(\s*bridge\.ecr, nativeDevice, Boolean\(existing\), terminalId, deviceConnection/);
+  assert.match(deviceSetupSource, /ecr\.(addDevice|updateDevice)/);
+  assert.match(deviceSetupSource, /ecr\.connectDevice/);
+  assert.match(deviceSetupSource, /ecr\.testConnection/);
+  assert.match(deviceSetupSource, /protocol_handshake: true/);
   assert.match(integrationsSource, /isMyDataFiscalDeviceMode\s*&&/);
   assert.match(
     integrationsSource,

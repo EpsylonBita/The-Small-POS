@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import en from '../../../../locales/en.json'
 import type { RepairCapabilitiesSnapshot } from '../contracts'
+import type { RepairFiscalReadiness } from '../../../services/RepairMoneyApiService'
 
 const mocks = vi.hoisted(() => ({
   createSecureRepairId: vi.fn(() => '99999999-9999-4999-8999-999999999999'),
@@ -68,9 +69,37 @@ const capabilities: RepairCapabilitiesSnapshot = {
   overrideDeliveryBalance: true,
 }
 
+const readyFiscalReadiness: RepairFiscalReadiness = {
+  ready: true,
+  code: 'ready',
+  countryCode: 'GR',
+  fiscalMode: 'fiscal',
+  capabilities: { collectPayments: true, refundPayments: true, fiscalize: true },
+}
+
+const readyOperationalReadiness: RepairFiscalReadiness = {
+  ...readyFiscalReadiness,
+  fiscalMode: 'non_fiscal',
+  capabilities: { collectPayments: true, refundPayments: true, fiscalize: false },
+}
+
+function fiscalProjection(state = 'issued') {
+  return {
+    ...projection,
+    orders: [{ ...projection.orders[0], fiscal_state: state }],
+    fiscal_commands: [{
+      id: '66666666-6666-4666-8666-666666666666',
+      order_id: projection.orders[0].id,
+      purpose: 'deposit', amount_minor: 4000, status: state === 'issued' ? 'submitted' : 'queued',
+      attempt_count: 1, occurred_at: '2026-08-31T10:00:00.000Z', updated_at: '2026-08-31T10:00:00.000Z',
+    }],
+  }
+}
+
 function createMoneyService() {
   return {
     getSettlement: vi.fn().mockResolvedValue(projection),
+    getFiscalReadiness: vi.fn().mockResolvedValue(readyFiscalReadiness),
     createOrRefreshSettlement: vi.fn().mockResolvedValue({ success: true, data: {} }),
     recordPayment: vi.fn().mockResolvedValue({ success: true, data: {} }),
     recordRefund: vi.fn().mockResolvedValue({ success: true, data: {} }),
@@ -103,7 +132,7 @@ function renderPanel(overrides: Partial<React.ComponentProps<typeof RepairMoneyP
   const view = render(<I18nextProvider i18n={instance}><RepairMoneyPanel {...props} /></I18nextProvider>)
   return {
     props,
-    moneyService,
+    moneyService: props.moneyService as ReturnType<typeof createMoneyService>,
     rerender: (next: Partial<React.ComponentProps<typeof RepairMoneyPanel>>) => view.rerender(
       <I18nextProvider i18n={instance}><RepairMoneyPanel {...props} {...next} /></I18nextProvider>,
     ),
@@ -286,5 +315,297 @@ describe('RepairMoneyPanel', () => {
     await waitFor(() => expect(moneyService.deliver).toHaveBeenCalledWith(expect.objectContaining({
       payload: { reason: 'Approved account customer' },
     })))
+  })
+
+  it('shows a loading state while fiscal readiness is being checked', async () => {
+    const moneyService = createMoneyService()
+    let resolveReadiness: ((value: RepairFiscalReadiness) => void) | undefined
+    moneyService.getFiscalReadiness.mockImplementation(() => new Promise((resolve) => {
+      resolveReadiness = resolve
+    }))
+    renderPanel({ moneyService })
+
+    expect(await screen.findByText('Checking fiscal readiness…')).toBeVisible()
+
+    await act(async () => resolveReadiness?.(readyFiscalReadiness))
+    await waitFor(() => expect(screen.queryByText('Checking fiscal readiness…')).not.toBeInTheDocument())
+  })
+
+  it('shows a bounded blocked-readiness message with retry and denies fiscal-gated actions', async () => {
+    const moneyService = createMoneyService()
+    moneyService.getSettlement.mockResolvedValue(fiscalProjection())
+    moneyService.getFiscalReadiness.mockResolvedValue({
+      ready: false,
+      code: 'certification_required',
+      countryCode: 'GR',
+      fiscalMode: null,
+      capabilities: { collectPayments: false, refundPayments: false, fiscalize: false },
+    })
+    renderPanel({ moneyService })
+    await screen.findByText('€60.00')
+
+    expect(await screen.findByText('Fiscal certification is required for fiscal actions.')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Issue fiscal document' })).toBeDisabled()
+
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Payment amount' }), { target: { value: '60.00' } })
+    expect(screen.getByRole('button', { name: 'Collect payment' })).toBeDisabled()
+  })
+
+  it('shows optional myDATA info and still allows collecting payment when readiness is non-fiscal ready', async () => {
+    const moneyService = createMoneyService()
+    moneyService.getFiscalReadiness.mockResolvedValue({
+      ready: true,
+      code: 'ready',
+      countryCode: 'GR',
+      fiscalMode: 'non_fiscal',
+      capabilities: { collectPayments: true, refundPayments: true, fiscalize: false },
+    })
+    renderPanel({ moneyService })
+    await screen.findByText('€60.00')
+
+    expect(await screen.findByText(
+      'myDATA is optional. Repair payments can be recorded without the plugin.',
+    )).toBeVisible()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Issue fiscal document' })).toBeDisabled()
+
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Payment amount' }), { target: { value: '60.00' } })
+    expect(screen.getByRole('button', { name: 'Collect payment' })).toBeEnabled()
+  })
+
+  it('denies fiscal-gated actions and shows a bounded message without leaking internal errors when readiness fails to load', async () => {
+    const moneyService = createMoneyService()
+    moneyService.getSettlement.mockResolvedValue(fiscalProjection())
+    moneyService.getFiscalReadiness.mockRejectedValue(new Error('internal transport detail that must not leak'))
+    renderPanel({ moneyService })
+    await screen.findByText('€60.00')
+
+    expect(await screen.findByText('Fiscal readiness could not be determined.')).toBeVisible()
+    expect(screen.queryByText('internal transport detail that must not leak')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Collect payment' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Refund payment' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Issue fiscal document' })).toBeDisabled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(moneyService.getFiscalReadiness).toHaveBeenCalledTimes(2))
+  })
+
+  it('ignores a stale fiscal readiness result after the staff shift context changes', async () => {
+    const moneyService = createMoneyService()
+    let resolveOld: ((value: RepairFiscalReadiness) => void) | undefined
+    let resolveNext: ((value: RepairFiscalReadiness) => void) | undefined
+    let calls = 0
+    moneyService.getFiscalReadiness.mockImplementation(() => new Promise((resolve) => {
+      calls += 1
+      if (calls === 1) resolveOld = resolve
+      else resolveNext = resolve
+    }))
+    const { rerender } = renderPanel({ moneyService, hasActiveShift: true })
+    await waitFor(() => expect(moneyService.getFiscalReadiness).toHaveBeenCalledTimes(1))
+
+    rerender({ hasActiveShift: false })
+    await waitFor(() => expect(moneyService.getFiscalReadiness).toHaveBeenCalledTimes(2))
+
+    await act(async () => resolveNext?.({
+      ready: false,
+      code: 'setup_required',
+      countryCode: 'GR',
+      fiscalMode: null,
+      capabilities: { collectPayments: false, refundPayments: false, fiscalize: false },
+    }))
+    expect(await screen.findByText('Fiscal setup for this branch is incomplete.')).toBeVisible()
+
+    await act(async () => resolveOld?.(readyFiscalReadiness))
+    expect(screen.getByText('Fiscal setup for this branch is incomplete.')).toBeVisible()
+  })
+
+  it('ignores a stale fiscal readiness result after the repair changes', async () => {
+    const nextRepairId = '55555555-5555-4555-8555-555555555555'
+    const moneyService = createMoneyService()
+    let resolveOld: ((value: RepairFiscalReadiness) => void) | undefined
+    let resolveNext: ((value: RepairFiscalReadiness) => void) | undefined
+    let calls = 0
+    moneyService.getFiscalReadiness.mockImplementation(() => new Promise((resolve) => {
+      calls += 1
+      if (calls === 1) resolveOld = resolve
+      else resolveNext = resolve
+    }))
+    const { rerender } = renderPanel({ moneyService })
+    await waitFor(() => expect(moneyService.getFiscalReadiness).toHaveBeenCalledTimes(1))
+
+    rerender({ repairId: nextRepairId, repairVersion: 1 })
+    await waitFor(() => expect(moneyService.getFiscalReadiness).toHaveBeenCalledTimes(2))
+
+    await act(async () => resolveNext?.({
+      ready: false,
+      code: 'setup_required',
+      countryCode: 'GR',
+      fiscalMode: null,
+      capabilities: { collectPayments: false, refundPayments: false, fiscalize: false },
+    }))
+    expect(await screen.findByText('Fiscal setup for this branch is incomplete.')).toBeVisible()
+
+    await act(async () => resolveOld?.(readyFiscalReadiness))
+    expect(screen.getByText('Fiscal setup for this branch is incomplete.')).toBeVisible()
+  })
+
+  it('allows a partial payment without deposit support when readiness is non-fiscal ready', async () => {
+    const moneyService = createMoneyService()
+    moneyService.getSettlement.mockResolvedValue({ ...projection, paid_minor: 0, balance_minor: 10000, payments: [] })
+    moneyService.getFiscalReadiness.mockResolvedValue({
+      ready: true,
+      code: 'ready',
+      countryCode: 'GR',
+      fiscalMode: 'non_fiscal',
+      capabilities: { collectPayments: true, refundPayments: true, fiscalize: false },
+    })
+    const { moneyService: service } = renderPanel({ moneyService, repairDepositSupported: false })
+    await screen.findByText('€0.00')
+    await screen.findByText('myDATA is optional. Repair payments can be recorded without the plugin.')
+
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Payment amount' }), { target: { value: '20.00' } })
+    expect(screen.getByRole('button', { name: 'Collect payment' })).toBeEnabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Collect payment' }))
+
+    await waitFor(() => expect(service.recordPayment).toHaveBeenCalledWith(expect.objectContaining({
+      payload: expect.objectContaining({ amount_minor: 2000 }),
+    })))
+  })
+
+  it('still denies a partial payment without deposit support when readiness is plain fiscal ready', async () => {
+    const moneyService = createMoneyService()
+    moneyService.getSettlement.mockResolvedValue(fiscalProjection())
+    renderPanel({ moneyService, repairDepositSupported: false })
+    await screen.findByText('€60.00')
+
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Payment amount' }), { target: { value: '20.00' } })
+    expect(screen.getByRole('button', { name: 'Collect payment' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Collect payment' }))
+
+    expect(moneyService.recordPayment).not.toHaveBeenCalled()
+  })
+
+  it('allows collecting and refunding existing operational order history even when branch readiness is blocked', async () => {
+    const moneyService = createMoneyService()
+    moneyService.getFiscalReadiness.mockResolvedValue({
+      ready: false,
+      code: 'provider_required',
+      countryCode: 'GR',
+      fiscalMode: null,
+      capabilities: { collectPayments: false, refundPayments: false, fiscalize: false },
+    })
+    const { moneyService: service } = renderPanel({ moneyService })
+    await screen.findByText('€60.00')
+    await screen.findByText('A fiscal provider is required for fiscal actions.')
+
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Payment amount' }), { target: { value: '20.00' } })
+    expect(screen.getByRole('button', { name: 'Collect payment' })).toBeEnabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Collect payment' }))
+    await waitFor(() => expect(service.recordPayment).toHaveBeenCalled())
+
+    fireEvent.change(screen.getByRole('combobox', { name: 'Payment to refund' }), { target: { value: PAYMENT_ID } })
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Refund amount' }), { target: { value: '10.00' } })
+    fireEvent.change(screen.getByRole('textbox', { name: 'Refund reason' }), { target: { value: 'Customer request' } })
+    expect(screen.getByRole('button', { name: 'Refund payment' })).toBeEnabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Refund payment' }))
+
+    await waitFor(() => expect(service.recordRefund).toHaveBeenCalled())
+  })
+
+  it('does not allow the operational override once a fiscal command exists for that order', async () => {
+    const moneyService = createMoneyService()
+    moneyService.getFiscalReadiness.mockResolvedValue({
+      ready: false,
+      code: 'provider_required',
+      countryCode: 'GR',
+      fiscalMode: null,
+      capabilities: { collectPayments: false, refundPayments: false, fiscalize: false },
+    })
+    moneyService.getSettlement.mockResolvedValue({
+      ...projection,
+      fiscal_commands: [{
+        id: '66666666-6666-4666-8666-666666666666',
+        order_id: projection.orders[0].id,
+        purpose: 'sale',
+        amount_minor: 10000,
+        status: 'submitted',
+        attempt_count: 1,
+        occurred_at: '2026-08-31T10:00:00.000Z',
+        updated_at: '2026-08-31T10:00:00.000Z',
+      }],
+    })
+    const { moneyService: service } = renderPanel({ moneyService })
+    await screen.findByText('€60.00')
+    await screen.findByText('A fiscal provider is required for fiscal actions.')
+
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Payment amount' }), { target: { value: '20.00' } })
+    expect(screen.getByRole('button', { name: 'Collect payment' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Collect payment' }))
+
+    expect(service.recordPayment).not.toHaveBeenCalled()
+  })
+
+  it.each(['issued', 'issue_pending', 'unknown', 'issue_failed', 'correction_pending', 'cancelled'])(
+    'keeps %s fiscal history blocked after the optional plugin is disabled', async state => {
+      const moneyService = createMoneyService()
+      moneyService.getSettlement.mockResolvedValue(fiscalProjection(state))
+      moneyService.getFiscalReadiness.mockResolvedValue(readyOperationalReadiness)
+      renderPanel({ moneyService })
+      await screen.findByText('myDATA is optional. Repair payments can be recorded without the plugin.')
+      fireEvent.change(screen.getByRole('spinbutton', { name: 'Payment amount' }), { target: { value: '20.00' } })
+      fireEvent.change(screen.getByRole('combobox', { name: 'Payment to refund' }), { target: { value: PAYMENT_ID } })
+      fireEvent.change(screen.getByRole('spinbutton', { name: 'Refund amount' }), { target: { value: '10.00' } })
+      fireEvent.change(screen.getByRole('textbox', { name: 'Refund reason' }), { target: { value: 'Customer request' } })
+      expect(screen.getByRole('button', { name: 'Collect payment' })).toBeDisabled()
+      expect(screen.getByRole('button', { name: 'Refund payment' })).toBeDisabled()
+      fireEvent.click(screen.getByRole('button', { name: 'Collect payment' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Refund payment' }))
+      expect(moneyService.recordPayment).not.toHaveBeenCalled()
+      expect(moneyService.recordRefund).not.toHaveBeenCalled()
+    },
+  )
+
+  it('keeps unresolved fiscal history blocked even when branch fiscal readiness is ready', async () => {
+    const moneyService = createMoneyService()
+    moneyService.getSettlement.mockResolvedValue(fiscalProjection('unknown'))
+    renderPanel({ moneyService })
+    await screen.findByText('€60.00')
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Payment amount' }), { target: { value: '60.00' } })
+    fireEvent.change(screen.getByRole('combobox', { name: 'Payment to refund' }), { target: { value: PAYMENT_ID } })
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Refund amount' }), { target: { value: '10.00' } })
+    fireEvent.change(screen.getByRole('textbox', { name: 'Refund reason' }), { target: { value: 'Customer request' } })
+    expect(screen.getByRole('button', { name: 'Collect payment' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Refund payment' })).toBeDisabled()
+  })
+
+  it('does not borrow another order’s operational history for collection or the selected refund', async () => {
+    const moneyService = createMoneyService()
+    const supplementId = '77777777-7777-4777-8777-777777777777'
+    const supplementPaymentId = '88888888-8888-4888-8888-888888888888'
+    moneyService.getFiscalReadiness.mockResolvedValue(readyOperationalReadiness)
+    moneyService.getSettlement.mockResolvedValue({
+      ...projection,
+      total_minor: 15000, paid_minor: 11000, balance_minor: 4000,
+      orders: [
+        { ...projection.orders[0], fiscal_state: 'recognized_non_fiscal', payment_status: 'paid' },
+        { ...projection.orders[0], id: supplementId, role: 'supplement', fiscal_state: 'issued', total_minor: 5000 },
+      ],
+      payments: [
+        { ...projection.payments[0], amount_minor: 10000, refundable_minor: 10000 },
+        { ...projection.payments[0], id: supplementPaymentId, order_id: supplementId, amount_minor: 1000, refundable_minor: 1000 },
+      ],
+      fiscal_commands: [{ ...fiscalProjection().fiscal_commands[0], order_id: supplementId }],
+    })
+    renderPanel({ moneyService })
+    await screen.findByText('myDATA is optional. Repair payments can be recorded without the plugin.')
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Payment amount' }), { target: { value: '40.00' } })
+    expect(screen.getByRole('button', { name: 'Collect payment' })).toBeDisabled()
+    fireEvent.change(screen.getByRole('combobox', { name: 'Payment to refund' }), { target: { value: supplementPaymentId } })
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Refund amount' }), { target: { value: '10.00' } })
+    fireEvent.change(screen.getByRole('textbox', { name: 'Refund reason' }), { target: { value: 'Customer request' } })
+    expect(screen.getByRole('button', { name: 'Refund payment' })).toBeDisabled()
+    fireEvent.change(screen.getByRole('combobox', { name: 'Payment to refund' }), { target: { value: PAYMENT_ID } })
+    expect(screen.getByRole('button', { name: 'Refund payment' })).toBeEnabled()
   })
 })

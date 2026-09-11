@@ -48,6 +48,34 @@ describe('PlatformsSection', () => {
   });
   afterEach(cleanup);
 
+  it.each([
+    ['provider_forbidden', true],
+    ['provider_forbidden (HTTP 502)', true],
+    ['provider_forbidden (HTTP 502): upstream refusal', true],
+    ['HTTP 403', false],
+    ['network timeout', false],
+    ['not_provider_forbidden_suffix', false],
+  ])('distinguishes provider refusal from an unknown outcome: %s', async (error, forbidden) => {
+    posApiGet.mockResolvedValue({ success: true, data: { platforms: [makePlatform({ open: false })] } });
+    posApiPost.mockResolvedValue({ success: false, error });
+    render(<PlatformsSection />);
+    fireEvent.click(await screen.findByRole('switch'));
+    await screen.findByText('Unknown');
+    expect(screen.getByText('Last known: Closed')).toBeInTheDocument();
+    expect(Boolean(screen.queryByText(/The platform rejected this change/))).toBe(forbidden);
+    expect(Boolean(screen.queryByText('Could not confirm the result. Refresh to check the current status.'))).toBe(!forbidden);
+    expect(posApiPost).toHaveBeenCalledTimes(1);
+  });
+
+  it('recognizes a provider refusal in the response body', async () => {
+    posApiGet.mockResolvedValue({ success: true, data: { platforms: [makePlatform({ open: false })] } });
+    posApiPost.mockResolvedValue({ success: true, data: { success: false, error: 'provider_forbidden' } });
+    render(<PlatformsSection />);
+    fireEvent.click(await screen.findByRole('switch'));
+    await screen.findByText(/The platform rejected this change/);
+    expect(screen.queryByRole('switch')).not.toBeInTheDocument();
+  });
+
   it('calls the unwrapped platforms contract and renders a real switch reflecting open state', async () => {
     posApiGet.mockResolvedValue({ success: true, data: { success: true, platforms: [makePlatform({ open: true })] } });
     render(<PlatformsSection />);

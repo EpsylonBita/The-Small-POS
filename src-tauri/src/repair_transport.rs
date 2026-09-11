@@ -2236,6 +2236,7 @@ pub(crate) enum RepairJsonRequest {
     FinancialProjection {
         repair_id: String,
     },
+    FiscalReadiness {},
     Command {
         repair_id: String,
         operation_id: String,
@@ -2337,7 +2338,8 @@ pub(crate) fn required_permission_for_json_request(
         | RepairJsonRequest::Customers { .. }
         | RepairJsonRequest::CustomerDevices { .. }
         | RepairJsonRequest::PrintProjection { .. }
-        | RepairJsonRequest::FinancialProjection { .. } => Ok("repairs.read"),
+        | RepairJsonRequest::FinancialProjection { .. }
+        | RepairJsonRequest::FiscalReadiness {} => Ok("repairs.read"),
         RepairJsonRequest::Attachments { .. } => Ok("repairs.attachments"),
         RepairJsonRequest::CreateCustomerDevice { .. } => Ok("repairs.create"),
         RepairJsonRequest::Command { command, .. } => {
@@ -2458,6 +2460,7 @@ enum RepairJsonResponseShape {
     Attachments,
     PrintProjection,
     FinancialProjection,
+    FiscalReadiness,
     CommandSignal,
     Settlement,
     Payment,
@@ -3016,6 +3019,12 @@ pub(crate) fn prepare_repair_json_request(
                 RepairJsonResponseShape::FinancialProjection,
             )
         }
+        RepairJsonRequest::FiscalReadiness {} => (
+            "GET",
+            "/api/pos/repairs/fiscal-readiness".to_string(),
+            None,
+            RepairJsonResponseShape::FiscalReadiness,
+        ),
         RepairJsonRequest::Command {
             repair_id,
             operation_id,
@@ -3398,6 +3407,85 @@ struct RawRepairFinancialProjection {
     payments: Vec<RawRepairFinancialPayment>,
     adjustments: Vec<RawRepairFinancialAdjustment>,
     fiscal_commands: Vec<RawRepairFinancialFiscalCommand>,
+}
+
+const REPAIR_FISCAL_READINESS_CODES: [&str; 7] = [
+    "ready",
+    "setup_required",
+    "country_required",
+    "provider_required",
+    "certification_required",
+    "transport_unavailable",
+    "status_unavailable",
+];
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawRepairFiscalReadinessCapabilities {
+    #[serde(rename = "collectPayments")]
+    collect_payments: bool,
+    #[serde(rename = "refundPayments")]
+    refund_payments: bool,
+    fiscalize: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawRepairFiscalReadiness {
+    ready: bool,
+    code: String,
+    #[serde(rename = "countryCode")]
+    country_code: Option<String>,
+    #[serde(rename = "fiscalMode")]
+    fiscal_mode: Option<String>,
+    capabilities: RawRepairFiscalReadinessCapabilities,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawRepairFiscalReadinessResponse {
+    readiness: RawRepairFiscalReadiness,
+}
+
+/// Fiscal readiness is a bounded status projection, never an authorization
+/// control: the SQL money path re-checks everything. The classifier therefore
+/// keeps no optimistic default and rejects any response that does not reconcile
+/// (`ready` exactly matching the `ready` code, no capability granted while
+/// blocked, and no fiscalize capability outside a fiscal mode).
+fn classify_fiscal_readiness_success(body: &[u8]) -> Option<Value> {
+    let response: RawRepairFiscalReadinessResponse = serde_json::from_slice(body).ok()?;
+    let readiness = &response.readiness;
+    if !REPAIR_FISCAL_READINESS_CODES.contains(&readiness.code.as_str())
+        || readiness.ready != (readiness.code == "ready")
+    {
+        return None;
+    }
+    if let Some(country_code) = readiness.country_code.as_deref() {
+        if country_code.len() != 2 || !country_code.bytes().all(|byte| byte.is_ascii_uppercase()) {
+            return None;
+        }
+    }
+    let fiscal_mode = readiness.fiscal_mode.as_deref();
+    if !matches!(fiscal_mode, None | Some("fiscal") | Some("non_fiscal")) {
+        return None;
+    }
+    let capabilities = &readiness.capabilities;
+    let any_capability =
+        capabilities.collect_payments || capabilities.refund_payments || capabilities.fiscalize;
+    if readiness.country_code.is_none() && fiscal_mode.is_some() {
+        return None;
+    }
+    if readiness.ready {
+        if readiness.country_code.is_none() || fiscal_mode.is_none() {
+            return None;
+        }
+    } else if any_capability {
+        return None;
+    }
+    if capabilities.fiscalize && fiscal_mode != Some("fiscal") {
+        return None;
+    }
+    serde_json::to_value(response).ok()
 }
 
 fn bounded_financial_text(value: &str, maximum: usize) -> bool {
@@ -4955,6 +5043,9 @@ fn classify_repair_json_response(
             RepairJsonResponseShape::FinancialProjection => {
                 classify_financial_projection_success(&response.body, prepared)
             }
+            RepairJsonResponseShape::FiscalReadiness => {
+                classify_fiscal_readiness_success(&response.body)
+            }
             RepairJsonResponseShape::CommandSignal => {
                 validate_command_signal_success(&response.body, prepared)
             }
@@ -5716,6 +5807,125 @@ mod financial_projection_tests {
             &prepared(),
         )
         .is_none());
+    }
+}
+
+#[cfg(test)]
+mod fiscal_readiness_tests {
+    use super::*;
+
+    fn readiness(value: Value) -> Value {
+        serde_json::json!({ "readiness": value })
+    }
+
+    fn ready_fiscal() -> Value {
+        readiness(serde_json::json!({
+            "ready": true,
+            "code": "ready",
+            "countryCode": "GR",
+            "fiscalMode": "fiscal",
+            "capabilities": {
+                "collectPayments": true,
+                "refundPayments": true,
+                "fiscalize": true
+            }
+        }))
+    }
+
+    fn blocked_setup_required() -> Value {
+        readiness(serde_json::json!({
+            "ready": false,
+            "code": "setup_required",
+            "countryCode": "GR",
+            "fiscalMode": null,
+            "capabilities": {
+                "collectPayments": false,
+                "refundPayments": false,
+                "fiscalize": false
+            }
+        }))
+    }
+
+    #[test]
+    fn fiscal_readiness_is_a_bounded_read_on_the_terminal_scoped_endpoint() {
+        assert_eq!(
+            required_permission_for_json_request(&RepairJsonRequest::FiscalReadiness {}).unwrap(),
+            "repairs.read"
+        );
+        let request: RepairJsonRequest =
+            serde_json::from_str(r#"{"action":"fiscal_readiness"}"#).unwrap();
+        assert!(matches!(request, RepairJsonRequest::FiscalReadiness {}));
+        assert!(serde_json::from_str::<RepairJsonRequest>(
+            r#"{"action":"fiscal_readiness","repair_id":"20000000-0000-4000-8000-000000000001"}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn fiscal_readiness_accepts_only_the_exact_shared_readiness_shape() {
+        assert!(classify_fiscal_readiness_success(ready_fiscal().to_string().as_bytes()).is_some());
+        assert!(
+            classify_fiscal_readiness_success(blocked_setup_required().to_string().as_bytes())
+                .is_some()
+        );
+
+        let mut extra_field = ready_fiscal();
+        extra_field["readiness"]["providerId"] = Value::String("provider-secret".to_string());
+        assert!(classify_fiscal_readiness_success(extra_field.to_string().as_bytes()).is_none());
+
+        let mut extra_envelope = ready_fiscal();
+        extra_envelope["detail"] = Value::String("Certified fiscal repair path".to_string());
+        assert!(classify_fiscal_readiness_success(extra_envelope.to_string().as_bytes()).is_none());
+
+        assert!(classify_fiscal_readiness_success(b"{\"readiness\":null}").is_none());
+        assert!(classify_fiscal_readiness_success(b"not json").is_none());
+    }
+
+    #[test]
+    fn fiscal_readiness_rejects_unbounded_or_unreconciled_status() {
+        let mut unknown_code = ready_fiscal();
+        unknown_code["readiness"]["code"] = Value::String("mostly_ready".to_string());
+        assert!(classify_fiscal_readiness_success(unknown_code.to_string().as_bytes()).is_none());
+
+        let mut ready_without_ready_code = ready_fiscal();
+        ready_without_ready_code["readiness"]["code"] = Value::String("setup_required".to_string());
+        assert!(
+            classify_fiscal_readiness_success(ready_without_ready_code.to_string().as_bytes())
+                .is_none()
+        );
+
+        let mut blocked_with_capability = blocked_setup_required();
+        blocked_with_capability["readiness"]["capabilities"]["collectPayments"] = Value::Bool(true);
+        assert!(
+            classify_fiscal_readiness_success(blocked_with_capability.to_string().as_bytes())
+                .is_none()
+        );
+
+        let mut non_fiscal_fiscalize = ready_fiscal();
+        non_fiscal_fiscalize["readiness"]["fiscalMode"] = Value::String("non_fiscal".to_string());
+        assert!(
+            classify_fiscal_readiness_success(non_fiscal_fiscalize.to_string().as_bytes())
+                .is_none()
+        );
+
+        let mut bad_country = ready_fiscal();
+        bad_country["readiness"]["countryCode"] = Value::String("gr".to_string());
+        assert!(classify_fiscal_readiness_success(bad_country.to_string().as_bytes()).is_none());
+
+        let mut ready_without_country = ready_fiscal();
+        ready_without_country["readiness"]["countryCode"] = Value::Null;
+        assert!(
+            classify_fiscal_readiness_success(ready_without_country.to_string().as_bytes())
+                .is_none()
+        );
+
+        let mut mode_without_country = blocked_setup_required();
+        mode_without_country["readiness"]["countryCode"] = Value::Null;
+        mode_without_country["readiness"]["fiscalMode"] = Value::String("fiscal".to_string());
+        assert!(
+            classify_fiscal_readiness_success(mode_without_country.to_string().as_bytes())
+                .is_none()
+        );
     }
 }
 

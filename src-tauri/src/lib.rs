@@ -1589,6 +1589,9 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             commands::callerid_firewall::callerid_firewall_status,
             commands::callerid_firewall::callerid_firewall_enable,
             commands::callerid_firewall::callerid_firewall_remove,
+            // Cap Driver setup assistance (status + official installer launch)
+            commands::cap_setup::ecr_cap_setup,
+            commands::cap_discovery::ecr_cap_discover,
             // Invoice capture — connected scanner (WIA)
             commands::capture_scanner::capture_scanner_list,
             commands::capture_scanner::capture_scanner_test,

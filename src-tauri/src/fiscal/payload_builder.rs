@@ -4,7 +4,7 @@
 //! Implements Task 18 of `.claude/specs/fiscalization-core/tasks.md`.
 //! Satisfies Req 4.9.
 //!
-//! ## Status: FULL IMPLEMENTATION (audit #1 fix — 2026-05-25)
+//! ## Status: populated generic payload; GR financial snapshot work remains
 //!
 //! Earlier revision was a scaffold that emitted empty `vatBreakdown` /
 //! `lines` / `payments` / `metadata` arrays — fiscalization audit
@@ -20,17 +20,20 @@
 //!     total_price}, ...]`).
 //!   * **payments**    — `order_payments WHERE order_id=? AND status='completed'`.
 //!   * **vatBreakdown** — single aggregated entry derived from
-//!     `orders.tax_amount` + payments-sum (defensive
-//!     grossCents source — payments are the authoritative
-//!     "what the cashier rang up" figure).
+//!     stored order tax + order gross, with legacy amount conversion
+//!     only when the corresponding integer cents are absent.
 //!   * **metadata**    — country-agnostic `kind` + HR/GR-friendly
 //!     `operatorOib` (looked up via local_settings),
 //!     `sequenceNumber` (allocated atomically via
 //!     [`super::sequence_counter::next_sequence`]),
-//!     `paymentMethodCode` (mapped from
-//!     `orders.payment_method` to CIS codes G/K/C/T/O).
+//!     `paymentMethodCode` (mapped from completed payment rows
+//!     to CIS codes G/K/C/T/O; mixed methods use O).
 //!
-//! ## Documented limitations (audit #1 partial coverage)
+//! ## Documented limitations
+//!
+//!   * **Issuance and tax snapshots** — the authoritative issuance moment
+//!     and immutable per-line VAT snapshot are unresolved. Populating this
+//!     generic payload does not establish GR production readiness.
 //!
 //!   * **Single-rate VAT** — pos-tauri's `orders` row carries one
 //!     `tax_rate` for the whole order. Multi-rate baskets (e.g. food at
@@ -44,11 +47,9 @@
 //!     existing settings-sync path. Missing both → empty string,
 //!     validator returns terminal `payload_invalid: metadata.operatorOib
 //!     is required` with a clear remediation message.
-//!   * **Mobile parallel** — `POSSystemMobile/src/services/fiscal/
-//!     buildFiscalReceiptInput.ts` has the same empty-arrays bug but is
-//!     scope-split: separate codebase, separate op-sqlite testing
-//!     concerns. The pos-tauri fix here is the larger of the two
-//!     deliverables.
+//!   * **Mobile parallel** — `POSSystemMobile/src/services/fiscal/`
+//!     reads actual completed payment rows and populates the generic
+//!     payload, but shares the unresolved per-line VAT snapshot limitation.
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, SecondsFormat, TimeZone, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -92,8 +93,8 @@ struct OrderHeader {
     organization_id: String,
     receipt_number: String,
     issued_at: String,
-    total_amount: f64,
-    tax_amount: f64,
+    total_cents: i64,
+    tax_cents: i64,
     items_json: String,
     staff_id: Option<String>,
     tax_rate: Option<f64>,
@@ -104,17 +105,16 @@ struct OrderHeader {
 struct PaymentRow {
     id: String,
     method: String,
-    amount: f64,
+    amount_cents: i64,
     transaction_ref: Option<String>,
 }
 
 /// Build the canonical fiscal receipt payload.
 ///
 /// Returns a JSON value ready for `serde_json::to_string` over the wire.
-/// Errors only on the order-not-found case. Every other field-level
-/// shortcoming (missing items JSON, missing operatorOib, missing tax_rate)
-/// is downgraded gracefully — the adapter validator will reject with a
-/// clear `payload_invalid` reason that the admin health view surfaces.
+/// Propagates missing-order and storage/query/sequence failures. Missing
+/// field values (items, operatorOib, tax_rate) remain for adapter validation;
+/// no settlement or issuance decision is made by this payload builder.
 pub fn build_fiscal_receipt_input(
     conn: &Connection,
     order_id: &str,
@@ -124,25 +124,12 @@ pub fn build_fiscal_receipt_input(
     let parsed_items = parse_items_json(&header.items_json);
     let payments = read_completed_payments(conn, order_id)?;
 
-    // Authoritative grossCents = sum of completed payments. This is the
-    // "what the cashier actually rang up" figure. If no payments exist,
-    // fall back to the order header total — the validator will reject the
-    // empty payments array anyway, but the totals stay internally
-    // consistent so other validation paths can still surface useful
-    // diagnostics.
-    let gross_cents: i64 = if payments.is_empty() {
-        Cents::round_half_even(header.total_amount).as_i64()
-    } else {
-        payments
-            .iter()
-            .map(|p| Cents::round_half_even(p.amount).as_i64())
-            .sum()
-    };
+    // A partial settlement must never reduce the invoice to the paid amount.
+    // Keep actual payments separate so adapter validation can detect a mismatch.
+    let gross_cents = header.total_cents;
 
-    let tax_cents = if header.tax_amount > 0.0 {
-        Cents::round_half_even(header.tax_amount)
-            .as_i64()
-            .min(gross_cents)
+    let tax_cents = if header.tax_cents > 0 {
+        header.tax_cents.min(gross_cents)
     } else {
         0
     };
@@ -208,8 +195,8 @@ fn read_order_header(conn: &Connection, order_id: &str) -> Result<OrderHeader, S
             COALESCE(organization_id, ''),
             COALESCE(receipt_number, id),
             COALESCE(created_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-            COALESCE(total_amount, 0.0),
-            COALESCE(tax_amount, 0.0),
+            total_amount_cents, COALESCE(total_amount, 0.0),
+            tax_amount_cents, COALESCE(tax_amount, 0.0),
             COALESCE(items, '[]'),
             staff_id,
             tax_rate
@@ -221,17 +208,28 @@ fn read_order_header(conn: &Connection, order_id: &str) -> Result<OrderHeader, S
                 organization_id: row.get(0)?,
                 receipt_number: row.get(1)?,
                 issued_at: row.get(2)?,
-                total_amount: row.get(3)?,
-                tax_amount: row.get(4)?,
-                items_json: row.get(5)?,
-                staff_id: row.get(6)?,
-                tax_rate: row.get(7)?,
+                total_cents: read_cents(row, 3, 4)?,
+                tax_cents: read_cents(row, 5, 6)?,
+                items_json: row.get(7)?,
+                staff_id: row.get(8)?,
+                tax_rate: row.get(9)?,
             })
         },
     )
     .optional()
     .map_err(|e| format!("read orders header for {order_id}: {e}"))?
     .ok_or_else(|| format!("order {order_id} not found in local DB"))
+}
+
+fn read_cents(
+    row: &rusqlite::Row<'_>,
+    cents_index: usize,
+    legacy_index: usize,
+) -> rusqlite::Result<i64> {
+    match row.get::<_, Option<i64>>(cents_index)? {
+        Some(cents) => Ok(cents),
+        None => Ok(Cents::round_half_even(row.get(legacy_index)?).as_i64()),
+    }
 }
 
 pub(crate) fn normalize_issued_at(raw: &str) -> String {
@@ -274,7 +272,7 @@ fn parse_items_json(json_text: &str) -> Vec<ParsedOrderItem> {
 fn read_completed_payments(conn: &Connection, order_id: &str) -> Result<Vec<PaymentRow>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, method, amount, transaction_ref
+            "SELECT id, method, amount_cents, amount, transaction_ref
              FROM order_payments
              WHERE order_id = ?1 AND status = 'completed'
              ORDER BY created_at ASC",
@@ -285,8 +283,9 @@ fn read_completed_payments(conn: &Connection, order_id: &str) -> Result<Vec<Paym
             Ok(PaymentRow {
                 id: row.get(0)?,
                 method: row.get(1)?,
-                amount: row.get(2)?,
-                transaction_ref: row.get(3)?,
+                // tip_amount_cents is separate from the amount applied to the order.
+                amount_cents: read_cents(row, 2, 3)?,
+                transaction_ref: row.get(4)?,
             })
         })
         .map_err(|e| format!("query_map read_completed_payments: {e}"))?;
@@ -356,7 +355,7 @@ fn build_payments_json(payments: &[PaymentRow]) -> Vec<Value> {
             json!({
                 "paymentId": p.id,
                 "method": p.method,
-                "amountCents": Cents::round_half_even(p.amount).as_i64(),
+                "amountCents": p.amount_cents,
                 "reference": p.transaction_ref,
             })
         })
@@ -381,7 +380,7 @@ fn build_vat_breakdown(
     })]
 }
 
-/// Map `orders.payment_method` (cash/card/other) to the CIS NacinPlac
+/// Map the derived completed-payment method (cash/card/other) to CIS NacinPlac
 /// enum (xml-builder.ts:254): G=cash, K=card, C=cheque, T=transfer,
 /// O=other. `None` / unknown values default to `O` (Other).
 fn map_to_cis_payment_code(method: Option<&str>) -> &'static str {
@@ -465,7 +464,9 @@ mod audit_1_tests {
                 receipt_number TEXT,
                 items TEXT NOT NULL DEFAULT '[]',
                 total_amount REAL NOT NULL DEFAULT 0,
+                total_amount_cents INTEGER,
                 tax_amount REAL DEFAULT 0,
+                tax_amount_cents INTEGER,
                 subtotal REAL DEFAULT 0,
                 staff_id TEXT,
                 tax_rate REAL,
@@ -476,6 +477,8 @@ mod audit_1_tests {
                 order_id TEXT NOT NULL,
                 method TEXT NOT NULL,
                 amount REAL NOT NULL,
+                amount_cents INTEGER,
+                tip_amount_cents INTEGER,
                 status TEXT NOT NULL DEFAULT 'completed',
                 transaction_ref TEXT,
                 created_at TEXT NOT NULL
@@ -521,6 +524,84 @@ mod audit_1_tests {
             [],
         )
         .expect("insert payment");
+    }
+
+    #[test]
+    fn stored_cents_override_legacy_amounts_and_exclude_separate_tips() {
+        let conn = make_test_db();
+        seed_simple_order(&conn);
+        conn.execute_batch(
+            "UPDATE orders SET total_amount_cents = 500, tax_amount_cents = 97,
+                 total_amount = 99.99, tax_amount = 9.99 WHERE id = 'ord-1';
+             UPDATE order_payments SET amount_cents = 500, amount = 88.88,
+                 tip_amount_cents = 200, transaction_ref = 'terminal-reference' WHERE id = 'pay-1';",
+        ).unwrap();
+        let payload = build_fiscal_receipt_input(&conn, "ord-1", "branch-1").unwrap();
+        assert_eq!(payload["totals"]["grossCents"], 500);
+        assert_eq!(payload["totals"]["vatCents"], 97);
+        assert_eq!(payload["totals"]["netCents"], 403);
+        assert_eq!(payload["payments"][0]["amountCents"], 500);
+        assert_eq!(payload["payments"][0]["reference"], "terminal-reference");
+    }
+
+    #[test]
+    fn stored_zero_cents_do_not_fall_back_to_legacy_amounts() {
+        let conn = make_test_db();
+        seed_simple_order(&conn);
+        conn.execute_batch(
+            "UPDATE orders SET total_amount_cents = 0, tax_amount_cents = 0;
+             UPDATE order_payments SET amount_cents = 0;",
+        )
+        .unwrap();
+        let payload = build_fiscal_receipt_input(&conn, "ord-1", "branch-1").unwrap();
+        assert_eq!(payload["totals"]["grossCents"], 0);
+        assert_eq!(payload["totals"]["vatCents"], 0);
+        assert_eq!(payload["payments"][0]["amountCents"], 0);
+    }
+
+    #[test]
+    fn partial_payment_does_not_reduce_the_invoice_gross() {
+        let conn = make_test_db();
+        seed_simple_order(&conn);
+        conn.execute("UPDATE order_payments SET amount_cents = 200", [])
+            .unwrap();
+        let payload = build_fiscal_receipt_input(&conn, "ord-1", "branch-1").unwrap();
+        assert_eq!(payload["totals"]["grossCents"], 500);
+        assert_eq!(payload["payments"][0]["amountCents"], 200);
+        assert_eq!(payload["totals"]["vatCents"], 97);
+    }
+
+    #[test]
+    fn completed_split_payments_preserve_tenders_and_ignore_unsettled_rows() {
+        let conn = make_test_db();
+        seed_simple_order(&conn);
+        conn.execute_batch(
+            "UPDATE order_payments SET amount_cents = 200 WHERE id = 'pay-1';
+             INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status, transaction_ref, created_at)
+             VALUES ('pay-card', 'ord-1', 'card', 99.0, 300, 'completed', 'card-reference', '2026-05-25T10:00:02Z'),
+                    ('pay-pending', 'ord-1', 'card', 99.0, 9900, 'pending', NULL, '2026-05-25T10:00:03Z'),
+                    ('pay-void', 'ord-1', 'card', 99.0, 9900, 'voided', NULL, '2026-05-25T10:00:04Z'),
+                    ('pay-refund', 'ord-1', 'card', 99.0, 9900, 'refunded', NULL, '2026-05-25T10:00:05Z');",
+        ).unwrap();
+        let payload = build_fiscal_receipt_input(&conn, "ord-1", "branch-1").unwrap();
+        assert_eq!(payload["totals"]["grossCents"], 500);
+        assert_eq!(
+            payload["payments"],
+            json!([
+                { "paymentId": "pay-1", "method": "cash", "amountCents": 200, "reference": null },
+                { "paymentId": "pay-card", "method": "card", "amountCents": 300, "reference": "card-reference" },
+            ])
+        );
+        assert_eq!(payload["metadata"]["paymentMethodCode"], "O");
+    }
+
+    #[test]
+    fn missing_payment_storage_fails_without_fabricating_a_payment() {
+        let conn = make_test_db();
+        seed_simple_order(&conn);
+        conn.execute("DROP TABLE order_payments", []).unwrap();
+        let result = build_fiscal_receipt_input(&conn, "ord-1", "branch-1");
+        assert!(result.unwrap_err().contains("read_completed_payments"));
     }
 
     #[test]
@@ -783,7 +864,7 @@ mod audit_1_tests {
         let payments = payload["payments"].as_array().unwrap();
         assert_eq!(payments.len(), 1, "voided payment must be filtered out");
         assert_eq!(payments[0]["paymentId"], "pay-1");
-        // And the grossCents is the completed-payment sum, not affected by the voided 99.00.
+        // The order gross is unchanged by a voided payment.
         assert_eq!(payload["totals"]["grossCents"], 500);
     }
 
@@ -851,7 +932,7 @@ mod audit_1_tests {
         // No order_payments row.
         let payload = build_fiscal_receipt_input(&conn, "ord-unpaid", "branch-1").unwrap();
 
-        // Falls back to header total_amount for grossCents — the
+        // Uses the header total_amount for grossCents — the
         // validator will still reject (empty payments array), but the
         // builder's job is to assemble the payload, not gate on it.
         assert_eq!(payload["totals"]["grossCents"], 500);

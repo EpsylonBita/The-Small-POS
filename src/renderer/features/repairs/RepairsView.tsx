@@ -602,6 +602,7 @@ export default function RepairsView({
       {error && <div role="alert" className="mx-4 mt-3 shrink-0 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-800 dark:text-red-200">{error}</div>}
       <div className="min-h-0 flex-1">
         <RepairsShell
+          key={`${scopedOrganizationId ?? 'no-org'}:${scopedBranchId ?? 'no-branch'}:${activeActorKey ?? 'no-actor'}`}
           repairs={repairs}
           pagination={pagination}
           workspace={visibleWorkspace}

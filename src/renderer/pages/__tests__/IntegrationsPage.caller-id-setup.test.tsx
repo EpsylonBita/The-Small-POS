@@ -126,6 +126,7 @@ import IntegrationsPage from '../IntegrationsPage'
 
 describe('Caller ID setup entry point', () => {
   beforeEach(() => {
+    vi.spyOn(document, 'hasFocus').mockReturnValue(true)
     localStorage.clear()
     localStorage.setItem('admin_dashboard_url', 'https://admin.example/')
     mocks.openExternalUrl.mockReset()

@@ -578,6 +578,12 @@ export interface RepairBarcodeScannedEvent {
 
 export type RepairMoneyRequest =
   | { action: 'financial_projection'; repair_id: string }
+  /**
+   * Terminal-scoped read: may this branch legally take repair money at all?
+   * Branch, organization and staff identity stay native-owned, so the renderer
+   * sends no scope of its own.
+   */
+  | { action: 'fiscal_readiness' }
   | {
       action: 'settlement' | 'fiscalize'
       repair_id: string

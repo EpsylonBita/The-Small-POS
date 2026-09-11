@@ -167,7 +167,8 @@ async function warmAdvisoryPageCaches(config: RuntimeConfigLike): Promise<void> 
   const cachedVerticalPaths = Array.isArray(cachedPathResult?.paths) ? cachedPathResult?.paths : []
   if (cachedVerticalPaths.length > 0) {
     await Promise.allSettled(
-      cachedVerticalPaths.map((path) => bridge.adminApi.fetchFromAdmin(path, { method: 'GET' })),
+      [...new Set(cachedVerticalPaths)].filter((path) => !cachePaths.includes(path))
+        .map((path) => bridge.adminApi.fetchFromAdmin(path, { method: 'GET' })),
     )
   }
 
@@ -280,9 +281,12 @@ export async function runParitySyncCycle(options?: {
     inFlightSync = (async () => {
       const bridge = getBridge();
       const syncQueue = getSyncQueueBridge();
-      const shouldSyncTerminalConfig = options?.syncTerminalConfig !== false;
       const requestedLegacySync = options?.forceLegacySync;
       const trigger = options?.trigger ?? 'unknown';
+      // Replaying an existing queue must not reload unrelated configuration and
+      // page datasets each time a parked/failed item is inspected.
+      const refreshSnapshots = trigger !== 'scheduled_retry';
+      const shouldSyncTerminalConfig = options?.syncTerminalConfig ?? refreshSnapshots;
       const startedAt = new Date().toISOString();
 
       if (shouldSyncTerminalConfig) {
@@ -337,7 +341,9 @@ export async function runParitySyncCycle(options?: {
       }
 
       try {
-        await warmAdvisoryPageCaches(config);
+        if (refreshSnapshots && credentialState.hasAdminUrl && credentialState.hasApiKey) {
+          await warmAdvisoryPageCaches(config);
+        }
       } catch (error) {
         console.warn('[ParitySyncCoordinator] Advisory cache warmup failed:', error);
       }
@@ -347,7 +353,9 @@ export async function runParitySyncCycle(options?: {
       // processQueue so queued receipts replay before the snapshot
       // refresh, clearing their pending overlays into fresh server state.
       try {
-        await syncPurchaseOrderSnapshot();
+        if (refreshSnapshots || (paritySyncResult?.processed ?? 0) > 0) {
+          await syncPurchaseOrderSnapshot();
+        }
       } catch (error) {
         console.warn('[ParitySyncCoordinator] Purchase order snapshot sync failed:', error);
       }

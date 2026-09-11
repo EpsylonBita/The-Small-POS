@@ -147,3 +147,110 @@ describe('RepairMoneyApiService financial projection', () => {
     })
   })
 })
+
+describe('RepairMoneyApiService fiscal readiness', () => {
+  let repairMoneyApiService: RepairMoneyApiService
+
+  const readyFiscal = {
+    readiness: {
+      ready: true,
+      code: 'ready',
+      countryCode: 'GR',
+      fiscalMode: 'fiscal',
+      capabilities: { collectPayments: true, refundPayments: true, fiscalize: true },
+    },
+  }
+
+  beforeEach(() => {
+    mocks.moneyRequest.mockReset()
+    repairMoneyApiService = new RepairMoneyApiService({
+      staffAuth: { getSession: vi.fn().mockResolvedValue({ sessionId: STAFF_SESSION_ID }) },
+      repairs: { moneyRequest: mocks.moneyRequest },
+    })
+  })
+
+  it('reads readiness over the native money bridge without renderer-supplied scope', async () => {
+    mocks.moneyRequest.mockResolvedValue(readyFiscal)
+
+    await expect(repairMoneyApiService.getFiscalReadiness()).resolves.toEqual(readyFiscal.readiness)
+    expect(mocks.moneyRequest).toHaveBeenCalledWith({
+      staffSessionId: STAFF_SESSION_ID,
+      request: { action: 'fiscal_readiness' },
+    })
+  })
+
+  it('accepts a blocked readiness that grants no capability', async () => {
+    mocks.moneyRequest.mockResolvedValue({
+      readiness: {
+        ready: false,
+        code: 'setup_required',
+        countryCode: 'GR',
+        fiscalMode: null,
+        capabilities: { collectPayments: false, refundPayments: false, fiscalize: false },
+      },
+    })
+
+    const readiness = await repairMoneyApiService.getFiscalReadiness()
+    expect(readiness.ready).toBe(false)
+    expect(readiness.code).toBe('setup_required')
+    expect(readiness.capabilities.collectPayments).toBe(false)
+  })
+
+  it('rejects extra data, unbounded codes and unreconciled readiness', async () => {
+    mocks.moneyRequest.mockResolvedValueOnce({
+      readiness: { ...readyFiscal.readiness, providerId: 'provider-secret' },
+    })
+    await expect(repairMoneyApiService.getFiscalReadiness())
+      .rejects.toThrow('REPAIR_FISCAL_READINESS_INVALID')
+
+    mocks.moneyRequest.mockResolvedValueOnce({ ...readyFiscal, detail: 'Certified path' })
+    await expect(repairMoneyApiService.getFiscalReadiness())
+      .rejects.toThrow('REPAIR_FISCAL_READINESS_INVALID')
+
+    mocks.moneyRequest.mockResolvedValueOnce({
+      readiness: { ...readyFiscal.readiness, code: 'mostly_ready' },
+    })
+    await expect(repairMoneyApiService.getFiscalReadiness())
+      .rejects.toThrow('REPAIR_FISCAL_READINESS_INVALID')
+
+    mocks.moneyRequest.mockResolvedValueOnce({
+      readiness: {
+        ready: false,
+        code: 'provider_required',
+        countryCode: 'GR',
+        fiscalMode: 'fiscal',
+        capabilities: { collectPayments: true, refundPayments: false, fiscalize: false },
+      },
+    })
+    await expect(repairMoneyApiService.getFiscalReadiness())
+      .rejects.toThrow('REPAIR_FISCAL_READINESS_INVALID')
+
+    mocks.moneyRequest.mockResolvedValueOnce({
+      readiness: { ...readyFiscal.readiness, fiscalMode: 'non_fiscal' },
+    })
+    await expect(repairMoneyApiService.getFiscalReadiness())
+      .rejects.toThrow('REPAIR_FISCAL_READINESS_INVALID')
+
+    mocks.moneyRequest.mockResolvedValueOnce(readyFiscal.readiness)
+    await expect(repairMoneyApiService.getFiscalReadiness())
+      .rejects.toThrow('REPAIR_FISCAL_READINESS_INVALID')
+  })
+
+  it('surfaces a denied or offline native read instead of defaulting to ready', async () => {
+    mocks.moneyRequest.mockRejectedValue(new Error('REPAIR_PERMISSION_DENIED'))
+
+    await expect(repairMoneyApiService.getFiscalReadiness())
+      .rejects.toThrow('REPAIR_PERMISSION_DENIED')
+  })
+
+  it('fails closed before transport when the native staff session is absent', async () => {
+    repairMoneyApiService = new RepairMoneyApiService({
+      staffAuth: { getSession: vi.fn().mockResolvedValue(null) },
+      repairs: { moneyRequest: mocks.moneyRequest },
+    })
+
+    await expect(repairMoneyApiService.getFiscalReadiness())
+      .rejects.toThrow('REPAIR_STAFF_SESSION_REQUIRED')
+    expect(mocks.moneyRequest).not.toHaveBeenCalled()
+  })
+})

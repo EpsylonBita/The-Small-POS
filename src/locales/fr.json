@@ -29,6 +29,7 @@
     "panels": { "partsEmpty": "Aucune pièce, main-d’œuvre ou charge prévue.", "estimateEmpty": "Aucun devis n’a encore été émis.", "timelineEmpty": "Aucun événement dans l’historique.", "photosEmpty": "Aucune métadonnée de pièce jointe disponible.", "conflictsTitle": "Conflits de synchronisation", "conflictsEmpty": "Aucun conflit de réparation à examiner." },
     "messages": { "readyQueued": "Le statut « Prête » est en attente de synchronisation.", "noNotificationSent": "Aucune notification client n’a encore été envoyée.", "offline": "Les modifications hors ligne restent en attente jusqu’à la reconnexion de ce terminal.", "onlineActionRequired": "Cette action nécessite une vérification en ligne du serveur.", "activeShiftRequired": "Démarrez un service du personnel pour charger les données et actions de réparation.", "selectorOnline": "La recherche de clients et d’appareils nécessite une connexion native en ligne. Un client et un appareil canoniques déjà sélectionnés peuvent toujours être envoyés hors ligne.", "createUnavailable": "La création d’une réparation nécessite un service actif et l’autorisation de création.", "conflictResolutionUnavailable": "La résolution des conflits nécessite un service actif, une connexion native en ligne et l’autorisation de mise à jour.", "submitInProgress": "La réparation est en cours d’enregistrement. La fermeture est temporairement désactivée.", "finalDiagnosisOnline": "Le diagnostic final nécessite une vérification en ligne ; les brouillons peuvent être mis en attente hors ligne.", "estimateOnline": "Les devis et approbations nécessitent une vérification en ligne du serveur.", "estimateNeedsLines": "Ajoutez au moins une ligne prévue avant de créer un devis.", "photoOneShot": "La photo sélectionnée est lue une seule fois et transmise au stockage natif chiffré ; le renderer ne la conserve pas.", "photoUnavailable": "La préparation d’une photo nécessite les paramètres chargés, l’autorisation de réparation, un état réseau connu et un service actif.", "attachmentTypeInvalid": "Ce type de fichier n’est pas autorisé par les paramètres de réparation.", "attachmentTooLarge": "Cette photo dépasse la taille maximale des pièces jointes de réparation.", "attachmentInvalid": "Sélectionnez une photo non vide autorisée par les paramètres.", "attachmentStageFailed": "Impossible de préparer la photo.", "attachmentOpenFailed": "Impossible d’ouvrir la pièce jointe de manière sécurisée.", "loadFailed": "Impossible de charger les réparations.", "commandFailed": "Impossible d’enregistrer la modification.", "assignmentUnavailable": "L’auto-attribution nécessite une identité employé canonique et l’autorisation d’attribuer les réparations.", "settingsUnavailable": "La réception d’une réparation reste désactivée jusqu’à la disponibilité de paramètres officiels ou mis en cache.", "invalidIntake": "Vérifiez les informations de réception et réessayez.", "customerSearchFailed": "La recherche de clients n’a pas abouti.", "deviceLoadFailed": "Impossible de charger les appareils du client.", "deviceCreateFailed": "Impossible d’enregistrer l’appareil.", "secureIdUnavailable": "Les identifiants sécurisés ne sont pas disponibles. Redémarrez l’application avant de créer une réparation." },
     "locked": { "communication": "Customer Messaging n’est pas activé dans cette version bêta privée.", "money": "Paiements, remboursements, fiscalisation et remise restent verrouillés jusqu’à la disponibilité du transport financier natif typé.", "approvalTransition": "Le statut Approuvée est atteint uniquement via l’action d’approbation auditée dans Devis et approbation.", "assignment": "Les changements d’assignation restent verrouillés jusqu’à la disponibilité d’une projection du personnel sûre et limitée au périmètre.", "stockReversal": "L’annulation du mouvement de stock reste verrouillée car l’espace natif n’expose pas la référence du mouvement d’origine.", "catalog": "La recherche de produits et services reste verrouillée jusqu’à une projection native sûre en lecture seule.", "attachmentOpen": "L’ouverture des pièces jointes existantes reste verrouillée jusqu’à la récupération native signée.", "printing": "L’impression des réparations reste verrouillée jusqu’à la disponibilité de la file d’impression native typée." },
+    "money": { "readiness": { "loading": "Vérification de la préparation fiscale…", "retry": "Réessayer", "nonFiscalInfo": "myDATA est optionnel. Les paiements de réparation peuvent être enregistrés sans le plugin.", "setupRequired": "La configuration fiscale de cet établissement est incomplète.", "countryRequired": "Un pays d’établissement est requis avant cette action.", "providerRequired": "Un fournisseur fiscal est requis pour les actions fiscales.", "certificationRequired": "Une certification fiscale est requise pour les actions fiscales.", "transportUnavailable": "La soumission de documents fiscaux n'est pas disponible pour cette intégration.", "statusUnavailable": "Impossible de déterminer la préparation fiscale." } },
     "a11y": { "resultsUpdated": "{{count}} résultats de réparation disponibles.", "currentRepair": "Réparation actuelle : {{number}}", "tabHint": "Utilisez les flèches gauche et droite pour changer d’onglet.", "statusLabel": "Statut de la réparation : {{status}}" }
   },
   "common": {
@@ -7350,6 +7351,50 @@
       "baudRate": "Débit en bauds",
       "serialPortRequired": "Le port série est requis pour la connexion USB",
       "bluetoothAddressRequired": "L'adresse Bluetooth est requise",
+      "localSettingsUnavailable": "Impossible de charger les réglages locaux de la caisse. Fermez la configuration et réessayez.",
+      "bluetoothUnavailable": "Le Bluetooth direct est indisponible sur ce POS. Utilisez une connexion LAN ou série prise en charge par le fabricant.",
+      "bluetoothOptionUnavailable": "Bluetooth — indisponible",
+      "physicalConnectionHelp": "Le LAN est recommandé. CAP Driver gère la connexion physique : sélectionnez TCP, UDP ou COM dans le service Windows du fabricant et utilisez l’IP correspondante de l’appareil. Le Bluetooth direct est indisponible.",
+      "capTcpProbe": "Tester un port ERP TCP connu avant la connexion (port requis ; désactiver pour UDP ou COM)",
+      "capOptionalPort": "La configuration LAN de CAP Driver nécessite l’IP de l’appareil. Laissez le port ERP vide, sauf si vous activez le test TCP facultatif ou si le fabricant indique explicitement un port.",
+      "protocolUnavailable": "Indisponible pour une caisse fiscale",
+      "capAdvanced": "Paramètres avancés de CAP Driver",
+      "capServiceHelp": "Le service du fabricant doit être installé et démarré. Les dossiers d’entrée/sortie et l’encodage doivent correspondre. Le test imprime un rapport X sans clôture ; confirmez la prise en charge du modèle exact et du firmware auprès du fabricant.",
+      "capSettingsInvalid": "Vérifiez les dossiers CAP, le service, l’encodage, le délai (5000–300000 ms), les codes de paiement (1–20) et l’index EFT (1–99).",
+      "capSettings": {
+        "capturePath": "Dossier d’entrée",
+        "outputPath": "Dossier de sortie",
+        "serviceName": "Nom du service Windows",
+        "fileEncoding": "Encodage des fichiers de commandes",
+        "transactionTimeoutMs": "Délai (ms)",
+        "cashPaymentCode": "Code de paiement en espèces",
+        "cardPaymentCode": "Code de paiement par carte",
+        "eftPosIndex": "Index EFT POS"
+      },
+      "capSetup": {
+        "checking": "Vérification du support RBS installé…",
+        "unsupported": "La configuration du support RBS est disponible sous Windows.",
+        "failed": "Impossible de terminer la vérification ou l’action d’installation. Actualisez et réessayez.",
+        "running": "Le service RBS est en cours d’exécution. Vérifiez la connexion, puis connectez et testez la caisse.",
+        "stopped": "Le support RBS est installé. Ouvrez la configuration de connexion, démarrez le service du fabricant, puis actualisez.",
+        "missing": "Le support RBS n’est pas installé. Ouvrez le programme d’installation officiel et terminez la configuration.",
+        "installerOpened": "Programme d’installation ouvert. Terminez les étapes Windows, puis actualisez. La caisse n’est pas encore vérifiée.",
+        "errorCode": "Code de support",
+        "opening": "Ouverture de la configuration officielle…",
+        "openSetup": "Ouvrir la configuration de connexion",
+        "install": "Installer le support RBS",
+        "refresh": "Actualiser l’état du support"
+      },
+      "discovery": {
+        "find": "Rechercher une caisse",
+        "searching": "Recherche de caisses sur ce LAN…",
+        "help": "La recherche vérifie uniquement le réseau local. Choisir une IP ne connecte ni ne vérifie la caisse et ne modifie pas la configuration du service CAP Driver.",
+        "failed": "Impossible de rechercher sur ce LAN. Réessayez ou saisissez l’IP de l’appareil manuellement.",
+        "empty": "Aucune caisse RBS/MAT trouvée. Vérifiez sa connexion réseau ou saisissez l’IP manuellement.",
+        "select": "Sélectionner"
+      },
+      "capTargetMismatch": "La cible du service CAP est inconnue ou diffère du formulaire. Ouvrez la configuration de connexion, définissez cette IP ou ce port COM dans le service du fabricant, puis actualisez l’état du support.",
+      "capServiceTarget": "Cible du service du fabricant",
       "configSaved": "Configuration MyData enregistrée",
       "dashboardBanner": {
         "title": "La configuration de myDATA se fait dans le tableau de bord d'administration",

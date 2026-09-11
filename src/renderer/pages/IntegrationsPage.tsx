@@ -56,6 +56,16 @@ import { getPluginLogo } from '../utils/plugin-icons';
 import { pageMotionContainer, pageMotionItem } from '../components/ui/page-motion';
 import { getBridge } from '../../lib';
 import { getCachedTerminalCredentials } from '../services/terminal-credentials';
+import { useIntegrationRefresh } from '../hooks/useIntegrationRefresh';
+import {
+  MYDATA_FISCAL_DEVICE_ID, DEFAULT_MYDATA_CAP_SETTINGS, readMyDataCapSettings,
+  myDataConnectionTypeFromSaved, buildMyDataDeviceSettings, validateMyDataCapSettings,
+  verifyAndSaveMyDataDevice, normalizeMyDataProtocol, isMyDataFiscalProtocol,
+  getMyDataCapPrefill,
+  myDataCapTargetMatches,
+} from '../utils/mydata-device-setup';
+import { MyDataCapSetupAssistant, type MyDataCapSetupStatus } from '../components/integrations/MyDataCapSetupAssistant';
+import { MyDataCashierDiscovery } from '../components/integrations/MyDataCashierDiscovery';
 
 // ============================================================
 // TYPES
@@ -75,8 +85,10 @@ interface Integration {
 
 interface IntegrationWithStatus extends Integration {
   status: 'connected' | 'disconnected' | 'pending';
+  environment?: 'test' | 'production';
   lastSyncedAt?: string;
   settings?: {
+    environment?: 'test' | 'production' | null;
     auto_accept_orders?: boolean;
     auto_accept_prep_minutes?: number;
     store_status_override?: string;
@@ -99,6 +111,8 @@ interface RemoteIntegrationPayload {
   category?: string | null;
   is_purchased?: boolean;
   is_active?: boolean;
+  is_enabled?: boolean;
+  environment?: 'test' | 'production' | null;
   status?: string | null;
   requires_partner_credentials?: boolean;
   read_only_admin_setup?: boolean;
@@ -122,7 +136,6 @@ interface IntegrationStats {
 // CONSTANTS
 // ============================================================
 
-const MYDATA_FISCAL_DEVICE_ID = 'mydata-fiscal-device';
 const MYDATA_FISCAL_TAX_RATES = [
   { code: 'A', rate: 24, label: 'Standard' },
   { code: 'B', rate: 13, label: 'Reduced' },
@@ -492,6 +505,11 @@ const getRemoteIntegrationId = (integration: RemoteIntegrationPayload) =>
   );
 
 const mapRemoteStatus = (integration: RemoteIntegrationPayload): IntegrationWithStatus['status'] => {
+  if (integration.is_enabled === false || integration.is_active === false) return 'disconnected';
+  if (getRemoteIntegrationId(integration) === 'fiscalization_gr') {
+    return integration.is_enabled === true && integration.status === 'connected'
+      ? 'connected' : integration.status === 'pending' || integration.status === 'error' ? 'pending' : 'disconnected';
+  }
   if (integration.provider === 'efood' || integration.plugin_id === 'efood') {
     if (integration.onboarding_status === 'sandbox_connected' || integration.onboarding_status === 'production_connected') {
       return 'connected';
@@ -519,6 +537,7 @@ const mapPurchasedIntegration = (remote: RemoteIntegrationPayload): IntegrationW
   const requiresPartnerCredentials = !readOnlyAdminSetup && Boolean(
     remote.requires_partner_credentials ?? fallback?.requiresPartnerCredentials
   );
+  const environment = remote.settings?.environment ?? remote.environment;
 
   return {
     id,
@@ -529,6 +548,7 @@ const mapPurchasedIntegration = (remote: RemoteIntegrationPayload): IntegrationW
     requiredModule: fallback?.requiredModule,
     requiresPartnerCredentials,
     status: requiresPartnerCredentials ? 'pending' : mapRemoteStatus(remote),
+    environment: environment === 'test' || environment === 'production' ? environment : undefined,
     lastSyncedAt: typeof remote.last_sync_at === 'string' ? remote.last_sync_at : undefined,
     settings: remote.settings || undefined,
     onboardingStatus: remote.onboarding_status || undefined,
@@ -725,6 +745,13 @@ const IntegrationCard = memo<IntegrationCardProps>(({
             )}
           </div>
 
+          {integration.id === 'fiscalization_gr' && integration.environment && (
+            <p className={`text-xs mt-2 ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+              {t('integrations.mydata.environment', 'Environment')}: {integration.environment === 'test'
+                ? t('modals.connectionSettings.test', 'Test')
+                : t('settings.managedByAdmin.syncHealth.live', 'Live')}
+            </p>
+          )}
           {/* myDATA fiscal reporting status line: fiscal failures are silent by design, so the
               owner needs one plain-language sentence saying whether receipts are actually being
               reported to AADE. The plugin card status alone is not enough — real transmission
@@ -1007,10 +1034,17 @@ export const IntegrationsPage: React.FC = () => {
   // provider_status.is_enabled from /pos/mydata/config: whether receipts are actually
   // transmitted to AADE. null = unknown (not fetched yet, offline, or fetch failed).
   const [myDataReportingEnabled, setMyDataReportingEnabled] = useState<boolean | null>(null);
-  const myDataReportingFetchedRef = useRef(false);
   const [myDataModalOpen, setMyDataModalOpen] = useState(false);
   const [myDataSaving, setMyDataSaving] = useState(false);
-  const [myDataConnectionType, setMyDataConnectionType] = useState<'usb_serial' | 'bluetooth' | 'network'>('usb_serial');
+  const [myDataConnectionType, setMyDataConnectionType] = useState<'usb_serial' | 'bluetooth' | 'network'>('network');
+  const [myDataCapSettings, setMyDataCapSettings] = useState({ ...DEFAULT_MYDATA_CAP_SETTINGS });
+  const [myDataLocalSettingsReady, setMyDataLocalSettingsReady] = useState(false);
+  const [myDataCapStatus, setMyDataCapStatus] = useState<{ scope: string; status: MyDataCapSetupStatus | null } | null>(null);
+  const myDataCapStatusRef = useRef(myDataCapStatus);
+  const myDataEditedFields = useRef(new Set<string>());
+  const myDataSavedLocalSettings = useRef<unknown>({});
+  const myDataLocalSettingsError = useRef('');
+  myDataLocalSettingsError.current = t('integrations.mydata.localSettingsUnavailable', 'Could not load local cashier settings. Close setup and try again.');
   const [myDataSerialPort, setMyDataSerialPort] = useState('');
   const [myDataBaudRate, setMyDataBaudRate] = useState('9600');
   const [myDataBluetoothAddress, setMyDataBluetoothAddress] = useState('');
@@ -1062,7 +1096,7 @@ export const IntegrationsPage: React.FC = () => {
   // Monitor online status
   useEffect(() => {
     const handleOnline = () => setIsOnline(true);
-    const handleOffline = () => setIsOnline(false);
+    const handleOffline = () => { setIsOnline(false); setMyDataReportingEnabled(null); };
 
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
@@ -1074,8 +1108,9 @@ export const IntegrationsPage: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    if (!myDataConfig?.device_connection) return;
-    const connection = myDataConfig.device_connection as Record<string, any>;
+    if (myDataModalOpen) return;
+    const connection = (myDataConfig?.device_connection || {}) as Record<string, any>;
+    setMyDataConnectionType(myDataConnectionTypeFromSaved(connection));
     if (connection.type === 'bluetooth') {
       setMyDataConnectionType('bluetooth');
       setMyDataBluetoothAddress(connection.address || '');
@@ -1090,7 +1125,7 @@ export const IntegrationsPage: React.FC = () => {
     }
     setMyDataDeviceBrand(connection.brand || '');
     setMyDataDeviceModel(connection.model || '');
-    setMyDataProtocolProfile(connection.protocol || '');
+    setMyDataProtocolProfile(normalizeMyDataProtocol(connection.protocol || ''));
     const departmentMap =
       connection.department_map && typeof connection.department_map === 'object'
         ? connection.department_map
@@ -1101,7 +1136,27 @@ export const IntegrationsPage: React.FC = () => {
       C: departmentMap.C ? String(departmentMap.C) : '',
       D: departmentMap.D ? String(departmentMap.D) : '',
     });
-  }, [myDataConfig]);
+  }, [myDataConfig, myDataModalOpen]);
+
+  useEffect(() => {
+    setMyDataLocalSettingsReady(false);
+    if (!myDataModalOpen) return;
+    myDataEditedFields.current.clear();
+    let cancelled = false;
+    (async () => {
+      const result: any = await getBridge().ecr.getDevices();
+      const devices = Array.isArray(result) ? result : Array.isArray(result?.devices) ? result.devices : null;
+      if (!devices) throw new Error('Could not read local fiscal device settings');
+      const existing = devices.find((device: any) => device?.id === MYDATA_FISCAL_DEVICE_ID);
+      if (cancelled) return;
+      myDataSavedLocalSettings.current = normalizeMyDataProtocol(existing?.protocol || '') === 'cap_driver' ? existing?.settings || {} : {};
+      setMyDataCapSettings(readMyDataCapSettings(normalizeMyDataProtocol(existing?.protocol || '') === 'cap_driver' ? existing?.settings : {}));
+      setMyDataLocalSettingsReady(true);
+    })().catch(() => {
+      if (!cancelled) toast.error(myDataLocalSettingsError.current);
+    });
+    return () => { cancelled = true; };
+  }, [myDataModalOpen]);
 
   // A branch switched to provider/direct mode must not retain an enabled
   // locally-managed cashier from its former fiscal-device setup. Otherwise
@@ -1134,40 +1189,24 @@ export const IntegrationsPage: React.FC = () => {
   // Quietly refresh the card-level reporting flag (provider_status.is_enabled).
   // Never throws and never surfaces an error: on failure the flag goes to null
   // (unknown) and the connected card simply renders no reporting claim.
-  const refreshMyDataReportingFlag = useCallback(async () => {
+  const refreshMyDataReportingFlag = useCallback(async (isCurrent: () => boolean) => {
     const result = await fetchMyDataConfigQuietly();
+    if (!isCurrent()) return;
     setMyDataReportingEnabled(deriveMyDataReportingEnabled(result));
     if (result.ok && result.config) {
       setMyDataConfig(result.config);
       setMyDataConfigError(null);
-    }
-  }, []);
-
-  const fetchMyDataConfig = useCallback(async () => {
-    try {
-      const myDataResult = await fetchMyDataConfigQuietly();
-      setMyDataReportingEnabled(deriveMyDataReportingEnabled(myDataResult));
-      if (myDataResult.ok && myDataResult.config) {
-        setMyDataConfig(myDataResult.config);
-        setMyDataConfigError(null);
-        return;
-      }
-
-      if (myDataResult.status === 404) {
-        setMyDataConfig({});
-        setMyDataConfigError('MyData not configured');
-        return;
-      }
-
-      setMyDataConfigError(myDataResult.error || 'Failed to fetch MyData config');
-    } catch (err) {
-      console.warn('Failed to fetch MyData config:', err);
-      setMyDataConfigError('Failed to fetch MyData config');
+    } else if (result.status === 404) {
+      setMyDataConfig({});
+      setMyDataConfigError('MyData not configured');
+    } else {
+      setMyDataConfigError(result.error || 'Failed to fetch MyData config');
     }
   }, []);
 
   // Fetch integration statuses
-  const fetchIntegrations = useCallback(async () => {
+  const loadIntegrations = useCallback(async (isCurrent: () => boolean) => {
+    if (!isCurrent()) return false;
     const shouldShowLoading = !hasLoadedIntegrationsRef.current;
 
     try {
@@ -1176,7 +1215,11 @@ export const IntegrationsPage: React.FC = () => {
       }
       setError(null);
 
-      const integrationsResult = await posApiGet<{ integrations?: RemoteIntegrationPayload[] }>('/pos/integrations');
+      const [integrationsResult] = await Promise.all([
+        posApiGet<{ integrations?: RemoteIntegrationPayload[] }>('/pos/integrations'),
+        refreshMyDataReportingFlag(isCurrent),
+      ]);
+      if (!isCurrent()) return false;
       if (!integrationsResult.success) {
         throw new Error(integrationsResult.error || 'Failed to fetch integrations');
       }
@@ -1192,50 +1235,83 @@ export const IntegrationsPage: React.FC = () => {
         });
 
       setIntegrations(integrationsWithStatus);
+      return true;
     } catch (err) {
+      if (!isCurrent()) return false;
       console.error('Failed to fetch integrations:', err);
       setError(err instanceof Error ? err.message : 'Failed to fetch integrations');
-      setIntegrations([]);
+      setMyDataReportingEnabled(null);
+      return false;
     } finally {
-      hasLoadedIntegrationsRef.current = true;
-      setHasLoadedIntegrations(true);
-      setLoading(false);
+      if (isCurrent()) {
+        hasLoadedIntegrationsRef.current = true;
+        setHasLoadedIntegrations(true);
+        setLoading(false);
+      }
     }
-  }, []);
+  }, [refreshMyDataReportingFlag]);
 
-  // Initial fetch
+  const integrationScope = JSON.stringify([
+    getSetting('terminal', 'organization_id'), getSetting('terminal', 'branch_id'),
+    getSetting('terminal', 'terminal_id'), getSetting('terminal', 'admin_dashboard_url'),
+  ]);
+  const myDataSetupScope = JSON.stringify([integrationScope, myDataConfig?.mode, myDataConfig?.device_connection]);
+  const myDataSetupScopeRef = useRef(myDataSetupScope);
+  myDataSetupScopeRef.current = myDataSetupScope;
+  const receiveCapStatus = useCallback((status: MyDataCapSetupStatus | null) => {
+    if (myDataSetupScopeRef.current !== myDataSetupScope) return;
+    const entry = { scope: myDataSetupScope, status };
+    myDataCapStatusRef.current = entry;
+    setMyDataCapStatus(entry);
+  }, [myDataSetupScope]);
+  const myDataCapTargetReady = myDataCapStatus?.scope === myDataSetupScope && myDataCapTargetMatches(myDataCapStatus.status, {
+    type: myDataConnectionType, host: myDataNetworkHost, serialPort: myDataSerialPort, baudRate: myDataBaudRate,
+  });
+  const previousMyDataSetupScope = useRef(myDataSetupScope);
   useEffect(() => {
-    fetchIntegrations();
-  }, [fetchIntegrations]);
+    if (myDataModalOpen && previousMyDataSetupScope.current !== myDataSetupScope) setMyDataModalOpen(false);
+    previousMyDataSetupScope.current = myDataSetupScope;
+  }, [myDataSetupScope, myDataModalOpen]);
+  const applyDetectedCapSetup = useCallback((detected: MyDataCapSetupStatus) => {
+    if (myDataSetupScopeRef.current !== myDataSetupScope) return;
+    const prefill = getMyDataCapPrefill(detected, myDataConfig?.device_connection, myDataSavedLocalSettings.current, myDataEditedFields.current);
+    setMyDataCapSettings(previous => ({ ...previous, ...prefill.settings }));
+    if (prefill.target) {
+      setMyDataConnectionType(prefill.target.type);
+      if (prefill.target.host) setMyDataNetworkHost(prefill.target.host);
+      if (prefill.target.serial_port) setMyDataSerialPort(prefill.target.serial_port);
+      if (prefill.target.baud_rate) setMyDataBaudRate(String(prefill.target.baud_rate));
+    }
+  }, [myDataSetupScope, myDataConfig?.device_connection]);
+  const fetchIntegrations = useIntegrationRefresh(integrationScope, loadIntegrations, () => {
+    setMyDataModalOpen(false);
+    setMyDataLocalSettingsReady(false);
+    setIntegrations([]);
+    setMyDataReportingEnabled(null);
+    setMyDataConfig(null);
+    hasLoadedIntegrationsRef.current = false;
+    setHasLoadedIntegrations(false);
+    setLoading(true);
+  });
 
-  // Fetch the myDATA reporting flag once when the loaded integrations include the
-  // purchased mydata plugin, so the CARD status line reflects actual transmission
-  // (fiscal_provider_configs.is_enabled) and not just the plugin-config status.
-  useEffect(() => {
-    if (myDataReportingFetchedRef.current) return;
-    if (!integrations.some((item) => item.id === 'mydata')) return;
-    myDataReportingFetchedRef.current = true;
-    refreshMyDataReportingFlag();
-  }, [integrations, refreshMyDataReportingFlag]);
-
-  // Lazy-load MyData config only when MyData modal is open.
+  const myDataCardStatus = integrations.find((item) => item.id === 'mydata')?.status;
+  // Opening the modal shares the same refresh request as lifecycle and polling.
   useEffect(() => {
     if (!myDataModalOpen) return;
-    const myDataIntegration = integrations.find((item) => item.id === 'mydata');
-    if (!myDataIntegration || myDataIntegration.status === 'disconnected') {
+    if (!myDataCardStatus || myDataCardStatus === 'disconnected') {
       setMyDataConfig({});
       setMyDataConfigError('MyData not configured');
       return;
     }
-    fetchMyDataConfig();
-  }, [myDataModalOpen, fetchMyDataConfig, integrations]);
+    void fetchIntegrations();
+  }, [myDataModalOpen, fetchIntegrations, myDataCardStatus]);
 
   // Handle refresh
   const handleRefresh = useCallback(async () => {
     setIsRefreshing(true);
     try {
       await refetchModules();
-      await fetchIntegrations();
+      if (!(await fetchIntegrations())) throw new Error('Integration refresh failed');
       toast.success(t('integrations.refreshSuccess', 'Plugins refreshed'));
     } catch (err) {
       toast.error(t('integrations.refreshError', 'Failed to refresh plugins'));
@@ -1416,6 +1492,13 @@ export const IntegrationsPage: React.FC = () => {
   }, [openPluginInAdminDashboard, t]);
 
   const handleSaveMyDataConfig = useCallback(async () => {
+    if (!myDataLocalSettingsReady || myDataSaving) return;
+    if (myDataProtocolProfile === 'cap_driver' && (myDataCapStatusRef.current?.scope !== myDataSetupScope || !myDataCapTargetMatches(myDataCapStatusRef.current.status, {
+      type: myDataConnectionType, host: myDataNetworkHost, serialPort: myDataSerialPort, baudRate: myDataBaudRate,
+    }))) {
+      toast.error(t('integrations.mydata.capTargetMismatch', 'The CAP service target is unavailable or differs from this form. Open connection setup, configure this IP or COM port in the vendor service, then refresh support status.'));
+      return;
+    }
     if (!isMyDataFiscalDeviceMode) {
       toast.error(
         t(
@@ -1435,16 +1518,15 @@ export const IntegrationsPage: React.FC = () => {
       return;
     }
 
-    if (myDataConnectionType === 'bluetooth' && !myDataBluetoothAddress.trim()) {
-      toast.error(t('integrations.mydata.bluetoothAddressRequired', 'Bluetooth address is required'));
+    if (myDataConnectionType === 'bluetooth') {
+      toast.error(t('integrations.mydata.bluetoothUnavailable', 'Direct Bluetooth is not available on this POS. Use LAN or serial supported by your vendor.'));
       return;
     }
     if (
       myDataConnectionType === 'network' &&
       (!myDataNetworkHost.trim() ||
-        !Number.isInteger(Number(myDataNetworkPort)) ||
-        Number(myDataNetworkPort) < 1 ||
-        Number(myDataNetworkPort) > 65535)
+        ((myDataProtocolProfile !== 'cap_driver' || myDataCapSettings.probeDeviceTcp || myDataNetworkPort.trim()) &&
+          (!Number.isInteger(Number(myDataNetworkPort)) || Number(myDataNetworkPort) < 1 || Number(myDataNetworkPort) > 65535)))
     ) {
       toast.error(t('integrations.mydata.networkTargetRequired', 'A valid device IP/host and ERP port are required'));
       return;
@@ -1452,9 +1534,13 @@ export const IntegrationsPage: React.FC = () => {
     if (
       !myDataDeviceBrand.trim() ||
       !myDataDeviceModel.trim() ||
-      !myDataProtocolProfile.trim()
+      !isMyDataFiscalProtocol(myDataProtocolProfile)
     ) {
       toast.error(t('integrations.mydata.driverIdentityRequired', 'Brand, exact model, and protocol profile are required'));
+      return;
+    }
+    if (myDataProtocolProfile === 'cap_driver' && !validateMyDataCapSettings(myDataCapSettings)) {
+      toast.error(t('integrations.mydata.capSettingsInvalid', 'Check CAP folders, service, encoding, timeout (5000–300000 ms), payment codes (1–20) and EFT index (1–99).'));
       return;
     }
     if (
@@ -1476,13 +1562,11 @@ export const IntegrationsPage: React.FC = () => {
     setMyDataSaving(true);
     try {
       const deviceConnection: Record<string, any> =
-        myDataConnectionType === 'bluetooth'
-          ? { type: 'bluetooth', address: myDataBluetoothAddress.trim() }
-          : myDataConnectionType === 'network'
+        myDataConnectionType === 'network'
             ? {
                 type: 'network',
                 host: myDataNetworkHost.trim(),
-                port: Number(myDataNetworkPort),
+                ...(myDataNetworkPort.trim() ? { port: Number(myDataNetworkPort) } : {}),
               }
             : {
                 type: 'usb_serial',
@@ -1502,14 +1586,22 @@ export const IntegrationsPage: React.FC = () => {
       }
 
       const bridge = getBridge();
+      if (myDataProtocolProfile === 'cap_driver') {
+        const currentStatus = await bridge.ecr.capSetup('status');
+        if (myDataSetupScopeRef.current !== myDataSetupScope || !myDataCapTargetMatches(currentStatus, {
+          type: myDataConnectionType, host: myDataNetworkHost, serialPort: myDataSerialPort, baudRate: myDataBaudRate,
+        })) throw new Error(t('integrations.mydata.capTargetMismatch', 'The CAP service target is unavailable or differs from this form. Open connection setup, configure this IP or COM port in the vendor service, then refresh support status.'));
+      }
       const managedDeviceId = MYDATA_FISCAL_DEVICE_ID;
+      const devicesResult: any = await bridge.ecr.getDevices();
+      const devices = Array.isArray(devicesResult) ? devicesResult : Array.isArray(devicesResult?.devices) ? devicesResult.devices : null;
+      if (!devices) throw new Error('Could not read local fiscal device settings');
+      const existing = devices.find((device: any) => device?.id === managedDeviceId);
       const nativeConnectionType =
         myDataConnectionType === 'usb_serial' ? 'serial_usb' : myDataConnectionType;
       const connectionDetails =
-        myDataConnectionType === 'bluetooth'
-          ? { address: myDataBluetoothAddress.trim() }
-          : myDataConnectionType === 'network'
-            ? { ip: myDataNetworkHost.trim(), port: Number(myDataNetworkPort) }
+        myDataConnectionType === 'network'
+            ? { ip: myDataNetworkHost.trim(), ...(myDataNetworkPort.trim() ? { port: Number(myDataNetworkPort) } : {}) }
             : {
                 port: myDataSerialPort.trim(),
                 baudRate: Number(myDataBaudRate) || 9600,
@@ -1532,64 +1624,15 @@ export const IntegrationsPage: React.FC = () => {
         })),
         isDefault: true,
         enabled: true,
-        settings: {
-          mydataManaged: true,
-          model: myDataDeviceModel.trim(),
-          protocolProfile: myDataProtocolProfile.trim(),
-          ...(myDataProtocolProfile === 'cap_driver'
-            ? {
-                capturePath: 'C:\\Capture',
-                outputPath: 'C:\\Capture\\Output',
-                serviceName: 'CapDriverSVC',
-                transactionTimeoutMs: 120000,
-                cashPaymentCode: 1,
-                cardPaymentCode: 2,
-                eftPosIndex: 1,
-              }
-            : {}),
-        },
+        settings: buildMyDataDeviceSettings(myDataProtocolProfile, myDataDeviceModel.trim(), existing, myDataCapSettings),
       };
-
-      const devicesResult: any = await bridge.ecr.getDevices();
-      const devices = Array.isArray(devicesResult)
-        ? devicesResult
-        : Array.isArray(devicesResult?.devices)
-          ? devicesResult.devices
-          : [];
-      const existing = devices.find((device: any) => device?.id === managedDeviceId);
-      const saveDeviceResult: any = existing
-        ? await bridge.ecr.updateDevice(managedDeviceId, nativeDevice)
-        : await bridge.ecr.addDevice(nativeDevice);
-      if (saveDeviceResult?.success !== true) {
-        throw new Error(saveDeviceResult?.error || 'Failed to save fiscal device locally');
-      }
-
-      const connectResult: any = await bridge.ecr.connectDevice(managedDeviceId);
-      if (connectResult?.success !== true) {
-        throw new Error(connectResult?.error || 'Fiscal device connection failed');
-      }
-      const testResult: any = await bridge.ecr.testConnection(managedDeviceId);
-      if (testResult?.success !== true || testResult?.connected !== true) {
-        throw new Error(testResult?.error || 'Fiscal protocol handshake failed');
-      }
 
       const terminalId =
         getCachedTerminalCredentials().terminalId ||
         String(getSetting('terminal', 'terminal_id') || '').trim();
-      if (!terminalId) {
-        throw new Error('Terminal identity is unavailable; pair this POS again before verification');
-      }
-      deviceConnection.verification = {
-        status: 'verified',
-        terminal_id: terminalId,
-        device_id: managedDeviceId,
-        verified_at: new Date().toISOString(),
-        protocol_handshake: true,
-      };
-
-      const result = await posApiPost<{ config?: Record<string, any> }>(
-        '/pos/mydata/config',
-        { device_connection: deviceConnection, status: 'connected' }
+      const result = await verifyAndSaveMyDataDevice(
+        bridge.ecr, nativeDevice, Boolean(existing), terminalId, deviceConnection,
+        payload => posApiPost<{ config?: Record<string, any> }>('/pos/mydata/config', payload)
       );
 
       if (!result.success) {
@@ -1608,7 +1651,7 @@ export const IntegrationsPage: React.FC = () => {
       setMyDataModalOpen(false);
       // Re-derive the card-level reporting flag from the server after the save:
       // saving device wiring does not by itself enable fiscal transmission.
-      void refreshMyDataReportingFlag();
+      void fetchIntegrations();
     } catch (err: any) {
       toast.error(err?.message || 'Failed to save MyData configuration');
     } finally {
@@ -1625,9 +1668,13 @@ export const IntegrationsPage: React.FC = () => {
     myDataProtocolProfile,
     myDataDepartmentMap,
     myDataSerialPort,
+    myDataCapSettings,
+    myDataLocalSettingsReady,
+    myDataSaving,
+    myDataSetupScope,
     isMyDataFiscalDeviceMode,
     getSetting,
-    refreshMyDataReportingFlag,
+    fetchIntegrations,
     saveMyDataAction.disabled,
     saveMyDataAction.message,
     t,
@@ -2018,21 +2065,24 @@ export const IntegrationsPage: React.FC = () => {
                 </label>
                 <select
                   value={myDataConnectionType}
-                  onChange={(event) => setMyDataConnectionType(event.target.value as 'usb_serial' | 'bluetooth' | 'network')}
+                  onChange={(event) => { myDataEditedFields.current.add('target'); setMyDataConnectionType(event.target.value as 'usb_serial' | 'bluetooth' | 'network'); }}
                   className="liquid-glass-modal-input"
                   disabled={!canSaveMyData || saveMyDataAction.disabled}
                 >
-                  <option value="usb_serial">{t('integrations.mydata.connectionTypes.usbSerial', 'USB serial')}</option>
-                  <option value="bluetooth">{t('integrations.mydata.connectionTypes.bluetooth', 'Bluetooth')}</option>
                   <option value="network">{t('integrations.mydata.connectionTypes.network', 'Network (LAN)')}</option>
+                  <option value="usb_serial">{t('integrations.mydata.connectionTypes.usbSerial', 'USB serial')}</option>
+                  <option value="bluetooth" disabled>{t('integrations.mydata.bluetoothOptionUnavailable', 'Bluetooth — unavailable')}</option>
                 </select>
+                <p className="mt-2 text-xs liquid-glass-modal-text-muted">
+                  {t('integrations.mydata.physicalConnectionHelp', 'LAN is preferred. CAP Driver owns the physical connection: select TCP, UDP or COM in the vendor Windows service and use the matching device IP. Direct Bluetooth is unavailable.')}
+                </p>
               </div>
 
               {myDataConnectionType === 'usb_serial' ? (
                 <POSGlassInput
                   label={t('integrations.mydata.serialPort', 'Serial port')}
                   value={myDataSerialPort}
-                  onChange={(event) => setMyDataSerialPort(event.target.value)}
+                  onChange={(event) => { myDataEditedFields.current.add('target'); setMyDataSerialPort(event.target.value); }}
                   placeholder="COM3 or /dev/ttyUSB0"
                   disabled={saveMyDataAction.disabled}
                 />
@@ -2049,20 +2099,28 @@ export const IntegrationsPage: React.FC = () => {
                   <POSGlassInput
                     label={t('integrations.mydata.networkHost', 'Device IP address or host')}
                     value={myDataNetworkHost}
-                    onChange={(event) => setMyDataNetworkHost(event.target.value)}
+                    onChange={(event) => { myDataEditedFields.current.add('target'); setMyDataNetworkHost(event.target.value); }}
                     placeholder="192.168.1.50"
                     disabled={saveMyDataAction.disabled}
                   />
                   <POSGlassInput
                     label={t('integrations.mydata.networkPort', 'Device ERP port')}
                     value={myDataNetworkPort}
-                    onChange={(event) => setMyDataNetworkPort(event.target.value)}
+                    onChange={(event) => { myDataEditedFields.current.add('target'); setMyDataNetworkPort(event.target.value); }}
                     placeholder={t(
                       'integrations.mydata.networkPortPlaceholder',
                       'From the vendor ERP manual'
                     )}
                     disabled={saveMyDataAction.disabled}
                   />
+                  <MyDataCashierDiscovery key={myDataSetupScope} scopeKey={myDataSetupScope} disabled={myDataSaving}
+                    onSelect={host => {
+                      if (myDataSetupScopeRef.current !== myDataSetupScope) return;
+                      myDataEditedFields.current.add('target'); setMyDataNetworkHost(host);
+                    }} />
+                  {myDataProtocolProfile === 'cap_driver' && <p className="md:col-span-2 text-xs liquid-glass-modal-text-muted">
+                    {t('integrations.mydata.capOptionalPort', 'CAP Driver LAN setup needs the device IP. Leave the ERP port blank unless you enable the optional TCP probe or your vendor explicitly provides a port.')}
+                  </p>}
                 </>
               )}
 
@@ -2070,7 +2128,7 @@ export const IntegrationsPage: React.FC = () => {
                 <POSGlassInput
                   label={t('integrations.mydata.baudRate', 'Baud rate')}
                   value={myDataBaudRate}
-                  onChange={(event) => setMyDataBaudRate(event.target.value)}
+                  onChange={(event) => { myDataEditedFields.current.add('target'); setMyDataBaudRate(event.target.value); }}
                   placeholder="9600"
                   disabled={saveMyDataAction.disabled}
                 />
@@ -2108,8 +2166,11 @@ export const IntegrationsPage: React.FC = () => {
                   <option value="generic">
                     {t('integrations.mydata.legacyDatecsProtocol', 'Legacy Datecs-style STX/ETX')}
                   </option>
-                  <option value="zvt">ZVT</option>
-                  <option value="pax">PAX</option>
+                  {myDataProtocolProfile && !isMyDataFiscalProtocol(myDataProtocolProfile) && (
+                    <option value={myDataProtocolProfile} disabled>
+                      {myDataProtocolProfile} — {t('integrations.mydata.protocolUnavailable', 'Unavailable for fiscal cashier setup')}
+                    </option>
+                  )}
                 </select>
                 <p className={`mt-2 text-xs ${isDark ? 'text-amber-200/80' : 'text-amber-700'}`}>
                   {t(
@@ -2122,6 +2183,13 @@ export const IntegrationsPage: React.FC = () => {
                   )}
                 </p>
               </div>
+              {myDataProtocolProfile === 'cap_driver' && myDataLocalSettingsReady && (
+                <MyDataCapSetupAssistant key={myDataSetupScope} scopeKey={myDataSetupScope}
+                  onDetected={applyDetectedCapSetup} onStatus={receiveCapStatus} disabled={myDataSaving || saveMyDataAction.disabled} />
+              )}
+              {myDataProtocolProfile === 'cap_driver' && myDataLocalSettingsReady && !myDataCapTargetReady && <p role="status" className="md:col-span-2 text-sm text-amber-600">
+                {t('integrations.mydata.capTargetMismatch', 'The CAP service target is unavailable or differs from this form. Open connection setup, configure this IP or COM port in the vendor service, then refresh support status.')}
+              </p>}
               {myDataProtocolProfile === 'cap_driver' && (
                 <div className="md:col-span-2 rounded-2xl border border-purple-500/20 bg-purple-500/10 p-3">
                   <div className={`text-sm font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>
@@ -2153,6 +2221,49 @@ export const IntegrationsPage: React.FC = () => {
                   </div>
                 </div>
               )}
+              {myDataProtocolProfile === 'cap_driver' && (
+                <details className="md:col-span-2 rounded-2xl border border-purple-500/20 p-3">
+                  <summary className="cursor-pointer text-sm font-medium">
+                    {t('integrations.mydata.capAdvanced', 'CAP Driver advanced settings')}
+                  </summary>
+                  <p className="my-3 text-xs liquid-glass-modal-text-muted">
+                    {t('integrations.mydata.capServiceHelp', 'The installed vendor service must be running. Match its capture/output folders and encoding. Testing prints a non-closing X report; exact model and firmware support must be confirmed with your vendor.')}
+                  </p>
+                  <label className="mb-3 flex items-center gap-2 text-sm">
+                    <input type="checkbox" checked={myDataCapSettings.probeDeviceTcp}
+                      onChange={event => setMyDataCapSettings(previous => ({ ...previous, probeDeviceTcp: event.target.checked }))}
+                      disabled={!myDataLocalSettingsReady || myDataSaving || saveMyDataAction.disabled} />
+                    {t('integrations.mydata.capTcpProbe', 'Probe a known TCP ERP port before connecting (requires a port; leave off for UDP or COM)')}
+                  </label>
+                  <div className="grid gap-3 md:grid-cols-2">
+                    {([
+                      ['capturePath', 'Capture folder'], ['outputPath', 'Output folder'], ['serviceName', 'Windows service name'],
+                    ] as const).map(([key, fallback]) => (
+                      <POSGlassInput key={key} label={t(`integrations.mydata.capSettings.${key}`, fallback)}
+                        value={myDataCapSettings[key]}
+                        onChange={event => { myDataEditedFields.current.add(`cap.${key}`); setMyDataCapSettings(previous => ({ ...previous, [key]: event.target.value })); }}
+                        disabled={!myDataLocalSettingsReady || myDataSaving || saveMyDataAction.disabled} />
+                    ))}
+                    <label className="text-sm">
+                      {t('integrations.mydata.capSettings.fileEncoding', 'Command file encoding')}
+                      <select className="liquid-glass-modal-input mt-2" value={myDataCapSettings.fileEncoding}
+                        onChange={event => { myDataEditedFields.current.add('cap.fileEncoding'); setMyDataCapSettings(previous => ({ ...previous, fileEncoding: event.target.value as 'utf-8' | 'windows-1253' })); }}
+                        disabled={!myDataLocalSettingsReady || myDataSaving || saveMyDataAction.disabled}>
+                        <option value="utf-8">UTF-8</option><option value="windows-1253">Windows-1253 (Greek ANSI)</option>
+                      </select>
+                    </label>
+                    {([
+                      ['transactionTimeoutMs', 'Timeout (ms)', 5000, 300000], ['cashPaymentCode', 'Cash payment code', 1, 20],
+                      ['cardPaymentCode', 'Card payment code', 1, 20], ['eftPosIndex', 'EFT POS index', 1, 99],
+                    ] as const).map(([key, fallback, min, max]) => (
+                      <POSGlassInput key={key} label={t(`integrations.mydata.capSettings.${key}`, fallback)}
+                        type="number" min={min} max={max} value={myDataCapSettings[key]}
+                        onChange={event => setMyDataCapSettings(previous => ({ ...previous, [key]: Number(event.target.value) }))}
+                        disabled={!myDataLocalSettingsReady || myDataSaving || saveMyDataAction.disabled} />
+                    ))}
+                  </div>
+                </details>
+              )}
             </div>
           </div>
 
@@ -2163,7 +2274,7 @@ export const IntegrationsPage: React.FC = () => {
             <POSGlassButton
               onClick={handleSaveMyDataConfig}
               loading={myDataSaving}
-              disabled={!canSaveMyData || myDataSaving || saveMyDataAction.disabled}
+              disabled={!canSaveMyData || myDataSaving || !myDataLocalSettingsReady || (myDataProtocolProfile === 'cap_driver' && !myDataCapTargetReady) || myDataConnectionType === 'bluetooth' || !isMyDataFiscalProtocol(myDataProtocolProfile) || saveMyDataAction.disabled}
             >
               {t('integrations.mydata.testingLocally', 'Connect, test & save')}
             </POSGlassButton>

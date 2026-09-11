@@ -51,7 +51,9 @@ fn fresh_db() -> Connection {
              receipt_number  TEXT,
              items           TEXT NOT NULL DEFAULT '[]',
              total_amount    REAL DEFAULT 0,
+             total_amount_cents INTEGER,
              tax_amount      REAL DEFAULT 0,
+             tax_amount_cents INTEGER,
              staff_id        TEXT,
              tax_rate        REAL,
              created_at      TEXT
@@ -62,6 +64,7 @@ fn fresh_db() -> Connection {
              order_id        TEXT NOT NULL,
              method          TEXT NOT NULL,
              amount          REAL NOT NULL,
+             amount_cents    INTEGER,
              status          TEXT NOT NULL DEFAULT 'completed',
              transaction_ref TEXT,
              created_at      TEXT NOT NULL

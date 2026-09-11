@@ -1255,6 +1255,62 @@ export interface EcrDiscoveryResponse {
   warnings?: string[];
 }
 
+// -- Cap Driver setup assistance ---------------------------------------------
+
+/**
+ * The only two operations `ecr:cap-setup` accepts. `status` is a read-only
+ * Windows query; `open_installer` downloads the pinned official vendor package
+ * and launches the vendor's own installer elevated and visible.
+ *
+ * No path, URL, or command line crosses this boundary — the renderer picks an
+ * action and nothing else. The native side re-validates and rejects anything
+ * outside this list.
+ */
+export const CAP_SETUP_ACTIONS = ["status", "open_installer"] as const;
+export type CapSetupAction = (typeof CAP_SETUP_ACTIONS)[number];
+
+export interface CapSetupSettings {
+  capturePath?: string;
+  outputPath?: string;
+  /** Absent when the service INI names a code page the POS does not support. */
+  fileEncoding?: "utf-8" | "windows-1253";
+}
+
+export interface CapSetupTarget {
+  type: "network" | "usb_serial";
+  host?: string;
+  serial_port?: string;
+  baud_rate?: number;
+}
+
+export interface CapSetupResult {
+  success: boolean;
+  platformSupported: boolean;
+  serviceInstalled: boolean;
+  serviceRunning: boolean;
+  /** A launch is never a completed installation. */
+  installerLaunched?: boolean;
+  code?: string;
+  /**
+   * Only ever the allow-listed folder/encoding fields read from an installed
+   * service's own INI. Device keys, device ids and cashier serial numbers are
+   * never read, so they can never appear here.
+   */
+  settings?: CapSetupSettings;
+  target?: CapSetupTarget;
+}
+
+export interface CapDiscoveryResult {
+  success: boolean;
+  candidates: Array<{
+    host: string;
+    detectedFamily: "rbs_mat";
+    label: "MAT ECR";
+    verification: "network_only";
+  }>;
+  code?: string;
+}
+
 // -- Window / Update ---------------------------------------------------------
 
 export interface WindowState {
@@ -1988,6 +2044,8 @@ export interface PlatformBridge {
     testConnection(deviceId: string): Promise<IpcResult>;
     testPrint(deviceId: string): Promise<IpcResult>;
     fiscalPrint(orderId: string): Promise<IpcResult>;
+    capSetup(action: CapSetupAction): Promise<CapSetupResult>;
+    capDiscover(): Promise<CapDiscoveryResult>;
   };
 
   // -- Caller ID (VoIP/SIP) --------------------------------------------------
@@ -2590,6 +2648,8 @@ export const CHANNEL_MAP: Record<string, string> = {
   "ecr:test-connection": "ecr.testConnection",
   "ecr:test-print": "ecr.testPrint",
   "ecr:fiscal-print": "ecr.fiscalPrint",
+  "ecr:cap-setup": "ecr.capSetup",
+  "ecr:cap-discover": "ecr.capDiscover",
 
   // Caller ID / VoIP
   "callerid:start": "callerid.start",
@@ -3634,6 +3694,13 @@ export class TauriBridge implements PlatformBridge {
     testConnection: (did: string) => this.inv("ecr:test-connection", did),
     testPrint: (did: string) => this.inv("ecr:test-print", did),
     fiscalPrint: (oid: string) => this.inv("ecr:fiscal-print", oid),
+    // Runtime allow-list, not just a type: a caller that passes anything other
+    // than the two fixed actions never reaches the native command at all.
+    capSetup: (action: CapSetupAction): Promise<CapSetupResult> =>
+      (CAP_SETUP_ACTIONS as readonly string[]).includes(action)
+        ? this.inv("ecr:cap-setup", action)
+        : Promise.reject(new Error("CAP_SETUP_UNKNOWN_ACTION")),
+    capDiscover: (): Promise<CapDiscoveryResult> => this.inv("ecr:cap-discover"),
   };
 
   callerid = {

@@ -158,6 +158,82 @@ export const repairFinancialProjectionSchema = z.object({
 
 export type RepairFinancialProjection = z.infer<typeof repairFinancialProjectionSchema>;
 
+/**
+ * Mirrors `repairFiscalReadinessSchema` in `shared/types/repair-pos.ts`. The POS
+ * renderer cannot import the admin/shared zod contract, so the bounded code list
+ * and the reconciliation rules are restated here and are re-checked natively.
+ * Readiness is a UI hint only: the SQL money path stays the authorization control.
+ */
+const repairFiscalReadinessCodeSchema = z.enum([
+  'ready',
+  'setup_required',
+  'country_required',
+  'provider_required',
+  'certification_required',
+  'transport_unavailable',
+  'status_unavailable',
+]);
+
+export const repairFiscalReadinessSchema = z.object({
+  ready: z.boolean(),
+  code: repairFiscalReadinessCodeSchema,
+  countryCode: z.string().regex(/^[A-Z]{2}$/).nullable(),
+  fiscalMode: z.enum(['fiscal', 'non_fiscal']).nullable(),
+  capabilities: z.object({
+    collectPayments: z.boolean(),
+    refundPayments: z.boolean(),
+    fiscalize: z.boolean(),
+  }).strict(),
+}).strict().superRefine((readiness, context) => {
+  if (readiness.ready !== (readiness.code === 'ready')) {
+    context.addIssue({
+      code: 'custom',
+      path: ['code'],
+      message: 'readiness flag does not match the readiness code',
+    });
+  }
+  if (readiness.countryCode === null && readiness.fiscalMode !== null) {
+    context.addIssue({
+      code: 'custom',
+      path: ['fiscalMode'],
+      message: 'fiscal mode cannot be known without a country',
+    });
+  }
+  const capabilities = readiness.capabilities;
+  const anyCapability = capabilities.collectPayments
+    || capabilities.refundPayments
+    || capabilities.fiscalize;
+  if (readiness.ready) {
+    if (readiness.countryCode === null || readiness.fiscalMode === null) {
+      context.addIssue({
+        code: 'custom',
+        path: ['ready'],
+        message: 'ready readiness requires a country and a fiscal mode',
+      });
+    }
+  } else if (anyCapability) {
+    context.addIssue({
+      code: 'custom',
+      path: ['capabilities'],
+      message: 'blocked readiness cannot grant a money capability',
+    });
+  }
+  if (capabilities.fiscalize && readiness.fiscalMode !== 'fiscal') {
+    context.addIssue({
+      code: 'custom',
+      path: ['capabilities', 'fiscalize'],
+      message: 'fiscalize capability requires fiscal mode',
+    });
+  }
+});
+
+const repairFiscalReadinessResponseSchema = z.object({
+  readiness: repairFiscalReadinessSchema,
+}).strict();
+
+export type RepairFiscalReadinessCode = z.infer<typeof repairFiscalReadinessCodeSchema>;
+export type RepairFiscalReadiness = z.infer<typeof repairFiscalReadinessSchema>;
+
 export interface RepairMoneyIntentBase {
   operation_id: string;
   repair_id: string;
@@ -268,6 +344,31 @@ export class RepairMoneyApiService {
       throw new Error('REPAIR_FINANCIAL_PROJECTION_INVALID');
     }
     return parsed.data;
+  }
+
+  /**
+   * Read the branch fiscal readiness through the native money bridge. There is
+   * no optimistic default: an unavailable or unrecognised response throws and
+   * the caller keeps the money surface closed.
+   */
+  async getFiscalReadiness(): Promise<RepairFiscalReadiness> {
+    const staffSessionId = await this.staffSessionId();
+    let data: unknown;
+    try {
+      data = await this.bridge.repairs.moneyRequest({
+        staffSessionId,
+        request: { action: 'fiscal_readiness' },
+      });
+    } catch (error) {
+      throw new Error(error instanceof Error
+        ? error.message
+        : String(error || 'REPAIR_FISCAL_READINESS_UNAVAILABLE'));
+    }
+    const parsed = repairFiscalReadinessResponseSchema.safeParse(data);
+    if (!parsed.success) {
+      throw new Error('REPAIR_FISCAL_READINESS_INVALID');
+    }
+    return parsed.data.readiness;
   }
 
   private async post(command: RepairMoneyPostCommand) {

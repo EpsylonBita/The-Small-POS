@@ -37,7 +37,8 @@
         "providerUnavailable": "La piattaforma è temporaneamente non disponibile.",
         "busy": "La piattaforma è occupata. Riprova a breve.",
         "outcomeUnknown": "Stato sconosciuto. Aggiorna per controllare di nuovo.",
-        "outsideHours": "Online, ma fuori dagli orari di ordinazione previsti — non riceve ordini."
+        "outsideHours": "Online, ma fuori dagli orari di ordinazione previsti — non riceve ordini.",
+        "providerForbidden": "La piattaforma ha rifiutato questa modifica (403). Usa la sua app e chiedi al supporto di verificare i permessi API per le modifiche di stato."
       },
       "sound": {
         "title": "Suono di avviso degli ordini",

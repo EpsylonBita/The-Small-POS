@@ -70,11 +70,16 @@ before install so operators can review changes before accepting the update.
 
 Public `pos-tauri` releases start automatically when a matching `pos-tauri/**`,
 desktop-branding, or release-workflow change reaches private `main` or `master`.
+**Every runtime release requires a synchronized version bump** across
+`pos-tauri/package.json`, `pos-tauri/src-tauri/Cargo.toml`, and
+`pos-tauri/src-tauri/tauri.conf.json` — pushing a `pos-tauri/**` change without
+bumping the version does not publish anything new (see Release Admission Gate
+below).
 
 Operational rule:
 
 1. Merge the tested `pos-tauri` change and version bump into private `main` or `master`.
-2. Let `POS Tauri Auto Release` validate version sync, inject the updater key, build/sign the installer, generate `latest.json`, sync `pos-tauri/` into `EpsylonBita/The-Small-POS`, and recreate the public release tag `v<version>`.
+2. Let `POS Tauri Auto Release` admit the version, validate version sync, inject the updater key, build/sign the installer, generate `latest.json`, sync `pos-tauri/` into `EpsylonBita/The-Small-POS`, and publish the public release tag `v<version>`.
 3. Use `workflow_dispatch` from `main` or `master` only if that automatic run failed and is no longer active. Do not launch both paths for the same version.
 
 The workflow fails fast if it is dispatched from any ref other than branch `main` or `master`.
@@ -83,18 +88,77 @@ No separate private release commit or private release tag is required. The publi
 
 This keeps `The-Small-002` as the source of truth while avoiding a second private push just to publish the public desktop release.
 
+## Release Admission Gate
+
+The Windows build is an expensive native Rust compile, and a maintenance
+change to `pos-tauri/**` (workflow tweaks, docs, tests) with no version bump
+must not rebuild or replace an already-published public installer. Before the
+Windows job runs, a cheap `release-admission` job (`ubuntu-latest`) checks
+whether the public repo already has a complete, verified release for the
+current version's tag:
+
+1. Validates the push ref is `main` or `master`, and that `package.json`,
+   `Cargo.toml`, and `tauri.conf.json` versions are in sync.
+2. Queries `GET /repos/EpsylonBita/The-Small-POS/releases/tags/v<version>` via
+   `scripts/pos-release-admission.mjs`. A `404` means the tag is absent and
+   admits a fresh build (`should_release=true`). Any other non-2xx response,
+   or a network error, fails the job closed — it never treats an error as
+   "absent."
+3. If the tag exists, the release must be published (not draft, not
+   prerelease) with complete (`state: uploaded`) installer, `.sig`, and
+   `latest.json` assets. The script then fetches `latest.json` and checks its
+   `version` matches the source version and its `windows-x86_64.url` points
+   at that same tag's installer asset with a non-empty signature.
+4. If everything matches, admission emits `should_release=false` with a clear
+   step-summary message ("bump the version to publish new app changes") and
+   the Windows job is skipped entirely.
+5. If the release exists but is a draft, a prerelease, incomplete, or its
+   manifest disagrees with the source version — admission fails the workflow
+   run instead of silently overwriting or deleting the existing public
+   release. Resolve the conflict manually; the gate never deletes a release.
+
+The Windows `sync-and-release` job declares `needs: release-admission` and
+`if: needs.release-admission.outputs.should_release == 'true'`, so it only
+runs when admission reports a genuinely new version. The publish step itself
+(`Publish new release`) only ever runs `gh release create` for a new tag — it
+no longer deletes or recreates an existing release, so a race against another
+publish simply fails that step rather than clobbering the public artifact.
+
+The workflow's `concurrency` group keeps `cancel-in-progress: false`, so a
+maintenance-triggered run cannot cancel an in-flight publication partway
+through uploading assets.
+
 ## Release Output
 
-Each automatic or recovery run performs the same release work:
+Each admitted automatic or recovery run performs the same release work:
 
-1. Validate version sync.
-2. Inject updater public key into `src-tauri/tauri.conf.json`.
-3. Build signed Windows NSIS installer.
-4. Validate icon parity policy.
-5. Generate `latest.json`.
-6. Sync `pos-tauri/` source to the public distribution repo root.
-7. Create or replace public release tag `v<version>`.
-8. Upload `.exe`, `.sig`, and `latest.json` as the latest public release artifacts.
+1. Pass the release admission gate (no existing complete release for this version).
+2. Validate version sync.
+3. Inject updater public key into `src-tauri/tauri.conf.json`.
+4. Build signed Windows NSIS installer.
+5. Validate icon parity policy.
+6. Generate `latest.json`.
+7. Sync `pos-tauri/` source to the public distribution repo root.
+8. Create the new public release tag `v<version>` (never delete/recreate an existing one).
+9. Upload `.exe`, `.sig`, and `latest.json` as that release's artifacts.
+
+## Build Cache
+
+`POS Tauri Auto Release` caches compiled Rust dependencies with
+`Swatinem/rust-cache` (pinned to commit `6323deb102c322ba6fcbdcafc7e3dddab59af2b6`,
+tag `v2`), workspace `pos-tauri/src-tauri -> target`, and shared key
+`pos-tauri-release-windows-msvc`. This key is separate from the
+`pos-tauri-test` cache used by `pos-tauri-test.yml` so a release build never
+reuses or clobbers debug/test artifacts.
+
+The cache only stores dependency crates, not workspace-owned or `bin`
+artifacts (`cache-workspace-crates: false`, `cache-bin: false`,
+`cache-all-crates: false`), and only saves on a successful run on `main` or
+`master` (`cache-on-failure: false`). It invalidates automatically on
+toolchain, `Cargo.lock`/`Cargo.toml`, profile, or compiler-environment
+changes, so the first build after a dependency bump is still cold; only
+later runs with matching dependencies reuse the cache. Actual time savings
+have not yet been measured from a warm-cache run.
 
 ## Pre-Release Checklist
 

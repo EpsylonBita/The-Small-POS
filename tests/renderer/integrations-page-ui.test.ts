@@ -148,10 +148,10 @@ test('myDATA card carries a plain-language reporting status line gated on real t
 
 test('MyData toasts are localized (no hardcoded English strings)', () => {
   assert.match(source, /t\('integrations\.mydata\.serialPortRequired', 'Serial port is required for USB connection'\)/);
-  assert.match(source, /t\('integrations\.mydata\.bluetoothAddressRequired', 'Bluetooth address is required'\)/);
+  assert.match(source, /t\('integrations\.mydata\.bluetoothUnavailable', 'Direct Bluetooth is not available on this POS\. Use LAN or serial supported by your vendor\.'\)/);
   assert.match(source, /t\('integrations\.mydata\.configSaved', 'MyData configuration saved'\)/);
   assert.doesNotMatch(source, /toast\.error\('Serial port is required for USB connection'\)/);
-  assert.doesNotMatch(source, /toast\.error\('Bluetooth address is required'\)/);
+  assert.doesNotMatch(source, /toast\.error\('Direct Bluetooth is not available/);
   assert.doesNotMatch(source, /toast\.success\('MyData configuration saved'\)/);
 });
 

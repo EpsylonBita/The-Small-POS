@@ -7497,9 +7497,14 @@ fn sanitize_orders_since_cursor(raw: Option<String>) -> String {
     }
 
     match DateTime::parse_from_rfc3339(&candidate) {
-        Ok(dt) => dt
-            .with_timezone(&Utc)
-            .to_rfc3339_opts(SecondsFormat::Millis, true),
+        Ok(dt) => dt.with_timezone(&Utc).to_rfc3339_opts(
+            if dt.timestamp_subsec_nanos() % 1_000_000 == 0 {
+                SecondsFormat::Millis
+            } else {
+                SecondsFormat::Micros
+            },
+            true,
+        ),
         Err(_) => ORDER_SYNC_SINCE_FALLBACK.to_string(),
     }
 }
@@ -11010,6 +11015,323 @@ fn should_preserve_local_cancelled(previous_status: Option<&str>, incoming_statu
         && !matches!(incoming_status, "cancelled" | "canceled")
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct OrderPullCursor {
+    timestamp: String,
+    id: Option<String>,
+}
+
+fn parse_order_pull_cursor(value: Option<&Value>) -> Option<OrderPullCursor> {
+    let cursor: OrderPullCursor = serde_json::from_value(value?.clone()).ok()?;
+    DateTime::parse_from_rfc3339(&cursor.timestamp).ok()?;
+    if let Some(id) = &cursor.id {
+        uuid::Uuid::parse_str(id).ok()?;
+    }
+    Some(OrderPullCursor {
+        timestamp: sanitize_orders_since_cursor(Some(cursor.timestamp)),
+        id: cursor.id,
+    })
+}
+
+/// Result of applying one fetched page of remote orders to the local
+/// SQLite cache. `error` is the first row-apply failure encountered (if
+/// any); rows processed before it are already committed (each statement
+/// autocommits), so their contributions to `newly_materialized_order_ids`
+/// / `reconciled_order_events` are still returned and must be flushed by
+/// the caller even when `error` is `Some` — otherwise a later row's
+/// failure would silently drop an earlier, already-persisted row's
+/// order_created / order_realtime_update / print side effects, and a
+/// retry (which finds that row already materialized) would never
+/// re-schedule them.
+struct RemoteOrdersPageApply {
+    reconciled: usize,
+    newest_updated_at: Option<String>,
+    newly_materialized_order_ids: Vec<String>,
+    reconciled_order_events: Vec<(String, Option<String>)>,
+    error: Option<String>,
+}
+
+fn apply_remote_orders_page(conn: &Connection, orders: Vec<Value>) -> RemoteOrdersPageApply {
+    let mut reconciled = 0usize;
+    let mut newest_updated_at: Option<String> = None;
+    let mut newly_materialized_order_ids: Vec<String> = Vec::new();
+    let mut reconciled_order_events: Vec<(String, Option<String>)> = Vec::new();
+    let mut page_error: Option<String> = None;
+
+    for remote_order in orders {
+        if remote_order_is_repair_settlement(&remote_order) {
+            continue;
+        }
+        let remote_id = match remote_order.get("id").and_then(Value::as_str) {
+            Some(v) if !v.trim().is_empty() => v.to_string(),
+            _ => continue,
+        };
+        let local_id = match resolve_local_order_id(conn, &remote_order) {
+            Some(v) => match local_order_is_repair_settlement(conn, &v) {
+                Ok(true) => continue,
+                Ok(false) => v,
+                Err(error) => {
+                    page_error = Some(format!("Failed to apply remote order page: {error}"));
+                    break;
+                }
+            },
+            None => {
+                // Pre-Z-report filtering happens inside
+                // materialize_remote_order: it is status-aware (a still
+                // -open order is never hidden by a Z) and normalizes
+                // timestamp shapes via SQLite datetime(). The raw
+                // string comparison that used to live here treated
+                // every 'T'-format created_at as newer than a space-
+                // format cutoff, so a whole closed day could slip
+                // through — or an open one be wrongly hidden.
+                match materialize_remote_order(conn, &remote_order) {
+                    Ok(Some(inserted_id)) => {
+                        info!(
+                            local_id = %inserted_id,
+                            remote_id = %remote_id,
+                            "Materialized missing remote order into local cache"
+                        );
+                        newly_materialized_order_ids.push(inserted_id.clone());
+                        reconciled += 1;
+                        inserted_id
+                    }
+                    Ok(None) => continue,
+                    Err(error) => {
+                        warn!(
+                            remote_id = %remote_id,
+                            error = %error,
+                            "Failed to materialize remote order"
+                        );
+                        page_error = Some(format!("Failed to apply remote order page: {error}"));
+                        break;
+                    }
+                }
+            }
+        };
+
+        let updated_at = remote_order_changed_at(&remote_order);
+        if newest_updated_at
+            .as_ref()
+            .map(|cur| updated_at > *cur)
+            .unwrap_or(true)
+        {
+            newest_updated_at = Some(updated_at.clone());
+        }
+
+        let status = remote_order
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("pending");
+        let payment_status = remote_order
+            .get("payment_status")
+            .and_then(Value::as_str)
+            .unwrap_or("pending");
+        let payment_method = normalize_payment_method_for_sync(
+            str_any(&remote_order, &["payment_method", "paymentMethod"]).as_deref(),
+        );
+        let payment_transaction_id = str_any(
+            &remote_order,
+            &["payment_transaction_id", "paymentTransactionId"],
+        );
+        let cancellation_reason = str_any(
+            &remote_order,
+            &["cancellation_reason", "cancellationReason"],
+        );
+
+        // Check if order has genuinely unsynced queue entries rather than
+        // relying on orders.sync_status which can be reset by concurrent edits.
+        let has_pending_queue = has_outstanding_local_order_queue(conn, &local_id);
+
+        if has_pending_queue {
+            // Still set supabase_id (needed for resolution)
+            let _ = conn.execute(
+                "UPDATE orders SET supabase_id = ?1 WHERE id = ?2 AND supabase_id IS NULL",
+                params![remote_id, local_id],
+            );
+            log_reconcile_skip_throttled(&local_id);
+        } else {
+            // Only apply remote changes if they're at least as new as local
+            let previous_status: Option<String> = conn
+                .query_row(
+                    "SELECT status FROM orders WHERE id = ?1",
+                    params![local_id],
+                    |row| row.get(0),
+                )
+                .ok()
+                .flatten();
+
+            let local_updated_at: Option<String> = conn
+                .query_row(
+                    "SELECT updated_at FROM orders WHERE id = ?1",
+                    params![local_id],
+                    |row| row.get(0),
+                )
+                .ok()
+                .flatten();
+
+            let should_update = if updated_at.is_empty() {
+                local_updated_at.is_none()
+            } else {
+                local_updated_at
+                    .as_ref()
+                    .map(|local| updated_at >= *local)
+                    .unwrap_or(true)
+            };
+
+            if should_update {
+                if should_preserve_local_cancelled(previous_status.as_deref(), status) {
+                    let _ = conn.execute(
+                        "UPDATE orders
+                         SET supabase_id = COALESCE(?1, supabase_id),
+                             sync_status = CASE
+                                 WHEN COALESCE(sync_status, '') = 'pending' THEN sync_status
+                                 ELSE 'synced'
+                             END,
+                             last_synced_at = datetime('now')
+                         WHERE id = ?2",
+                        params![remote_id, local_id],
+                    );
+                    continue;
+                }
+
+                // W6: `orders.payment_method` was dropped in v55.
+                // The inbound `payment_method` from the remote is
+                // still consumed elsewhere (sync payload,
+                // downstream derivation) but is no longer
+                // persisted on the local orders row. The
+                // `?4` parameter slot was repurposed for
+                // cancellation_reason (formerly `?8`).
+                let _ = &payment_method;
+                // Table-service propagation (field 30/08, geminix org):
+                // items ADDED to an open satellite order never reached
+                // this mirror — the reconcile applied only status-level
+                // fields, so the local copy kept the stale item list
+                // and total (19€ vs the real 34€), and every consumer
+                // of the local row (payment pairing, drawer sums,
+                // prints) worked from wrong money. Apply items and the
+                // money trio when the remote actually carries them;
+                // absent keys leave the local values untouched.
+                let remote_items_json: Option<String> = match remote_order
+                    .get("items")
+                    .or_else(|| remote_order.get("order_items"))
+                    .or_else(|| remote_order.get("orderItems"))
+                {
+                    Some(Value::String(raw)) => Some(raw.clone()),
+                    Some(value) => serde_json::to_string(value).ok(),
+                    None => None,
+                };
+                let remote_total = num_any(&remote_order, &["total_amount", "totalAmount"]);
+                let remote_subtotal = num_any(&remote_order, &["subtotal"]);
+                let remote_tax = num_any(&remote_order, &["tax_amount", "taxAmount"]);
+                let updated = match conn.execute(
+                    "UPDATE orders
+                         SET supabase_id = ?1,
+                             status = ?2,
+                             payment_status = ?3,
+                             payment_transaction_id = COALESCE(?5, payment_transaction_id),
+                             sync_status = 'synced',
+                             last_synced_at = datetime('now'),
+                             updated_at = ?6,
+                             cancellation_reason = COALESCE(?4, cancellation_reason),
+                             items = COALESCE(?8, items),
+                             total_amount = COALESCE(?9, total_amount),
+                             subtotal = COALESCE(?10, subtotal),
+                             tax_amount = COALESCE(?11, tax_amount)
+                         WHERE id = ?7
+                           AND (
+                             COALESCE(supabase_id, '') != COALESCE(?1, '')
+                             OR COALESCE(status, '') != COALESCE(?2, '')
+                             OR COALESCE(payment_status, '') != COALESCE(?3, '')
+                             OR COALESCE(payment_transaction_id, '') != COALESCE(?5, '')
+                             OR COALESCE(sync_status, '') != 'synced'
+                             OR COALESCE(updated_at, '') != COALESCE(?6, '')
+                             OR COALESCE(cancellation_reason, '') != COALESCE(?4, '')
+                             OR (?8 IS NOT NULL AND COALESCE(items, '') != ?8)
+                             OR (?9 IS NOT NULL AND COALESCE(total_amount, -1) != ?9)
+                             OR (?10 IS NOT NULL AND COALESCE(subtotal, -1) != ?10)
+                             OR (?11 IS NOT NULL AND COALESCE(tax_amount, -1) != ?11)
+                           )",
+                    params![
+                        remote_id,
+                        status,
+                        payment_status,
+                        cancellation_reason.as_deref(),
+                        payment_transaction_id,
+                        updated_at,
+                        local_id,
+                        remote_items_json,
+                        remote_total,
+                        remote_subtotal,
+                        remote_tax,
+                    ],
+                ) {
+                    Ok(v) => v,
+                    Err(error) => {
+                        page_error = Some(format!("Failed to apply remote order page: {error}"));
+                        break;
+                    }
+                };
+                if updated > 0 {
+                    if local_order_has_completed_payment_rows(conn, &local_id).unwrap_or(false) {
+                        if let Err(error) = recompute_local_order_payment_snapshot(
+                            conn,
+                            &local_id,
+                            updated_at.as_str(),
+                        ) {
+                            warn!(
+                                order_id = %local_id,
+                                error = %error,
+                                "Failed to re-derive local payment status after remote order snapshot"
+                            );
+                        }
+                    }
+                    reconciled += 1;
+                    let status_changed = previous_status
+                        .as_deref()
+                        .map(|prev| prev != status)
+                        .unwrap_or(true);
+                    reconciled_order_events.push((
+                        local_id.clone(),
+                        if status_changed {
+                            Some(status.to_string())
+                        } else {
+                            None
+                        },
+                    ));
+                }
+            } else {
+                // Remote is stale, just ensure supabase_id is set
+                let _ = conn.execute(
+                    "UPDATE orders SET supabase_id = ?1 WHERE id = ?2 AND supabase_id IS NULL",
+                    params![remote_id, local_id],
+                );
+            }
+        }
+
+        if !has_pending_queue {
+            if let Err(error) = maybe_reconstruct_paid_remote_order_payment(conn, &remote_order) {
+                warn!(
+                    order_id = %local_id,
+                    remote_id = %remote_id,
+                    error = %error,
+                    "Failed to reconstruct missing local payment row from remote order"
+                );
+            }
+        }
+
+        // Always promote payments regardless of reconciliation outcome
+        promote_payments_for_order(conn, &local_id);
+    }
+
+    RemoteOrdersPageApply {
+        reconciled,
+        newest_updated_at,
+        newly_materialized_order_ids,
+        reconciled_order_events,
+        error: page_error,
+    }
+}
+
 async fn reconcile_remote_orders(
     db: &DbState,
     admin_url: &str,
@@ -11019,6 +11341,13 @@ async fn reconcile_remote_orders(
     let mut since_cursor =
         sanitize_orders_since_cursor(local_setting_get(db, "sync", "orders_since"));
     let _ = local_setting_set(db, "sync", "orders_since", &since_cursor);
+    let stored_page = local_setting_get(db, "sync", "orders_page_cursor")
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+    let mut page_cursor = parse_order_pull_cursor(stored_page.as_ref())
+        .filter(|cursor| cursor.timestamp == since_cursor);
+    let stored_deleted = local_setting_get(db, "sync", "orders_deleted_cursor")
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+    let mut deleted_cursor = parse_order_pull_cursor(stored_deleted.as_ref());
     let bootstrap_mode = ensure_sync_bootstrap_mode(db)?;
     let bootstrap_active = bootstrap_mode != SYNC_BOOTSTRAP_MODE_LIVE;
     let mut reconciled = 0usize;
@@ -11027,6 +11356,18 @@ async fn reconcile_remote_orders(
     for _page in 0..4 {
         let mut path = "/api/pos/orders/sync?limit=200&include_deleted=true&since=".to_string();
         path.push_str(&percent_encode(&since_cursor));
+        if let Some(id) = page_cursor.as_ref().and_then(|cursor| cursor.id.as_ref()) {
+            path.push_str("&since_id=");
+            path.push_str(&percent_encode(id));
+        }
+        if let Some(cursor) = &deleted_cursor {
+            path.push_str("&deleted_since=");
+            path.push_str(&percent_encode(&cursor.timestamp));
+            if let Some(id) = &cursor.id {
+                path.push_str("&deleted_since_id=");
+                path.push_str(&percent_encode(id));
+            }
+        }
 
         let resp = match api::fetch_from_admin(admin_url, api_key, &path, "GET", None).await {
             Ok(v) => v,
@@ -11065,7 +11406,7 @@ async fn reconcile_remote_orders(
             .cloned()
             .unwrap_or_default();
         if !deleted_ids.is_empty() {
-            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
             for deleted_id in &deleted_ids {
                 let Some(remote_id) = deleted_id.as_str().filter(|s| !s.trim().is_empty()) else {
                     continue;
@@ -11082,23 +11423,27 @@ async fn reconcile_remote_orders(
                     )
                     .ok();
                 if let Some(local_id) = local_id {
+                    let transaction = conn.transaction().map_err(|e| e.to_string())?;
                     // Clean up sync_queue entries (no FK cascade to orders)
-                    let _ = conn.execute(
-                        "DELETE FROM sync_queue WHERE entity_type = 'order' AND entity_id = ?1",
-                        params![local_id],
-                    );
-                    let _ = conn.execute(
+                    transaction
+                        .execute(
+                            "DELETE FROM sync_queue WHERE entity_type = 'order' AND entity_id = ?1",
+                            params![local_id],
+                        )
+                        .map_err(|e| e.to_string())?;
+                    transaction.execute(
                         "DELETE FROM sync_queue WHERE entity_type = 'payment' AND entity_id IN (SELECT id FROM order_payments WHERE order_id = ?1)",
                         params![local_id],
-                    );
-                    let _ = conn.execute(
+                    ).map_err(|e| e.to_string())?;
+                    transaction.execute(
                         "DELETE FROM sync_queue WHERE entity_type = 'payment_adjustment' AND entity_id IN (SELECT id FROM payment_adjustments WHERE order_id = ?1)",
                         params![local_id],
-                    );
+                    ).map_err(|e| e.to_string())?;
                     // Delete the order — FK CASCADE cleans order_payments, payment_adjustments, driver_earnings
-                    let deleted = conn
+                    let deleted = transaction
                         .execute("DELETE FROM orders WHERE id = ?1", params![local_id])
-                        .unwrap_or(0);
+                        .map_err(|e| e.to_string())?;
+                    transaction.commit().map_err(|e| e.to_string())?;
                     if deleted > 0 {
                         reconciled += 1;
                         let _ =
@@ -11113,275 +11458,17 @@ async fn reconcile_remote_orders(
             }
         }
 
-        let mut newest_updated_at: Option<String> = None;
-        let mut newly_materialized_order_ids: Vec<String> = Vec::new();
-        let mut reconciled_order_events: Vec<(String, Option<String>)> = Vec::new();
-
-        {
+        let RemoteOrdersPageApply {
+            reconciled: page_reconciled,
+            newest_updated_at,
+            newly_materialized_order_ids,
+            reconciled_order_events,
+            error: page_error,
+        } = {
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
-
-            for remote_order in orders {
-                if remote_order_is_repair_settlement(&remote_order) {
-                    continue;
-                }
-                let remote_id = match remote_order.get("id").and_then(Value::as_str) {
-                    Some(v) if !v.trim().is_empty() => v.to_string(),
-                    _ => continue,
-                };
-                let local_id = match resolve_local_order_id(&conn, &remote_order) {
-                    Some(v) => {
-                        if local_order_is_repair_settlement(&conn, &v)? {
-                            continue;
-                        }
-                        v
-                    }
-                    None => {
-                        // Pre-Z-report filtering happens inside
-                        // materialize_remote_order: it is status-aware (a still
-                        // -open order is never hidden by a Z) and normalizes
-                        // timestamp shapes via SQLite datetime(). The raw
-                        // string comparison that used to live here treated
-                        // every 'T'-format created_at as newer than a space-
-                        // format cutoff, so a whole closed day could slip
-                        // through — or an open one be wrongly hidden.
-                        match materialize_remote_order(&conn, &remote_order) {
-                            Ok(Some(inserted_id)) => {
-                                info!(
-                                    local_id = %inserted_id,
-                                    remote_id = %remote_id,
-                                    "Materialized missing remote order into local cache"
-                                );
-                                newly_materialized_order_ids.push(inserted_id.clone());
-                                reconciled += 1;
-                                inserted_id
-                            }
-                            Ok(None) => continue,
-                            Err(error) => {
-                                warn!(
-                                    remote_id = %remote_id,
-                                    error = %error,
-                                    "Failed to materialize remote order"
-                                );
-                                continue;
-                            }
-                        }
-                    }
-                };
-
-                let updated_at = remote_order_changed_at(&remote_order);
-                if newest_updated_at
-                    .as_ref()
-                    .map(|cur| updated_at > *cur)
-                    .unwrap_or(true)
-                {
-                    newest_updated_at = Some(updated_at.clone());
-                }
-
-                let status = remote_order
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .unwrap_or("pending");
-                let payment_status = remote_order
-                    .get("payment_status")
-                    .and_then(Value::as_str)
-                    .unwrap_or("pending");
-                let payment_method = normalize_payment_method_for_sync(
-                    str_any(&remote_order, &["payment_method", "paymentMethod"]).as_deref(),
-                );
-                let payment_transaction_id = str_any(
-                    &remote_order,
-                    &["payment_transaction_id", "paymentTransactionId"],
-                );
-                let cancellation_reason = str_any(
-                    &remote_order,
-                    &["cancellation_reason", "cancellationReason"],
-                );
-
-                // Check if order has genuinely unsynced queue entries rather than
-                // relying on orders.sync_status which can be reset by concurrent edits.
-                let has_pending_queue = has_outstanding_local_order_queue(&conn, &local_id);
-
-                if has_pending_queue {
-                    // Still set supabase_id (needed for resolution)
-                    let _ = conn.execute(
-                        "UPDATE orders SET supabase_id = ?1 WHERE id = ?2 AND supabase_id IS NULL",
-                        params![remote_id, local_id],
-                    );
-                    log_reconcile_skip_throttled(&local_id);
-                } else {
-                    // Only apply remote changes if they're at least as new as local
-                    let previous_status: Option<String> = conn
-                        .query_row(
-                            "SELECT status FROM orders WHERE id = ?1",
-                            params![local_id],
-                            |row| row.get(0),
-                        )
-                        .ok()
-                        .flatten();
-
-                    let local_updated_at: Option<String> = conn
-                        .query_row(
-                            "SELECT updated_at FROM orders WHERE id = ?1",
-                            params![local_id],
-                            |row| row.get(0),
-                        )
-                        .ok()
-                        .flatten();
-
-                    let should_update = if updated_at.is_empty() {
-                        local_updated_at.is_none()
-                    } else {
-                        local_updated_at
-                            .as_ref()
-                            .map(|local| updated_at >= *local)
-                            .unwrap_or(true)
-                    };
-
-                    if should_update {
-                        if should_preserve_local_cancelled(previous_status.as_deref(), status) {
-                            let _ = conn.execute(
-                                "UPDATE orders
-                                 SET supabase_id = COALESCE(?1, supabase_id),
-                                     sync_status = CASE
-                                         WHEN COALESCE(sync_status, '') = 'pending' THEN sync_status
-                                         ELSE 'synced'
-                                     END,
-                                     last_synced_at = datetime('now')
-                                 WHERE id = ?2",
-                                params![remote_id, local_id],
-                            );
-                            continue;
-                        }
-
-                        // W6: `orders.payment_method` was dropped in v55.
-                        // The inbound `payment_method` from the remote is
-                        // still consumed elsewhere (sync payload,
-                        // downstream derivation) but is no longer
-                        // persisted on the local orders row. The
-                        // `?4` parameter slot was repurposed for
-                        // cancellation_reason (formerly `?8`).
-                        let _ = &payment_method;
-                        // Table-service propagation (field 30/08, geminix org):
-                        // items ADDED to an open satellite order never reached
-                        // this mirror — the reconcile applied only status-level
-                        // fields, so the local copy kept the stale item list
-                        // and total (19€ vs the real 34€), and every consumer
-                        // of the local row (payment pairing, drawer sums,
-                        // prints) worked from wrong money. Apply items and the
-                        // money trio when the remote actually carries them;
-                        // absent keys leave the local values untouched.
-                        let remote_items_json: Option<String> = match remote_order
-                            .get("items")
-                            .or_else(|| remote_order.get("order_items"))
-                            .or_else(|| remote_order.get("orderItems"))
-                        {
-                            Some(Value::String(raw)) => Some(raw.clone()),
-                            Some(value) => serde_json::to_string(value).ok(),
-                            None => None,
-                        };
-                        let remote_total = num_any(&remote_order, &["total_amount", "totalAmount"]);
-                        let remote_subtotal = num_any(&remote_order, &["subtotal"]);
-                        let remote_tax = num_any(&remote_order, &["tax_amount", "taxAmount"]);
-                        let updated = conn
-                            .execute(
-                                "UPDATE orders
-                                 SET supabase_id = ?1,
-                                     status = ?2,
-                                     payment_status = ?3,
-                                     payment_transaction_id = COALESCE(?5, payment_transaction_id),
-                                     sync_status = 'synced',
-                                     last_synced_at = datetime('now'),
-                                     updated_at = ?6,
-                                     cancellation_reason = COALESCE(?4, cancellation_reason),
-                                     items = COALESCE(?8, items),
-                                     total_amount = COALESCE(?9, total_amount),
-                                     subtotal = COALESCE(?10, subtotal),
-                                     tax_amount = COALESCE(?11, tax_amount)
-                                 WHERE id = ?7
-                                   AND (
-                                     COALESCE(supabase_id, '') != COALESCE(?1, '')
-                                     OR COALESCE(status, '') != COALESCE(?2, '')
-                                     OR COALESCE(payment_status, '') != COALESCE(?3, '')
-                                     OR COALESCE(payment_transaction_id, '') != COALESCE(?5, '')
-                                     OR COALESCE(sync_status, '') != 'synced'
-                                     OR COALESCE(updated_at, '') != COALESCE(?6, '')
-                                     OR COALESCE(cancellation_reason, '') != COALESCE(?4, '')
-                                     OR (?8 IS NOT NULL AND COALESCE(items, '') != ?8)
-                                     OR (?9 IS NOT NULL AND COALESCE(total_amount, -1) != ?9)
-                                     OR (?10 IS NOT NULL AND COALESCE(subtotal, -1) != ?10)
-                                     OR (?11 IS NOT NULL AND COALESCE(tax_amount, -1) != ?11)
-                                   )",
-                                params![
-                                    remote_id,
-                                    status,
-                                    payment_status,
-                                    cancellation_reason.as_deref(),
-                                    payment_transaction_id,
-                                    updated_at,
-                                    local_id,
-                                    remote_items_json,
-                                    remote_total,
-                                    remote_subtotal,
-                                    remote_tax,
-                                ],
-                            )
-                            .unwrap_or(0);
-                        if updated > 0 {
-                            if local_order_has_completed_payment_rows(&conn, &local_id)
-                                .unwrap_or(false)
-                            {
-                                if let Err(error) = recompute_local_order_payment_snapshot(
-                                    &conn,
-                                    &local_id,
-                                    updated_at.as_str(),
-                                ) {
-                                    warn!(
-                                        order_id = %local_id,
-                                        error = %error,
-                                        "Failed to re-derive local payment status after remote order snapshot"
-                                    );
-                                }
-                            }
-                            reconciled += 1;
-                            let status_changed = previous_status
-                                .as_deref()
-                                .map(|prev| prev != status)
-                                .unwrap_or(true);
-                            reconciled_order_events.push((
-                                local_id.clone(),
-                                if status_changed {
-                                    Some(status.to_string())
-                                } else {
-                                    None
-                                },
-                            ));
-                        }
-                    } else {
-                        // Remote is stale, just ensure supabase_id is set
-                        let _ = conn.execute(
-                            "UPDATE orders SET supabase_id = ?1 WHERE id = ?2 AND supabase_id IS NULL",
-                            params![remote_id, local_id],
-                        );
-                    }
-                }
-
-                if !has_pending_queue {
-                    if let Err(error) =
-                        maybe_reconstruct_paid_remote_order_payment(&conn, &remote_order)
-                    {
-                        warn!(
-                            order_id = %local_id,
-                            remote_id = %remote_id,
-                            error = %error,
-                            "Failed to reconstruct missing local payment row from remote order"
-                        );
-                    }
-                }
-
-                // Always promote payments regardless of reconciliation outcome
-                promote_payments_for_order(&conn, &local_id);
-            }
-        }
+            apply_remote_orders_page(&conn, orders)
+        };
+        reconciled += page_reconciled;
 
         for (local_id, status_event) in reconciled_order_events {
             if let Ok(order_json) = get_order_by_id(db, &local_id) {
@@ -11513,7 +11600,20 @@ async fn reconcile_remote_orders(
             }
         }
 
-        let next_cursor = sanitize_orders_since_cursor(newest_updated_at.or(Some(sync_timestamp)));
+        // A row-apply failure was captured above (and already committed rows
+        // before it were flushed just now) — surface it without advancing
+        // the cursor so the next sync attempt retries this same page.
+        if let Some(error) = page_error {
+            return Err(error);
+        }
+
+        let next_page = parse_order_pull_cursor(resp.get("next_cursor"));
+        let next_cursor = next_page
+            .as_ref()
+            .map(|cursor| cursor.timestamp.clone())
+            .unwrap_or_else(|| {
+                sanitize_orders_since_cursor(newest_updated_at.or(Some(sync_timestamp)))
+            });
         // Only advance cursor forward — never regress.  This protects against
         // a Z-report updating the cursor to "now" while we hold a stale
         // response whose newest_updated_at predates the cleanup.
@@ -11521,12 +11621,32 @@ async fn reconcile_remote_orders(
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
             let current_stored =
                 sanitize_orders_since_cursor(crate::db::get_setting(&conn, "sync", "orders_since"));
-            if next_cursor > current_stored {
+            if DateTime::parse_from_rfc3339(&next_cursor).ok()
+                >= DateTime::parse_from_rfc3339(&current_stored).ok()
+            {
                 since_cursor = next_cursor.clone();
+                page_cursor = next_page;
+                // Store the pair first: a crash before the scalar update safely replays the older page.
+                crate::db::set_setting(
+                    &conn,
+                    "sync",
+                    "orders_page_cursor",
+                    &serde_json::to_string(&page_cursor).map_err(|e| e.to_string())?,
+                )?;
                 crate::db::set_setting(&conn, "sync", "orders_since", &next_cursor)?;
             } else if since_cursor != current_stored {
                 // Another path (e.g. Z-report) advanced the cursor past us — adopt it
                 since_cursor = current_stored;
+                page_cursor = None;
+            }
+            if let Some(next_deleted) = parse_order_pull_cursor(resp.get("deleted_cursor")) {
+                crate::db::set_setting(
+                    &conn,
+                    "sync",
+                    "orders_deleted_cursor",
+                    &serde_json::to_string(&next_deleted).map_err(|e| e.to_string())?,
+                )?;
+                deleted_cursor = Some(next_deleted);
             }
         }
 
@@ -12620,13 +12740,21 @@ async fn resolve_remote_order_for_local_order(
     }
 
     let mut sync_since_cursor = build_remote_order_repair_since_cursor(&lookup);
+    let mut sync_cursor_id: Option<String> = None;
     for _page in 0..3 {
-        let normalized_since_cursor =
-            normalize_remote_order_repair_since_cursor(sync_since_cursor.trim());
-        let path = format!(
+        let normalized_since_cursor = if sync_cursor_id.is_some() {
+            sanitize_orders_since_cursor(Some(sync_since_cursor.clone()))
+        } else {
+            normalize_remote_order_repair_since_cursor(sync_since_cursor.trim())
+        };
+        let mut path = format!(
             "/api/pos/orders/sync?limit=200&since={}",
             percent_encode(&normalized_since_cursor)
         );
+        if let Some(id) = &sync_cursor_id {
+            path.push_str("&since_id=");
+            path.push_str(&percent_encode(id));
+        }
         let response = match api::fetch_from_admin(admin_url, api_key, &path, "GET", None).await {
             Ok(response) => response,
             Err(error) if is_non_authoritative_terminal_lookup_miss(&error) => {
@@ -12671,14 +12799,21 @@ async fn resolve_remote_order_for_local_order(
             break;
         }
 
-        let Some(next_cursor) = remote_orders
-            .iter()
-            .rfind(|order| !remote_order_changed_at(order).trim().is_empty())
-            .map(remote_order_changed_at)
+        let page_cursor = parse_order_pull_cursor(response.get("next_cursor"));
+        let Some(next_cursor) = page_cursor
+            .as_ref()
+            .map(|cursor| cursor.timestamp.clone())
+            .or_else(|| {
+                remote_orders
+                    .iter()
+                    .rfind(|order| !remote_order_changed_at(order).trim().is_empty())
+                    .map(remote_order_changed_at)
+            })
         else {
             break;
         };
-        sync_since_cursor = normalize_remote_order_repair_since_cursor(&next_cursor);
+        sync_cursor_id = page_cursor.and_then(|cursor| cursor.id);
+        sync_since_cursor = next_cursor;
     }
 
     if let Some(remote_order_id) = lookup.supabase_id {
@@ -22977,6 +23112,221 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_remote_orders_page_preserves_earlier_materialization_when_later_row_fails() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        // Real SQLite failure, not a mocked error: a trigger aborts the
+        // INSERT that materialize_remote_order issues for the second row's
+        // supabase_id, so its statement genuinely fails while leaving the
+        // first row's already-committed INSERT (autocommit, prior
+        // statement) untouched.
+        conn.execute_batch(
+            "CREATE TRIGGER test_fail_materialize_insert
+             BEFORE INSERT ON orders
+             WHEN NEW.supabase_id = 'remote-fail-b'
+             BEGIN
+                 SELECT RAISE(ABORT, 'induced test failure');
+             END;",
+        )
+        .expect("install failing insert trigger");
+
+        let remote_order_a = serde_json::json!({
+            "id": "remote-ok-a",
+            "order_number": "ORD-A",
+            "items": [{ "name": "Coffee", "quantity": 1, "price": 2.5 }],
+            "total_amount": 2.5,
+            "status": "pending",
+            "payment_status": "pending",
+            "updated_at": "2026-09-01T10:00:00Z"
+        });
+        let remote_order_b = serde_json::json!({
+            "id": "remote-fail-b",
+            "order_number": "ORD-B",
+            "items": [{ "name": "Tea", "quantity": 1, "price": 2.0 }],
+            "total_amount": 2.0,
+            "status": "pending",
+            "payment_status": "pending",
+            "updated_at": "2026-09-01T10:00:00Z"
+        });
+
+        let first_pass =
+            apply_remote_orders_page(&conn, vec![remote_order_a.clone(), remote_order_b.clone()]);
+
+        let error = first_pass
+            .error
+            .as_deref()
+            .expect("second row's induced failure must surface as a page error");
+        assert!(error.contains("induced test failure"), "got: {error}");
+
+        // Row A's creation action must still be reported so the caller can
+        // flush order_created / auto-print for it despite row B failing.
+        assert_eq!(first_pass.newly_materialized_order_ids.len(), 1);
+        let local_id_a: String = conn
+            .query_row(
+                "SELECT id FROM orders WHERE supabase_id = 'remote-ok-a'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("row A must already be committed");
+        assert_eq!(first_pass.newly_materialized_order_ids[0], local_id_a);
+
+        let row_a_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM orders WHERE supabase_id = 'remote-ok-a'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            row_a_count, 1,
+            "row A's insert must be durable despite row B's failure"
+        );
+        let row_b_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM orders WHERE supabase_id = 'remote-fail-b'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            row_b_count, 0,
+            "row B's aborted insert must not leave a partial row"
+        );
+
+        conn.execute_batch("DROP TRIGGER test_fail_materialize_insert;")
+            .expect("remove failing insert trigger");
+
+        // Retry with the same page (the caller never advanced its cursor
+        // past this page): row A must resolve to its existing local row
+        // instead of materializing a duplicate, and row B must now succeed.
+        let retry_pass = apply_remote_orders_page(&conn, vec![remote_order_a, remote_order_b]);
+
+        assert!(retry_pass.error.is_none());
+        // Row B genuinely materializes for the first time now; row A must
+        // NOT appear again (no duplicate creation action for it).
+        assert_eq!(retry_pass.newly_materialized_order_ids.len(), 1);
+        let local_id_b: String = conn
+            .query_row(
+                "SELECT id FROM orders WHERE supabase_id = 'remote-fail-b'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("row B must now be committed");
+        assert_eq!(retry_pass.newly_materialized_order_ids[0], local_id_b);
+        assert_ne!(
+            retry_pass.newly_materialized_order_ids[0], local_id_a,
+            "row A must not be re-materialized on retry"
+        );
+        let total_orders: i64 = conn
+            .query_row("SELECT COUNT(*) FROM orders", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            total_orders, 2,
+            "retry must add exactly row B, no duplicates"
+        );
+    }
+
+    #[test]
+    fn test_apply_remote_orders_page_preserves_earlier_status_update_when_later_row_fails() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        for (local_id, supabase_id) in [("order-a", "remote-a"), ("order-b", "remote-b")] {
+            conn.execute(
+                "INSERT INTO orders (
+                    id, supabase_id, items, total_amount, total_amount_cents,
+                    status, payment_status, sync_status, created_at, updated_at
+                 ) VALUES (?1, ?2, '[]', 10.0, 1000, 'pending', 'pending', 'synced',
+                    '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                params![local_id, supabase_id],
+            )
+            .unwrap();
+        }
+
+        // Real SQLite failure on the second row's UPDATE only.
+        conn.execute_batch(
+            "CREATE TRIGGER test_fail_status_update
+             BEFORE UPDATE ON orders
+             WHEN NEW.id = 'order-b'
+             BEGIN
+                 SELECT RAISE(ABORT, 'induced update failure');
+             END;",
+        )
+        .expect("install failing update trigger");
+
+        let remote_order_a = serde_json::json!({
+            "id": "remote-a",
+            "status": "confirmed",
+            "payment_status": "pending",
+            "updated_at": "2026-01-02T00:00:00Z"
+        });
+        let remote_order_b = serde_json::json!({
+            "id": "remote-b",
+            "status": "confirmed",
+            "payment_status": "pending",
+            "updated_at": "2026-01-02T00:00:00Z"
+        });
+
+        let first_pass =
+            apply_remote_orders_page(&conn, vec![remote_order_a.clone(), remote_order_b.clone()]);
+
+        let error = first_pass
+            .error
+            .as_deref()
+            .expect("second row's induced UPDATE failure must surface as a page error");
+        assert!(error.contains("induced update failure"), "got: {error}");
+        assert_eq!(
+            first_pass.reconciled_order_events,
+            vec![("order-a".to_string(), Some("confirmed".to_string()))],
+            "row A's status-change event must still be reported"
+        );
+
+        let (status_a, status_b): (String, String) = (
+            conn.query_row(
+                "SELECT status FROM orders WHERE id = 'order-a'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap(),
+            conn.query_row(
+                "SELECT status FROM orders WHERE id = 'order-b'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        );
+        assert_eq!(status_a, "confirmed", "row A's update must be durable");
+        assert_eq!(
+            status_b, "pending",
+            "row B's aborted update must not apply partially"
+        );
+
+        conn.execute_batch("DROP TRIGGER test_fail_status_update;")
+            .expect("remove failing update trigger");
+
+        // Retry with the same page: row A already matches the remote
+        // snapshot, so it must not produce a duplicate status-change event;
+        // row B must now succeed.
+        let retry_pass = apply_remote_orders_page(&conn, vec![remote_order_a, remote_order_b]);
+
+        assert!(retry_pass.error.is_none());
+        assert_eq!(
+            retry_pass.reconciled_order_events,
+            vec![("order-b".to_string(), Some("confirmed".to_string()))],
+            "row A must not repeat its status-change event on retry"
+        );
+        let status_b_after: String = conn
+            .query_row(
+                "SELECT status FROM orders WHERE id = 'order-b'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status_b_after, "confirmed");
+    }
+
+    #[test]
     fn get_all_orders_filters_other_main_terminal_rows_when_isolated() {
         let db = test_db();
         set_terminal_setting(&db, "pos_operating_mode", "main_isolated");
@@ -23957,6 +24307,19 @@ mod tests {
             normalize_remote_order_repair_since_cursor("2026-04-28T23:49:11+00:00"),
             "2026-04-28T23:49:11Z"
         );
+    }
+
+    #[test]
+    fn test_parse_order_pull_cursor_preserves_microseconds_and_rejects_invalid_ids() {
+        let input = serde_json::json!({ "timestamp": "2026-09-08T12:00:00.123456+02:00", "id": "11111111-1111-4111-8111-111111111111" });
+        let cursor = parse_order_pull_cursor(Some(&input)).expect("valid cursor");
+        assert_eq!(cursor.timestamp, "2026-09-08T10:00:00.123456Z");
+        assert_eq!(
+            cursor.id.as_deref(),
+            Some("11111111-1111-4111-8111-111111111111")
+        );
+        let invalid = serde_json::json!({ "timestamp": cursor.timestamp, "id": "unsafe,filter" });
+        assert!(parse_order_pull_cursor(Some(&invalid)).is_none());
     }
 
     #[test]

@@ -29,6 +29,7 @@
     "panels": { "partsEmpty": "No planned parts, labour or charges yet.", "estimateEmpty": "No estimate has been issued yet.", "timelineEmpty": "No timeline events yet.", "photosEmpty": "No attachment metadata is available.", "conflictsTitle": "Sync conflicts", "conflictsEmpty": "No repair conflicts need review." },
     "messages": { "readyQueued": "Ready status is queued for sync.", "noNotificationSent": "No customer notification has been sent yet.", "offline": "Offline changes stay queued until this terminal reconnects.", "onlineActionRequired": "This action requires an online server check.", "activeShiftRequired": "Start a staff shift to load repair data and actions.", "selectorOnline": "Customer and device lookup requires an online native connection. A previously selected canonical customer and device can still be submitted offline.", "createUnavailable": "Creating repairs requires an active shift and repair-create permission.", "conflictResolutionUnavailable": "Conflict resolution requires an active shift, an online native connection and repair-update permission.", "submitInProgress": "The repair is being saved. Closing is temporarily disabled.", "finalDiagnosisOnline": "Final diagnosis requires an online server check; drafts can be queued offline.", "estimateOnline": "Estimates and approvals require an online server check.", "estimateNeedsLines": "Add at least one planned line before creating an estimate.", "photoOneShot": "The selected photo is read once and handed to encrypted native staging; the renderer does not persist it.", "photoUnavailable": "Photo staging requires loaded attachment settings, repair permission, a known connection state and an active shift.", "attachmentTypeInvalid": "This file type is not allowed by repair settings.", "attachmentTooLarge": "This photo is larger than the repair attachment limit.", "attachmentInvalid": "Select a non-empty photo allowed by repair settings.", "attachmentStageFailed": "The photo could not be staged.", "attachmentOpenFailed": "The attachment could not be opened securely.", "loadFailed": "Repairs could not be loaded.", "commandFailed": "The repair change could not be saved.", "assignmentUnavailable": "Self-assignment requires a canonical staff identity and repair-assignment permission.", "settingsUnavailable": "Repair intake stays disabled until authoritative or cached settings are available.", "invalidIntake": "Check the intake details and try again.", "customerSearchFailed": "Customer search could not be completed.", "deviceLoadFailed": "Customer devices could not be loaded.", "deviceCreateFailed": "The device could not be saved.", "secureIdUnavailable": "Secure device identifiers are unavailable. Restart the application before creating a repair." },
     "locked": { "communication": "Customer Messaging is not enabled in this private-beta build.", "money": "Repair payments, refunds, fiscalization and delivery remain locked until the typed native money transport is available.", "approvalTransition": "Approved status is reached only through the audited approval action in Estimate & approval.", "assignment": "Assignment changes remain locked until a scoped, repair-safe staff projection is available.", "stockReversal": "Stock reversal remains locked because the native workspace does not expose the original movement reference.", "catalog": "Product and service catalog lookup remains locked until a repair-safe read-only native projection is available.", "attachmentOpen": "Opening existing attachments remains locked until signed native retrieval is available.", "printing": "Repair printing remains locked until the typed native print queue is available." },
+    "money": { "readiness": { "loading": "Checking fiscal readiness…", "retry": "Retry", "nonFiscalInfo": "myDATA is optional. Repair payments can be recorded without the plugin.", "setupRequired": "Fiscal setup for this branch is incomplete.", "countryRequired": "A branch country is required before this action.", "providerRequired": "A fiscal provider is required for fiscal actions.", "certificationRequired": "Fiscal certification is required for fiscal actions.", "transportUnavailable": "Fiscal document submission is not available for this integration.", "statusUnavailable": "Fiscal readiness could not be determined." } },
     "a11y": { "resultsUpdated": "{{count}} repair results available.", "currentRepair": "Current repair: {{number}}", "tabHint": "Use the left and right arrow keys to change tabs.", "statusLabel": "Repair status: {{status}}" }
   },
   "common": {
@@ -7350,6 +7351,50 @@
       "baudRate": "Baud rate",
       "serialPortRequired": "Serial port is required for USB connection",
       "bluetoothAddressRequired": "Bluetooth address is required",
+      "localSettingsUnavailable": "Could not load local cashier settings. Close setup and try again.",
+      "bluetoothUnavailable": "Direct Bluetooth is not available on this POS. Use LAN or serial supported by your vendor.",
+      "bluetoothOptionUnavailable": "Bluetooth — unavailable",
+      "physicalConnectionHelp": "LAN is preferred. CAP Driver owns the physical connection: select TCP, UDP or COM in the vendor Windows service and use the matching device IP. Direct Bluetooth is unavailable.",
+      "capTcpProbe": "Probe a known TCP ERP port before connecting (requires a port; leave off for UDP or COM)",
+      "capOptionalPort": "CAP Driver LAN setup needs the device IP. Leave the ERP port blank unless you enable the optional TCP probe or your vendor explicitly provides a port.",
+      "protocolUnavailable": "Unavailable for fiscal cashier setup",
+      "capAdvanced": "CAP Driver advanced settings",
+      "capServiceHelp": "The installed vendor service must be running. Match its capture/output folders and encoding. Testing prints a non-closing X report; exact model and firmware support must be confirmed with your vendor.",
+      "capSettingsInvalid": "Check CAP folders, service, encoding, timeout (5000–300000 ms), payment codes (1–20) and EFT index (1–99).",
+      "capSettings": {
+        "capturePath": "Capture folder",
+        "outputPath": "Output folder",
+        "serviceName": "Windows service name",
+        "fileEncoding": "Command file encoding",
+        "transactionTimeoutMs": "Timeout (ms)",
+        "cashPaymentCode": "Cash payment code",
+        "cardPaymentCode": "Card payment code",
+        "eftPosIndex": "EFT POS index"
+      },
+      "capSetup": {
+        "checking": "Checking installed RBS support…",
+        "unsupported": "RBS support setup is available on Windows.",
+        "failed": "Could not complete the support check or installer action. Refresh and try again.",
+        "running": "RBS service is running. Check the connection details, then connect and test the cashier.",
+        "stopped": "RBS support is installed. Open its connection setup and start the vendor service, then refresh.",
+        "missing": "RBS support is not installed. Open the official installer and complete its setup.",
+        "installerOpened": "Installer opened. Complete the Windows prompts, then refresh. The cashier is not verified yet.",
+        "errorCode": "Support code",
+        "opening": "Opening official setup…",
+        "openSetup": "Open connection setup",
+        "install": "Install RBS support",
+        "refresh": "Refresh support status"
+      },
+      "discovery": {
+        "find": "Find cashier",
+        "searching": "Finding cashiers on this LAN…",
+        "help": "Discovery checks the local network only. Selecting an IP does not connect or verify the cashier, or change the CAP Driver service configuration.",
+        "failed": "Could not search this LAN. Try again or enter the device IP manually.",
+        "empty": "No RBS/MAT cashier found. Check its network connection or enter the IP manually.",
+        "select": "Select"
+      },
+      "capTargetMismatch": "The CAP service target is unavailable or differs from this form. Open connection setup, configure this IP or COM port in the vendor service, then refresh support status.",
+      "capServiceTarget": "Vendor service target",
       "configSaved": "MyData configuration saved",
       "dashboardBanner": {
         "title": "myDATA setup happens in the Admin Dashboard",

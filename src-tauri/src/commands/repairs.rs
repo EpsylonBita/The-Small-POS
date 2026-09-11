@@ -1961,6 +1961,7 @@ fn is_money_request(request: &crate::repair_transport::RepairJsonRequest) -> boo
     matches!(
         request,
         crate::repair_transport::RepairJsonRequest::FinancialProjection { .. }
+            | crate::repair_transport::RepairJsonRequest::FiscalReadiness {}
             | crate::repair_transport::RepairJsonRequest::Settlement { .. }
             | crate::repair_transport::RepairJsonRequest::Payment { .. }
             | crate::repair_transport::RepairJsonRequest::Refund { .. }
@@ -3209,6 +3210,9 @@ mod tests {
             &crate::repair_transport::RepairJsonRequest::FinancialProjection {
                 repair_id: TEST_REPAIR_ID.to_string(),
             }
+        ));
+        assert!(is_money_request(
+            &crate::repair_transport::RepairJsonRequest::FiscalReadiness {}
         ));
         assert!(is_money_request(
             &crate::repair_transport::RepairJsonRequest::Settlement {

@@ -175,12 +175,16 @@ describe('Integrations view stability', () => {
     const view = render(<RefactoredMainLayout className="before-sync" />)
 
     fireEvent.click(screen.getByRole('button', { name: 'Plugins' }))
-    await screen.findByText('Integrations stateful view')
-    expect(mocks.integrationMounts).toBe(1)
-    expect(mocks.integrationUnmounts).toBe(0)
+    const integrationView = await screen.findByText('Integrations stateful view')
+    // DOM visibility can precede the lazy page's passive mount effect.
+    await waitFor(() => {
+      expect(mocks.integrationMounts).toBe(1)
+      expect(mocks.integrationUnmounts).toBe(0)
+    })
 
     view.rerender(<RefactoredMainLayout className="after-background-sync" />)
 
+    expect(screen.getByText('Integrations stateful view')).toBe(integrationView)
     await waitFor(() => {
       expect(mocks.integrationMounts).toBe(1)
       expect(mocks.integrationUnmounts).toBe(0)

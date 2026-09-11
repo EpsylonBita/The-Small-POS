@@ -203,8 +203,8 @@ if (!concurrencyBlock.includes('group: pos-tauri-public-release')) {
   violations.push('all POS release refs must share one public-release concurrency group');
 }
 
-if (!concurrencyBlock.includes('cancel-in-progress: true')) {
-  violations.push('a newer POS release must cancel an older in-progress release');
+if (!concurrencyBlock.includes('cancel-in-progress: false')) {
+  violations.push('a newer POS release must queue without interrupting public artifact publication');
 }
 
 for (const token of [

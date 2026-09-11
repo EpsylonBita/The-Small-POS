@@ -37,7 +37,8 @@
         "providerUnavailable": "La plateforme est temporairement indisponible.",
         "busy": "La plateforme est occupée. Réessayez dans un instant.",
         "outcomeUnknown": "Statut inconnu. Actualisez pour vérifier à nouveau.",
-        "outsideHours": "En ligne, mais hors des horaires de commande prévus — ne reçoit pas de commandes."
+        "outsideHours": "En ligne, mais hors des horaires de commande prévus — ne reçoit pas de commandes.",
+        "providerForbidden": "La plateforme a refusé cette modification (403). Utilisez son application et demandez à son support de vérifier les autorisations de changement de statut via l’API."
       },
       "sound": {
         "title": "Son des alertes de commande",

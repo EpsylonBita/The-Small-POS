@@ -34,6 +34,14 @@ interface PlatformActionBody {
 
 type PendingAction = 'open' | 'close'
 
+// The backend returns this exact marker only for a proved provider 403 on a
+// platform write (HTTP 502 {success:false, error:'provider_forbidden'}); the
+// Tauri IPC transport embeds it as "provider_forbidden (HTTP 502): ...", the
+// same wrapping used for MODULE_REQUIRED. Never inferred from a bare 403.
+function isProviderForbiddenError(error?: string | null): boolean {
+  return typeof error === 'string' && /^provider_forbidden(?:$| \(HTTP 502\)(?::|$))/.test(error)
+}
+
 const REASON_DEFAULTS: Record<string, { key: string; defaultValue: string }> = {
   module_disabled: {
     key: 'settings.platforms.reason.moduleDisabled',
@@ -62,6 +70,11 @@ const REASON_DEFAULTS: Record<string, { key: string; defaultValue: string }> = {
   outcome_unknown: {
     key: 'settings.platforms.reason.outcomeUnknown',
     defaultValue: 'Status unknown. Refresh to check again.',
+  },
+  provider_forbidden: {
+    key: 'settings.platforms.reason.providerForbidden',
+    defaultValue:
+      'The platform rejected this change (403). Use its app and ask its support to check API store-status permissions.',
   },
   outside_hours: {
     key: 'settings.platforms.reason.outsideHours',
@@ -238,6 +251,15 @@ export const PlatformsSection: React.FC = () => {
 
       if (response.success && body?.success !== false && body?.platform) {
         setPlatform(platform.plugin_id, body.platform)
+        setUncertain((current) => ({ ...current, [platform.plugin_id]: false }))
+        return
+      }
+
+      if (isProviderForbiddenError(response.error) || isProviderForbiddenError(body?.error)) {
+        // A proved provider refusal, not an unconfirmed request: status stays
+        // Unknown (the write did not take effect) but this is not the generic
+        // "could not confirm" uncertainty banner.
+        setPlatform(platform.plugin_id, { ...platform, open: null, reason: 'provider_forbidden' })
         setUncertain((current) => ({ ...current, [platform.plugin_id]: false }))
         return
       }

@@ -5,6 +5,8 @@ pub mod auth;
 pub mod branch_data;
 pub mod callerid;
 pub mod callerid_firewall;
+pub mod cap_discovery;
+pub mod cap_setup;
 pub mod capture_documents;
 pub mod capture_scanner;
 pub mod customers;

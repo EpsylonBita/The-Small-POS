@@ -37,7 +37,8 @@
         "providerUnavailable": "Die Plattform ist vorübergehend nicht verfügbar.",
         "busy": "Die Plattform ist ausgelastet. Versuchen Sie es in Kürze erneut.",
         "outcomeUnknown": "Status unbekannt. Aktualisieren Sie, um erneut zu prüfen.",
-        "outsideHours": "Online, aber außerhalb der geplanten Bestellzeiten — empfängt keine Bestellungen."
+        "outsideHours": "Online, aber außerhalb der geplanten Bestellzeiten — empfängt keine Bestellungen.",
+        "providerForbidden": "Die Plattform hat diese Änderung abgelehnt (403). Verwenden Sie deren App und bitten Sie den Support, die API-Berechtigung für Statusänderungen zu prüfen."
       },
       "sound": {
         "title": "Signalton für Bestellungen",

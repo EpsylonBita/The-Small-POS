@@ -29,6 +29,7 @@
     "panels": { "partsEmpty": "Nessun ricambio, manodopera o addebito pianificato.", "estimateEmpty": "Nessun preventivo ancora emesso.", "timelineEmpty": "Nessun evento in cronologia.", "photosEmpty": "Nessun metadato allegato disponibile.", "conflictsTitle": "Conflitti di sincronizzazione", "conflictsEmpty": "Nessun conflitto di riparazione da verificare." },
     "messages": { "readyQueued": "Lo stato «Pronta» è in coda per la sincronizzazione.", "noNotificationSent": "Non è ancora stata inviata alcuna notifica al cliente.", "offline": "Le modifiche offline restano in coda finché il terminale non si riconnette.", "onlineActionRequired": "Questa azione richiede una verifica online del server.", "activeShiftRequired": "Avvia un turno del personale per caricare dati e azioni delle riparazioni.", "selectorOnline": "La ricerca di clienti e dispositivi richiede una connessione nativa online. Un cliente e dispositivo canonici già selezionati possono comunque essere inviati offline.", "createUnavailable": "La creazione di riparazioni richiede un turno attivo e il permesso di creazione.", "conflictResolutionUnavailable": "La risoluzione dei conflitti richiede un turno attivo, una connessione nativa online e il permesso di aggiornamento.", "submitInProgress": "La riparazione è in fase di salvataggio. La chiusura è temporaneamente disabilitata.", "finalDiagnosisOnline": "La diagnosi finale richiede una verifica online; le bozze possono essere accodate offline.", "estimateOnline": "Preventivi e approvazioni richiedono una verifica online del server.", "estimateNeedsLines": "Aggiungi almeno una riga pianificata prima di creare un preventivo.", "photoOneShot": "La foto selezionata viene letta una volta e passata allo staging nativo cifrato; il renderer non la conserva.", "photoUnavailable": "Lo staging foto richiede impostazioni caricate, permesso riparazioni, stato di connessione noto e turno attivo.", "attachmentTypeInvalid": "Questo tipo di file non è consentito dalle impostazioni di riparazione.", "attachmentTooLarge": "La foto supera il limite degli allegati di riparazione.", "attachmentInvalid": "Seleziona una foto non vuota consentita dalle impostazioni.", "attachmentStageFailed": "Impossibile preparare la foto.", "attachmentOpenFailed": "Impossibile aprire l’allegato in modo sicuro.", "loadFailed": "Impossibile caricare le riparazioni.", "commandFailed": "Impossibile salvare la modifica.", "assignmentUnavailable": "L’auto-assegnazione richiede un’identità staff canonica e il permesso di assegnare riparazioni.", "settingsUnavailable": "L’accettazione riparazione resta disattivata finché non sono disponibili impostazioni autorevoli o memorizzate.", "invalidIntake": "Controlla i dati di accettazione e riprova.", "customerSearchFailed": "Impossibile completare la ricerca clienti.", "deviceLoadFailed": "Impossibile caricare i dispositivi del cliente.", "deviceCreateFailed": "Impossibile salvare il dispositivo.", "secureIdUnavailable": "Gli identificatori sicuri non sono disponibili. Riavvia l’applicazione prima di creare una riparazione." },
     "locked": { "communication": "Customer Messaging non è attivo in questa build beta privata.", "money": "Pagamenti, rimborsi, fiscalizzazione e consegna restano bloccati finché non è disponibile il trasporto finanziario nativo tipizzato.", "approvalTransition": "Lo stato Approvata si raggiunge solo tramite l’azione di approvazione verificata in Preventivo e approvazione.", "assignment": "Le modifiche di assegnazione restano bloccate finché non è disponibile una proiezione del personale sicura e limitata allo scope.", "stockReversal": "L’annullamento del movimento di magazzino resta bloccato perché lo spazio nativo non espone il riferimento al movimento originale.", "catalog": "La ricerca di prodotti e servizi resta bloccata finché non è disponibile una proiezione nativa sicura in sola lettura.", "attachmentOpen": "L’apertura degli allegati esistenti resta bloccata finché non è disponibile il recupero nativo firmato.", "printing": "La stampa delle riparazioni resta bloccata finché non è disponibile la coda di stampa nativa tipizzata." },
+    "money": { "readiness": { "loading": "Verifica della prontezza fiscale…", "retry": "Riprova", "nonFiscalInfo": "myDATA è opzionale. I pagamenti di riparazione possono essere registrati senza il plugin.", "setupRequired": "La configurazione fiscale di questa filiale è incompleta.", "countryRequired": "È richiesto un paese della filiale prima di questa azione.", "providerRequired": "È richiesto un fornitore fiscale per le azioni fiscali.", "certificationRequired": "È richiesta la certificazione fiscale per le azioni fiscali.", "transportUnavailable": "L'invio di documenti fiscali non è disponibile per questa integrazione.", "statusUnavailable": "Non è stato possibile determinare la prontezza fiscale." } },
     "a11y": { "resultsUpdated": "{{count}} risultati di riparazione disponibili.", "currentRepair": "Riparazione corrente: {{number}}", "tabHint": "Usa le frecce sinistra e destra per cambiare scheda.", "statusLabel": "Stato riparazione: {{status}}" }
   },
   "common": {
@@ -7350,6 +7351,50 @@
       "baudRate": "Velocità baud",
       "serialPortRequired": "La porta seriale è richiesta per la connessione USB",
       "bluetoothAddressRequired": "L'indirizzo Bluetooth è richiesto",
+      "localSettingsUnavailable": "Impossibile caricare le impostazioni locali del registratore. Chiudi la configurazione e riprova.",
+      "bluetoothUnavailable": "Il Bluetooth diretto non è disponibile su questo POS. Usa una connessione LAN o seriale supportata dal produttore.",
+      "bluetoothOptionUnavailable": "Bluetooth — non disponibile",
+      "physicalConnectionHelp": "Si consiglia la LAN. CAP Driver gestisce la connessione fisica: seleziona TCP, UDP o COM nel servizio Windows del produttore e usa l’IP corrispondente del dispositivo. Il Bluetooth diretto non è disponibile.",
+      "capTcpProbe": "Verifica una porta TCP ERP nota prima della connessione (richiede una porta; disattivare per UDP o COM)",
+      "capOptionalPort": "La configurazione LAN di CAP Driver richiede l’IP del dispositivo. Lascia vuota la porta ERP, a meno che non attivi il test TCP facoltativo o il produttore specifichi una porta.",
+      "protocolUnavailable": "Non disponibile per la configurazione del registratore fiscale",
+      "capAdvanced": "Impostazioni avanzate CAP Driver",
+      "capServiceHelp": "Il servizio del produttore deve essere installato e in esecuzione. Le cartelle di ingresso/uscita e la codifica devono corrispondere. Il test stampa un rapporto X senza chiusura; conferma il supporto del modello esatto e del firmware con il produttore.",
+      "capSettingsInvalid": "Controlla cartelle CAP, servizio, codifica, timeout (5000–300000 ms), codici pagamento (1–20) e indice EFT (1–99).",
+      "capSettings": {
+        "capturePath": "Cartella di ingresso",
+        "outputPath": "Cartella di uscita",
+        "serviceName": "Nome del servizio Windows",
+        "fileEncoding": "Codifica dei file di comando",
+        "transactionTimeoutMs": "Timeout (ms)",
+        "cashPaymentCode": "Codice pagamento in contanti",
+        "cardPaymentCode": "Codice pagamento con carta",
+        "eftPosIndex": "Indice EFT POS"
+      },
+      "capSetup": {
+        "checking": "Verifica del supporto RBS installato…",
+        "unsupported": "La configurazione del supporto RBS è disponibile su Windows.",
+        "failed": "Impossibile completare la verifica o l’azione di installazione. Aggiorna e riprova.",
+        "running": "Il servizio RBS è in esecuzione. Controlla i dettagli di connessione, poi collega e verifica il registratore.",
+        "stopped": "Il supporto RBS è installato. Apri la configurazione della connessione, avvia il servizio del produttore e aggiorna.",
+        "missing": "Il supporto RBS non è installato. Apri il programma di installazione ufficiale e completa la configurazione.",
+        "installerOpened": "Programma di installazione aperto. Completa i passaggi di Windows e aggiorna. Il registratore non è ancora verificato.",
+        "errorCode": "Codice di supporto",
+        "opening": "Apertura della configurazione ufficiale…",
+        "openSetup": "Apri configurazione connessione",
+        "install": "Installa supporto RBS",
+        "refresh": "Aggiorna stato del supporto"
+      },
+      "discovery": {
+        "find": "Trova registratore",
+        "searching": "Ricerca dei registratori sulla LAN…",
+        "help": "La ricerca controlla solo la rete locale. Selezionare un IP non collega né verifica il registratore e non modifica la configurazione del servizio CAP Driver.",
+        "failed": "Impossibile cercare su questa LAN. Riprova o inserisci manualmente l’IP del dispositivo.",
+        "empty": "Nessun registratore RBS/MAT trovato. Controlla la connessione di rete o inserisci l’IP manualmente.",
+        "select": "Seleziona"
+      },
+      "capTargetMismatch": "La destinazione del servizio CAP non è disponibile o differisce dal modulo. Apri la configurazione della connessione, imposta questo IP o questa porta COM nel servizio del produttore e aggiorna lo stato del supporto.",
+      "capServiceTarget": "Destinazione del servizio del produttore",
       "configSaved": "Configurazione MyData salvata",
       "dashboardBanner": {
         "title": "La configurazione di myDATA avviene nella dashboard di amministrazione",

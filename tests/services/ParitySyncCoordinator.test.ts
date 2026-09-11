@@ -369,6 +369,24 @@ test('runParitySyncCycle drives config sync, parity queue sync, and renderer eve
   }
 });
 
+test('scheduled queue retries never download unrelated advisory snapshots', async () => {
+  const { bridge, calls } = createMockBridge();
+  setBridge(bridge);
+  let replayed = 0;
+  setSyncQueueBridgeInstanceForTests({
+    getStatus: async () => ({ total: 1, pending: 0, failed: 1, conflicts: 0, oldestItemAge: null }),
+    processQueue: async () => { replayed++; return { success: false, processed: 0, failed: 1, conflicts: 0, errors: [] }; },
+  } as any);
+  try {
+    await runParitySyncCycle({ trigger: 'scheduled_retry' });
+    await runParitySyncCycle({ trigger: 'scheduled_retry' });
+    assert.equal(replayed, 2);
+    assert.deepEqual(calls.adminFetches, []);
+    assert.equal(calls.syncFromAdmin, 0);
+    assert.equal(calls.loyaltySyncCustomers, 0);
+  } finally { setSyncQueueBridgeInstanceForTests(null); resetBridge(); }
+});
+
 test('POS module cache registry covers every scoped parity vertical', () => {
   const modules = new Set(POS_MODULE_CACHE_ENTRIES.map((entry) => entry.moduleId));
 

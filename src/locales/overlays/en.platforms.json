@@ -37,7 +37,8 @@
         "providerUnavailable": "The platform is temporarily unavailable.",
         "busy": "The platform is busy. Try again shortly.",
         "outcomeUnknown": "Status unknown. Refresh to check again.",
-        "outsideHours": "Online, but outside the scheduled ordering hours — not receiving orders."
+        "outsideHours": "Online, but outside the scheduled ordering hours — not receiving orders.",
+        "providerForbidden": "The platform rejected this change (403). Use its app and ask its support to check API store-status permissions."
       },
       "sound": {
         "title": "Order alert sound",
