@@ -3527,6 +3527,10 @@
       "subtitle": "Uses the same sync-health diagnostics and adds guided repair actions for the visible problems.",
       "guidedTitle": "Sync recovery assistant",
       "guidedContextNote": "Start with the first blocker. If a known fix exists, the POS can run it or open the exact screen needed to fix the order.",
+      "showTechnicalDetails": "Technical details and restore",
+      "hideTechnicalDetails": "Hide technical details",
+      "staleData": "Showing the last successful check. Refresh failed; check again before taking action.",
+      "loadFailed": "Status is unavailable. Refresh to check whether anything needs attention.",
       "contextNote": "This recovery view stays in sync with the same blockers shown by the sync explanation panel.",
       "noIssues": "No actionable recovery issues are currently visible.",
       "credentialsTitle": "Credentials need attention",
@@ -7505,6 +7509,7 @@
     "messages": {
       "actionSucceeded": "Action completed successfully.",
       "actionFailed": "Action failed. Review the issue details and try again.",
+      "actionPendingVerification": "Retry requested. Waiting for a fresh check to confirm recovery.",
       "orderPaymentOpenFailed": "Could not open the blocked order payment screen."
     },
     "actions": {
@@ -7515,17 +7520,24 @@
         "label": "Open connection settings"
       },
       "runParitySyncNow": {
-        "label": "Run sync now"
+        "label": "Try syncing now"
+      },
+      "auto_retry": {
+        "label": "Automatic retry"
       },
       "retryParityItem": {
-        "label": "Retry parity item"
+        "label": "Retry this update"
+      },
+      "retryCustomerAddressDefault": {
+        "label": "Retry saving this address",
+        "description": "Retry the saved change for this address. Confirmation still depends on the server."
       },
       "retryCatalogAvailabilitySync": {
         "label": "Retry catalog availability",
         "description": "Retries the blocked availability flag after the admin compatibility fix."
       },
       "retryParityModule": {
-        "label": "Retry parity module"
+        "label": "Retry related updates"
       },
       "repairPaymentTotalConflict": {
         "label": "Fix payment/order mismatch",
@@ -7621,7 +7633,7 @@
       "recoveringTitle": "Recovering",
       "recoveringSubtitle": "Issues that are queued, deferred, or ready for another sync attempt.",
       "noRecoveringIssues": "No recovering issues are currently visible.",
-      "recentActionsTitle": "Resolved recently",
+      "recentActionsTitle": "Recent attempts",
       "recentActionsSubtitle": "Every repair attempt is audited locally so staff can see what was tried and what succeeded.",
       "noRecentActions": "No recovery actions have been recorded yet.",
       "guidedTitle": "Sync recovery",
@@ -7643,7 +7655,7 @@
       "genericVerificationDescription": "After any action, the POS refreshes diagnostics and shows whether the queue can continue.",
       "lastActionSucceeded": "Last action succeeded",
       "lastActionFailed": "Last action failed",
-      "advancedDetailsTitle": "Advanced details",
+      "advancedDetailsTitle": "Other actions and history",
       "systemStatusTitle": "System sync status",
       "systemStatusSubtitle": "A simple view of what is happening, why orders may be stuck, and the safest next action.",
       "noFixNeededTitle": "No fix needed",
@@ -7654,7 +7666,14 @@
       "diagnosticFileHeadline": "Technical details are saved to a file",
       "diagnosticFileDescription": "To keep this screen simple, queue counts, parity rows, printer state, database details, logs, issue codes, order ids, and the latest recovery result are included in the exported diagnostic bundle instead of being shown here.",
       "diagnosticFilePrivacy": "Use this when Contact Dev asks for support details. Sensitive fields are handled by the export settings.",
-      "exportDiagnosticFile": "Export diagnostic file"
+      "exportDiagnosticFile": "Export diagnostic file",
+      "actionNotVerified": "Not yet verified",
+      "outcomes": {
+        "pending": "Waiting for verification",
+        "failed": "Attempt failed",
+        "unknown": "Recovery not confirmed",
+        "resolved": "Recovery confirmed"
+      }
     },
     "recipes": {
       "checkoutPaymentOpenPayment": {
@@ -7686,6 +7705,11 @@
         "label": "Known bulk legacy cleanup",
         "explanation": "This recipe clears all stale legacy financial sync rows in one guarded pass after verifying their local payment or adjustment records are still missing.",
         "verification": "Refresh recovery after the cleanup. The stale legacy financial blocker should be gone, then run sync again."
+      },
+      "customerAddressDefaultConflictRepair": {
+        "label": "Default address retry",
+        "explanation": "This known address conflict can be retried safely. The server must accept the change before recovery is confirmed.",
+        "verification": "The issue stays visible until a fresh check confirms the saved address was accepted. If it fails again, open support details."
       }
     },
     "issues": {
@@ -7705,9 +7729,9 @@
         "guidance": "Open connection settings and confirm the terminal connection code, admin URL, and POS API key."
       },
       "parityProcessorStalled": {
-        "title": "Parity processor stalled",
-        "summary": "The last parity cycle processed {{processed}} items and still left {{remaining}} queued. Current blocker: {{reason}}.",
-        "guidance": "Run parity sync now. If the same backlog remains, inspect the module-level parity issues below or contact Dev. Latest parity error: {{reason}}."
+        "title": "Updates are waiting to be sent",
+        "summary": "The last sync made no progress. Some saved changes have not reached the office yet.",
+        "guidance": "Check the connection, then try syncing once. If the problem remains, open support details."
       },
       "paymentTotalConflict": {
         "title": "Payment/order mismatch",
@@ -7740,9 +7764,9 @@
         "guidance": "Use the recommended retry after admin is deployed. Only availability flags are retried; menu names, prices, and structure edits stay blocked."
       },
       "parityModuleFailed": {
-        "title": "{{moduleLabel}} parity failures",
-        "summary": "{{count}} parity items in {{moduleLabel}} are failed and need a retry.",
-        "guidance": "Retry the sample item if you want a narrow test, or retry the full parity module to unblock the whole family."
+        "title": "Some updates could not be sent",
+        "summary": "{{count}} saved updates are waiting for a successful retry.",
+        "guidance": "Try the selected update once. Open support details if it fails again."
       },
       "parityModulePending": {
         "title": "{{moduleLabel}} parity backlog",
@@ -7793,6 +7817,11 @@
         "title": "Dev attention required",
         "summary": "Sync backlog is visible, but there is no guided fix mapped for this exact failure yet.",
         "guidance": "Contact Dev and include the diagnostics bundle so the next occurrence can be mapped to a guided fix."
+      },
+      "customerAddressDefaultConflict": {
+        "title": "Default address could not be saved",
+        "summary": "The server could not confirm this customer’s default address change. The saved change is still on this register.",
+        "guidance": "Retry this address once. If it is rejected again, use support details to ask for help."
       },
       "contactDevFallback": {
         "title": "Dev attention required",

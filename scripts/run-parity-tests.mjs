@@ -15,6 +15,9 @@ const entryPoints = [
   path.join(testsRoot, 'scripts', 'managed-credential-cleanup.test.ts'),
   path.join(testsRoot, 'services', 'RealtimeManager.test.ts'),
   path.join(testsRoot, 'services', 'SyncQueueBridge.test.ts'),
+  // Known recovery matchers must reject unrelated/confusable failures and
+  // retain general warnings for incomplete queue observations.
+  path.join(testsRoot, 'services', 'sync-recovery-issues.test.ts'),
   path.join(testsRoot, 'services', 'ParitySyncCoordinator.test.ts'),
   path.join(testsRoot, 'services', 'offline-page-capabilities.test.ts'),
   path.join(testsRoot, 'services', 'VerticalOfflineFlows.test.ts'),
@@ -126,6 +129,7 @@ const entryPoints = [
   // names/labels only -- never the raw terminalId/branchId/organizationId UUIDs -- while internal action-log
   // IDs are preserved.
   path.join(testsRoot, 'renderer', 'recovery-center-panel-ui.test.ts'),
+  path.join(testsRoot, 'renderer', 'sync-recovery-modal-ui.test.ts'),
   path.join(testsRoot, 'renderer', 'update-changelog-ui.test.ts'),
   // Every shipped version must carry a plain-language changelog section —
   // that section is what the update dialog shows the operator.

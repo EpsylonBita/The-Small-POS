@@ -483,6 +483,14 @@ pub async fn recovery_record_action_log(
     Ok(entry)
 }
 
+/// Recovery scheduling is not healing. Expose only the shipped outcome enum;
+/// malformed/legacy payloads retain the existing response without an outcome.
+fn recovery_action_log_outcome(payload_json: Option<&str>) -> Option<String> {
+    let payload: Value = serde_json::from_str(payload_json?).ok()?;
+    let outcome = payload.get("outcome")?.as_str()?;
+    matches!(outcome, "pending" | "failed" | "unknown" | "resolved").then(|| outcome.to_string())
+}
+
 #[tauri::command]
 pub async fn recovery_list_action_log(
     arg0: Option<Value>,
@@ -500,7 +508,7 @@ pub async fn recovery_list_action_log(
                 id, action_id, issue_code, success, created_at, recipe_id,
                 recipe_version, snapshot_point_id, export_path, message,
                 error_message, actor_staff_id, actor_staff_name, entity_id,
-                order_id, order_number, shift_id
+                order_id, order_number, shift_id, payload_json
              FROM recovery_action_log
              ORDER BY created_at DESC
              LIMIT ?1",
@@ -509,7 +517,7 @@ pub async fn recovery_list_action_log(
     let rows = stmt
         .query_map(rusqlite::params![limit], |row| {
             let success: i64 = row.get(3)?;
-            Ok(json!({
+            let mut entry = json!({
                 "id": row.get::<_, String>(0)?,
                 "actionId": row.get::<_, String>(1)?,
                 "issueCode": row.get::<_, String>(2)?,
@@ -531,7 +539,12 @@ pub async fn recovery_list_action_log(
                     "orderNumber": row.get::<_, Option<String>>(15)?,
                     "shiftId": row.get::<_, Option<String>>(16)?,
                 },
-            }))
+            });
+            let payload_json: Option<String> = row.get(17)?;
+            if let Some(outcome) = recovery_action_log_outcome(payload_json.as_deref()) {
+                entry["outcome"] = Value::String(outcome);
+            }
+            Ok(entry)
         })
         .map_err(|e| format!("query recovery action log: {e}"))?;
 
@@ -1628,6 +1641,26 @@ mod tests {
     use super::*;
     use rusqlite::{types::ValueRef, Connection};
     use serde_json::json;
+
+    #[test]
+    fn recovery_action_log_outcome_preserves_pending_and_rejects_unrecognized_payloads() {
+        for outcome in ["pending", "failed", "unknown", "resolved"] {
+            let payload = json!({"outcome": outcome, "success": false}).to_string();
+            assert_eq!(
+                recovery_action_log_outcome(Some(&payload)).as_deref(),
+                Some(outcome)
+            );
+        }
+        for payload in [
+            None,
+            Some("bad-json"),
+            Some("{}"),
+            Some(r#"{"outcome":"scheduled"}"#),
+            Some(r#"{"outcome":true}"#),
+        ] {
+            assert_eq!(recovery_action_log_outcome(payload), None);
+        }
+    }
 
     fn test_db() -> db::DbState {
         let conn = Connection::open_in_memory().expect("open in-memory db");

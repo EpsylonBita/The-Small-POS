@@ -99,6 +99,15 @@ const RECOVERY_RECIPES = {
     verificationKey: 'recovery.recipes.legacyFinancialBulkClear.verification',
     requiresSnapshot: true,
   },
+  customerAddressDefaultConflictRepair: {
+    recipeId: 'customer-address-default-conflict.repair',
+    version: 1,
+    actionId: 'retryParityItem',
+    labelKey: 'recovery.recipes.customerAddressDefaultConflictRepair.label',
+    explanationKey: 'recovery.recipes.customerAddressDefaultConflictRepair.explanation',
+    verificationKey: 'recovery.recipes.customerAddressDefaultConflictRepair.verification',
+    requiresSnapshot: true,
+  },
 } as const satisfies Record<string, RecoveryRecipeDefinition>;
 
 const knownSolutionFromRecipe = (
@@ -173,6 +182,17 @@ const createRunParitySyncAction = (): RecoveryActionDescriptor =>
 
 const createRetryParityItemAction = (): RecoveryActionDescriptor =>
   createAction('retryParityItem', 'recovery.actions.retryParityItem.label');
+
+const createRetryCustomerAddressDefaultAction = (): RecoveryActionDescriptor =>
+  withRecipe(
+    createAction('retryParityItem', 'recovery.actions.retryCustomerAddressDefault.label', {
+      descriptionKey: 'recovery.actions.retryCustomerAddressDefault.description',
+      recommended: true,
+      requiresOnline: true,
+      requiresSnapshot: true,
+    }),
+    RECOVERY_RECIPES.customerAddressDefaultConflictRepair,
+  );
 
 const createRetryCatalogAvailabilityAction = (): RecoveryActionDescriptor =>
   createAction('retryParityItem', 'recovery.actions.retryCatalogAvailabilitySync.label', {
@@ -1131,6 +1151,85 @@ const buildCatalogAvailabilityIssues = (
   };
 };
 
+const CUSTOMER_ADDRESS_DEFAULT_CONFLICT_MARKER = 'CUSTOMER_ADDRESS_DEFAULT_CONFLICT';
+const CUSTOMER_ADDRESS_DEFAULT_RETRY_MARKER = 'CUSTOMER_ADDRESS_DEFAULT_RETRY';
+const CUSTOMER_ADDRESS_DEFAULT_LEGACY_INDEX_SIGNATURE =
+  'idx_customer_addresses_default_unique';
+
+const isCustomerAddressDefaultFailure = (item: SyncQueueItem): boolean => {
+  if (item.tableName !== 'customer_addresses' || item.moduleType !== 'customers' ||
+      (item.operation !== 'INSERT' && item.operation !== 'UPDATE')) {
+    return false;
+  }
+  if (item.status !== 'failed' && item.status !== 'conflict') {
+    return false;
+  }
+  const message = item.errorMessage ?? '';
+  if (/unauthori[sz]ed|forbidden|privacy|permission denied|row.level security/i.test(message)) {
+    return false;
+  }
+  return new RegExp(
+    `(?:^|[^A-Za-z0-9_])(?:${CUSTOMER_ADDRESS_DEFAULT_CONFLICT_MARKER}|${CUSTOMER_ADDRESS_DEFAULT_RETRY_MARKER}|${CUSTOMER_ADDRESS_DEFAULT_LEGACY_INDEX_SIGNATURE})(?:$|[^A-Za-z0-9_])`,
+  ).test(message);
+};
+
+const customerAddressDefaultMatchedSignal = (
+  message?: string | null,
+): 'unique_default_conflict' | 'lock_contention' | 'legacy_index_conflict' => {
+  const value = message ?? '';
+  if (value.includes(CUSTOMER_ADDRESS_DEFAULT_RETRY_MARKER)) {
+    return 'lock_contention';
+  }
+  if (value.includes(CUSTOMER_ADDRESS_DEFAULT_CONFLICT_MARKER)) {
+    return 'unique_default_conflict';
+  }
+  return 'legacy_index_conflict';
+};
+
+const buildCustomerAddressDefaultConflictIssues = (
+  parityItems: SyncQueueItem[],
+): { issues: RecoveryIssue[]; suppressedRows: Set<string> } => {
+  const rows = parityItems.filter(isCustomerAddressDefaultFailure);
+  if (rows.length === 0) {
+    return { issues: [], suppressedRows: new Set() };
+  }
+
+  const sample = rows[0];
+  const suppressedRows = new Set(rows
+    .filter(item => parityItems.filter(other => other.tableName === item.tableName && other.recordId === item.recordId).every(isCustomerAddressDefaultFailure))
+    .map((item) => `${item.tableName}:${item.recordId}`));
+
+  const issue = withKnownSolution(
+    {
+      id: `customer-address-default-conflict-${sample.id}`,
+      code: 'customer_address_default_conflict',
+      severity: 'error',
+      status: 'blocking',
+      entityType: 'customer_address',
+      entityId: sample.recordId,
+      titleKey: 'recovery.issues.customerAddressDefaultConflict.title',
+      summaryKey: 'recovery.issues.customerAddressDefaultConflict.summary',
+      guidanceKey: 'recovery.issues.customerAddressDefaultConflict.guidance',
+      actions: [
+        createRetryCustomerAddressDefaultAction(),
+        createContactDevAction(),
+      ],
+      params: {
+        count: rows.length,
+        sampleItemId: sample.id,
+        sampleTableName: sample.tableName,
+        sampleRecordId: sample.recordId,
+        moduleType: sample.moduleType || 'customers',
+        matchedSignal: customerAddressDefaultMatchedSignal(sample.errorMessage),
+        lastError: sample.errorMessage ?? null,
+      },
+    } satisfies RecoveryIssue,
+    RECOVERY_RECIPES.customerAddressDefaultConflictRepair,
+  );
+
+  return { suppressedRows, issues: [issue] };
+};
+
 const buildParityModuleIssues = (
   parityItems: SyncQueueItem[],
   suppressedRows: Set<string>,
@@ -1562,18 +1661,29 @@ export function buildSyncRecoveryIssues({
   for (const suppressedRow of catalogAvailabilityResult.suppressedRows) {
     suppressedLegacyFinancialRows.add(suppressedRow);
   }
+  const customerAddressDefaultConflictResult = buildCustomerAddressDefaultConflictIssues(parityItems);
+  for (const suppressedRow of customerAddressDefaultConflictResult.suppressedRows) {
+    suppressedLegacyFinancialRows.add(suppressedRow);
+  }
   const hasSpecificParityRecoveryIssue =
     paymentTotalConflictResult.issues.length > 0 ||
     invalidDriverOrderResult.issues.length > 0 ||
     orderUpdateParentWaitResult.issues.length > 0 ||
     orderUpdateReplayResult.issues.length > 0 ||
-    catalogAvailabilityResult.issues.length > 0;
+    catalogAvailabilityResult.issues.length > 0 ||
+    customerAddressDefaultConflictResult.issues.length > 0;
   pushIssue(issues, buildMissingCredentialIssue(systemHealth, lastParitySync));
   for (const issue of buildCheckoutPaymentBlockerIssues(systemHealth)) {
     pushIssue(issues, issue);
   }
   pushIssue(issues, buildInvalidOrdersIssue(systemHealth));
-  if (!hasSpecificParityRecoveryIssue) {
+  // A specific recipe only replaces the general warning when it covers the
+  // entire observed queue. A truncated sample or another failure stays visible.
+  const specificRecipesCoverQueue = hasSpecificParityRecoveryIssue &&
+    parityItems.length > 0 &&
+    (systemHealth.parityQueueStatus?.total ?? parityItems.length) <= parityItems.length &&
+    parityItems.every(item => suppressedLegacyFinancialRows.has(`${item.tableName}:${item.recordId}`));
+  if (!specificRecipesCoverQueue) {
     pushIssue(issues, buildParityProcessorIssue(systemHealth, parityItems, lastParitySync));
   }
 
@@ -1593,6 +1703,9 @@ export function buildSyncRecoveryIssues({
     pushIssue(issues, issue);
   }
   for (const issue of catalogAvailabilityResult.issues) {
+    pushIssue(issues, issue);
+  }
+  for (const issue of customerAddressDefaultConflictResult.issues) {
     pushIssue(issues, issue);
   }
   for (const issue of buildParityModuleIssues(parityItems, suppressedLegacyFinancialRows)) {

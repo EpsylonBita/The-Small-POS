@@ -29,6 +29,45 @@ const baseSystemHealth = (overrides: Partial<DiagnosticsSystemHealth> = {}) =>
     ...overrides,
   }) as DiagnosticsSystemHealth;
 
+const addressRow = (overrides: Partial<SyncQueueItem> = {}): SyncQueueItem => ({
+  id: 'address-queue', tableName: 'customer_addresses', recordId: 'address-1', operation: 'UPDATE',
+  data: '{"is_default":true}', organizationId: 'org-1', createdAt: '2026-09-13T00:00:00Z',
+  attempts: 1, lastAttempt: null, errorMessage: 'CUSTOMER_ADDRESS_DEFAULT_CONFLICT', nextRetryAt: null,
+  retryDelayMs: 0, priority: 0, moduleType: 'customers', conflictStrategy: 'manual', version: 1, status: 'failed', ...overrides,
+});
+const addressResult = (rows: SyncQueueItem[], total = rows.length) => buildSyncRecoveryIssues({
+  systemHealth: baseSystemHealth({parityQueueStatus: {total, failed:total, pending:0, conflicts:0}}),
+  lastParitySync: {status:'failed', error:'updates blocked'} as any,
+  parityItems: rows,
+});
+
+test('default address remedy only matches known scoped address write failures', () => {
+  for (const signal of ['CUSTOMER_ADDRESS_DEFAULT_CONFLICT','CUSTOMER_ADDRESS_DEFAULT_RETRY','idx_customer_addresses_default_unique']) {
+    const result = addressResult([addressRow({errorMessage:signal})]);
+    const issue = result.issues.find(item => item.code === 'customer_address_default_conflict');
+    assert.ok(issue, signal);
+    assert.equal(issue.actions[0].recipeVersion,1);
+    assert.equal(issue.actions[0].requiresSnapshot,true);
+    assert.equal(issue.actions[0].requiresOnline,true);
+    assert.equal(result.issues.some(item=>item.code === 'parity_processor_stalled_zero_progress'),false);
+  }
+  for (const change of [
+    {errorMessage:'HTTP 500'}, {errorMessage:'CUSTOMER_ADDRESS_DEFAULT_CONFLICT forbidden'},
+    {errorMessage:'NOT_CUSTOMER_ADDRESS_DEFAULT_CONFLICT_OTHER'}, {errorMessage:'idx_customer_addresses_default_unique_unrelated'},
+    {tableName:'payments'}, {operation:'DELETE' as const}, {moduleType:'financial'}, {status:'pending' as const},
+  ]) {
+    assert.equal(addressResult([addressRow(change)]).issues.some(item=>item.code === 'customer_address_default_conflict'),false);
+  }
+});
+
+test('specific address recipe cannot hide unrelated or unsampled processor failures', () => {
+  const row=addressRow();
+  for (const result of [addressResult([row],2), addressResult([row,addressRow({id:'unknown',recordId:'other',errorMessage:'HTTP 500'})]),addressResult([row,addressRow({id:'unknown',errorMessage:'HTTP 500'})])]) {
+    assert.ok(result.issues.some(item=>item.code === 'customer_address_default_conflict'));
+    assert.ok(result.issues.some(item=>item.code === 'parity_processor_stalled_zero_progress'));
+  }
+});
+
 test('checkout payment blockers route to the order payment screen with a versioned known solution', () => {
   const result = buildSyncRecoveryIssues({
     systemHealth: baseSystemHealth({

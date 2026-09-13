@@ -3549,7 +3549,11 @@
       "staffSection": "Personal und Fahrer",
       "refreshSuccess": "Recovery-Status aktualisiert",
       "contactOperator": "Dev kontaktieren",
-      "contactOperatorDetail": "Für dieses Problem gibt es noch keine geführte Entblockung. Kontaktieren Sie Dev und fügen Sie Diagnosen hinzu, damit der nächste Vorfall einer Ein-Klick-Lösung zugeordnet werden kann."
+      "contactOperatorDetail": "Für dieses Problem gibt es noch keine geführte Entblockung. Kontaktieren Sie Dev und fügen Sie Diagnosen hinzu, damit der nächste Vorfall einer Ein-Klick-Lösung zugeordnet werden kann.",
+      "showTechnicalDetails": "Technische Details und Wiederherstellung",
+      "hideTechnicalDetails": "Technische Details ausblenden",
+      "staleData": "Der letzte erfolgreiche Stand wird angezeigt. Die Aktualisierung ist fehlgeschlagen; vor einer Aktion erneut prüfen.",
+      "loadFailed": "Status nicht verfügbar. Aktualisieren, um mögliche Probleme zu prüfen."
     }
   },
   "modals": {
@@ -7505,7 +7509,8 @@
     "messages": {
       "actionSucceeded": "Aktion erfolgreich abgeschlossen.",
       "actionFailed": "Aktion fehlgeschlagen. Prüfen Sie die Details und versuchen Sie es erneut.",
-      "orderPaymentOpenFailed": "Der Zahlungsbildschirm der blockierten Bestellung konnte nicht geöffnet werden."
+      "orderPaymentOpenFailed": "Der Zahlungsbildschirm der blockierten Bestellung konnte nicht geöffnet werden.",
+      "actionPendingVerification": "Erneuter Versuch angefordert. Ein neuer Check muss die Behebung bestätigen."
     },
     "actions": {
       "refresh": {
@@ -7515,17 +7520,20 @@
         "label": "Verbindungseinstellungen öffnen"
       },
       "runParitySyncNow": {
-        "label": "Synchronisierung jetzt ausführen"
+        "label": "Jetzt synchronisieren"
+      },
+      "auto_retry": {
+        "label": "Automatischer neuer Versuch"
       },
       "retryParityItem": {
-        "label": "Parity-Eintrag erneut versuchen"
+        "label": "Diese Änderung erneut versuchen"
       },
       "retryCatalogAvailabilitySync": {
         "label": "Katalogverfügbarkeit erneut versuchen",
         "description": "Wiederholt das blockierte Verfügbarkeits-Flag nach dem Admin-Kompatibilitätsfix."
       },
       "retryParityModule": {
-        "label": "Parity-Modul erneut versuchen"
+        "label": "Zugehörige Änderungen erneut versuchen"
       },
       "repairPaymentTotalConflict": {
         "label": "Zahlungs-/Bestellabgleich reparieren",
@@ -7601,7 +7609,11 @@
         "label": "Dev kontaktieren"
       },
       "confirmTitle": "Wiederherstellungsaktion bestätigen",
-      "confirmMessage": "Diese Aktion ändert lokale Wiederherstellungsdaten für das ausgewählte Problem."
+      "confirmMessage": "Diese Aktion ändert lokale Wiederherstellungsdaten für das ausgewählte Problem.",
+      "retryCustomerAddressDefault": {
+        "label": "Adresse erneut speichern",
+        "description": "Die gespeicherte Änderung dieser Adresse erneut versuchen. Die Bestätigung hängt weiterhin vom Server ab."
+      }
     },
     "context": {
       "terminalId": "Terminal-ID",
@@ -7621,7 +7633,7 @@
       "recoveringTitle": "Wird wiederhergestellt",
       "recoveringSubtitle": "Probleme, die in der Warteschlange sind, verschoben wurden oder für einen weiteren Synchronisierungsversuch bereit sind.",
       "noRecoveringIssues": "Derzeit sind keine wiederherstellbaren Probleme sichtbar.",
-      "recentActionsTitle": "Kürzlich gelöst",
+      "recentActionsTitle": "Letzte Versuche",
       "recentActionsSubtitle": "Jeder Reparaturversuch wird lokal protokolliert, damit das Personal sehen kann, was versucht wurde und was erfolgreich war.",
       "noRecentActions": "Es wurden noch keine Wiederherstellungsaktionen aufgezeichnet.",
       "guidedTitle": "Sync-Wiederherstellung",
@@ -7643,7 +7655,7 @@
       "genericVerificationDescription": "Nach jeder Aktion aktualisiert das POS die Diagnosen und zeigt, ob die Warteschlange weiterlaufen kann.",
       "lastActionSucceeded": "Letzte Aktion erfolgreich",
       "lastActionFailed": "Letzte Aktion fehlgeschlagen",
-      "advancedDetailsTitle": "Erweiterte Details",
+      "advancedDetailsTitle": "Weitere Aktionen und Verlauf",
       "systemStatusTitle": "System-Sync-Status",
       "systemStatusSubtitle": "Eine einfache Ansicht dessen, was passiert, warum Bestellungen hängen können und welcher nächste Schritt am sichersten ist.",
       "noFixNeededTitle": "Keine Korrektur nötig",
@@ -7654,7 +7666,14 @@
       "diagnosticFileHeadline": "Technische Details werden in einer Datei gespeichert",
       "diagnosticFileDescription": "Damit dieser Bildschirm einfach bleibt, werden Warteschlangenzahlen, Parity-Zeilen, Druckerstatus, Datenbankdetails, Logs, Problemcodes, Bestell-IDs und das letzte Wiederherstellungsergebnis in das exportierte Diagnosepaket geschrieben, statt hier angezeigt zu werden.",
       "diagnosticFilePrivacy": "Nutzen Sie dies, wenn Contact Dev Supportdetails anfordert. Sensible Felder werden über die Exporteinstellungen behandelt.",
-      "exportDiagnosticFile": "Diagnosedatei exportieren"
+      "exportDiagnosticFile": "Diagnosedatei exportieren",
+      "actionNotVerified": "Noch nicht bestätigt",
+      "outcomes": {
+        "pending": "Bestätigung ausstehend",
+        "failed": "Versuch fehlgeschlagen",
+        "unknown": "Behebung nicht bestätigt",
+        "resolved": "Behebung bestätigt"
+      }
     },
     "recipes": {
       "checkoutPaymentOpenPayment": {
@@ -7686,6 +7705,11 @@
         "label": "Bekannte Massenbereinigung für Legacy-Zeilen",
         "explanation": "Dieses Rezept bereinigt alle veralteten Legacy-Finanz-Sync-Zeilen in einem geschützten Durchlauf, nachdem geprüft wurde, dass ihre lokalen Zahlungs- oder Anpassungseinträge weiterhin fehlen.",
         "verification": "Aktualisieren Sie Recovery nach der Bereinigung. Der Legacy-Finanzblocker sollte verschwunden sein; führen Sie danach Sync erneut aus."
+      },
+      "customerAddressDefaultConflictRepair": {
+        "label": "Standardadresse erneut versuchen",
+        "explanation": "Dieser bekannte Adresskonflikt erlaubt einen sicheren erneuten Versuch. Erst wenn der Server die Änderung annimmt, ist die Behebung bestätigt.",
+        "verification": "Das Problem bleibt sichtbar, bis ein neuer Check die Annahme der Adresse bestätigt. Bei erneutem Fehler die Supportdetails öffnen."
       }
     },
     "issues": {
@@ -7705,9 +7729,9 @@
         "guidance": "Öffnen Sie die Verbindungseinstellungen und prüfen Sie den Verbindungscode des Terminals, die Admin-URL und den POS-API-Schlüssel."
       },
       "parityProcessorStalled": {
-        "title": "Parity-Prozessor hängt",
-        "summary": "Der letzte Parity-Zyklus hat {{processed}} Elemente verarbeitet und {{remaining}} weiter in der Warteschlange gelassen. Aktueller Blocker: {{reason}}.",
-        "guidance": "Führen Sie die Parity-Synchronisierung jetzt aus. Wenn derselbe Rückstau bleibt, prüfen Sie die Parity-Probleme auf Modulebene unten oder kontaktieren Sie Dev. Letzter Parity-Fehler: {{reason}}."
+        "title": "Änderungen warten auf Übertragung",
+        "summary": "Die letzte Synchronisierung kam nicht voran. Einige gespeicherte Änderungen sind noch nicht im Büro angekommen.",
+        "guidance": "Verbindung prüfen und einmal synchronisieren. Bleibt das Problem bestehen, Supportdetails öffnen."
       },
       "paymentTotalConflict": {
         "title": "Zahlung und Bestellung passen nicht zusammen",
@@ -7740,9 +7764,9 @@
         "guidance": "Nutzen Sie den empfohlenen erneuten Versuch nach dem Admin-Deployment. Nur Verfügbarkeits-Flags werden wiederholt; Namen, Preise und Menüstruktur bleiben blockiert."
       },
       "parityModuleFailed": {
-        "title": "Parity-Fehler in {{moduleLabel}}",
-        "summary": "{{count}} Parity-Einträge in {{moduleLabel}} sind fehlgeschlagen und müssen erneut versucht werden.",
-        "guidance": "Wiederholen Sie zuerst den Beispiel-Eintrag für einen engen Test oder das gesamte Parity-Modul, um die ganze Gruppe zu entblocken."
+        "title": "Einige Änderungen konnten nicht gesendet werden",
+        "summary": "{{count}} gespeicherte Änderungen warten auf einen erfolgreichen neuen Versuch.",
+        "guidance": "Die ausgewählte Änderung einmal erneut versuchen. Bei erneutem Fehler Supportdetails öffnen."
       },
       "parityModulePending": {
         "title": "Parity-Rückstau in {{moduleLabel}}",
@@ -7798,6 +7822,11 @@
         "title": "Dev-Unterstützung erforderlich",
         "summary": "Ein Sync-Rückstau ist sichtbar, aber für diesen genauen Fehler ist noch keine geführte Lösung hinterlegt.",
         "guidance": "Kontaktieren Sie Dev und fügen Sie das Diagnostik-Bundle bei, damit der nächste Vorfall einer geführten Lösung zugeordnet werden kann."
+      },
+      "customerAddressDefaultConflict": {
+        "title": "Standardadresse konnte nicht gespeichert werden",
+        "summary": "Der Server konnte die Änderung der Standardadresse nicht bestätigen. Die gespeicherte Änderung bleibt auf dieser Kasse.",
+        "guidance": "Diese Adresse einmal erneut versuchen. Bei erneuter Ablehnung über die Supportdetails Hilfe anfordern."
       }
     }
   },

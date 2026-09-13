@@ -86,11 +86,17 @@ test('Health Status modal shell, state cards, and sections opt into light-first 
     'support-needed state card must use the shared danger tone',
   );
 
-  const neutralSectionCount =
-    healthModal.match(/<section\b[\s\S]*?liquidGlassModalTone\('neutral'\)/g)?.length ?? 0;
-  assert.ok(
-    neutralSectionCount >= 3,
-    'recommended actions, explanation, support actions, and advanced details must use the shared neutral tone',
+  // The compact layout groups support behind one disclosure. Check both real
+  // neutral surfaces instead of requiring the retired duplicate sections.
+  assert.match(
+    healthModal,
+    /<details\s+className=\{cn\('[^']+',\s*liquidGlassModalTone\('neutral'\)\)\}/,
+    'support disclosure must use the shared light/dark neutral tone',
+  );
+  assert.match(
+    healthModal,
+    /<section\s+id=\{healthAdvancedId\}\s+className=\{cn\('[^']+',\s*liquidGlassModalTone\('neutral'\)\)\}/,
+    'expanded technical details must use the shared light/dark neutral tone',
   );
 
   assert.deepEqual(failures, [], failures.join('\n'));
@@ -98,18 +104,22 @@ test('Health Status modal shell, state cards, and sections opt into light-first 
 
 test('Health Status modal neutral controls have light bases and dark overrides', () => {
   const buttonClasses = [
-    ...modalContent.matchAll(/<button\b[^>]*className="([^"]+)"[^>]*>/gs),
+    ...modalContent.matchAll(/<button\b[\s\S]*?className="([^"]+)"/g),
   ].map((match) => match[1]);
 
-  // Yellow/red/green opaque buttons intentionally use the same high-contrast
+  // Amber/yellow/red/green opaque buttons intentionally use the same high-contrast
   // semantic palette in both themes. Neutral chrome must adapt explicitly.
   const neutralControls = buttonClasses.filter(
     (classes) =>
-      !/\bbg-(?:yellow|red|rose|emerald|green)-(?:400|500|600|700|800|900)\b/.test(
+      !/\bbg-(?:amber|yellow|red|rose|emerald|green)-(?:400|500|600|700|800|900)\b/.test(
         classes,
       ),
   );
-  assert.ok(neutralControls.length >= 3, 'close, diagnostics, and advanced controls must be covered');
+  assert.ok(neutralControls.length >= 5, 'close, export, folder, advanced and refresh controls must be covered, including arrow-function handlers');
+
+  for (const classes of buttonClasses.filter(classes => /\bbg-(?:amber|yellow)-400\b/.test(classes))) {
+    assert.match(classes, /\btext-(?:black|slate-950)\b/, 'bright primary actions must retain a dark, readable foreground');
+  }
 
   const failures = neutralControls.flatMap((classes, index) => {
     const label = `neutral control ${index + 1}`;

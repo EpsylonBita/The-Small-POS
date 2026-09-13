@@ -26,8 +26,8 @@ test('SyncRecoveryModal shell is amber/neutral, touch-first, and hides native sc
   assert.match(source, /overflow-y-auto scrollbar-hide/);
   assert.match(source, /border-amber-200\/90 bg-amber-50\/90/);
   assert.match(source, /dark:border-amber-400\/30 dark:bg-amber-500\/10/);
-  assert.match(source, /border-4 border-amber-500\/30 border-t-amber-500/);
-  assert.match(source, /min-h-\[44px\][\s\S]*active:scale-\[0\.98\]/);
+  assert.match(source, /role="status"[\s\S]*?animate-spin/);
+  assert.match(source, /<summary className="min-h-\[44px\]/);
   assert.match(source, /min-h-\[44px\] min-w-\[44px\] rounded-2xl/);
 });
 

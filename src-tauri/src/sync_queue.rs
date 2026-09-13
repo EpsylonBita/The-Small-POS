@@ -207,6 +207,18 @@ const REQUEST_TIMEOUT_SECS: u64 = 30;
 /// Default cooldown when the admin API responds with rate limiting.
 const DEFAULT_RATE_LIMIT_RETRY_SECS: i64 = 60;
 
+/// Versioned recipe id for the bounded customer-address default-switch
+/// recovery probe. Persisted alongside each guarded row in `local_settings`
+/// so a restart cannot reset the cooldown/cap (guard survives process exit).
+const CUSTOMER_ADDRESS_DEFAULT_RECOVERY_RECIPE_ID: &str = "customer-address-default.retry";
+const CUSTOMER_ADDRESS_DEFAULT_RECOVERY_RECIPE_VERSION: i64 = 1;
+/// Minimum time between automatic recovery probes for the same known
+/// default-address failure row.
+const CUSTOMER_ADDRESS_DEFAULT_RECOVERY_COOLDOWN_SECS: i64 = 5 * 60;
+/// Hard cap on automatic probes per row; manual retry stays available after.
+const CUSTOMER_ADDRESS_DEFAULT_RECOVERY_MAX_PROBES: i64 = 3;
+const CUSTOMER_ADDRESS_DEFAULT_RECOVERY_SETTING_CATEGORY: &str = "recovery_probe";
+
 // ---------------------------------------------------------------------------
 // Data structures (mirror shared/pos/sync-queue-types.ts)
 // ---------------------------------------------------------------------------
@@ -3165,6 +3177,55 @@ fn is_customer_address_missing_street_error(error: &str) -> bool {
         .contains("customer address recreate is missing street_address details")
 }
 
+/// True only for the exact, known default-address-switch failure signature:
+/// the legacy unique index name, the stable permanent-conflict code, or the
+/// stable transient advisory-lock retry code raised by
+/// `customer_address_default_write_gate_v1` / `ensure_single_default_address`
+/// (see `supabase/migrations/20260913123000_restore_customer_address_default_switch.sql`).
+/// Deliberately narrow: a bare `23505`, a generic 500, auth/privacy failures
+/// and unrelated version conflicts must never match here.
+fn is_customer_address_default_write_conflict_error(error: &str) -> bool {
+    error
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .any(|token| {
+            [
+                "idx_customer_addresses_default_unique",
+                "customer_address_default_conflict",
+                "customer_address_default_retry",
+            ]
+            .iter()
+            .any(|known| token.eq_ignore_ascii_case(known))
+        })
+}
+
+fn is_eligible_customer_address_default_failure(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    is_customer_address_default_write_conflict_error(error)
+        && ![
+            "http 401",
+            "http 403",
+            "unauthorized",
+            "forbidden",
+            "privacy",
+            "erasure",
+            "redacted",
+            "credential",
+            "version conflict",
+            "version mismatch",
+            "expected_version",
+            "authentication",
+            "authorization",
+            "permission",
+            "access denied",
+            "gdpr",
+            "stale version",
+            "optimistic",
+            "deleted",
+        ]
+        .iter()
+        .any(|ambiguous| lower.contains(ambiguous))
+}
+
 fn requeue_failed_items(
     conn: &Connection,
     queue_ids: &[String],
@@ -3512,6 +3573,258 @@ fn retry_failed_customer_address_not_found_items_limited(
         &queue_ids,
         "Requeued stale customer address parity rows after cache-backed recreate auto-heal",
     )
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct CustomerAddressDefaultRecoveryGuard {
+    attempts: i64,
+    last_probe_at: Option<chrono::DateTime<Utc>>,
+}
+
+fn customer_address_default_recovery_guard_key(queue_id: &str) -> String {
+    format!(
+        "{}.v{}:{}",
+        CUSTOMER_ADDRESS_DEFAULT_RECOVERY_RECIPE_ID,
+        CUSTOMER_ADDRESS_DEFAULT_RECOVERY_RECIPE_VERSION,
+        queue_id
+    )
+}
+
+/// Reads the persisted probe guard for one queue row. Backed by
+/// `local_settings` (via `db::get_setting`), so the attempt count and last
+/// probe time survive an app restart -- a fresh process must not reset the
+/// cooldown/cap for a row it has already probed.
+fn read_customer_address_default_recovery_guard(
+    conn: &Connection,
+    queue_id: &str,
+) -> CustomerAddressDefaultRecoveryGuard {
+    // Missing state is a first probe; malformed state or a read failure closes
+    // automatic recovery instead of accidentally replenishing its budget.
+    let blocked = CustomerAddressDefaultRecoveryGuard {
+        attempts: CUSTOMER_ADDRESS_DEFAULT_RECOVERY_MAX_PROBES,
+        last_probe_at: None,
+    };
+    let raw: Option<String> = match conn.query_row(
+        "SELECT setting_value FROM local_settings WHERE setting_category = ?1 AND setting_key = ?2",
+        params![CUSTOMER_ADDRESS_DEFAULT_RECOVERY_SETTING_CATEGORY,
+                customer_address_default_recovery_guard_key(queue_id)], |row| row.get(0)
+    ).optional() {
+        Ok(raw) => raw,
+        Err(_) => return blocked,
+    };
+    let Some(raw) = raw else {
+        return CustomerAddressDefaultRecoveryGuard::default();
+    };
+    let Ok(parsed) = serde_json::from_str::<Value>(&raw) else {
+        return blocked;
+    };
+    let Some(attempts) = parsed
+        .get("attempts")
+        .and_then(Value::as_i64)
+        .filter(|n| *n > 0)
+    else {
+        return blocked;
+    };
+    let last_probe_at = parsed
+        .get("lastProbeAt")
+        .and_then(Value::as_str)
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc));
+    if parsed.get("recipeId").and_then(Value::as_str)
+        != Some(CUSTOMER_ADDRESS_DEFAULT_RECOVERY_RECIPE_ID)
+        || parsed.get("recipeVersion").and_then(Value::as_i64)
+            != Some(CUSTOMER_ADDRESS_DEFAULT_RECOVERY_RECIPE_VERSION)
+        || last_probe_at.is_none()
+    {
+        return blocked;
+    }
+    CustomerAddressDefaultRecoveryGuard {
+        attempts,
+        last_probe_at,
+    }
+}
+
+fn write_customer_address_default_recovery_guard(
+    conn: &Connection,
+    queue_id: &str,
+    guard: CustomerAddressDefaultRecoveryGuard,
+) -> Result<(), String> {
+    let payload = serde_json::json!({
+        "recipeId": CUSTOMER_ADDRESS_DEFAULT_RECOVERY_RECIPE_ID,
+        "recipeVersion": CUSTOMER_ADDRESS_DEFAULT_RECOVERY_RECIPE_VERSION,
+        "attempts": guard.attempts,
+        "lastProbeAt": guard.last_probe_at.map(|value| value.to_rfc3339()),
+    });
+    db::set_setting(
+        conn,
+        CUSTOMER_ADDRESS_DEFAULT_RECOVERY_SETTING_CATEGORY,
+        &customer_address_default_recovery_guard_key(queue_id),
+        &payload.to_string(),
+    )
+}
+
+/// Bounded, cooldown-gated recovery for the *known* customer-address
+/// default-switch failure signature (see
+/// `is_customer_address_default_write_conflict_error`). Unlike the other
+/// `retry_failed_*_limited` helpers in this module, this recipe schedules at
+/// most one probe per persisted cooldown window and stops issuing probes
+/// once its total cap is spent -- exhausting the queue's normal retry budget
+/// must never turn into a tight requeue loop. Manual retry
+/// (`retry_item`/`renderer_retry_item`) stays available regardless of this
+/// recipe's own cap. The row's payload is never rewritten: only queue
+/// status/attempts/error bookkeeping is reset, exactly like a manual retry,
+/// so success still requires an authoritative server acknowledgement.
+fn retry_failed_customer_address_default_conflict_items_limited(
+    conn: &Connection,
+    limit: usize,
+) -> Result<RetryItemsResult, String> {
+    if limit == 0 {
+        return Ok(RetryItemsResult { retried: 0 });
+    }
+
+    if resolve_request_terminal_id(conn, &Value::Object(Map::new())).is_none() {
+        return Ok(RetryItemsResult { retried: 0 });
+    }
+
+    let organization_id = infer_organization_id(conn, &Value::Null);
+    if organization_id == "pending-org" {
+        return Ok(RetryItemsResult { retried: 0 });
+    }
+    retry_transaction(conn, |conn| {
+        let generic_owner = semantic_generic_nonfinancial_owner_predicate("parity_sync_queue");
+        let select_sql = format!(
+            "SELECT id, error_message, json_object(
+                'status', status, 'attempts', attempts,
+                'error_message', 'CUSTOMER_ADDRESS_DEFAULT_CONFLICT', 'errorMessageRedacted', json('true'),
+                'next_retry_at', next_retry_at, 'last_attempt', last_attempt,
+                'retry_delay_ms', retry_delay_ms)
+             FROM parity_sync_queue WHERE table_name = 'customer_addresses'
+               AND {generic_owner} AND module_type = 'customers' AND organization_id = ?1
+               AND json_valid(data) AND json_type(data) = 'object'
+               AND coalesce(json_extract(data, '$.is_default'), json_extract(data, '$.isDefault')) = 1
+               AND NOT EXISTS (SELECT 1 FROM json_each(data) WHERE key IN
+                   ('total', 'subtotal', 'tax', 'discount_amount', 'payment_amount', 'refund_amount',
+                    'amount', 'price', 'unit_price', 'order_total', 'grand_total', 'tip', 'tip_amount',
+                    'privacy_redacted', 'privacyRedacted', 'erased_at', 'deleted_at'))
+               AND operation IN ('INSERT', 'UPDATE') AND status = 'failed'
+               AND error_message IS NOT NULL ORDER BY created_at ASC"
+        );
+        let mut stmt = conn.prepare(&select_sql).map_err(|e| e.to_string())?;
+        let candidates = stmt
+            .query_map([&organization_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        drop(stmt);
+        let now = Utc::now();
+        let mut retried = 0;
+        for (queue_id, error_message, preimage) in candidates {
+            if retried as usize >= limit {
+                break;
+            }
+            if !is_eligible_customer_address_default_failure(&error_message) {
+                continue;
+            }
+            let guard = read_customer_address_default_recovery_guard(conn, &queue_id);
+            if guard.attempts >= CUSTOMER_ADDRESS_DEFAULT_RECOVERY_MAX_PROBES
+                || guard.last_probe_at.is_some_and(|last| {
+                    now.signed_duration_since(last)
+                        < ChronoDuration::seconds(CUSTOMER_ADDRESS_DEFAULT_RECOVERY_COOLDOWN_SECS)
+                })
+            {
+                continue;
+            }
+
+            let audit_id = Uuid::new_v4().to_string();
+            // Metadata-only recovery: capture every field we change before the
+            // mutation in this same IMMEDIATE transaction. Native replay owns a
+            // Connection, not DatabaseState; no unlocked full-DB snapshot seam.
+            // Business payload/financial rows are untouched. The error preimage
+            // is normalized to the known code, so SQL key values cannot expose
+            // personal data in either the local snapshot or support audit.
+            db::set_setting(
+                conn,
+                CUSTOMER_ADDRESS_DEFAULT_RECOVERY_SETTING_CATEGORY,
+                &format!("preimage:{audit_id}"),
+                &preimage,
+            )?;
+            let payload = serde_json::json!({"outcome": "pending", "queueId": queue_id,
+                "attempt": guard.attempts + 1, "snapshotKind": "retry_bookkeeping",
+                "snapshotKey": format!("preimage:{audit_id}")});
+            conn.execute("INSERT INTO recovery_action_log
+                (id, action_id, issue_code, recipe_id, recipe_version, entity_type, entity_id,
+                 success, message, payload_json)
+                VALUES (?1, 'auto_retry', 'CUSTOMER_ADDRESS_DEFAULT_CONFLICT', ?2, ?3,
+                    'parity_sync_queue', ?4, 0, 'Retry scheduled; server confirmation pending', ?5)",
+                params![audit_id, CUSTOMER_ADDRESS_DEFAULT_RECOVERY_RECIPE_ID,
+                    CUSTOMER_ADDRESS_DEFAULT_RECOVERY_RECIPE_VERSION, queue_id, payload.to_string()])
+                .map_err(|e| e.to_string())?;
+            write_customer_address_default_recovery_guard(
+                conn,
+                &queue_id,
+                CustomerAddressDefaultRecoveryGuard {
+                    attempts: guard.attempts + 1,
+                    last_probe_at: Some(now),
+                },
+            )?;
+            conn.execute(
+                "UPDATE parity_sync_queue SET status = 'pending', attempts = 0,
+                error_message = NULL, next_retry_at = NULL, last_attempt = NULL, retry_delay_ms = ?1
+                WHERE id = ?2 AND status = 'failed' AND organization_id = ?3",
+                params![DEFAULT_INITIAL_RETRY_DELAY_MS, queue_id, organization_id],
+            )
+            .map_err(|e| e.to_string())?;
+            retried += 1;
+        }
+        Ok(RetryItemsResult { retried })
+    })
+}
+
+/// Called only inside the live-claim transaction. Scheduling or deleting a row
+/// elsewhere is deliberately not confirmation of this recipe's server write.
+fn record_customer_address_default_recovery_outcome(
+    conn: &Connection,
+    queue_id: &str,
+    outcome: &str,
+) -> Result<(), String> {
+    if db::get_setting(
+        conn,
+        CUSTOMER_ADDRESS_DEFAULT_RECOVERY_SETTING_CATEGORY,
+        &customer_address_default_recovery_guard_key(queue_id),
+    )
+    .is_none()
+    {
+        return Ok(());
+    }
+    let message = match outcome {
+        "resolved" => "Server confirmed the customer address write",
+        "failed" => "Server rejected the retry; customer address remains unsaved",
+        _ => "Retry outcome unknown; server confirmation required",
+    };
+    conn.execute(
+        "UPDATE recovery_action_log SET success = ?1, message = ?2,
+        payload_json = json_set(payload_json, '$.outcome', ?3, '$.verifiedAt', ?4)
+        WHERE recipe_id = ?5 AND entity_type = 'parity_sync_queue' AND entity_id = ?6
+          AND id = (SELECT id FROM recovery_action_log WHERE recipe_id = ?5
+              AND entity_type = 'parity_sync_queue' AND entity_id = ?6 ORDER BY rowid DESC LIMIT 1)
+          AND json_extract(payload_json, '$.outcome') IN ('pending', 'unknown', 'failed')",
+        params![
+            i64::from(outcome == "resolved"),
+            message,
+            outcome,
+            Utc::now().to_rfc3339(),
+            CUSTOMER_ADDRESS_DEFAULT_RECOVERY_RECIPE_ID,
+            queue_id
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// True when an admin replay failed because a `restaurant_table_sessions`
@@ -5426,6 +5739,16 @@ fn mark_failure_in_transaction(
     else {
         return Ok(MarkFailureOutcome::default());
     };
+
+    record_customer_address_default_recovery_outcome(
+        conn,
+        item_id,
+        if error_message == "NETWORK_ERROR" {
+            "unknown"
+        } else {
+            "failed"
+        },
+    )?;
 
     let new_attempts = attempts + 1;
 
@@ -8537,6 +8860,17 @@ fn apply_success(
 }
 
 fn is_replay_conflict_response(status: u16, response_body: &str, item: &SyncQueueItem) -> bool {
+    // The default-address write gate's advisory-lock retry and unique-index
+    // conflict are not optimistic-concurrency version conflicts: treating
+    // them as one here would auto-resolve via `mark_success` without the
+    // write ever landing. Let them fall through to the generic failure path
+    // below so the bounded recovery probe (not blind success) owns retries.
+    if item.table_name == "customer_addresses"
+        && is_customer_address_default_write_conflict_error(response_body)
+    {
+        return false;
+    }
+
     if status == 409 {
         return true;
     }
@@ -9309,6 +9643,14 @@ where
                 remaining_requeue_budget = remaining_requeue_budget
                     .saturating_sub(customer_address_retries.retried as usize);
 
+                let customer_address_default_conflict_retries =
+                    retry_failed_customer_address_default_conflict_items_limited(
+                        &db,
+                        remaining_requeue_budget,
+                    )?;
+                remaining_requeue_budget = remaining_requeue_budget
+                    .saturating_sub(customer_address_default_conflict_retries.retried as usize);
+
                 let _ = retry_failed_table_session_local_placeholder_items_limited(
                     &db,
                     remaining_requeue_budget,
@@ -9648,18 +9990,69 @@ where
                     }
                     continue;
                 }
-                if is_success {
+                let address_acknowledged = item.table_name != "customer_addresses"
+                    || response_json
+                        .as_ref()
+                        .and_then(|body| body.get("success"))
+                        .and_then(Value::as_bool)
+                        == Some(true);
+                if is_success && address_acknowledged {
                     // Success -- remove from queue
                     let applied = {
                         let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
                         with_live_generic_claim(&db, &item, |db| {
                             apply_success(db, &item, response_json.as_ref())?;
+                            if item.table_name == "customer_addresses" {
+                                record_customer_address_default_recovery_outcome(
+                                    db, &item.id, "resolved",
+                                )?;
+                            }
                             mark_success(db, &item.id, item.claim_generation)
                         })?
                     };
                     if applied.is_some() {
                         processed += 1;
                         telemetry.record_success(&item);
+                    }
+                } else if item.table_name == "customer_addresses"
+                    && ((status == 409 || status >= 500)
+                        && is_customer_address_default_write_conflict_error(&response_body)
+                        || is_success && !address_acknowledged)
+                {
+                    let error_code = if is_success {
+                        "CUSTOMER_ADDRESS_WRITE_UNCONFIRMED"
+                    } else if is_eligible_customer_address_default_failure(&response_body) {
+                        "CUSTOMER_ADDRESS_DEFAULT_CONFLICT"
+                    } else {
+                        "CUSTOMER_ADDRESS_WRITE_REQUIRES_REVIEW"
+                    };
+                    let applied = {
+                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        with_live_generic_claim(&db, &item, |db| {
+                            record_customer_address_default_recovery_outcome(
+                                db,
+                                &item.id,
+                                if is_success { "unknown" } else { "failed" },
+                            )?;
+                            db.execute(
+                                "UPDATE parity_sync_queue SET status = 'failed',
+                                attempts = attempts + 1, error_message = ?1, next_retry_at = NULL,
+                                last_attempt = ?2 WHERE id = ?3 AND claim_generation = ?4",
+                                params![
+                                    error_code,
+                                    Utc::now().to_rfc3339(),
+                                    item.id,
+                                    item.claim_generation
+                                ],
+                            )
+                            .map_err(|e| e.to_string())?;
+                            Ok(())
+                        })?
+                    };
+                    if applied.is_some() {
+                        failed += 1;
+                        telemetry.record_error(&item, "failed", error_code, Some(status));
+                        errors.push(safe_sync_error(&item, error_code, Some(status)));
                     }
                 } else if is_parent_order_wait_response(status, &response_body) {
                     let reason = "Waiting for parent order sync";
@@ -11871,6 +12264,570 @@ mod tests {
             payload.get("street_address").and_then(Value::as_str),
             Some("Retry Street 5")
         );
+    }
+
+    fn seed_failed_customer_address_default_conflict_row(
+        conn: &Connection,
+        record_id: &str,
+        error_message: &str,
+    ) -> String {
+        db::set_setting(conn, "terminal", "organization_id", "org-1").unwrap();
+        let queue_id = enqueue_test_item(
+            conn,
+            "customer_addresses",
+            "UPDATE",
+            record_id,
+            json!({
+                "customer_id": "cust-1",
+                "is_default": true,
+                "street_address": "Main St 42",
+            }),
+        );
+        conn.execute(
+            "UPDATE parity_sync_queue
+             SET status = 'failed',
+                 error_message = ?1
+             WHERE id = ?2",
+            params![error_message, queue_id.as_str()],
+        )
+        .expect("seed failed customer address default-conflict parity row");
+        queue_id
+    }
+
+    #[test]
+    fn retry_failed_customer_address_default_conflict_items_requeues_known_unique_index_signature()
+    {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        let queue_id = seed_failed_customer_address_default_conflict_row(
+            &conn,
+            "addr-1",
+            "HTTP 500: duplicate key value violates unique constraint \"idx_customer_addresses_default_unique\"",
+        );
+
+        let original_payload: String = conn
+            .query_row(
+                "SELECT data FROM parity_sync_queue WHERE id = ?1",
+                params![queue_id.as_str()],
+                |row| row.get(0),
+            )
+            .expect("load original payload");
+
+        let result = retry_failed_customer_address_default_conflict_items_limited(&conn, 5)
+            .expect("retry known default-address conflict rows");
+        assert_eq!(result.retried, 1);
+
+        let (status, payload): (String, String) = conn
+            .query_row(
+                "SELECT status, data FROM parity_sync_queue WHERE id = ?1",
+                params![queue_id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("load updated queue row");
+        assert_eq!(status, "pending");
+        assert_eq!(payload, original_payload, "payload must never be rewritten");
+
+        let guard = read_customer_address_default_recovery_guard(&conn, queue_id.as_str());
+        assert_eq!(guard.attempts, 1);
+        assert!(guard.last_probe_at.is_some());
+    }
+
+    #[test]
+    fn retry_failed_customer_address_default_conflict_items_requeues_stable_codes() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        let conflict_id = seed_failed_customer_address_default_conflict_row(
+            &conn,
+            "addr-conflict",
+            "HTTP 409: CUSTOMER_ADDRESS_DEFAULT_CONFLICT",
+        );
+        let retry_id = seed_failed_customer_address_default_conflict_row(
+            &conn,
+            "addr-retry",
+            "HTTP 409: CUSTOMER_ADDRESS_DEFAULT_RETRY",
+        );
+
+        let result = retry_failed_customer_address_default_conflict_items_limited(&conn, 5)
+            .expect("retry known default-address conflict rows");
+        assert_eq!(result.retried, 2);
+
+        for queue_id in [conflict_id, retry_id] {
+            let status: String = conn
+                .query_row(
+                    "SELECT status FROM parity_sync_queue WHERE id = ?1",
+                    params![queue_id.as_str()],
+                    |row| row.get(0),
+                )
+                .expect("load updated queue row");
+            assert_eq!(status, "pending");
+        }
+    }
+
+    #[test]
+    fn retry_failed_customer_address_default_conflict_items_excludes_unrelated_failures() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        let generic_500 = seed_failed_customer_address_default_conflict_row(
+            &conn,
+            "addr-500",
+            "HTTP 500: internal error",
+        );
+        let bare_23505 = seed_failed_customer_address_default_conflict_row(
+            &conn,
+            "addr-23505",
+            "HTTP 500: duplicate key value violates unique constraint \"uq_customer_addresses_fingerprint\"",
+        );
+        let auth_error = seed_failed_customer_address_default_conflict_row(
+            &conn,
+            "addr-auth",
+            "HTTP 401: invalid terminal credentials",
+        );
+        let privacy_error = seed_failed_customer_address_default_conflict_row(
+            &conn,
+            "addr-privacy",
+            "HTTP 403: privacy erasure in progress",
+        );
+        let version_conflict = seed_failed_customer_address_default_conflict_row(
+            &conn,
+            "addr-version",
+            "HTTP 409: version conflict, expected_version mismatch",
+        );
+
+        let result = retry_failed_customer_address_default_conflict_items_limited(&conn, 5)
+            .expect("retry known default-address conflict rows");
+        assert_eq!(result.retried, 0);
+
+        for queue_id in [
+            generic_500,
+            bare_23505,
+            auth_error,
+            privacy_error,
+            version_conflict,
+        ] {
+            let status: String = conn
+                .query_row(
+                    "SELECT status FROM parity_sync_queue WHERE id = ?1",
+                    params![queue_id.as_str()],
+                    |row| row.get(0),
+                )
+                .expect("load unchanged queue row");
+            assert_eq!(
+                status, "failed",
+                "unrelated failures must never be auto-reset"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_failed_customer_address_default_conflict_items_respects_persisted_cooldown() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        let queue_id = seed_failed_customer_address_default_conflict_row(
+            &conn,
+            "addr-cooldown",
+            "CUSTOMER_ADDRESS_DEFAULT_RETRY",
+        );
+
+        let first = retry_failed_customer_address_default_conflict_items_limited(&conn, 5)
+            .expect("first probe");
+        assert_eq!(first.retried, 1);
+
+        // The replay failed again immediately (still within the same
+        // cooldown window) -- a fresh app instance reading the persisted
+        // guard must still refuse a second immediate probe.
+        conn.execute(
+            "UPDATE parity_sync_queue
+             SET status = 'failed', error_message = ?1
+             WHERE id = ?2",
+            params!["CUSTOMER_ADDRESS_DEFAULT_RETRY", queue_id.as_str()],
+        )
+        .expect("re-fail row after first probe");
+
+        let second = retry_failed_customer_address_default_conflict_items_limited(&conn, 5)
+            .expect("second probe attempt within cooldown");
+        assert_eq!(
+            second.retried, 0,
+            "cooldown must block an immediate second probe"
+        );
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM parity_sync_queue WHERE id = ?1",
+                params![queue_id.as_str()],
+                |row| row.get(0),
+            )
+            .expect("load queue row");
+        assert_eq!(status, "failed");
+
+        let guard = read_customer_address_default_recovery_guard(&conn, queue_id.as_str());
+        assert_eq!(
+            guard.attempts, 1,
+            "attempts must not increase without a scheduled probe"
+        );
+    }
+
+    #[test]
+    fn retry_failed_customer_address_default_conflict_items_respects_persisted_cap_across_reconnect(
+    ) {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        let queue_id = seed_failed_customer_address_default_conflict_row(
+            &conn,
+            "addr-cap",
+            "CUSTOMER_ADDRESS_DEFAULT_CONFLICT",
+        );
+
+        // Simulate a guard already at its cap from probes issued before an
+        // app restart, with the cooldown long expired -- persisted state
+        // (not an in-memory counter) must still stop a new probe.
+        let stale_probe_at = Utc::now() - ChronoDuration::hours(1);
+        write_customer_address_default_recovery_guard(
+            &conn,
+            queue_id.as_str(),
+            CustomerAddressDefaultRecoveryGuard {
+                attempts: CUSTOMER_ADDRESS_DEFAULT_RECOVERY_MAX_PROBES,
+                last_probe_at: Some(stale_probe_at),
+            },
+        )
+        .expect("seed exhausted guard");
+
+        let result = retry_failed_customer_address_default_conflict_items_limited(&conn, 5)
+            .expect("probe attempt after cap exhausted");
+        assert_eq!(
+            result.retried, 0,
+            "cap must survive a persisted-state reload"
+        );
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM parity_sync_queue WHERE id = ?1",
+                params![queue_id.as_str()],
+                |row| row.get(0),
+            )
+            .expect("load queue row");
+        assert_eq!(status, "failed");
+
+        // Manual retry (the existing staff-triggered path) must remain
+        // usable even after the automatic recipe's cap is spent.
+        retry_item(&conn, queue_id.as_str()).expect("manual retry stays available past the cap");
+        let manual_status: String = conn
+            .query_row(
+                "SELECT status FROM parity_sync_queue WHERE id = ?1",
+                params![queue_id.as_str()],
+                |row| row.get(0),
+            )
+            .expect("load queue row after manual retry");
+        assert_eq!(manual_status, "pending");
+    }
+
+    #[test]
+    fn customer_address_default_recovery_malformed_guard_and_ineligible_rows_fail_closed() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        for (index, raw) in [
+            "broken",
+            "{}",
+            r#"{"attempts":-1}"#,
+            r#"{"attempts":0,"lastProbeAt":"bad"}"#,
+        ]
+        .iter()
+        .enumerate()
+        {
+            let id = seed_failed_customer_address_default_conflict_row(
+                &conn,
+                &format!("bad-{index}"),
+                "CUSTOMER_ADDRESS_DEFAULT_CONFLICT",
+            );
+            db::set_setting(
+                &conn,
+                CUSTOMER_ADDRESS_DEFAULT_RECOVERY_SETTING_CATEGORY,
+                &customer_address_default_recovery_guard_key(&id),
+                raw,
+            )
+            .unwrap();
+        }
+        for error in [
+            "CUSTOMER_ADDRESS_DEFAULT_CONFLICT privacy erasure",
+            "CUSTOMER_ADDRESS_DEFAULT_CONFLICT HTTP 403",
+            "CUSTOMER_ADDRESS_DEFAULT_CONFLICT version conflict",
+            "PREFIX_CUSTOMER_ADDRESS_DEFAULT_CONFLICT_SUFFIX",
+        ] {
+            seed_failed_customer_address_default_conflict_row(
+                &conn,
+                &Uuid::new_v4().to_string(),
+                error,
+            );
+        }
+        for (column, value) in [
+            ("module_type", "payment"),
+            ("organization_id", "other-org"),
+            ("operation", "DELETE"),
+            ("status", "conflict"),
+            ("data", "{}"),
+            ("data", "bad-json"),
+        ] {
+            let id = seed_failed_customer_address_default_conflict_row(
+                &conn,
+                &Uuid::new_v4().to_string(),
+                "CUSTOMER_ADDRESS_DEFAULT_CONFLICT",
+            );
+            conn.execute(
+                &format!("UPDATE parity_sync_queue SET {column} = ?1 WHERE id = ?2"),
+                params![value, id],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            retry_failed_customer_address_default_conflict_items_limited(&conn, 100)
+                .unwrap()
+                .retried,
+            0
+        );
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM recovery_action_log", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn customer_address_default_recovery_guard_or_audit_failure_rolls_back_everything() {
+        for trigger in [
+            "CREATE TRIGGER reject_guard BEFORE INSERT ON local_settings WHEN NEW.setting_category = 'recovery_probe' AND NEW.setting_key NOT LIKE 'preimage:%' BEGIN SELECT RAISE(ABORT, 'test guard failure'); END;",
+            "CREATE TRIGGER reject_audit BEFORE INSERT ON recovery_action_log BEGIN SELECT RAISE(ABORT, 'test audit failure'); END;",
+            "CREATE TRIGGER reject_queue BEFORE UPDATE ON parity_sync_queue BEGIN SELECT RAISE(ABORT, 'test queue failure'); END;"
+        ] {
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            let id = seed_failed_customer_address_default_conflict_row(&conn, "atomic", "CUSTOMER_ADDRESS_DEFAULT_CONFLICT");
+            let before = full_queue_row_fingerprint(&conn, &id);
+            conn.execute_batch(trigger).unwrap();
+            assert!(retry_failed_customer_address_default_conflict_items_limited(&conn, 1).is_err());
+            assert_eq!(full_queue_row_fingerprint(&conn, &id), before);
+            assert_eq!(conn.query_row("SELECT count(*) FROM local_settings WHERE setting_category = 'recovery_probe'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+            assert_eq!(conn.query_row("SELECT count(*) FROM recovery_action_log", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        }
+    }
+
+    #[test]
+    fn customer_address_default_recovery_budget_survives_real_database_reopen() {
+        let (file, mut conn) = FileBackedTestDb::new("default-recovery-restart");
+        db::set_setting(&conn, "terminal", "__ignore_keyring", "1").unwrap();
+        seed_terminal_context(&conn);
+        let id = seed_failed_customer_address_default_conflict_row(
+            &conn,
+            "restart",
+            "CUSTOMER_ADDRESS_DEFAULT_CONFLICT",
+        );
+        for attempt in 1..=CUSTOMER_ADDRESS_DEFAULT_RECOVERY_MAX_PROBES {
+            assert_eq!(
+                retry_failed_customer_address_default_conflict_items_limited(&conn, 1)
+                    .unwrap()
+                    .retried,
+                1
+            );
+            conn.execute("UPDATE parity_sync_queue SET status = 'failed', error_message = 'CUSTOMER_ADDRESS_DEFAULT_CONFLICT' WHERE id = ?1", [&id]).unwrap();
+            drop(conn);
+            conn = Connection::open(&file.path).unwrap();
+            assert_eq!(
+                read_customer_address_default_recovery_guard(&conn, &id).attempts,
+                attempt
+            );
+            assert_eq!(
+                retry_failed_customer_address_default_conflict_items_limited(&conn, 1)
+                    .unwrap()
+                    .retried,
+                0
+            );
+            write_customer_address_default_recovery_guard(
+                &conn,
+                &id,
+                CustomerAddressDefaultRecoveryGuard {
+                    attempts: attempt,
+                    last_probe_at: Some(Utc::now() - ChronoDuration::hours(1)),
+                },
+            )
+            .unwrap();
+        }
+        drop(conn);
+        let conn = Connection::open(&file.path).unwrap();
+        assert_eq!(
+            retry_failed_customer_address_default_conflict_items_limited(&conn, 1)
+                .unwrap()
+                .retried,
+            0
+        );
+        let preimage_key: String = conn.query_row("SELECT json_extract(payload_json, '$.snapshotKey') FROM recovery_action_log LIMIT 1", [], |r| r.get(0)).unwrap();
+        let preimage: Value = serde_json::from_str(
+            &db::get_setting(
+                &conn,
+                CUSTOMER_ADDRESS_DEFAULT_RECOVERY_SETTING_CATEGORY,
+                &preimage_key,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(preimage["status"], "failed");
+        assert_eq!(
+            preimage["error_message"],
+            "CUSTOMER_ADDRESS_DEFAULT_CONFLICT"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn customer_address_default_recovery_replay_only_confirms_authoritative_success() {
+        clear_terminal_identity();
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        let id = seed_failed_customer_address_default_conflict_row(
+            &conn,
+            "11111111-1111-4111-8111-111111111111",
+            "CUSTOMER_ADDRESS_DEFAULT_CONFLICT",
+        );
+        // The historical default strategy used to silently acknowledge this 409.
+        conn.execute(
+            "UPDATE parity_sync_queue SET conflict_strategy = 'server-wins' WHERE id = ?1",
+            [&id],
+        )
+        .unwrap();
+        let original: String = conn
+            .query_row(
+                "SELECT data FROM parity_sync_queue WHERE id = ?1",
+                [&id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let conn = std::sync::Mutex::new(conn);
+        let (url, mut requests, server) = spawn_mock_http_server(vec![
+            MockResponse::json(
+                409,
+                r#"{"success":false,"code":"CUSTOMER_ADDRESS_DEFAULT_RETRY"}"#,
+            ),
+            MockResponse::json(200, r#"{"success":false}"#),
+            MockResponse::json(200, r#"{"success":true}"#),
+        ])
+        .await;
+        let result = process_queue(&conn, &url, "api-key").await.unwrap();
+        assert_eq!(result.processed, 0);
+        assert_eq!(result.failed, 1);
+        requests.recv().await.unwrap();
+        {
+            let db = conn.lock().unwrap();
+            let (status, data): (String, String) = db
+                .query_row(
+                    "SELECT status, data FROM parity_sync_queue WHERE id = ?1",
+                    [&id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(status, "failed");
+            assert_eq!(data, original);
+            let (success, outcome): (i64, String) = db.query_row("SELECT success, json_extract(payload_json, '$.outcome') FROM recovery_action_log", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+            assert_eq!((success, outcome.as_str()), (0, "failed"));
+        }
+        // A reconnect tick cannot bypass cooldown or count scheduling as healing.
+        assert_eq!(
+            process_queue(&conn, &url, "api-key")
+                .await
+                .unwrap()
+                .processed,
+            0
+        );
+        retry_item(&conn.lock().unwrap(), &id).unwrap();
+        assert_eq!(
+            process_queue(&conn, &url, "api-key")
+                .await
+                .unwrap()
+                .processed,
+            0
+        );
+        requests.recv().await.unwrap();
+        {
+            let db = conn.lock().unwrap();
+            assert!(full_queue_row_fingerprint(&db, &id).is_some());
+            assert_eq!(
+                db.query_row(
+                    "SELECT json_extract(payload_json, '$.outcome') FROM recovery_action_log",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+                "unknown"
+            );
+            retry_item(&db, &id).unwrap();
+        }
+        assert_eq!(
+            process_queue(&conn, &url, "api-key")
+                .await
+                .unwrap()
+                .processed,
+            1
+        );
+        requests.recv().await.unwrap();
+        {
+            let db = conn.lock().unwrap();
+            assert!(full_queue_row_fingerprint(&db, &id).is_none());
+            let (success, outcome): (i64, String) = db.query_row("SELECT success, json_extract(payload_json, '$.outcome') FROM recovery_action_log", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+            assert_eq!((success, outcome.as_str()), (1, "resolved"));
+        }
+        clear_terminal_identity();
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn is_customer_address_default_write_conflict_error_matches_only_known_signature() {
+        assert!(is_customer_address_default_write_conflict_error(
+            "duplicate key value violates unique constraint \"idx_customer_addresses_default_unique\""
+        ));
+        assert!(is_customer_address_default_write_conflict_error(
+            "CUSTOMER_ADDRESS_DEFAULT_CONFLICT"
+        ));
+        assert!(is_customer_address_default_write_conflict_error(
+            "CUSTOMER_ADDRESS_DEFAULT_RETRY"
+        ));
+
+        assert!(!is_customer_address_default_write_conflict_error(
+            "HTTP 500: internal server error"
+        ));
+        assert!(!is_customer_address_default_write_conflict_error(
+            "duplicate key value violates unique constraint \"uq_customer_addresses_fingerprint\""
+        ));
+        assert!(!is_customer_address_default_write_conflict_error(
+            "invalid terminal credentials"
+        ));
+        assert!(!is_customer_address_default_write_conflict_error(
+            "privacy erasure in progress"
+        ));
+        assert!(!is_customer_address_default_write_conflict_error(
+            "version conflict, expected_version mismatch"
+        ));
+    }
+
+    #[test]
+    fn is_replay_conflict_response_excludes_default_address_write_conflicts() {
+        let item = queue_item(
+            "customer_addresses",
+            "UPDATE",
+            "addr-1",
+            json!({ "customer_id": "cust-1", "is_default": true }),
+        );
+
+        assert!(
+            !is_replay_conflict_response(409, "CUSTOMER_ADDRESS_DEFAULT_RETRY", &item),
+            "the advisory-lock retry signal must not be auto-resolved as success"
+        );
+        assert!(!is_replay_conflict_response(
+            409,
+            "CUSTOMER_ADDRESS_DEFAULT_CONFLICT",
+            &item
+        ));
+        assert!(is_replay_conflict_response(
+            409,
+            "version conflict, expected_version mismatch",
+            &item
+        ));
     }
 
     #[test]

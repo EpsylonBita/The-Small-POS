@@ -790,6 +790,7 @@ export interface RecoveryActionLogEntry {
   actionId: string;
   issueCode: string;
   success: boolean;
+  outcome?: 'pending' | 'failed' | 'unknown' | 'resolved';
   timestamp: string;
   recipeId?: string | null;
   recipeVersion?: number | null;

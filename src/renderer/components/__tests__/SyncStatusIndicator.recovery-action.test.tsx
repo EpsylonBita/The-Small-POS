@@ -36,7 +36,7 @@ const { bridge, queueBridge } = vi.hoisted(() => ({
     },
   },
   queueBridge: {
-    listItems: vi.fn().mockResolvedValue([]),
+    listItems: vi.fn().mockResolvedValue([{ id: 'queue-1', tableName: 'customer_addresses', recordId: 'address-1', moduleType: 'customers', operation: 'UPDATE', status: 'failed', errorMessage: 'CUSTOMER_ADDRESS_DEFAULT_CONFLICT' }]),
   },
 }))
 

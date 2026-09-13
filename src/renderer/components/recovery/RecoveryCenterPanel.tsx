@@ -1,20 +1,16 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import toast from 'react-hot-toast';
 import {
   AlertTriangle,
   ArrowRight,
-  ChevronDown,
-  ChevronUp,
   CheckCircle2,
   Clock3,
   DatabaseBackup,
   ExternalLink,
   LifeBuoy,
-  ListChecks,
   RefreshCw,
   ShieldAlert,
-  Sparkles,
   Wrench,
 } from 'lucide-react';
 
@@ -42,6 +38,7 @@ interface RecoveryCenterPanelProps {
   onActionResolved?: (entry: RecoveryActionLogEntry) => void;
   titleKey?: string;
   subtitleKey?: string;
+  diagnosticsStale?: boolean;
 }
 
 const severityOrder: Record<RecoveryIssue['severity'], number> = {
@@ -50,6 +47,9 @@ const severityOrder: Record<RecoveryIssue['severity'], number> = {
   warning: 2,
   info: 3,
 };
+const recoveryPriority = (left: RecoveryIssue, right: RecoveryIssue) =>
+  severityOrder[left.severity] - severityOrder[right.severity] ||
+  Number(Boolean(right.knownSolution)) - Number(Boolean(left.knownSolution));
 
 const severityClasses: Record<
   RecoveryIssue['severity'],
@@ -152,12 +152,24 @@ const dispatchRecoveryRoute = (target: RecoveryRouteTarget) => {
   );
 };
 
+// Backend exception text can contain credentials or customer details. Keep it
+// in redacted support exports; staff copy uses a safe explanation instead.
+const staffIssueParams = (issue: RecoveryIssue, fallback: string) => ({
+  ...issue.params,
+  reason: fallback,
+  reasonText: fallback,
+  lastError: fallback,
+  errorMessage: fallback,
+});
+
 const RecoveryIssueCard: React.FC<{
   issue: RecoveryIssue;
   busyActionId: string | null;
+  diagnosticsStale?: boolean;
   onActionClick: (issue: RecoveryIssue, action: RecoveryActionDescriptor) => void;
-}> = ({ issue, busyActionId, onActionClick }) => {
+}> = ({ issue, busyActionId, diagnosticsStale, onActionClick }) => {
   const { t } = useTranslation();
+  const displayParams = staffIssueParams(issue, t('sync.healthModal.failure.safeError'));
   const style = severityClasses[issue.severity];
   const Icon = style.icon;
   const entityLabel = entityLabelKey[issue.entityType]
@@ -231,13 +243,13 @@ const RecoveryIssueCard: React.FC<{
               </div>
               <div className="mt-2 text-base font-black tracking-tight text-slate-900 dark:text-white">
                 {t(issue.titleKey, {
-                  ...issue.params,
+                  ...displayParams,
                   defaultValue: issue.orderNumber || issue.entityId,
                 })}
               </div>
               <div className="mt-1 text-sm text-slate-700 dark:text-slate-200/90">
                 {t(issue.summaryKey, {
-                  ...issue.params,
+                  ...displayParams,
                   defaultValue: issue.code,
                 })}
               </div>
@@ -255,7 +267,7 @@ const RecoveryIssueCard: React.FC<{
 
         <div className="rounded-[20px] border border-white/50 bg-white/70 px-4 py-3 text-sm text-slate-700 dark:border-white/10 dark:bg-white/[0.05] dark:text-slate-200/90">
           {t(issue.guidanceKey, {
-            ...issue.params,
+            ...displayParams,
             defaultValue: issue.code,
           })}
         </div>
@@ -331,9 +343,9 @@ const RecoveryIssueCard: React.FC<{
                 key={`${issue.id}:${action.id}`}
                 type="button"
                 onClick={() => onActionClick(issue, action)}
-                disabled={actionBusy || (action.requiresOnline && !navigator.onLine)}
+                disabled={diagnosticsStale || !!busyActionId || (action.requiresOnline && !navigator.onLine)}
                 className={cn(
-                  'inline-flex items-center justify-center gap-2 rounded-2xl border px-4 py-2.5 text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50',
+                  'inline-flex min-h-[44px] items-center justify-center gap-2 rounded-2xl border px-4 py-2.5 text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50',
                   actionButtonTone(action),
                 )}
               >
@@ -375,59 +387,44 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
   recentActions,
   terminalContext,
   onRefresh,
-  onSyncNow,
   onNavigate,
   onActionResolved,
-  titleKey = 'recovery.center.guidedTitle',
-  subtitleKey = 'recovery.center.guidedSubtitle',
+  diagnosticsStale = false,
 }) => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const bridge = getBridge();
   const { runWithPrivilegedConfirmation, confirmationModal } =
     usePrivilegedActionConfirmation();
   const [busyActionId, setBusyActionId] = useState<string | null>(null);
-  const [optimisticallyResolvedIssueIds, setOptimisticallyResolvedIssueIds] = useState<
-    Set<string>
-  >(new Set());
+  const actionInFlight = useRef(false);
+  const pendingIssueIdRef = useRef<string | null>(null);
+  const [actionFeedback, setActionFeedback] = useState<string | null>(null);
+  useEffect(() => {
+    if (pendingIssueIdRef.current && !issues.some(issue => issue.id === pendingIssueIdRef.current)) {
+      pendingIssueIdRef.current = null;
+      setActionFeedback(t('recovery.center.outcomes.resolved'));
+    }
+  }, [issues, t]);
   const [confirmingAction, setConfirmingAction] = useState<{
     issue: RecoveryIssue;
     action: RecoveryActionDescriptor;
   } | null>(null);
-  const [showAdvanced, setShowAdvanced] = useState(false);
 
-  useEffect(() => {
-    setOptimisticallyResolvedIssueIds((current) => {
-      if (current.size === 0) {
-        return current;
-      }
-
-      const next = new Set(
-        [...current].filter((issueId) =>
-          issues.some((issue) => issue.id === issueId),
-        ),
-      );
-      return next.size === current.size ? current : next;
-    });
-  }, [issues]);
-
-  const visibleIssues = useMemo(
-    () =>
-      issues.filter((issue) => !optimisticallyResolvedIssueIds.has(issue.id)),
-    [issues, optimisticallyResolvedIssueIds],
-  );
+  // Only the owner of a fresh diagnostics snapshot can remove an issue.
+  const visibleIssues = issues;
 
   const blockingIssues = useMemo(
     () =>
       visibleIssues
         .filter((issue) => issue.status === 'blocking')
-        .sort((left, right) => severityOrder[left.severity] - severityOrder[right.severity]),
+        .sort(recoveryPriority),
     [visibleIssues],
   );
   const recoveringIssues = useMemo(
     () =>
       visibleIssues
         .filter((issue) => issue.status === 'recovering')
-        .sort((left, right) => severityOrder[left.severity] - severityOrder[right.severity]),
+        .sort(recoveryPriority),
     [visibleIssues],
   );
   const resolvedActions = useMemo(
@@ -468,10 +465,14 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
     issue: RecoveryIssue,
     action: RecoveryActionDescriptor,
   ) => {
+    if (actionInFlight.current || diagnosticsStale) return;
+    actionInFlight.current = true;
+    setActionFeedback(null);
     const actionKey = `${issue.id}:${action.id}`;
     const request = buildActionRequest(issue, action);
     let snapshotPointId: string | null = null;
     let exportPath: string | null = null;
+    let outcome: RecoveryActionLogEntry['outcome'] = 'unknown';
     const buildLogEntry = (
       success: boolean,
       message?: string | null,
@@ -484,6 +485,7 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
       entityType: issue.entityType,
       queueId: issue.queueId ?? null,
       success,
+      outcome,
       timestamp: new Date().toISOString(),
       recipeId: action.recipeId ?? issue.knownSolution?.recipeId ?? null,
       recipeVersion: action.recipeVersion ?? issue.knownSolution?.version ?? null,
@@ -521,6 +523,7 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
     try {
       if (action.requiresSnapshot) {
         const snapshot = await bridge.recovery.createPreActionSnapshot();
+        if (!snapshot?.id) throw new Error('Recovery snapshot was not confirmed');
         snapshotPointId = snapshot.id;
       }
 
@@ -545,33 +548,62 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
         }),
       });
 
-      toast.success(
-        result.message ||
+      // Route-only actions (open a screen) and contactDev (export diagnostics)
+      // never "heal" a sync problem by themselves — resolving the underlying
+      // issue still depends on what the operator does next or on the server.
+      const isHealingAction = action.id !== 'contactDev' && !action.routeTarget;
+      const verificationStatus = result?.verification?.status ?? null;
+      // Only a strict `success === true` counts. A falsy/undefined response,
+      // or a backend-reported verification failure, is a real failure even
+      // though executeAction did not throw.
+      const succeeded = result?.success === true && verificationStatus !== 'failed';
+      const pendingVerification = succeeded && isHealingAction && verificationStatus !== 'passed';
+
+      if (!succeeded) {
+        outcome = 'failed';
+        const friendlyMessage = t('recovery.messages.actionFailed', {
+          action: t(action.labelKey, { defaultValue: action.id }),
+          defaultValue: 'Action failed. Review the issue details and try again.',
+        });
+        // The raw backend message is kept in the audited log for support, but
+        // the toast leads with plain language rather than a raw server string.
+        await persistLogEntry(false, null, result?.message ?? friendlyMessage);
+        setActionFeedback(friendlyMessage);
+        toast.error(friendlyMessage);
+      } else if (pendingVerification) {
+        outcome = 'pending';
+        pendingIssueIdRef.current = issue.id;
+        const pendingMessage = t('recovery.messages.actionPendingVerification', {
+          action: t(action.labelKey, { defaultValue: action.id }),
+          defaultValue:
+            'The action ran. Refreshing to confirm whether it actually fixed the problem.',
+        });
+        toast(pendingMessage);
+        setActionFeedback(pendingMessage);
+        // Not a confirmed success yet: keep the issue visible and log it as
+        // unresolved so staff see honest pending state until a fresh
+        // diagnostics refresh proves it worked.
+        await persistLogEntry(false, result?.message ?? null, pendingMessage);
+      } else {
+        outcome = isHealingAction ? 'resolved' : 'unknown';
+        toast.success(
           t('recovery.messages.actionSucceeded', {
             action: t(action.labelKey, { defaultValue: action.id }),
             defaultValue: 'Action completed successfully.',
           }),
-      );
+        );
+        await persistLogEntry(true, result?.message ?? null, null);
 
-      await persistLogEntry(true, result.message ?? null, null);
+      }
 
-      setOptimisticallyResolvedIssueIds((current) => {
-        const next = new Set(current);
-        next.add(issue.id);
-        return next;
-      });
-
-      if (result.routeTarget || action.routeTarget) {
-        dispatchRecoveryRoute(result.routeTarget || action.routeTarget!);
+      if (succeeded && (result?.routeTarget || action.routeTarget)) {
+        dispatchRecoveryRoute(result?.routeTarget || action.routeTarget!);
         onNavigate?.();
       }
 
-      if (result.requiresRefresh) {
-        await onRefresh();
-      } else {
-        await onRefresh();
-      }
+      await onRefresh();
     } catch (error) {
+      outcome = 'failed';
       console.error('[RecoveryCenter] action failed', error);
       const errorMessage = getErrorMessage(
         error,
@@ -581,10 +613,11 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
         }),
       );
       await persistLogEntry(false, null, errorMessage);
-      toast.error(
-        errorMessage,
-      );
+      const friendlyMessage = t('recovery.messages.actionFailed');
+      setActionFeedback(friendlyMessage);
+      toast.error(friendlyMessage);
     } finally {
+      actionInFlight.current = false;
       setBusyActionId(null);
       setConfirmingAction(null);
     }
@@ -594,6 +627,7 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
     issue: RecoveryIssue,
     action: RecoveryActionDescriptor,
   ) => {
+    if (diagnosticsStale || actionInFlight.current) return;
     if (action.confirmationRequired) {
       setConfirmingAction({ issue, action });
       return;
@@ -638,6 +672,7 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
               key={issue.id}
               issue={issue}
               busyActionId={busyActionId}
+              diagnosticsStale={diagnosticsStale}
               onActionClick={handleActionClick}
             />
           ))}
@@ -653,399 +688,58 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
   return (
     <>
       {confirmationModal}
-      <section className="rounded-[28px] border border-slate-200/80 bg-white/95 p-5 shadow-[0_18px_40px_rgba(15,23,42,0.08)] dark:border-white/10 dark:bg-slate-950/55 dark:shadow-[0_18px_40px_rgba(2,6,23,0.28)]">
-        <div className="flex flex-col gap-5">
-          <div className="flex flex-wrap items-start justify-between gap-4">
-            <div>
-              <h3 className="text-2xl font-black tracking-tight text-slate-950 dark:text-white">
-                {t(titleKey, {
-                  defaultValue: 'System sync status',
-                })}
-              </h3>
-              <p className="mt-2 max-w-3xl text-sm text-slate-600 dark:text-slate-300/85">
-                {t(subtitleKey, {
-                  defaultValue:
-                    'The POS explains what is happening, offers the safest next step, then verifies sync again.',
-                })}
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={() => void onRefresh()}
-              className="inline-flex min-h-[44px] items-center gap-2 rounded-2xl border border-slate-200/90 bg-white px-4 text-sm font-semibold text-slate-700 transition-transform active:scale-[0.98] active:bg-slate-50 dark:border-white/10 dark:bg-white/[0.05] dark:text-slate-100 dark:active:bg-white/[0.09]"
-            >
-              <RefreshCw className="h-4 w-4" />
-              {t('recovery.actions.refresh.label', {
-                defaultValue: 'Refresh issues',
-              })}
-            </button>
+      <section className="space-y-4 text-slate-900 dark:text-slate-100">
+        {actionFeedback && <div role="status" className="rounded-2xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-400/30 dark:bg-amber-500/10 dark:text-amber-100">{actionFeedback}</div>}
+        {!primaryIssue ? (
+          <div className="rounded-2xl border border-emerald-300 bg-emerald-50 p-5 text-emerald-900 dark:border-emerald-400/25 dark:bg-emerald-500/10 dark:text-emerald-100">
+            <h3 className="flex items-center gap-2 text-lg font-bold"><CheckCircle2 className="h-5 w-5" />{t('recovery.center.noVisibleBlockerTitle')}</h3>
+            <p className="mt-2 text-sm">{t('recovery.center.noVisibleBlockerDescription')}</p>
           </div>
-
-          <div className="grid gap-3 md:grid-cols-3">
-            <div className="rounded-[22px] border border-emerald-200/80 bg-emerald-50 px-4 py-3 dark:border-emerald-400/25 dark:bg-emerald-500/10">
-              <div className="text-xs font-semibold text-emerald-700 dark:text-emerald-200">
-                {t('recovery.center.blockedCount', {
-                  count: blockingIssues.length,
-                  defaultValue: '{{count}} blocking',
-                })}
-              </div>
-              <div className="mt-1 text-xs text-emerald-700/75 dark:text-emerald-100/70">
-                {t('recovery.center.thisTerminal', {
-                  defaultValue: 'This register',
-                })}
-              </div>
-            </div>
-            <div className="rounded-[22px] border border-slate-200/80 bg-slate-50 px-4 py-3 dark:border-white/10 dark:bg-white/[0.06]">
-              <div className="text-xs font-semibold text-slate-800 dark:text-slate-100">
-                {branchDisplayName}
-              </div>
-              <div className="mt-1 text-xs text-slate-600/80 dark:text-slate-300/75">
-                {organizationDisplayName}
-              </div>
-            </div>
-            <div className="rounded-[22px] border border-slate-200/80 bg-slate-50 px-4 py-3 dark:border-white/10 dark:bg-black/20">
-              <div className="text-xs font-semibold text-slate-800 dark:text-slate-100">
-                {t('recovery.center.remainingIssues', {
-                  count: visibleIssues.length,
-                  defaultValue: '{{count}} visible issues',
-                })}
-              </div>
-              <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                {t(`recovery.status.${terminalContext?.syncHealthState || 'blocking'}`, {
-                  defaultValue: terminalContext?.syncHealthState || '-',
-                })}
-              </div>
-            </div>
-          </div>
-
-          {!primaryIssue ? (
-            <div className="grid gap-4 xl:grid-cols-[1.1fr_0.9fr_0.9fr]">
-              <div className="rounded-[26px] border border-emerald-200 bg-emerald-50/90 p-5 text-emerald-900 dark:border-emerald-400/25 dark:bg-emerald-500/10 dark:text-emerald-100">
-                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.18em] text-emerald-700 dark:text-emerald-200">
-                  <CheckCircle2 className="h-4 w-4" />
-                  {t('recovery.center.whatBlocksTitle', {
-                    defaultValue: 'What is blocking sync',
-                  })}
-                </div>
-                <h4 className="mt-4 text-xl font-black tracking-tight text-slate-950 dark:text-white">
-                  {t('recovery.center.noVisibleBlockerTitle', {
-                    defaultValue: 'Nothing is blocking sync',
-                  })}
-                </h4>
-                <p className="mt-2 text-sm leading-6 text-slate-700 dark:text-slate-200/90">
-                  {t('recovery.center.noVisibleBlockerDescription', {
-                    defaultValue:
-                      'No order, payment, or queue item currently needs manual recovery.',
-                  })}
-                </p>
-              </div>
-
-              <div className="rounded-[26px] border border-emerald-200 bg-emerald-50/90 p-5 dark:border-emerald-400/25 dark:bg-emerald-500/10">
-                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.18em] text-emerald-700 dark:text-emerald-200">
-                  <Sparkles className="h-4 w-4" />
-                  {t('recovery.center.automaticSolutionTitle', {
-                    defaultValue: 'Automatic solution',
-                  })}
-                </div>
-                <h4 className="mt-4 text-lg font-black text-slate-950 dark:text-white">
-                  {t('recovery.center.noFixNeededTitle', {
-                    defaultValue: 'No fix needed',
-                  })}
-                </h4>
-                <p className="mt-2 text-sm leading-6 text-slate-700 dark:text-slate-200/90">
-                  {t('recovery.center.noFixNeededDescription', {
-                    defaultValue:
-                      'The app has no matched error to repair. If a new order was just changed, run sync and check again.',
-                  })}
-                </p>
-              </div>
-
-              <div className="rounded-[26px] border border-slate-200 bg-slate-50/90 p-5 dark:border-white/10 dark:bg-white/[0.06]">
-                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.18em] text-slate-700 dark:text-slate-200">
-                  <ListChecks className="h-4 w-4" />
-                  {t('recovery.center.verificationTitle', {
-                    defaultValue: 'Check after the fix',
-                  })}
-                </div>
-                <p className="mt-4 text-sm leading-6 text-slate-700 dark:text-slate-200/90">
-                  {t('recovery.center.healthyVerificationDescription', {
-                    defaultValue:
-                      'Refresh this panel to verify the queue is still clear after the next sync cycle.',
-                  })}
-                </p>
-                <div className="mt-5 flex flex-col gap-2">
-                  {onSyncNow && (
-                    <button
-                      type="button"
-                      onClick={() => void onSyncNow()}
-                      className="inline-flex min-h-[46px] items-center justify-center gap-2 rounded-2xl bg-amber-400 px-4 text-sm font-black text-black transition-transform active:scale-[0.98] active:bg-amber-300"
-                    >
-                      <RefreshCw className="h-4 w-4" />
-                      {t('sync.actions.forceSync', {
-                        defaultValue: 'Sync now',
-                      })}
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => void onRefresh()}
-                    className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-2xl border border-slate-300 bg-white px-4 text-sm font-semibold text-slate-700 transition-transform active:scale-[0.98] active:bg-slate-50 dark:border-white/10 dark:bg-white/[0.05] dark:text-slate-100 dark:active:bg-white/[0.09]"
-                  >
-                    <RefreshCw className="h-4 w-4" />
-                    {t('recovery.actions.refresh.label', {
-                      defaultValue: 'Refresh issues',
-                    })}
+        ) : (
+          <div className={cn('rounded-2xl border p-4 sm:p-5', severityClasses[primaryIssue.severity].panel)}>
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="mt-1 h-6 w-6 shrink-0" aria-hidden="true" />
+              <div className="min-w-0 flex-1">
+                <h3 className="text-xl font-bold">{t(primaryIssue.titleKey, {...staffIssueParams(primaryIssue, t('sync.healthModal.failure.safeError')), defaultValue: t('recovery.center.whatBlocksTitle')})}</h3>
+                <p className="mt-2 text-sm leading-6">{t(primaryIssue.summaryKey, {...staffIssueParams(primaryIssue, t('sync.healthModal.failure.safeError')), defaultValue: t('recovery.center.noKnownSolutionDescription')})}</p>
+                <p className="mt-2 text-sm leading-6">{t(primaryIssue.guidanceKey, {...staffIssueParams(primaryIssue, t('sync.healthModal.failure.safeError')), defaultValue: t('recovery.center.noKnownSolutionDescription')})}</p>
+                {recommendedAction && (
+                  <button type="button" onClick={() => handleActionClick(primaryIssue, recommendedAction)}
+                    disabled={diagnosticsStale || !!busyActionId || (recommendedAction.requiresOnline && !navigator.onLine)}
+                    aria-busy={!!busyActionId}
+                    className="mt-4 inline-flex min-h-[48px] w-full items-center justify-center gap-2 rounded-2xl bg-amber-400 px-4 py-3 text-sm font-bold text-slate-950 active:bg-amber-300 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto">
+                    {busyActionId ? <RefreshCw className="h-5 w-5 animate-spin" /> : recommendedAction.routeTarget ? <ExternalLink className="h-5 w-5" /> : <Wrench className="h-5 w-5" />}
+                    {t(recommendedAction.labelKey)}<ArrowRight className="h-4 w-4" />
                   </button>
-                </div>
+                )}
+                {recommendedAction?.requiresOnline && !navigator.onLine && <p role="status" className="mt-2 text-sm">{t('sync.healthModal.status.offline')}</p>}
+                <p className="mt-3 text-sm opacity-80">{primaryIssue.knownSolution?.verificationKey ? t(primaryIssue.knownSolution.verificationKey) : t('recovery.center.genericVerificationDescription')}</p>
+                {recommendedAction?.requiresSnapshot && <p className="mt-2 flex gap-2 text-xs opacity-80"><DatabaseBackup className="h-4 w-4 shrink-0" />{t('recovery.center.backupBeforeFix')}</p>}
+                {remainingIssueCount > 0 && <p className="mt-3 text-sm font-semibold">{t('recovery.center.otherIssuesWaiting', {count: remainingIssueCount})}</p>}
               </div>
             </div>
-          ) : (
-            <div className="grid gap-4 xl:grid-cols-[1.2fr_0.9fr_0.9fr]">
-              <div className="rounded-[26px] border border-amber-200 bg-amber-50/90 p-5 dark:border-amber-400/25 dark:bg-amber-500/10">
-                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.18em] text-amber-700 dark:text-amber-200">
-                  <AlertTriangle className="h-4 w-4" />
-                  {t('recovery.center.whatBlocksTitle', {
-                    defaultValue: 'What is blocking sync',
-                  })}
-                </div>
-                <h4 className="mt-4 text-xl font-black tracking-tight text-slate-950 dark:text-white">
-                  {t(primaryIssue.titleKey, {
-                    ...primaryIssue.params,
-                    defaultValue: primaryIssue.code,
-                  })}
-                </h4>
-                <p className="mt-2 text-sm leading-6 text-slate-700 dark:text-slate-200/90">
-                  {t(primaryIssue.summaryKey, {
-                    ...primaryIssue.params,
-                    defaultValue: primaryIssue.code,
-                  })}
-                </p>
-                <div className="mt-4 rounded-2xl border border-white/70 bg-white/75 p-4 text-sm text-slate-700 dark:border-white/10 dark:bg-black/20 dark:text-slate-200">
-                  {t(primaryIssue.guidanceKey, {
-                    ...primaryIssue.params,
-                    defaultValue: primaryIssue.code,
-                  })}
-                </div>
-                <div className="mt-4 flex flex-wrap gap-2 text-xs">
-                  <span className="rounded-full border border-amber-300/70 bg-white/70 px-3 py-1 font-semibold text-amber-800 dark:border-amber-400/30 dark:bg-white/[0.06] dark:text-amber-100">
-                    {primaryIssue.orderNumber || primaryIssue.entityId}
-                  </span>
-                  {remainingIssueCount > 0 && (
-                    <span className="rounded-full border border-slate-200 bg-white/70 px-3 py-1 font-semibold text-slate-600 dark:border-white/10 dark:bg-white/[0.06] dark:text-slate-300">
-                      {t('recovery.center.otherIssuesWaiting', {
-                        count: remainingIssueCount,
-                        defaultValue: '+{{count}} more',
-                      })}
-                    </span>
-                  )}
-                </div>
-              </div>
-
-              <div className="rounded-[26px] border border-emerald-200 bg-emerald-50/90 p-5 dark:border-emerald-400/25 dark:bg-emerald-500/10">
-                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.18em] text-emerald-700 dark:text-emerald-200">
-                  <Sparkles className="h-4 w-4" />
-                  {t('recovery.center.automaticSolutionTitle', {
-                    defaultValue: 'Automatic solution',
-                  })}
-                </div>
-                <h4 className="mt-4 text-lg font-black text-slate-950 dark:text-white">
-                  {primaryIssue.knownSolution
-                    ? t(primaryIssue.knownSolution.labelKey, {
-                        defaultValue: 'Known solution available',
-                      })
-                    : t('recovery.center.noKnownSolutionTitle', {
-                        defaultValue: 'No one-click fix yet',
-                      })}
-                </h4>
-                <p className="mt-2 text-sm leading-6 text-slate-700 dark:text-slate-200/90">
-                  {primaryIssue.knownSolution
-                    ? t(primaryIssue.knownSolution.explanationKey, {
-                        defaultValue:
-                          'This issue matches a developer-approved recovery recipe from this app version.',
-                      })
-                    : t('recovery.center.noKnownSolutionDescription', {
-                        defaultValue:
-                          'The POS can explain the blocker and prepare diagnostics for development support.',
-                      })}
-                </p>
-                {recommendedAction?.requiresSnapshot && (
-                  <div className="mt-4 flex items-start gap-2 rounded-2xl border border-emerald-300/60 bg-white/75 p-3 text-xs text-emerald-800 dark:border-emerald-400/25 dark:bg-black/20 dark:text-emerald-100">
-                    <DatabaseBackup className="mt-0.5 h-4 w-4 shrink-0" />
-                    <span>
-                      {t('recovery.center.backupBeforeFix', {
-                        defaultValue:
-                          'A recovery backup is created before this action changes local sync data.',
-                      })}
-                    </span>
-                  </div>
-                )}
-                <div className="mt-5 flex flex-col gap-2">
-                  {recommendedAction && (
-                    <button
-                      type="button"
-                      onClick={() => handleActionClick(primaryIssue, recommendedAction)}
-                      disabled={
-                        busyActionId === `${primaryIssue.id}:${recommendedAction.id}` ||
-                        (recommendedAction.requiresOnline && !navigator.onLine)
-                      }
-                      className="inline-flex min-h-[48px] items-center justify-center gap-2 rounded-2xl bg-emerald-600 px-4 text-sm font-black text-white transition-transform active:scale-[0.98] active:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100 dark:bg-emerald-500 dark:text-slate-950 dark:active:bg-emerald-400"
-                    >
-                      {busyActionId === `${primaryIssue.id}:${recommendedAction.id}` ? (
-                        <RefreshCw className="h-4 w-4 animate-spin" />
-                      ) : recommendedAction.routeTarget ? (
-                        <ExternalLink className="h-4 w-4" />
-                      ) : (
-                        <Wrench className="h-4 w-4" />
-                      )}
-                      {t(recommendedAction.labelKey, {
-                        defaultValue: recommendedAction.id,
-                      })}
-                      <ArrowRight className="h-4 w-4" />
-                    </button>
-                  )}
-                  {contactDevAction && contactDevAction.id !== recommendedAction?.id && (
-                    <button
-                      type="button"
-                      onClick={() => handleActionClick(primaryIssue, contactDevAction)}
-                      disabled={busyActionId === `${primaryIssue.id}:${contactDevAction.id}`}
-                      className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-2xl border border-slate-300 bg-white px-4 text-sm font-semibold text-slate-700 transition-transform active:scale-[0.98] active:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100 dark:border-white/10 dark:bg-white/[0.05] dark:text-slate-100 dark:active:bg-white/[0.09]"
-                    >
-                      <LifeBuoy className="h-4 w-4" />
-                      {t(contactDevAction.labelKey, {
-                        defaultValue: 'Contact Dev',
-                      })}
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              <div className="rounded-[26px] border border-slate-200 bg-slate-50/90 p-5 dark:border-white/10 dark:bg-white/[0.06]">
-                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.18em] text-slate-700 dark:text-slate-200">
-                  <ListChecks className="h-4 w-4" />
-                  {t('recovery.center.verificationTitle', {
-                    defaultValue: 'Check after the fix',
-                  })}
-                </div>
-                <p className="mt-4 text-sm leading-6 text-slate-700 dark:text-slate-200/90">
-                  {primaryIssue.knownSolution?.verificationKey
-                    ? t(primaryIssue.knownSolution.verificationKey, {
-                        defaultValue:
-                          'After the action finishes, refresh sync health to confirm the blocker is gone.',
-                      })
-                    : t('recovery.center.genericVerificationDescription', {
-                        defaultValue:
-                          'After any action, the POS refreshes diagnostics and shows whether the queue can continue.',
-                      })}
-                </p>
-                {resolvedActions[0] && (
-                  <div className="mt-4 rounded-2xl border border-white/70 bg-white/75 p-3 text-xs text-slate-700 dark:border-white/10 dark:bg-black/20 dark:text-slate-200">
-                    <div className="font-bold">
-                      {resolvedActions[0].success
-                        ? t('recovery.center.lastActionSucceeded', {
-                            defaultValue: 'Last action succeeded',
-                          })
-                        : t('recovery.center.lastActionFailed', {
-                            defaultValue: 'Last action failed',
-                          })}
-                    </div>
-                    <div className="mt-1 opacity-75">
-                      {new Date(resolvedActions[0].timestamp).toLocaleString()}
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
-          <div className="rounded-[24px] border border-slate-200/80 bg-slate-50/80 dark:border-white/10 dark:bg-black/20">
-            <button
-              type="button"
-              onClick={() => setShowAdvanced((value) => !value)}
-              className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left text-sm font-bold text-slate-800 dark:text-slate-100"
-            >
-              <span>
-                {t('recovery.center.advancedDetailsTitle', {
-                  defaultValue: 'Advanced details',
-                })}
-              </span>
-              {showAdvanced ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-            </button>
-            {showAdvanced && (
-              <div className="space-y-6 border-t border-slate-200/80 p-4 dark:border-white/10">
-                {renderSection(
-                  'recovery.center.needsAttentionTitle',
-                  'recovery.center.needsAttentionSubtitle',
-                  blockingIssues,
-                  'recovery.center.noBlockingIssues',
-                )}
-                {renderSection(
-                  'recovery.center.recoveringTitle',
-                  'recovery.center.recoveringSubtitle',
-                  recoveringIssues,
-                  'recovery.center.noRecoveringIssues',
-                )}
-              </div>
-            )}
           </div>
-
-          <div className="space-y-3">
-            <div className="flex items-end justify-between gap-3">
-              <div>
-                <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500 dark:text-slate-400">
-                  {t('recovery.center.recentActionsTitle', {
-                    defaultValue: 'Resolved recently',
-                  })}
-                </div>
-                <div className="mt-2 text-sm text-slate-600 dark:text-slate-300/80">
-                  {t('recovery.center.recentActionsSubtitle', {
-                    defaultValue:
-                      'Every repair attempt is audited locally with the recipe version and backup id.',
-                  })}
-                </div>
-              </div>
-            </div>
-            {resolvedActions.length > 0 ? (
-              <div className="grid gap-2 md:grid-cols-2">
-                {resolvedActions.slice(0, 4).map((entry) => (
-                  <div
-                    key={entry.id}
-                    className="flex items-center justify-between gap-3 rounded-[20px] border border-slate-200/80 bg-white px-4 py-3 text-sm dark:border-white/10 dark:bg-white/[0.04]"
-                  >
-                    <div className="flex min-w-0 items-center gap-3">
-                      <CheckCircle2
-                        className={cn(
-                          'h-4 w-4 shrink-0',
-                          entry.success
-                            ? 'text-emerald-600 dark:text-emerald-300'
-                            : 'text-red-600 dark:text-red-300',
-                        )}
-                      />
-                      <div className="min-w-0">
-                        <div className="truncate font-semibold text-slate-900 dark:text-white">
-                          {t(`recovery.actions.${entry.actionId}.label`, {
-                            defaultValue: entry.actionId,
-                          })}
-                        </div>
-                        <div className="truncate text-xs text-slate-500 dark:text-slate-400">
-                          {entry.recipeId || entry.issueCode}
-                        </div>
-                      </div>
-                    </div>
-                    <div className="shrink-0 text-right text-xs text-slate-500 dark:text-slate-400">
-                      {new Date(entry.timestamp).toLocaleTimeString()}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="rounded-[22px] border border-slate-200/80 bg-slate-50/90 px-4 py-4 text-sm text-slate-600 dark:border-white/10 dark:bg-black/20 dark:text-slate-300">
-                {t('recovery.center.noRecentActions', {
-                  defaultValue: 'No recovery actions have been recorded yet.',
-                })}
-              </div>
-            )}
-          </div>
+        )}
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-600 dark:text-slate-300">
+          <span>{t('recovery.center.thisTerminal')}</span><span>{branchDisplayName}</span><span>{organizationDisplayName}</span>
         </div>
+        <details className="rounded-2xl border border-slate-200 bg-white/70 dark:border-white/10 dark:bg-white/[0.04]">
+          <summary className="min-h-[44px] cursor-pointer px-4 py-3 text-sm font-semibold">{t('recovery.center.advancedDetailsTitle')}</summary>
+          <div className="space-y-4 border-t border-slate-200 p-4 dark:border-white/10">
+            {primaryIssue && contactDevAction && contactDevAction.id !== recommendedAction?.id && <button type="button" onClick={() => handleActionClick(primaryIssue, contactDevAction)} disabled={diagnosticsStale || !!busyActionId} className="inline-flex min-h-[44px] items-center gap-2 rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold disabled:opacity-50 dark:border-white/20"><LifeBuoy className="h-4 w-4" />{t(contactDevAction.labelKey)}</button>}
+            {renderSection('recovery.center.needsAttentionTitle', 'recovery.center.needsAttentionSubtitle', blockingIssues, 'recovery.center.noBlockingIssues')}
+            {renderSection('recovery.center.recoveringTitle', 'recovery.center.recoveringSubtitle', recoveringIssues, 'recovery.center.noRecoveringIssues')}
+            <h4 className="text-sm font-bold">{t('recovery.center.recentActionsTitle')}</h4>
+            <p className="text-xs">{t('recovery.center.recentActionsSubtitle')}</p>
+            {resolvedActions.length === 0 ? <p className="text-sm">{t('recovery.center.noRecentActions')}</p> : resolvedActions.map(entry => (
+              <div key={entry.id} className="rounded-xl border border-slate-200 p-3 text-sm dark:border-white/10">
+                <div className="font-semibold">{t(`recovery.actions.${entry.actionId}.label`, {defaultValue: entry.actionId})}</div>
+                <div className="mt-1">{entry.outcome ? t(`recovery.center.outcomes.${entry.outcome}`) : entry.success ? t('recovery.center.lastActionSucceeded') : t('recovery.center.actionNotVerified')}</div>
+                <div className="mt-1 break-all text-xs opacity-70">{entry.recipeId || entry.issueCode} · {new Date(entry.timestamp).toLocaleString(i18n?.resolvedLanguage || i18n?.language)}</div>
+              </div>
+            ))}
+          </div>
+        </details>
       </section>
 
       <ConfirmDialog

@@ -224,8 +224,9 @@ describe('SyncStatusIndicator Health Status modal contract', () => {
     renderHealthModal()
 
     await screen.findByRole('button', {
-      name: i18n.t('sync.dashboard.openRecovery'),
+      name: i18n.t('sync.healthModal.actions.refresh'),
     })
+    expect(screen.queryByRole('button', {name: i18n.t('sync.dashboard.openRecovery')})).not.toBeInTheDocument()
     await screen.findByText(i18n.t('sync.healthModal.states.healthy.title'))
 
     for (const englishFragment of [
@@ -476,6 +477,16 @@ describe('SyncStatusIndicator Health Status modal contract', () => {
     expect(
       screen.queryByText(i18n.t('sync.healthModal.problems.ready')),
     ).not.toBeInTheDocument()
+  })
+
+  it('offers a recheck without a repair entry for an offline terminal with no blocked changes', async () => {
+    bridge.sync.getStatus.mockResolvedValue({...HEALTHY_SYNC_STATUS, isOnline:false})
+    bridge.diagnostics.getSystemHealth.mockResolvedValue({...HEALTHY_SYSTEM_HEALTH,isOnline:false})
+    renderHealthModal()
+    await screen.findByText(i18n.t('sync.healthModal.problems.offline'))
+    expect(screen.getByRole('button',{name:i18n.t('sync.healthModal.actions.refresh')})).toBeInTheDocument()
+    expect(screen.queryByRole('button',{name:i18n.t('sync.dashboard.openRecovery')})).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading',{name:i18n.t('sync.healthModal.advanced.title')})).not.toBeInTheDocument()
   })
 
   it('announces the current transport and sync-health state from the collapsed launcher', async () => {

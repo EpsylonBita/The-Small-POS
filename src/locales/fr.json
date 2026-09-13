@@ -3199,7 +3199,7 @@
       "createdAt": "[NEEDS FR TRANSLATION] Δημιουργήθηκε"
     },
     "health": {
-      "label": "Sync health",
+      "label": "État de synchronisation",
       "healthy": "Healthy",
       "healthyDetail": "No local sync backlog or failures are currently visible.",
       "pending": "Pending",
@@ -3549,7 +3549,11 @@
       "staffSection": "Personnel et livreurs",
       "refreshSuccess": "Statut de récupération actualisé",
       "contactOperator": "Contacter Dev",
-      "contactOperatorDetail": "Ce problème n’a pas encore de déblocage guidé. Contactez Dev avec les diagnostics afin que la prochaine occurrence puisse être reliée à une correction en un clic."
+      "contactOperatorDetail": "Ce problème n’a pas encore de déblocage guidé. Contactez Dev avec les diagnostics afin que la prochaine occurrence puisse être reliée à une correction en un clic.",
+      "showTechnicalDetails": "Détails techniques et restauration",
+      "hideTechnicalDetails": "Masquer les détails techniques",
+      "staleData": "Le dernier contrôle réussi est affiché. L’actualisation a échoué ; vérifiez à nouveau avant toute action.",
+      "loadFailed": "État indisponible. Actualisez pour vérifier si une intervention est nécessaire."
     }
   },
   "modals": {
@@ -7505,7 +7509,8 @@
     "messages": {
       "actionSucceeded": "Action terminée avec succès.",
       "actionFailed": "L'action a échoué. Vérifiez les détails du problème et réessayez.",
-      "orderPaymentOpenFailed": "Impossible d'ouvrir l'écran de paiement de la commande bloquée."
+      "orderPaymentOpenFailed": "Impossible d'ouvrir l'écran de paiement de la commande bloquée.",
+      "actionPendingVerification": "Nouvelle tentative demandée. Un nouveau contrôle doit confirmer le rétablissement."
     },
     "actions": {
       "refresh": {
@@ -7515,17 +7520,20 @@
         "label": "Ouvrir les paramètres de connexion"
       },
       "runParitySyncNow": {
-        "label": "Lancer la synchronisation maintenant"
+        "label": "Essayer de synchroniser"
+      },
+      "auto_retry": {
+        "label": "Nouvelle tentative automatique"
       },
       "retryParityItem": {
-        "label": "Réessayer l'élément parity"
+        "label": "Réessayer cette mise à jour"
       },
       "retryCatalogAvailabilitySync": {
         "label": "Réessayer la disponibilité du catalogue",
         "description": "Réessaie le flag de disponibilité bloqué après le correctif de compatibilité admin."
       },
       "retryParityModule": {
-        "label": "Réessayer le module parity"
+        "label": "Réessayer les mises à jour associées"
       },
       "repairPaymentTotalConflict": {
         "label": "Réparer l'écart paiement/commande",
@@ -7601,7 +7609,11 @@
         "label": "Contacter Dev"
       },
       "confirmTitle": "Confirmer l'action de récupération",
-      "confirmMessage": "Cette action modifie les données locales de récupération pour le problème sélectionné."
+      "confirmMessage": "Cette action modifie les données locales de récupération pour le problème sélectionné.",
+      "retryCustomerAddressDefault": {
+        "label": "Réessayer d’enregistrer cette adresse",
+        "description": "Réessayer la modification enregistrée de cette adresse. La confirmation dépend toujours du serveur."
+      }
     },
     "context": {
       "terminalId": "ID du terminal",
@@ -7621,7 +7633,7 @@
       "recoveringTitle": "En récupération",
       "recoveringSubtitle": "Problèmes en file, différés ou prêts pour une nouvelle tentative de synchronisation.",
       "noRecoveringIssues": "Aucun problème en récupération n'est actuellement visible.",
-      "recentActionsTitle": "Résolu récemment",
+      "recentActionsTitle": "Tentatives récentes",
       "recentActionsSubtitle": "Chaque tentative de réparation est auditée localement afin que le personnel voie ce qui a été essayé et ce qui a réussi.",
       "noRecentActions": "Aucune action de récupération n'a encore été enregistrée.",
       "guidedTitle": "Récupération de synchronisation",
@@ -7643,7 +7655,7 @@
       "genericVerificationDescription": "Après chaque action, le POS actualise les diagnostics et indique si la file peut continuer.",
       "lastActionSucceeded": "Dernière action réussie",
       "lastActionFailed": "Dernière action échouée",
-      "advancedDetailsTitle": "Détails avancés",
+      "advancedDetailsTitle": "Autres actions et historique",
       "systemStatusTitle": "État de synchronisation du système",
       "systemStatusSubtitle": "Une vue simple de ce qui se passe, pourquoi des commandes peuvent être bloquées et quelle est l’action la plus sûre.",
       "noFixNeededTitle": "Aucune correction nécessaire",
@@ -7654,7 +7666,14 @@
       "diagnosticFileHeadline": "Les détails techniques sont enregistrés dans un fichier",
       "diagnosticFileDescription": "Pour garder cet écran simple, les compteurs de file, lignes de parity, état des imprimantes, détails de base de données, journaux, codes de problème, ids de commande et dernier résultat de récupération sont inclus dans le bundle de diagnostic exporté au lieu d’être affichés ici.",
       "diagnosticFilePrivacy": "Utilisez-le lorsque Contact Dev demande des détails de support. Les champs sensibles sont gérés par les paramètres d’export.",
-      "exportDiagnosticFile": "Exporter le fichier de diagnostic"
+      "exportDiagnosticFile": "Exporter le fichier de diagnostic",
+      "actionNotVerified": "Pas encore vérifié",
+      "outcomes": {
+        "pending": "En attente de vérification",
+        "failed": "Tentative échouée",
+        "unknown": "Rétablissement non confirmé",
+        "resolved": "Rétablissement confirmé"
+      }
     },
     "recipes": {
       "checkoutPaymentOpenPayment": {
@@ -7686,6 +7705,11 @@
         "label": "Nettoyage legacy groupé connu",
         "explanation": "Cette recette supprime toutes les lignes de synchronisation financière legacy obsolètes en une passe contrôlée après avoir vérifié que leurs paiements ou ajustements locaux manquent encore.",
         "verification": "Actualisez Recovery après le nettoyage. Le blocage financier legacy doit disparaître, puis relancez la synchronisation."
+      },
+      "customerAddressDefaultConflictRepair": {
+        "label": "Nouvelle tentative pour l’adresse par défaut",
+        "explanation": "Ce conflit d’adresse connu permet une nouvelle tentative sûre. Le serveur doit accepter la modification avant de confirmer le rétablissement.",
+        "verification": "Le problème reste visible jusqu’à ce qu’un nouveau contrôle confirme l’acceptation de l’adresse. En cas de nouvel échec, ouvrez les détails d’assistance."
       }
     },
     "issues": {
@@ -7705,9 +7729,9 @@
         "guidance": "Ouvrez les paramètres de connexion et vérifiez le code de connexion du terminal, l'URL admin et la clé API POS."
       },
       "parityProcessorStalled": {
-        "title": "Le processeur parity est bloqué",
-        "summary": "Le dernier cycle parity a traité {{processed}} éléments et a laissé {{remaining}} éléments en file. Blocage actuel : {{reason}}.",
-        "guidance": "Lancez la synchronisation parity maintenant. Si le même backlog persiste, inspectez les problèmes parity par module ci-dessous ou contactez Dev. Dernière erreur parity : {{reason}}."
+        "title": "Des mises à jour attendent d’être envoyées",
+        "summary": "La dernière synchronisation n’a pas avancé. Certaines modifications enregistrées ne sont pas encore arrivées au bureau.",
+        "guidance": "Vérifiez la connexion, puis synchronisez une fois. Si le problème persiste, ouvrez les détails d’assistance."
       },
       "paymentTotalConflict": {
         "title": "Écart paiement/commande",
@@ -7740,9 +7764,9 @@
         "guidance": "Utilisez le réessai recommandé après le déploiement admin. Seuls les flags de disponibilité sont réessayés ; les noms, prix et structure du menu restent bloqués."
       },
       "parityModuleFailed": {
-        "title": "Échecs parity dans {{moduleLabel}}",
-        "summary": "{{count}} éléments parity dans {{moduleLabel}} ont échoué et nécessitent une nouvelle tentative.",
-        "guidance": "Réessayez d'abord l'élément d'exemple pour un test ciblé ou réessayez tout le module parity pour débloquer toute la famille."
+        "title": "Certaines mises à jour n’ont pas été envoyées",
+        "summary": "{{count}} mises à jour enregistrées attendent une nouvelle tentative réussie.",
+        "guidance": "Réessayez la mise à jour sélectionnée une fois. Ouvrez les détails d’assistance en cas de nouvel échec."
       },
       "parityModulePending": {
         "title": "Backlog parity dans {{moduleLabel}}",
@@ -7798,6 +7822,11 @@
         "title": "Intervention de Dev requise",
         "summary": "Un backlog de synchronisation est visible, mais aucune solution guidée n'est encore associée à cet échec précis.",
         "guidance": "Contactez Dev et joignez le bundle de diagnostics afin que la prochaine occurrence puisse être reliée à une solution guidée."
+      },
+      "customerAddressDefaultConflict": {
+        "title": "L’adresse par défaut n’a pas pu être enregistrée",
+        "summary": "Le serveur n’a pas confirmé le changement d’adresse par défaut. La modification reste enregistrée sur cette caisse.",
+        "guidance": "Réessayez cette adresse une fois. Si elle est encore refusée, demandez de l’aide via les détails d’assistance."
       }
     }
   },

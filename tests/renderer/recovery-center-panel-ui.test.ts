@@ -24,11 +24,12 @@ const loadLocale = (lng: string): Record<string, any> =>
   JSON.parse(readFileSync(path.join(localesDir, `${lng}.json`), 'utf8'));
 
 test('Round 340: the sync-recovery summary cards render no raw terminal/branch/organization IDs', () => {
-  // Scope to the visible 3-card summary header, between the summary grid and the primary-issue block.
-  const summaryStart = source.indexOf('grid gap-3 md:grid-cols-3');
-  assert.notEqual(summaryStart, -1, 'the summary grid must exist');
-  const summaryEnd = source.indexOf('{!primaryIssue ?', summaryStart);
-  assert.notEqual(summaryEnd, -1, 'the primary-issue block must follow the summary');
+  // The compact staff view replaces the former three-card summary. Keep the
+  // privacy invariant across the whole rendered panel, including disclosures.
+  const summaryStart = source.indexOf('<section className="space-y-4');
+  assert.notEqual(summaryStart, -1, 'the staff panel must exist');
+  const summaryEnd = source.indexOf('</section>', summaryStart);
+  assert.notEqual(summaryEnd, -1, 'the staff panel must close');
   const summary = source.slice(summaryStart, summaryEnd);
 
   assert.doesNotMatch(summary, /terminalContext\?\.terminalId/, 'summary must not render the raw terminalId');
@@ -108,12 +109,11 @@ test('Round 384: recovery center panel is touch-first and avoids old sky/orange 
   assert.match(source, /error:[\s\S]*?border border-red-400\/30 bg-red-500\/10 text-red-700/);
   assert.match(source, /warning:[\s\S]*?border border-amber-400\/30 bg-amber-500\/10 text-amber-700/);
   assert.match(source, /info:[\s\S]*?border border-slate-300\/80 bg-white\/85 text-slate-700/);
-  assert.match(source, /rounded-\[22px\] border border-slate-200\/80 bg-slate-50/);
-  assert.match(source, /rounded-\[26px\] border border-slate-200 bg-slate-50\/90/);
+  assert.match(source, /<details className="rounded-2xl border border-slate-200/);
+  assert.match(source, /<summary className="min-h-\[44px\]/);
 
   // Touch feedback replaces hover on recovery actions while preserving semantic action colors.
-  assert.match(source, /active:scale-\[0\.98\]/);
-  assert.match(source, /bg-emerald-600[\s\S]*?active:bg-emerald-500/);
+  assert.match(source, /min-h-\[48px\][\s\S]*?disabled:opacity-50/);
   assert.match(source, /bg-amber-400[\s\S]*?active:bg-amber-300/);
   assert.match(source, /border-red-300\/80 bg-red-50\/90 text-red-700 active:bg-red-100/);
 });

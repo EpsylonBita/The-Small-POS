@@ -3199,7 +3199,7 @@
       "createdAt": "[NEEDS IT TRANSLATION] Δημιουργήθηκε"
     },
     "health": {
-      "label": "Sync health",
+      "label": "Stato sincronizzazione",
       "healthy": "Healthy",
       "healthyDetail": "No local sync backlog or failures are currently visible.",
       "pending": "Pending",
@@ -3549,7 +3549,11 @@
       "staffSection": "Personale e fattorini",
       "refreshSuccess": "Stato di ripristino aggiornato",
       "contactOperator": "Contatta Dev",
-      "contactOperatorDetail": "Questo problema non ha ancora uno sblocco guidato. Contatta Dev con la diagnostica così la prossima occorrenza potrà essere collegata a una correzione con un clic."
+      "contactOperatorDetail": "Questo problema non ha ancora uno sblocco guidato. Contatta Dev con la diagnostica così la prossima occorrenza potrà essere collegata a una correzione con un clic.",
+      "showTechnicalDetails": "Dettagli tecnici e ripristino",
+      "hideTechnicalDetails": "Nascondi dettagli tecnici",
+      "staleData": "È mostrato l’ultimo controllo riuscito. L’aggiornamento non è riuscito; ricontrolla prima di intervenire.",
+      "loadFailed": "Stato non disponibile. Aggiorna per verificare se serve un intervento."
     }
   },
   "modals": {
@@ -7505,7 +7509,8 @@
     "messages": {
       "actionSucceeded": "Azione completata con successo.",
       "actionFailed": "Azione non riuscita. Controlla i dettagli del problema e riprova.",
-      "orderPaymentOpenFailed": "Impossibile aprire la schermata di pagamento dell'ordine bloccato."
+      "orderPaymentOpenFailed": "Impossibile aprire la schermata di pagamento dell'ordine bloccato.",
+      "actionPendingVerification": "Nuovo tentativo richiesto. Un nuovo controllo deve confermare il ripristino."
     },
     "actions": {
       "refresh": {
@@ -7515,17 +7520,20 @@
         "label": "Apri impostazioni di connessione"
       },
       "runParitySyncNow": {
-        "label": "Esegui sincronizzazione ora"
+        "label": "Prova a sincronizzare ora"
+      },
+      "auto_retry": {
+        "label": "Nuovo tentativo automatico"
       },
       "retryParityItem": {
-        "label": "Riprova elemento parity"
+        "label": "Riprova questo aggiornamento"
       },
       "retryCatalogAvailabilitySync": {
         "label": "Riprova disponibilita catalogo",
         "description": "Riprova il flag di disponibilita bloccato dopo la correzione di compatibilita admin."
       },
       "retryParityModule": {
-        "label": "Riprova modulo parity"
+        "label": "Riprova gli aggiornamenti correlati"
       },
       "repairPaymentTotalConflict": {
         "label": "Correggi differenza pagamento/ordine",
@@ -7601,7 +7609,11 @@
         "label": "Contatta Dev"
       },
       "confirmTitle": "Conferma azione di recupero",
-      "confirmMessage": "Questa azione modifica i dati locali di recupero per il problema selezionato."
+      "confirmMessage": "Questa azione modifica i dati locali di recupero per il problema selezionato.",
+      "retryCustomerAddressDefault": {
+        "label": "Riprova a salvare questo indirizzo",
+        "description": "Riprova la modifica salvata per questo indirizzo. Serve ancora la conferma del server."
+      }
     },
     "context": {
       "terminalId": "ID terminale",
@@ -7621,7 +7633,7 @@
       "recoveringTitle": "In recupero",
       "recoveringSubtitle": "Problemi in coda, rimandati o pronti per un nuovo tentativo di sincronizzazione.",
       "noRecoveringIssues": "Al momento non sono visibili problemi in recupero.",
-      "recentActionsTitle": "Risolto di recente",
+      "recentActionsTitle": "Tentativi recenti",
       "recentActionsSubtitle": "Ogni tentativo di riparazione viene registrato localmente così il personale può vedere cosa è stato provato e cosa ha funzionato.",
       "noRecentActions": "Nessuna azione di recupero è stata ancora registrata.",
       "guidedTitle": "Recupero sincronizzazione",
@@ -7643,7 +7655,7 @@
       "genericVerificationDescription": "Dopo ogni azione, il POS aggiorna la diagnostica e mostra se la coda può continuare.",
       "lastActionSucceeded": "Ultima azione riuscita",
       "lastActionFailed": "Ultima azione non riuscita",
-      "advancedDetailsTitle": "Dettagli avanzati",
+      "advancedDetailsTitle": "Altre azioni e cronologia",
       "systemStatusTitle": "Stato sincronizzazione sistema",
       "systemStatusSubtitle": "Una vista semplice di cosa sta succedendo, perché gli ordini possono essere bloccati e qual è l’azione più sicura.",
       "noFixNeededTitle": "Nessuna correzione necessaria",
@@ -7654,7 +7666,14 @@
       "diagnosticFileHeadline": "I dettagli tecnici vengono salvati in un file",
       "diagnosticFileDescription": "Per mantenere semplice questa schermata, conteggi della coda, righe parity, stato stampanti, dettagli database, log, codici problema, id ordine e ultimo risultato di recupero sono inclusi nel bundle diagnostico esportato invece di essere mostrati qui.",
       "diagnosticFilePrivacy": "Usalo quando Contact Dev richiede dettagli di supporto. I campi sensibili sono gestiti dalle impostazioni di esportazione.",
-      "exportDiagnosticFile": "Esporta file diagnostico"
+      "exportDiagnosticFile": "Esporta file diagnostico",
+      "actionNotVerified": "Non ancora verificato",
+      "outcomes": {
+        "pending": "In attesa di verifica",
+        "failed": "Tentativo non riuscito",
+        "unknown": "Ripristino non confermato",
+        "resolved": "Ripristino confermato"
+      }
     },
     "recipes": {
       "checkoutPaymentOpenPayment": {
@@ -7686,6 +7705,11 @@
         "label": "Pulizia legacy massiva nota",
         "explanation": "Questa ricetta rimuove tutte le righe di sincronizzazione finanziaria legacy obsolete in un unico passaggio controllato, dopo aver verificato che i record locali di pagamento o rettifica manchino ancora.",
         "verification": "Aggiorna Recovery dopo la pulizia. Il blocco finanziario legacy dovrebbe sparire, poi esegui di nuovo la sincronizzazione."
+      },
+      "customerAddressDefaultConflictRepair": {
+        "label": "Nuovo tentativo per l’indirizzo predefinito",
+        "explanation": "Questo conflitto noto consente un nuovo tentativo sicuro. Il server deve accettare la modifica prima di confermare il ripristino.",
+        "verification": "Il problema resta visibile finché un nuovo controllo conferma che l’indirizzo è stato accettato. Se fallisce di nuovo, apri i dettagli di assistenza."
       }
     },
     "issues": {
@@ -7705,9 +7729,9 @@
         "guidance": "Apri le impostazioni di connessione e verifica il codice di connessione del terminale, l'URL admin e la chiave API POS."
       },
       "parityProcessorStalled": {
-        "title": "Il processore parity è bloccato",
-        "summary": "L'ultimo ciclo parity ha elaborato {{processed}} elementi e ne ha lasciati ancora {{remaining}} in coda. Blocco attuale: {{reason}}.",
-        "guidance": "Esegui ora la sincronizzazione parity. Se lo stesso backlog rimane, controlla i problemi parity a livello di modulo qui sotto o contatta Dev. Ultimo errore parity: {{reason}}."
+        "title": "Aggiornamenti in attesa di invio",
+        "summary": "L’ultima sincronizzazione non è avanzata. Alcune modifiche salvate non sono ancora arrivate in ufficio.",
+        "guidance": "Controlla la connessione, poi sincronizza una volta. Se il problema persiste, apri i dettagli di assistenza."
       },
       "paymentTotalConflict": {
         "title": "Differenza pagamento/ordine",
@@ -7740,9 +7764,9 @@
         "guidance": "Usa il tentativo consigliato dopo il deploy admin. Vengono riprovati solo i flag di disponibilita; nomi, prezzi e struttura menu restano bloccati."
       },
       "parityModuleFailed": {
-        "title": "Errori parity in {{moduleLabel}}",
-        "summary": "{{count}} elementi parity in {{moduleLabel}} sono falliti e richiedono un nuovo tentativo.",
-        "guidance": "Riprova prima l'elemento di esempio per un test mirato oppure riprova l'intero modulo parity per sbloccare tutta la famiglia."
+        "title": "Alcuni aggiornamenti non sono stati inviati",
+        "summary": "{{count}} aggiornamenti salvati attendono un nuovo tentativo riuscito.",
+        "guidance": "Riprova una volta l’aggiornamento selezionato. Apri i dettagli di assistenza se fallisce ancora."
       },
       "parityModulePending": {
         "title": "Backlog parity in {{moduleLabel}}",
@@ -7798,6 +7822,11 @@
         "title": "Serve l'intervento Dev",
         "summary": "È visibile un backlog di sincronizzazione, ma non esiste ancora una correzione guidata per questo errore specifico.",
         "guidance": "Contatta Dev e includi il bundle diagnostico così la prossima occorrenza potrà essere associata a una soluzione guidata."
+      },
+      "customerAddressDefaultConflict": {
+        "title": "Impossibile salvare l’indirizzo predefinito",
+        "summary": "Il server non ha confermato la modifica dell’indirizzo predefinito. La modifica resta salvata su questa cassa.",
+        "guidance": "Riprova una volta. Se viene rifiutato di nuovo, chiedi aiuto tramite i dettagli di assistenza."
       }
     }
   },
