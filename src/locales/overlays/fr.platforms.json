@@ -20,14 +20,17 @@
       "uncertain": "Impossible de confirmer le résultat. Actualisez pour vérifier l'état actuel.",
       "open": "Ouvrir",
       "close": "Fermer",
-      "manualClosureNote": "Vous pouvez rouvrir une plateforme ici à tout moment. Si efood reste fermé, il rouvre à la première ouverture de caisse après le prochain rapport Z.",
+      "manualClosureNote": "efood s'ouvre automatiquement au check-in du premier caissier et se ferme à l'émission du rapport Z. « Fermer » le garde fermé jusqu'au prochain check-in, sauf si vous appuyez sur « Ouvrir ».",
       "acceptingOrders": "Reçoit des commandes",
       "notAcceptingOrders": "Ne reçoit pas de commandes actuellement",
       "lastKnown": "Dernier état connu : {{status}}",
+      "closedUntil": "Fermé jusqu'à {{time}}",
       "status": {
         "open": "Ouvert",
         "closed": "Fermé",
-        "unknown": "Inconnu"
+        "unknown": "Inconnu",
+        "opening": "Ouverture…",
+        "closing": "Fermeture…"
       },
       "reason": {
         "moduleDisabled": "Un module requis n’est pas activé sur cette caisse.",
@@ -38,7 +41,12 @@
         "busy": "La plateforme est occupée. Réessayez dans un instant.",
         "outcomeUnknown": "Statut inconnu. Actualisez pour vérifier à nouveau.",
         "outsideHours": "En ligne, mais hors des horaires de commande prévus — ne reçoit pas de commandes.",
-        "providerForbidden": "La plateforme a refusé cette modification (403). Utilisez son application et demandez à son support de vérifier les autorisations de changement de statut via l’API."
+        "providerForbidden": "La plateforme a refusé cette modification (403). Utilisez son application et demandez à son support de vérifier les autorisations de changement de statut via l’API.",
+        "awaitingProviderConfirmation": "La plateforme a accepté la modification. La mise à jour de son statut peut prendre quelques minutes.",
+        "providerRejected": "La plateforme a refusé cette modification. Si vous êtes en dehors des horaires d'ouverture, réessayez pendant ces horaires ou utilisez l'application de la plateforme.",
+        "providerReportsClosed": "La plateforme indique que le commerce est fermé. Vérifiez la tablette ou l'application de la plateforme.",
+        "closedUntilDayStart": "S'ouvre automatiquement au check-in du premier caissier.",
+        "reopensAtOpening": "S'ouvre automatiquement à {{time}}."
       },
       "sound": {
         "title": "Son des alertes de commande",

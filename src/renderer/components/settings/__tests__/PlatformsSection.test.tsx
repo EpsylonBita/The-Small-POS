@@ -1,6 +1,11 @@
 import React from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import dePlatforms from '../../../../locales/overlays/de.platforms.json';
+import elPlatforms from '../../../../locales/overlays/el.platforms.json';
+import enPlatforms from '../../../../locales/overlays/en.platforms.json';
+import frPlatforms from '../../../../locales/overlays/fr.platforms.json';
+import itPlatforms from '../../../../locales/overlays/it.platforms.json';
 
 const { posApiGet, posApiPost } = vi.hoisted(() => ({
   posApiGet: vi.fn(),
@@ -17,12 +22,19 @@ const translate = (key: string, defaultValueOrOptions?: string | { defaultValue?
   if (typeof template !== 'string' || !defaultValueOrOptions) return template;
   return template.replace(/\{\{(\w+)\}\}/g, (_, name) => String((defaultValueOrOptions as Record<string, unknown>)[name] ?? ''));
 };
+// Stable for the same reason; the closure end reads `i18n.language` for its weekday.
+const i18nStub = { language: 'en' };
 vi.mock('react-i18next', async (importOriginal) => {
   const actual = await importOriginal<typeof import('react-i18next')>();
-  return { ...actual, useTranslation: () => ({ t: translate }) };
+  return { ...actual, useTranslation: () => ({ t: translate, i18n: i18nStub }) };
 });
 
 import { PlatformsSection, type Platform } from '../PlatformsSection';
+
+const AWAITING_TEXT = 'The platform accepted the change. Its status can take a few minutes to update.';
+const REJECTED_TEXT = "The platform refused this change. Outside opening hours, try again during them or use the platform's own app.";
+const DAY_START_TEXT = 'Opens automatically when the first cashier checks in.';
+const UNCERTAIN_TEXT = /Could not confirm the result/;
 
 function makePlatform(overrides: Partial<Platform> = {}): Platform {
   return {
@@ -37,16 +49,60 @@ function makePlatform(overrides: Partial<Platform> = {}): Platform {
   };
 }
 
+function listResponse(...platforms: Platform[]) {
+  return { success: true, data: { success: true, platforms } };
+}
+
+function actionResponse(platform: Platform) {
+  return { success: true, data: { success: true, platform } };
+}
+
 async function flush() {
   await act(async () => Promise.resolve());
+}
+
+// Under full fake timers findBy/waitFor cannot poll, so time moves explicitly
+// and inside act, letting resolved requests and their re-renders land.
+async function advance(ms: number) {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(ms);
+  });
+}
+
+function setOnline(online: boolean) {
+  act(() => {
+    Object.defineProperty(window.navigator, 'onLine', { value: online, configurable: true });
+    window.dispatchEvent(new Event(online ? 'online' : 'offline'));
+  });
+}
+
+function flattenKeys(value: unknown, prefix = ''): string[] {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return Object.entries(value as Record<string, unknown>)
+      .flatMap(([key, nested]) => flattenKeys(nested, prefix ? `${prefix}.${key}` : key));
+  }
+  return [prefix];
+}
+
+function valueAt(source: unknown, dotPath: string): unknown {
+  return dotPath.split('.').reduce<unknown>(
+    (current, key) => (current && typeof current === 'object' ? (current as Record<string, unknown>)[key] : undefined),
+    source,
+  );
 }
 
 describe('PlatformsSection', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Also drop queued once-values so no response can leak into the next test.
+    posApiGet.mockReset();
+    posApiPost.mockReset();
     Object.defineProperty(window.navigator, 'onLine', { value: true, configurable: true });
   });
-  afterEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+  });
 
   it.each([
     ['provider_forbidden', true],
@@ -55,6 +111,7 @@ describe('PlatformsSection', () => {
     ['HTTP 403', false],
     ['network timeout', false],
     ['not_provider_forbidden_suffix', false],
+    ['provider_rejected_elsewhere', false],
   ])('distinguishes provider refusal from an unknown outcome: %s', async (error, forbidden) => {
     posApiGet.mockResolvedValue({ success: true, data: { platforms: [makePlatform({ open: false })] } });
     posApiPost.mockResolvedValue({ success: false, error });
@@ -82,6 +139,9 @@ describe('PlatformsSection', () => {
     await waitFor(() => expect(screen.getByRole('switch')).toHaveAttribute('aria-checked', 'true'));
     expect(posApiGet).toHaveBeenCalledWith('/pos/platforms');
     expect(screen.getByText('Open')).toBeInTheDocument();
+    expect(screen.getByText(
+      'efood opens automatically when the first cashier checks in and closes when the Z report is issued. Closing it here keeps it closed until the next check-in, unless you open it again.',
+    )).toBeInTheDocument();
   });
 
   it('shows an empty state when there are no connected platforms', async () => {
@@ -423,5 +483,311 @@ describe('PlatformsSection', () => {
 
     fireEvent.click(screen.getByText('Weekly hours'));
     expect(await screen.findByRole('dialog', { name: 'efood weekly hours' })).toBeInTheDocument();
+  });
+
+  it('shows "Opening…" and the awaiting explanation, never the uncertain banner, while efood catches up', async () => {
+    posApiGet.mockResolvedValue(listResponse(makePlatform({ open: false })));
+    posApiPost.mockResolvedValue(actionResponse(
+      makePlatform({ open: true, pending: true, reason: 'awaiting_provider_confirmation' }),
+    ));
+    render(<PlatformsSection />);
+    fireEvent.click(await screen.findByRole('switch'));
+
+    await screen.findByText('Opening…');
+    expect(screen.getByText(AWAITING_TEXT)).toBeInTheDocument();
+    expect(screen.queryByText('Open')).not.toBeInTheDocument();
+    expect(screen.queryByText('Unknown')).not.toBeInTheDocument();
+    expect(screen.queryByText(UNCERTAIN_TEXT)).not.toBeInTheDocument();
+    // Staff can still change their mind: the switch shows the requested state and stays usable.
+    await waitFor(() => expect(screen.getByRole('switch')).toBeEnabled());
+    expect(screen.getByRole('switch')).toHaveAttribute('aria-checked', 'true');
+  });
+
+  it('shows "Closing…" for an accepted close and sends a new request when staff change their mind', async () => {
+    posApiGet.mockResolvedValue(listResponse(makePlatform({ open: true })));
+    posApiPost
+      .mockResolvedValueOnce(actionResponse(makePlatform({ open: false, pending: true, reason: 'awaiting_provider_confirmation' })))
+      .mockResolvedValueOnce(actionResponse(makePlatform({ open: true, pending: true, reason: 'awaiting_provider_confirmation' })));
+    render(<PlatformsSection />);
+    fireEvent.click(await screen.findByRole('switch'));
+
+    await screen.findByText('Closing…');
+    expect(screen.getByText(AWAITING_TEXT)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('switch')).toBeEnabled());
+    expect(screen.getByRole('switch')).toHaveAttribute('aria-checked', 'false');
+
+    fireEvent.click(screen.getByRole('switch'));
+    await screen.findByText('Opening…');
+    expect(posApiPost).toHaveBeenNthCalledWith(1, '/pos/platforms', { plugin_id: 'efood', open: false });
+    expect(posApiPost).toHaveBeenNthCalledWith(2, '/pos/platforms', { plugin_id: 'efood', open: true });
+  });
+
+  it('drops the pending label when a later change cannot be confirmed', async () => {
+    posApiGet.mockResolvedValue(listResponse(
+      makePlatform({ open: true, pending: true, reason: 'awaiting_provider_confirmation' }),
+    ));
+    posApiPost.mockResolvedValue({ success: false, error: 'outcome_unknown (HTTP 502)' });
+    render(<PlatformsSection />);
+    await screen.findByText('Opening…');
+
+    fireEvent.click(screen.getByRole('switch'));
+    await screen.findByText(UNCERTAIN_TEXT);
+    expect(screen.getByText('Unknown')).toBeInTheDocument();
+    expect(screen.queryByText('Opening…')).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ['as the error code', { success: false, error: 'provider_rejected' }],
+    ['wrapped by the IPC transport', { success: false, error: 'provider_rejected (HTTP 502): efood refused the change' }],
+    ['in the response body', { success: true, data: { success: false, error: 'provider_rejected' } }],
+  ])('keeps the previous status and explains a provider refusal %s', async (_where, result) => {
+    posApiGet.mockResolvedValue(listResponse(makePlatform({ open: false })));
+    posApiPost.mockResolvedValue(result);
+    render(<PlatformsSection />);
+    fireEvent.click(await screen.findByRole('switch'));
+
+    await screen.findByText(REJECTED_TEXT);
+    expect(screen.getByText('Closed')).toBeInTheDocument();
+    expect(screen.queryByText('Unknown')).not.toBeInTheDocument();
+    expect(screen.queryByText(UNCERTAIN_TEXT)).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('switch')).toBeEnabled());
+    expect(screen.getByRole('switch')).toHaveAttribute('aria-checked', 'false');
+  });
+
+  it('explains when efood itself reports the store closed', async () => {
+    posApiGet.mockResolvedValue(listResponse(makePlatform({ open: false, reason: 'provider_reports_closed' })));
+    render(<PlatformsSection />);
+    await screen.findByText("The platform reports the store as closed. Check the platform's tablet or app.");
+    expect(screen.getByText('Closed')).toBeInTheDocument();
+  });
+
+  describe('automatic re-read while efood catches up', () => {
+    it('re-reads 30 s after the change is accepted, then every 60 s, and stops once nothing is pending', async () => {
+      vi.useFakeTimers();
+      posApiGet.mockResolvedValueOnce(listResponse(makePlatform({ open: false })));
+      render(<PlatformsSection />);
+      await advance(0);
+      expect(posApiGet).toHaveBeenCalledTimes(1);
+
+      const opening = makePlatform({ open: true, pending: true, reason: 'awaiting_provider_confirmation' });
+      posApiPost.mockResolvedValueOnce(actionResponse(opening));
+      posApiGet.mockResolvedValue(listResponse(opening));
+      fireEvent.click(screen.getByRole('switch'));
+      await advance(0);
+      expect(screen.getByText('Opening…')).toBeInTheDocument();
+
+      await advance(29_999);
+      expect(posApiGet).toHaveBeenCalledTimes(1);
+      await advance(1);
+      expect(posApiGet).toHaveBeenCalledTimes(2);
+      expect(posApiGet).toHaveBeenLastCalledWith('/pos/platforms');
+      expect(screen.getByText('Opening…')).toBeInTheDocument();
+
+      await advance(59_999);
+      expect(posApiGet).toHaveBeenCalledTimes(2);
+      posApiGet.mockResolvedValue(listResponse(makePlatform({ open: true })));
+      await advance(1);
+      expect(posApiGet).toHaveBeenCalledTimes(3);
+      expect(screen.getByText('Open')).toBeInTheDocument();
+      expect(screen.queryByText('Opening…')).not.toBeInTheDocument();
+
+      await advance(15 * 60_000);
+      expect(posApiGet).toHaveBeenCalledTimes(3);
+    });
+
+    it('starts from a list read and gives up 15 minutes after the wait began', async () => {
+      vi.useFakeTimers();
+      posApiGet.mockResolvedValue(listResponse(
+        makePlatform({ open: false, pending: true, reason: 'awaiting_provider_confirmation' }),
+      ));
+      render(<PlatformsSection />);
+      await advance(0);
+      expect(screen.getByText('Closing…')).toBeInTheDocument();
+      expect(posApiGet).toHaveBeenCalledTimes(1);
+
+      // Re-reads at 0:30, 1:30, … 14:30: fifteen inside the window, none after it.
+      await advance(15 * 60_000);
+      expect(posApiGet).toHaveBeenCalledTimes(16);
+      await advance(30 * 60_000);
+      expect(posApiGet).toHaveBeenCalledTimes(16);
+    });
+
+    it('does not re-read while offline and picks the cadence back up after reconnecting', async () => {
+      vi.useFakeTimers();
+      posApiGet.mockResolvedValue(listResponse(
+        makePlatform({ open: true, pending: true, reason: 'awaiting_provider_confirmation' }),
+      ));
+      render(<PlatformsSection />);
+      await advance(0);
+      expect(posApiGet).toHaveBeenCalledTimes(1);
+
+      setOnline(false);
+      await advance(5 * 60_000);
+      expect(posApiGet).toHaveBeenCalledTimes(1);
+
+      setOnline(true);
+      await advance(0);
+      expect(posApiGet).toHaveBeenCalledTimes(2); // the existing reconnect re-check
+      // Five minutes into the wait, the next slot on the cadence is 5:30.
+      await advance(29_999);
+      expect(posApiGet).toHaveBeenCalledTimes(2);
+      await advance(1);
+      expect(posApiGet).toHaveBeenCalledTimes(3);
+    });
+
+    it('clears the scheduled re-read when the section unmounts', async () => {
+      vi.useFakeTimers();
+      posApiGet.mockResolvedValue(listResponse(
+        makePlatform({ open: true, pending: true, reason: 'awaiting_provider_confirmation' }),
+      ));
+      const { unmount } = render(<PlatformsSection />);
+      await advance(0);
+      expect(posApiGet).toHaveBeenCalledTimes(1);
+
+      unmount();
+      await advance(15 * 60_000);
+      expect(posApiGet).toHaveBeenCalledTimes(1);
+    });
+
+    it('shows Closed with the opening time for an «Open» pressed before hours, and keeps re-reading', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(2026, 8, 14, 23, 0, 0)); // Monday night on the register's clock
+      posApiGet.mockResolvedValue(listResponse(
+        makePlatform({ open: false, reason: 'closed_until_day_start', closed_until: '2026-09-15T05:00:00' }),
+      ));
+      render(<PlatformsSection />);
+      await advance(0);
+      expect(screen.getByText(DAY_START_TEXT)).toBeInTheDocument();
+
+      const reopensAtOpening = makePlatform({
+        open: false,
+        pending: true,
+        reason: 'reopens_at_opening',
+        closed_until: '2026-09-15T09:00:00',
+      });
+      posApiPost.mockResolvedValueOnce(actionResponse(reopensAtOpening));
+      posApiGet.mockResolvedValue(listResponse(reopensAtOpening));
+      fireEvent.click(screen.getByRole('switch'));
+      await advance(0);
+
+      expect(posApiPost).toHaveBeenCalledWith('/pos/platforms', { plugin_id: 'efood', open: true });
+      expect(screen.getByText('Closed')).toBeInTheDocument();
+      expect(screen.getByText('Opens automatically at Tue 09:00.')).toBeInTheDocument();
+      expect(screen.queryByText('Closing…')).not.toBeInTheDocument();
+      expect(screen.queryByText(/Closed until/)).not.toBeInTheDocument();
+      expect(screen.queryByText(UNCERTAIN_TEXT)).not.toBeInTheDocument();
+      expect(screen.getByRole('switch')).toBeEnabled();
+      expect(screen.getByRole('switch')).toHaveAttribute('aria-checked', 'false');
+
+      // `pending` still drives the loop even though no pending label is shown.
+      await advance(30_000);
+      expect(posApiGet).toHaveBeenCalledTimes(2);
+      expect(screen.getByText('Opens automatically at Tue 09:00.')).toBeInTheDocument();
+    });
+  });
+
+  describe('closure end', () => {
+    beforeEach(() => {
+      // Only Date is faked, so findBy/waitFor keep their real timers.
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date(2026, 8, 14, 9, 0, 0)); // Monday 14/09/2026 on the register's clock
+    });
+
+    it.each([
+      ['today', '2026-09-14T23:30:00', 'Closed until 23:30'],
+      ['on another day', '2026-09-15T18:00:00', 'Closed until Tue 18:00'],
+    ])('shows when a closure set outside the POS ends %s', async (_when, closedUntil, expected) => {
+      posApiGet.mockResolvedValue(listResponse(makePlatform({ open: false, closed_until: closedUntil })));
+      render(<PlatformsSection />);
+      await screen.findByText(expected);
+      expect(screen.getByText('Closed')).toBeInTheDocument();
+    });
+
+    it('shows no closure end while a change is pending, while open, or for a value with an offset', async () => {
+      posApiGet.mockResolvedValue(listResponse(
+        makePlatform({
+          plugin_id: 'efood',
+          name: 'efood',
+          open: false,
+          pending: true,
+          reason: 'awaiting_provider_confirmation',
+          closed_until: '2026-09-15T18:00:00',
+        }),
+        makePlatform({ plugin_id: 'efood-open', name: 'efood open', open: true, closed_until: '2026-09-15T18:00:00' }),
+        makePlatform({ plugin_id: 'efood-offset', name: 'efood offset', open: false, closed_until: '2026-09-15T18:00:00+03:00' }),
+      ));
+      render(<PlatformsSection />);
+      await screen.findByText('Closing…');
+      expect(screen.getByText('Open')).toBeInTheDocument();
+      expect(screen.getByText('Closed')).toBeInTheDocument();
+      expect(screen.queryByText(/Closed until/)).not.toBeInTheDocument();
+    });
+
+    it.each([false, true])(
+      'explains a POS or Z-report closure without its distant safety bound (pending: %s)',
+      async (pending) => {
+        posApiGet.mockResolvedValue(listResponse(
+          makePlatform({ open: false, pending, reason: 'closed_until_day_start', closed_until: '2026-09-21T05:00:00' }),
+        ));
+        render(<PlatformsSection />);
+        await screen.findByText(DAY_START_TEXT);
+        expect(screen.getByText('Closed')).toBeInTheDocument();
+        expect(screen.queryByText('Closing…')).not.toBeInTheDocument();
+        expect(screen.queryByText(/05:00/)).not.toBeInTheDocument();
+      },
+    );
+
+    it('says when opening hours reopen efood, with the time formatted like the closure end', async () => {
+      posApiGet.mockResolvedValue(listResponse(
+        makePlatform({ open: false, reason: 'reopens_at_opening', closed_until: '2026-09-14T18:00:00' }),
+      ));
+      render(<PlatformsSection />);
+      await screen.findByText('Opens automatically at 18:00.');
+      expect(screen.getByText('Closed')).toBeInTheDocument();
+      expect(screen.queryByText(/Closed until/)).not.toBeInTheDocument();
+    });
+  });
+});
+
+describe('platforms locale overlays', () => {
+  const overlays: Record<string, unknown> = {
+    en: enPlatforms,
+    el: elPlatforms,
+    de: dePlatforms,
+    fr: frPlatforms,
+    it: itPlatforms,
+  };
+  const newCopyKeys = [
+    'settings.platforms.manualClosureNote',
+    'settings.platforms.closedUntil',
+    'settings.platforms.status.opening',
+    'settings.platforms.status.closing',
+    'settings.platforms.reason.awaitingProviderConfirmation',
+    'settings.platforms.reason.providerRejected',
+    'settings.platforms.reason.providerReportsClosed',
+    'settings.platforms.reason.closedUntilDayStart',
+    'settings.platforms.reason.reopensAtOpening',
+  ];
+
+  it('keeps all five overlays on the same keys', () => {
+    const englishKeys = flattenKeys(enPlatforms).sort();
+    for (const [locale, overlay] of Object.entries(overlays)) {
+      expect({ locale, keys: flattenKeys(overlay).sort() }).toEqual({ locale, keys: englishKeys });
+    }
+  });
+
+  it('translates the pending, closure and refusal copy in every locale', () => {
+    for (const [locale, overlay] of Object.entries(overlays)) {
+      for (const key of newCopyKeys) {
+        const value = valueAt(overlay, key);
+        const translated = typeof value === 'string' && value.trim() !== ''
+          && (locale === 'en' || value !== valueAt(enPlatforms, key));
+        expect({ locale, key, translated }).toEqual({ locale, key, translated: true });
+      }
+      for (const key of ['settings.platforms.closedUntil', 'settings.platforms.reason.reopensAtOpening']) {
+        expect({ locale, key, value: valueAt(overlay, key) })
+          .toEqual({ locale, key, value: expect.stringContaining('{{time}}') });
+      }
+    }
   });
 });

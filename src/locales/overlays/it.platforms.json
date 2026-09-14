@@ -20,14 +20,17 @@
       "uncertain": "Impossibile confermare il risultato. Aggiorna per controllare lo stato attuale.",
       "open": "Apri",
       "close": "Chiudi",
-      "manualClosureNote": "Puoi riaprire una piattaforma qui in qualsiasi momento. Se efood resta chiuso, si riapre alla prima apertura della cassa dopo il prossimo rapporto Z.",
+      "manualClosureNote": "efood si apre automaticamente al check-in del primo cassiere e si chiude all'emissione del rapporto Z. «Chiudi» lo mantiene chiuso fino al prossimo check-in, a meno che tu non prema «Apri».",
       "acceptingOrders": "Riceve ordini",
       "notAcceptingOrders": "Non riceve ordini in questo momento",
       "lastKnown": "Ultimo stato noto: {{status}}",
+      "closedUntil": "Chiuso fino a {{time}}",
       "status": {
         "open": "Aperto",
         "closed": "Chiuso",
-        "unknown": "Sconosciuto"
+        "unknown": "Sconosciuto",
+        "opening": "Apertura in corso…",
+        "closing": "Chiusura in corso…"
       },
       "reason": {
         "moduleDisabled": "Un modulo richiesto non è abilitato su questa cassa.",
@@ -38,7 +41,12 @@
         "busy": "La piattaforma è occupata. Riprova a breve.",
         "outcomeUnknown": "Stato sconosciuto. Aggiorna per controllare di nuovo.",
         "outsideHours": "Online, ma fuori dagli orari di ordinazione previsti — non riceve ordini.",
-        "providerForbidden": "La piattaforma ha rifiutato questa modifica (403). Usa la sua app e chiedi al supporto di verificare i permessi API per le modifiche di stato."
+        "providerForbidden": "La piattaforma ha rifiutato questa modifica (403). Usa la sua app e chiedi al supporto di verificare i permessi API per le modifiche di stato.",
+        "awaitingProviderConfirmation": "La piattaforma ha accettato la modifica. L'aggiornamento del suo stato può richiedere alcuni minuti.",
+        "providerRejected": "La piattaforma ha rifiutato questa modifica. Se sei fuori dall'orario di apertura, riprova durante l'orario o usa l'app della piattaforma.",
+        "providerReportsClosed": "La piattaforma segnala il negozio come chiuso. Controlla il tablet o l'app della piattaforma.",
+        "closedUntilDayStart": "Si apre automaticamente al check-in del primo cassiere.",
+        "reopensAtOpening": "Si apre automaticamente alle {{time}}."
       },
       "sound": {
         "title": "Suono di avviso degli ordini",

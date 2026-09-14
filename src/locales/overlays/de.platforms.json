@@ -20,14 +20,17 @@
       "uncertain": "Das Ergebnis konnte nicht bestätigt werden. Aktualisieren Sie, um den aktuellen Status zu prüfen.",
       "open": "Öffnen",
       "close": "Schließen",
-      "manualClosureNote": "Sie können eine Plattform hier jederzeit wieder öffnen. Bleibt efood geschlossen, öffnet es bei der ersten Kassenöffnung nach dem nächsten Z-Bericht automatisch.",
+      "manualClosureNote": "efood öffnet automatisch beim Check-in des ersten Kassierers und schließt, wenn der Z-Bericht erstellt wird. „Schließen“ hält es bis zum nächsten Check-in geschlossen, es sei denn, Sie tippen auf „Öffnen“.",
       "acceptingOrders": "Empfängt Bestellungen",
       "notAcceptingOrders": "Empfängt derzeit keine Bestellungen",
       "lastKnown": "Zuletzt bekannt: {{status}}",
+      "closedUntil": "Geschlossen bis {{time}}",
       "status": {
         "open": "Geöffnet",
         "closed": "Geschlossen",
-        "unknown": "Unbekannt"
+        "unknown": "Unbekannt",
+        "opening": "Wird geöffnet…",
+        "closing": "Wird geschlossen…"
       },
       "reason": {
         "moduleDisabled": "Ein erforderliches Modul ist auf dieser Kasse nicht aktiviert.",
@@ -38,7 +41,12 @@
         "busy": "Die Plattform ist ausgelastet. Versuchen Sie es in Kürze erneut.",
         "outcomeUnknown": "Status unbekannt. Aktualisieren Sie, um erneut zu prüfen.",
         "outsideHours": "Online, aber außerhalb der geplanten Bestellzeiten — empfängt keine Bestellungen.",
-        "providerForbidden": "Die Plattform hat diese Änderung abgelehnt (403). Verwenden Sie deren App und bitten Sie den Support, die API-Berechtigung für Statusänderungen zu prüfen."
+        "providerForbidden": "Die Plattform hat diese Änderung abgelehnt (403). Verwenden Sie deren App und bitten Sie den Support, die API-Berechtigung für Statusänderungen zu prüfen.",
+        "awaitingProviderConfirmation": "Die Plattform hat die Änderung angenommen. Es kann einige Minuten dauern, bis ihr Status aktualisiert ist.",
+        "providerRejected": "Die Plattform hat diese Änderung abgelehnt. Falls Sie außerhalb der Öffnungszeiten sind, versuchen Sie es während der Öffnungszeiten erneut oder verwenden Sie die App der Plattform.",
+        "providerReportsClosed": "Die Plattform meldet das Geschäft als geschlossen. Prüfen Sie das Tablet oder die App der Plattform.",
+        "closedUntilDayStart": "Öffnet automatisch beim Check-in des ersten Kassierers.",
+        "reopensAtOpening": "Öffnet automatisch um {{time}}."
       },
       "sound": {
         "title": "Signalton für Bestellungen",

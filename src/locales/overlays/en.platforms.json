@@ -20,14 +20,17 @@
       "uncertain": "Could not confirm the result. Refresh to check the current status.",
       "open": "Open",
       "close": "Close",
-      "manualClosureNote": "You can reopen a platform here at any time. If efood stays closed, it reopens at the first register opening after the next Z report.",
+      "manualClosureNote": "efood opens automatically when the first cashier checks in and closes when the Z report is issued. Closing it here keeps it closed until the next check-in, unless you open it again.",
       "acceptingOrders": "Receiving orders",
       "notAcceptingOrders": "Not receiving orders right now",
       "lastKnown": "Last known: {{status}}",
+      "closedUntil": "Closed until {{time}}",
       "status": {
         "open": "Open",
         "closed": "Closed",
-        "unknown": "Unknown"
+        "unknown": "Unknown",
+        "opening": "Opening…",
+        "closing": "Closing…"
       },
       "reason": {
         "moduleDisabled": "A required module is not enabled on this register.",
@@ -38,7 +41,12 @@
         "busy": "The platform is busy. Try again shortly.",
         "outcomeUnknown": "Status unknown. Refresh to check again.",
         "outsideHours": "Online, but outside the scheduled ordering hours — not receiving orders.",
-        "providerForbidden": "The platform rejected this change (403). Use its app and ask its support to check API store-status permissions."
+        "providerForbidden": "The platform rejected this change (403). Use its app and ask its support to check API store-status permissions.",
+        "awaitingProviderConfirmation": "The platform accepted the change. Its status can take a few minutes to update.",
+        "providerRejected": "The platform refused this change. Outside opening hours, try again during them or use the platform's own app.",
+        "providerReportsClosed": "The platform reports the store as closed. Check the platform's tablet or app.",
+        "closedUntilDayStart": "Opens automatically when the first cashier checks in.",
+        "reopensAtOpening": "Opens automatically at {{time}}."
       },
       "sound": {
         "title": "Order alert sound",

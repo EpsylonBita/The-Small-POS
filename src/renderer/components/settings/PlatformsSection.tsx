@@ -10,6 +10,14 @@ import type { EfoodDaySchedule } from '../../services/efoodWeeklySchedule'
 
 const EFOOD_PLUGIN_ID = 'efood'
 
+// efood accepts an open/close write at once, but its own status read can lag
+// for many minutes. While any platform waits for that confirmation the list is
+// re-read on a fixed cadence measured from when the wait began: after 30 s,
+// then every 60 s, for at most 15 minutes. Manual refresh stays available.
+const CONFIRMATION_FIRST_REFRESH_MS = 30_000
+const CONFIRMATION_REFRESH_INTERVAL_MS = 60_000
+const CONFIRMATION_REFRESH_WINDOW_MS = 15 * 60_000
+
 export interface Platform {
   plugin_id: string
   name: string
@@ -19,6 +27,17 @@ export interface Platform {
   accepting_orders?: boolean | null
   reason?: string | null
   checked_at?: string | null
+  /**
+   * efood: the provider accepted the change but its status has not caught up
+   * yet. While true, `open` is the REQUESTED state, not a confirmed one.
+   */
+  pending?: boolean
+  /**
+   * efood: end of the current closure as Athens local wall time
+   * 'YYYY-MM-DDTHH:mm:ss' (no offset), present while an efood closure interval
+   * keeps the store closed.
+   */
+  closed_until?: string | null
 }
 
 // The API helper (posApiFetch) already unwraps the HTTP envelope into
@@ -44,6 +63,75 @@ type PendingAction = 'open' | 'close'
 // same wrapping used for MODULE_REQUIRED. Never inferred from a bare 403.
 function isProviderForbiddenError(error?: string | null): boolean {
   return typeof error === 'string' && /^provider_forbidden(?:$| \(HTTP 502\)(?::|$))/.test(error)
+}
+
+// efood refused the change itself (HTTP 502 {success:false,
+// error:'provider_rejected'}), wrapped by the IPC transport the same way.
+// Nothing changed at the provider, so the previous status is still accurate.
+function isProviderRejectedError(error?: string | null): boolean {
+  return typeof error === 'string' && /^provider_rejected(?:$| \(HTTP 502\)(?::|$))/.test(error)
+}
+
+// Accepted by the provider but not yet reflected in its status. Without a
+// requested open/closed state there is nothing to wait for.
+function isAwaitingProvider(platform: Platform): boolean {
+  return platform.pending === true && typeof platform.open === 'boolean'
+}
+
+// efood closure reasons, sent with `open === false`. Each already says how the
+// closure ends, so the status reads Closed with that explanation and never
+// Opening…/Closing…, even while `pending` keeps the re-read loop running.
+//  - closed_until_day_start: closed by the POS or the Z report until the first
+//    cashier check-in; `closed_until` is only a distant safety bound, not shown.
+//  - reopens_at_opening: ends when opening hours start, at `closed_until`.
+const CLOSED_UNTIL_DAY_START_REASON = 'closed_until_day_start'
+const REOPENS_AT_OPENING_REASON = 'reopens_at_opening'
+
+function hasClosureReason(platform: Platform): boolean {
+  return platform.open === false
+    && (platform.reason === CLOSED_UNTIL_DAY_START_REASON || platform.reason === REOPENS_AT_OPENING_REASON)
+}
+
+const CLOSED_UNTIL_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/
+
+const padTwo = (value: number): string => String(value).padStart(2, '0')
+
+// `closed_until` is Athens wall time with no offset, so its components are read
+// as written: `new Date(string)` would reinterpret them in this register's
+// timezone. Ends today: "HH:mm"; any other day: short weekday + "HH:mm".
+// A malformed value shows nothing rather than a wrong time.
+function formatClosedUntil(value: string | null | undefined, language: string | undefined): string | null {
+  if (typeof value !== 'string') return null
+  const match = CLOSED_UNTIL_PATTERN.exec(value)
+  if (!match) return null
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText] = match
+  if (Number(hourText) > 23 || Number(minuteText) > 59 || Number(secondText ?? '0') > 59) return null
+
+  const year = Number(yearText)
+  const month = Number(monthText)
+  const day = Number(dayText)
+  const calendarDay = new Date(Date.UTC(year, month - 1, day))
+  if (
+    calendarDay.getUTCFullYear() !== year
+    || calendarDay.getUTCMonth() !== month - 1
+    || calendarDay.getUTCDate() !== day
+  ) {
+    return null
+  }
+
+  const time = `${hourText}:${minuteText}`
+  const now = new Date()
+  const today = `${now.getFullYear()}-${padTwo(now.getMonth() + 1)}-${padTwo(now.getDate())}`
+  if (`${yearText}-${monthText}-${dayText}` === today) return time
+
+  let weekday: string
+  try {
+    weekday = calendarDay.toLocaleDateString(language, { weekday: 'short', timeZone: 'UTC' })
+  } catch {
+    // An unusable language tag must not hide when the closure ends.
+    weekday = calendarDay.toLocaleDateString(undefined, { weekday: 'short', timeZone: 'UTC' })
+  }
+  return `${weekday} ${time}`
 }
 
 const REASON_DEFAULTS: Record<string, { key: string; defaultValue: string }> = {
@@ -84,10 +172,28 @@ const REASON_DEFAULTS: Record<string, { key: string; defaultValue: string }> = {
     key: 'settings.platforms.reason.outsideHours',
     defaultValue: 'Online, but outside the scheduled ordering hours — not receiving orders.',
   },
+  awaiting_provider_confirmation: {
+    key: 'settings.platforms.reason.awaitingProviderConfirmation',
+    defaultValue: 'The platform accepted the change. Its status can take a few minutes to update.',
+  },
+  provider_rejected: {
+    key: 'settings.platforms.reason.providerRejected',
+    defaultValue:
+      "The platform refused this change. Outside opening hours, try again during them or use the platform's own app.",
+  },
+  provider_reports_closed: {
+    key: 'settings.platforms.reason.providerReportsClosed',
+    defaultValue: "The platform reports the store as closed. Check the platform's tablet or app.",
+  },
+  [CLOSED_UNTIL_DAY_START_REASON]: {
+    key: 'settings.platforms.reason.closedUntilDayStart',
+    defaultValue: 'Opens automatically when the first cashier checks in.',
+  },
+  // reopens_at_opening is worded in describeReason: it needs the opening time.
 }
 
 export const PlatformsSection: React.FC = () => {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const [platforms, setPlatforms] = useState<Platform[]>([])
   const [lastKnownOpen, setLastKnownOpen] = useState<Record<string, boolean>>({})
   const [isLoading, setIsLoading] = useState(true)
@@ -102,6 +208,9 @@ export const PlatformsSection: React.FC = () => {
   // Lifted above the editor so an outstanding (unconfirmed) efood schedule
   // write survives closing and reopening the "Weekly hours" panel.
   const [efoodPendingSchedule, setEfoodPendingSchedule] = useState<EfoodDaySchedule[] | null>(null)
+  // Bumped whenever a write comes back accepted-but-unconfirmed, so the
+  // automatic re-read cadence restarts for that newest change.
+  const [confirmationWaitRestarts, setConfirmationWaitRestarts] = useState(0)
 
   // Refs (not React state) so races are resolved deterministically and are not
   // sensitive to whether a re-render has happened yet:
@@ -115,10 +224,13 @@ export const PlatformsSection: React.FC = () => {
   //    current in-memory value instead of being overwritten by the refresh.
   //  - inFlightRef: blocks a second toggle on the same plugin from starting
   //    before React has had a chance to re-render the disabled control.
+  //  - confirmationWaitStartedAtRef: when the current wait for provider
+  //    confirmation began (Date.now()), or null while nothing is waiting.
   const listGenerationRef = useRef(0)
   const mutationGenerationRef = useRef<Record<string, number>>({})
   const inFlightRef = useRef<Set<string>>(new Set())
   const mountedRef = useRef(true)
+  const confirmationWaitStartedAtRef = useRef<number | null>(null)
 
   useEffect(() => {
     mountedRef.current = true
@@ -161,7 +273,7 @@ export const PlatformsSection: React.FC = () => {
           const generation = mutationGenerationRef.current[entry.plugin_id] || 0
           return generation % 2 === 1 || generation !== (mutationSnapshot[entry.plugin_id] || 0)
             ? entry
-            : { ...entry, open: null, reason: 'provider_unavailable' }
+            : { ...entry, open: null, pending: false, closed_until: null, reason: 'provider_unavailable' }
         }))
       }
       setIsLoading(false)
@@ -230,6 +342,49 @@ export const PlatformsSection: React.FC = () => {
     }
   }, [loadPlatforms])
 
+  const anyAwaitingProvider = platforms.some(isAwaitingProvider)
+
+  useEffect(() => {
+    if (!anyAwaitingProvider) {
+      confirmationWaitStartedAtRef.current = null
+      return undefined
+    }
+    if (confirmationWaitStartedAtRef.current === null) {
+      confirmationWaitStartedAtRef.current = Date.now()
+    }
+    if (!isOnline) return undefined
+
+    const startedAt = confirmationWaitStartedAtRef.current
+    const elapsed = Date.now() - startedAt
+    // Re-read n is due 30 s + n × 60 s after the wait began. Resuming (after
+    // reconnecting, say) continues at the next slot still ahead, and nothing
+    // is scheduled past the window.
+    let slot = elapsed < CONFIRMATION_FIRST_REFRESH_MS
+      ? 0
+      : Math.floor((elapsed - CONFIRMATION_FIRST_REFRESH_MS) / CONFIRMATION_REFRESH_INTERVAL_MS) + 1
+    let timer: ReturnType<typeof setTimeout> | undefined
+
+    const scheduleNext = () => {
+      const dueAfter = CONFIRMATION_FIRST_REFRESH_MS + slot * CONFIRMATION_REFRESH_INTERVAL_MS
+      if (dueAfter > CONFIRMATION_REFRESH_WINDOW_MS) return
+      const delay = Math.min(
+        Math.max(dueAfter - (Date.now() - startedAt), 0),
+        CONFIRMATION_REFRESH_INTERVAL_MS,
+      )
+      timer = setTimeout(() => {
+        timer = undefined
+        slot += 1
+        if (navigator.onLine !== false) void loadPlatforms({ refresh: true })
+        scheduleNext()
+      }, delay)
+    }
+
+    scheduleNext()
+    return () => {
+      if (timer !== undefined) clearTimeout(timer)
+    }
+  }, [anyAwaitingProvider, isOnline, confirmationWaitRestarts, loadPlatforms])
+
   const setPlatform = (pluginId: string, next: Platform) => {
     setPlatforms((current) =>
       current.map((entry) => (entry.plugin_id === pluginId ? next : entry)),
@@ -258,8 +413,15 @@ export const PlatformsSection: React.FC = () => {
       const body = response.data
 
       if (response.success && body?.success !== false && body?.platform) {
-        setPlatform(platform.plugin_id, body.platform)
+        const next = body.platform
+        setPlatform(platform.plugin_id, next)
         setUncertain((current) => ({ ...current, [platform.plugin_id]: false }))
+        if (isAwaitingProvider(next)) {
+          // Accepted, but not yet visible in the provider's status: restart the
+          // automatic re-read cadence from this newest change.
+          confirmationWaitStartedAtRef.current = Date.now()
+          setConfirmationWaitRestarts((current) => current + 1)
+        }
         return
       }
 
@@ -267,18 +429,44 @@ export const PlatformsSection: React.FC = () => {
         // A proved provider refusal, not an unconfirmed request: status stays
         // Unknown (the write did not take effect) but this is not the generic
         // "could not confirm" uncertainty banner.
-        setPlatform(platform.plugin_id, { ...platform, open: null, reason: 'provider_forbidden' })
+        setPlatform(platform.plugin_id, {
+          ...platform,
+          open: null,
+          pending: false,
+          closed_until: null,
+          reason: 'provider_forbidden',
+        })
+        setUncertain((current) => ({ ...current, [platform.plugin_id]: false }))
+        return
+      }
+
+      if (isProviderRejectedError(response.error) || isProviderRejectedError(body?.error)) {
+        // efood refused the change outright, so nothing changed there: keep the
+        // previous status (not Unknown) and say why, without the uncertainty banner.
+        setPlatform(platform.plugin_id, { ...platform, reason: 'provider_rejected' })
         setUncertain((current) => ({ ...current, [platform.plugin_id]: false }))
         return
       }
 
       // The action's outcome could not be confirmed: show Unknown rather than
       // claiming the previous open/closed value is still accurate.
-      setPlatform(platform.plugin_id, { ...platform, open: null, reason: 'outcome_unknown' })
+      setPlatform(platform.plugin_id, {
+        ...platform,
+        open: null,
+        pending: false,
+        closed_until: null,
+        reason: 'outcome_unknown',
+      })
       setUncertain((current) => ({ ...current, [platform.plugin_id]: true }))
     } catch {
       if (!mountedRef.current) return
-      setPlatform(platform.plugin_id, { ...platform, open: null, reason: 'outcome_unknown' })
+      setPlatform(platform.plugin_id, {
+        ...platform,
+        open: null,
+        pending: false,
+        closed_until: null,
+        reason: 'outcome_unknown',
+      })
       setUncertain((current) => ({ ...current, [platform.plugin_id]: true }))
     } finally {
       mutationGenerationRef.current[platform.plugin_id] =
@@ -294,8 +482,18 @@ export const PlatformsSection: React.FC = () => {
     }
   }
 
-  const describeReason = (reason?: string | null): string | null => {
+  const describeReason = (reason: string | null | undefined, closureEndTime: string | null): string | null => {
     if (!reason) return null
+    if (reason === REOPENS_AT_OPENING_REASON) {
+      // The sentence is about the opening time; without a readable one, say
+      // nothing rather than an incomplete "Opens automatically at".
+      return closureEndTime
+        ? t('settings.platforms.reason.reopensAtOpening', {
+            time: closureEndTime,
+            defaultValue: 'Opens automatically at {{time}}.',
+          })
+        : null
+    }
     const entry = REASON_DEFAULTS[reason]
     return entry
       ? t(entry.key, entry.defaultValue)
@@ -354,7 +552,7 @@ export const PlatformsSection: React.FC = () => {
       <p className="text-xs liquid-glass-modal-text-muted">
         {t(
           'settings.platforms.manualClosureNote',
-          'You can reopen a platform here at any time. If efood stays closed, it reopens at the first register opening after the next Z report.',
+          'efood opens automatically when the first cashier checks in and closes when the Z report is issued. Closing it here keeps it closed until the next check-in, unless you open it again.',
         )}
       </p>
 
@@ -402,8 +600,18 @@ export const PlatformsSection: React.FC = () => {
           {platforms.map((platform) => {
             const action = pending[platform.plugin_id]
             const isPending = Boolean(action)
-            const isUncertain = Boolean(uncertain[platform.plugin_id])
-            const reasonText = describeReason(platform.reason)
+            const awaitingProvider = isAwaitingProvider(platform)
+            const closureExplained = hasClosureReason(platform)
+            const showConfirmationLabel = awaitingProvider && !closureExplained
+            // An accepted change that the provider has yet to reflect is not
+            // an unconfirmed outcome, so it never carries the uncertainty banner.
+            const isUncertain = Boolean(uncertain[platform.plugin_id]) && !awaitingProvider
+            const closureEndTime =
+              platform.open === false ? formatClosedUntil(platform.closed_until, i18n?.language) : null
+            const reasonText = describeReason(platform.reason, closureEndTime)
+            // A closure reason already explains the end (or deliberately hides a
+            // safety bound), so the generic "Closed until" line is for the rest.
+            const showClosedUntil = closureEndTime !== null && !awaitingProvider && !closureExplained
             const showExplicitActions = platform.controllable && platform.open === null
             const knownBefore = lastKnownOpen[platform.plugin_id]
             const showAcceptingOrders =
@@ -425,9 +633,26 @@ export const PlatformsSection: React.FC = () => {
                     >
                       {platform.name}
                     </span>
-                    <span className={`block text-xs font-semibold ${statusToneClass(platform.open)}`}>
-                      {statusLabel(platform.open)}
-                    </span>
+                    {showConfirmationLabel ? (
+                      <span className="flex items-center gap-1.5 text-xs font-semibold text-amber-700 dark:text-amber-300">
+                        <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden="true" />
+                        {platform.open
+                          ? t('settings.platforms.status.opening', 'Opening…')
+                          : t('settings.platforms.status.closing', 'Closing…')}
+                      </span>
+                    ) : (
+                      <span className={`block text-xs font-semibold ${statusToneClass(platform.open)}`}>
+                        {statusLabel(platform.open)}
+                      </span>
+                    )}
+                    {showClosedUntil && (
+                      <span className="block text-xs liquid-glass-modal-text-muted">
+                        {t('settings.platforms.closedUntil', {
+                          time: closureEndTime,
+                          defaultValue: 'Closed until {{time}}',
+                        })}
+                      </span>
+                    )}
                     {showAcceptingOrders && (
                       <span className="block text-xs liquid-glass-modal-text-muted">
                         {platform.accepting_orders
