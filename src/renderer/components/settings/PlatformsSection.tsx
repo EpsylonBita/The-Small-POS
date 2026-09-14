@@ -5,6 +5,10 @@ import { posApiGet, posApiPost } from '../../utils/api-helpers'
 import { POSGlassSwitch } from '../ui/pos-glass-components'
 import { liquidGlassModalButton } from '../../styles/designSystem'
 import { PlatformNotificationSoundSettings } from './PlatformNotificationSoundSettings'
+import { EfoodWeeklyScheduleEditor } from './EfoodWeeklyScheduleEditor'
+import type { EfoodDaySchedule } from '../../services/efoodWeeklySchedule'
+
+const EFOOD_PLUGIN_ID = 'efood'
 
 export interface Platform {
   plugin_id: string
@@ -94,6 +98,10 @@ export const PlatformsSection: React.FC = () => {
   const [isOnline, setIsOnline] = useState<boolean>(
     typeof navigator === 'undefined' || navigator.onLine !== false,
   )
+  const [weeklyScheduleOpenFor, setWeeklyScheduleOpenFor] = useState<string | null>(null)
+  // Lifted above the editor so an outstanding (unconfirmed) efood schedule
+  // write survives closing and reopening the "Weekly hours" panel.
+  const [efoodPendingSchedule, setEfoodPendingSchedule] = useState<EfoodDaySchedule[] | null>(null)
 
   // Refs (not React state) so races are resolved deterministically and are not
   // sensitive to whether a re-render has happened yet:
@@ -400,6 +408,9 @@ export const PlatformsSection: React.FC = () => {
             const knownBefore = lastKnownOpen[platform.plugin_id]
             const showAcceptingOrders =
               platform.open === true && typeof platform.accepting_orders === 'boolean'
+            const isEfood = platform.plugin_id === EFOOD_PLUGIN_ID
+            const canManageEfoodSchedule = isEfood && platform.controllable
+            const isScheduleOpen = weeklyScheduleOpenFor === platform.plugin_id
 
             return (
               <div
@@ -496,6 +507,33 @@ export const PlatformsSection: React.FC = () => {
                     </div>
                   )}
                 </div>
+
+                {canManageEfoodSchedule && (
+                  <div>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setWeeklyScheduleOpenFor((current) =>
+                          current === platform.plugin_id ? null : platform.plugin_id,
+                        )
+                      }
+                      disabled={isPending}
+                      className={liquidGlassModalButton('secondary', 'sm')}
+                    >
+                      {t('settings.platforms.weeklySchedule.action', 'Weekly hours')}
+                    </button>
+                  </div>
+                )}
+
+                {canManageEfoodSchedule && isScheduleOpen && (
+                  <EfoodWeeklyScheduleEditor
+                    onClose={() => setWeeklyScheduleOpenFor(null)}
+                    parentActionPending={isPending}
+                    isOnline={isOnline}
+                    pendingSubmission={efoodPendingSchedule}
+                    onPendingSubmissionChange={setEfoodPendingSchedule}
+                  />
+                )}
               </div>
             )
           })}

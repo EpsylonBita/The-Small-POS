@@ -12,6 +12,7 @@ import { ErrorBoundary } from "./components/error/ErrorBoundary";
 import { ScreenCaptureControlRequestModal } from "./components/ScreenCaptureControlRequestModal";
 import { SyncNotificationManager } from "./components/SyncNotificationManager";
 import { CaptureNotificationManager } from "./components/CaptureNotificationManager";
+import { CancellationNoticeManager } from "./components/notices/CancellationNoticeManager";
 import { SyncStatusIndicator } from "./components/SyncStatusIndicator";
 import { CallerIdCustomerSearchModalHost } from "./components/callerid/CallerIdCustomerSearchModalHost";
 import { DeferredModal } from "./components/ui/DeferredModal";
@@ -1732,6 +1733,12 @@ function AppContent() {
                 that arrives while the user is taking an order still becomes a
                 readable capture and still announces itself. [R3.6, R11.9] */}
             <CaptureNotificationManager />
+
+            {/* Blocking provider-cancellation notice. Mounted at the app root
+                (not on the orders page) so a provider cancelling an order
+                stays visible to staff no matter what screen they are on;
+                hides immediately when `user` clears on logout. */}
+            <CancellationNoticeManager enabled={Boolean(user)} />
 
             <PortaledToaster
               position="top-center"

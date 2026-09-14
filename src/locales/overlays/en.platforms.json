@@ -66,7 +66,62 @@
           "noImportedClip": "No imported clip is available to select.",
           "cancelled": "Import cancelled. The previous selection is still active."
         }
+      },
+      "weeklySchedule": {
+        "action": "Weekly hours",
+        "title": "efood weekly hours",
+        "close": "Close",
+        "explain": "These hours repeat every week and only affect efood ordering hours. Overnight hours must be split across the two days they span.",
+        "loading": "Loading efood hours...",
+        "loadFailed": "Could not load efood hours",
+        "refresh": "Refresh",
+        "save": "Send to efood",
+        "closed": "Closed",
+        "from": "From",
+        "to": "To",
+        "addInterval": "Add hours",
+        "removeInterval": "Remove hours",
+        "allDay": "All day (00:00–23:59)",
+        "offline": "Reconnect to load or edit efood hours.",
+        "validationError": "Check the hours below: times must be HH:mm, end after start, and ranges cannot overlap.",
+        "waitingConfirmation": "Waiting for efood to apply changes; refresh in a few minutes.",
+        "confirmed": "efood confirmed the new hours.",
+        "staleBanner": "A newer schedule was loaded from efood. Reload to see it, or keep editing.",
+        "discardReload": "Discard my changes and reload",
+        "days": {
+          "monday": "Monday",
+          "tuesday": "Tuesday",
+          "wednesday": "Wednesday",
+          "thursday": "Thursday",
+          "friday": "Friday",
+          "saturday": "Saturday",
+          "sunday": "Sunday"
+        },
+        "errors": {
+          "providerForbidden": "efood has not permitted this change; contact support.",
+          "invalidSchedule": "These hours could not be accepted. Check the schedule and try again.",
+          "providerUnavailable": "efood is temporarily unavailable. Try again shortly.",
+          "outcomeUnknown": "Could not confirm the result. Refresh to check the current schedule.",
+          "productionNotConnected": "This platform is not connected to a live store yet.",
+          "wrongTerminal": "Manage this platform from its assigned register.",
+          "moduleDisabled": "A required module is not enabled on this register.",
+          "moduleRequired": "A required module is not enabled on this register.",
+          "generic": "Something went wrong. Refresh to check the current schedule."
+        }
       }
     }
+  },
+  "cancellationNotice": {
+    "eyebrow": "Order cancelled by platform",
+    "stopPreparing": "Stop preparing this order",
+    "explain": "The delivery platform cancelled this order. Do not continue preparing or dispatching it.",
+    "orderNumber": "Order",
+    "platform": "Platform",
+    "externalOrderId": "Platform order ID",
+    "queueCount": "{{count}} more cancelled orders are waiting to be acknowledged.",
+    "ackFailed": "Could not save that you read this. Try again.",
+    "acknowledge": "I have read this",
+    "persistPending": "Could not save this notice yet. Try again before acknowledging.",
+    "retry": "Try again"
   }
 }

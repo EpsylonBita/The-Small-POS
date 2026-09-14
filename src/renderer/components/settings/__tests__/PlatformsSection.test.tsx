@@ -385,4 +385,43 @@ describe('PlatformsSection', () => {
     expect(() => resolveGet({ success: true, data: { success: true, platforms: [makePlatform()] } })).not.toThrow();
     await flush();
   });
+
+  it('offers "Weekly hours" only for a connected, controllable efood card', async () => {
+    posApiGet.mockResolvedValue({
+      success: true,
+      data: {
+        success: true,
+        platforms: [
+          makePlatform({ plugin_id: 'efood', name: 'efood', controllable: true }),
+          makePlatform({ plugin_id: 'wolt', name: 'wolt', controllable: true }),
+          makePlatform({ plugin_id: 'efood-locked', name: 'efood locked', controllable: false }),
+        ],
+      },
+    });
+    render(<PlatformsSection />);
+    await screen.findByText('efood');
+
+    expect(screen.getAllByText('Weekly hours')).toHaveLength(1);
+    expect(screen.queryByText('efood locked')).toBeInTheDocument();
+  });
+
+  it('opens the efood weekly hours editor from the platform card', async () => {
+    posApiGet.mockImplementation((path: string) => {
+      if (path === '/pos/platforms/efood/schedule') {
+        return Promise.resolve({
+          success: true,
+          data: { success: true, schedule: { days: [], checked_at: null } },
+        });
+      }
+      return Promise.resolve({
+        success: true,
+        data: { success: true, platforms: [makePlatform({ plugin_id: 'efood', name: 'efood', controllable: true })] },
+      });
+    });
+    render(<PlatformsSection />);
+    await screen.findByText('efood');
+
+    fireEvent.click(screen.getByText('Weekly hours'));
+    expect(await screen.findByRole('dialog', { name: 'efood weekly hours' })).toBeInTheDocument();
+  });
 });

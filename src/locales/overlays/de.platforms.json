@@ -66,7 +66,62 @@
           "noImportedClip": "Es ist keine importierte Aufnahme zur Auswahl verfügbar.",
           "cancelled": "Import abgebrochen. Die bisherige Auswahl bleibt aktiv."
         }
+      },
+      "weeklySchedule": {
+        "action": "Wochenzeiten",
+        "title": "efood Wochenzeiten",
+        "close": "Schließen",
+        "explain": "Diese Zeiten wiederholen sich jede Woche und betreffen nur die efood-Bestellzeiten. Zeiten über Mitternacht müssen auf die beiden betroffenen Tage aufgeteilt werden.",
+        "loading": "efood-Zeiten werden geladen...",
+        "loadFailed": "efood-Zeiten konnten nicht geladen werden",
+        "refresh": "Aktualisieren",
+        "save": "An efood senden",
+        "closed": "Geschlossen",
+        "from": "Von",
+        "to": "Bis",
+        "addInterval": "Zeitraum hinzufügen",
+        "removeInterval": "Zeitraum entfernen",
+        "allDay": "Ganztägig (00:00–23:59)",
+        "offline": "Verbinden Sie sich erneut, um efood-Zeiten zu laden oder zu bearbeiten.",
+        "validationError": "Prüfen Sie die Zeiten unten: Uhrzeiten müssen im Format HH:mm sein, das Ende muss nach dem Beginn liegen und Zeiträume dürfen sich nicht überschneiden.",
+        "waitingConfirmation": "Warten auf Übernahme durch efood; in ein paar Minuten erneut aktualisieren.",
+        "confirmed": "efood hat die neuen Zeiten bestätigt.",
+        "staleBanner": "Es wurden neuere Zeiten von efood geladen. Neu laden, um sie zu sehen, oder mit der Bearbeitung fortfahren.",
+        "discardReload": "Änderungen verwerfen und neu laden",
+        "days": {
+          "monday": "Montag",
+          "tuesday": "Dienstag",
+          "wednesday": "Mittwoch",
+          "thursday": "Donnerstag",
+          "friday": "Freitag",
+          "saturday": "Samstag",
+          "sunday": "Sonntag"
+        },
+        "errors": {
+          "providerForbidden": "efood hat diese Änderung nicht zugelassen; wenden Sie sich an den Support.",
+          "invalidSchedule": "Diese Zeiten konnten nicht übernommen werden. Prüfen Sie den Zeitplan und versuchen Sie es erneut.",
+          "providerUnavailable": "efood ist vorübergehend nicht verfügbar. Versuchen Sie es in Kürze erneut.",
+          "outcomeUnknown": "Das Ergebnis konnte nicht bestätigt werden. Aktualisieren Sie, um die aktuellen Zeiten zu prüfen.",
+          "productionNotConnected": "Diese Plattform ist noch nicht mit einem Live-Geschäft verbunden.",
+          "wrongTerminal": "Verwalten Sie diese Plattform über die zugewiesene Kasse.",
+          "moduleDisabled": "Ein erforderliches Modul ist auf dieser Kasse nicht aktiviert.",
+          "moduleRequired": "Ein erforderliches Modul ist auf dieser Kasse nicht aktiviert.",
+          "generic": "Etwas ist schiefgelaufen. Aktualisieren Sie, um die aktuellen Zeiten zu prüfen."
+        }
       }
     }
+  },
+  "cancellationNotice": {
+    "eyebrow": "Bestellung von der Plattform storniert",
+    "stopPreparing": "Zubereitung dieser Bestellung stoppen",
+    "explain": "Die Lieferplattform hat diese Bestellung storniert. Nicht weiter zubereiten oder ausliefern.",
+    "orderNumber": "Bestellung",
+    "platform": "Plattform",
+    "externalOrderId": "Plattform-Bestellnummer",
+    "queueCount": "{{count}} weitere stornierte Bestellungen warten auf Bestätigung.",
+    "ackFailed": "Konnte nicht speichern, dass Sie dies gelesen haben. Bitte erneut versuchen.",
+    "acknowledge": "Ich habe das gelesen",
+    "persistPending": "Diese Meldung konnte noch nicht gespeichert werden. Vor der Bestätigung erneut versuchen.",
+    "retry": "Erneut versuchen"
   }
 }

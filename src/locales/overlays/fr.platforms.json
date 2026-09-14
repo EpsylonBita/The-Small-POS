@@ -66,7 +66,62 @@
           "noImportedClip": "Aucun extrait importé n’est disponible.",
           "cancelled": "Importation annulée. Le choix précédent reste actif."
         }
+      },
+      "weeklySchedule": {
+        "action": "Horaires hebdomadaires",
+        "title": "Horaires hebdomadaires efood",
+        "close": "Fermer",
+        "explain": "Ces horaires se répètent chaque semaine et n’affectent que les horaires de commande efood. Les horaires de nuit doivent être répartis sur les deux jours concernés.",
+        "loading": "Chargement des horaires efood...",
+        "loadFailed": "Impossible de charger les horaires efood",
+        "refresh": "Actualiser",
+        "save": "Envoyer à efood",
+        "closed": "Fermé",
+        "from": "De",
+        "to": "À",
+        "addInterval": "Ajouter un horaire",
+        "removeInterval": "Supprimer l'horaire",
+        "allDay": "Toute la journée (00:00–23:59)",
+        "offline": "Reconnectez-vous pour charger ou modifier les horaires efood.",
+        "validationError": "Vérifiez les horaires ci-dessous : les heures doivent être au format HH:mm, la fin doit suivre le début et les plages ne doivent pas se chevaucher.",
+        "waitingConfirmation": "En attente de l'application des changements par efood ; actualisez dans quelques minutes.",
+        "confirmed": "efood a confirmé les nouveaux horaires.",
+        "staleBanner": "Des horaires plus récents ont été chargés depuis efood. Rechargez pour les voir, ou continuez la modification.",
+        "discardReload": "Annuler mes modifications et recharger",
+        "days": {
+          "monday": "Lundi",
+          "tuesday": "Mardi",
+          "wednesday": "Mercredi",
+          "thursday": "Jeudi",
+          "friday": "Vendredi",
+          "saturday": "Samedi",
+          "sunday": "Dimanche"
+        },
+        "errors": {
+          "providerForbidden": "efood n'a pas autorisé ce changement ; contactez le support.",
+          "invalidSchedule": "Ces horaires n'ont pas pu être acceptés. Vérifiez le programme et réessayez.",
+          "providerUnavailable": "efood est temporairement indisponible. Réessayez dans un instant.",
+          "outcomeUnknown": "Impossible de confirmer le résultat. Actualisez pour vérifier les horaires actuels.",
+          "productionNotConnected": "Cette plateforme n'est pas encore connectée à un commerce en production.",
+          "wrongTerminal": "Gérez cette plateforme depuis la caisse à laquelle elle est assignée.",
+          "moduleDisabled": "Un module requis n’est pas activé sur cette caisse.",
+          "moduleRequired": "Un module requis n’est pas activé sur cette caisse.",
+          "generic": "Une erreur s'est produite. Actualisez pour vérifier les horaires actuels."
+        }
       }
     }
+  },
+  "cancellationNotice": {
+    "eyebrow": "Commande annulée par la plateforme",
+    "stopPreparing": "Arrêtez de préparer cette commande",
+    "explain": "La plateforme de livraison a annulé cette commande. Ne continuez pas à la préparer ni à l'expédier.",
+    "orderNumber": "Commande",
+    "platform": "Plateforme",
+    "externalOrderId": "N° de commande de la plateforme",
+    "queueCount": "{{count}} autres commandes annulées sont en attente de confirmation.",
+    "ackFailed": "Impossible d'enregistrer que vous avez lu ceci. Réessayez.",
+    "acknowledge": "J'ai lu ceci",
+    "persistPending": "Impossible d'enregistrer cette notification pour le moment. Réessayez avant de confirmer.",
+    "retry": "Réessayer"
   }
 }
