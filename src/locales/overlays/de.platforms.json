@@ -25,6 +25,7 @@
       "notAcceptingOrders": "Empfängt derzeit keine Bestellungen",
       "lastKnown": "Zuletzt bekannt: {{status}}",
       "closedUntil": "Geschlossen bis {{time}}",
+      "closureStatus": "efood-Status: {{status}}",
       "status": {
         "open": "Geöffnet",
         "closed": "Geschlossen",
@@ -46,7 +47,8 @@
         "providerRejected": "Die Plattform hat diese Änderung abgelehnt. Falls Sie außerhalb der Öffnungszeiten sind, versuchen Sie es während der Öffnungszeiten erneut oder verwenden Sie die App der Plattform.",
         "providerReportsClosed": "Die Plattform meldet das Geschäft als geschlossen. Prüfen Sie das Tablet oder die App der Plattform.",
         "closedUntilDayStart": "Öffnet automatisch beim Check-in des ersten Kassierers.",
-        "reopensAtOpening": "Öffnet automatisch um {{time}}."
+        "reopensAtOpening": "Öffnet automatisch um {{time}}.",
+        "closedByProvider": "efood hat das Geschäft nach der angenommenen Öffnung wieder geschlossen. Meist ist die efood-Partner-App getrennt: Öffnen Sie sie oder bitten Sie efood, kein Gerät mehr vorauszusetzen."
       },
       "sound": {
         "title": "Signalton für Bestellungen",

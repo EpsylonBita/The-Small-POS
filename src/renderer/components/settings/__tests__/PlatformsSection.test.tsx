@@ -34,6 +34,8 @@ import { PlatformsSection, type Platform } from '../PlatformsSection';
 const AWAITING_TEXT = 'The platform accepted the change. Its status can take a few minutes to update.';
 const REJECTED_TEXT = "The platform refused this change. Outside opening hours, try again during them or use the platform's own app.";
 const DAY_START_TEXT = 'Opens automatically when the first cashier checks in.';
+const CLOSED_BY_PROVIDER_TEXT =
+  'efood closed the store again after accepting the open. This usually means the efood Partner app is disconnected: open it, or ask efood to stop requiring a device.';
 const UNCERTAIN_TEXT = /Could not confirm the result/;
 
 function makePlatform(overrides: Partial<Platform> = {}): Platform {
@@ -561,6 +563,20 @@ describe('PlatformsSection', () => {
     expect(screen.getByText('Closed')).toBeInTheDocument();
   });
 
+  it('says efood closed the store again after an accepted open, with the closure it reports, never "Opening…"', async () => {
+    posApiGet.mockResolvedValue(listResponse(makePlatform({
+      open: false, reason: 'closed_by_provider', closure_status: 'close_indefinite', closed_until: null,
+    })));
+    render(<PlatformsSection />);
+    await screen.findByText(CLOSED_BY_PROVIDER_TEXT);
+    expect(screen.getByText('Closed')).toBeInTheDocument();
+    expect(screen.getByText('efood status: close_indefinite')).toBeInTheDocument();
+    expect(screen.queryByText('Opening…')).not.toBeInTheDocument();
+    expect(screen.queryByText(UNCERTAIN_TEXT)).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('switch')).toBeEnabled());
+    expect(screen.getByRole('switch')).toHaveAttribute('aria-checked', 'false');
+  });
+
   describe('automatic re-read while efood catches up', () => {
     it('re-reads 30 s after the change is accepted, then every 60 s, and stops once nothing is pending', async () => {
       vi.useFakeTimers();
@@ -593,6 +609,28 @@ describe('PlatformsSection', () => {
 
       await advance(15 * 60_000);
       expect(posApiGet).toHaveBeenCalledTimes(3);
+    });
+
+    it('drops "Opening…" and explains as soon as a re-read says efood closed the store again, then stops', async () => {
+      vi.useFakeTimers();
+      posApiGet.mockResolvedValueOnce(listResponse(
+        makePlatform({ open: true, pending: true, reason: 'awaiting_provider_confirmation' }),
+      ));
+      render(<PlatformsSection />);
+      await advance(0);
+      expect(screen.getByText('Opening…')).toBeInTheDocument();
+
+      posApiGet.mockResolvedValue(listResponse(makePlatform({
+        open: false, reason: 'closed_by_provider', closure_status: 'close_indefinite',
+      })));
+      await advance(30_000);
+      expect(posApiGet).toHaveBeenCalledTimes(2);
+      expect(screen.getByText(CLOSED_BY_PROVIDER_TEXT)).toBeInTheDocument();
+      expect(screen.getByText('Closed')).toBeInTheDocument();
+      expect(screen.queryByText('Opening…')).not.toBeInTheDocument();
+
+      await advance(15 * 60_000);
+      expect(posApiGet).toHaveBeenCalledTimes(2);
     });
 
     it('starts from a list read and gives up 15 minutes after the wait began', async () => {
@@ -767,6 +805,8 @@ describe('platforms locale overlays', () => {
     'settings.platforms.reason.providerReportsClosed',
     'settings.platforms.reason.closedUntilDayStart',
     'settings.platforms.reason.reopensAtOpening',
+    'settings.platforms.reason.closedByProvider',
+    'settings.platforms.closureStatus',
   ];
 
   it('keeps all five overlays on the same keys', () => {
@@ -788,6 +828,8 @@ describe('platforms locale overlays', () => {
         expect({ locale, key, value: valueAt(overlay, key) })
           .toEqual({ locale, key, value: expect.stringContaining('{{time}}') });
       }
+      expect({ locale, value: valueAt(overlay, 'settings.platforms.closureStatus') })
+        .toEqual({ locale, value: expect.stringContaining('{{status}}') });
     }
   });
 });

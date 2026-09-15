@@ -25,6 +25,7 @@
       "notAcceptingOrders": "Ne reçoit pas de commandes actuellement",
       "lastKnown": "Dernier état connu : {{status}}",
       "closedUntil": "Fermé jusqu'à {{time}}",
+      "closureStatus": "Statut efood : {{status}}",
       "status": {
         "open": "Ouvert",
         "closed": "Fermé",
@@ -46,7 +47,8 @@
         "providerRejected": "La plateforme a refusé cette modification. Si vous êtes en dehors des horaires d'ouverture, réessayez pendant ces horaires ou utilisez l'application de la plateforme.",
         "providerReportsClosed": "La plateforme indique que le commerce est fermé. Vérifiez la tablette ou l'application de la plateforme.",
         "closedUntilDayStart": "S'ouvre automatiquement au check-in du premier caissier.",
-        "reopensAtOpening": "S'ouvre automatiquement à {{time}}."
+        "reopensAtOpening": "S'ouvre automatiquement à {{time}}.",
+        "closedByProvider": "efood a refermé le magasin après avoir accepté l'ouverture. En général, l'application efood Partner est déconnectée : ouvrez-la ou demandez à efood de ne plus exiger d'appareil."
       },
       "sound": {
         "title": "Son des alertes de commande",

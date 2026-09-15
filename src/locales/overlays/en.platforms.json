@@ -25,6 +25,7 @@
       "notAcceptingOrders": "Not receiving orders right now",
       "lastKnown": "Last known: {{status}}",
       "closedUntil": "Closed until {{time}}",
+      "closureStatus": "efood status: {{status}}",
       "status": {
         "open": "Open",
         "closed": "Closed",
@@ -46,7 +47,8 @@
         "providerRejected": "The platform refused this change. Outside opening hours, try again during them or use the platform's own app.",
         "providerReportsClosed": "The platform reports the store as closed. Check the platform's tablet or app.",
         "closedUntilDayStart": "Opens automatically when the first cashier checks in.",
-        "reopensAtOpening": "Opens automatically at {{time}}."
+        "reopensAtOpening": "Opens automatically at {{time}}.",
+        "closedByProvider": "efood closed the store again after accepting the open. This usually means the efood Partner app is disconnected: open it, or ask efood to stop requiring a device."
       },
       "sound": {
         "title": "Order alert sound",

@@ -38,6 +38,11 @@ export interface Platform {
    * keeps the store closed.
    */
   closed_until?: string | null
+  /**
+   * efood: the status code of the closure in force as efood reports it, e.g.
+   * 'close_indefinite' (a bounded machine code, or null when it is not one).
+   */
+  closure_status?: string | null
 }
 
 // The API helper (posApiFetch) already unwraps the HTTP envelope into
@@ -188,6 +193,13 @@ const REASON_DEFAULTS: Record<string, { key: string; defaultValue: string }> = {
   [CLOSED_UNTIL_DAY_START_REASON]: {
     key: 'settings.platforms.reason.closedUntilDayStart',
     defaultValue: 'Opens automatically when the first cashier checks in.',
+  },
+  // efood closed the store again after accepting an open: while its Partner
+  // app is disconnected it keeps the store closed, whatever the API is told.
+  closed_by_provider: {
+    key: 'settings.platforms.reason.closedByProvider',
+    defaultValue:
+      'efood closed the store again after accepting the open. This usually means the efood Partner app is disconnected: open it, or ask efood to stop requiring a device.',
   },
   // reopens_at_opening is worded in describeReason: it needs the opening time.
 }
@@ -666,6 +678,14 @@ export const PlatformsSection: React.FC = () => {
                     {reasonText && (
                       <span className="block text-xs liquid-glass-modal-text-muted">
                         {reasonText}
+                      </span>
+                    )}
+                    {platform.open === false && platform.closure_status && (
+                      <span className="block text-xs liquid-glass-modal-text-muted">
+                        {t('settings.platforms.closureStatus', {
+                          status: platform.closure_status,
+                          defaultValue: 'efood status: {{status}}',
+                        })}
                       </span>
                     )}
                     {isUncertain && (
