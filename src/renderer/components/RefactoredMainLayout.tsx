@@ -20,6 +20,8 @@ import { useEndOfDayStatus } from '../hooks/useEndOfDayStatus';
 import { getBridge, offEvent, onEvent } from '../../lib';
 import { clearSecureSession, getSecureSessionSync } from '../lib/secure-session-cache';
 import { getOfflinePageBanner } from '../services/offline-page-capabilities';
+import { useEfoodPartner } from '../hooks/useEfoodPartner';
+import { efoodPartnerBridge } from '../services/efoodPartner';
 import {
   consumeAuthorizedPendingPostLoginIntent,
   savePendingPostLoginIntent,
@@ -57,6 +59,7 @@ const StaffScheduleView = lazy(() => import('../pages/verticals/salon/StaffSched
 const ServiceCatalogView = lazy(() => import('../pages/verticals/salon/ServiceCatalogView').then(m => ({ default: m.ServiceCatalogView })));
 const ProductCatalogView = lazy(() => import('../pages/verticals/retail/ProductCatalogView').then(m => ({ default: m.ProductCatalogView })));
 const RepairsView = lazy(() => import('../features/repairs/RepairsView'));
+const EfoodPartnerView = lazy(() => import('./EfoodPartnerView').then(m => ({ default: m.EfoodPartnerView })));
 
 // View components
 // DashboardView now uses BusinessCategoryDashboard which automatically selects
@@ -240,6 +243,15 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
     setBlockedModule({ moduleId: currentView, requiredPlan: currentViewAccess.requiredPlan });
     setShowUpgradePrompt(true);
   }, [currentView, currentViewAccess.requiredPlan, enabledModules]);
+
+  // efood Partner (Live Orders) hosted in the POS: load it parked as soon as
+  // the register starts, so efood sees its equipment connected all day, not
+  // only while someone has the module open.
+  const efoodPartner = useEfoodPartner();
+  useEffect(() => {
+    if (!efoodPartner.available) return;
+    void efoodPartnerBridge.ensure({ muted: efoodPartner.settings.muted });
+  }, [efoodPartner.available, efoodPartner.settings.muted]);
 
   // Initialize orders on mount - temporarily disabled
   // useEffect(() => {
@@ -469,6 +481,9 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
     inventory: InventoryView,
     kitchen_display: KitchenDisplayView,
     customer_display: CustomerDisplayView,
+
+    // efood Partner (Live Orders) hosted in the POS
+    efood_partner: EfoodPartnerView,
 
     // Customer-facing modules
     customer_web: CustomerWebView,

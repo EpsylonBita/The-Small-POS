@@ -118,6 +118,14 @@
           "moduleRequired": "Un module requis n’est pas activé sur cette caisse.",
           "generic": "Une erreur s'est produite. Actualisez pour vérifier les horaires actuels."
         }
+      },
+      "efoodPartner": {
+        "pageToggle": "Page efood dans le POS",
+        "mute": "Couper les sons efood",
+        "help": "efood garde le magasin fermé tant que sa propre application n'est pas connectée. Le POS garde ici la page Live Orders d'efood active, sans navigateur séparé : ouvrez-la depuis l'icône efood de la barre latérale.",
+        "reload": "Recharger",
+        "home": "Commandes en direct",
+        "unavailable": "La page efood n'a pas pu être affichée sur cette caisse. Rechargez ou redémarrez le POS."
       }
     }
   },

@@ -390,7 +390,8 @@
     "logout": "Déconnexion",
     "currentPage": "{{label}} — Page actuelle",
     "plugin_integrations": "Extensions",
-    "integrations": "Extensions"
+    "integrations": "Extensions",
+    "efood_partner": "efood"
   },
   "orders": {
     "pagination": {

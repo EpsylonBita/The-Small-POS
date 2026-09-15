@@ -897,7 +897,10 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             // Best-effort: a failure must warn, never abort startup.
             #[cfg(desktop)]
             {
-                if let Some(main_window) = app.get_webview_window("main") {
+                // `get_window`, not `get_webview_window`: once the efood Partner
+                // webview is added as a child, the main window is no longer a
+                // single-webview window and the latter lookup returns None.
+                if let Some(main_window) = app.get_window("main") {
                     if let Err(error) = main_window.set_decorations(false) {
                         warn!(error = %error, "Startup: failed to keep main window decorations disabled");
                     }
@@ -1719,6 +1722,14 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             commands::system_ui::display_list_monitors,
             commands::system_ui::display_open_window,
             commands::system_ui::display_close_window,
+            // efood Partner (Live Orders) hosted in the POS window
+            commands::efood_partner::efood_partner_ensure,
+            commands::efood_partner::efood_partner_show,
+            commands::efood_partner::efood_partner_park,
+            commands::efood_partner::efood_partner_close,
+            commands::efood_partner::efood_partner_status,
+            commands::efood_partner::efood_partner_navigate,
+            commands::efood_partner::efood_partner_set_muted,
             // Database
             commands::diagnostics::database_health_check,
             commands::diagnostics::database_get_stats,

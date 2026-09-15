@@ -59,6 +59,7 @@ vi.mock('../../contexts/module-context', () => ({
   useModuleAccess: () => ({ isLocked: false, requiredPlan: undefined }),
   useModules: () => ({
     enabledModules: [],
+    isModuleEnabled: () => false,
     lockedModules: [],
   }),
 }))

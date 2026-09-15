@@ -118,6 +118,14 @@
           "moduleRequired": "Ein erforderliches Modul ist auf dieser Kasse nicht aktiviert.",
           "generic": "Etwas ist schiefgelaufen. Aktualisieren Sie, um die aktuellen Zeiten zu prüfen."
         }
+      },
+      "efoodPartner": {
+        "pageToggle": "efood-Seite im POS",
+        "mute": "efood-Töne stummschalten",
+        "help": "efood hält das Geschäft geschlossen, solange die eigene App nicht verbunden ist. Das POS hält die efood-Seite „Live Orders“ hier laufend, ohne separaten Browser: geöffnet wird sie über das efood-Symbol in der Seitenleiste.",
+        "reload": "Neu laden",
+        "home": "Live-Bestellungen",
+        "unavailable": "Die efood-Seite konnte auf dieser Kasse nicht angezeigt werden. Laden Sie neu oder starten Sie das POS neu."
       }
     }
   },

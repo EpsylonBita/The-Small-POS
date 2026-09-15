@@ -390,7 +390,8 @@
     "logout": "Disconnetti",
     "currentPage": "{{label}} — Pagina corrente",
     "plugin_integrations": "Plugin",
-    "integrations": "Plugin"
+    "integrations": "Plugin",
+    "efood_partner": "efood"
   },
   "orders": {
     "pagination": {

@@ -12,6 +12,7 @@ pub mod capture_scanner;
 pub mod customers;
 pub mod diagnostics;
 pub mod ecr;
+pub mod efood_partner;
 pub mod hardware;
 pub mod loyalty;
 pub mod menu;

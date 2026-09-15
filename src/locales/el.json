@@ -390,7 +390,8 @@
     "logout": "Αποσύνδεση",
     "currentPage": "{{label}} — Τρέχουσα σελίδα",
     "plugin_integrations": "Πρόσθετα",
-    "integrations": "Πρόσθετα"
+    "integrations": "Πρόσθετα",
+    "efood_partner": "efood"
   },
   "orders": {
     "pagination": {

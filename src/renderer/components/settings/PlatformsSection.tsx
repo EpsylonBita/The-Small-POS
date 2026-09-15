@@ -7,6 +7,7 @@ import { liquidGlassModalButton } from '../../styles/designSystem'
 import { PlatformNotificationSoundSettings } from './PlatformNotificationSoundSettings'
 import { EfoodWeeklyScheduleEditor } from './EfoodWeeklyScheduleEditor'
 import type { EfoodDaySchedule } from '../../services/efoodWeeklySchedule'
+import { useEfoodPartner } from '../../hooks/useEfoodPartner'
 
 const EFOOD_PLUGIN_ID = 'efood'
 
@@ -223,6 +224,8 @@ export const PlatformsSection: React.FC = () => {
   // Bumped whenever a write comes back accepted-but-unconfirmed, so the
   // automatic re-read cadence restarts for that newest change.
   const [confirmationWaitRestarts, setConfirmationWaitRestarts] = useState(0)
+  // efood Partner (Live Orders) hosted in the POS: its two local switches.
+  const efoodPartner = useEfoodPartner()
 
   // Refs (not React state) so races are resolved deterministically and are not
   // sensitive to whether a re-render has happened yet:
@@ -767,6 +770,33 @@ export const PlatformsSection: React.FC = () => {
                     >
                       {t('settings.platforms.weeklySchedule.action', 'Weekly hours')}
                     </button>
+                  </div>
+                )}
+
+                {canManageEfoodSchedule && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      aria-pressed={efoodPartner.settings.enabled}
+                      onClick={() => efoodPartner.updateSettings({ enabled: !efoodPartner.settings.enabled })}
+                      className={`${liquidGlassModalButton('secondary', 'sm')} ${efoodPartner.settings.enabled ? 'ring-2 ring-yellow-400/70' : ''}`}
+                    >
+                      {t('settings.platforms.efoodPartner.pageToggle', 'efood page inside the POS')}
+                    </button>
+                    <button
+                      type="button"
+                      aria-pressed={efoodPartner.settings.muted}
+                      onClick={() => efoodPartner.updateSettings({ muted: !efoodPartner.settings.muted })}
+                      className={`${liquidGlassModalButton('secondary', 'sm')} ${efoodPartner.settings.muted ? 'ring-2 ring-yellow-400/70' : ''}`}
+                    >
+                      {t('settings.platforms.efoodPartner.mute', 'Mute efood sounds')}
+                    </button>
+                    <span className="block w-full text-xs liquid-glass-modal-text-muted">
+                      {t(
+                        'settings.platforms.efoodPartner.help',
+                        'efood keeps the shop closed unless its own app is connected. The POS keeps the efood Live Orders page running here, so no separate browser is needed: open it from the efood icon in the sidebar.',
+                      )}
+                    </span>
                   </div>
                 )}
 

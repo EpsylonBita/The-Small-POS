@@ -29,7 +29,17 @@ vi.mock('react-i18next', async (importOriginal) => {
   return { ...actual, useTranslation: () => ({ t: translate, i18n: i18nStub }) };
 });
 
+const { efoodPartnerHook } = vi.hoisted(() => ({
+  efoodPartnerHook: {
+    available: true,
+    settings: { enabled: true, muted: false },
+    updateSettings: vi.fn(),
+  },
+}));
+vi.mock('../../../hooks/useEfoodPartner', () => ({ useEfoodPartner: () => efoodPartnerHook }));
+
 import { PlatformsSection, type Platform } from '../PlatformsSection';
+
 
 const AWAITING_TEXT = 'The platform accepted the change. Its status can take a few minutes to update.';
 const REJECTED_TEXT = "The platform refused this change. Outside opening hours, try again during them or use the platform's own app.";
@@ -577,7 +587,50 @@ describe('PlatformsSection', () => {
     expect(screen.getByRole('switch')).toHaveAttribute('aria-checked', 'false');
   });
 
+  describe('efood Partner page hosted in the POS', () => {
+    beforeEach(() => {
+      efoodPartnerHook.settings = { enabled: true, muted: false };
+      efoodPartnerHook.updateSettings.mockReset();
+    });
+
+    it('offers the in-POS page and its mute as toggles on the efood card and saves them', async () => {
+      posApiGet.mockResolvedValue(listResponse(makePlatform({ open: true })));
+      render(<PlatformsSection />);
+
+      const pageToggle = await screen.findByRole('button', { name: 'efood page inside the POS' });
+      expect(pageToggle).toHaveAttribute('aria-pressed', 'true');
+      fireEvent.click(pageToggle);
+      expect(efoodPartnerHook.updateSettings).toHaveBeenCalledWith({ enabled: false });
+
+      const muteToggle = screen.getByRole('button', { name: 'Mute efood sounds' });
+      expect(muteToggle).toHaveAttribute('aria-pressed', 'false');
+      fireEvent.click(muteToggle);
+      expect(efoodPartnerHook.updateSettings).toHaveBeenCalledWith({ muted: true });
+      // The efood switch itself is untouched: still the only switch on the card.
+      expect(screen.getAllByRole('switch')).toHaveLength(1);
+    });
+
+    it('shows the saved state of both toggles', async () => {
+      efoodPartnerHook.settings = { enabled: false, muted: true };
+      posApiGet.mockResolvedValue(listResponse(makePlatform({ open: true })));
+      render(<PlatformsSection />);
+      expect(await screen.findByRole('button', { name: 'efood page inside the POS' })).toHaveAttribute('aria-pressed', 'false');
+      expect(screen.getByRole('button', { name: 'Mute efood sounds' })).toHaveAttribute('aria-pressed', 'true');
+    });
+
+    it('keeps the toggles off the cards of other platforms and of an efood that this register cannot manage', async () => {
+      posApiGet.mockResolvedValue(listResponse(
+        makePlatform({ plugin_id: 'wolt', name: 'Wolt', open: true }),
+        makePlatform({ open: null, controllable: false, reason: 'wrong_terminal' }),
+      ));
+      render(<PlatformsSection />);
+      await screen.findByText('Wolt');
+      expect(screen.queryByRole('button', { name: 'efood page inside the POS' })).not.toBeInTheDocument();
+    });
+  });
+
   describe('automatic re-read while efood catches up', () => {
+
     it('re-reads 30 s after the change is accepted, then every 60 s, and stops once nothing is pending', async () => {
       vi.useFakeTimers();
       posApiGet.mockResolvedValueOnce(listResponse(makePlatform({ open: false })));
@@ -807,7 +860,14 @@ describe('platforms locale overlays', () => {
     'settings.platforms.reason.reopensAtOpening',
     'settings.platforms.reason.closedByProvider',
     'settings.platforms.closureStatus',
+    'settings.platforms.efoodPartner.pageToggle',
+    'settings.platforms.efoodPartner.mute',
+    'settings.platforms.efoodPartner.help',
+    'settings.platforms.efoodPartner.reload',
+    'settings.platforms.efoodPartner.home',
+    'settings.platforms.efoodPartner.unavailable',
   ];
+
 
   it('keeps all five overlays on the same keys', () => {
     const englishKeys = flattenKeys(enPlatforms).sort();

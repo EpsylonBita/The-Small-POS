@@ -118,6 +118,14 @@
           "moduleRequired": "Un modulo richiesto non è abilitato su questa cassa.",
           "generic": "Qualcosa è andato storto. Aggiorna per controllare l'orario attuale."
         }
+      },
+      "efoodPartner": {
+        "pageToggle": "Pagina efood nel POS",
+        "mute": "Silenzia i suoni efood",
+        "help": "efood tiene il negozio chiuso finché la sua app non è connessa. Il POS tiene qui attiva la pagina Live Orders di efood, senza un browser separato: si apre dall'icona efood nella barra laterale.",
+        "reload": "Ricarica",
+        "home": "Ordini live",
+        "unavailable": "La pagina efood non può essere mostrata su questa cassa. Ricarica o riavvia il POS."
       }
     }
   },

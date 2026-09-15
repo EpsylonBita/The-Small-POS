@@ -25,6 +25,7 @@ const entryPoints = [
   path.join(testsRoot, 'scripts', 'update-release-notes.test.ts'),
   path.join(testsRoot, 'scripts', 'fake-capdriver.test.ts'),
   path.join(testsRoot, 'renderer', 'cap-driver-settings-contract.test.ts'),
+  path.join(testsRoot, 'renderer', 'efood-partner-module.test.ts'),
   path.join(testsRoot, 'pages', 'OrderDetailsModal.test.tsx'),
   // Wave 0 regression tests — currently `test.skip`, un-skip as each
   // Critical fix lands in its wave. See

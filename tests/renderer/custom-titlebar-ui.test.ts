@@ -314,9 +314,10 @@ test('Tauri window menu commands call native webview APIs instead of no-op stubs
   assert.match(tauriLibSource, /commands::system_ui::window_start_drag/);
   assert.match(tauriLibSource, /commands::system_ui::window_get_position/);
   assert.match(tauriLibSource, /commands::system_ui::window_set_position/);
-  assert.match(source, /fn current_webview_window\(window: &tauri::Window\)/);
-  assert.match(source, /current_webview_window\(&window\)\?\s*\.reload\(\)/);
-  assert.match(source, /current_webview_window\(&window\)\?\s*\.eval\("window\.location\.reload\(\);"\)/);
+  assert.match(source, /fn current_webview\(window: &tauri::Window\) -> Result<tauri::Webview, String>/);
+  assert.match(source, /\.get_webview\(window\.label\(\)\)/);
+  assert.match(source, /current_webview\(&window\)\?\s*\.reload\(\)/);
+  assert.match(source, /current_webview\(&window\)\?\s*\.eval\("window\.location\.reload\(\);"\)/);
   assert.match(source, /webview\.open_devtools\(\)/);
   assert.match(source, /webview\.close_devtools\(\)/);
   assert.match(source, /webview\.set_zoom\(clamped\)/);

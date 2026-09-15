@@ -28,7 +28,9 @@ pub fn start_activity_policy(app: AppHandle) {
     use tauri::{Manager, WindowEvent};
 
     app.manage(MemoryPolicyState::default());
-    if let Some(window) = app.get_webview_window("main") {
+    // `get_window`, not `get_webview_window`: the main window also hosts the
+    // efood Partner child webview, so it is not a single-webview window.
+    if let Some(window) = app.get_window("main") {
         let event_app = app.clone();
         window.on_window_event(move |event| {
             if matches!(event, WindowEvent::Focused(_) | WindowEvent::Resized(_)) {
@@ -45,7 +47,7 @@ pub fn start_activity_policy(app: AppHandle) {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
-            if app.get_webview_window("main").is_none() {
+            if app.get_window("main").is_none() {
                 break;
             }
             if let Err(error) = reconcile_memory_target(&app) {
@@ -121,7 +123,7 @@ fn reconcile_memory_target(app: &AppHandle) -> Result<(), String> {
     // legacy IPC request queued before focus returns cannot apply stale Low.
     // There are no delayed restores or overlapping Low/Normal sleep cycles.
     app.run_on_main_thread(move || {
-        let Some(window) = activity_app.get_webview_window("main") else {
+        let Some(window) = activity_app.get_window("main") else {
             return;
         };
         let target = activity_app
@@ -136,16 +138,20 @@ fn reconcile_memory_target(app: &AppHandle) -> Result<(), String> {
                 ))
             })
             .unwrap_or(MemoryTarget::Normal);
-        apply_memory_target(&window, target);
+        // Every webview in the window: the POS shell and, when hosted, the
+        // efood Partner page.
+        for webview in window.webviews() {
+            apply_memory_target(&webview, target);
+        }
     })
     .map_err(|error| error.to_string())
 }
 
 #[cfg(windows)]
-fn apply_memory_target(window: &tauri::WebviewWindow, target: MemoryTarget) {
+fn apply_memory_target(webview_handle: &tauri::Webview, target: MemoryTarget) {
     // Called on the main thread, so the native state check and COM update
     // run together without another asynchronous hop between them.
-    let result = window.with_webview(move |webview| {
+    let result = webview_handle.with_webview(move |webview| {
         use webview2_com::Microsoft::Web::WebView2::Win32::{
             ICoreWebView2_19, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL,
         };

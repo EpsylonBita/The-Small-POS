@@ -161,11 +161,13 @@ fn emit_window_state_changed(window: &tauri::Window) {
     let _ = window.emit("window_state_changed", current_window_state(window));
 }
 
-fn current_webview_window(window: &tauri::Window) -> Result<tauri::WebviewWindow, String> {
+// `get_webview`, not `get_webview_window`: the main window also hosts the
+// efood Partner child webview, so it is not a single-webview window.
+fn current_webview(window: &tauri::Window) -> Result<tauri::Webview, String> {
     window
         .app_handle()
-        .get_webview_window(window.label())
-        .ok_or_else(|| format!("No webview window found for label {}", window.label()))
+        .get_webview(window.label())
+        .ok_or_else(|| format!("No webview found for label {}", window.label()))
 }
 
 fn current_zoom_scale(window: &tauri::Window) -> f64 {
@@ -178,7 +180,7 @@ fn current_zoom_scale(window: &tauri::Window) -> f64 {
 
 fn set_window_zoom(window: &tauri::Window, scale: f64) -> Result<(), String> {
     let clamped = scale.clamp(WINDOW_ZOOM_MIN, WINDOW_ZOOM_MAX);
-    let webview = current_webview_window(window)?;
+    let webview = current_webview(window)?;
     webview.set_zoom(clamped).map_err(|e| e.to_string())?;
 
     if let Ok(mut levels) = window_zoom_levels().lock() {
@@ -480,14 +482,14 @@ pub async fn window_toggle_fullscreen(window: tauri::Window) -> Result<(), Strin
 
 #[tauri::command]
 pub async fn window_reload(window: tauri::Window) -> Result<(), String> {
-    current_webview_window(&window)?
+    current_webview(&window)?
         .reload()
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn window_force_reload(window: tauri::Window) -> Result<(), String> {
-    current_webview_window(&window)?
+    current_webview(&window)?
         .eval("window.location.reload();")
         .map_err(|e| e.to_string())
 }
@@ -496,7 +498,7 @@ pub async fn window_force_reload(window: tauri::Window) -> Result<(), String> {
 pub async fn window_toggle_devtools(window: tauri::Window) -> Result<(), String> {
     #[cfg(debug_assertions)]
     {
-        let webview = current_webview_window(&window)?;
+        let webview = current_webview(&window)?;
         if webview.is_devtools_open() {
             webview.close_devtools();
         } else {

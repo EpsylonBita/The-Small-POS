@@ -118,6 +118,14 @@
           "moduleRequired": "A required module is not enabled on this register.",
           "generic": "Something went wrong. Refresh to check the current schedule."
         }
+      },
+      "efoodPartner": {
+        "pageToggle": "efood page inside the POS",
+        "mute": "Mute efood sounds",
+        "help": "efood keeps the shop closed unless its own app is connected. The POS keeps the efood Live Orders page running here, so no separate browser is needed: open it from the efood icon in the sidebar.",
+        "reload": "Reload",
+        "home": "Live orders",
+        "unavailable": "The efood page could not be shown on this register. Reload, or restart the POS."
       }
     }
   },

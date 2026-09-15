@@ -51,8 +51,11 @@ import {
   Award,
   Plug2,
   Wrench,
+  Store,
 } from 'lucide-react';
 import UpgradePromptModal from './modals/UpgradePromptModal';
+import { useEfoodPartner } from '../hooks/useEfoodPartner';
+import { EFOOD_PARTNER_VIEW } from '../services/efoodPartner';
 
 export const NavigationModuleIcon: React.FC<{ iconName: string }> = ({ iconName }) => {
   if (iconName === 'Wrench') {
@@ -175,6 +178,9 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
   const { resolvedTheme } = useTheme();
   const { staff, isShiftActive } = useShift();
   const { navigationModules: rawNavigationModules, isLoading } = useModules();
+  // efood Partner (Live Orders) hosted in the POS: shown only where this
+  // register manages efood (see useEfoodPartner).
+  const { available: efoodPartnerAvailable } = useEfoodPartner();
   // Hide the hub-migrated modules from the rail (Round 236). Everything downstream
   // (ordering, drag-reorder, render) consumes this filtered list.
   const navigationModules = useMemo(
@@ -977,6 +983,24 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
               })}
               {dropSlotBeforeModuleId === '__navigation_drop_end__' && (
                 <div className="navigation-drop-slot -my-2 mx-auto h-1 w-8 rounded-full bg-amber-400/85 shadow-[0_0_12px_rgba(250,204,21,0.78)]" />
+              )}
+              {/* efood Partner (Live Orders) hosted in the POS */}
+              {efoodPartnerAvailable && (
+                <button
+                  type="button"
+                  onClick={() => handleNavClick(EFOOD_PARTNER_VIEW, false)}
+                  data-testid="nav-efood-partner"
+                  className={`relative w-12 h-12 flex items-center justify-center transition-transform duration-150 ease-out active:scale-95 ${sidebarFocusRing} ${getNeonClass('orange', currentView === EFOOD_PARTNER_VIEW, resolvedTheme)}`}
+                  aria-label={currentView === EFOOD_PARTNER_VIEW
+                    ? t('navigation.currentPage', {
+                        label: resolveNavigationLabel(t, EFOOD_PARTNER_VIEW, 'efood'),
+                        defaultValue: '{{label}} — Current page',
+                      })
+                    : resolveNavigationLabel(t, EFOOD_PARTNER_VIEW, 'efood')}
+                  aria-current={currentView === EFOOD_PARTNER_VIEW ? 'page' : undefined}
+                >
+                  <Store className="w-5 h-5" strokeWidth={2} />
+                </button>
               )}
             </>
           )}

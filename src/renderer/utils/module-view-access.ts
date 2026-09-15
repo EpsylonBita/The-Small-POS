@@ -25,6 +25,8 @@ export const VIEW_MODULE_ALIASES: Record<string, string> = {
   customers: 'users',
   integrations: 'plugin_integrations',
   services: 'service_catalog',
+  // The efood Partner page hosted in the POS belongs to the plugins module.
+  efood_partner: 'plugin_integrations',
 };
 
 /**
