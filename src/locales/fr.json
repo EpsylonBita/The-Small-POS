@@ -7673,6 +7673,27 @@
       "retryCustomerAddressDefault": {
         "label": "Réessayer d’enregistrer cette adresse",
         "description": "Réessayer la modification enregistrée de cette adresse. La confirmation dépend toujours du serveur."
+      },
+      "resolveDuplicateCustomerConflict": {
+        "label": "Lier au client existant",
+        "description": "Le bureau détient déjà ce numéro de téléphone. Reprenez ici sa fiche client pour que la modification bloquée quitte la file d'attente.",
+        "confirmTitle": "Lier cette caisse au client existant ?",
+        "confirmMessage": "Le bureau a refusé ce client parce que son numéro de téléphone appartient déjà à une fiche qu'il détient. Cette fiche est lue, les commandes et les modifications en attente de cette caisse pointent ensuite vers elle, et la modification qui ne pourra jamais être acceptée est retirée. Rien n'est envoyé au bureau.",
+        "confirmCheckbox": "Je confirme qu'il s'agit du même client que celui que le bureau détient déjà."
+      },
+      "settlePlatformOrder": {
+        "label": "Enregistrer le règlement de la plateforme",
+        "description": "Cet argent est détenu par la plateforme. Enregistrez-le comme recette de plateforme — l'écran de paiement ne peut pas le prendre, et ni espèces ni carte n'interviennent.",
+        "confirmTitle": "Enregistrer le règlement de la plateforme pour cette commande ?",
+        "confirmMessage": "Ceci écrit le règlement que la plateforme doit pour cette commande : le montant est le solde restant de la commande et le type vient de ses propres informations de livraison. Il est comptabilisé hors caisse, le comptage des espèces ne change donc pas, et il ne peut pas être écrit deux fois.",
+        "confirmCheckbox": "Je confirme que la plateforme règle cette commande et qu'aucun argent n'a été encaissé au comptoir."
+      },
+      "repairPlatformSettlementMismatch": {
+        "label": "Corriger : cet argent est détenu par la plateforme",
+        "description": "Retire la ligne de caisse et enregistre le règlement dû par la plateforme, en une seule étape. Ne faire que la première laisse la journée bloquée pour la raison inverse.",
+        "confirmTitle": "Corriger cette commande en argent de plateforme ?",
+        "confirmMessage": "Le client a payé la plateforme, pas cette caisse : les informations de livraison de la commande indiquent un prépaiement en ligne, ou un encaissement par le livreur de la plateforme. Ceci annule la ligne espèces ou carte enregistrée dessus — avec un motif, pour que le bureau voie la correction — et enregistre le règlement à la place. Le comptage de caisse ne change pas, car cet argent n'y est jamais entré.",
+        "confirmCheckbox": "Je confirme qu'aucune espèce ni carte n'a été encaissée à cette caisse pour cette commande."
       }
     },
     "context": {
@@ -7770,6 +7791,21 @@
         "label": "Nouvelle tentative pour l’adresse par défaut",
         "explanation": "Ce conflit d’adresse connu permet une nouvelle tentative sûre. Le serveur doit accepter la modification avant de confirmer le rétablissement.",
         "verification": "Le problème reste visible jusqu’à ce qu’un nouveau contrôle confirme l’acceptation de l’adresse. En cas de nouvel échec, ouvrez les détails d’assistance."
+      },
+      "duplicateCustomerConflictResolve": {
+        "label": "Reprendre la fiche client du bureau",
+        "explanation": "Un client créé sur cette caisse fait double emploi avec un client que le bureau détient déjà. Le bureau ne fusionne pas les deux de lui-même — il demande de sélectionner explicitement la fiche existante — donc réessayer la même modification ne peut jamais aboutir.",
+        "verification": "Le problème disparaît dès que la file est vide et que le client s'ouvre avec les informations du bureau. Si le bureau n'a aucun client pour ce numéro, la modification reste à examiner."
+      },
+      "platformSettlementSettle": {
+        "label": "Régler à partir des informations de la plateforme",
+        "explanation": "Une commande prépayée, ou encaissée par le livreur de la plateforme, arrive par virement. Son enregistrement n'a jamais été écrit, la journée ne peut donc pas se clôturer. Rien n'est deviné : une commande dont les informations n'indiquent pas un règlement par la plateforme est refusée.",
+        "verification": "Le blocage disparaît dès que la commande affiche le règlement et que la clôture de service ne la cite plus. L'attente de caisse est inchangée."
+      },
+      "platformHeldDrawerRowRepair": {
+        "label": "Annuler la ligne de caisse et enregistrer le règlement",
+        "explanation": "De l'argent détenu par la plateforme a été enregistré comme recette de caisse : les mêmes euros comptent deux fois, une fois en virement, une fois en espèces. Les deux écritures vont ensemble : annuler seul laisse la commande sans aucun règlement et la journée toujours bloquée.",
+        "verification": "La commande quitte la clôture de service et affiche le règlement de la plateforme. Le total de caisse attendu est inchangé. Seules les commandes dont les informations indiquent un règlement par la plateforme sont éligibles."
       }
     },
     "issues": {
@@ -7892,6 +7928,11 @@
         "title": "L’adresse par défaut n’a pas pu être enregistrée",
         "summary": "Le serveur n’a pas confirmé le changement d’adresse par défaut. La modification reste enregistrée sur cette caisse.",
         "guidance": "Réessayez cette adresse une fois. Si elle est encore refusée, demandez de l’aide via les détails d’assistance."
+      },
+      "duplicateCustomerConflict": {
+        "title": "Ce client existe déjà au bureau",
+        "summary": "Un client enregistré sur cette caisse porte le même numéro de téléphone qu'un client déjà détenu par le bureau : la modification ne peut donc pas être envoyée. Elle bloque la synchronisation depuis son enregistrement.",
+        "guidance": "S'il s'agit de la même personne, liez cette caisse à la fiche existante. Réessayer ne sert à rien : le bureau répond chaque fois par le même refus."
       }
     }
   },

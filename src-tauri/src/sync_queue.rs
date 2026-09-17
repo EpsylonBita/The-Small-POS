@@ -5643,6 +5643,239 @@ pub fn mark_success(
     Ok(())
 }
 
+/// The office's own token for "this phone or email already belongs to a record
+/// I hold", as `server_conflict_reason` renders its 409 body.
+pub const SERVER_CONFLICT_DUPLICATE_MARKER: &str = "SERVER_CONFLICT_DUPLICATE";
+
+/// A customer INSERT the office rejected as a duplicate.
+///
+/// The office refuses to merge on the till's behalf, and that refusal is
+/// deliberate: a terminal must not be able to pull a stranger's record by
+/// guessing a phone number, and two people behind one number must never be
+/// fused by a background worker. So it answers `DUPLICATE` and tells the
+/// operator to "select it explicitly" — which no replay worker can do.
+///
+/// That is the whole of the 17/09/2026 incident. One such row sat in the queue
+/// for twenty hours with `attempts = 0` and no `next_retry_at`, holding the
+/// sync card red, while the recovery assistant offered only «retry» — an
+/// action that cannot, by construction, resolve a duplicate.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DuplicateCustomerConflict {
+    pub item_id: String,
+    pub record_id: String,
+    pub claim_generation: i64,
+    pub phone: Option<String>,
+    pub email: Option<String>,
+}
+
+/// What adopting the office's record actually changed on this terminal.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DuplicateCustomerAdoption {
+    pub remote_customer_id: String,
+    pub local_record_id: String,
+    pub relinked_orders: usize,
+    pub relinked_queue_rows: usize,
+}
+
+fn duplicate_conflict_payload_field(payload: &Value, keys: &[&str]) -> Option<String> {
+    string_field(payload, keys).filter(|value| !value.trim().is_empty())
+}
+
+/// Read one blocked row and decide whether it is a duplicate-customer conflict.
+///
+/// Returns `Ok(None)` for anything else, so the caller can tell "not this kind
+/// of problem" from "the lookup failed" without matching on an error string.
+pub fn find_duplicate_customer_conflict(
+    conn: &Connection,
+    item_id: &str,
+) -> Result<Option<DuplicateCustomerConflict>, String> {
+    let row = conn
+        .query_row(
+            "SELECT record_id, operation, status, data, error_message, claim_generation
+             FROM parity_sync_queue
+             WHERE id = ?1
+               AND table_name = 'customers'",
+            params![item_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| format!("sync_queue find_duplicate_customer_conflict: {error}"))?;
+
+    let Some((record_id, operation, status, data, error_message, claim_generation)) = row else {
+        return Ok(None);
+    };
+
+    if !operation.eq_ignore_ascii_case("INSERT") || status != "conflict" {
+        return Ok(None);
+    }
+    if !error_message
+        .as_deref()
+        .unwrap_or_default()
+        .contains(SERVER_CONFLICT_DUPLICATE_MARKER)
+    {
+        return Ok(None);
+    }
+
+    let payload =
+        serde_json::from_str::<Value>(&data).unwrap_or_else(|_| Value::Object(Map::new()));
+
+    Ok(Some(DuplicateCustomerConflict {
+        item_id: item_id.to_string(),
+        record_id,
+        claim_generation,
+        phone: duplicate_conflict_payload_field(
+            &payload,
+            &[
+                "phone",
+                "customerPhone",
+                "customer_phone",
+                "mobile",
+                "telephone",
+            ],
+        ),
+        email: duplicate_conflict_payload_field(
+            &payload,
+            &["email", "customerEmail", "customer_email"],
+        ),
+    }))
+}
+
+/// Adopt the office's existing customer in place of the local duplicate.
+///
+/// This is the operator's «select it explicitly», carried out on the record the
+/// office itself handed back: the cached copy becomes the office's, every local
+/// row that pointed at the local placeholder points at the office id instead,
+/// and the INSERT that can never succeed leaves the queue. Nothing is merged
+/// upward — no write of any kind reaches the office from here.
+pub fn adopt_remote_customer_for_conflict(
+    conn: &Connection,
+    conflict: &DuplicateCustomerConflict,
+    remote_customer: &Value,
+) -> Result<DuplicateCustomerAdoption, String> {
+    let remote_id = duplicate_conflict_payload_field(remote_customer, &["id", "customerId"])
+        .ok_or_else(|| "DUPLICATE_CONFLICT_REMOTE_CUSTOMER_HAS_NO_ID".to_string())?;
+    if remote_id == conflict.record_id {
+        return Err("DUPLICATE_CONFLICT_REMOTE_CUSTOMER_IS_THE_LOCAL_ROW".to_string());
+    }
+
+    retry_transaction(conn, |conn| {
+        // Re-read inside the transaction. The office lookup between finding
+        // this row and applying the adoption is a real window: a conflict can
+        // be requeued by `revalidate_parked_conflicts` while it is open, and a
+        // requeued row is the queue's to replay, not ours to retire.
+        let live = find_duplicate_customer_conflict(conn, conflict.item_id.as_str())?;
+        if live.as_ref() != Some(conflict) {
+            return Err("DUPLICATE_CONFLICT_ROW_MOVED_WHILE_RESOLVING".to_string());
+        }
+
+        let mut cache = read_local_json_array_setting(conn, "customer_cache_v1");
+        cache.retain(|entry| {
+            !string_field(entry, &["id", "customerId"])
+                .is_some_and(|candidate| candidate == conflict.record_id)
+        });
+        let normalized = remote_customer.clone();
+        if let Some(existing) = cache.iter_mut().find(|entry| {
+            string_field(entry, &["id", "customerId"])
+                .is_some_and(|candidate| candidate == remote_id)
+        }) {
+            *existing = normalized;
+        } else {
+            cache.push(normalized);
+        }
+        write_local_json_array_setting(conn, "customer_cache_v1", &cache)?;
+
+        let relinked_orders = conn
+            .execute(
+                "UPDATE orders SET customer_id = ?1 WHERE customer_id = ?2",
+                params![remote_id.as_str(), conflict.record_id.as_str()],
+            )
+            .map_err(|error| format!("sync_queue adopt_remote_customer relink orders: {error}"))?;
+
+        let relinked_queue_rows =
+            relink_queued_customer_children(conn, conflict.record_id.as_str(), remote_id.as_str())?;
+
+        mark_success(conn, conflict.item_id.as_str(), conflict.claim_generation)?;
+
+        Ok(DuplicateCustomerAdoption {
+            remote_customer_id: remote_id.clone(),
+            local_record_id: conflict.record_id.clone(),
+            relinked_orders,
+            relinked_queue_rows,
+        })
+    })
+}
+
+/// Queued rows that name the local customer in their payload — addresses above
+/// all — would replay against an id the office has never seen. Point them at
+/// the adopted record while they are still in the queue.
+fn relink_queued_customer_children(
+    conn: &Connection,
+    local_customer_id: &str,
+    remote_customer_id: &str,
+) -> Result<usize, String> {
+    let mut statement = conn
+        .prepare(
+            "SELECT id, data
+             FROM parity_sync_queue
+             WHERE table_name IN ('customer_addresses', 'customers')
+               AND data LIKE ?1",
+        )
+        .map_err(|error| format!("sync_queue relink_queued_customer_children prepare: {error}"))?;
+    let rows: Vec<(String, String)> = statement
+        .query_map(params![format!("%{local_customer_id}%")], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|error| format!("sync_queue relink_queued_customer_children query: {error}"))?
+        .filter_map(Result::ok)
+        .collect();
+    drop(statement);
+
+    let mut relinked = 0usize;
+    for (queue_id, data) in rows {
+        let Ok(mut payload) = serde_json::from_str::<Value>(&data) else {
+            continue;
+        };
+        let Some(object) = payload.as_object_mut() else {
+            continue;
+        };
+        let mut changed = false;
+        for key in ["customer_id", "customerId"] {
+            if object
+                .get(key)
+                .and_then(Value::as_str)
+                .is_some_and(|value| value == local_customer_id)
+            {
+                object.insert(
+                    key.to_string(),
+                    Value::String(remote_customer_id.to_string()),
+                );
+                changed = true;
+            }
+        }
+        if !changed {
+            continue;
+        }
+        conn.execute(
+            "UPDATE parity_sync_queue SET data = ?1 WHERE id = ?2",
+            params![payload.to_string(), queue_id.as_str()],
+        )
+        .map_err(|error| format!("sync_queue relink_queued_customer_children update: {error}"))?;
+        relinked += 1;
+    }
+
+    Ok(relinked)
+}
+
 /// Mark an item as failed with exponential backoff for retry.
 ///
 /// If max retries are exhausted, the item status changes to `failed`.
@@ -20996,6 +21229,208 @@ mod tests {
         );
         assert_eq!(after.0, "conflict");
         assert_eq!(after.1.as_deref(), Some("PAYMENT_VERSION_CONFLICT"));
+    }
+
+    // -----------------------------------------------------------------------
+    // 17/09/2026: the duplicate-customer conflict that retry cannot move.
+    //
+    // A shop on 1.4.114 sat with `conflicts: 1`, `attempts: 0` and
+    // `nextRetryAt: null` for twenty hours, the sync card red, because the
+    // office's answer to that INSERT — "a customer with this phone or email
+    // already exists; select it explicitly" — is one no replay can satisfy.
+    // -----------------------------------------------------------------------
+
+    fn seed_duplicate_customer_conflict(conn: &Connection, id: &str, record_id: &str) {
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                id, table_name, record_id, operation, data, organization_id,
+                created_at, attempts, status, error_message, conflict_strategy,
+                module_type
+             ) VALUES (
+                ?1, 'customers', ?2, 'INSERT',
+                '{\"name\":\"Πελάτης\",\"phone\":\"6948128474\"}', 'org-live',
+                datetime('now', '-20 hours'), 0, 'conflict',
+                'SERVER_CONFLICT_DUPLICATE: A customer with this phone or email already exists; select it explicitly',
+                'manual', 'customers'
+             )",
+            params![id, record_id],
+        )
+        .expect("seed duplicate customer conflict");
+    }
+
+    #[test]
+    fn a_duplicate_customer_conflict_is_recognised_with_the_phone_to_look_up() {
+        let conn = test_connection();
+        seed_duplicate_customer_conflict(&conn, "dup-1", "cust-local-1");
+
+        let conflict = find_duplicate_customer_conflict(&conn, "dup-1")
+            .expect("lookup")
+            .expect("the row is a duplicate-customer conflict");
+
+        assert_eq!(conflict.record_id, "cust-local-1");
+        assert_eq!(conflict.phone.as_deref(), Some("6948128474"));
+        assert_eq!(conflict.email, None);
+    }
+
+    /// Only the office's own duplicate answer qualifies. A conflict parked for
+    /// any other reason keeps whatever recovery its own family provides — this
+    /// action must never be offered as a catch-all for "blocked customer row".
+    #[test]
+    fn another_customer_conflict_is_not_treated_as_a_duplicate() {
+        let conn = test_connection();
+        seed_customer_conflict(
+            &conn,
+            "other",
+            r#"{"name":"Πελάτης","phone":"6948128474"}"#,
+            Some("CUSTOMER_PHONE_COUNTRY_UNRESOLVED"),
+        );
+
+        assert_eq!(
+            find_duplicate_customer_conflict(&conn, "other").expect("lookup"),
+            None,
+        );
+    }
+
+    /// A pending row is not a conflict, whatever its error text says.
+    #[test]
+    fn a_replayable_row_is_never_offered_the_duplicate_resolution() {
+        let conn = test_connection();
+        seed_duplicate_customer_conflict(&conn, "dup-2", "cust-local-2");
+        conn.execute(
+            "UPDATE parity_sync_queue SET status = 'pending' WHERE id = 'dup-2'",
+            [],
+        )
+        .expect("make the row replayable");
+
+        assert_eq!(
+            find_duplicate_customer_conflict(&conn, "dup-2").expect("lookup"),
+            None,
+        );
+    }
+
+    #[test]
+    fn adopting_the_office_customer_clears_the_row_and_relinks_the_local_ones() {
+        let conn = test_connection();
+        seed_duplicate_customer_conflict(&conn, "dup-3", "cust-local-3");
+        // A queued address that names the local customer, and an order already
+        // linked to it. Both would keep pointing at an id the office has never
+        // seen.
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                id, table_name, record_id, operation, data, organization_id,
+                created_at, attempts, status, conflict_strategy, module_type
+             ) VALUES (
+                'addr-3', 'customer_addresses', 'local-addr-3', 'INSERT',
+                '{\"customer_id\":\"cust-local-3\",\"street_address\":\"Οδός 1\"}',
+                'org-live', datetime('now'), 0, 'pending', 'server-wins', 'customers'
+             )",
+            [],
+        )
+        .expect("seed queued address");
+        conn.execute(
+            "INSERT INTO orders (id, customer_id, status, created_at)
+             VALUES ('ord-3', 'cust-local-3', 'completed', datetime('now'))",
+            [],
+        )
+        .expect("seed order");
+        crate::db::set_setting(
+            &conn,
+            "local",
+            "customer_cache_v1",
+            r#"[{"id":"cust-local-3","name":"Πελάτης","phone":"6948128474"}]"#,
+        )
+        .expect("seed customer cache");
+
+        let conflict = find_duplicate_customer_conflict(&conn, "dup-3")
+            .expect("lookup")
+            .expect("duplicate conflict");
+        let remote = serde_json::json!({
+            "id": "6f1a0f5c-0b8e-4d2c-9a1e-1f2b3c4d5e6f",
+            "name": "Πελάτης",
+            "phone": "6948128474",
+        });
+
+        let adoption =
+            adopt_remote_customer_for_conflict(&conn, &conflict, &remote).expect("adopt");
+
+        assert_eq!(
+            adoption.remote_customer_id,
+            "6f1a0f5c-0b8e-4d2c-9a1e-1f2b3c4d5e6f"
+        );
+        assert_eq!(adoption.relinked_orders, 1);
+        assert_eq!(adoption.relinked_queue_rows, 1);
+
+        // The dead INSERT is gone — this is what turns the sync card green.
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE id = 'dup-3'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(remaining, 0, "the INSERT that can never succeed must leave");
+
+        let status = get_status(&conn).expect("queue status");
+        assert_eq!(
+            status.conflicts, 0,
+            "no conflict is left to hold the card red"
+        );
+
+        // The address still queued now names the office's customer.
+        let address_payload: String = conn
+            .query_row(
+                "SELECT data FROM parity_sync_queue WHERE id = 'addr-3'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("address payload");
+        assert!(
+            address_payload.contains("6f1a0f5c-0b8e-4d2c-9a1e-1f2b3c4d5e6f"),
+            "the queued address must follow the customer: {address_payload}"
+        );
+        assert!(!address_payload.contains("cust-local-3"));
+
+        let order_customer: String = conn
+            .query_row(
+                "SELECT customer_id FROM orders WHERE id = 'ord-3'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("order customer");
+        assert_eq!(order_customer, "6f1a0f5c-0b8e-4d2c-9a1e-1f2b3c4d5e6f");
+
+        let cache = read_local_json_array_setting(&conn, "customer_cache_v1");
+        assert_eq!(
+            cache.len(),
+            1,
+            "the local duplicate must not survive beside it"
+        );
+        assert_eq!(
+            string_field(&cache[0], &["id"]).as_deref(),
+            Some("6f1a0f5c-0b8e-4d2c-9a1e-1f2b3c4d5e6f"),
+        );
+    }
+
+    /// An office answer without an id cannot be adopted, and must leave the
+    /// queue exactly as it was rather than dropping the row on a guess.
+    #[test]
+    fn an_office_answer_without_an_id_changes_nothing() {
+        let conn = test_connection();
+        seed_duplicate_customer_conflict(&conn, "dup-4", "cust-local-4");
+        let conflict = find_duplicate_customer_conflict(&conn, "dup-4")
+            .expect("lookup")
+            .expect("duplicate conflict");
+
+        let error = adopt_remote_customer_for_conflict(
+            &conn,
+            &conflict,
+            &serde_json::json!({ "name": "Πελάτης" }),
+        )
+        .expect_err("an id-less answer must be refused");
+        assert!(error.contains("REMOTE_CUSTOMER_HAS_NO_ID"), "{error}");
+
+        let (status, _) = row_state(&conn, "dup-4");
+        assert_eq!(status, "conflict", "the row must still be there for review");
     }
 
     fn seed_h8_sibling_test_row(conn: &Connection, id: &str, status: &str, attempts: i64) {

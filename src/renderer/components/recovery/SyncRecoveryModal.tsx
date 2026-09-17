@@ -1,4 +1,4 @@
-import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom';
 import { FolderOpen, RefreshCw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -9,6 +9,7 @@ import {
   type DiagnosticsSystemHealth,
   type RecoveryActionLogEntry,
   type SyncFinancialIntegrityResponse,
+  type UnsettledPaymentBlocker,
 } from '../../../lib';
 import { getSyncQueueBridge } from '../../services/SyncQueueBridge';
 import { RecoveryCenterPanel } from './RecoveryCenterPanel';
@@ -16,6 +17,11 @@ import {
   buildSyncRecoveryIssues,
   type BuildSyncRecoveryIssuesResult,
 } from './sync-recovery-issues';
+import {
+  getLocalizedPaymentBlockerFix,
+  getLocalizedPaymentBlockerReason,
+} from '../../../lib/payment-integrity';
+import { formatCurrency } from '../../utils/format';
 
 export interface SyncRecoveryOpenContext {
   systemHealth?: DiagnosticsSystemHealth | null;
@@ -155,6 +161,16 @@ export const SyncRecoveryModal: React.FC<SyncRecoveryModalProps> = ({
     [],
   );
 
+  // The checkout-blocker card renders the classifier's own sentence. Hand it
+  // the operator's language, or a Greek till reads its money in English.
+  const localizePaymentBlocker = useCallback(
+    (blocker: UnsettledPaymentBlocker) => ({
+      reason: getLocalizedPaymentBlockerReason(blocker, t, formatCurrency),
+      fix: getLocalizedPaymentBlockerFix(blocker, t, formatCurrency),
+    }),
+    [t],
+  );
+
   const issueResult: BuildSyncRecoveryIssuesResult = useMemo(
     () =>
       buildSyncRecoveryIssues({
@@ -163,8 +179,16 @@ export const SyncRecoveryModal: React.FC<SyncRecoveryModalProps> = ({
         parityItems,
         financialItems,
         integrity,
+        localizePaymentBlocker,
       }),
-    [financialItems, integrity, lastParitySync, parityItems, systemHealth],
+    [
+      financialItems,
+      integrity,
+      lastParitySync,
+      localizePaymentBlocker,
+      parityItems,
+      systemHealth,
+    ],
   );
 
   const rawParityDiagnostic =

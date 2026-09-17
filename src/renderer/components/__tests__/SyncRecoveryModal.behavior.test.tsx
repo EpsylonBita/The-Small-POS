@@ -15,7 +15,12 @@ const { bridge, queue, toast } = vi.hoisted(() => ({
 vi.mock('../../../lib', () => ({ getBridge: () => bridge }));
 vi.mock('../../services/SyncQueueBridge', () => ({ getSyncQueueBridge: () => queue }));
 vi.mock('react-hot-toast', () => ({ default: toast }));
-vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
+// The modal formats blocker money through `renderer/utils/format`, which
+// pulls in the real i18n bootstrap; the mock has to carry its plugin too.
+vi.mock('react-i18next', () => ({
+  useTranslation: () => ({ t: (key: string) => key }),
+  initReactI18next: { type: '3rdParty', init: () => {} },
+}));
 vi.mock('../../hooks/usePrivilegedActionConfirmation', () => ({ usePrivilegedActionConfirmation: () => ({
   runWithPrivilegedConfirmation: ({ action }: { action: () => Promise<unknown> }) => action(), confirmationModal: null,
 }) }));

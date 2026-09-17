@@ -139,6 +139,10 @@ const entryPoints = [
   path.join(testsRoot, 'renderer', 'z-report-headline-total-revenue.test.ts'),
   path.join(testsRoot, 'renderer', 'z-report-reconciliation-and-platforms.test.ts'),
   path.join(testsRoot, 'renderer', 'platform-held-payment-notice.test.ts'),
+  // 17/09/2026: a Greek till read its blocker in English, because the
+  // settlement-shape sentences live in the Rust classifier and no locale
+  // carried their reason codes.
+  path.join(testsRoot, 'renderer', 'payment-blocker-localization.test.ts'),
   path.join(testsRoot, 'renderer', 'z-report-day-orders-list.test.ts'),
   path.join(testsRoot, 'renderer', 'z-report-action-rail-scroll.test.ts'),
   path.join(testsRoot, 'renderer', 'display-pages-ui.test.ts'),

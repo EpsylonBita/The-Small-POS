@@ -1938,6 +1938,45 @@ pub(crate) fn platform_settlement_kind(
     None
 }
 
+/// The completed cash/card rows on an order the PLATFORM settles.
+///
+/// Eligibility is the order's own disposition, never a guess:
+/// [`platform_settlement_kind`] answers `Some` only for prepaid-online and
+/// platform-rider COD — the two cases where the store's own terminal cannot
+/// have taken the money, which is exactly why [`record_payment`] already
+/// REFUSES a fresh drawer tender on them. A completed cash/card row on such an
+/// order is therefore a mistake, or predates that refusal; either way it is the
+/// row that counts the same euros twice at close, once as bank settlement and
+/// once as drawer takings.
+///
+/// Returns an empty vector for every other order, so a caller cannot use this
+/// to reach money the store really did collect.
+pub(crate) fn platform_held_drawer_payment_ids(
+    conn: &Connection,
+    order_id: &str,
+) -> Result<Vec<String>, String> {
+    if platform_settlement_kind(conn, order_id).is_none() {
+        return Ok(Vec::new());
+    }
+
+    let mut statement = conn
+        .prepare(
+            "SELECT id
+             FROM order_payments
+             WHERE order_id = ?1
+               AND status = 'completed'
+               AND LOWER(TRIM(COALESCE(method, ''))) IN ('cash', 'card')
+             ORDER BY created_at ASC, id ASC",
+        )
+        .map_err(|e| format!("prepare platform-held drawer rows: {e}"))?;
+    let rows = statement
+        .query_map(params![order_id], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("query platform-held drawer rows: {e}"))?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("read platform-held drawer rows: {e}"))
+}
+
 /// THE-437: settle a platform-settled order automatically when it is marked
 /// delivered/completed. The operator must never be asked to "collect" money
 /// the platform is holding — prepaid orders and COD carried by the platform's

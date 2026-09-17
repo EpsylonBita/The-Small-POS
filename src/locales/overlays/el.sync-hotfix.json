@@ -26,7 +26,16 @@
       "partial_cash_payment": "Η παραγγελία {{orderNumber}} έχει υπόλοιπο σε μετρητά που δεν έχει εισπραχθεί.",
       "partial_card_payment": "Η παραγγελία {{orderNumber}} έχει υπόλοιπο σε κάρτα που δεν έχει εισπραχθεί.",
       "split_payment_incomplete": "Η παραγγελία {{orderNumber}} έχει μη ολοκληρωμένη μικτή πληρωμή.",
-      "unsupported_payment_method": "Η παραγγελία {{orderNumber}} χρησιμοποιεί τρόπο πληρωμής που πρέπει να εισπραχθεί χειροκίνητα."
+      "unsupported_payment_method": "Η παραγγελία {{orderNumber}} χρησιμοποιεί τρόπο πληρωμής που πρέπει να εισπραχθεί χειροκίνητα.",
+      "no_persisted_payment": "Η παραγγελία {{orderNumber}} ολοκληρώθηκε χωρίς αποθηκευμένη πληρωμή με μετρητά ή κάρτα.",
+      "partial_payment_remaining": "Η παραγγελία {{orderNumber}} έχει ακόμη ανείσπρακτα {{outstandingAmount}} από {{totalAmount}}.",
+      "duplicate_payment": "Η ίδια συναλλαγή είναι καταγεγραμμένη πάνω από μία φορά στην {{orderNumber}}: {{settledAmount}} σε παραγγελία {{totalAmount}}.",
+      "overpaid_order": "Οι πληρωμές στην {{orderNumber}} ξεπερνούν την παραγγελία κατά {{overpaidAmount}}: καταγράφηκαν {{netSettledAmount}} σε παραγγελία {{ceilingAmount}}.",
+      "platform_settlement_missing": "Την {{orderNumber}} την εξοφλεί η πλατφόρμα, αλλά δεν υπάρχει καταγεγραμμένη εξόφληση πλατφόρμας {{totalAmount}}.",
+      "platform_settlement_mismatch": "Τα χρήματα της {{orderNumber}} είναι καταγεγραμμένα στη λάθος πλευρά: δεν μπορούν να τα κρατούν και η πλατφόρμα και το ταμείο.",
+      "platform_settlement_mismatch__platform_holds": "Την {{orderNumber}} την εξοφλεί η πλατφόρμα, αλλά {{drawerAmount}} είναι καταγεγραμμένα ως μετρητά ή κάρτα στο ταμείο.",
+      "platform_settlement_mismatch__store_collects": "Η {{orderNumber}} είναι παραγγελία του καταστήματος, αλλά {{platformSettledAmount}} είναι περασμένα ως χρήματα εξοφλημένα από την πλατφόρμα.",
+      "platform_settlement_mismatch__store_collects_platform_order": "Την {{orderNumber}} την παρέδωσε δικός μας διανομέας, αλλά {{platformSettledAmount}} είναι περασμένα ως χρήματα εξοφλημένα από την πλατφόρμα."
     },
     "fixCodes": {
       "missing_cash_payment": "Κατάγραψε ή επιβεβαίωσε τη λείπουσα πληρωμή με μετρητά.",
@@ -35,7 +44,16 @@
       "partial_cash_payment": "Κατάγραψε το υπόλοιπο ποσό με μετρητά για να συνεχίσεις.",
       "partial_card_payment": "Κατάγραψε το υπόλοιπο ποσό με κάρτα για να συνεχίσεις.",
       "split_payment_incomplete": "Ολοκλήρωσε όλα τα μέρη της μικτής πληρωμής πριν συνεχίσεις.",
-      "unsupported_payment_method": "Έλεγξε την παραγγελία και εισέπραξε την πληρωμή χειροκίνητα."
+      "unsupported_payment_method": "Έλεγξε την παραγγελία και εισέπραξε την πληρωμή χειροκίνητα.",
+      "no_persisted_payment": "Κατάγραψε την πληρωμή που πραγματικά εισπράχθηκε για αυτή την παραγγελία.",
+      "partial_payment_remaining": "Εισέπραξε τα υπόλοιπα {{outstandingAmount}} για να συνεχίσεις.",
+      "duplicate_payment": "Ακύρωσε τη διπλή εγγραφή πληρωμής, κρατώντας μία πληρωμή ανά πραγματική συναλλαγή.",
+      "overpaid_order": "Επίστρεψε ή ακύρωσε την επιπλέον πληρωμή, ώστε το καθολικό να συμφωνεί με το σύνολο της παραγγελίας.",
+      "platform_settlement_missing": "Ξανατρέξε την εξόφληση πλατφόρμας για αυτή την παραγγελία, ώστε τα χρήματα να καταγραφούν ως έσοδο πλατφόρμας.",
+      "platform_settlement_mismatch": "Ακύρωσε την εγγραφή στη λάθος πλευρά, ώστε τα χρήματα να καταγραφούν εκεί που πραγματικά είναι.",
+      "platform_settlement_mismatch__platform_holds": "Ακύρωσε την εγγραφή μετρητών ή κάρτας: τα προπληρωμένα και τα χρήματα του διανομέα της πλατφόρμας δεν μπαίνουν ποτέ στο συρτάρι.",
+      "platform_settlement_mismatch__store_collects": "Ακύρωσε την εγγραφή εξόφλησης πλατφόρμας και κατάγραψε τα μετρητά ή την κάρτα που πραγματικά εισέπραξε το κατάστημα.",
+      "platform_settlement_mismatch__store_collects_platform_order": "Ακύρωσε την εγγραφή εξόφλησης πλατφόρμας και κατάγραψε τα μετρητά ή την κάρτα που πραγματικά έφερε πίσω ο διανομέας."
     }
   },
   "sync": {

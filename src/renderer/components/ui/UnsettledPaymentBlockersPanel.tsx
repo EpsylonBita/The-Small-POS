@@ -141,7 +141,7 @@ export function UnsettledPaymentBlockersPanel({
                     })}
                   </div>
                   <div className="mt-1 text-sm font-medium text-slate-100">
-                    {getLocalizedPaymentBlockerReason(blocker, t)}
+                    {getLocalizedPaymentBlockerReason(blocker, t, formatCurrency)}
                   </div>
                 </div>
 
@@ -200,7 +200,7 @@ export function UnsettledPaymentBlockersPanel({
                       defaultValue: "Fix",
                     })}
                   </span>
-                  {getLocalizedPaymentBlockerFix(blocker, t)}
+                  {getLocalizedPaymentBlockerFix(blocker, t, formatCurrency)}
                 </div>
               </div>
 

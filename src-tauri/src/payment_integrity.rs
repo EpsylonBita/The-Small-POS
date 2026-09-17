@@ -1,6 +1,7 @@
 use rusqlite::{params, Connection};
 use serde::Serialize;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 
 use crate::business_day;
 use crate::money::{serialize_cents_as_f64_dp2, Cents};
@@ -53,6 +54,27 @@ pub struct UnsettledPaymentBlocker {
     /// ledger holds MORE than the order is worth (overpayment / duplicate).
     /// Lets the reconciliation panel show the money without re-deriving it.
     pub difference_cents: i64,
+    /// The money the reason sentence names, in cents, keyed by the placeholder
+    /// the localized sentence uses.
+    ///
+    /// Additive wire field (17/09/2026). The sentences below are written in
+    /// English and interpolate their own figures, so a Greek till showed a
+    /// Greek operator «The platform settles this order, but EUR 6.50 is
+    /// recorded as cash/card in the till.» The renderer now builds the
+    /// sentence from `reason_code` in the operator's language, and needs the
+    /// figures separately to do it. `reason_text` stays as the fallback for a
+    /// locale that has no entry for a code.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub reason_amounts: BTreeMap<String, i64>,
+    /// Which sentence a reason code with more than one shape is telling.
+    ///
+    /// `platform_settlement_mismatch` covers two opposite breaks — platform
+    /// money booked as drawer takings, and store money booked as platform
+    /// revenue — and one translated sentence cannot honestly say both. The
+    /// wire code stays as it is, because the admin and the Z gate key on it;
+    /// this names the arm so the renderer can pick the right sentence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason_variant: Option<String>,
 }
 
 impl UnsettledPaymentBlocker {
@@ -191,7 +213,31 @@ fn build_blocker_with_severity(
         suggested_fix,
         severity: severity.as_str().to_string(),
         difference_cents: (row.total_amount - row.settled_amount).as_i64(),
+        reason_amounts: BTreeMap::new(),
+        reason_variant: None,
     }
+}
+
+/// Attach the money a reason sentence names, so the renderer can write that
+/// sentence in the operator's language instead of shipping ours.
+fn with_reason_amounts(
+    mut blocker: UnsettledPaymentBlocker,
+    amounts: impl IntoIterator<Item = (&'static str, Cents)>,
+) -> UnsettledPaymentBlocker {
+    blocker.reason_amounts = amounts
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value.as_i64().max(0)))
+        .collect();
+    blocker
+}
+
+/// Name which arm of a two-shaped reason code this finding is.
+fn with_reason_variant(
+    mut blocker: UnsettledPaymentBlocker,
+    variant: &'static str,
+) -> UnsettledPaymentBlocker {
+    blocker.reason_variant = Some(variant.to_string());
+    blocker
 }
 
 /// Findings about the SHAPE of an order's settlement rather than its amount:
@@ -236,16 +282,23 @@ fn classify_settlement_shape(row: &RawBlockerRow) -> Option<UnsettledPaymentBloc
         } else {
             "Refund or void the excess payment so the ledger matches the order total.".to_string()
         };
-        return Some(build_blocker(
-            row,
-            "overpaid_order",
-            format!(
-                "Payments exceed the order by {}: {} recorded against an order of {}.",
-                format_money(overpaid),
-                format_money(row.net_settled_amount),
-                format_money(ceiling)
+        return Some(with_reason_amounts(
+            build_blocker(
+                row,
+                "overpaid_order",
+                format!(
+                    "Payments exceed the order by {}: {} recorded against an order of {}.",
+                    format_money(overpaid),
+                    format_money(row.net_settled_amount),
+                    format_money(ceiling)
+                ),
+                suggested_fix,
             ),
-            suggested_fix,
+            [
+                ("overpaidAmount", overpaid),
+                ("netSettledAmount", row.net_settled_amount),
+                ("ceilingAmount", ceiling),
+            ],
         ));
     }
 
@@ -255,16 +308,19 @@ fn classify_settlement_shape(row: &RawBlockerRow) -> Option<UnsettledPaymentBloc
         // means the same euros are counted twice: once as bank settlement,
         // once as drawer takings.
         if row.drawer_tender_amount > Cents::ZERO {
-            return Some(build_blocker(
-                row,
-                "platform_settlement_mismatch",
-                format!(
-                    "The platform settles this order, but {} is recorded as cash/card in the till.",
-                    format_money(row.drawer_tender_amount)
+            return Some(with_reason_variant(with_reason_amounts(
+                build_blocker(
+                    row,
+                    "platform_settlement_mismatch",
+                    format!(
+                        "The platform settles this order, but {} is recorded as cash/card in the till.",
+                        format_money(row.drawer_tender_amount)
+                    ),
+                    "Void the cash/card row: prepaid and platform-rider COD money never enters the drawer."
+                        .to_string(),
                 ),
-                "Void the cash/card row: prepaid and platform-rider COD money never enters the drawer."
-                    .to_string(),
-            ));
+                [("drawerAmount", row.drawer_tender_amount)],
+            ), "platform_holds"));
         }
         // Platform-settled, and no settlement row at all: the
         // `platform_settlement:*` write never happened (or was swept). This
@@ -312,12 +368,22 @@ fn classify_settlement_shape(row: &RawBlockerRow) -> Option<UnsettledPaymentBloc
                 format_money(row.platform_settled_amount)
             )
         };
-        return Some(build_blocker(
-            row,
-            "platform_settlement_mismatch",
-            reason_text,
-            "Void the platform settlement row and record the cash or card the store actually collected."
-                .to_string(),
+        return Some(with_reason_variant(
+            with_reason_amounts(
+                build_blocker(
+                    row,
+                    "platform_settlement_mismatch",
+                    reason_text,
+                    "Void the platform settlement row and record the cash or card the store actually collected."
+                        .to_string(),
+                ),
+                [("platformSettledAmount", row.platform_settled_amount)],
+            ),
+            if row.is_external_platform {
+                "store_collects_platform_order"
+            } else {
+                "store_collects"
+            },
         ));
     }
 
@@ -1586,5 +1652,234 @@ mod tests {
         assert_eq!(blockers[0].severity, "blocking");
         assert!(blockers[0].is_blocking());
         assert_eq!(blockers[0].difference_cents, 500);
+    }
+
+    /// 17/09/2026: a Greek till showed its operator the sentences below in
+    /// English, because they are written here and had no locale entry. The
+    /// renderer now writes them, and needs the money and the arm separately to
+    /// do it. If either stops being emitted, the translated sentence loses its
+    /// figure or says the wrong thing — so both are pinned.
+    #[test]
+    fn a_mismatch_carries_the_money_and_the_arm_the_sentence_needs() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        seed_order(
+            &conn,
+            "ord-efood-locale",
+            650,
+            "paid",
+            Some("efood"),
+            Some(r#"{"food_delivery":{"prepaid":true,"payment_method":"online"}}"#),
+        );
+        seed_payment(
+            &conn,
+            "pay-efood-locale",
+            "ord-efood-locale",
+            "card",
+            650,
+            None,
+        );
+
+        let blockers = load_order_payment_blockers(&conn, "ord-efood-locale").expect("blockers");
+        assert_eq!(blockers[0].reason_code, "platform_settlement_mismatch");
+        assert_eq!(
+            blockers[0].reason_variant.as_deref(),
+            Some("platform_holds"),
+            "the platform-holds arm must be named, or Greek says the opposite"
+        );
+        assert_eq!(blockers[0].reason_amounts.get("drawerAmount"), Some(&650));
+        // The English sentence stays as the fallback for an untranslated code.
+        assert!(
+            blockers[0].reason_text.contains("6.50"),
+            "{:?}",
+            blockers[0]
+        );
+    }
+
+    #[test]
+    fn the_reverse_arm_is_named_separately_and_carries_its_own_money() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        seed_order(
+            &conn,
+            "ord-ours-locale",
+            650,
+            "paid",
+            Some("efood"),
+            Some(
+                r#"{"food_delivery":{"payment_method":"cash","delivery_provider":"vendor_delivery"}}"#,
+            ),
+        );
+        seed_payment(
+            &conn,
+            "pay-ours-locale",
+            "ord-ours-locale",
+            "other",
+            650,
+            Some("platform_settlement:cod:ord-ours-locale"),
+        );
+
+        let blockers = load_order_payment_blockers(&conn, "ord-ours-locale").expect("blockers");
+        assert_eq!(blockers[0].reason_code, "platform_settlement_mismatch");
+        assert_eq!(
+            blockers[0].reason_variant.as_deref(),
+            Some("store_collects_platform_order"),
+        );
+        assert_eq!(
+            blockers[0].reason_amounts.get("platformSettledAmount"),
+            Some(&650),
+        );
+    }
+
+    /// The live 17/09/2026 order, end to end: the wrongly recorded drawer row
+    /// is voided, and the settlement the platform owes is recorded from the
+    /// order's own disposition. The Z must be clean afterwards — not holding a
+    /// second blocker, which is where the printed advice «void the cash/card
+    /// row» alone would have left the operator.
+    #[test]
+    fn voiding_the_drawer_row_and_settling_leaves_the_order_clean() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        seed_order(
+            &conn,
+            "ord-efood-live",
+            650,
+            "paid",
+            Some("efood"),
+            Some(
+                r#"{"food_delivery":{"prepaid":true,"payment_method":"online","delivery_provider":"platform_delivery"}}"#,
+            ),
+        );
+        seed_payment(
+            &conn,
+            "pay-manual-card",
+            "ord-efood-live",
+            "card",
+            650,
+            None,
+        );
+        assert_eq!(
+            order_reason(&conn, "ord-efood-live").as_deref(),
+            Some("platform_settlement_mismatch"),
+        );
+
+        // Void the manual card row: the money never entered the drawer.
+        conn.execute(
+            "UPDATE order_payments SET status = 'voided' WHERE id = 'pay-manual-card'",
+            [],
+        )
+        .expect("void the drawer row");
+
+        // Voiding alone is not enough — this is the trap.
+        assert_eq!(
+            order_reason(&conn, "ord-efood-live").as_deref(),
+            Some("platform_settlement_missing"),
+            "a void on its own swaps one blocker for another"
+        );
+
+        assert!(
+            crate::payments::auto_settle_platform_order(&conn, "ord-efood-live")
+                .expect("settle from disposition"),
+            "a prepaid platform-delivery order must be eligible"
+        );
+
+        assert_eq!(
+            order_reason(&conn, "ord-efood-live"),
+            None,
+            "the Z must be clean once the settlement is recorded"
+        );
+    }
+
+    /// The eligibility rule behind the one-action correction. It must reach the
+    /// wrongly recorded till row on platform-held money, and nothing else.
+    #[test]
+    fn only_platform_held_money_exposes_its_till_rows_to_the_repair() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        // (a) Prepaid online, platform delivery — the live 17/09/2026 shape.
+        seed_order(
+            &conn,
+            "ord-prepaid",
+            650,
+            "paid",
+            Some("efood"),
+            Some(
+                r#"{"food_delivery":{"prepaid":true,"payment_method":"online","delivery_provider":"platform_delivery"}}"#,
+            ),
+        );
+        seed_payment(&conn, "pay-prepaid", "ord-prepaid", "card", 650, None);
+        assert_eq!(
+            crate::payments::platform_held_drawer_payment_ids(&conn, "ord-prepaid")
+                .expect("eligibility"),
+            vec!["pay-prepaid".to_string()],
+        );
+
+        // (b) A platform order OUR driver carried: that cash is genuinely ours.
+        seed_order(
+            &conn,
+            "ord-our-driver",
+            650,
+            "paid",
+            Some("efood"),
+            Some(
+                r#"{"food_delivery":{"payment_method":"cash","delivery_provider":"vendor_delivery"}}"#,
+            ),
+        );
+        seed_payment(&conn, "pay-our-driver", "ord-our-driver", "cash", 650, None);
+        assert!(
+            crate::payments::platform_held_drawer_payment_ids(&conn, "ord-our-driver")
+                .expect("eligibility")
+                .is_empty(),
+            "money our own driver brought back must be unreachable"
+        );
+
+        // (c) A plain store order.
+        seed_order(&conn, "ord-store", 650, "paid", Some("pos"), None);
+        seed_payment(&conn, "pay-store", "ord-store", "cash", 650, None);
+        assert!(
+            crate::payments::platform_held_drawer_payment_ids(&conn, "ord-store")
+                .expect("eligibility")
+                .is_empty(),
+            "a store order's takings must be unreachable"
+        );
+
+        // (d) The settlement row itself is never a till row.
+        seed_order(
+            &conn,
+            "ord-settled",
+            650,
+            "paid",
+            Some("efood"),
+            Some(r#"{"food_delivery":{"prepaid":true,"payment_method":"online"}}"#),
+        );
+        seed_payment(
+            &conn,
+            "pay-settled",
+            "ord-settled",
+            "other",
+            650,
+            Some("platform_settlement:online:ord-settled"),
+        );
+        assert!(
+            crate::payments::platform_held_drawer_payment_ids(&conn, "ord-settled")
+                .expect("eligibility")
+                .is_empty(),
+            "the settlement row must never be voided by this repair"
+        );
+    }
+
+    /// An order that is simply short carries no extra figures: its sentence is
+    /// written from the total and settled amounts the blocker already has.
+    #[test]
+    fn a_plain_shortfall_carries_no_reason_amounts_and_no_arm() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        seed_order(&conn, "ord-plain", 2000, "paid", Some("pos"), None);
+        seed_payment(&conn, "pay-plain", "ord-plain", "cash", 1500, None);
+
+        let blockers = load_order_payment_blockers(&conn, "ord-plain").expect("blockers");
+        assert!(blockers[0].reason_amounts.is_empty());
+        assert_eq!(blockers[0].reason_variant, None);
     }
 }

@@ -271,6 +271,25 @@ export interface UnsettledPaymentBlocker {
    * than the order is worth (overpayment / duplicate settlement).
    */
   differenceCents?: number;
+  /**
+   * The money `reasonText` names, in cents, keyed by the placeholder the
+   * localized sentence uses — `drawerAmount`, `platformSettledAmount`,
+   * `overpaidAmount`, `netSettledAmount`, `ceilingAmount`.
+   *
+   * Absent on ≤1.4.114, and absent for reason codes whose sentence only needs
+   * the order's own total and settled figures.
+   */
+  reasonAmounts?: Record<string, number>;
+  /**
+   * Which sentence a reason code with more than one shape is telling.
+   * `platform_settlement_mismatch` covers two opposite breaks — platform money
+   * booked as drawer takings (`platform_holds`) and store money booked as
+   * platform revenue (`store_collects`, `store_collects_platform_order`) — and
+   * one translated sentence cannot honestly say both.
+   *
+   * Absent on ≤1.4.114 and for single-shaped reason codes.
+   */
+  reasonVariant?: string;
 }
 
 /**

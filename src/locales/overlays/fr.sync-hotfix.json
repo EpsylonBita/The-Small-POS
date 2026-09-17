@@ -26,7 +26,16 @@
       "partial_cash_payment": "La commande {{orderNumber}} a encore un reste en espèces à encaisser.",
       "partial_card_payment": "La commande {{orderNumber}} a encore un reste par carte à encaisser.",
       "split_payment_incomplete": "Le paiement partagé de la commande {{orderNumber}} n'est pas terminé.",
-      "unsupported_payment_method": "La commande {{orderNumber}} utilise un mode de paiement à encaisser manuellement."
+      "unsupported_payment_method": "La commande {{orderNumber}} utilise un mode de paiement à encaisser manuellement.",
+      "no_persisted_payment": "La commande {{orderNumber}} a été terminée sans paiement en espèces ou par carte enregistré.",
+      "partial_payment_remaining": "Il reste {{outstandingAmount}} sur {{totalAmount}} à encaisser pour la commande {{orderNumber}}.",
+      "duplicate_payment": "La même transaction est enregistrée plusieurs fois sur {{orderNumber}} : {{settledAmount}} pour une commande de {{totalAmount}}.",
+      "overpaid_order": "Les paiements de {{orderNumber}} dépassent la commande de {{overpaidAmount}} : {{netSettledAmount}} enregistrés pour une commande de {{ceilingAmount}}.",
+      "platform_settlement_missing": "La plateforme règle {{orderNumber}}, mais aucun règlement de plateforme de {{totalAmount}} n'est enregistré.",
+      "platform_settlement_mismatch": "L'argent de {{orderNumber}} est enregistré du mauvais côté : la plateforme et la caisse ne peuvent pas le détenir toutes les deux.",
+      "platform_settlement_mismatch__platform_holds": "La plateforme règle {{orderNumber}}, mais {{drawerAmount}} sont enregistrés en espèces ou par carte en caisse.",
+      "platform_settlement_mismatch__store_collects": "{{orderNumber}} est une commande du magasin, mais {{platformSettledAmount}} sont comptabilisés comme argent réglé par la plateforme.",
+      "platform_settlement_mismatch__store_collects_platform_order": "{{orderNumber}} a été livrée par notre propre livreur, mais {{platformSettledAmount}} sont comptabilisés comme argent réglé par la plateforme."
     },
     "fixCodes": {
       "missing_cash_payment": "Enregistrez ou confirmez le paiement en espèces manquant.",
@@ -35,7 +44,16 @@
       "partial_cash_payment": "Enregistrez le montant restant en espèces pour continuer.",
       "partial_card_payment": "Enregistrez le montant restant par carte pour continuer.",
       "split_payment_incomplete": "Terminez toutes les parties du paiement partagé avant de continuer.",
-      "unsupported_payment_method": "Vérifiez la commande et encaissez le paiement manuellement."
+      "unsupported_payment_method": "Vérifiez la commande et encaissez le paiement manuellement.",
+      "no_persisted_payment": "Enregistrez le paiement réellement encaissé pour cette commande.",
+      "partial_payment_remaining": "Encaissez les {{outstandingAmount}} restants pour continuer.",
+      "duplicate_payment": "Annulez la ligne de paiement en double, en gardant un paiement par transaction réelle.",
+      "overpaid_order": "Remboursez ou annulez le paiement excédentaire pour que le journal corresponde au total de la commande.",
+      "platform_settlement_missing": "Relancez le règlement de plateforme pour cette commande afin que l'argent soit enregistré comme recette de plateforme.",
+      "platform_settlement_mismatch": "Annulez la ligne du mauvais côté pour que l'argent soit enregistré là où il se trouve réellement.",
+      "platform_settlement_mismatch__platform_holds": "Annulez la ligne espèces ou carte : l'argent prépayé et celui du livreur de la plateforme n'entre jamais dans le tiroir.",
+      "platform_settlement_mismatch__store_collects": "Annulez la ligne de règlement de plateforme et enregistrez les espèces ou la carte que le magasin a réellement encaissées.",
+      "platform_settlement_mismatch__store_collects_platform_order": "Annulez la ligne de règlement de plateforme et enregistrez les espèces ou la carte que le livreur a réellement rapportées."
     }
   },
   "sync": {

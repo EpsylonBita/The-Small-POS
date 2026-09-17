@@ -2313,6 +2313,47 @@ pub async fn customer_resolve_conflict(
     Ok(serde_json::json!({ "success": false, "error": "Conflict not found" }))
 }
 
+/// Resolve a customer INSERT the office rejected as a duplicate, the only way
+/// the office allows: by selecting its existing record explicitly.
+///
+/// The office answers `DUPLICATE` and refuses to merge — deliberately, so no
+/// till can pull a stranger's record by guessing a phone number. A replay
+/// worker cannot «select it explicitly», so the row sits in the queue forever
+/// and the sync card stays red. This is that selection, made by an operator
+/// pressing a button: the same phone lookup the till runs whenever a customer
+/// calls, followed by adopting whatever the office hands back.
+///
+/// Read-only against the office. Every write it makes is local.
+pub(crate) async fn resolve_duplicate_customer_conflict(
+    db: &db::DbState,
+    sync_state: &crate::sync::SyncState,
+    cancellation: &tokio_util::sync::CancellationToken,
+    item_id: &str,
+) -> Result<sync_queue::DuplicateCustomerAdoption, String> {
+    let item_id = item_id.to_string();
+    let conflict = crate::sync::guarded_renderer_local_mutation(db, sync_state, cancellation, {
+        let item_id = item_id.clone();
+        move |conn| sync_queue::find_duplicate_customer_conflict(conn, item_id.as_str())
+    })
+    .await?
+    .ok_or_else(|| "DUPLICATE_CONFLICT_ITEM_NOT_A_CUSTOMER_DUPLICATE".to_string())?;
+
+    let phone = conflict
+        .phone
+        .clone()
+        .ok_or_else(|| "DUPLICATE_CONFLICT_QUEUED_CUSTOMER_HAS_NO_PHONE".to_string())?;
+
+    let remote_customer = sync_customer_fetch_remote_by_phone(db, &phone)
+        .await?
+        .ok_or_else(|| "DUPLICATE_CONFLICT_SERVER_CUSTOMER_NOT_FOUND".to_string())?;
+    let normalized = normalize_customer_for_cache(remote_customer);
+
+    crate::sync::guarded_renderer_local_mutation(db, sync_state, cancellation, move |conn| {
+        sync_queue::adopt_remote_customer_for_conflict(conn, &conflict, &normalized)
+    })
+    .await
+}
+
 #[cfg(test)]
 mod dto_tests {
     use super::*;

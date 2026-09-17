@@ -7588,6 +7588,27 @@
       "retryParityItem": {
         "label": "Retry this update"
       },
+      "repairPlatformSettlementMismatch": {
+        "label": "Correct it: the platform holds this money",
+        "description": "Removes the till row and records the settlement the platform owes, in one step. Doing only the first leaves the day blocked for the opposite reason.",
+        "confirmTitle": "Correct this order to platform money?",
+        "confirmMessage": "The customer paid the platform, not this till: the order's own delivery details say prepaid online, or collected by the platform's rider. This voids the cash or card row recorded against it — with a reason, so the office sees the correction — and records the settlement instead. The drawer count does not change, because that money was never in the drawer.",
+        "confirmCheckbox": "I confirm no cash or card was taken at this till for this order."
+      },
+      "settlePlatformOrder": {
+        "label": "Record the platform settlement",
+        "description": "The platform is holding this money. Record it as platform revenue — the payment screen cannot take it, and no cash or card is involved.",
+        "confirmTitle": "Record the platform settlement for this order?",
+        "confirmMessage": "This writes the settlement the platform owes for this order: the amount is the order's outstanding balance and the kind comes from the order's own delivery details. It is booked outside the drawer, so the cash count does not change, and it cannot be written twice.",
+        "confirmCheckbox": "I confirm the platform is settling this order and no money was taken at the counter."
+      },
+      "resolveDuplicateCustomerConflict": {
+        "label": "Link to the existing customer",
+        "description": "The office already holds this phone number. Adopt its customer record here so the blocked change can leave the queue.",
+        "confirmTitle": "Link this terminal to the existing customer?",
+        "confirmMessage": "The office rejected this customer because its phone number already belongs to a record it holds. This reads that record, points this terminal's orders and queued changes at it, and removes the change that can never be accepted. Nothing is sent to the office.",
+        "confirmCheckbox": "I confirm this is the same customer as the one the office already has."
+      },
       "retryCustomerAddressDefault": {
         "label": "Retry saving this address",
         "description": "Retry the saved change for this address. Confirmation still depends on the server."
@@ -7770,6 +7791,21 @@
         "label": "Default address retry",
         "explanation": "This known address conflict can be retried safely. The server must accept the change before recovery is confirmed.",
         "verification": "The issue stays visible until a fresh check confirms the saved address was accepted. If it fails again, open support details."
+      },
+      "duplicateCustomerConflictResolve": {
+        "label": "Adopt the office's customer record",
+        "explanation": "A customer created on this terminal duplicates one the office already has. The office will not merge the two on its own — it asks for the existing record to be selected explicitly — so retrying the same change can never succeed.",
+        "verification": "The issue clears once the queue is empty and the customer opens with the office's details. If the office has no customer for this number, the change stays for review."
+      },
+      "platformSettlementSettle": {
+        "label": "Settle from the platform's own disposition",
+        "explanation": "A prepaid order, or one the platform's own rider collected, arrives by bank settlement. The record of it was never written, so the day cannot close. Nothing is guessed: an order whose details do not say the platform settles it is refused.",
+        "verification": "The blocker clears once the order shows the settlement and the shift checkout no longer names it. The drawer expectation is unchanged."
+      },
+      "platformHeldDrawerRowRepair": {
+        "label": "Void the till row and record the settlement",
+        "explanation": "Money the platform holds was recorded as till takings, so the same euros are counted twice — once as bank settlement, once as drawer cash. Both writes belong together: voiding alone leaves the order with no settlement at all and the day still blocked.",
+        "verification": "The order drops off the shift checkout and shows the platform settlement. The expected drawer total is unchanged. Only orders whose own details say the platform settles them are eligible."
       }
     },
     "issues": {
@@ -7882,6 +7918,11 @@
         "title": "Dev attention required",
         "summary": "Sync backlog is visible, but there is no guided fix mapped for this exact failure yet.",
         "guidance": "Contact Dev and include the diagnostics bundle so the next occurrence can be mapped to a guided fix."
+      },
+      "duplicateCustomerConflict": {
+        "title": "This customer already exists at the office",
+        "summary": "A customer saved on this terminal has the same phone number as one the office already holds, so the change cannot be sent. It has been blocking the sync since it was saved.",
+        "guidance": "If it is the same person, link this terminal to the existing record. Retrying will not help: the office answers with the same rejection every time."
       },
       "customerAddressDefaultConflict": {
         "title": "Default address could not be saved",

@@ -124,6 +124,72 @@ function collectCandidateRecords(value: unknown): Record<string, unknown>[] {
   return candidates;
 }
 
+function normalizeReasonAmounts(
+  value: unknown,
+): Record<string, number> | undefined {
+  const record = asRecord(value);
+  if (!record) {
+    return undefined;
+  }
+
+  const amounts: Record<string, number> = {};
+  for (const [key, raw] of Object.entries(record)) {
+    const cents =
+      typeof raw === "number"
+        ? raw
+        : typeof raw === "string" && raw.trim().length > 0
+          ? Number(raw)
+          : Number.NaN;
+    if (Number.isFinite(cents)) {
+      amounts[key] = cents;
+    }
+  }
+
+  return Object.keys(amounts).length > 0 ? amounts : undefined;
+}
+
+/**
+ * Last-resort money formatting for callers with no renderer formatter to hand.
+ * Components pass `formatCurrency`, which follows the operator's locale.
+ */
+function defaultFormatMoney(amount: number): string {
+  const safe = Number.isFinite(amount) ? amount : 0;
+  return `\u20AC${safe.toFixed(2)}`;
+}
+
+/**
+ * The figures a localized blocker sentence may interpolate.
+ *
+ * The desktop classifier writes its sentences in English and puts the money
+ * inside them, which is how a Greek till came to show a Greek operator «The
+ * platform settles this order, but EUR 6.50 is recorded as cash/card in the
+ * till.» (live, 17/09/2026). The operator-facing sentence is built here from
+ * `reasonCode` instead, and these are the values it can name. `reasonText`
+ * remains the fallback for a code the locale has not translated.
+ */
+function blockerInterpolation(
+  blocker: UnsettledPaymentBlocker,
+  t: TFunction,
+  formatMoney: (amount: number) => string,
+): Record<string, string> {
+  const total = Number(blocker.totalAmount) || 0;
+  const settled = Number(blocker.settledAmount) || 0;
+  const values: Record<string, string> = {
+    orderNumber: blocker.orderNumber,
+    paymentMethod: getLocalizedPaymentMethod(blocker.paymentMethod, t),
+    paymentStatus: getLocalizedPaymentStatus(blocker.paymentStatus, t),
+    totalAmount: formatMoney(total),
+    settledAmount: formatMoney(settled),
+    outstandingAmount: formatMoney(Math.max(total - settled, 0)),
+  };
+
+  for (const [key, cents] of Object.entries(blocker.reasonAmounts ?? {})) {
+    values[key] = formatMoney(cents / 100);
+  }
+
+  return values;
+}
+
 function normalizeBlockers(value: unknown): UnsettledPaymentBlocker[] {
   const parsed = parseJsonString(value);
   if (!Array.isArray(parsed)) {
@@ -156,9 +222,19 @@ function normalizeBlockers(value: unknown): UnsettledPaymentBlocker[] {
         return null;
       }
 
+      const reasonAmounts = normalizeReasonAmounts(
+        record.reasonAmounts ?? record.reason_amounts,
+      );
+      const reasonVariant = firstString(record, [
+        "reasonVariant",
+        "reason_variant",
+      ]);
+
       return {
         orderId,
         orderNumber,
+        ...(reasonAmounts ? { reasonAmounts } : {}),
+        ...(reasonVariant ? { reasonVariant } : {}),
         totalAmount:
           firstNumber(record, ["totalAmount", "total_amount"]) ?? 0,
         settledAmount:
@@ -318,27 +394,41 @@ export function getLocalizedPaymentStatus(
   return t(paymentStatusKey(status), { defaultValue: status || "pending" });
 }
 
+/**
+ * The keys a blocker sentence may live under, most specific first: the variant
+ * of a two-shaped reason code, then the code itself. `reasonText` /
+ * `suggestedFix` — the desktop's English — is the last resort, so a code no
+ * locale has translated still says something true.
+ */
+function blockerSentenceKeys(
+  namespace: "reasonCodes" | "fixCodes",
+  blocker: UnsettledPaymentBlocker,
+): string[] {
+  const base = `paymentIntegrity.${namespace}.${blocker.reasonCode}`;
+  return blocker.reasonVariant
+    ? [`${base}__${blocker.reasonVariant}`, base]
+    : [base];
+}
+
 export function getLocalizedPaymentBlockerReason(
   blocker: UnsettledPaymentBlocker,
   t: TFunction,
+  formatMoney: (amount: number) => string = defaultFormatMoney,
 ): string {
-  return t(`paymentIntegrity.reasonCodes.${blocker.reasonCode}`, {
+  return t(blockerSentenceKeys("reasonCodes", blocker), {
     defaultValue: blocker.reasonText,
-    orderNumber: blocker.orderNumber,
-    paymentMethod: getLocalizedPaymentMethod(blocker.paymentMethod, t),
-    paymentStatus: getLocalizedPaymentStatus(blocker.paymentStatus, t),
+    ...blockerInterpolation(blocker, t, formatMoney),
   });
 }
 
 export function getLocalizedPaymentBlockerFix(
   blocker: UnsettledPaymentBlocker,
   t: TFunction,
+  formatMoney: (amount: number) => string = defaultFormatMoney,
 ): string {
-  return t(`paymentIntegrity.fixCodes.${blocker.reasonCode}`, {
+  return t(blockerSentenceKeys("fixCodes", blocker), {
     defaultValue: blocker.suggestedFix,
-    orderNumber: blocker.orderNumber,
-    paymentMethod: getLocalizedPaymentMethod(blocker.paymentMethod, t),
-    paymentStatus: getLocalizedPaymentStatus(blocker.paymentStatus, t),
+    ...blockerInterpolation(blocker, t, formatMoney),
   });
 }
 

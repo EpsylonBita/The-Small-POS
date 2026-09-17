@@ -7673,6 +7673,27 @@
       "retryCustomerAddressDefault": {
         "label": "Adresse erneut speichern",
         "description": "Die gespeicherte Änderung dieser Adresse erneut versuchen. Die Bestätigung hängt weiterhin vom Server ab."
+      },
+      "resolveDuplicateCustomerConflict": {
+        "label": "Mit vorhandener Kundin oder vorhandenem Kunden verknüpfen",
+        "description": "Das Büro führt diese Telefonnummer bereits. Übernehmen Sie den dortigen Kundensatz hier, damit die blockierte Änderung die Warteschlange verlassen kann.",
+        "confirmTitle": "Diese Kasse mit dem vorhandenen Kundensatz verknüpfen?",
+        "confirmMessage": "Das Büro hat diesen Kundensatz abgelehnt, weil die Telefonnummer bereits zu einem dort geführten Satz gehört. Dieser Satz wird gelesen, die Bestellungen und wartenden Änderungen dieser Kasse zeigen danach darauf, und die Änderung, die nie angenommen werden kann, wird entfernt. An das Büro wird nichts gesendet.",
+        "confirmCheckbox": "Ich bestätige, dass es sich um dieselbe Person handelt, die das Büro bereits führt."
+      },
+      "settlePlatformOrder": {
+        "label": "Plattformabrechnung erfassen",
+        "description": "Dieses Geld hält die Plattform. Erfassen Sie es als Plattformerlös — die Zahlungsmaske kann es nicht annehmen, und es sind weder Bargeld noch Karte im Spiel.",
+        "confirmTitle": "Plattformabrechnung für diese Bestellung erfassen?",
+        "confirmMessage": "Damit wird die Abrechnung geschrieben, die die Plattform für diese Bestellung schuldet: der Betrag ist der offene Rest der Bestellung, die Art ergibt sich aus ihren eigenen Lieferangaben. Sie wird außerhalb der Kasse verbucht, die Bargeldzählung ändert sich also nicht, und sie kann nicht doppelt geschrieben werden.",
+        "confirmCheckbox": "Ich bestätige, dass die Plattform diese Bestellung abrechnet und am Tresen kein Geld angenommen wurde."
+      },
+      "repairPlatformSettlementMismatch": {
+        "label": "Korrigieren: dieses Geld hält die Plattform",
+        "description": "Entfernt die Kassenzeile und erfasst die Abrechnung, die die Plattform schuldet, in einem Schritt. Nur der erste Teil lässt den Tag aus dem umgekehrten Grund blockiert.",
+        "confirmTitle": "Diese Bestellung auf Plattformgeld korrigieren?",
+        "confirmMessage": "Die Kundin oder der Kunde hat die Plattform bezahlt, nicht diese Kasse: die eigenen Lieferangaben der Bestellung nennen Vorauszahlung online oder Kassierung durch den Fahrer der Plattform. Dies storniert die dagegen erfasste Bar- oder Kartenzeile — mit Begründung, damit das Büro die Korrektur sieht — und erfasst stattdessen die Abrechnung. Die Kassenzählung ändert sich nicht, denn dieses Geld war nie in der Kasse.",
+        "confirmCheckbox": "Ich bestätige, dass an dieser Kasse für diese Bestellung weder Bargeld noch Karte angenommen wurde."
       }
     },
     "context": {
@@ -7770,6 +7791,21 @@
         "label": "Standardadresse erneut versuchen",
         "explanation": "Dieser bekannte Adresskonflikt erlaubt einen sicheren erneuten Versuch. Erst wenn der Server die Änderung annimmt, ist die Behebung bestätigt.",
         "verification": "Das Problem bleibt sichtbar, bis ein neuer Check die Annahme der Adresse bestätigt. Bei erneutem Fehler die Supportdetails öffnen."
+      },
+      "duplicateCustomerConflictResolve": {
+        "label": "Kundensatz des Büros übernehmen",
+        "explanation": "Ein an dieser Kasse angelegter Kundensatz doppelt einen, den das Büro bereits führt. Das Büro führt beide nicht von sich aus zusammen — es verlangt, den vorhandenen Satz ausdrücklich auszuwählen — deshalb kann ein erneuter Versuch derselben Änderung nie gelingen.",
+        "verification": "Der Hinweis verschwindet, sobald die Warteschlange leer ist und der Kundensatz mit den Daten des Büros öffnet. Führt das Büro keinen Satz zu dieser Nummer, bleibt die Änderung zur Prüfung stehen."
+      },
+      "platformSettlementSettle": {
+        "label": "Aus den Angaben der Plattform abrechnen",
+        "explanation": "Eine vorausbezahlte Bestellung, oder eine, die der Fahrer der Plattform kassiert hat, kommt als Banküberweisung. Ihre Erfassung fehlte, deshalb lässt sich der Tag nicht abschließen. Nichts wird geraten: eine Bestellung, deren Angaben keine Plattformabrechnung nennen, wird abgelehnt.",
+        "verification": "Der Hinweis verschwindet, sobald die Bestellung die Abrechnung zeigt und der Schichtabschluss sie nicht mehr nennt. Die Kassenerwartung bleibt unverändert."
+      },
+      "platformHeldDrawerRowRepair": {
+        "label": "Kassenzeile stornieren und Abrechnung erfassen",
+        "explanation": "Geld, das die Plattform hält, wurde als Kasseneinnahme erfasst; dieselben Euro zählen damit doppelt — einmal als Bankabrechnung, einmal als Bargeld. Beide Schritte gehören zusammen: ein reines Stornieren lässt die Bestellung ganz ohne Abrechnung und den Tag weiterhin blockiert.",
+        "verification": "Die Bestellung verschwindet aus dem Schichtabschluss und zeigt die Plattformabrechnung. Die erwartete Kassensumme bleibt gleich. Nur Bestellungen, deren eigene Angaben eine Plattformabrechnung nennen, sind zulässig."
       }
     },
     "issues": {
@@ -7892,6 +7928,11 @@
         "title": "Standardadresse konnte nicht gespeichert werden",
         "summary": "Der Server konnte die Änderung der Standardadresse nicht bestätigen. Die gespeicherte Änderung bleibt auf dieser Kasse.",
         "guidance": "Diese Adresse einmal erneut versuchen. Bei erneuter Ablehnung über die Supportdetails Hilfe anfordern."
+      },
+      "duplicateCustomerConflict": {
+        "title": "Diesen Kundensatz führt das Büro bereits",
+        "summary": "Ein an dieser Kasse gespeicherter Kundensatz hat dieselbe Telefonnummer wie einer, den das Büro bereits führt; die Änderung lässt sich deshalb nicht senden. Sie blockiert die Synchronisierung seit dem Speichern.",
+        "guidance": "Handelt es sich um dieselbe Person, verknüpfen Sie diese Kasse mit dem vorhandenen Satz. Ein erneuter Versuch hilft nicht: Das Büro antwortet jedes Mal mit derselben Ablehnung."
       }
     }
   },

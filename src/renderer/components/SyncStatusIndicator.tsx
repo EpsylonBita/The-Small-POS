@@ -36,7 +36,11 @@ import { cn } from '../utils/cn';
 import { liquidGlassModalTone } from '../styles/designSystem';
 import { useBackgroundAccessibilityIsolation } from './ui/pos-glass-components';
 import { buildHealthSupportContext } from '../support';
-import { getLocalizedSyncBlockerReason } from '../../lib/payment-integrity';
+import {
+  getLocalizedPaymentBlockerFix,
+  getLocalizedPaymentBlockerReason,
+  getLocalizedSyncBlockerReason,
+} from '../../lib/payment-integrity';
 import {
   getBridge,
   offEvent,
@@ -49,6 +53,7 @@ import {
   type RemoteIncidentReportResponse,
   type RecoveryActionLogEntry,
   type SyncFinancialIntegrityResponse,
+  type UnsettledPaymentBlocker,
 } from '../../lib';
 import {
   PARITY_QUEUE_STATUS_EVENT,
@@ -1614,6 +1619,15 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     };
   }, [isShiftActive, simpleHealthSummary, t]);
   const syncBlockerDetails = systemHealth?.syncBlockerDetails ?? [];
+  // The checkout-blocker card renders the classifier's own sentence. Hand it
+  // the operator's language, or a Greek till reads its money in English.
+  const localizePaymentBlocker = useCallback(
+    (blocker: UnsettledPaymentBlocker) => ({
+      reason: getLocalizedPaymentBlockerReason(blocker, t, formatCurrency),
+      fix: getLocalizedPaymentBlockerFix(blocker, t, formatCurrency),
+    }),
+    [t],
+  );
   const sharedRecoveryIssues = useMemo(
     () =>
       buildSyncRecoveryIssues({
@@ -1622,9 +1636,11 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
         financialItems: recoveryFinancialItems,
         integrity: recoveryIntegrity,
         parityItems: recoveryParityItems,
+        localizePaymentBlocker,
       }).issues,
     [
       effectiveLastParitySync,
+      localizePaymentBlocker,
       recoveryFinancialItems,
       recoveryIntegrity,
       recoveryParityItems,

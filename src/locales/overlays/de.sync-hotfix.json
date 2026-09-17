@@ -26,7 +26,16 @@
       "partial_cash_payment": "Für Bestellung {{orderNumber}} steht noch ein Bar-Restbetrag aus.",
       "partial_card_payment": "Für Bestellung {{orderNumber}} steht noch ein Karten-Restbetrag aus.",
       "split_payment_incomplete": "Für Bestellung {{orderNumber}} ist die geteilte Zahlung noch nicht vollständig.",
-      "unsupported_payment_method": "Bestellung {{orderNumber}} verwendet eine Zahlungsart, die manuell eingezogen werden muss."
+      "unsupported_payment_method": "Bestellung {{orderNumber}} verwendet eine Zahlungsart, die manuell eingezogen werden muss.",
+      "no_persisted_payment": "Bestellung {{orderNumber}} wurde ohne gespeicherte Bar- oder Kartenzahlung abgeschlossen.",
+      "partial_payment_remaining": "Bei Bestellung {{orderNumber}} sind noch {{outstandingAmount}} von {{totalAmount}} offen.",
+      "duplicate_payment": "Dieselbe Transaktion ist bei {{orderNumber}} mehrfach erfasst: {{settledAmount}} bei einer Bestellung über {{totalAmount}}.",
+      "overpaid_order": "Die Zahlungen zu {{orderNumber}} übersteigen die Bestellung um {{overpaidAmount}}: erfasst sind {{netSettledAmount}} bei einer Bestellung über {{ceilingAmount}}.",
+      "platform_settlement_missing": "{{orderNumber}} rechnet die Plattform ab, es ist aber keine Plattformabrechnung über {{totalAmount}} erfasst.",
+      "platform_settlement_mismatch": "Das Geld zu {{orderNumber}} ist auf der falschen Seite erfasst: Plattform und Kasse können es nicht beide halten.",
+      "platform_settlement_mismatch__platform_holds": "{{orderNumber}} rechnet die Plattform ab, doch {{drawerAmount}} sind als Bar- oder Kartenzahlung in der Kasse erfasst.",
+      "platform_settlement_mismatch__store_collects": "{{orderNumber}} ist eine Bestellung des Ladens, doch {{platformSettledAmount}} sind als von der Plattform abgerechnetes Geld verbucht.",
+      "platform_settlement_mismatch__store_collects_platform_order": "{{orderNumber}} hat unser eigener Fahrer ausgeliefert, doch {{platformSettledAmount}} sind als von der Plattform abgerechnetes Geld verbucht."
     },
     "fixCodes": {
       "missing_cash_payment": "Die fehlende Barzahlung erfassen oder bestätigen.",
@@ -35,7 +44,16 @@
       "partial_cash_payment": "Den restlichen Barzahlungsbetrag erfassen, um fortzufahren.",
       "partial_card_payment": "Den restlichen Kartenzahlungsbetrag erfassen, um fortzufahren.",
       "split_payment_incomplete": "Alle Teile der geteilten Zahlung abschließen, bevor Sie fortfahren.",
-      "unsupported_payment_method": "Bestellung prüfen und die Zahlung manuell kassieren."
+      "unsupported_payment_method": "Bestellung prüfen und die Zahlung manuell kassieren.",
+      "no_persisted_payment": "Erfassen Sie die Zahlung, die für diese Bestellung tatsächlich angenommen wurde.",
+      "partial_payment_remaining": "Kassieren Sie die verbleibenden {{outstandingAmount}}, um fortzufahren.",
+      "duplicate_payment": "Stornieren Sie die doppelte Zahlungszeile; pro echter Transaktion bleibt eine Zahlung.",
+      "overpaid_order": "Erstatten oder stornieren Sie die überschüssige Zahlung, damit das Journal zum Bestellwert passt.",
+      "platform_settlement_missing": "Führen Sie die Plattformabrechnung für diese Bestellung erneut aus, damit das Geld als Plattformerlös erfasst wird.",
+      "platform_settlement_mismatch": "Stornieren Sie die Zeile auf der falschen Seite, damit das Geld dort erfasst ist, wo es wirklich liegt.",
+      "platform_settlement_mismatch__platform_holds": "Stornieren Sie die Bar- oder Kartenzeile: vorausbezahltes Geld und Geld des Plattformfahrers gelangt nie in die Kasse.",
+      "platform_settlement_mismatch__store_collects": "Stornieren Sie die Plattformabrechnungszeile und erfassen Sie die Bar- oder Kartenzahlung, die der Laden tatsächlich angenommen hat.",
+      "platform_settlement_mismatch__store_collects_platform_order": "Stornieren Sie die Plattformabrechnungszeile und erfassen Sie die Bar- oder Kartenzahlung, die der Fahrer tatsächlich zurückgebracht hat."
     }
   },
   "sync": {

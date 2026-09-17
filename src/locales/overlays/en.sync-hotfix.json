@@ -26,7 +26,16 @@
       "partial_cash_payment": "Order {{orderNumber}} still has unpaid cash remaining.",
       "partial_card_payment": "Order {{orderNumber}} still has unpaid card remaining.",
       "split_payment_incomplete": "Order {{orderNumber}} still has an incomplete split payment.",
-      "unsupported_payment_method": "Order {{orderNumber}} uses a payment method that must be collected manually."
+      "unsupported_payment_method": "Order {{orderNumber}} uses a payment method that must be collected manually.",
+      "no_persisted_payment": "Order {{orderNumber}} was completed without a saved cash or card payment.",
+      "partial_payment_remaining": "Order {{orderNumber}} still has {{outstandingAmount}} of {{totalAmount}} uncollected.",
+      "duplicate_payment": "The same transaction is recorded more than once on {{orderNumber}}: {{settledAmount}} against an order of {{totalAmount}}.",
+      "overpaid_order": "Payments on {{orderNumber}} exceed the order by {{overpaidAmount}}: {{netSettledAmount}} recorded against an order of {{ceilingAmount}}.",
+      "platform_settlement_missing": "The platform settles {{orderNumber}}, but no platform settlement of {{totalAmount}} is recorded.",
+      "platform_settlement_mismatch": "The money on {{orderNumber}} is recorded on the wrong side: the platform and the till cannot both hold it.",
+      "platform_settlement_mismatch__platform_holds": "The platform settles {{orderNumber}}, but {{drawerAmount}} is recorded as cash or card in the till.",
+      "platform_settlement_mismatch__store_collects": "{{orderNumber}} is a store order, but {{platformSettledAmount}} is booked as platform-settled money.",
+      "platform_settlement_mismatch__store_collects_platform_order": "{{orderNumber}} was delivered by our own driver, but {{platformSettledAmount}} is booked as platform-settled money."
     },
     "fixCodes": {
       "missing_cash_payment": "Record or confirm the missing cash payment.",
@@ -35,7 +44,16 @@
       "partial_cash_payment": "Record the remaining cash payment to continue.",
       "partial_card_payment": "Record the remaining card payment to continue.",
       "split_payment_incomplete": "Complete all split-payment portions before continuing.",
-      "unsupported_payment_method": "Review the order and collect the payment manually."
+      "unsupported_payment_method": "Review the order and collect the payment manually.",
+      "no_persisted_payment": "Record the payment that was actually taken for this order.",
+      "partial_payment_remaining": "Collect the remaining {{outstandingAmount}} to continue.",
+      "duplicate_payment": "Void the duplicate payment row, keeping one payment per real transaction.",
+      "overpaid_order": "Refund or void the excess payment so the ledger matches the order total.",
+      "platform_settlement_missing": "Re-run the platform settlement for this order so the money is recorded as platform revenue.",
+      "platform_settlement_mismatch": "Void the row on the wrong side so the money is recorded where it really is.",
+      "platform_settlement_mismatch__platform_holds": "Void the cash or card row: prepaid and platform-rider money never enters the drawer.",
+      "platform_settlement_mismatch__store_collects": "Void the platform settlement row and record the cash or card the store actually took.",
+      "platform_settlement_mismatch__store_collects_platform_order": "Void the platform settlement row and record the cash or card the driver actually brought back."
     }
   },
   "sync": {

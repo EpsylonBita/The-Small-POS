@@ -11,12 +11,27 @@ import type {
 } from '../../../lib';
 import type { SyncQueueItem } from '../../../../../shared/pos/sync-queue-types';
 
+/**
+ * Turns one payment blocker into the operator's own language.
+ *
+ * The checkout-blocker card renders `{{reasonText}}` / `{{suggestedFix}}`, and
+ * those are the desktop classifier's English. Live, 17/09/2026: a Greek shift
+ * checkout read «The platform settles this order, but EUR 6.50 is recorded as
+ * cash/card in the till.» A UI caller passes this so the card says it in Greek;
+ * without it the English sentence is still shown, which is what non-UI callers
+ * and the tests want.
+ */
+export type PaymentBlockerLocalizer = (
+  blocker: UnsettledPaymentBlocker,
+) => { reason: string; fix: string };
+
 interface BuildSyncRecoveryIssuesInput {
   systemHealth: DiagnosticsSystemHealth | null;
   lastParitySync?: DiagnosticsLastParitySync | null;
   parityItems?: SyncQueueItem[];
   financialItems?: SyncFinancialQueueItem[];
   integrity?: SyncFinancialIntegrityResponse | null;
+  localizePaymentBlocker?: PaymentBlockerLocalizer;
 }
 
 export interface BuildSyncRecoveryIssuesResult {
@@ -97,6 +112,33 @@ const RECOVERY_RECIPES = {
     labelKey: 'recovery.recipes.legacyFinancialBulkClear.label',
     explanationKey: 'recovery.recipes.legacyFinancialBulkClear.explanation',
     verificationKey: 'recovery.recipes.legacyFinancialBulkClear.verification',
+    requiresSnapshot: true,
+  },
+  platformHeldDrawerRowRepair: {
+    recipeId: 'platform-settlement-mismatch.void-drawer-and-settle',
+    version: 1,
+    actionId: 'repairPlatformSettlementMismatch',
+    labelKey: 'recovery.recipes.platformHeldDrawerRowRepair.label',
+    explanationKey: 'recovery.recipes.platformHeldDrawerRowRepair.explanation',
+    verificationKey: 'recovery.recipes.platformHeldDrawerRowRepair.verification',
+    requiresSnapshot: true,
+  },
+  platformSettlementSettle: {
+    recipeId: 'platform-settlement-missing.settle-from-disposition',
+    version: 1,
+    actionId: 'settlePlatformOrder',
+    labelKey: 'recovery.recipes.platformSettlementSettle.label',
+    explanationKey: 'recovery.recipes.platformSettlementSettle.explanation',
+    verificationKey: 'recovery.recipes.platformSettlementSettle.verification',
+    requiresSnapshot: true,
+  },
+  duplicateCustomerConflictResolve: {
+    recipeId: 'duplicate-customer-conflict.adopt-server-record',
+    version: 1,
+    actionId: 'resolveDuplicateCustomerConflict',
+    labelKey: 'recovery.recipes.duplicateCustomerConflictResolve.label',
+    explanationKey: 'recovery.recipes.duplicateCustomerConflictResolve.explanation',
+    verificationKey: 'recovery.recipes.duplicateCustomerConflictResolve.verification',
     requiresSnapshot: true,
   },
   customerAddressDefaultConflictRepair: {
@@ -192,6 +234,72 @@ const createRetryCustomerAddressDefaultAction = (): RecoveryActionDescriptor =>
       requiresSnapshot: true,
     }),
     RECOVERY_RECIPES.customerAddressDefaultConflictRepair,
+  );
+
+const createRepairPlatformHeldDrawerRowAction = (
+  blocker: UnsettledPaymentBlocker,
+): RecoveryActionDescriptor =>
+  withRecipe(
+    createAction(
+      'repairPlatformSettlementMismatch',
+      'recovery.actions.repairPlatformSettlementMismatch.label',
+      {
+        descriptionKey: 'recovery.actions.repairPlatformSettlementMismatch.description',
+        recommended: true,
+        requiresOnline: false,
+        requiresSnapshot: true,
+        safetyLevel: 'destructive_local',
+        confirmationRequired: true,
+        confirmTitleKey: 'recovery.actions.repairPlatformSettlementMismatch.confirmTitle',
+        confirmMessageKey: 'recovery.actions.repairPlatformSettlementMismatch.confirmMessage',
+        confirmCheckboxKey: 'recovery.actions.repairPlatformSettlementMismatch.confirmCheckbox',
+        routeTarget: {
+          screen: 'orderPayment',
+          orderId: blocker.orderId,
+          orderNumber: blocker.orderNumber,
+        },
+      },
+    ),
+    RECOVERY_RECIPES.platformHeldDrawerRowRepair,
+  );
+
+const createSettlePlatformOrderAction = (
+  blocker: UnsettledPaymentBlocker,
+): RecoveryActionDescriptor =>
+  withRecipe(
+    createAction('settlePlatformOrder', 'recovery.actions.settlePlatformOrder.label', {
+      descriptionKey: 'recovery.actions.settlePlatformOrder.description',
+      recommended: true,
+      requiresOnline: false,
+      requiresSnapshot: true,
+      safetyLevel: 'destructive_local',
+      confirmationRequired: true,
+      confirmTitleKey: 'recovery.actions.settlePlatformOrder.confirmTitle',
+      confirmMessageKey: 'recovery.actions.settlePlatformOrder.confirmMessage',
+      confirmCheckboxKey: 'recovery.actions.settlePlatformOrder.confirmCheckbox',
+      routeTarget: { screen: 'orderPayment', orderId: blocker.orderId, orderNumber: blocker.orderNumber },
+    }),
+    RECOVERY_RECIPES.platformSettlementSettle,
+  );
+
+const createResolveDuplicateCustomerAction = (): RecoveryActionDescriptor =>
+  withRecipe(
+    createAction(
+      'resolveDuplicateCustomerConflict',
+      'recovery.actions.resolveDuplicateCustomerConflict.label',
+      {
+        descriptionKey: 'recovery.actions.resolveDuplicateCustomerConflict.description',
+        recommended: true,
+        requiresOnline: true,
+        requiresSnapshot: true,
+        safetyLevel: 'destructive_local',
+        confirmationRequired: true,
+        confirmTitleKey: 'recovery.actions.resolveDuplicateCustomerConflict.confirmTitle',
+        confirmMessageKey: 'recovery.actions.resolveDuplicateCustomerConflict.confirmMessage',
+        confirmCheckboxKey: 'recovery.actions.resolveDuplicateCustomerConflict.confirmCheckbox',
+      },
+    ),
+    RECOVERY_RECIPES.duplicateCustomerConflictResolve,
   );
 
 const createRetryCatalogAvailabilityAction = (): RecoveryActionDescriptor =>
@@ -564,6 +672,7 @@ const preferredCheckoutBlockerMethod = (
 
 const buildCheckoutPaymentBlockerIssues = (
   systemHealth: DiagnosticsSystemHealth,
+  localize?: PaymentBlockerLocalizer,
 ): RecoveryIssue[] => {
   const blockerSnapshot = systemHealth.checkoutPaymentBlockers;
   const blockers = blockerSnapshot?.details ?? [];
@@ -577,6 +686,20 @@ const buildCheckoutPaymentBlockerIssues = (
       Number(blocker.totalAmount || 0) - Number(blocker.settledAmount || 0),
       0,
     );
+    const localized = localize?.(blocker);
+    // `platform_settlement_missing` means the money is with the platform and
+    // the canonical settlement row was never written. Sending the operator to
+    // the payment screen is a dead end — that screen REFUSES cash and card on
+    // a platform-held order, by design. The money is not collected there; it
+    // is recorded from the platform's own disposition.
+    const settlementMissing = blocker.reasonCode === 'platform_settlement_missing';
+    // The other half of the same break: the platform holds the money AND a
+    // till row was recorded against it. Voiding that row alone lands on
+    // `platform_settlement_missing` above, so the correction is one action:
+    // void, then record the settlement the platform owes.
+    const platformHoldsButTillWasCharged =
+      blocker.reasonCode === 'platform_settlement_mismatch' &&
+      blocker.reasonVariant === 'platform_holds';
     const issue = {
       id: `checkout-payment-blocker-${blocker.orderId}`,
       code: blocker.reasonCode,
@@ -587,15 +710,25 @@ const buildCheckoutPaymentBlockerIssues = (
       titleKey: 'recovery.issues.checkoutPaymentBlocker.title',
       summaryKey: 'recovery.issues.checkoutPaymentBlocker.summary',
       guidanceKey: 'recovery.issues.checkoutPaymentBlocker.guidance',
-      actions: [
-        createOpenOrderPaymentFixAction(blocker, preferredMethod),
-        createContactDevAction(),
-      ],
+      actions: settlementMissing
+        ? [
+            createSettlePlatformOrderAction(blocker),
+            createContactDevAction(),
+          ]
+        : platformHoldsButTillWasCharged
+          ? [
+              createRepairPlatformHeldDrawerRowAction(blocker),
+              createContactDevAction(),
+            ]
+          : [
+              createOpenOrderPaymentFixAction(blocker, preferredMethod),
+              createContactDevAction(),
+            ],
       params: {
         orderNumber: blocker.orderNumber,
         reasonCode: blocker.reasonCode,
-        reasonText: blocker.reasonText,
-        suggestedFix: blocker.suggestedFix,
+        reasonText: localized?.reason ?? blocker.reasonText,
+        suggestedFix: localized?.fix ?? blocker.suggestedFix,
         paymentMethod: blocker.paymentMethod,
         paymentStatus: blocker.paymentStatus,
         totalAmount: Number(blocker.totalAmount || 0).toFixed(2),
@@ -607,7 +740,14 @@ const buildCheckoutPaymentBlockerIssues = (
       orderId: blocker.orderId,
       orderNumber: blocker.orderNumber,
     } satisfies RecoveryIssue;
-    return withKnownSolution(issue, RECOVERY_RECIPES.checkoutPaymentOpenPayment);
+    return withKnownSolution(
+      issue,
+      settlementMissing
+        ? RECOVERY_RECIPES.platformSettlementSettle
+        : platformHoldsButTillWasCharged
+          ? RECOVERY_RECIPES.platformHeldDrawerRowRepair
+          : RECOVERY_RECIPES.checkoutPaymentOpenPayment,
+    );
   });
 };
 
@@ -1230,6 +1370,61 @@ const buildCustomerAddressDefaultConflictIssues = (
   return { suppressedRows, issues: [issue] };
 };
 
+const SERVER_CONFLICT_DUPLICATE_MARKER = 'SERVER_CONFLICT_DUPLICATE';
+
+/// A customer INSERT the office rejected because it already holds the phone.
+///
+/// The office refuses to merge on the till's behalf — a terminal must not be
+/// able to pull a stranger's record by guessing a number — so it answers
+/// `DUPLICATE` and tells the operator to select the existing record
+/// explicitly. A replay worker cannot do that, which is why «retry» kept
+/// answering «Η ενέργεια απέτυχε» on a live shop for twenty hours while the
+/// sync card stayed red.
+const isDuplicateCustomerConflict = (item: SyncQueueItem): boolean =>
+  item.tableName === 'customers' &&
+  item.operation === 'INSERT' &&
+  item.status === 'conflict' &&
+  (item.errorMessage ?? '').includes(SERVER_CONFLICT_DUPLICATE_MARKER);
+
+const buildDuplicateCustomerConflictIssues = (
+  parityItems: SyncQueueItem[],
+): { issues: RecoveryIssue[]; suppressedRows: Set<string> } => {
+  const rows = parityItems.filter(isDuplicateCustomerConflict);
+  if (rows.length === 0) {
+    return { issues: [], suppressedRows: new Set() };
+  }
+
+  const suppressedRows = new Set(rows.map((item) => `${item.tableName}:${item.recordId}`));
+  const sample = rows[0];
+
+  const issue = withKnownSolution(
+    {
+      id: `duplicate-customer-conflict-${sample.id}`,
+      code: 'duplicate_customer_conflict',
+      severity: 'error',
+      status: 'blocking',
+      entityType: 'customer',
+      entityId: sample.recordId,
+      titleKey: 'recovery.issues.duplicateCustomerConflict.title',
+      summaryKey: 'recovery.issues.duplicateCustomerConflict.summary',
+      guidanceKey: 'recovery.issues.duplicateCustomerConflict.guidance',
+      actions: [createResolveDuplicateCustomerAction(), createContactDevAction()],
+      params: {
+        count: rows.length,
+        sampleItemId: sample.id,
+        queueItemId: sample.id,
+        sampleTableName: sample.tableName,
+        sampleRecordId: sample.recordId,
+        moduleType: sample.moduleType || 'customers',
+        lastError: sample.errorMessage ?? null,
+      },
+    } satisfies RecoveryIssue,
+    RECOVERY_RECIPES.duplicateCustomerConflictResolve,
+  );
+
+  return { suppressedRows, issues: [issue] };
+};
+
 const buildParityModuleIssues = (
   parityItems: SyncQueueItem[],
   suppressedRows: Set<string>,
@@ -1640,6 +1835,7 @@ export function buildSyncRecoveryIssues({
   parityItems = [],
   financialItems = [],
   integrity,
+  localizePaymentBlocker,
 }: BuildSyncRecoveryIssuesInput): BuildSyncRecoveryIssuesResult {
   if (!systemHealth) {
     return {
@@ -1703,15 +1899,20 @@ export function buildSyncRecoveryIssues({
   for (const suppressedRow of customerAddressDefaultConflictResult.suppressedRows) {
     suppressedLegacyFinancialRows.add(suppressedRow);
   }
+  const duplicateCustomerConflictResult = buildDuplicateCustomerConflictIssues(parityItems);
+  for (const suppressedRow of duplicateCustomerConflictResult.suppressedRows) {
+    suppressedLegacyFinancialRows.add(suppressedRow);
+  }
   const hasSpecificParityRecoveryIssue =
     paymentTotalConflictResult.issues.length > 0 ||
     invalidDriverOrderResult.issues.length > 0 ||
     orderUpdateParentWaitResult.issues.length > 0 ||
     orderUpdateReplayResult.issues.length > 0 ||
     catalogAvailabilityResult.issues.length > 0 ||
-    customerAddressDefaultConflictResult.issues.length > 0;
+    customerAddressDefaultConflictResult.issues.length > 0 ||
+    duplicateCustomerConflictResult.issues.length > 0;
   pushIssue(issues, buildMissingCredentialIssue(systemHealth, lastParitySync));
-  for (const issue of buildCheckoutPaymentBlockerIssues(systemHealth)) {
+  for (const issue of buildCheckoutPaymentBlockerIssues(systemHealth, localizePaymentBlocker)) {
     pushIssue(issues, issue);
   }
   pushIssue(issues, buildInvalidOrdersIssue(systemHealth));
@@ -1744,6 +1945,9 @@ export function buildSyncRecoveryIssues({
     pushIssue(issues, issue);
   }
   for (const issue of customerAddressDefaultConflictResult.issues) {
+    pushIssue(issues, issue);
+  }
+  for (const issue of duplicateCustomerConflictResult.issues) {
     pushIssue(issues, issue);
   }
   for (const issue of buildParityModuleIssues(parityItems, suppressedLegacyFinancialRows)) {

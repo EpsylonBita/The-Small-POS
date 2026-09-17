@@ -7673,6 +7673,27 @@
       "retryCustomerAddressDefault": {
         "label": "Riprova a salvare questo indirizzo",
         "description": "Riprova la modifica salvata per questo indirizzo. Serve ancora la conferma del server."
+      },
+      "resolveDuplicateCustomerConflict": {
+        "label": "Collega al cliente esistente",
+        "description": "L'ufficio ha già questo numero di telefono. Adotta qui la sua scheda cliente, così la modifica bloccata può uscire dalla coda.",
+        "confirmTitle": "Collegare questa cassa al cliente esistente?",
+        "confirmMessage": "L'ufficio ha rifiutato questo cliente perché il suo numero di telefono appartiene già a una scheda che conserva. Questa operazione legge quella scheda, fa puntare a essa gli ordini e le modifiche in coda di questa cassa e rimuove la modifica che non potrà mai essere accettata. All'ufficio non viene inviato nulla.",
+        "confirmCheckbox": "Confermo che si tratta dello stesso cliente che l'ufficio ha già."
+      },
+      "settlePlatformOrder": {
+        "label": "Registra il saldo della piattaforma",
+        "description": "Questo denaro lo tiene la piattaforma. Registralo come ricavo della piattaforma — la schermata di pagamento non può accettarlo e non ci sono contanti né carta di mezzo.",
+        "confirmTitle": "Registrare il saldo della piattaforma per questo ordine?",
+        "confirmMessage": "Questo scrive il saldo che la piattaforma deve per questo ordine: l'importo è il residuo dell'ordine e il tipo viene dai suoi stessi dati di consegna. Viene contabilizzato fuori cassa, quindi il conteggio dei contanti non cambia, e non può essere scritto due volte.",
+        "confirmCheckbox": "Confermo che la piattaforma salda questo ordine e che al banco non è stato incassato nulla."
+      },
+      "repairPlatformSettlementMismatch": {
+        "label": "Correggi: questo denaro lo tiene la piattaforma",
+        "description": "Toglie la riga di cassa e registra il saldo dovuto dalla piattaforma, in un solo passo. Fare solo il primo lascia la giornata bloccata per il motivo opposto.",
+        "confirmTitle": "Correggere questo ordine in denaro della piattaforma?",
+        "confirmMessage": "Il cliente ha pagato la piattaforma, non questa cassa: i dati di consegna dell'ordine stesso dicono prepagato online, oppure incassato dal fattorino della piattaforma. Questo annulla la riga contanti o carta registrata su di esso — con una motivazione, così l'ufficio vede la correzione — e registra al suo posto il saldo. Il conteggio di cassa non cambia, perché quel denaro in cassa non è mai entrato.",
+        "confirmCheckbox": "Confermo che a questa cassa non sono stati incassati contanti né carta per questo ordine."
       }
     },
     "context": {
@@ -7770,6 +7791,21 @@
         "label": "Nuovo tentativo per l’indirizzo predefinito",
         "explanation": "Questo conflitto noto consente un nuovo tentativo sicuro. Il server deve accettare la modifica prima di confermare il ripristino.",
         "verification": "Il problema resta visibile finché un nuovo controllo conferma che l’indirizzo è stato accettato. Se fallisce di nuovo, apri i dettagli di assistenza."
+      },
+      "duplicateCustomerConflictResolve": {
+        "label": "Adotta la scheda cliente dell'ufficio",
+        "explanation": "Un cliente creato su questa cassa duplica uno che l'ufficio ha già. L'ufficio non unisce i due da solo — chiede di selezionare esplicitamente la scheda esistente — quindi riprovare la stessa modifica non potrà mai riuscire.",
+        "verification": "Il problema si risolve quando la coda è vuota e il cliente si apre con i dati dell'ufficio. Se l'ufficio non ha un cliente per questo numero, la modifica resta in attesa di revisione."
+      },
+      "platformSettlementSettle": {
+        "label": "Salda dai dati della piattaforma stessa",
+        "explanation": "Un ordine prepagato, o incassato dal fattorino della piattaforma, arriva per bonifico. La sua registrazione non è mai stata scritta, perciò la giornata non si chiude. Nulla viene indovinato: un ordine i cui dati non dicono che lo salda la piattaforma viene rifiutato.",
+        "verification": "Il blocco si risolve quando l'ordine mostra il saldo e la chiusura turno non lo nomina più. L'attesa di cassa resta invariata."
+      },
+      "platformHeldDrawerRowRepair": {
+        "label": "Annulla la riga di cassa e registra il saldo",
+        "explanation": "Denaro che tiene la piattaforma è stato registrato come incasso di cassa, quindi gli stessi euro contano due volte — una come bonifico, una come contante. Le due scritture vanno insieme: il solo annullamento lascia l'ordine senza alcun saldo e la giornata ancora bloccata.",
+        "verification": "L'ordine esce dalla chiusura turno e mostra il saldo della piattaforma. Il totale di cassa atteso resta invariato. Sono idonei solo gli ordini i cui dati dicono che li salda la piattaforma."
       }
     },
     "issues": {
@@ -7892,6 +7928,11 @@
         "title": "Impossibile salvare l’indirizzo predefinito",
         "summary": "Il server non ha confermato la modifica dell’indirizzo predefinito. La modifica resta salvata su questa cassa.",
         "guidance": "Riprova una volta. Se viene rifiutato di nuovo, chiedi aiuto tramite i dettagli di assistenza."
+      },
+      "duplicateCustomerConflict": {
+        "title": "Questo cliente esiste già in ufficio",
+        "summary": "Un cliente salvato su questa cassa ha lo stesso numero di telefono di uno che l'ufficio conserva già, quindi la modifica non può essere inviata. Blocca la sincronizzazione da quando è stata salvata.",
+        "guidance": "Se è la stessa persona, collega questa cassa alla scheda esistente. Riprovare non serve: l'ufficio risponde ogni volta con lo stesso rifiuto."
       }
     }
   },

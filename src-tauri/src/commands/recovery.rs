@@ -3,8 +3,13 @@ use serde_json::{json, Value};
 use tracing::info;
 use uuid::Uuid;
 
+use crate::commands::customers;
 use crate::terminal_helpers::TerminalEventSink;
 use crate::{auth, db, payments, recovery, sync, sync_queue};
+
+/// Recorded on every void this repair makes, so the adjustment says why.
+const PLATFORM_MISMATCH_VOID_REASON: &str =
+    "Platform-settled order: money is held by the platform, not the till";
 
 fn parse_point_id(arg0: Option<Value>) -> Result<String, String> {
     crate::payload_arg0_as_string(arg0, &["id", "pointId", "point_id", "value"])
@@ -1219,6 +1224,169 @@ async fn recovery_execute_action_core(
                     result.processed,
                     result.failed,
                     result.conflicts,
+                    status.total,
+                ),
+            }))
+        }
+        "repairPlatformSettlementMismatch" => {
+            // The founder's own words on the 17/09/2026 order: «ήταν από
+            // πλατφόρμα έτσι κι αλλιώς και ήταν κάρτα» — the customer paid by
+            // card ONLINE, to efood. That money reaches us by bank
+            // settlement; it never passed through this till's terminal.
+            //
+            // Correcting it is two writes that must not come apart: void the
+            // drawer row, then record the settlement the platform owes. Doing
+            // only the first swaps this blocker for
+            // `platform_settlement_missing`, which is exactly the dead end the
+            // printed advice used to lead to.
+            //
+            // Eligibility is the order's own disposition, checked in
+            // `platform_held_drawer_payment_ids`: prepaid-online or
+            // platform-rider COD only — the cases where `record_payment`
+            // already refuses a fresh drawer tender. Money the store really
+            // collected is unreachable from here.
+            let order_id = request_field_str(&request, "orderId")
+                .map(ToOwned::to_owned)
+                .or_else(|| request_param_str(&request, "orderId"))
+                .or_else(|| request_field_str(&request, "entityId").map(ToOwned::to_owned))
+                .ok_or_else(|| "Missing order id".to_string())?;
+
+            let drawer_rows =
+                sync::guarded_renderer_local_mutation(db, sync_state.as_ref(), cancellation, {
+                    let order_id = order_id.clone();
+                    move |conn| payments::platform_held_drawer_payment_ids(conn, order_id.as_str())
+                })
+                .await
+                .map_err(auth::GuardedCommandError::from)?;
+            if drawer_rows.is_empty() {
+                return Err(auth::GuardedCommandError::from(
+                    "PLATFORM_MISMATCH_NOT_ELIGIBLE".to_string(),
+                ));
+            }
+
+            // `void_payment_with_adjustment` writes the `payment_adjustments`
+            // row and queues it, so the office sees the correction rather than
+            // a row that quietly changed state.
+            for payment_id in &drawer_rows {
+                crate::refunds::void_payment_with_adjustment(
+                    db,
+                    payment_id,
+                    PLATFORM_MISMATCH_VOID_REASON,
+                    None,
+                    None,
+                )
+                .map_err(auth::GuardedCommandError::from)?;
+            }
+
+            let settled =
+                sync::guarded_renderer_local_mutation(db, sync_state.as_ref(), cancellation, {
+                    let order_id = order_id.clone();
+                    move |conn| payments::auto_settle_platform_order(conn, order_id.as_str())
+                })
+                .await
+                .map_err(auth::GuardedCommandError::from)?;
+
+            info!(
+                order_id = %order_id,
+                voided_rows = drawer_rows.len(),
+                settled,
+                "Platform-held money corrected: drawer rows voided and settlement recorded"
+            );
+            Ok(json!({
+                "success": true,
+                "requiresRefresh": true,
+                "voidedPaymentIds": drawer_rows,
+                "settlementRecorded": settled,
+                "message": format!(
+                    "Voided {} till row(s) on {order_id} and {} the platform settlement. No drawer money was touched.",
+                    drawer_rows.len(),
+                    if settled { "recorded" } else { "left" },
+                ),
+            }))
+        }
+        "settlePlatformOrder" => {
+            // `platform_settlement_missing`: the platform is holding this
+            // money and the canonical settlement row was never written. The
+            // payment screen cannot help — it refuses cash and card on a
+            // platform-held order, correctly — so this writes the row the
+            // sync path already writes, through the same reviewed helper.
+            //
+            // Nothing is guessed. `auto_settle_platform_order` refuses any
+            // order whose own disposition does not say the platform settles
+            // it, takes the amount from the order's outstanding balance, fixes
+            // the tender from that disposition, books it as `other` so the
+            // drawer expectation is untouched, and carries an idempotency key
+            // so a second press cannot write a second row.
+            let order_id = request_field_str(&request, "orderId")
+                .map(ToOwned::to_owned)
+                .or_else(|| request_param_str(&request, "orderId"))
+                .or_else(|| request_field_str(&request, "entityId").map(ToOwned::to_owned))
+                .ok_or_else(|| "Missing order id".to_string())?;
+            let settled =
+                sync::guarded_renderer_local_mutation(db, sync_state.as_ref(), cancellation, {
+                    let order_id = order_id.clone();
+                    move |conn| payments::auto_settle_platform_order(conn, order_id.as_str())
+                })
+                .await
+                .map_err(auth::GuardedCommandError::from)?;
+            if !settled {
+                return Err(auth::GuardedCommandError::from(
+                    "PLATFORM_SETTLEMENT_NOT_ELIGIBLE".to_string(),
+                ));
+            }
+            info!(
+                order_id = %order_id,
+                "Platform settlement recorded from the order's own disposition"
+            );
+            Ok(json!({
+                "success": true,
+                "requiresRefresh": true,
+                "message": format!(
+                    "Platform settlement recorded for {order_id} from the platform's own disposition. No drawer money was touched.",
+                ),
+            }))
+        }
+        "resolveDuplicateCustomerConflict" => {
+            // The office rejected this customer INSERT because it already holds
+            // the phone, and told the operator to select that record
+            // explicitly. Retry cannot do that — it is the same INSERT — so
+            // this action makes the selection instead: one read of the office's
+            // own record by phone, then the local copy adopts it and the dead
+            // row leaves the queue. Nothing is written to the office.
+            let item_id = request_param_str(&request, "sampleItemId")
+                .or_else(|| request_param_str(&request, "queueItemId"))
+                .or_else(|| request_field_str(&request, "entityId").map(ToOwned::to_owned))
+                .ok_or_else(|| "Missing parity item id".to_string())?;
+            let adoption = customers::resolve_duplicate_customer_conflict(
+                db,
+                sync_state.as_ref(),
+                cancellation,
+                item_id.as_str(),
+            )
+            .await
+            .map_err(auth::GuardedCommandError::from)?;
+            let status = {
+                let conn = db.conn.lock().map_err(|e| e.to_string())?;
+                sync_queue::renderer_get_status(&conn)
+            }
+            .map_err(auth::GuardedCommandError::from)?;
+            info!(
+                item_id = %item_id,
+                remote_customer_id = %adoption.remote_customer_id,
+                local_record_id = %adoption.local_record_id,
+                relinked_orders = adoption.relinked_orders,
+                relinked_queue_rows = adoption.relinked_queue_rows,
+                "Duplicate customer conflict resolved by adopting the office record"
+            );
+            Ok(json!({
+                "success": true,
+                "requiresRefresh": true,
+                "adoption": adoption,
+                "message": format!(
+                    "Linked this terminal to the existing customer {}: {} order(s) and {} queued row(s) now point at it, remaining {}.",
+                    adoption.remote_customer_id,
+                    adoption.relinked_orders,
+                    adoption.relinked_queue_rows,
                     status.total,
                 ),
             }))
