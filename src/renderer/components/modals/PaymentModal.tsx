@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { CreditCard, Banknote, Coins, AlertTriangle, Split, BedDouble, HandCoins } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { roundMoney } from '@shared/utils/money';
 import { useFeatures } from '../../hooks/useFeatures';
 import { useAcquiredModules, MODULE_IDS } from '../../hooks/useAcquiredModules';
 import { formatMoneyInputFromNumber, formatMoneyInputWithCents, parseMoneyInputValue } from '../../utils/moneyInput';
@@ -93,8 +94,8 @@ const QUICK_CASH_ROUNDING_STEPS = [1, 5, 10, 20, 50, 100];
 const CASH_CHANGE_CHIP_CLASS =
   'inline-flex min-h-8 items-center gap-1.5 whitespace-nowrap rounded-full border border-slate-200/90 bg-white/90 px-2.5 py-1 text-xs font-semibold text-slate-700 shadow-[0_4px_12px_rgba(15,23,42,0.06)] dark:border-white/10 dark:bg-white/5 dark:text-slate-100 dark:shadow-none';
 
-const roundMoney = (value: number): number =>
-  Math.round((Number.isFinite(value) ? value : 0) * 100) / 100;
+// Module audit closure (2026-09-16): one rounding rule for the renderer. The local copy
+// rounded 1.005 down to 1.00 (1.005 * 100 is 100.49999999999999 in binary).
 
 const hasMoneyAmount = (amounts: number[], candidate: number): boolean =>
   amounts.some(amount => Math.abs(amount - candidate) < 0.01);

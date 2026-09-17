@@ -359,8 +359,72 @@ fn get_payment_adjustment_backlog(conn: &rusqlite::Connection) -> Value {
     })
 }
 
-fn get_sync_blocker_details_json(details: Vec<SyncBlockerDetail>) -> Value {
-    serde_json::to_value(details).unwrap_or_else(|_| json!([]))
+/// The exported blocker list.
+///
+/// `SyncBlockerDetail` describes the legacy `sync_queue` only, and its integer
+/// `queue_id` cannot carry a parity row's UUID. A parity conflict is still a
+/// blocker — in practice the hardest kind, because no amount of waiting clears
+/// it — so parity rows are appended here as their own shape rather than forced
+/// into that struct. Without this, a terminal whose parity queue was jammed
+/// exported an empty `sync_blocker_details.json`.
+fn get_sync_blocker_details_json(
+    details: Vec<SyncBlockerDetail>,
+    parity_blockers: Vec<Value>,
+) -> Value {
+    let mut combined = match serde_json::to_value(details) {
+        Ok(Value::Array(items)) => items,
+        _ => Vec::new(),
+    };
+    combined.extend(parity_blockers);
+    Value::Array(combined)
+}
+
+/// Parity-queue rows an operator has to act on: conflicts, and anything holding
+/// a recorded error. Each one names the queue it belongs to so the two shapes in
+/// `sync_blocker_details.json` stay tellable apart.
+fn get_parity_blocker_details(db: &DbState, limit: i64) -> Vec<Value> {
+    let Ok(conn) = db.conn.lock() else {
+        return Vec::new();
+    };
+    // Same ownership boundary as the error list: the accessor decides what a
+    // renderer (and therefore a support bundle) may see.
+    let Ok(items) = crate::sync_queue::renderer_list_actionable_items(
+        &conn,
+        &crate::sync_queue::QueueListQuery {
+            limit: Some(limit),
+            module_type: None,
+        },
+    ) else {
+        return Vec::new();
+    };
+    items
+        .into_iter()
+        .filter(|item| {
+            item.status == "conflict"
+                || (item.status == "failed"
+                    && item
+                        .error_message
+                        .as_deref()
+                        .is_some_and(|reason| !reason.trim().is_empty()))
+        })
+        .map(|item| {
+            json!({
+                "queue": "parity_sync_queue",
+                "queueItemId": item.id,
+                "moduleType": item.module_type,
+                "entityType": item.table_name,
+                "entityId": item.record_id,
+                "operation": item.operation,
+                "queueStatus": item.status,
+                "blockerReason": crate::print::safe_operational_error(item.error_message, 1024)
+                    .unwrap_or_else(|| "(no reason recorded)".to_string()),
+                "conflictStrategy": item.conflict_strategy,
+                "attempts": item.attempts,
+                "createdAt": item.created_at,
+                "lastAttempt": item.last_attempt,
+            })
+        })
+        .collect()
 }
 
 fn parse_local_setting_value(raw: &str) -> Value {
@@ -784,7 +848,10 @@ pub fn export_diagnostics_with_options(
     let credential_state =
         redact_value_for_export(get_credential_state(db), export_options.redact_sensitive);
     let sync_blocker_details = redact_value_for_export(
-        get_sync_blocker_details_json(crate::sync::get_sync_blocker_details(db, 25)?),
+        get_sync_blocker_details_json(
+            crate::sync::get_sync_blocker_details(db, 25)?,
+            get_parity_blocker_details(db, 25),
+        ),
         export_options.redact_sensitive,
     );
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -1063,6 +1130,16 @@ fn should_redact_key(key: &str) -> bool {
         .any(|marker| normalized.contains(marker))
 }
 
+/// Recent sync failures for the exported support bundle.
+///
+/// This used to read only the legacy `sync_queue`, so a terminal blocked on the
+/// parity queue exported an empty `sync_errors.json` while `syncStatus.syncErrors`
+/// counted 1 — the count and the evidence came from different tables. A shop
+/// whose whole queue was stuck could therefore hand support a bundle that said
+/// nothing was wrong. Both queues are read now, each row tagged with the queue it
+/// came from, and parity conflicts are included explicitly: a manual conflict is
+/// the one failure an operator cannot clear by waiting, so it is the one support
+/// most needs to see.
 fn get_recent_sync_errors(conn: &rusqlite::Connection, limit: i64) -> Vec<Value> {
     let mut errors = Vec::new();
     if let Ok(mut stmt) = conn.prepare(
@@ -1073,6 +1150,7 @@ fn get_recent_sync_errors(conn: &rusqlite::Connection, limit: i64) -> Vec<Value>
     ) {
         if let Ok(rows) = stmt.query_map(params![limit], |row| {
             Ok(json!({
+                "queue": "sync_queue",
                 "id": row.get::<_, String>(0)?,
                 "entityType": row.get::<_, String>(1)?,
                 "status": row.get::<_, String>(2)?,
@@ -1087,6 +1165,41 @@ fn get_recent_sync_errors(conn: &rusqlite::Connection, limit: i64) -> Vec<Value>
             }
         }
     }
+
+    // Parity rows go through `renderer_list_actionable_items`, not raw SQL. That
+    // accessor carries the repair-ownership exclusions, and native repair queue
+    // data must never reach an exported bundle — a hand-written query here would
+    // have to restate those rules and would leak the moment they changed.
+    if let Ok(items) = crate::sync_queue::renderer_list_actionable_items(
+        conn,
+        &crate::sync_queue::QueueListQuery {
+            limit: Some(limit),
+            module_type: None,
+        },
+    ) {
+        for item in items
+            .into_iter()
+            .filter(|item| item.status == "conflict" || item.status == "failed")
+        {
+            errors.push(json!({
+                "queue": "parity_sync_queue",
+                "id": item.id,
+                "entityType": item.module_type,
+                "tableName": item.table_name,
+                "status": item.status,
+                // A conflict with no reason is itself the finding; say so rather
+                // than exporting a null the reader has to interpret.
+                "lastError": crate::print::safe_operational_error(item.error_message, 1024)
+                    .unwrap_or_else(|| "(no reason recorded)".to_string()),
+                "retryCount": item.attempts,
+                "createdAt": item.created_at,
+                "updatedAt": item.last_attempt,
+                "conflictStrategy": item.conflict_strategy,
+                "operation": item.operation,
+            }));
+        }
+    }
+
     errors
 }
 

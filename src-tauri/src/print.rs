@@ -5905,22 +5905,14 @@ fn build_split_receipt_doc(db: &DbState, payment_id: &str) -> Result<OrderReceip
 /// Food-delivery platforms whose slips are handed to an external rider.
 /// Internal sources (`pos`, `kiosk`, `web`, `android-ios`) deliberately fail
 /// this check: the kiosk route stores `platform = 'web'`, and those receipts
-/// must not grow a rider banner. Mirrors KNOWN_EXTERNAL_PLUGINS (delivery
-/// subset) in src/renderer/utils/plugin-icons.tsx.
+/// must not grow a rider banner.
+///
+/// Thin alias over the central classifier in `crate::platforms` — the local
+/// `matches!` list this replaced was one of the three competing definitions
+/// behind the «POS x37» Z-report incident (16/09/2026). Do not reintroduce a
+/// literal list here; add the slug to `platforms::EXTERNAL_DELIVERY_PLATFORMS`.
 pub(crate) fn is_food_delivery_plugin(plugin: &str) -> bool {
-    matches!(
-        plugin.trim().to_ascii_lowercase().as_str(),
-        "efood"
-            | "wolt"
-            | "box"
-            | "glovo"
-            | "bolt_food"
-            | "uber_eats"
-            | "just_eat_takeaway"
-            | "deliveroo"
-            | "foodora"
-            | "smood"
-    )
+    crate::platforms::is_external_delivery_platform(plugin)
 }
 
 /// The rider-facing 4-digit code from ghost_metadata.food_delivery — the
@@ -6943,6 +6935,16 @@ fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &st
             &["/sales/platformCodSales", "/daySummary/platformCodTotal"],
         )
         .unwrap_or(0.0),
+        // Order side vs payment side, carried onto the slip so the two are
+        // labelled rather than left to be read as one number.
+        order_turnover: number_from_paths(
+            payload,
+            &["/integrity/orderTurnover", "/sales/totalSales"],
+        ),
+        payment_coverage: number_from_paths(
+            payload,
+            &["/integrity/paymentCoverage", "/daySummary/total"],
+        ),
         refunds_total,
         drawer_refunds_total,
         voids_total,
@@ -7160,6 +7162,13 @@ fn build_z_report_doc(db: &DbState, z_report_id: &str) -> Result<ZReportDoc, Str
             &["/sales/platformCodSales", "/daySummary/platformCodTotal"],
         )
         .unwrap_or(0.0),
+        // Order side vs payment side, carried onto the slip so the two are
+        // labelled rather than left to be read as one number.
+        order_turnover: number_from_paths(&rj, &["/integrity/orderTurnover", "/sales/totalSales"]),
+        payment_coverage: number_from_paths(
+            &rj,
+            &["/integrity/paymentCoverage", "/daySummary/total"],
+        ),
         refunds_total,
         drawer_refunds_total: number_from_paths(&rj, &["/cashDrawer/totalRefunds"]),
         voids_total,

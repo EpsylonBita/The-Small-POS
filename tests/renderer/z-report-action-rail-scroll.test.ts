@@ -116,8 +116,18 @@ test('Round 322/355/356: the single next action is a plain Commit Z report butto
   assert.match(action, /disabled=\{!canCommitZReport\}/);
   assert.match(
     source,
-    /const closeoutHasHardSubmitBlocker =[\s\S]*?!Boolean\(zReport\)[\s\S]*?lockedTerminal[\s\S]*?loading[\s\S]*?Boolean\(error\)[\s\S]*?hasActiveStaffShifts[\s\S]*?paymentBlockers\.length > 0;/,
+    /const closeoutHasHardSubmitBlocker =[\s\S]*?!Boolean\(zReport\)[\s\S]*?lockedTerminal[\s\S]*?loading[\s\S]*?Boolean\(error\)[\s\S]*?hasActiveStaffShifts[\s\S]*?blockingPaymentIssues\.length > 0;/,
     'hard submit blockers must match the native preconditions: report loaded, executable terminal, no error/loading, no active staff, no payment blockers',
+  );
+  // 16/09/2026: the gate moved from the submit-time rejection list to
+  // `blockingPaymentIssues` — preview findings and submit rejections merged on
+  // orderId+reasonCode, keeping only `severity !== 'warning'`. That is strictly
+  // wider (a broken day is caught at PREVIEW, not only when a submit bounces)
+  // while warnings no longer wedge the close.
+  assert.match(
+    source,
+    /const blockingPaymentIssues = useMemo\([\s\S]*?effectivePaymentBlockers\.filter\([\s\S]*?severity !== 'warning'/,
+    'the hard gate must read the merged preview+submit blocking set',
   );
   assert.match(
     source,
@@ -212,7 +222,7 @@ test('Round 352 (reversed 06/09/2026): the Review tab headline is the whole day,
   // The staff helpers survive for the Staff tab rows only.
   assert.match(source, /formatMoney\(resolveShiftEarnedTotal\(staff\)\)/);
 
-  const reviewMoney = slice(source, 'data-z-report-review-money-overview', 'paymentBlockers.length > 0');
+  const reviewMoney = slice(source, 'data-z-report-review-money-overview', 'effectivePaymentBlockers.length > 0');
   assert.match(reviewMoney, /formatMoney\(collectedTotal\)/);
   assert.match(reviewMoney, /data-z-report-earned-source/);
   assert.match(reviewMoney, /liveCurrentWindow/);

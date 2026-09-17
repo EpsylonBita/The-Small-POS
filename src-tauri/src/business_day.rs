@@ -314,6 +314,36 @@ pub(crate) fn paid_order_swept_by_last_z_expr(order_alias: &str, anchor_param: &
     )
 }
 
+/// The order population a Z-report may report on, as one SQL predicate.
+///
+/// Two exclusions, and they MUST be the same two the closeout gate applies
+/// (`payment_integrity::load_branch_window_payment_blockers`):
+///
+///   * an open, never-settled table tab — its money was not collected yet, so
+///     it belongs to the day it is finally settled;
+///   * a paid order the LAST Z already closed, whose local `order_payments`
+///     rows the rollover deleted on purpose.
+///
+/// Before 16/09/2026 only the gate knew about the second one. The revenue
+/// aggregates did not, so an order from an already-closed day whose
+/// `updated_at` was bumped back into the open window (remote snapshot
+/// refresh, platform ack replay — both routine) was counted as turnover a
+/// second time while being exempt from the payment check that would have
+/// caught it. That is how the founder's Z showed order-level turnover of
+/// €1.636,16 against payment-level €1.105,73 and still closed without a
+/// single warning: the €531 gap was, by construction, invisible to the gate.
+///
+/// Anything this predicate hides is reported as
+/// `integrity.carriedOverFromClosedDays` on the Z payload — excluded from
+/// the totals, never from the operator's sight.
+///
+/// `anchor_param` is the bound parameter carrying [`last_z_anchor_utc`].
+pub(crate) fn z_report_reportable_order_expr(order_alias: &str, anchor_param: &str) -> String {
+    let open_tab = open_unsettled_table_tab_expr(order_alias);
+    let swept = paid_order_swept_by_last_z_expr(order_alias, anchor_param);
+    format!("(NOT {open_tab} AND NOT {swept})")
+}
+
 /// The local ledger's retention cutoff under the founder's day model
 /// (stated 2026-08-18, verbatim): «όλα πρέπει να είναι άνοιγμα ημέρας —
 /// κλείσιμο ημέρας, όχι βάση ώρας ή ημέρας· ένα τερματικό μπορεί να ανοίγει

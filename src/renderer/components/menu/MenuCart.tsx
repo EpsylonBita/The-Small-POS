@@ -1902,7 +1902,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
 
             <div className="space-y-2">
               <label className="text-xs font-semibold antialiased liquid-glass-modal-text-muted">
-                {t('order.unit_price', 'Unit price')}
+                {t('menu.cart.unitPrice', 'Unit price')}
               </label>
               <input
                 type="text"

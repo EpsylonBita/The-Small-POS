@@ -1238,14 +1238,24 @@ const buildParityModuleIssues = (
     return [];
   }
 
-  const grouped = new Map<string, { pending: SyncQueueItem[]; failed: SyncQueueItem[] }>();
+  const grouped = new Map<
+    string,
+    { pending: SyncQueueItem[]; failed: SyncQueueItem[]; conflict: SyncQueueItem[] }
+  >();
   for (const item of parityItems) {
     if (suppressedRows.has(`${item.tableName}:${item.recordId}`)) {
       continue;
     }
     const moduleType = item.moduleType || 'orders';
-    const bucket = grouped.get(moduleType) ?? { pending: [], failed: [] };
-    if (item.status === 'failed') {
+    const bucket = grouped.get(moduleType) ?? { pending: [], failed: [], conflict: [] };
+    // A conflict used to land in `pending`, so a permanently blocked row was
+    // shown as a backlog that was "still pending" and offered a retry that
+    // could not touch it — the drain loop only claims pending rows. A live shop
+    // sat on that card for twelve hours. A conflict is its own state: blocking,
+    // and only clearable by acting on the row.
+    if (item.status === 'conflict') {
+      bucket.conflict.push(item);
+    } else if (item.status === 'failed') {
       bucket.failed.push(item);
     } else {
       bucket.pending.push(item);
@@ -1281,6 +1291,34 @@ const buildParityModuleIssues = (
           sampleTableName: sample.tableName,
           sampleRecordId: sample.recordId,
           sampleError: sample.errorMessage ?? null,
+        },
+      });
+    }
+
+    if (bucket.conflict.length > 0) {
+      const sample = bucket.conflict[0];
+      pushIssue(issues, {
+        id: `parity-module-conflict-${moduleType}`,
+        code: 'parity_module_conflict_items',
+        severity: 'error',
+        status: 'blocking',
+        entityType: 'parity_module',
+        entityId: moduleType,
+        titleKey: 'recovery.issues.parityModuleConflict.title',
+        summaryKey: 'recovery.issues.parityModuleConflict.summary',
+        guidanceKey: 'recovery.issues.parityModuleConflict.guidance',
+        actions: [createRetryParityItemAction(), createRetryParityModuleAction()],
+        params: {
+          moduleType,
+          moduleLabel,
+          count: bucket.conflict.length,
+          sampleItemId: sample.id,
+          sampleTableName: sample.tableName,
+          sampleRecordId: sample.recordId,
+          // The reason is the whole point of this card: the operator cannot act
+          // on "blocked", only on why.
+          sampleError: sample.errorMessage ?? null,
+          conflictStrategy: sample.conflictStrategy ?? null,
         },
       });
     }

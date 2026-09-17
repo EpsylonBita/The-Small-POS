@@ -47,7 +47,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-pub(crate) const CURRENT_SCHEMA_VERSION: i32 = 81;
+pub(crate) const CURRENT_SCHEMA_VERSION: i32 = 82;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -387,12 +387,21 @@ where
     }
     let needs_v56_backfill = needs_v56_claim_generation_backfill(conn, current)?;
     let needs_v79_backfill = needs_v79_repair_aggregate_backfill(conn, current)?;
-    if current == CURRENT_SCHEMA_VERSION && !needs_v56_backfill && !needs_v79_backfill {
+    let needs_v81_backfill = needs_v81_payment_identity_backfill(conn, current)?;
+    if current == CURRENT_SCHEMA_VERSION
+        && !needs_v56_backfill
+        && !needs_v79_backfill
+        && !needs_v81_backfill
+    {
         info!("Database schema up to date (v{current})");
         return Ok(());
     }
-    let pending_migrations =
-        computed_pending_migrations(current, needs_v56_backfill, needs_v79_backfill);
+    let pending_migrations = computed_pending_migrations(
+        current,
+        needs_v56_backfill,
+        needs_v79_backfill,
+        needs_v81_backfill,
+    );
 
     if current > 0 {
         let db_path = resolve_main_path(conn)
@@ -671,10 +680,39 @@ where
     if current < 80 {
         run_migration_tx(conn, 80, migrate_v80)?;
     }
-    if current < 81 {
+    if current < 81 || needs_v81_backfill {
         run_migration_tx(conn, 81, migrate_v81)?;
     }
+    if current < 82 {
+        run_migration_tx(conn, 82, migrate_v82)?;
+    }
 
+    Ok(())
+}
+
+/// Migration v82: no parked conflict may sit without a reason, and customer
+/// rows blocked only on a missing phone country get one honest re-judgement.
+///
+/// Until this version `mark_conflict` set the status and left `error_message`
+/// alone, so a server 409 produced a row that blocked a shop's parity queue with
+/// nothing to show the operator and nothing in the exported diagnostics. One
+/// live terminal sat that way for twelve hours over a single customer record.
+/// The backfill gives those rows a reason; the re-judgement releases the ones
+/// that were only ever waiting for the branch country the terminal can now
+/// resolve. See `sync_queue::revalidate_parked_conflicts` for what is and is not
+/// retried — financial queues are untouched.
+fn migrate_v82(conn: &Connection) -> Result<(), String> {
+    let outcome = crate::sync_queue::revalidate_parked_conflicts(conn)?;
+
+    conn.execute_batch("INSERT INTO schema_version (version) VALUES (82);")
+        .map_err(|e| format!("migration v82 schema_version: {e}"))?;
+
+    info!(
+        reasons_backfilled = outcome.reasons_backfilled,
+        customers_requeued = outcome.customers_requeued,
+        customers_still_blocked = outcome.customers_still_blocked,
+        "Applied migration v82 (parked conflicts carry a reason)"
+    );
     Ok(())
 }
 
@@ -743,12 +781,13 @@ enum PreMigrationRecoveryMode {
     NativeRepairAtomicOnly,
 }
 
-const NATIVE_REPAIR_ATOMIC_MIGRATION_ALLOWLIST: &[i32] = &[56, 75, 76, 77, 78, 79, 80, 81];
+const NATIVE_REPAIR_ATOMIC_MIGRATION_ALLOWLIST: &[i32] = &[56, 75, 76, 77, 78, 79, 80, 81, 82];
 
 fn computed_pending_migrations(
     current: i32,
     needs_v56_backfill: bool,
     needs_v79_backfill: bool,
+    needs_v81_backfill: bool,
 ) -> Vec<i32> {
     let mut pending = Vec::new();
     if needs_v56_backfill && current >= 56 {
@@ -759,6 +798,9 @@ fn computed_pending_migrations(
     }
     if needs_v79_backfill && current >= 79 {
         pending.push(79);
+    }
+    if needs_v81_backfill && current >= 81 {
+        pending.push(81);
     }
     pending.sort_unstable();
     pending.dedup();
@@ -879,6 +921,30 @@ fn sqlite_index_exists(conn: &Connection, index: &str) -> Result<bool, String> {
         |row| row.get::<_, bool>(0),
     )
     .map_err(|error| format!("inspect sqlite index: {error}"))
+}
+
+/// Whether v81's payment identity columns have to be put back.
+///
+/// The runner decides what to run from `MAX(schema_version)`, so a version that
+/// is no longer the newest becomes invisible: once v82 existed, a terminal whose
+/// v81 columns were lost (a restore from a pre-v81 backup of one table, a hand
+/// repair, an interrupted vacuum) reported v82, was told "up to date", and never
+/// got `order_payments.table_session_id` back. Every payment payload build on
+/// that register then failed with `no such column`.
+///
+/// Same shape as the v56 and v79 predicates: look at the effect, not the
+/// bookkeeping. `migrate_v81` is idempotent — it guards each ALTER with
+/// `column_exists`, creates its index `IF NOT EXISTS` and only COALESCEs values
+/// in — so re-running it costs nothing when the columns are already there.
+fn needs_v81_payment_identity_backfill(conn: &Connection, current: i32) -> Result<bool, String> {
+    if current < 81 {
+        return Ok(false);
+    }
+    let has_version = schema_version_exists(conn, 81)?;
+    let has_session = column_exists(conn, "order_payments", "table_session_id")?;
+    let has_seat = column_exists(conn, "order_payments", "seat_number")?;
+    let has_item = column_exists(conn, "payment_items", "order_item_id")?;
+    Ok(!has_version || !has_session || !has_seat || !has_item)
 }
 
 fn needs_v79_repair_aggregate_backfill(conn: &Connection, current: i32) -> Result<bool, String> {
@@ -7996,21 +8062,86 @@ mod tests {
         .expect("read schema version")
     }
 
+    /// A migration that is no longer the newest must still be recoverable.
+    ///
+    /// The runner decides what to run from `MAX(schema_version)`, so the moment
+    /// v82 existed a register that had lost v81's columns reported v82, was told
+    /// "up to date", and never got `order_payments.table_session_id` back — every
+    /// payment payload build on it then failed with `no such column`. Raising
+    /// CURRENT_SCHEMA_VERSION is what exposed it, so this pins the recovery
+    /// rather than the version number.
+    #[test]
+    fn a_lost_v81_comes_back_even_though_it_is_no_longer_the_newest_migration() {
+        let (_tmp, conn) = current_file_fixture();
+        assert_eq!(max_schema_version(&conn), CURRENT_SCHEMA_VERSION);
+
+        // What a partial restore or a hand repair leaves behind: the columns and
+        // v81's bookkeeping row are gone, and MAX(schema_version) still reads 82.
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS idx_payment_table_session;
+             ALTER TABLE order_payments DROP COLUMN table_session_id;
+             ALTER TABLE order_payments DROP COLUMN seat_number;
+             ALTER TABLE payment_items DROP COLUMN order_item_id;
+             DELETE FROM schema_version WHERE version = 81;",
+        )
+        .expect("simulate a lost v81");
+        assert_eq!(
+            max_schema_version(&conn),
+            CURRENT_SCHEMA_VERSION,
+            "the bookkeeping still claims the database is current, which is the trap"
+        );
+        assert!(needs_v81_payment_identity_backfill(&conn, CURRENT_SCHEMA_VERSION).unwrap());
+
+        run_migrations(&conn).expect("recovery run");
+
+        for (table, column) in [
+            ("order_payments", "table_session_id"),
+            ("order_payments", "seat_number"),
+            ("payment_items", "order_item_id"),
+        ] {
+            assert!(
+                column_exists(&conn, table, column).unwrap(),
+                "{table}.{column} must come back"
+            );
+        }
+        assert!(schema_version_exists(&conn, 81).unwrap());
+        assert!(!needs_v81_payment_identity_backfill(&conn, CURRENT_SCHEMA_VERSION).unwrap());
+
+        // Idempotent: a second pass neither errors nor changes anything.
+        run_migrations(&conn).expect("second pass");
+        assert_eq!(max_schema_version(&conn), CURRENT_SCHEMA_VERSION);
+    }
+
     #[test]
     fn migration_v79_native_repair_atomic_only_policy_uses_computed_explicit_allowlist() {
         assert_eq!(
-            computed_pending_migrations(75, true, false),
-            vec![56, 76, 77, 78, 79, 80, 81]
+            computed_pending_migrations(75, true, false, false),
+            vec![56, 76, 77, 78, 79, 80, 81, 82]
         );
         assert_eq!(
-            computed_pending_migrations(78, false, false),
-            vec![79, 80, 81]
+            computed_pending_migrations(78, false, false, false),
+            vec![79, 80, 81, 82]
         );
         assert_eq!(
-            computed_pending_migrations(79, false, true),
-            vec![79, 80, 81]
+            computed_pending_migrations(79, false, true, false),
+            vec![79, 80, 81, 82]
+        );
+        // A v81 whose columns went missing is re-run even though it is no longer
+        // the newest version and MAX(schema_version) says the database is current.
+        assert_eq!(
+            computed_pending_migrations(82, false, false, true),
+            vec![81]
         );
         assert!(native_repair_atomic_only_allowed(80, &[81]));
+
+        // v82 only rewrites non-repair `parity_sync_queue` bookkeeping: its
+        // statements carry the same repair-ownership exclusions the renderer
+        // uses, so native repair state is never read or written. Leaving it off
+        // the allowlist would strand a private-beta repair terminal at v78 —
+        // `native_repair_atomic_only_allowed` returning false there is a hard
+        // REPAIR_MIGRATION_ATOMIC_ONLY_UNSAFE error, not a quiet fallback.
+        assert!(native_repair_atomic_only_allowed(81, &[82]));
+        assert!(native_repair_atomic_only_allowed(79, &[80, 81, 82]));
 
         assert!(native_repair_atomic_only_allowed(75, &[56, 76, 77, 78, 79]));
         assert!(native_repair_atomic_only_allowed(78, &[79]));

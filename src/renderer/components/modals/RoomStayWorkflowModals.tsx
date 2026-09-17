@@ -52,7 +52,7 @@ const translateRoomType = (t: RoomTranslate, roomType?: string | null): string =
 };
 
 const roomGuestName = (room: Room): string | null =>
-  room.activeFolio?.guestName || room.currentGuestName || null;
+  room.activeFolio?.guestName || null;
 
 // Unique, ascending floor numbers present in a candidate room set (mirrors RoomsService.getFloors).
 export const deriveRoomFloors = (rooms: Room[]): number[] =>

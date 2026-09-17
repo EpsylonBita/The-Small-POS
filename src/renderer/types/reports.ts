@@ -1,5 +1,9 @@
 // Report-related types for the POS renderer
 
+import type { ZReportIntegrity } from '../../lib/ipc-contracts';
+
+export type { ZReportIntegrity };
+
 /**
  * One row of the Z builder's day-level order list (`ZReportData.dayOrders`).
  * Platform orders (efood/wolt…) have no staff shift, so `staffName` is null
@@ -301,6 +305,20 @@ export interface ZReportData {
    */
   dayOrders?: ZReportDayOrder[];
   dayOrdersTruncated?: boolean;
+  /**
+   * Does the order side of the day agree with the payment side?
+   *
+   * `integrity.orderTurnover` is `sales.totalSales` (Σ order totals) and
+   * `integrity.paymentCoverage` is `daySummary.total` (Σ completed payments).
+   * They are reported side by side and NEVER summed: efood's «x43 / €504,80»
+   * is platform turnover already inside both, not an extra amount on top.
+   *
+   * `findings` names every order that breaks the founder's rule — a paid
+   * order must have canonical completed payment coverage — and a non-zero
+   * `blockingFindings` is why the Z refuses to close. Absent on reports
+   * persisted before 1.4.114.
+   */
+  integrity?: ZReportIntegrity;
   /** Completed-payment buckets (count + total) behind `daySummary`. */
   paymentsBreakdown?: Partial<
     Record<'cash' | 'card' | 'other' | 'platform_online' | 'platform_cod', { count: number; total: number }>

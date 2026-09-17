@@ -22,7 +22,6 @@ export { FloatingActionButton } from './ui/FloatingActionButton';
 
 // Order components
 export { default as OrderCard } from './order/OrderCard';
-export { OrderActions } from './order/OrderActions';
 
 // Form components
 export { OrderTypeSelector } from './forms/OrderTypeSelector';

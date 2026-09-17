@@ -478,11 +478,14 @@ test('SplitPaymentModal blocks every terminal-card entry point during reconcilia
 
   assert.match(
     source,
-    /const handleTerminalCardPayment = useCallback\(async \(portionId: string\) => \{\s*if \(isReconciliationPending\) return;/,
+    // 16/09/2026: the same guard now also refuses money the platform is
+    // holding, so a prepaid/platform-rider-COD order cannot be charged here
+    // either. Both locks, one condition.
+    /const handleTerminalCardPayment = useCallback\(async \(portionId: string\) => \{\s*if \(isReconciliationPending \|\| platformHeld\) return;/,
   );
   assert.match(
     source,
-    /const locked = portion\.status !== 'draft' \|\| isProcessing \|\| isTerminalChargeInFlight \|\| isReconciliationPending;/,
+    /const locked = portion\.status !== 'draft' \|\| isProcessing \|\| isTerminalChargeInFlight \|\| isReconciliationPending \|\| platformHeld;/,
   );
   assert.match(source, /inert=\{isReconciliationPending \? true : undefined\}/);
 });

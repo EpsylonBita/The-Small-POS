@@ -1999,6 +1999,9 @@ fn normalize_payment_method_for_insert(raw_method: Option<&str>) -> String {
         "cash" => "cash".to_string(),
         "card" => "card".to_string(),
         "digital_wallet" | "digital-wallet" | "wallet" => "digital_wallet".to_string(),
+        // Module audit 2026-09-16: an offline order tendered with a gift card replayed as
+        // "other"; the update normalizer below already knew the method.
+        "gift_card" | "gift-card" => "gift_card".to_string(),
         _ => "other".to_string(),
     }
 }
@@ -6109,20 +6112,102 @@ fn mark_terminal_auth_pending(
 }
 
 /// Mark an item as having a conflict.
+/// Fallback reason for a conflict whose cause the caller could not name. Every
+/// path should supply something better; this exists so that "no reason" is
+/// impossible rather than merely discouraged.
+pub const CONFLICT_REASON_UNSPECIFIED: &str = "SYNC_CONFLICT_UNSPECIFIED";
+
+/// The office already holds a newer version of this repair than the terminal is
+/// replaying; the encrypted conflict store keeps the local envelope for review.
+pub const REPAIR_CONFLICT_SERVER_VERSION_AHEAD: &str = "REPAIR_CONFLICT_SERVER_VERSION_AHEAD";
+
+/// Same, for a repair attachment's ciphertext.
+pub const REPAIR_ATTACHMENT_CONFLICT_SERVER_VERSION_AHEAD: &str =
+    "REPAIR_ATTACHMENT_CONFLICT_SERVER_VERSION_AHEAD";
+
+/// A generic replay whose server response said the office copy has moved on.
+/// Refined with the server's own error code when the 409 body carries one.
+pub const SERVER_CONFLICT_PREFIX: &str = "SERVER_CONFLICT";
+
+/// Build a conflict reason from the server's own 409 answer.
+///
+/// The admin API replies `{ success: false, error, code }`; `code` is the stable
+/// machine token (`DUPLICATE` when a customer's phone already belongs to another
+/// record) and `error` the sentence a human wrote. We keep the code as the
+/// leading token so the renderer can match on it and the operator still sees the
+/// sentence. A body that carries neither still yields a reason naming the table
+/// and operation, because a blank is what stranded a live shop for twelve hours.
+fn server_conflict_reason(response_body: &str, table_name: &str, operation: &str) -> String {
+    let parsed: Option<Value> = serde_json::from_str(response_body).ok();
+    let code = parsed
+        .as_ref()
+        .and_then(|value| value.get("code"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let message = parsed
+        .as_ref()
+        .and_then(|value| value.get("error").or_else(|| value.get("message")))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    match (code, message) {
+        (Some(code), Some(message)) => {
+            format!(
+                "{SERVER_CONFLICT_PREFIX}_{}: {message}",
+                code.to_uppercase()
+            )
+        }
+        (Some(code), None) => format!("{SERVER_CONFLICT_PREFIX}_{}", code.to_uppercase()),
+        (None, Some(message)) => format!("{SERVER_CONFLICT_PREFIX}: {message}"),
+        (None, None) => {
+            format!("{SERVER_CONFLICT_PREFIX}: {operation} on {table_name} rejected as a conflict")
+        }
+    }
+}
+
+/// Keep a conflict reason short, single-line and never empty. The value is shown
+/// to an operator and exported in support diagnostics, so it must survive a
+/// round trip through JSON and a table cell.
+fn normalize_conflict_reason(reason: &str) -> String {
+    let collapsed = reason
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string();
+    if collapsed.is_empty() {
+        return CONFLICT_REASON_UNSPECIFIED.to_string();
+    }
+    if collapsed.chars().count() > 400 {
+        return collapsed.chars().take(400).collect();
+    }
+    collapsed
+}
+
 pub fn mark_conflict(
     conn: &Connection,
     item_id: &str,
     expected_generation: i64,
+    reason: &str,
 ) -> Result<(), String> {
     // Wave 10 H8 sub-follow-up: claim_generation guard. A stale
     // claimer's HTTP-409 ack must not flip a row already reclaimed
     // by a fresh worker into 'conflict'.
+    //
+    // `reason` is not optional. This function used to set the status and leave
+    // `error_message` alone, so a server 409 produced a row that was blocked
+    // forever with nothing to show the operator, nothing in the exported
+    // diagnostics, and no way to tell one cause from another. A conflict the
+    // shop cannot read is a conflict the shop cannot clear.
+    let stored_reason = normalize_conflict_reason(reason);
     let rows_affected = conn
         .execute(
             "UPDATE parity_sync_queue
-             SET status = 'conflict'
-             WHERE id = ?1 AND claim_generation = ?2",
-            params![item_id, expected_generation],
+             SET status = 'conflict', error_message = ?1, next_retry_at = NULL
+             WHERE id = ?2 AND claim_generation = ?3",
+            params![stored_reason, item_id, expected_generation],
         )
         .map_err(|e| format!("sync_queue mark_conflict: {e}"))?;
     if rows_affected == 0 {
@@ -6309,7 +6394,7 @@ fn prepare_request(conn: &Connection, item: &SyncQueueItem) -> Result<RequestPre
         "customer_addresses" => {
             prepare_customer_address_request(conn, item, &payload, terminal_id.as_str())
         }
-        "customers" => prepare_customer_request(item, &payload, terminal_id.as_str()),
+        "customers" => prepare_customer_request(conn, item, &payload, terminal_id.as_str()),
         _ => Ok(RequestPreparation::Ready(RequestSpec {
             endpoint: resolve_endpoint(item),
             method: resolve_http_method(item),
@@ -6342,7 +6427,225 @@ fn normalize_supported_customer_phone_country(value: &str) -> Option<String> {
         .then_some(normalized)
 }
 
+/// The terminal's authoritative ISO-3166 country for phone normalization.
+///
+/// Cached from `/api/pos/settings/{terminal_id}` → `branch_info.phone_country_code`,
+/// which the server resolves from the branch row the till stands in. `None` is a
+/// real answer — the branch has no country this platform recognises — and callers
+/// must refuse rather than substitute one. Notably this is NOT the organization's
+/// country: live data has an organization recorded in the United States whose only
+/// branch is in Greece, and normalizing Greek numbers against it would be wrong in
+/// a way nobody would notice until the customer records had merged.
+fn terminal_phone_country(conn: &Connection) -> Option<String> {
+    let raw = db::get_setting(conn, "restaurant", "phone_country_code")?;
+    normalize_supported_customer_phone_country(raw.trim())
+}
+
+/// What a post-upgrade conflict revalidation pass changed.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ConflictRevalidation {
+    /// Conflicts that carried no reason at all and were given one.
+    pub reasons_backfilled: usize,
+    /// Customer rows whose phone-country context now resolves; returned to the
+    /// queue as `pending` so the ordinary replay picks them up.
+    pub customers_requeued: usize,
+    /// Customer rows still without an authoritative country, now carrying an
+    /// explicit reason instead of a blank.
+    pub customers_still_blocked: usize,
+}
+
+/// Re-examine parked conflicts once, at startup, after the binary is upgraded.
+///
+/// Two narrow jobs, in this order:
+///
+/// 1. **No conflict may sit without a reason.** `mark_conflict` used to write the
+///    status and leave `error_message` untouched, so a server 409 produced a row
+///    that blocked the queue with nothing to show anyone. Those rows are given a
+///    reason so the invariant holds from this version on, including for rows
+///    parked by the old binary.
+///
+/// 2. **Customer rows blocked only on phone country are re-judged.** The terminal
+///    now resolves its branch's country, so a row parked before that existed may
+///    simply be fine. It goes back to `pending` and syncs normally.
+///
+/// What this deliberately does NOT do is re-queue conflicts in general. A
+/// conflict is a row the office disagreed with; replaying every one of them
+/// blindly is how a sync bug becomes a data bug. The candidate set is only
+/// `customers` INSERT/UPDATE rows whose recorded reason is a phone-country
+/// refusal or the blank left by the old binary, and each such row is replayed at
+/// most once: the replay either succeeds or comes back with the server's own
+/// reason, which no longer matches the filter. Financial queues are not touched
+/// at all — they live in their own tables and no statement here names one.
+///
+/// A row with no recorded reason is replayed rather than guessed at, because the
+/// blank could have come from a phone-country park or from a server 409, and the
+/// only honest way to tell them apart is to ask the server again. That single
+/// round trip is what turns an unexplained block into an explained one.
+pub fn revalidate_parked_conflicts(conn: &Connection) -> Result<ConflictRevalidation, String> {
+    let mut outcome = ConflictRevalidation::default();
+
+    // Repair-owned rows are excluded throughout. Native repair state is
+    // separately owned and encrypted; this pass has no business rewriting its
+    // bookkeeping, and keeping it out is what lets v82 run on a private-beta
+    // repair terminal at all.
+    let generic_owner = renderer_generic_owner_predicate("parity_sync_queue");
+    let ownership_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
+
+    outcome.reasons_backfilled = conn
+        .execute(
+            &format!(
+                "UPDATE parity_sync_queue
+                    SET error_message = ?1
+                  WHERE status = 'conflict'
+                    AND (error_message IS NULL OR TRIM(error_message) = '')
+                    AND {generic_owner}
+                    AND {ownership_exclusion}"
+            ),
+            params![CONFLICT_REASON_UNSPECIFIED],
+        )
+        .map_err(|error| format!("sync_queue backfill conflict reasons: {error}"))?;
+
+    // Only the customer rows whose recorded reason is a phone-country refusal,
+    // or the blank we just backfilled (which is what the 409 bug and the old
+    // park path both left behind).
+    let candidates: Vec<(String, String)> = {
+        let mut statement = conn
+            .prepare(&format!(
+                "SELECT id, data
+                   FROM parity_sync_queue
+                  WHERE status = 'conflict'
+                    AND table_name = 'customers'
+                    AND operation IN ('INSERT', 'UPDATE')
+                    AND error_message IN (?1, ?2, ?3)
+                    AND {generic_owner}
+                    AND {ownership_exclusion}"
+            ))
+            .map_err(|error| format!("sync_queue select revalidation candidates: {error}"))?;
+        let rows = statement
+            .query_map(
+                params![
+                    CUSTOMER_PHONE_COUNTRY_CONTEXT_REQUIRED,
+                    CUSTOMER_PHONE_COUNTRY_CONTEXT_INVALID,
+                    CONFLICT_REASON_UNSPECIFIED
+                ],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .map_err(|error| format!("sync_queue map revalidation candidates: {error}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("sync_queue read revalidation candidates: {error}"))?
+    };
+
+    for (item_id, data) in candidates {
+        let Ok(payload) = serde_json::from_str::<Value>(&data) else {
+            continue;
+        };
+        let Some(object) = payload.as_object() else {
+            continue;
+        };
+        match resolve_customer_phone_country(conn, object) {
+            CustomerPhoneContext::Blocked(reason_code) => {
+                conn.execute(
+                    "UPDATE parity_sync_queue
+                        SET error_message = ?1
+                      WHERE id = ?2 AND status = 'conflict'",
+                    params![reason_code, item_id],
+                )
+                .map_err(|error| format!("sync_queue restate blocked customer: {error}"))?;
+                outcome.customers_still_blocked += 1;
+            }
+            CustomerPhoneContext::Resolved(_) | CustomerPhoneContext::Untouched => {
+                // The context exists now. Hand the row back to the ordinary
+                // replay with a clean slate; it earns its outcome from the
+                // server like any other pending item.
+                let updated = conn
+                    .execute(
+                        "UPDATE parity_sync_queue
+                            SET status = 'pending',
+                                error_message = NULL,
+                                next_retry_at = NULL,
+                                attempts = 0
+                          WHERE id = ?1 AND status = 'conflict'",
+                        params![item_id],
+                    )
+                    .map_err(|error| format!("sync_queue requeue customer: {error}"))?;
+                outcome.customers_requeued += updated;
+            }
+        }
+    }
+
+    Ok(outcome)
+}
+
+/// What the phone block of a customer payload resolves to.
+#[derive(Debug)]
+enum CustomerPhoneContext {
+    /// A country was established: `Some` to stamp on the payload, `None` when
+    /// the number is international (or absent) and needs no context.
+    Resolved(Option<String>),
+    /// No authoritative country. The row must be parked with this reason rather
+    /// than sent with a guessed one.
+    Blocked(&'static str),
+    /// The payload carries no phone key at all; leave it exactly as it is.
+    Untouched,
+}
+
+/// Decide the phone-normalization country for one customer payload.
+///
+/// Shared by the replay path and the post-upgrade revalidation so the two can
+/// never disagree about whether a parked row is still blocked.
+fn resolve_customer_phone_country(
+    conn: &Connection,
+    object: &serde_json::Map<String, Value>,
+) -> CustomerPhoneContext {
+    let Some(phone) = object.get("phone").and_then(Value::as_str) else {
+        return if object.get("phone").is_some_and(Value::is_null) {
+            CustomerPhoneContext::Resolved(None)
+        } else {
+            CustomerPhoneContext::Untouched
+        };
+    };
+
+    let trimmed_phone = phone.trim();
+    let submitted_country = object
+        .get("phone_country_code")
+        .or_else(|| object.get("phoneCountryCode"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let normalized_country = submitted_country.and_then(normalize_supported_customer_phone_country);
+
+    if submitted_country.is_some() && normalized_country.is_none() {
+        return CustomerPhoneContext::Blocked(CUSTOMER_PHONE_COUNTRY_CONTEXT_INVALID);
+    }
+
+    let international = trimmed_phone.starts_with('+') || trimmed_phone.starts_with("00");
+    if trimmed_phone.is_empty() {
+        // An empty string is not a number to normalize. Stamp a country only if
+        // one was explicitly supplied, matching the pre-existing contract — do
+        // not start writing a null where the payload previously kept its shape.
+        return match normalized_country {
+            Some(country) => CustomerPhoneContext::Resolved(Some(country)),
+            None => CustomerPhoneContext::Untouched,
+        };
+    }
+    if international {
+        return CustomerPhoneContext::Resolved(normalized_country);
+    }
+
+    // A national number carries no country of its own. The row used to be parked
+    // here outright, which stranded every customer an operator saved with a local
+    // number — one such row blocked a live shop's whole parity queue for twelve
+    // hours. The till's own branch is the authoritative context, so consult it
+    // before refusing. It is still a refusal when the branch has no recognised
+    // country: this resolves the context, it does not invent one.
+    match normalized_country.or_else(|| terminal_phone_country(conn)) {
+        Some(country) => CustomerPhoneContext::Resolved(Some(country)),
+        None => CustomerPhoneContext::Blocked(CUSTOMER_PHONE_COUNTRY_CONTEXT_REQUIRED),
+    }
+}
+
 fn prepare_customer_request(
+    conn: &Connection,
     item: &SyncQueueItem,
     payload: &Value,
     terminal_id: &str,
@@ -6354,45 +6657,25 @@ fn prepare_customer_request(
         });
     };
 
-    let submitted_phone = object.get("phone").and_then(Value::as_str);
-    if let Some(phone) = submitted_phone {
-        let trimmed_phone = phone.trim();
-        let country_value = object
-            .get("phone_country_code")
-            .or_else(|| object.get("phoneCountryCode"));
-        let submitted_country = country_value
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
-        let normalized_country =
-            submitted_country.and_then(normalize_supported_customer_phone_country);
-
-        if submitted_country.is_some() && normalized_country.is_none() {
+    match resolve_customer_phone_country(conn, object) {
+        CustomerPhoneContext::Blocked(reason_code) => {
             return Ok(RequestPreparation::ManualResolution {
-                reason_code: CUSTOMER_PHONE_COUNTRY_CONTEXT_INVALID.to_string(),
+                reason_code: reason_code.to_string(),
             });
         }
-
-        let international = trimmed_phone.starts_with('+') || trimmed_phone.starts_with("00");
-        if !trimmed_phone.is_empty() && !international && normalized_country.is_none() {
-            return Ok(RequestPreparation::ManualResolution {
-                reason_code: CUSTOMER_PHONE_COUNTRY_CONTEXT_REQUIRED.to_string(),
-            });
-        }
-
-        if let Some(country) = normalized_country {
+        CustomerPhoneContext::Resolved(Some(country)) => {
             object.insert("phone_country_code".to_string(), Value::String(country));
             object.remove("phoneCountryCode");
-        } else if international {
+        }
+        CustomerPhoneContext::Resolved(None) => {
             // Upgrade pre-country-context rows into the current explicit
-            // payload contract. The international prefix is self-contained,
-            // so no country guess is needed or permitted.
+            // payload contract. An international prefix is self-contained, and
+            // an absent phone needs no country at all, so no guess is needed
+            // or permitted in either case.
             object.insert("phone_country_code".to_string(), Value::Null);
             object.remove("phoneCountryCode");
         }
-    } else if object.get("phone").is_some_and(Value::is_null) {
-        object.insert("phone_country_code".to_string(), Value::Null);
-        object.remove("phoneCountryCode");
+        CustomerPhoneContext::Untouched => {}
     }
 
     Ok(RequestPreparation::Ready(RequestSpec {
@@ -9185,7 +9468,12 @@ async fn process_repair_command_item(
             {
                 warn!("repair conflict audit telemetry write failed after durable native park");
             }
-            mark_conflict(&db, &item.id, item.claim_generation)?;
+            mark_conflict(
+                &db,
+                &item.id,
+                item.claim_generation,
+                REPAIR_CONFLICT_SERVER_VERSION_AHEAD,
+            )?;
             Ok(RepairQueueProcessOutcome::Conflict)
         }
         RepairSyncDisposition::SessionRequired(error) => {
@@ -9327,7 +9615,12 @@ async fn process_repair_attachment_item(
             {
                 warn!("repair attachment conflict audit telemetry write failed after durable native park");
             }
-            mark_conflict(&db, &item.id, item.claim_generation)?;
+            mark_conflict(
+                &db,
+                &item.id,
+                item.claim_generation,
+                REPAIR_ATTACHMENT_CONFLICT_SERVER_VERSION_AHEAD,
+            )?;
             Ok(RepairQueueProcessOutcome::Conflict)
         }
         RepairAttachmentDisposition::SessionRequired(error) => {
@@ -10146,6 +10439,13 @@ where
                     };
                     let requires_operator_review =
                         resolution == "manual" || resolution == "client-wins" || is_monetary;
+                    // Name the conflict from the server's own answer. The 409
+                    // body carries a machine code (`DUPLICATE` for a customer
+                    // whose phone already belongs to another record) and a
+                    // human sentence; both are worth more to the shop than the
+                    // blank the row used to get.
+                    let conflict_reason =
+                        server_conflict_reason(&response_body, &item.table_name, &item.operation);
 
                     let applied = {
                         let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
@@ -10163,7 +10463,12 @@ where
                                 false,
                             )?;
                             if requires_operator_review {
-                                mark_conflict(db, &item.id, item.claim_generation)
+                                mark_conflict(
+                                    db,
+                                    &item.id,
+                                    item.claim_generation,
+                                    conflict_reason.as_str(),
+                                )
                             } else {
                                 mark_success(db, &item.id, item.claim_generation)
                             }
@@ -10488,7 +10793,9 @@ fn resolve_special_entity_endpoint(item: &SyncQueueItem) -> Option<String> {
         "menu_categories" => Some(format!("/api/pos/sync/menu_categories/{}", item.record_id)),
         "menu_subcategories" => Some(format!("/api/pos/sync/subcategories/{}", item.record_id)),
         "menu_ingredients" => Some(format!("/api/pos/sync/ingredients/{}", item.record_id)),
-        "menu_combos" => Some(format!("/api/menu/combos/{}", item.record_id)),
+        // Terminal-authenticated availability patch (pos-sync-policy: menu_combos ->
+        // is_active only); the admin combos route rejects terminal keys.
+        "menu_combos" => Some(format!("/api/pos/sync/menu_combos/{}", item.record_id)),
         "reservations" => Some(match item.operation.as_str() {
             "INSERT" => "/api/pos/reservations".to_string(),
             _ => format!("/api/pos/reservations/{}", item.record_id),
@@ -10825,6 +11132,27 @@ mod tests {
     const TEST_TERMINAL_ID: &str = "terminal-test";
     const TEST_BRANCH_ID: &str = "11111111-1111-1111-1111-111111111111";
     const TEST_MENU_ITEM_ID: &str = "22222222-2222-2222-2222-222222222222";
+
+    #[test]
+    fn insert_normalizer_keeps_gift_card_tender() {
+        // Module audit 2026-09-16: offline gift-card orders replayed as "other".
+        assert_eq!(
+            normalize_payment_method_for_insert(Some("gift_card")),
+            "gift_card"
+        );
+        assert_eq!(
+            normalize_payment_method_for_insert(Some(" Gift-Card ")),
+            "gift_card"
+        );
+        assert_eq!(
+            normalize_payment_method_for_insert(Some("voucher")),
+            "other"
+        );
+        assert_eq!(
+            normalize_payment_method_for_update(Some("gift_card")),
+            Some("gift_card".to_string())
+        );
+    }
 
     fn seed_terminal_context(conn: &Connection) {
         crate::db::set_setting(conn, "terminal", "terminal_id", TEST_TERMINAL_ID)
@@ -11861,6 +12189,13 @@ mod tests {
             let conn = Connection::open(&path).expect("open queue database");
             crate::db::run_migrations_for_test(&conn);
             create_tables(&conn).expect("create queue tables");
+            // `prepare_request` resolves the terminal before it reaches any
+            // table-specific preparer and returns Failed without one, so this
+            // test asserted a ManualResolution it could never reach. It has
+            // been failing on master for that reason; seeding the terminal
+            // restores the coverage it was written for.
+            crate::db::set_setting(&conn, "terminal", "terminal_id", "terminal-test")
+                .expect("seed terminal id");
             let id = enqueue_test_item(
                 &conn,
                 "customers",
@@ -13297,6 +13632,20 @@ mod tests {
                 payload
             );
         }
+    }
+
+    #[test]
+    fn menu_combo_availability_toggles_use_the_pos_sync_route() {
+        let combo_item = queue_item(
+            "menu_combos",
+            "UPDATE",
+            "combo-1",
+            serde_json::json!({ "is_active": false }),
+        );
+        assert_eq!(
+            resolve_special_entity_endpoint(&combo_item).as_deref(),
+            Some("/api/pos/sync/menu_combos/combo-1")
+        );
     }
 
     #[test]
@@ -20418,6 +20767,237 @@ mod tests {
     /// Seed a parity_sync_queue row with the supplied id, status, and
     /// attempts. Sets module_type to 'orders' (non-monetary, so
     /// MonetaryDeadLetter side-effects are off the test path).
+    // -------------------------------------------------------------------
+    // Live incident, 2026-09-16: one customer INSERT sat in `conflict` on a
+    // shop's terminal for twelve hours. `mark_conflict` set the status and left
+    // `error_message` NULL, so the operator saw a permanently blocked sync with
+    // no reason, the exported bundle showed an empty `sync_errors.json`, and the
+    // offered "sync now" could not help because a conflict is not `pending`.
+    // These six cover the fix the founder asked for.
+    // -------------------------------------------------------------------
+
+    fn seed_customer_conflict(conn: &Connection, id: &str, payload: &str, reason: Option<&str>) {
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                id, table_name, record_id, operation, data, organization_id,
+                created_at, attempts, status, error_message, conflict_strategy,
+                module_type
+             ) VALUES (
+                ?1, 'customers', 'cust-live', 'INSERT', ?2, 'org-live',
+                datetime('now', '-12 hours'), 0, 'conflict', ?3, 'manual',
+                'customers'
+             )",
+            params![id, payload, reason],
+        )
+        .expect("seed customer conflict row");
+    }
+
+    fn row_state(conn: &Connection, id: &str) -> (String, Option<String>) {
+        conn.query_row(
+            "SELECT status, error_message FROM parity_sync_queue WHERE id = ?1",
+            params![id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read parity row")
+    }
+
+    /// 1. A Greek local number with the branch country known resolves to GR and
+    ///    is sent, instead of being parked.
+    #[test]
+    fn local_phone_with_known_branch_country_resolves_instead_of_parking() {
+        let conn = test_connection();
+        crate::db::set_setting(&conn, "restaurant", "phone_country_code", "GR")
+            .expect("cache branch country");
+
+        let payload = serde_json::json!({ "name": "Πελάτης", "phone": "6948128474" });
+        let object = payload.as_object().expect("object payload");
+
+        match resolve_customer_phone_country(&conn, object) {
+            CustomerPhoneContext::Resolved(Some(country)) => assert_eq!(country, "GR"),
+            other => panic!("expected GR context, got {other:?}"),
+        }
+    }
+
+    /// 2. The same number with no branch country stays blocked — and the block
+    ///    names a reason. Never a guessed +30.
+    #[test]
+    fn local_phone_without_country_context_blocks_with_an_explicit_reason() {
+        let conn = test_connection();
+        // No `restaurant.phone_country_code` cached: the branch has no country
+        // this platform recognises.
+        let payload = serde_json::json!({ "name": "Πελάτης", "phone": "6948128474" });
+        let object = payload.as_object().expect("object payload");
+
+        match resolve_customer_phone_country(&conn, object) {
+            CustomerPhoneContext::Blocked(reason) => {
+                assert_eq!(reason, CUSTOMER_PHONE_COUNTRY_CONTEXT_REQUIRED);
+                assert!(!reason.trim().is_empty(), "a block must name its reason");
+            }
+            other => panic!("expected a block, got {other:?}"),
+        }
+    }
+
+    /// 3. `mark_conflict` cannot produce the blank that stranded the live shop,
+    ///    even when the caller passes an empty reason.
+    #[test]
+    fn a_conflict_can_never_be_stored_without_a_reason() {
+        let conn = test_connection();
+        seed_h8_sibling_test_row(&conn, "no-reason", "processing", 0);
+
+        mark_conflict(&conn, "no-reason", 0, "   ").expect("mark conflict");
+
+        let (status, reason) = row_state(&conn, "no-reason");
+        assert_eq!(status, "conflict");
+        assert_eq!(reason.as_deref(), Some(CONFLICT_REASON_UNSPECIFIED));
+
+        // And the server's own 409 body becomes the reason when there is one.
+        seed_h8_sibling_test_row(&conn, "dup", "processing", 0);
+        let body = r#"{"success":false,"error":"Customer already exists","code":"DUPLICATE"}"#;
+        let derived = server_conflict_reason(body, "customers", "INSERT");
+        mark_conflict(&conn, "dup", 0, &derived).expect("mark conflict");
+        let (_, reason) = row_state(&conn, "dup");
+        let reason = reason.expect("reason recorded");
+        assert!(
+            reason.contains("DUPLICATE"),
+            "reason should name the code: {reason}"
+        );
+        assert!(
+            reason.contains("Customer already exists"),
+            "reason should keep the server sentence: {reason}"
+        );
+    }
+
+    /// 4. The row parked before the branch country was known heals on upgrade:
+    ///    conflict -> pending, and the ordinary replay takes it from there. A row
+    ///    that still has no context keeps a conflict WITH a reason.
+    #[test]
+    fn an_existing_conflict_self_heals_once_the_context_exists() {
+        let conn = test_connection();
+        let payload = r#"{"name":"Πελάτης","phone":"6948128474"}"#;
+        seed_customer_conflict(
+            &conn,
+            "heals",
+            payload,
+            Some(CUSTOMER_PHONE_COUNTRY_CONTEXT_REQUIRED),
+        );
+        // The blank the old `mark_conflict` left behind.
+        seed_customer_conflict(&conn, "blank", payload, None);
+
+        // Still no branch country: both stay blocked, and the blank gains a reason.
+        let first = revalidate_parked_conflicts(&conn).expect("first pass");
+        assert_eq!(
+            first.reasons_backfilled, 1,
+            "the blank row must gain a reason"
+        );
+        assert_eq!(first.customers_requeued, 0);
+        assert_eq!(first.customers_still_blocked, 2);
+        for id in ["heals", "blank"] {
+            let (status, reason) = row_state(&conn, id);
+            assert_eq!(status, "conflict", "{id} must stay parked without context");
+            assert_eq!(
+                reason.as_deref(),
+                Some(CUSTOMER_PHONE_COUNTRY_CONTEXT_REQUIRED),
+                "{id} must say why"
+            );
+        }
+
+        // The terminal now knows its branch is in Greece.
+        crate::db::set_setting(&conn, "restaurant", "phone_country_code", "GR")
+            .expect("cache branch country");
+        let second = revalidate_parked_conflicts(&conn).expect("second pass");
+        assert_eq!(
+            second.customers_requeued, 2,
+            "both rows must return to the queue"
+        );
+        assert_eq!(second.customers_still_blocked, 0);
+        for id in ["heals", "blank"] {
+            let (status, reason) = row_state(&conn, id);
+            assert_eq!(status, "pending", "{id} must be replayable again");
+            assert!(
+                reason.is_none(),
+                "{id} must start its retry with a clean slate"
+            );
+        }
+
+        // Idempotent: a third pass has nothing left to do.
+        let third = revalidate_parked_conflicts(&conn).expect("third pass");
+        assert_eq!(third, ConflictRevalidation::default());
+    }
+
+    /// 5. The queue counters and the exported evidence agree. The live bundle had
+    ///    `syncErrors: 1` beside an empty `sync_errors.json`, because the counter
+    ///    read the parity queue and the export read the legacy one.
+    #[test]
+    fn diagnostics_report_the_manual_conflict_they_count() {
+        let conn = test_connection();
+        seed_customer_conflict(
+            &conn,
+            "reported",
+            r#"{"name":"Πελάτης","phone":"6948128474"}"#,
+            Some("SERVER_CONFLICT_DUPLICATE: Customer already exists"),
+        );
+
+        let status = get_status(&conn).expect("queue status");
+        assert_eq!(status.conflicts, 1, "the conflict must be counted");
+        assert_eq!(
+            status.pending, 0,
+            "a conflict is not pending — 'sync now' cannot clear it"
+        );
+
+        let actionable = renderer_list_actionable_items(
+            &conn,
+            &QueueListQuery {
+                limit: Some(10),
+                module_type: None,
+            },
+        )
+        .expect("actionable items");
+        let item = actionable
+            .iter()
+            .find(|entry| entry.id == "reported")
+            .expect("the conflict must be listed as actionable");
+        assert_eq!(item.status, "conflict");
+        assert!(
+            item.error_message
+                .as_deref()
+                .is_some_and(|reason| reason.contains("DUPLICATE")),
+            "the operator-facing list must carry the reason, not a blank"
+        );
+    }
+
+    /// 6. Revalidation is confined to the parity customer rows. It must not read,
+    ///    move or clear anything financial.
+    #[test]
+    fn revalidation_leaves_financial_work_untouched() {
+        let conn = test_connection();
+        // A parity row that is NOT a customer, parked with its own reason.
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                id, table_name, record_id, operation, data, organization_id,
+                created_at, attempts, status, error_message, conflict_strategy
+             ) VALUES (
+                'money', 'order_payments', 'pay-1', 'INSERT', '{}', 'org-live',
+                datetime('now'), 0, 'conflict', 'PAYMENT_VERSION_CONFLICT', 'manual'
+             )",
+            [],
+        )
+        .expect("seed payment conflict");
+        crate::db::set_setting(&conn, "restaurant", "phone_country_code", "GR")
+            .expect("cache branch country");
+
+        let before = row_state(&conn, "money");
+        let outcome = revalidate_parked_conflicts(&conn).expect("revalidate");
+        let after = row_state(&conn, "money");
+
+        assert_eq!(outcome.customers_requeued, 0);
+        assert_eq!(
+            before, after,
+            "a payment conflict must be left exactly as it was"
+        );
+        assert_eq!(after.0, "conflict");
+        assert_eq!(after.1.as_deref(), Some("PAYMENT_VERSION_CONFLICT"));
+    }
+
     fn seed_h8_sibling_test_row(conn: &Connection, id: &str, status: &str, attempts: i64) {
         conn.execute(
             "INSERT INTO parity_sync_queue (
@@ -20531,7 +21111,7 @@ mod tests {
         seed_h8_sibling_test_row(&conn, "h8-mc", "processing", 0);
         bump_h8_generation(&conn, "h8-mc", 7);
 
-        let result = mark_conflict(&conn, "h8-mc", 0);
+        let result = mark_conflict(&conn, "h8-mc", 0, "SERVER_CONFLICT_TEST");
         assert!(result.is_ok(), "mark_conflict stale must be Ok no-op");
 
         let (status, attempts, generation) = read_h8_state(&conn, "h8-mc");

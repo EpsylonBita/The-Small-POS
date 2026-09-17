@@ -137,6 +137,8 @@ const entryPoints = [
   path.join(testsRoot, 'renderer', 'release-notes-changelog.test.ts'),
   path.join(testsRoot, 'renderer', 'z-report-closeout-sync.test.ts'),
   path.join(testsRoot, 'renderer', 'z-report-headline-total-revenue.test.ts'),
+  path.join(testsRoot, 'renderer', 'z-report-reconciliation-and-platforms.test.ts'),
+  path.join(testsRoot, 'renderer', 'platform-held-payment-notice.test.ts'),
   path.join(testsRoot, 'renderer', 'z-report-day-orders-list.test.ts'),
   path.join(testsRoot, 'renderer', 'z-report-action-rail-scroll.test.ts'),
   path.join(testsRoot, 'renderer', 'display-pages-ui.test.ts'),

@@ -254,9 +254,83 @@ export interface UnsettledPaymentBlocker {
   settledAmount: number;
   paymentStatus: string;
   paymentMethod: string;
+  /**
+   * `missing_local_payment_row` · `no_persisted_payment` ·
+   * `partial_*` · `split_payment_incomplete` · `unsupported_payment_method`
+   * and, since the 16/09/2026 reconciliation work:
+   * `overpaid_order` · `duplicate_payment` ·
+   * `platform_settlement_mismatch` · `platform_settlement_missing`.
+   */
   reasonCode: string;
   reasonText: string;
   suggestedFix: string;
+  /** `blocking` (the Z must not close) or `warning`. Absent on ≤1.4.113. */
+  severity?: 'blocking' | 'warning';
+  /**
+   * Order total − settled, in cents. Negative means the ledger holds MORE
+   * than the order is worth (overpayment / duplicate settlement).
+   */
+  differenceCents?: number;
+}
+
+/**
+ * The Z-report reconciliation block: does the order side of the day agree
+ * with the payment side?
+ *
+ * `orderTurnover` (Σ order totals, = `sales.totalSales`) and
+ * `paymentCoverage` (Σ completed payments, = `daySummary.total`) are shown
+ * side by side and NEVER summed — platform turnover already lives inside
+ * both. On the founder's 16/09/2026 Z they read €1.636,16 against €1.105,73
+ * and the report closed without a word; `findings` is why it no longer can.
+ */
+export interface ZReportIntegrity {
+  orderTurnover: number;
+  paymentCoverage: number;
+  /** orderTurnover − paymentCoverage, raw arithmetic. */
+  difference: number;
+  /**
+   * The part of `difference` with a known, legitimate cause — today, orders
+   * whose `refunded` status keeps them in turnover but out of coverage. A
+   * normal refund must not read as a financial-integrity gap.
+   */
+  explainedDifference?: number;
+  /**
+   * `difference − explainedDifference`. THIS is the number that means
+   * something is wrong, and the one the panel colours on.
+   */
+  unexplainedDifference?: number;
+  /** Orders excluded from the payment side by their `refunded` status. */
+  refundedOrders?: { orders: number; amount: number };
+  /** Money missing because a paid order has no ledger coverage. */
+  uncoveredAmount: number;
+  /** Money the ledger holds beyond the orders' worth. */
+  excessAmount: number;
+  blockingFindings: number;
+  warningFindings: number;
+  findingsByReason?: Array<{
+    reasonCode: string;
+    orders: number;
+    difference: number;
+  }>;
+  findings: UnsettledPaymentBlocker[];
+  /**
+   * Orders held back because an earlier Z already closed their day. Excluded
+   * from every total, reported so nothing disappears silently.
+   */
+  carriedOverFromClosedDays?: { orders: number; amount: number };
+  /**
+   * Order sources that name neither one of our own channels (`pos`, `kiosk`,
+   * `web`, `android-ios`) nor a marketplace we know.
+   *
+   * `orders.plugin` shares its namespace with payment gateways, analytics,
+   * e-invoicing and e-commerce integrations (`stripe`, `viva`, `mydata`,
+   * `woocommerce`, …), so an unrecognised slug is NOT guessed into
+   * ΠΛΑΤΦΟΡΜΕΣ. Its money stays fully counted in `orderTurnover` and
+   * `paymentCoverage`; only the platform attribution is withheld, and it is
+   * named here so the slug can be classified.
+   */
+  unclassifiedPlatforms?: Array<{ source: string; orders: number; amount: number }>;
+  reconciled: boolean;
 }
 
 export interface PaymentIntegrityErrorPayload {

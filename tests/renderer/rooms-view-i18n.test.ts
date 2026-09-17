@@ -252,7 +252,9 @@ test('RoomsView room-option labels use the shared currency-formatted picker', ()
 test('RoomsView money uses the locale-aware currency helper, not hardcoded "$"', () => {
   // formatMoney must delegate to the shared POS currency formatter (Greek "145,00 €"),
   // not build a hardcoded "$" + toFixed string.
-  assert.match(viewSource, /import \{ formatCurrency, formatDate \} from '\.\.\/\.\.\/\.\.\/utils\/format';/);
+  // formatDate left the view with the always-empty checkout date (module audit 2026-09-16);
+  // the pin is about formatCurrency, not the exact import list.
+  assert.match(viewSource, /import \{ formatCurrency(?:, formatDate)? \} from '\.\.\/\.\.\/\.\.\/utils\/format';/);
   assert.match(viewSource, /const formatMoney = \(amount: number\): string => formatCurrency\(Number\(amount\) \|\| 0\);/);
   assert.doesNotMatch(viewSource, /\$\{amount\.toFixed\(2\)\}/);
   // The previously hardcoded "$" rate and check-in total are gone.

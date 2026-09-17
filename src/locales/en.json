@@ -25,14 +25,16 @@
     "pagination": { "label": "Repair pages", "previous": "Previous", "next": "Next", "summary": "{{start}}–{{end}} of {{total}}" },
     "timeline": { "created": "Repair created", "status_changed": "Status changed", "note_added": "Note added", "assignment_changed": "Assignment changed", "diagnosis_updated": "Diagnosis updated", "line_changed": "Repair line changed", "part_consumed": "Part consumed", "part_reversed": "Part consumption reversed", "estimate_created": "Estimate created", "approval_recorded": "Approval recorded", "attachment_added": "Attachment added", "attachment_retention_changed": "Attachment retention changed", "settlement_linked": "Settlement linked", "branch_transferred": "Branch transferred", "reopened": "Repair reopened", "unknown": "Repair activity" },
     "fields": { "customer": "Customer", "device": "Device", "assignedTo": "Assigned to", "assigned": "Assigned", "dueAt": "Due date", "intakeNotes": "Intake notes", "diagnosis": "Diagnosis", "anonymous": "Anonymous customer", "unassigned": "Unassigned", "notRecorded": "Not recorded" },
-    "actions": { "create": "Create repair", "operations": "Repair actions", "changeStatus": "Change status", "transitionReason": "Audited reason", "remainConsumed": "Keep consumed parts consumed", "addNote": "Add note", "assign": "Assign", "assignToMe": "Assign to me", "unassign": "Unassign", "updateDiagnosis": "Save diagnosis draft", "finalizeDiagnosis": "Save final diagnosis", "planLine": "Add planned line", "consumePart": "Consume part", "reversePart": "Reverse consumption", "reversalReason": "Reversal reason", "lineType": "Line type", "part": "Part", "labour": "Labour", "charge": "Charge", "lineName": "Line name", "sku": "SKU", "quantity": "Quantity", "unitPrice": "Unit price", "vatRate": "VAT rate", "discount": "Discount", "validUntil": "Valid until", "estimateNote": "Estimate note", "createEstimate": "Create estimate", "recordApproval": "Record in-person approval", "stagePhoto": "Add photo", "openAttachment": "Open attachment", "acceptServer": "Use server version", "rebase": "Rebase my changes", "close": "Close" },
+    "actions": {"create": "Create repair", "operations": "Repair actions", "changeStatus": "Change status", "transitionReason": "Audited reason", "remainConsumed": "Keep consumed parts consumed", "addNote": "Add note", "assign": "Assign", "assignToMe": "Assign to me", "unassign": "Unassign", "updateDiagnosis": "Save diagnosis draft", "finalizeDiagnosis": "Save final diagnosis", "planLine": "Add planned line", "consumePart": "Consume part", "reversePart": "Reverse consumption", "reversalReason": "Reversal reason", "lineType": "Line type", "part": "Part", "labour": "Labour", "charge": "Charge", "lineName": "Line name", "sku": "SKU", "quantity": "Quantity", "unitPrice": "Unit price", "vatRate": "VAT rate", "discount": "Discount", "validUntil": "Valid until", "estimateNote": "Estimate note", "createEstimate": "Create estimate", "recordApproval": "Record in-person approval", "stagePhoto": "Add photo", "openAttachment": "Open attachment", "acceptServer": "Use server version", "rebase": "Rebase my changes", "close": "Close", "catalogSearch": "Catalog search", "printIntake": "Print intake", "printLabel": "Print label", "searchCatalog": "Search catalog"},
     "panels": { "partsEmpty": "No planned parts, labour or charges yet.", "estimateEmpty": "No estimate has been issued yet.", "timelineEmpty": "No timeline events yet.", "photosEmpty": "No attachment metadata is available.", "conflictsTitle": "Sync conflicts", "conflictsEmpty": "No repair conflicts need review." },
-    "messages": { "readyQueued": "Ready status is queued for sync.", "noNotificationSent": "No customer notification has been sent yet.", "offline": "Offline changes stay queued until this terminal reconnects.", "onlineActionRequired": "This action requires an online server check.", "activeShiftRequired": "Start a staff shift to load repair data and actions.", "selectorOnline": "Customer and device lookup requires an online native connection. A previously selected canonical customer and device can still be submitted offline.", "createUnavailable": "Creating repairs requires an active shift and repair-create permission.", "conflictResolutionUnavailable": "Conflict resolution requires an active shift, an online native connection and repair-update permission.", "submitInProgress": "The repair is being saved. Closing is temporarily disabled.", "finalDiagnosisOnline": "Final diagnosis requires an online server check; drafts can be queued offline.", "estimateOnline": "Estimates and approvals require an online server check.", "estimateNeedsLines": "Add at least one planned line before creating an estimate.", "photoOneShot": "The selected photo is read once and handed to encrypted native staging; the renderer does not persist it.", "photoUnavailable": "Photo staging requires loaded attachment settings, repair permission, a known connection state and an active shift.", "attachmentTypeInvalid": "This file type is not allowed by repair settings.", "attachmentTooLarge": "This photo is larger than the repair attachment limit.", "attachmentInvalid": "Select a non-empty photo allowed by repair settings.", "attachmentStageFailed": "The photo could not be staged.", "attachmentOpenFailed": "The attachment could not be opened securely.", "loadFailed": "Repairs could not be loaded.", "commandFailed": "The repair change could not be saved.", "assignmentUnavailable": "Self-assignment requires a canonical staff identity and repair-assignment permission.", "settingsUnavailable": "Repair intake stays disabled until authoritative or cached settings are available.", "invalidIntake": "Check the intake details and try again.", "customerSearchFailed": "Customer search could not be completed.", "deviceLoadFailed": "Customer devices could not be loaded.", "deviceCreateFailed": "The device could not be saved.", "secureIdUnavailable": "Secure device identifiers are unavailable. Restart the application before creating a repair." },
+    "messages": {"readyQueued": "Ready status is queued for sync.", "noNotificationSent": "No customer notification has been sent yet.", "offline": "Offline changes stay queued until this terminal reconnects.", "onlineActionRequired": "This action requires an online server check.", "activeShiftRequired": "Start a staff shift to load repair data and actions.", "selectorOnline": "Customer and device lookup requires an online native connection. A previously selected canonical customer and device can still be submitted offline.", "createUnavailable": "Creating repairs requires an active shift and repair-create permission.", "conflictResolutionUnavailable": "Conflict resolution requires an active shift, an online native connection and repair-update permission.", "submitInProgress": "The repair is being saved. Closing is temporarily disabled.", "finalDiagnosisOnline": "Final diagnosis requires an online server check; drafts can be queued offline.", "estimateOnline": "Estimates and approvals require an online server check.", "estimateNeedsLines": "Add at least one planned line before creating an estimate.", "photoOneShot": "The selected photo is read once and handed to encrypted native staging; the renderer does not persist it.", "photoUnavailable": "Photo staging requires loaded attachment settings, repair permission, a known connection state and an active shift.", "attachmentTypeInvalid": "This file type is not allowed by repair settings.", "attachmentTooLarge": "This photo is larger than the repair attachment limit.", "attachmentInvalid": "Select a non-empty photo allowed by repair settings.", "attachmentStageFailed": "The photo could not be staged.", "attachmentOpenFailed": "The attachment could not be opened securely.", "loadFailed": "Repairs could not be loaded.", "commandFailed": "The repair change could not be saved.", "assignmentUnavailable": "Self-assignment requires a canonical staff identity and repair-assignment permission.", "settingsUnavailable": "Repair intake stays disabled until authoritative or cached settings are available.", "invalidIntake": "Check the intake details and try again.", "customerSearchFailed": "Customer search could not be completed.", "deviceLoadFailed": "Customer devices could not be loaded.", "deviceCreateFailed": "The device could not be saved.", "secureIdUnavailable": "Secure device identifiers are unavailable. Restart the application before creating a repair.", "catalogNoMatch": "No safe catalog match was found.", "catalogUnavailable": "Catalog lookup is unavailable.", "printFailed": "The repair document could not be queued securely."},
     "locked": { "communication": "Customer Messaging is not enabled in this private-beta build.", "money": "Repair payments, refunds, fiscalization and delivery remain locked until the typed native money transport is available.", "approvalTransition": "Approved status is reached only through the audited approval action in Estimate & approval.", "assignment": "Assignment changes remain locked until a scoped, repair-safe staff projection is available.", "stockReversal": "Stock reversal remains locked because the native workspace does not expose the original movement reference.", "catalog": "Product and service catalog lookup remains locked until a repair-safe read-only native projection is available.", "attachmentOpen": "Opening existing attachments remains locked until signed native retrieval is available.", "printing": "Repair printing remains locked until the typed native print queue is available." },
-    "money": { "readiness": { "loading": "Checking fiscal readiness…", "retry": "Retry", "nonFiscalInfo": "myDATA is optional. Repair payments can be recorded without the plugin.", "setupRequired": "Fiscal setup for this branch is incomplete.", "countryRequired": "A branch country is required before this action.", "providerRequired": "A fiscal provider is required for fiscal actions.", "certificationRequired": "Fiscal certification is required for fiscal actions.", "transportUnavailable": "Fiscal document submission is not available for this integration.", "statusUnavailable": "Fiscal readiness could not be determined." } },
+    "money": {"readiness": {"loading": "Checking fiscal readiness…", "retry": "Retry", "nonFiscalInfo": "myDATA is optional. Repair payments can be recorded without the plugin.", "setupRequired": "Fiscal setup for this branch is incomplete.", "countryRequired": "A branch country is required before this action.", "providerRequired": "A fiscal provider is required for fiscal actions.", "certificationRequired": "Fiscal certification is required for fiscal actions.", "transportUnavailable": "Fiscal document submission is not available for this integration.", "statusUnavailable": "Fiscal readiness could not be determined."}, "title": "Repair payments", "onlineRequired": "Payments require an online connection.", "activeShiftRequired": "Open a shift to perform repair money actions.", "loading": "Loading settlement…", "total": "Total", "paid": "Paid", "balance": "Balance", "createSettlement": "Create settlement", "fiscalize": "Issue fiscal document", "collect": "Collect payment", "refund": "Refund payment", "refundPayment": "Payment to refund", "deliver": "Deliver repair", "delivery": "Delivery", "deliveryReason": "Delivery override reason", "paymentAmount": "Payment amount", "paymentMethod": "Payment method", "refundAmount": "Refund amount", "refundMethod": "Refund method", "refundReason": "Refund reason", "providerReference": "Provider reference", "depositUnsupported": "Partial repair deposits are not supported by this fiscal profile."},
     "a11y": { "resultsUpdated": "{{count}} repair results available.", "currentRepair": "Current repair: {{number}}", "tabHint": "Use the left and right arrow keys to change tabs.", "statusLabel": "Repair status: {{status}}" }
   },
   "common": {
+    "requiresOnline": "This action requires an online connection.",
+    "savedLocallyQueued": "Saved locally and queued",
     "all": "All",
     "floorPresets": {
       "basementValue": "Basement",
@@ -192,7 +194,13 @@
     },
     "close": "Close",
     "retry": "Retry",
-    "refresh": "Refresh"
+    "refresh": "Refresh",
+    "live": "Live",
+    "saveChanges": "Save changes",
+    "apply": "Apply",
+    "more": "more",
+    "creating": "Creating...",
+    "saving": "Saving..."
   },
   "dashboard": {
     "tabs": {
@@ -693,7 +701,11 @@
       "lineDiscountCleared": "Selected item discounts cleared",
       "lineDiscountBadge": "Line discount",
       "lineDiscountTitle": "Selected Item Discount",
-      "lineDiscountSelectionSummary": "{{count}} items - {{amount}}"
+      "lineDiscountSelectionSummary": "{{count}} items - {{amount}}",
+      "ghostModeBanner": "Ghost order armed. This cart will print only, stay hidden in POS, and be saved as a ghost reference order.",
+      "ghostModeHint": "Enter name X and price 1 to arm ghost mode for the current cart only.",
+      "manualDeliveryFeePlaceholder": "0.00",
+      "unitPrice": "Unit price"
     },
     "emptyState": {
       "title": "No Menu Items",
@@ -738,7 +750,9 @@
       "from": "From ",
       "readyIn": "Ready in {{time}} min",
       "pickup": "Pickup",
-      "delivery": "Delivery"
+      "delivery": "Delivery",
+      "noDescription": "No description available",
+      "quantity": "Quantity"
     },
     "modifiers": {
       "title": "Modifiers",
@@ -815,7 +829,8 @@
       "updateItem": "Update Item",
       "searchIngredients": "Search ingredients...",
       "addNotes": "Add Notes",
-      "editNotes": "Edit Notes"
+      "editNotes": "Edit Notes",
+      "ingredients": "Ingredients"
     },
     "ingredients": {
       "otherCategory": "Other"
@@ -870,7 +885,8 @@
       "placeOrder": "Place Order",
       "placingOrder": "Placing Order...",
       "customerInfoRequired": "Please provide customer information to place order"
-    }
+    },
+    "customizable": "Customizable"
   },
   "users": {
     "title": "Users Management",
@@ -1232,6 +1248,13 @@
     }
   },
   "payment": {
+    "platformHeld": {
+      "title": "Payment already collected by the platform",
+      "body": "The payment has been collected by the platform. Do not take cash or card from the customer.",
+      "unsyncedTitle": "Platform payment not yet reconciled",
+      "unsyncedBody": "The platform has collected the payment, but the record of that collection has not synced yet. Do not collect from the customer again. The day cannot be closed until the reconciliation completes.",
+      "blockedAction": "Collection is disabled for this order."
+    },
     "title": "Payment",
     "subtitle": "Process payment",
     "paymentMethod": "Payment Method",
@@ -1744,6 +1767,16 @@
     }
   },
   "settings": {
+    "platforms": {
+      "efoodPartner": {
+        "reload": "Reload",
+        "home": "Live orders",
+        "soundOn": "efood sound on",
+        "soundOff": "efood sound off",
+        "soundFailed": "The efood page did not accept the sound change. Reload the page and try again.",
+        "unavailable": "The efood page could not be shown on this register. Reload, or restart the POS."
+      }
+    },
     "settingsHub": {
       "subtitle": "Set up and manage this register",
       "status": {
@@ -3672,7 +3705,8 @@
       "customerInfo": "Customer Info (Optional)",
       "customerName": "Name",
       "customerPhone": "Phone",
-      "customerNotes": "Notes"
+      "customerNotes": "Notes",
+      "loadItemsFailed": "Failed to load order items"
     },
     "payment": {
       "title": "Payment",
@@ -4235,6 +4269,27 @@
       "cardTotalLabel": "Card",
       "otherTender": "Other tender",
       "platformsTotal": "Platforms (efood etc.)",
+      "reconciliationTitle": "Reconciliation",
+      "orderTurnover": "Order turnover",
+      "paymentCoverage": "Payment coverage",
+      "reconciliationDifference": "Difference",
+      "reconciliationOrdersAffected": "Orders affected",
+      "reconciliationCarriedOver": "{{count}} order(s) worth {{amount}} belong to a day an earlier Z already closed and are excluded from these totals.",
+      "reconciliationUnclassifiedSources": "Order sources not recognised as a platform. Their money is included in the totals above; only the platform attribution is withheld.",
+      "reconciliationExplainedByRefunds": "{{amount}} explained by refunds",
+      "reconciliationReason": {
+        "missing_local_payment_row": "Paid order with no payment record",
+        "no_persisted_payment": "Completed order with no recorded payment",
+        "partial_payment_remaining": "Partial payment",
+        "partial_cash_payment": "Partial cash payment",
+        "partial_card_payment": "Partial card payment",
+        "split_payment_incomplete": "Unfinished split payment",
+        "unsupported_payment_method": "Unsupported payment method",
+        "overpaid_order": "Overpayment",
+        "duplicate_payment": "Duplicate payment",
+        "platform_settlement_mismatch": "Platform settlement in the wrong tender",
+        "platform_settlement_missing": "Missing platform settlement"
+      },
       "revenueSplitHint": "Cash + Card + Platforms = Actual earned",
       "liveShiftBreakdown": "Live Shift Breakdown",
       "liveCurrentWindow": "Live current window",
@@ -5056,6 +5111,7 @@
       "expiryWarning": "{{count}} items expiring soon"
     },
     "errors": {
+      "loadFailedTitle": "Inventory unavailable",
       "loadFailed": "Failed to load inventory",
       "adjustmentNegative": "Adjustment would result in negative stock",
       "adjustmentFailed": "Failed to adjust stock"
@@ -5467,7 +5523,9 @@
       "floorPlan": "Floor Plan",
       "switchToFloorPlan": "Switch to floor plan view",
       "switchToGrid": "Switch to grid view"
-    }
+    },
+    "noTables": "No tables configured",
+    "configureInAdmin": "Configure tables in the Admin Dashboard"
   },
   "reservations": {
     "title": "Reservations",
@@ -6063,6 +6121,14 @@
         "cancelled": "Appointment cancelled",
         "no_show": "Appointment marked as no-show"
       }
+    },
+    "status": {
+      "scheduled": "Scheduled",
+      "confirmed": "Confirmed",
+      "in_progress": "In Progress",
+      "completed": "Completed",
+      "cancelled": "Cancelled",
+      "no_show": "No Show"
     }
   },
   "reservationsView": {
@@ -6745,7 +6811,8 @@
       "title": "Kitchen context is missing",
       "body": "This terminal is not assigned to the required context. Check terminal settings and try again.",
       "action": "Retry Context"
-    }
+    },
+    "hoursAgo": "{{hours}}h {{mins}}m"
   },
   "loyalty": {
     "tier": {
@@ -6754,11 +6821,6 @@
       "silver": "Silver",
       "gold": "Gold",
       "platinum": "Platinum"
-    },
-    "contextMissing": {
-      "title": "Loyalty context is missing",
-      "body": "This terminal is missing organization settings. Check terminal settings and try again.",
-      "action": "Retry Context"
     },
     "pointsEarned": "+{{points}} loyalty points earned",
     "customerFound": "Loyalty customer: {{name}}",
@@ -6784,9 +6846,6 @@
     "settingsUnavailable": "Loyalty settings are not available on this terminal",
     "noAccountForCustomer": "This customer has no loyalty account",
     "notEnoughRedeemablePoints": "Minimum {{min}} points required",
-    "lastSynced": "Last synced: {{time}}",
-    "syncNow": "Sync Now",
-    "offlineNote": "Showing cached data",
     "noMembers": "No Loyalty Members",
     "noMembersDesc": "Customers will appear here when they join the loyalty program.",
     "unknownCustomer": "Unknown Customer",
@@ -7769,6 +7828,11 @@
         "summary": "{{count}} saved updates are waiting for a successful retry.",
         "guidance": "Try the selected update once. Open support details if it fails again."
       },
+      "parityModuleConflict": {
+        "title": "Some updates are blocked",
+        "summary": "{{count}} update(s) in {{moduleLabel}} were rejected by the office and cannot be sent as they are.",
+        "guidance": "Open support details to see the reason. Retrying alone will not clear a rejected update until its cause is fixed."
+      },
       "parityModulePending": {
         "title": "{{moduleLabel}} parity backlog",
         "summary": "{{count}} parity items in {{moduleLabel}} are still pending.",
@@ -8099,7 +8163,8 @@
       "checkoutFailed": "Failed to complete checkout",
       "paymentFailed": "Failed to post payment",
       "chargeFailed": "Failed to add charge"
-    }
+    },
+    "moduleRequired": "The Rooms module is not active for this business."
   },
   "guestBilling": {
     "room": "Room",
@@ -8304,7 +8369,9 @@
       "timeRequired": "Reservation time is required",
       "partySizeMin": "Party size must be at least 1",
       "partySizeExceedsCapacity": "Party size exceeds table capacity of {{capacity}}"
-    }
+    },
+    "guests": "{{count}} guests",
+    "guestCount": "{{count}} guests"
   },
   "customerMessaging": {
     "title": "Customer messages", "customerRequired": "Link a customer to use messaging.", "onlineOnly": "Messaging actions require an online connection.",
@@ -8316,5 +8383,61 @@
     "sendFailed": "Message could not be queued.", "retryFailed": "Retry was not queued.", "linkOpened": "Secure provider link opened.", "linkFailed": "The secure provider link could not be opened.",
     "attemptCount": "{{count}} attempt(s)", "attempt": "Attempt {{number}}",
     "status": { "queued": "Queued", "delayed": "Delayed", "sending": "Sending", "accepted": "Accepted", "sent": "Sent", "delivered": "Delivered", "read": "Read", "failed": "Failed", "skipped": "Skipped", "dead_lettered": "Retry limit reached", "unknown": "Outcome unknown" }
+  },
+  "driveThru": {
+    "selectBranch": "Please select a branch to view drive-through",
+    "activeOrders": "Active Orders",
+    "avgWaitTime": "Avg Wait Time",
+    "activeLanes": "Active Lanes",
+    "muteNotifications": "Mute notifications",
+    "enableNotifications": "Enable notifications",
+    "loading": "Loading drive-through data...",
+    "noOrders": "No orders",
+    "ordersServedToday": "{{count}} orders served today",
+    "cancelOrder": "Cancel order",
+    "stage": {
+      "waiting": "Order Placed",
+      "preparing": "Preparing",
+      "ready": "Ready",
+      "served": "Picked Up"
+    }
+  },
+  "modules": {
+    "kiosk": {
+      "completed": "Completed",
+      "description": "Manage self-service kiosk ordering",
+      "disabled": "Kiosk ordering is disabled",
+      "enabled": "Kiosk ordering is enabled",
+      "noOrders": "No kiosk orders yet",
+      "openKiosk": "Open",
+      "orderNumber": "Order",
+      "pending": "Pending",
+      "qrCodes": "QR Codes",
+      "qrCodesDescription": "Manage QR codes in the admin dashboard",
+      "qrCodesInfo": "Create and manage QR codes for kiosk ordering in the admin dashboard. Customers scan QR codes to place orders directly from their phones.",
+      "recentOrders": "Recent Kiosk Orders",
+      "revenue": "Revenue",
+      "status": "Kiosk Status",
+      "title": "Kiosk Management",
+      "todayOrders": "Today's Orders",
+      "toggleError": "Failed to update kiosk status"
+    }
+  },
+  "reservationInfoPanel": {
+    "title": "Table",
+    "customerName": "Customer",
+    "date": "Date",
+    "time": "Time",
+    "partySize": "Party Size",
+    "guests": "guests",
+    "phone": "Phone",
+    "status": "Status",
+    "specialRequests": "Special Requests",
+    "noReservation": "No reservation found for today",
+    "fetchError": "Failed to load reservation",
+    "seatGuest": "Seat Guest",
+    "seatError": "Failed to seat guest",
+    "cancelReservation": "Cancel Reservation",
+    "lateWarning": "{{minutes}} minutes late"
   }
 }

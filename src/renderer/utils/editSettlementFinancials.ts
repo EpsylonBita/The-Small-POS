@@ -1,3 +1,5 @@
+import { roundMoney } from '@shared/utils/money';
+
 export type EditSettlementEditableOrderType = 'pickup' | 'delivery' | 'dine-in';
 
 export type EditSettlementFinancialsOrderLike = object;
@@ -30,7 +32,8 @@ const readNumber = (
   return fallback;
 };
 
-const roundMoney = (value: number): number => Number(value.toFixed(2));
+// Module audit closure (2026-09-16): one rounding rule for the renderer. `toFixed(2)`
+// rounds on the binary value, so it sent 1.005 to 1.00 and 2.675 to 2.67.
 
 export const getEditSettlementItemsSubtotal = (
   nextItems: EditSettlementFinancialsItemLike[],

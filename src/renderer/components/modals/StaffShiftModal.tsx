@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { roundMoney } from '@shared/utils/money';
 import { toast } from 'react-hot-toast';
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { X, Clock, Euro, FileText, Plus, AlertCircle, User, ChevronLeft, ChevronRight, AlertTriangle, CheckCircle, XCircle, Banknote, CreditCard, Star, Check, Trash2, Pencil, QrCode, Delete } from 'lucide-react';
@@ -1706,7 +1707,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         const hoursWorked = (checkOutTime.getTime() - checkInTime.getTime()) / (1000 * 60 * 60);
 
         const expected = hourlyRate * hoursWorked;
-        setExpectedPayment(Math.round(expected * 100) / 100); // Round to 2 decimals
+        setExpectedPayment(roundMoney(expected));
       } else {
         setExpectedPayment(null);
       }

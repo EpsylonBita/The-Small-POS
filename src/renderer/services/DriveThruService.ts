@@ -12,7 +12,7 @@ import { getBridge } from '../../lib';
 import { offlineUpdateDriveThruStatus } from './offline-mutations';
 
 // Types
-export type DriveThruOrderStatus = 'waiting' | 'preparing' | 'ready' | 'served';
+export type DriveThruOrderStatus = 'waiting' | 'preparing' | 'ready' | 'served' | 'cancelled';
 
 export interface DriveThruLane {
   id: string;
@@ -77,7 +77,7 @@ function transformOrderFromAPI(data: any): DriveThruOrder {
     orderId: data.order_id,
     orderNumber: data.order_number || `DT-${data.id?.slice(-4).toUpperCase() || '0000'}`,
     customerName: data.customer_name || null,
-    itemsCount: 0, // Not available without separate order_items query
+    itemsCount: typeof data.items_count === 'number' ? data.items_count : 0,
     position: data.position || 0,
     status: data.status || 'waiting',
     arrivedAt: data.arrived_at,

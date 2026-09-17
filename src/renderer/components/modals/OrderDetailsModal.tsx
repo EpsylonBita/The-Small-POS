@@ -13,6 +13,10 @@ import { formatCurrency, formatDate, formatTime } from '../../utils/format';
 import { normalizeOrderTypeForDisplay } from '../../utils/orderDisplay';
 import { resolveTableServiceCustomerNumber } from '../../utils/tableOrderFlow';
 import { resolveStrikethroughSubtotal } from '../../utils/orderSummary';
+import {
+  PlatformHeldPaymentNotice,
+  usePlatformHeldNotice,
+} from '../ui/PlatformHeldPaymentNotice';
 import RefundVoidModal from './RefundVoidModal';
 import { SplitPaymentModal } from './SplitPaymentModal';
 import type { SplitPaymentResult } from './SplitPaymentModal';
@@ -1006,7 +1010,31 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   };
 
   const canRefund = paymentStatus === 'paid' || paymentStatus === 'completed';
-  const canSplitPayment = !isCancelledOrder && (paymentStatus === 'pending' || paymentStatus === 'partially_paid');
+
+  // Presentation for money the platform is holding (prepaid online, or COD its
+  // own rider collected). Read from the order's disposition through the shared
+  // collectability logic — NOT from `payment_status`, which a failed
+  // settlement honestly lowers to `pending` at exactly the moment the operator
+  // most needs to be told not to collect (founder request, 16/09/2026).
+  const platformHeldOrder = useMemo(
+    () => ({
+      id: orderId,
+      platform: displayOrder.plugin ?? displayOrder.platform ?? null,
+      externalPlatformOrderId:
+        displayOrder.external_plugin_order_id ?? displayOrder.externalPluginOrderId ?? null,
+      ghostMetadata: displayOrder.ghost_metadata ?? displayOrder.ghostMetadata ?? null,
+    }),
+    [displayOrder, orderId],
+  );
+  const platformHeldNotice = usePlatformHeldNotice(platformHeldOrder);
+
+  // The collect action is hidden for platform-held money, and the banner below
+  // says why. The write paths refuse it anyway; this keeps the operator from
+  // meeting that refusal as an error with a customer waiting.
+  const canSplitPayment =
+    !isCancelledOrder &&
+    platformHeldNotice === null &&
+    (paymentStatus === 'pending' || paymentStatus === 'partially_paid');
 
   useEffect(() => {
     if (!isOpen) {
@@ -1278,6 +1306,11 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                       </div>
                     </div>
                   </div>
+                  {/* Right under the status the operator reads before deciding
+                      to collect. `payment_status` alone cannot say this: a
+                      failed settlement leaves it `pending`, which looks
+                      exactly like money still owed. */}
+                  <PlatformHeldPaymentNotice order={platformHeldOrder} className="mt-3" />
                 </div>
 
                 <div className={`${insetPanelClass} px-4 py-3`}>

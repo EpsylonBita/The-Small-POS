@@ -210,9 +210,10 @@ test('round 2 P1: the in-flight flag is armed with the guard and cleared in fina
 
 test('round 2 P3: amount edits, method toggles, and add-person are locked during the guarded window (stale-amount charge)', () => {
   assert.match(modalSource, /disabled=\{portion\.status !== 'draft' \|\| isProcessing \|\| isTerminalChargeInFlight\}/);
-  assert.match(modalSource, /const locked = portion\.status !== 'draft' \|\| isProcessing \|\| isTerminalChargeInFlight \|\| isReconciliationPending;/);
+  // 16/09/2026: the same lock also covers money the platform is holding.
+  assert.match(modalSource, /const locked = portion\.status !== 'draft' \|\| isProcessing \|\| isTerminalChargeInFlight \|\| isReconciliationPending \|\| platformHeld;/);
   assert.match(modalSource, /disabled=\{Boolean\(processingPortionId\) \|\| isProcessing \|\| isTerminalChargeInFlight\}/);
-  assert.match(modalSource, /&& !isTerminalChargeInFlight && !isReconciliationPending, \[anyItemsAssigned/);
+  assert.match(modalSource, /&& !isTerminalChargeInFlight && !isReconciliationPending && !platformHeld, \[anyItemsAssigned/);
 });
 
 test('P0-02: settlement and recording use the normalized card portion, never the stale draft capture', () => {

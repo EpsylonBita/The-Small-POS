@@ -775,6 +775,31 @@ pub async fn loyalty_earn_points(
     }))
 }
 
+/// Debit a local loyalty balance only while it still covers the redemption. Returns
+/// `false` (and changes nothing) when the balance is insufficient, so a concurrent or
+/// replayed redemption can never drive the balance negative.
+fn debit_local_loyalty_balance(
+    conn: &rusqlite::Connection,
+    org_id: &str,
+    customer_id: &str,
+    points: i64,
+    now: &str,
+) -> Result<bool, String> {
+    let changed = conn
+        .execute(
+            "UPDATE loyalty_customers
+             SET points_balance = points_balance - ?1,
+                 total_redeemed = total_redeemed + ?1,
+                 updated_at = ?2
+             WHERE customer_id = ?3
+               AND organization_id = ?4
+               AND points_balance >= ?1",
+            params![points, now, customer_id, org_id],
+        )
+        .map_err(|e| format!("loyalty_redeem_points update balance: {e}"))?;
+    Ok(changed == 1)
+}
+
 /// Redeem points from a customer's balance for a discount. Creates a pending
 /// transaction in loyalty_transactions and enqueues it for sync.
 #[tauri::command]
@@ -893,62 +918,71 @@ pub async fn loyalty_redeem_points(
     );
     let negative_points = -points;
 
-    // Insert loyalty transaction (points stored as negative for redemptions)
-    conn.execute(
-        "INSERT INTO loyalty_transactions (
-            id, customer_id, organization_id, points, transaction_type,
-            order_id, description, sync_state, created_at
-        ) VALUES (?1, ?2, ?3, ?4, 'redeem', ?5, ?6, 'pending', ?7)",
-        params![
-            tx_id,
-            canonical_customer_id,
-            org_id,
-            negative_points,
-            order_id,
-            description,
-            now
-        ],
-    )
-    .map_err(|e| format!("loyalty_redeem_points insert tx: {e}"))?;
+    // The ledger row, the balance debit and the sync enqueue commit together, and the
+    // debit only succeeds while the balance still covers it (the pre-check above is a
+    // fast path, not the guard).
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| format!("loyalty_redeem_points begin: {e}"))?;
+    let redeemed = (|| -> Result<(), String> {
+        // Insert loyalty transaction (points stored as negative for redemptions)
+        conn.execute(
+            "INSERT INTO loyalty_transactions (
+                id, customer_id, organization_id, points, transaction_type,
+                order_id, description, sync_state, created_at
+            ) VALUES (?1, ?2, ?3, ?4, 'redeem', ?5, ?6, 'pending', ?7)",
+            params![
+                tx_id,
+                canonical_customer_id,
+                org_id,
+                negative_points,
+                order_id,
+                description,
+                now
+            ],
+        )
+        .map_err(|e| format!("loyalty_redeem_points insert tx: {e}"))?;
 
-    // Update customer balance
-    conn.execute(
-        "UPDATE loyalty_customers
-         SET points_balance = points_balance - ?1,
-             total_redeemed = total_redeemed + ?1,
-             updated_at = ?2
-         WHERE customer_id = ?3 AND organization_id = ?4",
-        params![points, now, canonical_customer_id, org_id],
-    )
-    .map_err(|e| format!("loyalty_redeem_points update balance: {e}"))?;
+        if !debit_local_loyalty_balance(&conn, &org_id, &canonical_customer_id, points, &now)? {
+            return Err(format!(
+                "Insufficient balance: have {current_balance}, need {points}"
+            ));
+        }
+
+        // Wave 5 Session 6: enqueue via canonical parity queue. Local stores
+        // `points` as the signed negative delta; `prepare_loyalty_request`
+        // flips to absolute value before POSTing to /redeem.
+        let sync_payload = serde_json::json!({
+            "id": tx_id,
+            "customer_id": canonical_customer_id,
+            "organization_id": org_id,
+            "points": negative_points,
+            "transaction_type": "redeem",
+            "order_id": order_id,
+            "description": description,
+            "discount_value": discount_value,
+            "created_at": now,
+        });
+        let _ = sync_queue::enqueue_payload_item(
+            &conn,
+            "loyalty_transactions",
+            &tx_id,
+            "INSERT",
+            &sync_payload,
+            Some(1),
+            Some("loyalty"),
+            Some("manual"),
+            Some(1),
+        );
+        Ok(())
+    })();
+    if let Err(error) = redeemed {
+        let _ = conn.execute_batch("ROLLBACK");
+        return Err(error);
+    }
+    conn.execute_batch("COMMIT")
+        .map_err(|e| format!("loyalty_redeem_points commit: {e}"))?;
 
     let new_balance = current_balance - points;
-
-    // Wave 5 Session 6: enqueue via canonical parity queue. Local stores
-    // `points` as the signed negative delta; `prepare_loyalty_request`
-    // flips to absolute value before POSTing to /redeem.
-    let sync_payload = serde_json::json!({
-        "id": tx_id,
-        "customer_id": canonical_customer_id,
-        "organization_id": org_id,
-        "points": negative_points,
-        "transaction_type": "redeem",
-        "order_id": order_id,
-        "description": description,
-        "discount_value": discount_value,
-        "created_at": now,
-    });
-    let _ = sync_queue::enqueue_payload_item(
-        &conn,
-        "loyalty_transactions",
-        &tx_id,
-        "INSERT",
-        &sync_payload,
-        Some(1),
-        Some("loyalty"),
-        Some("manual"),
-        Some(1),
-    );
 
     info!(
         customer_id = %canonical_customer_id,
@@ -1126,5 +1160,60 @@ mod tests {
         assert_eq!(inserted.0, None);
         assert_eq!(inserted.1, "customer-123");
         assert_eq!(inserted.2, 0);
+    }
+
+    #[test]
+    fn debit_local_loyalty_balance_refuses_an_insufficient_balance() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_loyalty_customers_table(&conn);
+        conn.execute(
+            "INSERT INTO loyalty_customers (
+                id, customer_id, organization_id, points_balance, created_at, updated_at
+            ) VALUES ('row-1', 'customer-1', 'org-1', 120, ?1, ?1)",
+            params!["2026-09-16T00:00:00Z"],
+        )
+        .unwrap();
+
+        assert!(!debit_local_loyalty_balance(
+            &conn,
+            "org-1",
+            "customer-1",
+            150,
+            "2026-09-16T00:00:01Z"
+        )
+        .unwrap());
+        assert!(debit_local_loyalty_balance(
+            &conn,
+            "org-1",
+            "customer-1",
+            100,
+            "2026-09-16T00:00:01Z"
+        )
+        .unwrap());
+
+        let (balance, redeemed): (i64, i64) = conn
+            .query_row(
+                "SELECT points_balance, total_redeemed FROM loyalty_customers WHERE customer_id = 'customer-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((balance, redeemed), (20, 100));
+        assert!(!debit_local_loyalty_balance(
+            &conn,
+            "org-1",
+            "customer-1",
+            21,
+            "2026-09-16T00:00:02Z"
+        )
+        .unwrap());
+        assert!(!debit_local_loyalty_balance(
+            &conn,
+            "org-2",
+            "customer-1",
+            1,
+            "2026-09-16T00:00:02Z"
+        )
+        .unwrap());
     }
 }

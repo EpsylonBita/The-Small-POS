@@ -2297,7 +2297,18 @@ fn load_day_order_details(
 ) -> Result<(Vec<Value>, bool), String> {
     let financial_expr = business_day::order_financial_timestamp_expr("o");
     let financial_predicate = lower_bound_mode.sql_predicate(&financial_expr, "?1");
-    let open_table_tab = business_day::open_unsettled_table_tab_expr("o");
+    // Same population as the turnover aggregate and the closeout gate, so the
+    // Orders tab lists exactly the orders the totals were built from.
+    let last_z_anchor = business_day::last_z_anchor_utc(conn);
+    let reportable_order = business_day::z_report_reportable_order_expr("o", "?4");
+    // `plugin` names an order SOURCE, and only a marketplace we can NAME is a
+    // platform: `pos`/`kiosk`/`web`/`android-ios` are our own channels and must
+    // read as platform-less here, or the modal's «Platforms» filter (which
+    // keys on a non-null `platform`) sweeps the whole till in. A slug we do
+    // not recognise is platform-less too — it is reported by
+    // `integrity.unclassifiedPlatforms` instead of being guessed into a
+    // marketplace it may have nothing to do with.
+    let external_platform_label = crate::platforms::external_marketplace_label_sql_expr("o.plugin");
     // instr() instead of LIKE for the fleet marker: it contains `_`, which
     // LIKE treats as a single-character wildcard.
     let sql = format!(
@@ -2329,7 +2340,7 @@ fn load_day_order_details(
                    o.payment_status AS payment_status,
                    o.status AS status,
                    o.created_at AS created_at,
-                   NULLIF(LOWER(TRIM(COALESCE(o.plugin, ''))), '') AS platform,
+                   NULLIF({external_platform_label}, '') AS platform,
                    CASE WHEN instr(COALESCE(o.ghost_metadata, ''),
                                    '\"delivery_provider\":\"platform_delivery\"') > 0
                         THEN 1 ELSE 0 END AS platform_fleet,
@@ -2351,7 +2362,7 @@ fn load_day_order_details(
               AND COALESCE(o.is_test, 0) = 0
               AND COALESCE(o.order_context, '') <> 'repair_settlement'
               AND o.status NOT IN ('cancelled', 'canceled')
-              AND NOT {open_table_tab}
+              AND {reportable_order}
          ) x
          ORDER BY x.created_at ASC, x.id ASC
          LIMIT 1001"
@@ -2360,9 +2371,11 @@ fn load_day_order_details(
     let mut rows = conn
         .prepare(&sql)
         .map_err(|e| format!("prepare day order details: {e}"))?
-        .query_map(params![period_start, cutoff_at, branch_id], |row| {
-            let raw_order_type = row.get::<_, String>(2)?;
-            Ok(serde_json::json!({
+        .query_map(
+            params![period_start, cutoff_at, branch_id, last_z_anchor],
+            |row| {
+                let raw_order_type = row.get::<_, String>(2)?;
+                Ok(serde_json::json!({
                 "id": row.get::<_, String>(0)?,
                 "orderNumber": row.get::<_, String>(1)?,
                 "orderType": normalize_order_type(&raw_order_type),
@@ -2379,8 +2392,9 @@ fn load_day_order_details(
                 "platformFleet": row.get::<_, i64>(11)? == 1,
                 "staffShiftId": row.get::<_, Option<String>>(12)?,
                 "staffName": row.get::<_, Option<String>>(13)?,
-            }))
-        })
+                }))
+            },
+        )
         .map_err(|e| format!("query day order details: {e}"))?
         .filter_map(|row| row.ok())
         .collect::<Vec<_>>();
@@ -3971,6 +3985,281 @@ pub fn get_end_of_day_status(db: &DbState, payload: &Value) -> Result<Value, Str
 ///
 /// The returned value is not persisted. Callers choose whether the snapshot
 /// is used as a preview or materialized into `z_reports` and `sync_queue`.
+/// Orders this Z window would have counted before 16/09/2026 but that belong
+/// to a day an earlier Z already closed (see
+/// `business_day::z_report_reportable_order_expr`). Reported, never totalled:
+/// hiding money silently is the failure mode we are fixing, not the fix.
+fn load_carried_over_from_closed_days(
+    conn: &Connection,
+    branch_id: &str,
+    period_start: &str,
+    cutoff_at: Option<&str>,
+    lower_bound_mode: LowerBoundMode,
+    last_z_anchor: Option<&str>,
+) -> Result<Value, String> {
+    let financial_expr = business_day::order_financial_timestamp_expr("o");
+    let financial_predicate = lower_bound_mode.sql_predicate(&financial_expr, "?1");
+    let swept = business_day::paid_order_swept_by_last_z_expr("o", "?4");
+    let sql = format!(
+        "SELECT COUNT(*),
+                COALESCE(SUM(COALESCE(o.total_amount_cents,
+                                      CAST(ROUND(o.total_amount * 100) AS INTEGER), 0)), 0)
+         FROM orders o
+         WHERE {financial_predicate}
+           AND (?2 IS NULL OR {financial_expr} <= ?2)
+           AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
+           AND COALESCE(o.is_ghost, 0) = 0
+           AND COALESCE(o.is_test, 0) = 0
+           AND COALESCE(o.order_context, '') <> 'repair_settlement'
+           AND o.status NOT IN ('cancelled', 'canceled')
+           AND {swept}"
+    );
+    let (count, amount_cents) = conn
+        .query_row(
+            &sql,
+            params![period_start, cutoff_at, branch_id, last_z_anchor],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .unwrap_or((0, 0));
+
+    Ok(serde_json::json!({
+        "orders": count,
+        "amount": Cents::new(amount_cents).to_f64_dp2(),
+        "amount_cents": amount_cents,
+    }))
+}
+
+/// Orders whose `plugin` names a source we cannot classify — neither one of
+/// our own channels nor a marketplace we know.
+///
+/// These are deliberately NOT filed under ΠΛΑΤΦΟΡΜΕΣ (see `crate::platforms`
+/// for why: `plugin` shares its namespace with payment gateways, analytics and
+/// e-commerce integrations, and guessing an unrecognised slug into a delivery
+/// marketplace would be a fabrication). Their money is untouched — it stays in
+/// `sales.totalSales` and `daySummary.total` like any other order, because the
+/// platform block is a breakdown, not a total. Only the attribution is
+/// withheld, and it is withheld out loud: the slug, the count and the amount
+/// are reported here so the slug can be added to the classifier.
+fn load_unclassified_platform_sources(
+    conn: &Connection,
+    branch_id: &str,
+    period_start: &str,
+    cutoff_at: Option<&str>,
+    lower_bound_mode: LowerBoundMode,
+    last_z_anchor: Option<&str>,
+) -> Result<Vec<Value>, String> {
+    let financial_expr = business_day::order_financial_timestamp_expr("o");
+    let financial_predicate = lower_bound_mode.sql_predicate(&financial_expr, "?1");
+    let reportable_order = business_day::z_report_reportable_order_expr("o", "?4");
+    let is_unknown = crate::platforms::unknown_platform_sql_predicate("o.plugin");
+    let sql = format!(
+        "SELECT LOWER(TRIM(COALESCE(o.plugin, ''))) AS source,
+                COUNT(*),
+                COALESCE(SUM(COALESCE(o.total_amount_cents,
+                                      CAST(ROUND(o.total_amount * 100) AS INTEGER), 0)), 0)
+         FROM orders o
+         WHERE {financial_predicate}
+           AND (?2 IS NULL OR {financial_expr} <= ?2)
+           AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
+           AND COALESCE(o.is_ghost, 0) = 0
+           AND COALESCE(o.is_test, 0) = 0
+           AND COALESCE(o.order_context, '') <> 'repair_settlement'
+           AND o.status NOT IN ('cancelled', 'canceled')
+           AND {reportable_order}
+           AND {is_unknown}
+         GROUP BY source
+         ORDER BY source"
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("prepare unclassified platform sources: {e}"))?;
+    let rows = stmt
+        .query_map(
+            params![period_start, cutoff_at, branch_id, last_z_anchor],
+            |row| {
+                let source: String = row.get(0)?;
+                let orders: i64 = row.get(1)?;
+                let amount_cents: i64 = row.get(2)?;
+                Ok(serde_json::json!({
+                    "source": source,
+                    "orders": orders,
+                    "amount": Cents::new(amount_cents).to_f64_dp2(),
+                    "amount_cents": amount_cents,
+                }))
+            },
+        )
+        .map_err(|e| format!("query unclassified platform sources: {e}"))?;
+    Ok(rows.filter_map(|row| row.ok()).collect())
+}
+
+/// The part of `orderTurnover - paymentCoverage` that has a LEGITIMATE
+/// explanation, so a healthy day does not read as a financial gap.
+///
+/// Review item C (16/09/2026): the two sides count different populations by
+/// design. Turnover excludes only `cancelled`/`canceled`; the payment query
+/// also excludes `refunded`, because a refunded order's money went back to the
+/// customer and must not be reported as takings. The order itself still
+/// belongs to the day's gross (the refunds line subtracts it separately), so a
+/// fully-refunded order leaves a non-zero difference with no finding behind it
+/// — and the panel painted that red.
+///
+/// A partial refund recorded as a `payment_adjustments` row moves NEITHER side
+/// (coverage is gross completed payments), so the founder's «order paid then
+/// €0,70 refunded» day nets to zero difference on its own. It is the
+/// order-level `refunded` STATUS that opens the gap, and this is what accounts
+/// for it.
+///
+/// Anything this does NOT explain is a real break and stays visible.
+fn load_reconciliation_explanations(
+    conn: &Connection,
+    branch_id: &str,
+    period_start: &str,
+    cutoff_at: Option<&str>,
+    lower_bound_mode: LowerBoundMode,
+    last_z_anchor: Option<&str>,
+) -> Result<(i64, i64), String> {
+    let financial_expr = business_day::order_financial_timestamp_expr("o");
+    let financial_predicate = lower_bound_mode.sql_predicate(&financial_expr, "?1");
+    let reportable_order = business_day::z_report_reportable_order_expr("o", "?4");
+    // Same population as the turnover aggregate, narrowed to the orders the
+    // payment side deliberately drops.
+    let sql = format!(
+        "SELECT COUNT(*),
+                COALESCE(SUM(COALESCE(o.total_amount_cents,
+                                      CAST(ROUND(o.total_amount * 100) AS INTEGER), 0)), 0)
+         FROM orders o
+         WHERE {financial_predicate}
+           AND (?2 IS NULL OR {financial_expr} <= ?2)
+           AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
+           AND COALESCE(o.is_ghost, 0) = 0
+           AND COALESCE(o.is_test, 0) = 0
+           AND COALESCE(o.order_context, '') <> 'repair_settlement'
+           AND LOWER(TRIM(COALESCE(o.status, ''))) = 'refunded'
+           AND {reportable_order}"
+    );
+    conn.query_row(
+        &sql,
+        params![period_start, cutoff_at, branch_id, last_z_anchor],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+    )
+    .map_err(|e| format!("load reconciliation explanations: {e}"))
+}
+
+/// The Z-report reconciliation block: does the order side of the day agree
+/// with the payment side, and if not, exactly which orders break it?
+///
+/// Founder rule (16/09/2026): «Αν ένα order θεωρείται οικονομικά paid, πρέπει
+/// να υπάρχει αντίστοιχη canonical completed payment κάλυψη για το ποσό του.»
+/// This block is how the Z proves that rule held for the day — and refuses to
+/// close when it did not.
+///
+/// `orderTurnover` is the order side (Σ order totals, = `sales.totalSales`);
+/// `paymentCoverage` is the ledger side (Σ completed payments, =
+/// `daySummary.total`). They are reported SEPARATELY and never summed: the
+/// founder's efood «x43 / €504,80» is platform turnover already inside both,
+/// not an extra amount to add on top.
+fn build_z_integrity_block(
+    order_turnover: f64,
+    payment_coverage: f64,
+    carried_over: &Value,
+    unclassified_platforms: &[Value],
+    refunded_orders: (i64, i64),
+    blockers: &[UnsettledPaymentBlocker],
+) -> Value {
+    let mut uncovered_cents = 0_i64;
+    let mut excess_cents = 0_i64;
+    let mut blocking = 0_i64;
+    let mut warnings = 0_i64;
+    let mut by_reason: std::collections::BTreeMap<String, (i64, i64)> =
+        std::collections::BTreeMap::new();
+
+    for blocker in blockers {
+        if blocker.is_blocking() {
+            blocking += 1;
+        } else {
+            warnings += 1;
+        }
+        let difference = blocker.difference_cents;
+        if difference > 0 {
+            uncovered_cents += difference;
+        } else {
+            excess_cents += -difference;
+        }
+        let entry = by_reason
+            .entry(blocker.reason_code.clone())
+            .or_insert((0, 0));
+        entry.0 += 1;
+        entry.1 += difference;
+    }
+
+    let reasons: Vec<Value> = by_reason
+        .into_iter()
+        .map(|(reason_code, (count, difference_cents))| {
+            serde_json::json!({
+                "reasonCode": reason_code,
+                "orders": count,
+                "differenceCents": difference_cents,
+                "difference": Cents::new(difference_cents).to_f64_dp2(),
+            })
+        })
+        .collect();
+
+    let turnover_cents = Cents::round_half_even(order_turnover).as_i64();
+    let coverage_cents = Cents::round_half_even(payment_coverage).as_i64();
+    let difference_cents = turnover_cents - coverage_cents;
+
+    // The two sides count different populations on purpose (see
+    // `load_reconciliation_explanations`). Subtract what that accounts for;
+    // only the residual is a real break.
+    let (refunded_order_count, refunded_order_cents) = refunded_orders;
+    let explained_cents = refunded_order_cents;
+    let unexplained_cents = difference_cents - explained_cents;
+    // `reconciled` is the single flag the UI colours on and the operator
+    // reads. It must mean "nothing here is wrong", not "the arithmetic is
+    // zero" — a legitimate refund must not paint the panel red, and a real
+    // gap must not be excused by one.
+    let reconciled = blocking == 0 && unexplained_cents == 0;
+
+    serde_json::json!({
+        // Order side vs ledger side. Shown side by side in the Z; never added.
+        "orderTurnover": Cents::new(turnover_cents).to_f64_dp2(),
+        "orderTurnover_cents": turnover_cents,
+        "paymentCoverage": Cents::new(coverage_cents).to_f64_dp2(),
+        "paymentCoverage_cents": coverage_cents,
+        "difference": Cents::new(difference_cents).to_f64_dp2(),
+        "difference_cents": difference_cents,
+        // Difference with a known, legitimate cause — today: orders whose
+        // `refunded` status keeps them in turnover but out of coverage.
+        "explainedDifference": Cents::new(explained_cents).to_f64_dp2(),
+        "explainedDifference_cents": explained_cents,
+        "refundedOrders": {
+            "orders": refunded_order_count,
+            "amount": Cents::new(refunded_order_cents).to_f64_dp2(),
+            "amount_cents": refunded_order_cents,
+        },
+        // What is left over. THIS is the number that means something is wrong.
+        "unexplainedDifference": Cents::new(unexplained_cents).to_f64_dp2(),
+        "unexplainedDifference_cents": unexplained_cents,
+        // Money the day is short because a paid order has no ledger row.
+        "uncoveredAmount": Cents::new(uncovered_cents).to_f64_dp2(),
+        "uncoveredAmount_cents": uncovered_cents,
+        // Money the ledger holds beyond the orders' worth (overpay/duplicate).
+        "excessAmount": Cents::new(excess_cents).to_f64_dp2(),
+        "excessAmount_cents": excess_cents,
+        "blockingFindings": blocking,
+        "warningFindings": warnings,
+        "findingsByReason": reasons,
+        "findings": blockers,
+        "carriedOverFromClosedDays": carried_over.clone(),
+        // Sources recorded on orders that name neither our own channels nor a
+        // marketplace we know. Their money is fully counted in the totals
+        // above; only their attribution to a platform is withheld, and it is
+        // named here so the slug can be classified.
+        "unclassifiedPlatforms": unclassified_platforms.to_vec(),
+        "reconciled": reconciled,
+    })
+}
+
 fn build_z_report_for_date(
     db: &DbState,
     payload: &Value,
@@ -4085,7 +4374,15 @@ fn build_z_report_for_date(
     // Gap review P0-03: open tabs are exempt from the closeout gate, so they can
     // still exist here — but their money was never collected, so they must not
     // be reported as revenue. They are counted on the day they are settled.
-    let open_table_tab = business_day::open_unsettled_table_tab_expr("o");
+    //
+    // 16/09/2026: the same predicate now also drops paid orders the LAST Z
+    // already closed. Turnover and the payment-integrity gate must report on
+    // ONE population — when they disagreed, a closed day's order whose
+    // `updated_at` drifted back into the window inflated turnover while being
+    // exempt from the check that would have caught it. See
+    // `business_day::z_report_reportable_order_expr`.
+    let last_z_anchor = business_day::last_z_anchor_utc(&conn);
+    let reportable_order = business_day::z_report_reportable_order_expr("o", "?4");
     let order_agg_sql = format!(
         // W4b-iii: cents-with-real-fallback shim (removed in 4e).
         "SELECT COUNT(*) as cnt,
@@ -4101,12 +4398,12 @@ fn build_z_report_for_date(
            AND COALESCE(o.is_test, 0) = 0
            AND COALESCE(o.order_context, '') <> 'repair_settlement'
            AND o.status NOT IN ('cancelled', 'canceled')
-           AND NOT {open_table_tab}"
+           AND {reportable_order}"
     );
     let order_agg = conn
         .query_row(
             &order_agg_sql,
-            params![period_start, cutoff_param, branch_id],
+            params![period_start, cutoff_param, branch_id, last_z_anchor],
             |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
@@ -4119,6 +4416,18 @@ fn build_z_report_for_date(
         .unwrap_or((0, 0.0, 0.0, 0.0));
 
     let (ordinary_orders, ordinary_gross_sales, discounts_total, tips_total) = order_agg;
+
+    // What the predicate above held back, so it is excluded from the totals
+    // but never from the operator's sight (rendered as «μεταφορά από κλεισμένη
+    // ημέρα» in the Z reconciliation panel).
+    let carried_over = load_carried_over_from_closed_days(
+        &conn,
+        branch_id.as_str(),
+        period_start.as_str(),
+        cutoff_param,
+        lower_bound_mode,
+        last_z_anchor.as_deref(),
+    )?;
     let total_orders = ordinary_orders + repair_orders_count;
     let gross_sales = ordinary_gross_sales + repair_tender_sales;
 
@@ -4131,6 +4440,19 @@ fn build_z_report_for_date(
     // `platform_settlement:*` transaction_ref. Split it out of the catch-all
     // `other` bucket so the Z shows it as its own line — revenue that arrives
     // by bank settlement and must never look like drawer cash.
+    //
+    // Population parity with the turnover aggregate above (review item E,
+    // 16/09/2026). This query carries no `{reportable_order}` clause and does
+    // not need one: BOTH halves of that predicate
+    // (`open_unsettled_table_tab_expr`, `paid_order_swept_by_last_z_expr`)
+    // require `NOT EXISTS (a completed order_payments row)`, and this query
+    // only counts `op.status = 'completed'`. An order the predicate hides
+    // therefore contributes zero here by construction — the two sides agree on
+    // the same orders. Pinned by
+    // `test_turnover_and_coverage_agree_on_the_reportable_population`; if that
+    // predicate ever stops requiring "no completed payments", this query must
+    // grow the clause (and a `?4` anchor param) or coverage will outrun
+    // turnover.
     let payment_scope_sql = format!(
         "SELECT op.method,
                 CASE WHEN op.method NOT IN ('cash','card')
@@ -4236,6 +4558,13 @@ fn build_z_report_for_date(
     {
         let platform_scope_expr = business_day::order_financial_timestamp_expr("o");
         let platform_scope_predicate = lower_bound_mode.sql_predicate(&platform_scope_expr, "?1");
+        // «POS x37» (founder, 16/09/2026): this block used to group every
+        // order whose `plugin` was merely non-empty, so the store's own till
+        // (`plugin = 'pos'`) printed inside ΠΛΑΤΦΟΡΜΕΣ next to efood and
+        // Wolt. Only a marketplace we can NAME belongs here — the list is
+        // closed, and anything else is reported as unclassified rather than
+        // filed under a platform. See `crate::platforms`.
+        let is_external_platform = crate::platforms::external_marketplace_sql_predicate("o.plugin");
         // instr() instead of LIKE: the marker contains `_`, which LIKE treats
         // as a single-character wildcard.
         let platform_orders_sql = format!(
@@ -4253,21 +4582,25 @@ fn build_z_report_for_date(
                AND COALESCE(o.is_ghost, 0) = 0
                AND COALESCE(o.is_test, 0) = 0
                AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
-               AND TRIM(COALESCE(o.plugin, '')) != ''
+               AND {is_external_platform}
+               AND {reportable_order}
              GROUP BY platform, platform_fleet"
         );
         let mut platform_stmt = conn
             .prepare(&platform_orders_sql)
             .map_err(|e| format!("prepare platform breakdown query: {e}"))?;
         let platform_rows = platform_stmt
-            .query_map(params![period_start, cutoff_param, branch_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                    Cents::new(row.get::<_, i64>(3)?).to_f64_dp2(),
-                ))
-            })
+            .query_map(
+                params![period_start, cutoff_param, branch_id, last_z_anchor],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        Cents::new(row.get::<_, i64>(3)?).to_f64_dp2(),
+                    ))
+                },
+            )
             .map_err(|e| format!("query platform breakdown: {e}"))?;
         for row in platform_rows.flatten() {
             let (platform, is_platform_fleet, count, total) = row;
@@ -4296,7 +4629,7 @@ fn build_z_report_for_date(
                AND COALESCE(o.is_ghost, 0) = 0
                AND COALESCE(o.is_test, 0) = 0
                AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
-               AND TRIM(COALESCE(o.plugin, '')) != ''
+               AND {is_external_platform}
                AND instr(COALESCE(o.ghost_metadata, ''),
                          '\"delivery_provider\":\"platform_delivery\"') = 0
              GROUP BY platform, op.method"
@@ -4794,6 +5127,44 @@ fn build_z_report_for_date(
     let total_sales = gross_sales - discounts_total;
     let day_total =
         cash_sales + card_sales + other_sales + platform_online_sales + platform_cod_sales;
+
+    // Reconciliation, computed on the SAME window and population as the
+    // totals above. `sales.totalSales` is the order side, `daySummary.total`
+    // the ledger side; when they disagree, `integrity.findings` names every
+    // order responsible and `prepare_z_report_submission` refuses to close.
+    let integrity_blockers = payment_integrity::load_branch_window_payment_blockers(
+        &conn,
+        branch_id.as_str(),
+        period_start.as_str(),
+        cutoff_param,
+        lower_bound_mode == LowerBoundMode::Inclusive,
+    )
+    .map_err(|e| format!("load z-report integrity findings: {e}"))?;
+    let unclassified_platforms = load_unclassified_platform_sources(
+        &conn,
+        branch_id.as_str(),
+        period_start.as_str(),
+        cutoff_param,
+        lower_bound_mode,
+        last_z_anchor.as_deref(),
+    )?;
+    let refunded_orders = load_reconciliation_explanations(
+        &conn,
+        branch_id.as_str(),
+        period_start.as_str(),
+        cutoff_param,
+        lower_bound_mode,
+        last_z_anchor.as_deref(),
+    )?;
+    let integrity = build_z_integrity_block(
+        total_sales,
+        day_total,
+        &carried_over,
+        &unclassified_platforms,
+        refunded_orders,
+        &integrity_blockers,
+    );
+
     let mut report_json = serde_json::json!({
         "date": date,
         "shifts": {
@@ -4874,6 +5245,10 @@ fn build_z_report_for_date(
         // (`generate_z_report`) reports one shift by design.
         "dayOrders": day_orders,
         "dayOrdersTruncated": day_orders_truncated,
+        // Founder rule 16/09/2026: a paid order must have canonical completed
+        // payment coverage. This block is the Z's proof, and the reason it
+        // refuses to close when the proof fails.
+        "integrity": integrity,
     });
     canonicalize_report_json_period(&mut report_json, period_start.as_str(), period_end.as_str());
 
@@ -9666,5 +10041,570 @@ mod tests {
             )
             .unwrap();
         assert_eq!(evidence, (4, None));
+    }
+
+    // ------------------------------------------------------------------
+    // 16/09/2026 incident regressions.
+    //
+    // Two bugs, one Z slip: «POS x37» printed inside ΠΛΑΤΦΟΡΜΕΣ, and
+    // order-level turnover of €1.636,16 against payment-level €1.105,73 with
+    // the report closing without a word.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_plugin_pos_is_not_reported_as_an_external_platform() {
+        let db = test_db();
+        let shift_id = seed_closed_shift(&db);
+        {
+            let conn = db.conn.lock().unwrap();
+            // 3 in-store orders that the till itself took. `plugin = 'pos'`
+            // is an order SOURCE, not a marketplace: these used to print as
+            // «POS ×3» next to efood.
+            for (index, total_cents) in [(1_i64, 1000_i64), (2, 1500), (3, 2000)] {
+                let order_id = format!("ord-pos-{index}");
+                conn.execute(
+                    "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents,
+                        status, order_type, payment_status, staff_shift_id, plugin, sync_status,
+                        created_at, updated_at)
+                     VALUES (?1, ?1, '[]', ?2, ?3, 'completed', 'takeaway', 'paid', ?4, 'pos',
+                             'pending', '2026-02-16T12:00:00Z', '2026-02-16T12:00:00Z')",
+                    params![order_id, total_cents as f64 / 100.0, total_cents, shift_id],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status,
+                        staff_shift_id, sync_status, created_at, updated_at)
+                     VALUES (?1, ?2, 'cash', ?3, ?4, 'completed', ?5, 'pending',
+                             '2026-02-16T12:05:00Z', '2026-02-16T12:05:00Z')",
+                    params![
+                        format!("pay-{order_id}"),
+                        order_id,
+                        total_cents as f64 / 100.0,
+                        total_cents,
+                        shift_id
+                    ],
+                )
+                .unwrap();
+            }
+            // One real platform order, so the section is not merely empty.
+            conn.execute(
+                "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents,
+                    status, order_type, payment_status, plugin, ghost_metadata, sync_status,
+                    created_at, updated_at)
+                 VALUES ('ord-efood-1', 'EF-1', '[]', 12.10, 1210, 'delivered', 'delivery', 'paid',
+                         'efood', '{\"food_delivery\":{\"delivery_provider\":\"platform_delivery\",\"payment_method\":\"online\",\"prepaid\":true}}',
+                         'pending', '2026-02-16T12:10:00Z', '2026-02-16T12:10:00Z')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status,
+                    transaction_ref, sync_status, created_at, updated_at)
+                 VALUES ('pay-efood-1', 'ord-efood-1', 'other', 12.10, 1210, 'completed',
+                         'platform_settlement:online:ord-efood-1', 'pending',
+                         '2026-02-16T12:10:30Z', '2026-02-16T12:10:30Z')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let payload = serde_json::json!({ "branchId": "branch-1", "date": "2026-02-16" });
+        let result = generate_z_report_for_date(&db, &payload).expect("generate");
+        let report = &result["report"]["reportJson"];
+
+        let platforms = report["sales"]["platforms"]
+            .as_array()
+            .expect("platforms array");
+        let names: Vec<&str> = platforms
+            .iter()
+            .map(|entry| entry["platform"].as_str().unwrap_or(""))
+            .collect();
+        assert_eq!(names, vec!["efood"], "only external platforms belong here");
+        assert!(
+            !names.contains(&"pos"),
+            "«POS x37»: the store's own till is not a platform"
+        );
+
+        // Same rule in the Orders tab: a POS order carries no platform, so
+        // the modal's «Platforms» filter cannot sweep the whole till in.
+        let day_orders = report["dayOrders"].as_array().expect("dayOrders");
+        for order in day_orders {
+            let id = order["id"].as_str().unwrap_or("");
+            if id.starts_with("ord-pos-") {
+                assert!(
+                    order["platform"].is_null(),
+                    "POS order {id} must have no platform: {order:?}"
+                );
+            }
+        }
+        let efood_row = day_orders
+            .iter()
+            .find(|order| order["id"] == "ord-efood-1")
+            .expect("efood order listed");
+        assert_eq!(efood_row["platform"], "efood");
+    }
+
+    #[test]
+    fn test_unknown_order_source_is_reported_not_filed_under_platforms() {
+        let db = test_db();
+        let shift_id = seed_closed_shift(&db);
+        {
+            let conn = db.conn.lock().unwrap();
+            // `plugin` shares its namespace with payment gateways, analytics
+            // and e-commerce integrations. `woocommerce` is catalogued with
+            // `supports_order_sync`, so it is the realistic near-term case:
+            // a web-shop order must NOT print inside ΠΛΑΤΦΟΡΜΕΣ as though a
+            // delivery marketplace had carried it.
+            conn.execute(
+                "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents,
+                    status, order_type, payment_status, staff_shift_id, plugin, sync_status,
+                    created_at, updated_at)
+                 VALUES ('ord-woo', 'WOO-1', '[]', 24.0, 2400, 'completed', 'takeaway', 'paid', ?1,
+                         'woocommerce', 'pending', '2026-02-16T12:00:00Z', '2026-02-16T12:00:00Z')",
+                params![shift_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status,
+                    staff_shift_id, sync_status, created_at, updated_at)
+                 VALUES ('pay-woo', 'ord-woo', 'card', 24.0, 2400, 'completed', ?1, 'pending',
+                         '2026-02-16T12:05:00Z', '2026-02-16T12:05:00Z')",
+                params![shift_id],
+            )
+            .unwrap();
+            // A real marketplace alongside it, so the section is not just empty.
+            conn.execute(
+                "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents,
+                    status, order_type, payment_status, plugin, ghost_metadata, sync_status,
+                    created_at, updated_at)
+                 VALUES ('ord-ef', 'EF-1', '[]', 12.10, 1210, 'delivered', 'delivery', 'paid',
+                         'efood', '{\"food_delivery\":{\"delivery_provider\":\"platform_delivery\",\"payment_method\":\"online\",\"prepaid\":true}}',
+                         'pending', '2026-02-16T12:10:00Z', '2026-02-16T12:10:00Z')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status,
+                    transaction_ref, sync_status, created_at, updated_at)
+                 VALUES ('pay-ef', 'ord-ef', 'other', 12.10, 1210, 'completed',
+                         'platform_settlement:online:ord-ef', 'pending',
+                         '2026-02-16T12:10:30Z', '2026-02-16T12:10:30Z')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let payload = serde_json::json!({ "branchId": "branch-1", "date": "2026-02-16" });
+        let result = generate_z_report_for_date(&db, &payload).expect("generate");
+        let report = &result["report"]["reportJson"];
+
+        // Only the marketplace is a platform.
+        let names: Vec<&str> = report["sales"]["platforms"]
+            .as_array()
+            .expect("platforms array")
+            .iter()
+            .map(|entry| entry["platform"].as_str().unwrap_or(""))
+            .collect();
+        assert_eq!(names, vec!["efood"]);
+
+        // The unknown source is NAMED, not swallowed.
+        let unclassified = report["integrity"]["unclassifiedPlatforms"]
+            .as_array()
+            .expect("unclassifiedPlatforms array");
+        assert_eq!(unclassified.len(), 1, "{unclassified:?}");
+        assert_eq!(unclassified[0]["source"], "woocommerce");
+        assert_eq!(unclassified[0]["orders"], 1);
+        assert_eq!(unclassified[0]["amount"], 24.0);
+
+        // …and it keeps its full weight in BOTH totals: the platform block is
+        // a breakdown, never a total. 100.00 fixture + 24.00 + 12.10.
+        assert_eq!(report["integrity"]["orderTurnover"], 136.10);
+        assert_eq!(report["integrity"]["paymentCoverage"], 136.10);
+        assert_eq!(report["integrity"]["reconciled"], true);
+
+        // The Orders tab shows it with no platform, so the «Platforms» filter
+        // cannot sweep it in.
+        let woo_row = report["dayOrders"]
+            .as_array()
+            .expect("dayOrders")
+            .iter()
+            .find(|order| order["id"] == "ord-woo")
+            .expect("woocommerce order listed");
+        assert!(woo_row["platform"].is_null());
+    }
+
+    #[test]
+    fn test_z_report_carries_a_reconciliation_block() {
+        let db = test_db();
+        let shift_id = seed_closed_shift(&db);
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents,
+                    status, order_type, payment_status, staff_shift_id, plugin, sync_status,
+                    created_at, updated_at)
+                 VALUES ('ord-clean', 'C-1', '[]', 20.0, 2000, 'completed', 'takeaway', 'paid', ?1,
+                         'pos', 'pending', '2026-02-16T12:00:00Z', '2026-02-16T12:00:00Z')",
+                params![shift_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status,
+                    staff_shift_id, sync_status, created_at, updated_at)
+                 VALUES ('pay-clean', 'ord-clean', 'cash', 20.0, 2000, 'completed', ?1, 'pending',
+                         '2026-02-16T12:05:00Z', '2026-02-16T12:05:00Z')",
+                params![shift_id],
+            )
+            .unwrap();
+        }
+
+        let payload = serde_json::json!({ "branchId": "branch-1", "date": "2026-02-16" });
+        let result = generate_z_report_for_date(&db, &payload).expect("generate");
+        let integrity = &result["report"]["reportJson"]["integrity"];
+
+        // `seed_closed_shift` already seeds 3 fully covered orders worth
+        // EUR 100.00 in this window; this test adds EUR 20.00 on top.
+        assert_eq!(integrity["reconciled"], true);
+        assert_eq!(integrity["blockingFindings"], 0);
+        assert_eq!(integrity["orderTurnover"], 120.0);
+        assert_eq!(integrity["paymentCoverage"], 120.0);
+        assert_eq!(integrity["difference"], 0.0);
+        assert_eq!(integrity["uncoveredAmount"], 0.0);
+        assert_eq!(integrity["excessAmount"], 0.0);
+        // The two sides are reported separately and never summed: efood
+        // turnover already sits inside both.
+        assert_eq!(
+            integrity["orderTurnover"],
+            result["report"]["reportJson"]["sales"]["totalSales"]
+        );
+        assert_eq!(
+            integrity["paymentCoverage"],
+            result["report"]["reportJson"]["daySummary"]["total"]
+        );
+    }
+
+    #[test]
+    fn test_turnover_and_coverage_agree_on_the_reportable_population() {
+        // Review item E (founder, 16/09/2026): the turnover aggregate carries
+        // `z_report_reportable_order_expr`; the payment aggregate does NOT.
+        // That asymmetry is only safe because both halves of the predicate
+        // require the order to have no completed payment row, and the payment
+        // aggregate counts only completed rows — so a hidden order contributes
+        // zero to both sides.
+        //
+        // This is the executable proof of that reasoning. Relax either half and
+        // coverage starts outrunning turnover (a negative `difference` with no
+        // finding behind it), so this test fails first and says what to do.
+        // The end-to-end behaviour it protects is pinned by
+        // `test_z_report_turnover_excludes_orders_an_earlier_z_already_closed`.
+        let open_tab = crate::business_day::open_unsettled_table_tab_expr("o");
+        let swept = crate::business_day::paid_order_swept_by_last_z_expr("o", "?4");
+        for (name, half) in [
+            ("open unsettled tab", &open_tab),
+            ("swept by last Z", &swept),
+        ] {
+            assert!(
+                half.contains("NOT EXISTS")
+                    && (half.contains("op_tab.status IN ('completed', 'refunded')")
+                        || half.contains("op_swept.status = 'completed'")),
+                "`{name}` must require \"no completed payment row\", or the payment \
+                 aggregate needs the reportable clause (and a ?4 anchor) too: {half}"
+            );
+        }
+        // …and those two really are the whole predicate.
+        let expr = crate::business_day::z_report_reportable_order_expr("o", "?4");
+        assert_eq!(
+            expr,
+            format!("(NOT {open_tab} AND NOT {swept})"),
+            "a third exclusion would need its own review against the payment side"
+        );
+        // And the payment aggregate must keep counting only completed rows —
+        // the other side of the same argument.
+        let zreport_src = include_str!("zreport.rs");
+        assert!(
+            zreport_src.contains("AND op.status = 'completed'"),
+            "the payment aggregate must count only completed rows"
+        );
+    }
+
+    #[test]
+    fn test_a_legitimate_refund_is_not_a_financial_integrity_gap() {
+        // Review item C (founder, 16/09/2026): «order fully paid -> refund
+        // €0,70 -> otherwise completely healthy day». A normal refund must not
+        // be presented as a financial-integrity gap.
+        let db = test_db();
+        let shift_id = seed_closed_shift(&db);
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents,
+                    status, order_type, payment_status, staff_shift_id, plugin, sync_status,
+                    created_at, updated_at)
+                 VALUES ('ord-refund-070', 'R-070', '[]', 12.00, 1200, 'completed', 'takeaway',
+                         'paid', ?1, 'pos', 'pending',
+                         '2026-02-16T12:00:00Z', '2026-02-16T12:00:00Z')",
+                params![shift_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status,
+                    staff_shift_id, sync_status, created_at, updated_at)
+                 VALUES ('pay-refund-070', 'ord-refund-070', 'card', 12.00, 1200, 'completed', ?1,
+                         'pending', '2026-02-16T12:05:00Z', '2026-02-16T12:05:00Z')",
+                params![shift_id],
+            )
+            .unwrap();
+            // The €0,70 refund, as a payment adjustment — the normal shape.
+            conn.execute(
+                "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type,
+                    amount, amount_cents, reason, sync_state, created_at, updated_at)
+                 VALUES ('adj-070', 'pay-refund-070', 'ord-refund-070', 'refund', 0.70, 70,
+                         'wrong side order', 'pending',
+                         '2026-02-16T12:30:00Z', '2026-02-16T12:30:00Z')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let payload = serde_json::json!({ "branchId": "branch-1", "date": "2026-02-16" });
+        let result = generate_z_report_for_date(&db, &payload).expect("generate");
+        let integrity = &result["report"]["reportJson"]["integrity"];
+
+        // The day is healthy: no finding, nothing unexplained, not red.
+        assert_eq!(integrity["reconciled"], true);
+        assert_eq!(integrity["blockingFindings"], 0);
+        assert_eq!(integrity["unexplainedDifference"], 0.0);
+        assert_eq!(
+            integrity["findings"].as_array().map(Vec::len),
+            Some(0),
+            "a refund is not a payment-integrity finding: {:?}",
+            integrity["findings"]
+        );
+
+        // The refund itself is still reported — on the refunds line, where it
+        // belongs — so nothing is hidden. €10,00 is `seed_closed_shift`'s own
+        // refund adjustment; €0,70 is this fixture's.
+        assert_eq!(result["report"]["refundsTotal"], 10.70);
+    }
+
+    #[test]
+    fn test_a_refunded_order_is_explained_not_reported_as_missing_money() {
+        // The other refund shape: the ORDER's status becomes 'refunded'. Such
+        // an order stays in turnover (gross) but is excluded from the payment
+        // side on purpose, which used to leave a non-zero difference painted
+        // red with no finding behind it.
+        let db = test_db();
+        let shift_id = seed_closed_shift(&db);
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents,
+                    status, order_type, payment_status, staff_shift_id, plugin, sync_status,
+                    created_at, updated_at)
+                 VALUES ('ord-fully-refunded', 'FR-1', '[]', 15.00, 1500, 'refunded', 'takeaway',
+                         'refunded', ?1, 'pos', 'pending',
+                         '2026-02-16T12:00:00Z', '2026-02-16T12:00:00Z')",
+                params![shift_id],
+            )
+            .unwrap();
+        }
+
+        let payload = serde_json::json!({ "branchId": "branch-1", "date": "2026-02-16" });
+        let result = generate_z_report_for_date(&db, &payload).expect("generate");
+        let integrity = &result["report"]["reportJson"]["integrity"];
+
+        // The raw arithmetic still shows the €15 …
+        assert_eq!(integrity["difference"], 15.0);
+        // … but it is ACCOUNTED FOR, not a gap.
+        assert_eq!(integrity["explainedDifference"], 15.0);
+        assert_eq!(integrity["unexplainedDifference"], 0.0);
+        assert_eq!(integrity["refundedOrders"]["orders"], 1);
+        assert_eq!(integrity["refundedOrders"]["amount"], 15.0);
+        assert_eq!(integrity["reconciled"], true);
+        assert_eq!(integrity["blockingFindings"], 0);
+    }
+
+    #[test]
+    fn test_a_real_missing_payment_is_still_unexplained_and_blocking() {
+        // The guard rail on the two tests above: explaining refunds must not
+        // become a way to excuse a genuine gap.
+        let db = test_db();
+        let shift_id = seed_closed_shift(&db);
+        {
+            let conn = db.conn.lock().unwrap();
+            // One legitimately refunded order …
+            conn.execute(
+                "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents,
+                    status, order_type, payment_status, staff_shift_id, plugin, sync_status,
+                    created_at, updated_at)
+                 VALUES ('ord-refunded', 'FR-2', '[]', 15.00, 1500, 'refunded', 'takeaway',
+                         'refunded', ?1, 'pos', 'pending',
+                         '2026-02-16T12:00:00Z', '2026-02-16T12:00:00Z')",
+                params![shift_id],
+            )
+            .unwrap();
+            // … and one genuinely missing payment.
+            conn.execute(
+                "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents,
+                    status, order_type, payment_status, staff_shift_id, plugin, sync_status,
+                    created_at, updated_at)
+                 VALUES ('ord-really-missing', 'RM-1', '[]', 9.40, 940, 'completed', 'takeaway',
+                         'paid', ?1, 'pos', 'pending',
+                         '2026-02-16T13:00:00Z', '2026-02-16T13:00:00Z')",
+                params![shift_id],
+            )
+            .unwrap();
+        }
+
+        let payload = serde_json::json!({ "branchId": "branch-1", "date": "2026-02-16" });
+        let result = generate_z_report_for_date(&db, &payload).expect("generate");
+        let integrity = &result["report"]["reportJson"]["integrity"];
+
+        assert_eq!(integrity["explainedDifference"], 15.0);
+        // The refund is explained; the missing EUR 9,40 is NOT.
+        assert_eq!(integrity["unexplainedDifference"], 9.40);
+        assert_eq!(integrity["reconciled"], false);
+        assert_eq!(integrity["blockingFindings"], 1);
+        assert_eq!(integrity["findings"][0]["orderId"], "ord-really-missing");
+    }
+
+    #[test]
+    fn test_z_report_names_a_paid_order_with_no_payment_and_refuses_to_close() {
+        let db = test_db();
+        let shift_id = seed_closed_shift(&db);
+        {
+            let conn = db.conn.lock().unwrap();
+            // Covered order — the day is not empty.
+            conn.execute(
+                "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents,
+                    status, order_type, payment_status, staff_shift_id, plugin, sync_status,
+                    created_at, updated_at)
+                 VALUES ('ord-ok', 'OK-1', '[]', 20.0, 2000, 'completed', 'takeaway', 'paid', ?1,
+                         'pos', 'pending', '2026-02-16T12:00:00Z', '2026-02-16T12:00:00Z')",
+                params![shift_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status,
+                    staff_shift_id, sync_status, created_at, updated_at)
+                 VALUES ('pay-ok', 'ord-ok', 'cash', 20.0, 2000, 'completed', ?1, 'pending',
+                         '2026-02-16T12:05:00Z', '2026-02-16T12:05:00Z')",
+                params![shift_id],
+            )
+            .unwrap();
+            // The incident shape: paid on the order row, absent from the ledger.
+            conn.execute(
+                "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents,
+                    status, order_type, payment_status, staff_shift_id, plugin, sync_status,
+                    created_at, updated_at)
+                 VALUES ('ord-ghost-paid', 'GP-1', '[]', 10.43, 1043, 'completed', 'takeaway',
+                         'paid', ?1, 'pos', 'pending', '2026-02-16T12:30:00Z', '2026-02-16T12:30:00Z')",
+                params![shift_id],
+            )
+            .unwrap();
+        }
+
+        let payload = serde_json::json!({ "branchId": "branch-1", "date": "2026-02-16" });
+        let result = generate_z_report_for_date(&db, &payload).expect("generate");
+        let integrity = &result["report"]["reportJson"]["integrity"];
+
+        assert_eq!(integrity["reconciled"], false);
+        assert_eq!(integrity["blockingFindings"], 1);
+        assert_eq!(integrity["uncoveredAmount"], 10.43);
+        // Order side counts it, payment side does not — exactly the shape of
+        // the EUR 531,13 gap, now stated on the report instead of hidden
+        // inside it. (EUR 100.00 of that turnover is the shared fixture's own
+        // fully covered orders.)
+        assert_eq!(integrity["orderTurnover"], 130.43);
+        assert_eq!(integrity["paymentCoverage"], 120.0);
+        assert_eq!(integrity["difference"], 10.43);
+
+        let findings = integrity["findings"].as_array().expect("findings");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0]["orderId"], "ord-ghost-paid");
+        assert_eq!(findings[0]["reasonCode"], "missing_local_payment_row");
+        assert_eq!(findings[0]["severity"], "blocking");
+
+        // And the day must not close over it.
+        let blockers = unsettled_payment_blockers(&db, &payload).expect("closeout blockers");
+        assert!(
+            blockers.iter().any(|b| b.order_id == "ord-ghost-paid"),
+            "the closeout gate must see the same order the report names"
+        );
+        assert!(
+            unsettled_payment_blocker_message(&blockers).is_some(),
+            "a real inconsistency must produce an operator-facing blocker"
+        );
+    }
+
+    #[test]
+    fn test_z_report_turnover_excludes_orders_an_earlier_z_already_closed() {
+        let db = test_db();
+        let shift_id = seed_closed_shift(&db);
+        {
+            let conn = db.conn.lock().unwrap();
+            // Mark a Z as already run — this is what makes the rollover's
+            // payment-row deletion legitimate history.
+            crate::db::set_setting(
+                &conn,
+                "system",
+                "last_z_report_timestamp",
+                "2026-02-16T04:00:00Z",
+            )
+            .unwrap();
+            // Today's real order.
+            conn.execute(
+                "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents,
+                    status, order_type, payment_status, staff_shift_id, plugin, sync_status,
+                    created_at, updated_at)
+                 VALUES ('ord-today', 'T-1', '[]', 20.0, 2000, 'completed', 'takeaway', 'paid', ?1,
+                         'pos', 'pending', '2026-02-16T12:00:00Z', '2026-02-16T12:00:00Z')",
+                params![shift_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status,
+                    staff_shift_id, sync_status, created_at, updated_at)
+                 VALUES ('pay-today', 'ord-today', 'cash', 20.0, 2000, 'completed', ?1, 'pending',
+                         '2026-02-16T12:05:00Z', '2026-02-16T12:05:00Z')",
+                params![shift_id],
+            )
+            .unwrap();
+            // A paid order from the CLOSED day whose payment rows the
+            // rollover deleted, with `updated_at` dragged back into the open
+            // window by a routine remote-snapshot refresh. This is the shape
+            // that inflated turnover while staying exempt from the gate.
+            conn.execute(
+                "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents,
+                    status, order_type, payment_status, staff_shift_id, plugin, sync_status,
+                    created_at, updated_at)
+                 VALUES ('ord-yesterday', 'Y-1', '[]', 31.13, 3113, 'completed', 'takeaway', 'paid',
+                         ?1, 'pos', 'pending', '2026-02-15T20:00:00Z', '2026-02-16T12:40:00Z')",
+                params![shift_id],
+            )
+            .unwrap();
+        }
+
+        let payload = serde_json::json!({ "branchId": "branch-1", "date": "2026-02-16" });
+        let result = generate_z_report_for_date(&db, &payload).expect("generate");
+        let report = &result["report"]["reportJson"];
+        let integrity = &report["integrity"];
+
+        // Turnover and coverage now describe ONE population…
+        // (EUR 100.00 of both is the shared fixture's own covered orders.)
+        assert_eq!(integrity["orderTurnover"], 120.0);
+        assert_eq!(integrity["paymentCoverage"], 120.0);
+        assert_eq!(integrity["reconciled"], true);
+        // …and the held-back order is reported rather than silently dropped.
+        assert_eq!(integrity["carriedOverFromClosedDays"]["orders"], 1);
+        assert_eq!(integrity["carriedOverFromClosedDays"]["amount"], 31.13);
+        assert!(
+            !report["dayOrders"]
+                .as_array()
+                .expect("dayOrders")
+                .iter()
+                .any(|order| order["id"] == "ord-yesterday"),
+            "a closed day's order must not be listed in the open day"
+        );
     }
 }

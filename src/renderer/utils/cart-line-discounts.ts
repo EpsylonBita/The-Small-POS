@@ -1,3 +1,5 @@
+import { fromCents, roundMoney, toCents as toSignedCents } from '@shared/utils/money';
+
 export type CartLineDiscountMode = 'percentage' | 'fixed';
 
 export interface DiscountableCartLine {
@@ -32,12 +34,12 @@ const finiteNumber = (value: unknown, fallback = 0): number => {
   return Number.isFinite(numeric) ? numeric : fallback;
 };
 
-export const roundMoney = (value: number): number =>
-  Number((Math.round((value + Number.EPSILON) * 100) / 100).toFixed(2));
+// One rounding rule for the whole renderer (module audit closure 2026-09-16): the local
+// copy did `Math.round((value + EPSILON) * 100) / 100` and sent 1.005 to 1.00.
+export { roundMoney };
 
-const toCents = (value: number): number => Math.max(0, Math.round(finiteNumber(value, 0) * 100));
-
-const fromCents = (value: number): number => roundMoney(value / 100);
+/** Cart money is never negative here, so cents are clamped at zero. */
+const toCents = (value: number): number => Math.max(0, toSignedCents(finiteNumber(value, 0)));
 
 export const getCartLineQuantity = (item: DiscountableCartLine): number =>
   Math.max(1, Math.round(finiteNumber(item.quantity, 1)));

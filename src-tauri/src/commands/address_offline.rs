@@ -256,7 +256,10 @@ pub async fn delivery_zone_validate_local(
             .unwrap_or_default();
     }
 
-    if zones.is_empty() {
+    // Module audit 2026-09-16: only aggregate every cached branch when the caller did not
+    // name one. A branch with no cached zones must stay unverified instead of being
+    // validated against another branch's polygons.
+    if zones.is_empty() && branch_id.is_empty() {
         if let Some(branches) = cache.get("branches").and_then(Value::as_object) {
             for branch in branches.values() {
                 if let Some(branch_zones) = branch.get("zones").and_then(Value::as_array) {

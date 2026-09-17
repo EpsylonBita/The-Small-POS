@@ -34,7 +34,13 @@ test('Rust Z builder emits a day-level order list with the headline predicate an
   assert.match(helper, /COALESCE\(o\.is_test, 0\) = 0/);
   assert.match(helper, /COALESCE\(o\.order_context, ''\) <> 'repair_settlement'/);
   assert.match(helper, /o\.status NOT IN \('cancelled', 'canceled'\)/);
-  assert.match(helper, /AND NOT \{open_table_tab\}/);
+  // 16/09/2026: the bare open-tab predicate became `z_report_reportable_order_expr`
+  // — `NOT open_unsettled_table_tab AND NOT paid_order_swept_by_last_z` — so the
+  // list drops orders an earlier Z already closed instead of double-reporting
+  // them. The list and the turnover aggregate must resolve the SAME helper, or
+  // the Orders tab and the headline count different days again.
+  assert.match(helper, /business_day::z_report_reportable_order_expr\("o", "\?4"\)/);
+  assert.match(helper, /AND \{reportable_order\}/);
   assert.doesNotMatch(helper, /staff_shift_id = \?/, 'the day list must not be scoped to a staff shift');
   assert.doesNotMatch(helper, /plugin, ''\)\) != ''/, 'the day list must not be scoped to platform orders either');
   // Platform-settled tenders are named like paymentsBreakdown, never bare `other`.

@@ -76,7 +76,9 @@ interface KdsStation {
 
 const BACKGROUND_SYNC_REFRESH_MIN_MS = 30000;
 const KDS_REALTIME_SUBSCRIPTION_KEY = 'kds-tickets-kitchen-display';
-const KDS_FALLBACK_POLL_INTERVAL_MS = 1500;
+// Fallback only: realtime drives the board; the poll runs while the channel is down
+// (module audit 2026-09-16: it used to fire every 1.5 s on top of realtime).
+const KDS_FALLBACK_POLL_INTERVAL_MS = 4000;
 const KITCHEN_DISPLAY_CONTENT_TYPE = 'kitchen_display';
 const CLOSED_ORDER_STATUSES = new Set([
   'completed',
@@ -197,7 +199,10 @@ const matchesKdsTerminal = (
 
   if (ticketSourceTerminalId) return ticketSourceTerminalId === terminalId;
   if (ticketTerminalId) return ticketTerminalId === terminalId;
-  if (ticketOwnerTerminalId === terminalId) return true;
+  // owner_terminal_id is the terminal's database id, not its public id, so it can never
+  // equal terminalId; the server already applied the terminal scope, so an owner-only
+  // ticket it returned belongs here (module audit 2026-09-16).
+  if (ticketOwnerTerminalId) return true;
 
   const localSourceTerminalId =
     readKdsString(localOrder, 'source_terminal_id') || readKdsString(localOrder, 'sourceTerminalId');
@@ -624,7 +629,7 @@ const KitchenDisplayPage: React.FC = () => {
   }, [autoRefresh, branchId, fetchOrders, isIdentityReady, organizationId]);
 
   useEffect(() => {
-    if (!autoRefresh || !isIdentityReady || !branchId) {
+    if (!autoRefresh || !isIdentityReady || !branchId || isRealtimeConnected) {
       return;
     }
 
@@ -633,7 +638,7 @@ const KitchenDisplayPage: React.FC = () => {
     }, KDS_FALLBACK_POLL_INTERVAL_MS);
 
     return () => clearInterval(interval);
-  }, [autoRefresh, branchId, fetchOrders, isIdentityReady]);
+  }, [autoRefresh, branchId, fetchOrders, isIdentityReady, isRealtimeConnected]);
 
   // Auto-refresh from Rust-driven events when enabled.
   useEffect(() => {
@@ -685,7 +690,7 @@ const KitchenDisplayPage: React.FC = () => {
     const mins = Math.floor(diff / 60000);
     if (mins < 1) return t('kitchen.justNow', 'Just now');
     if (mins < 60) return `${mins} ${t('kitchen.min', 'min')}`;
-    return `${Math.floor(mins / 60)}h ${mins % 60}m`;
+    return t('kitchen.hoursAgo', '{{hours}}h {{mins}}m', { hours: Math.floor(mins / 60), mins: mins % 60 });
   };
 
   const getTimeColor = (createdAt: string): string => {

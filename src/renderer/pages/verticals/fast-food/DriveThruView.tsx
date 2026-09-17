@@ -13,16 +13,7 @@ import { motion } from 'framer-motion';
 import { useTheme } from '../../../contexts/theme-context';
 import { useModules } from '../../../contexts/module-context';
 import { useDriveThru } from '../../../hooks/useDriveThru';
-import {
-  Car,
-  CheckCircle,
-  ChevronLeft,
-  ChevronRight,
-  Clock,
-  RefreshCw,
-  Volume2,
-  VolumeX,
-} from 'lucide-react';
+import { Car, CheckCircle, ChevronLeft, ChevronRight, Clock, RefreshCw, Volume2, VolumeX, XCircle } from 'lucide-react';
 import type { DriveThruOrder, DriveThruOrderStatus } from '../../../services/DriveThruService';
 import { offEvent, onEvent } from '../../../../lib';
 import {
@@ -38,6 +29,7 @@ const stageConfig: Record<DriveThruOrderStatus, { icon: typeof Car; label: strin
   preparing: { icon: Clock, label: 'Preparing', iconClass: 'text-yellow-500' },
   ready: { icon: CheckCircle, label: 'Ready', iconClass: 'text-green-500' },
   served: { icon: CheckCircle, label: 'Picked Up', iconClass: 'text-gray-500' },
+  cancelled: { icon: XCircle, label: 'Cancelled', iconClass: 'text-red-500' },
 };
 
 export const DriveThruView: React.FC = memo(() => {
@@ -123,6 +115,7 @@ export const DriveThruView: React.FC = memo(() => {
     stats,
     isLoading,
     refetch,
+    updateOrderStatus,
     moveToNextStage,
     moveToPrevStage,
     getOrdersByStatus,
@@ -140,6 +133,12 @@ export const DriveThruView: React.FC = memo(() => {
 
   const handleMovePrev = async (order: DriveThruOrder) => {
     await moveToPrevStage(order.id, order.status);
+  };
+
+  // A car that drives off before preparation starts is cancelled, not served
+  // (module audit 2026-09-16); the status was unreachable from the POS before.
+  const handleCancel = async (order: DriveThruOrder) => {
+    await updateOrderStatus(order.id, 'cancelled');
   };
 
   const getTimerColorClass = (arrivedAt: string): string => {
@@ -268,6 +267,16 @@ export const DriveThruView: React.FC = memo(() => {
                       
                       {/* Action Buttons */}
                       <div className="flex gap-2 mt-3">
+                        {stage === 'waiting' && (
+                          <button
+                            type="button"
+                            onClick={() => handleCancel(order)}
+                            aria-label={t('driveThru.cancelOrder', 'Cancel order')}
+                            className={`flex flex-1 items-center justify-center gap-1 rounded-2xl py-1.5 text-xs font-semibold transition-transform active:scale-95 ${secondaryButtonSurface}`}
+                          >
+                            {t('common.actions.cancel', 'Cancel')}
+                          </button>
+                        )}
                         {stage !== 'waiting' && (
                           <button
                             type="button"

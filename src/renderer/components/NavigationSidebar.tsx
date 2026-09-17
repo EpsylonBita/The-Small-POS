@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../contexts/theme-context';
 import { useShift } from '../contexts/shift-context';
-import { useModules } from '../contexts/module-context';
+import { useModules, type NavigationModule } from '../contexts/module-context';
 import { isModuleComingSoon } from '../../shared/constants/pos-modules';
 import { resolveNavigationLabel } from '../utils/i18nLabels';
 import {
@@ -183,10 +183,34 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
   const { available: efoodPartnerAvailable } = useEfoodPartner();
   // Hide the hub-migrated modules from the rail (Round 236). Everything downstream
   // (ordering, drag-reorder, render) consumes this filtered list.
-  const navigationModules = useMemo(
-    () => rawNavigationModules.filter((navModule) => !HUB_MIGRATED_NAV_IDS.has(navModule.module.id)),
-    [rawNavigationModules],
-  );
+  const navigationModules = useMemo(() => {
+    const modules = rawNavigationModules.filter((navModule) => !HUB_MIGRATED_NAV_IDS.has(navModule.module.id));
+    if (!efoodPartnerAvailable) return modules;
+    // efood is not a purchasable module, so ModuleContext never produces it.
+    // It was previously rendered as a button after the map, which is why it
+    // was the one icon in the rail that could not be dragged: the drag session
+    // works on entries of this list (pointer handlers, refs, drop slots and the
+    // persisted order all key off module.id). Giving it a synthetic entry makes
+    // it an ordinary rail icon, reorderable and remembered like the rest.
+    const efoodEntry: NavigationModule = {
+      module: {
+        id: EFOOD_PARTNER_VIEW,
+        name: 'efood',
+        description: 'efood Partner live orders, hosted in the POS',
+        category: 'addon',
+        isCore: false,
+        showInNavigation: true,
+        // Sorted last only on first appearance; the saved order wins after that.
+        sortOrder: Number.MAX_SAFE_INTEGER,
+        requiredFeatures: [],
+        compatibleBusinessTypes: [],
+        icon: 'Store',
+      },
+      isEnabled: true,
+      isLocked: false,
+    };
+    return [...modules, efoodEntry];
+  }, [rawNavigationModules, efoodPartnerAvailable]);
 
   // State for upgrade modal
   const [showUpgradeModal, setShowUpgradeModal] = useState(false);
@@ -470,6 +494,8 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
         return <Plug2 className={iconClass} strokeWidth={2} />;
       case 'Wrench':
         return <NavigationModuleIcon iconName={iconName} />;
+      case 'Store':
+        return <Store className={iconClass} strokeWidth={2} />;
       default:
         // Log unknown icons for debugging
         console.warn(`[NavigationSidebar] Unknown icon: ${iconName}, using default`);
@@ -497,6 +523,7 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
       staff_schedule: 'orange',
       service_catalog: 'green',
       drive_through: 'orange',
+      [EFOOD_PARTNER_VIEW]: 'orange',
       kiosk: 'green',
       delivery_zones: 'purple',
       analytics: 'purple',
@@ -983,24 +1010,6 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
               })}
               {dropSlotBeforeModuleId === '__navigation_drop_end__' && (
                 <div className="navigation-drop-slot -my-2 mx-auto h-1 w-8 rounded-full bg-amber-400/85 shadow-[0_0_12px_rgba(250,204,21,0.78)]" />
-              )}
-              {/* efood Partner (Live Orders) hosted in the POS */}
-              {efoodPartnerAvailable && (
-                <button
-                  type="button"
-                  onClick={() => handleNavClick(EFOOD_PARTNER_VIEW, false)}
-                  data-testid="nav-efood-partner"
-                  className={`relative w-12 h-12 flex items-center justify-center transition-transform duration-150 ease-out active:scale-95 ${sidebarFocusRing} ${getNeonClass('orange', currentView === EFOOD_PARTNER_VIEW, resolvedTheme)}`}
-                  aria-label={currentView === EFOOD_PARTNER_VIEW
-                    ? t('navigation.currentPage', {
-                        label: resolveNavigationLabel(t, EFOOD_PARTNER_VIEW, 'efood'),
-                        defaultValue: '{{label}} — Current page',
-                      })
-                    : resolveNavigationLabel(t, EFOOD_PARTNER_VIEW, 'efood')}
-                  aria-current={currentView === EFOOD_PARTNER_VIEW ? 'page' : undefined}
-                >
-                  <Store className="w-5 h-5" strokeWidth={2} />
-                </button>
               )}
             </>
           )}

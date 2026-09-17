@@ -109,7 +109,7 @@ export function useRooms({
       const term = searchTerm.toLowerCase();
       filtered = filtered.filter(r => 
         r.roomNumber.toLowerCase().includes(term) ||
-        (r.currentGuestName && r.currentGuestName.toLowerCase().includes(term))
+        (r.activeFolio?.guestName ?? '').toLowerCase().includes(term)
       );
     }
     

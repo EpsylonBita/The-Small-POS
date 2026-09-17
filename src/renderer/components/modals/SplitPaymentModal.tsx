@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { roundMoney } from '@shared/utils/money';
 import { useTranslation } from 'react-i18next';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Banknote, BadgePercent, Check, ChevronDown, CreditCard, Loader2, Plus, ShoppingCart, Split, Trash2, Users } from 'lucide-react';
@@ -8,6 +9,7 @@ import { getBridge } from '../../../lib';
 import { usePaymentPrintPrompt } from '../../hooks/usePaymentPrintPrompt';
 import { createInFlightGuard, settleDraftPortions, settleTerminalPortion, toTerminalCardPortion, type InFlightGuard, type SplitOrderFinancials, type TerminalSettlementResult } from '../../utils/splitPaymentSettlement';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
+import { PlatformHeldPaymentNotice, usePlatformHeldNoticeForOrderId } from '../ui/PlatformHeldPaymentNotice';
 import { formatCurrency } from '../../utils/format';
 
 export interface CartItem { name: string; quantity: number; totalPrice: number; price?: number; itemIndex?: number; isSynthetic?: boolean; [key: string]: any }
@@ -64,7 +66,9 @@ const terminalChargeGuard: InFlightGuard = createInFlightGuard();
 // review found Card-tap + Confirm during pre-flight double-collects).
 const CONFIRM_SETTLEMENT_GUARD_ID = '__confirm-settlement__';
 let nextGeneratedPortionId = 1;
-const round2 = (value: number) => Math.round(value * 100) / 100;
+// Module audit closure (2026-09-16): one rounding rule for the renderer. The local copy
+// rounded on the binary product, so it sent 1.005 to 1.00.
+const round2 = (value: number) => roundMoney(value);
 const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
 const nextPortionId = () => `portion-${nextGeneratedPortionId++}-${Date.now()}`;
 const unwrapBridgeArray = <T,>(result: any): T[] => Array.isArray(result) ? result : Array.isArray(result?.data) ? result.data : [];
@@ -189,6 +193,17 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
   }, [alreadyPaidAmount, normalizedItems, orderFinancials.totalAmount, paidItemIndexSet, t]);
   const persistedOutstanding = useMemo(() => round2(Math.max(0, orderFinancials.totalAmount - alreadyPaidAmount)), [alreadyPaidAmount, orderFinancials.totalAmount]);
   const processingPortionId = useMemo(() => portions.find((portion) => portion.status === 'processing')?.id ?? null, [portions]);
+  // Money the platform is holding (prepaid online, or COD its own rider
+  // collected) is never collected here. Reuses the existing collect lock so
+  // every confirm/portion path is covered at once, and the banner below says
+  // why instead of leaving the operator to meet the write path's refusal as a
+  // generic error (founder request, 16/09/2026).
+  //
+  // Read from the order's own disposition, NOT from `payment_status`: a failed
+  // settlement honestly lowers that to `pending`, which reads exactly like
+  // money still owed.
+  const platformHeldNotice = usePlatformHeldNoticeForOrderId(orderId, isOpen);
+  const platformHeld = platformHeldNotice !== null;
   const isCloseLocked = isReconciliationPending || Boolean(processingPortionId) || isProcessing || isTerminalChargeInFlight;
   const activeDiscountTotal = useMemo(() => round2(portions.filter((portion) => portion.status !== 'paid').reduce((sum, portion) => sum + portion.discountAmount, 0)), [portions]);
   const assignedDraftAmount = useMemo(() => round2(portions.filter((portion) => portion.status !== 'paid').reduce((sum, portion) => sum + portion.amount, 0)), [portions]);
@@ -196,7 +211,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
   const remaining = useMemo(() => round2(adjustedDue - assignedDraftAmount), [adjustedDue, assignedDraftAmount]);
   const hasPositiveAssignment = useMemo(() => portions.some((portion) => portion.status !== 'paid' && portion.amount > 0.009), [portions]);
   const anyItemsAssigned = useMemo(() => activeTab !== 'by-items' || availableItems.some((item) => itemAssignments[Number(item.itemIndex ?? 0)] !== undefined), [activeTab, availableItems, itemAssignments]);
-  const canConfirm = useMemo(() => hasPositiveAssignment && anyItemsAssigned && remaining >= -0.01 && !isInitializing && !isProcessing && !processingPortionId && !isTerminalChargeInFlight && !isReconciliationPending, [anyItemsAssigned, hasPositiveAssignment, isInitializing, isProcessing, isReconciliationPending, isTerminalChargeInFlight, processingPortionId, remaining]);
+  const canConfirm = useMemo(() => hasPositiveAssignment && anyItemsAssigned && remaining >= -0.01 && !isInitializing && !isProcessing && !processingPortionId && !isTerminalChargeInFlight && !isReconciliationPending && !platformHeld, [anyItemsAssigned, hasPositiveAssignment, isInitializing, isProcessing, isReconciliationPending, isTerminalChargeInFlight, platformHeld, processingPortionId, remaining]);
 
   const getPortion = useCallback((portionId: string) => portions.find((portion) => portion.id === portionId) ?? null, [portions]);
   const updatePortion = useCallback((portionId: string, updater: (portion: SplitPortion) => SplitPortion) => setPortions((current) => current.map((portion) => portion.id === portionId ? updater(portion) : portion)), []);
@@ -342,7 +357,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
 
   const resolveReadyTerminal = useCallback(async () => { const raw: any = await bridge.ecr.getDefaultTerminal(); const device = raw?.device ?? raw?.data?.device ?? null; const deviceId = typeof device?.id === 'string' ? device.id : ''; if (!deviceId) return null; const status: any = await bridge.ecr.getDeviceStatus(deviceId); return status?.connected === true && status?.ready === true && status?.busy !== true ? { deviceId, name: device?.name || deviceId } : null; }, [bridge]);
   const handleTerminalCardPayment = useCallback(async (portionId: string) => {
-    if (isReconciliationPending) return;
+    if (isReconciliationPending || platformHeld) return;
     const portion = getPortion(portionId); if (!portion || portion.status !== 'draft') return; if (portion.amount <= 0.009) return;
     // Gap review P0-01: the guard must be armed synchronously BEFORE the first
     // await. The pre-flight IPC below yields long enough for a double-tap to
@@ -396,7 +411,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
       terminalChargeGuard.release(portionId);
       setIsTerminalChargeInFlight(false);
     }
-  }, [activeTab, alreadyPaidAmount, bridge, completeAndClose, ensureLatestOutstanding, getPortion, isReconciliationPending, orderFinancials, orderId, persistFinancials, processingPortionId, receiptMode, recordPortionPayment, resolveReadyTerminal, safePrintSplitReceipt, setPortionMethod, t, updatePortion]);
+  }, [activeTab, alreadyPaidAmount, bridge, completeAndClose, ensureLatestOutstanding, getPortion, isReconciliationPending, orderFinancials, orderId, persistFinancials, platformHeld, processingPortionId, receiptMode, recordPortionPayment, resolveReadyTerminal, safePrintSplitReceipt, setPortionMethod, t, updatePortion]);
 
   const handleConfirm = useCallback(async () => {
     if (!canConfirm) return;
@@ -429,7 +444,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
   }, [activeTab, canConfirm, completeAndClose, ensureLatestOutstanding, orderFinancials, persistFinancials, portions, receiptMode, recordPortionPayment, safePrintSplitReceipt, t]);
 
   const MethodToggle: React.FC<{ portion: SplitPortion }> = ({ portion }) => {
-    const locked = portion.status !== 'draft' || isProcessing || isTerminalChargeInFlight || isReconciliationPending;
+    const locked = portion.status !== 'draft' || isProcessing || isTerminalChargeInFlight || isReconciliationPending || platformHeld;
     return (
       <div className="flex gap-1 rounded-2xl bg-slate-100/80 p-0.5 dark:bg-white/5">
         <button
@@ -457,7 +472,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
     if (!collectionMode?.enabled) {
       return null;
     }
-    const locked = portion.status !== 'draft' || isProcessing || isTerminalChargeInFlight || isReconciliationPending;
+    const locked = portion.status !== 'draft' || isProcessing || isTerminalChargeInFlight || isReconciliationPending || platformHeld;
     const showDriverShift = collectionMode.allowDriverShift === true;
     const selectedOwner = portion.collectedBy ?? defaultCollectedBy ?? 'cashier_drawer';
     return (
@@ -875,6 +890,11 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
                 <Loader2 className="h-8 w-8 animate-spin text-emerald-600 dark:text-emerald-300" />
               </div>
             )}
+          <PlatformHeldPaymentNotice
+            notice={platformHeldNotice}
+            showBlockedAction
+            className="flex-shrink-0"
+          />
           <div className="flex-shrink-0 text-center">
             <p className="mb-0.5 text-sm liquid-glass-modal-text-muted">
               {t("splitPayment.orderTotal", "Order Total")}

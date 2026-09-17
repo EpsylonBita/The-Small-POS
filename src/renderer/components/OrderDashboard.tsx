@@ -2081,7 +2081,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     const handleRoomOrderRoomSelect = (room: Room) => {
       const activeFolioId = room.activeFolio?.id || null;
       if (!activeFolioId) return;
-      const guestName = room.activeFolio?.guestName || room.currentGuestName || null;
+      const guestName = room.activeFolio?.guestName || null;
       setShowRoomOrderSelector(false);
       // Clear any stale table flow state so a prior table order can't leak its
       // table_number / table_id / table_session into this room-charge order.
@@ -7629,7 +7629,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                   <div className="grid max-h-[60vh] grid-cols-1 gap-2 overflow-y-auto scrollbar-hide pb-2 sm:grid-cols-2 lg:grid-cols-3">
                     {visibleRoomOrderRooms.map((room) => {
                       const folioId = room.activeFolio?.id || null;
-                      const guest = room.activeFolio?.guestName || room.currentGuestName;
+                      const guest = room.activeFolio?.guestName;
                       return (
                         <button
                           key={room.id}

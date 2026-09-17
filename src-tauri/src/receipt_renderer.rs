@@ -812,6 +812,17 @@ pub struct ZReportDoc {
     /// THE-437: COD collected by the platform's own rider (bank-settled).
     #[serde(default)]
     pub platform_cod_sales: f64,
+    /// Order-level turnover (Σ order totals = `sales.totalSales`). Printed
+    /// next to `payment_coverage` so the slip states, in words, which of the
+    /// two numbers is which — the founder's 16/09/2026 Z showed €1.636,16 of
+    /// orders against €1.105,73 of collected money with nothing naming the
+    /// difference. The two are never summed: platform turnover already lives
+    /// inside both.
+    #[serde(default)]
+    pub order_turnover: Option<f64>,
+    /// Payment-level turnover (Σ completed payments = `daySummary.total`).
+    #[serde(default)]
+    pub payment_coverage: Option<f64>,
     pub refunds_total: f64,
     #[serde(default)]
     pub drawer_refunds_total: Option<f64>,
@@ -1054,6 +1065,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "EXPENSES" => "ΕΞΟΔΑ",
             "PLATFORMS" => "ΠΛΑΤΦΟΡΜΕΣ",
             "Platforms Total" => "Σύνολο Πλατφορμών",
+            "Collected" => "Εισπράχθηκαν",
             "Total Expenses" => "Σύνολο Εξόδων",
             "Dine-in" => "Επιτόπου",
             "Takeaway" => "Παραλαβή",
@@ -1199,6 +1211,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "EXPENSES" => "AUSGABEN",
             "PLATFORMS" => "PLATTFORMEN",
             "Platforms Total" => "Plattformen gesamt",
+            "Collected" => "Vereinnahmt",
             "Total Expenses" => "Ausgaben gesamt",
             "Dine-in" => "Vor Ort",
             "Takeaway" => "Mitnahme",
@@ -1344,6 +1357,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "EXPENSES" => "DEPENSES",
             "PLATFORMS" => "PLATEFORMES",
             "Platforms Total" => "Total plateformes",
+            "Collected" => "Encaissé",
             "Total Expenses" => "Total des depenses",
             "Dine-in" => "Sur place",
             "Takeaway" => "A emporter",
@@ -1489,6 +1503,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "EXPENSES" => "SPESE",
             "PLATFORMS" => "PIATTAFORME",
             "Platforms Total" => "Totale piattaforme",
+            "Collected" => "Incassato",
             "Total Expenses" => "Totale spese",
             "Dine-in" => "Al tavolo",
             "Takeaway" => "Asporto",
@@ -4589,6 +4604,16 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                     "<div class=\"line\"><span>{}</span><span>-{}</span></div>",
                     esc(receipt_label(lang, "Voids")),
                     money(doc.voids_total),
+                ));
+            }
+            // The payment-level total, named. SALES above is order money,
+            // this is collected money — the slip now says which is which
+            // instead of leaving two similar numbers to be read as one.
+            if let Some(collected) = doc.payment_coverage {
+                body.push_str(&format!(
+                    "<div class=\"line\"><span><strong>{}</strong></span><span><strong>{}</strong></span></div>",
+                    esc(receipt_label(lang, "Collected")),
+                    money(collected),
                 ));
             }
             body.push_str("</div>");
@@ -8505,6 +8530,16 @@ fn render_classic_non_customer_raster_exact_ttf(
                 canvas.draw_pair(
                     &format!("{}:", receipt_label(lang, "Platform COD")),
                     &money_with_currency_locale(doc.platform_cod_sales, &cur, comma),
+                    preset.item_style,
+                );
+            }
+            // Name the payment-level total. Gross/Net above are ORDER money;
+            // Cash/Card/Platform are COLLECTED money, and this is their sum.
+            // Two similar numbers with no label is how a €531 gap went unread.
+            if let Some(collected) = doc.payment_coverage {
+                canvas.draw_pair(
+                    &format!("{}:", receipt_label(lang, "Collected")),
+                    &money_with_currency_locale(collected, &cur, comma),
                     preset.item_style,
                 );
             }

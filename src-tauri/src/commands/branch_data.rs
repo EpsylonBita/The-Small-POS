@@ -4,6 +4,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tauri::Emitter;
 
+use crate::money::{discount_cents, Cents};
 use crate::{db, read_local_json, read_local_setting, read_module_cache, storage};
 
 const CACHE_KEY_TABLES: &str = "tables";
@@ -174,12 +175,16 @@ fn payload_version(payload: &Value) -> Option<String> {
         .map(|value| value.to_string())
 }
 
+/// Patch a cached table's status. The second value is the `expected_updated_at`
+/// the queued replay should carry: the server stamp the row had before its first
+/// offline change, `None` once a replay is already pending for it (see
+/// `offline_mutations::capture_server_updated_at`).
 fn update_tables_cached_payload(
     payload: &mut Value,
     table_id: &str,
     status: &str,
     updated_at: &str,
-) -> Result<Value, String> {
+) -> Result<(Value, Option<String>), String> {
     let tables = if let Some(arr) = payload.as_array_mut() {
         arr
     } else if let Some(arr) = payload.get_mut("tables").and_then(Value::as_array_mut) {
@@ -199,10 +204,11 @@ fn update_tables_cached_payload(
         }
 
         if let Some(obj) = table.as_object_mut() {
+            let expected_updated_at = super::offline_mutations::capture_server_updated_at(obj);
             obj.insert("status".to_string(), json!(status));
             obj.insert("updated_at".to_string(), json!(updated_at));
             obj.insert("updatedAt".to_string(), json!(updated_at));
-            return Ok(Value::Object(obj.clone()));
+            return Ok((Value::Object(obj.clone()), expected_updated_at));
         }
     }
 
@@ -568,11 +574,15 @@ fn normalize_coupon_discount(coupon: &Value, order_total: f64) -> f64 {
         .unwrap_or(0.0)
         .max(0.0);
 
-    if discount_type.eq_ignore_ascii_case("percentage") {
-        ((order_total * discount_value) / 100.0).max(0.0)
-    } else {
-        discount_value.min(order_total.max(0.0))
-    }
+    // Integer cents on the one platform rule (`shared/types/money-fixtures.json`): the
+    // float version returned 1.0050000000000001 for 10% of EUR 10.05 while the server
+    // stored 1.01, so a coupon redeemed here and reported there disagreed by a cent.
+    discount_cents(
+        discount_type,
+        discount_value,
+        Cents::round_half_up(order_total),
+    )
+    .to_f64_dp2()
 }
 
 fn coupons_from_payload(payload: &Value) -> Vec<Value> {
@@ -626,7 +636,7 @@ pub async fn branch_data_update_table_status(
                     "Local tables cache is missing. Connect once while online before updating tables offline."
                         .to_string()
                 })?;
-            let updated_table =
+            let (updated_table, expected_updated_at) =
                 update_tables_cached_payload(&mut cached_tables.payload, &table_id, &status, &now)?;
             cache_payload(
                 &conn,
@@ -642,11 +652,18 @@ pub async fn branch_data_update_table_status(
                     table_name: "restaurant_tables".to_string(),
                     record_id: table_id.clone(),
                     operation: "UPDATE".to_string(),
-                    data: json!({
-                        "status": status,
-                        "updated_at": now,
-                    })
-                    .to_string(),
+                    data: {
+                        let mut data = json!({
+                            "status": status,
+                            "updated_at": now,
+                        });
+                        if let (Some(object), Some(stamp)) =
+                            (data.as_object_mut(), expected_updated_at)
+                        {
+                            object.insert("expected_updated_at".to_string(), Value::String(stamp));
+                        }
+                        data.to_string()
+                    },
                     organization_id: organization_id.clone(),
                     priority: Some(0),
                     module_type: Some("operations".to_string()),
@@ -1260,4 +1277,73 @@ pub async fn branch_data_get_bundle_status(
             "missingAdvisoryDatasets": advisory_missing,
         }
     }))
+}
+
+#[cfg(test)]
+mod stale_write_tests {
+    use super::*;
+
+    fn cached_tables() -> Value {
+        json!({
+            "success": true,
+            "tables": [
+                { "id": "table-1", "status": "available", "updated_at": "2026-09-16T10:00:00Z" },
+                { "id": "table-2", "status": "available" }
+            ]
+        })
+    }
+
+    #[test]
+    fn first_offline_status_change_carries_the_server_stamp() {
+        let mut payload = cached_tables();
+        let (table, expected) = update_tables_cached_payload(
+            &mut payload,
+            "table-1",
+            "occupied",
+            "2026-09-16T10:05:00Z",
+        )
+        .expect("patch");
+        assert_eq!(expected.as_deref(), Some("2026-09-16T10:00:00Z"));
+        assert_eq!(
+            table.get("status").and_then(Value::as_str),
+            Some("occupied")
+        );
+        assert_eq!(
+            table.get("server_updated_at").and_then(Value::as_str),
+            Some("2026-09-16T10:00:00Z")
+        );
+        assert_eq!(
+            table.get("updated_at").and_then(Value::as_str),
+            Some("2026-09-16T10:05:00Z")
+        );
+    }
+
+    #[test]
+    fn later_offline_changes_to_the_same_row_carry_no_expectation() {
+        let mut payload = cached_tables();
+        update_tables_cached_payload(&mut payload, "table-1", "occupied", "2026-09-16T10:05:00Z")
+            .expect("first");
+        let (_, expected) = update_tables_cached_payload(
+            &mut payload,
+            "table-1",
+            "cleaning",
+            "2026-09-16T10:06:00Z",
+        )
+        .expect("second");
+        assert_eq!(expected, None);
+    }
+
+    #[test]
+    fn a_row_never_seen_from_the_server_carries_no_expectation() {
+        let mut payload = cached_tables();
+        let (_, expected) = update_tables_cached_payload(
+            &mut payload,
+            "table-2",
+            "occupied",
+            "2026-09-16T10:05:00Z",
+        )
+        .expect("patch");
+        assert_eq!(expected, None);
+        assert!(update_tables_cached_payload(&mut payload, "missing", "occupied", "now").is_err());
+    }
 }

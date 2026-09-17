@@ -190,10 +190,19 @@ class CouponRedemptionService {
 
       const nextAttempts = item.attempts + 1;
       if (nextAttempts >= MAX_RETRY_ATTEMPTS) {
-        console.warn('[CouponRedemptionService] Dropping coupon apply after max retries', {
+        // The discount is already on the order; dropping the apply would leave the coupon's
+        // usage_count and the redemption ledger permanently behind the money. Park it on the
+        // slow cadence instead so a recovered backend still records the redemption.
+        console.error('[CouponRedemptionService] Coupon apply exhausted fast retries; parking on the slow cadence', {
           orderId: item.orderId,
           couponId: item.couponId,
           attempts: nextAttempts,
+        });
+        updatedQueue.push({
+          ...item,
+          attempts: MAX_RETRY_ATTEMPTS,
+          lastAttemptAt: new Date(now).toISOString(),
+          nextRetryAt: now + MODULE_REQUIRED_RETRY_DELAY_MS,
         });
         continue;
       }

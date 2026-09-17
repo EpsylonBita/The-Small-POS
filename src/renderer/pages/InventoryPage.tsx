@@ -850,6 +850,8 @@ const InventoryPage: React.FC = () => {
               </button>
               <input
                 type="number"
+                step="any"
+                inputMode="decimal"
                 aria-label={t('inventory.adjustmentQuantity', { defaultValue: 'Adjustment quantity' })}
                 value={adjustmentQty}
                 onChange={(e) => setAdjustmentQty(Number(e.target.value))}

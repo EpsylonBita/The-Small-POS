@@ -13,7 +13,7 @@ import toast from 'react-hot-toast';
 import { useTheme } from '../../../contexts/theme-context';
 import { useModules } from '../../../contexts/module-context';
 import { useRooms } from '../../../hooks/useRooms';
-import { formatCurrency, formatDate } from '../../../utils/format';
+import { formatCurrency } from '../../../utils/format';
 import { toLocalDateString } from '../../../utils/date';
 import { roomWorkflowError } from '../../../utils/room-workflow';
 import { reservationsService } from '../../../services/ReservationsService';
@@ -28,7 +28,7 @@ import {
 } from '../../../utils/guest-billing';
 import { 
   Bed, RefreshCw, Users, Wrench, Sparkles, Calendar, X, 
-  CreditCard, Receipt, Clock, User, Phone, Mail, DollarSign,
+  CreditCard, Receipt, User, Phone, Mail, DollarSign,
   ChevronDown, Filter, Search
 } from 'lucide-react';
 import type { Room, RoomStatus, RoomFilters } from '../../../services/RoomsService';
@@ -82,7 +82,7 @@ interface RoomCheckoutApiResponse {
 }
 
 const getRoomGuestName = (room: Room): string | null =>
-  room.activeFolio?.guestName || room.currentGuestName || null;
+  room.activeFolio?.guestName || null;
 
 // Locale-aware money formatting: delegates to the shared POS currency helper so
 // Greek shows "145,00 €" instead of a hardcoded "$145.00".
@@ -124,6 +124,9 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
   const { resolvedTheme } = useTheme();
   const { organizationId, isModuleEnabled } = useModules();
   const isDark = resolvedTheme === 'dark';
+  // Self-gate (the room views used to check only guest_billing/reservations): an
+  // organization without the module gets one clear line instead of a board that 403s.
+  const hasRoomsModule = isModuleEnabled('rooms' as any);
 
   const [branchId, setBranchId] = useState<string | null>(null);
   const [localOrgId, setLocalOrgId] = useState<string | null>(null);
@@ -478,6 +481,14 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
   // so a staff search/status/floor filter on the grid never hides selectable rooms.
 
 
+
+  if (!hasRoomsModule) {
+    return (
+      <div className={`p-6 text-sm ${isDark ? 'text-gray-300' : 'text-gray-600'}`} data-testid="rooms-module-required">
+        {t('roomsView.moduleRequired')}
+      </div>
+    );
+  }
 
   return (
     <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className="h-full flex flex-col p-3 sm:p-4 overflow-hidden">
@@ -954,12 +965,6 @@ const RoomCard: React.FC<{ room: Room; isDark: boolean; onClick: () => void }> =
         <div className={`text-xs mt-1 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
           <DollarSign className="w-3 h-3 inline mr-1" />
           {formatMoney(room.activeFolio.balanceCents / 100)}
-        </div>
-      )}
-      {room.checkoutDate && room.status === 'occupied' && (
-        <div className={`text-xs mt-1 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-          <Clock className="w-3 h-3 inline mr-1" />
-          {formatDate(room.checkoutDate)}
         </div>
       )}
     </motion.button>

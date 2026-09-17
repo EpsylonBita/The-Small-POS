@@ -43,9 +43,6 @@ export interface Room {
   ratePerNight: number | null;
   amenities: string[];
   notes: string | null;
-  currentGuestId: string | null;
-  currentGuestName: string | null;
-  checkoutDate: string | null;
   effectiveStatus: RoomStatus | null;
   activeFolio: RoomActiveFolio | null;
   createdAt: string;
@@ -82,9 +79,6 @@ interface RoomFromAPI {
   rate_per_night: number | null;
   amenities: string[];
   notes: string | null;
-  current_guest_id?: string | null;
-  current_guest_name?: string | null;
-  checkout_date?: string | null;
   effective_status?: RoomStatus | null;
   active_folio?: {
     id?: string | null;
@@ -127,9 +121,6 @@ function transformFromAPI(data: RoomFromAPI): Room {
     ratePerNight: data.rate_per_night,
     amenities: data.amenities || [],
     notes: data.notes,
-    currentGuestId: data.current_guest_id || null,
-    currentGuestName: data.current_guest_name || null,
-    checkoutDate: data.checkout_date || null,
     effectiveStatus: data.effective_status || null,
     activeFolio: transformActiveFolio(data.active_folio),
     createdAt: data.created_at,
@@ -198,7 +189,7 @@ class RoomsService {
         rooms = rooms.filter(
           (r: Room) =>
             r.roomNumber.toLowerCase().includes(term) ||
-            (r.currentGuestName && r.currentGuestName.toLowerCase().includes(term))
+            (r.activeFolio?.guestName ?? '').toLowerCase().includes(term)
         );
       }
 

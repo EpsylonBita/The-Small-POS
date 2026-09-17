@@ -7,6 +7,28 @@ use crate::money::{serialize_cents_as_f64_dp2, Cents};
 
 pub const UNSETTLED_PAYMENT_BLOCKER_ERROR_CODE: &str = "UNSETTLED_PAYMENT_BLOCKER";
 
+/// Severity of a payment-integrity finding.
+///
+/// Every shipped reason code is `Blocking`: the Z must not close over money
+/// that does not reconcile. `Warning` exists so a future advisory finding can
+/// be surfaced in the reconciliation panel without freezing the till — it is
+/// deliberately unused today, and the Z gate keys on
+/// [`UnsettledPaymentBlocker::is_blocking`] rather than on the reason code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IntegritySeverity {
+    Blocking,
+    Warning,
+}
+
+impl IntegritySeverity {
+    fn as_str(self) -> &'static str {
+        match self {
+            IntegritySeverity::Blocking => "blocking",
+            IntegritySeverity::Warning => "warning",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UnsettledPaymentBlocker {
@@ -24,6 +46,48 @@ pub struct UnsettledPaymentBlocker {
     pub reason_code: String,
     pub reason_text: String,
     pub suggested_fix: String,
+    /// Additive wire field (16/09/2026 reconciliation work). Existing admin
+    /// consumers read the keys above and ignore this one.
+    pub severity: String,
+    /// Signed order-total − settled difference in cents: negative means the
+    /// ledger holds MORE than the order is worth (overpayment / duplicate).
+    /// Lets the reconciliation panel show the money without re-deriving it.
+    pub difference_cents: i64,
+}
+
+impl UnsettledPaymentBlocker {
+    pub fn is_blocking(&self) -> bool {
+        self.severity == IntegritySeverity::Blocking.as_str()
+    }
+}
+
+/// How a platform order is expected to settle, read from the same
+/// `ghost_metadata.food_delivery` markers as
+/// `payments::platform_settlement_kind`. Kept as a small integer in SQL so
+/// the classifier and the ledger writer can never drift apart silently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExpectedPlatformSettlement {
+    /// Not a platform-settled order: the store collects the money itself.
+    /// Covers store orders AND platform orders our own driver delivers.
+    None_,
+    /// Customer paid the platform online; the money arrives by bank transfer.
+    PrepaidOnline,
+    /// COD collected by the PLATFORM's own rider; the platform banks it.
+    PlatformCollectedCod,
+}
+
+impl ExpectedPlatformSettlement {
+    fn from_sql(value: i64) -> Self {
+        match value {
+            1 => ExpectedPlatformSettlement::PrepaidOnline,
+            2 => ExpectedPlatformSettlement::PlatformCollectedCod,
+            _ => ExpectedPlatformSettlement::None_,
+        }
+    }
+
+    fn is_platform_held(self) -> bool {
+        !matches!(self, ExpectedPlatformSettlement::None_)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -36,6 +100,31 @@ struct RawBlockerRow {
     payment_method: String,
     completed_payment_count: i64,
     invalid_completed_method_count: i64,
+    /// Tips recorded on completed rows. Part of the overpayment ceiling: a
+    /// payment may legitimately carry the tip inside its amount.
+    tip_total: Cents,
+    /// Completed settled amount NET of refund adjustments. Only this figure
+    /// may be tested for overpayment — the gross sum double-counts a
+    /// refund-then-recollect cycle and would cry wolf on every corrected order.
+    net_settled_amount: Cents,
+    /// Completed rows sharing one non-empty `transaction_ref`. One real
+    /// transaction cannot settle twice, so >0 is an unambiguous replay.
+    duplicate_transaction_ref_groups: i64,
+    /// Completed rows sharing (method, amount). Ambiguous on its own — two
+    /// guests really can hand over 5.00 each — so it only ever colours the
+    /// overpayment message, never raises a finding by itself.
+    duplicate_amount_groups: i64,
+    expected_platform_settlement: ExpectedPlatformSettlement,
+    /// Does the order actually carry `ghost_metadata.food_delivery`? Without
+    /// it we do not KNOW how the platform settles this order — see the
+    /// guard in `classify_settlement_shape`.
+    platform_disposition_known: bool,
+    /// Completed `platform_settlement:*` money: revenue the platform banks.
+    platform_settled_amount: Cents,
+    /// Completed cash/card money: what really passed through our drawer or
+    /// card terminal.
+    drawer_tender_amount: Cents,
+    is_external_platform: bool,
 }
 
 impl UnsettledPaymentBlocker {
@@ -74,6 +163,22 @@ fn build_blocker(
     reason_text: String,
     suggested_fix: String,
 ) -> UnsettledPaymentBlocker {
+    build_blocker_with_severity(
+        row,
+        reason_code,
+        reason_text,
+        suggested_fix,
+        IntegritySeverity::Blocking,
+    )
+}
+
+fn build_blocker_with_severity(
+    row: &RawBlockerRow,
+    reason_code: &str,
+    reason_text: String,
+    suggested_fix: String,
+    severity: IntegritySeverity,
+) -> UnsettledPaymentBlocker {
     UnsettledPaymentBlocker {
         order_id: row.order_id.clone(),
         order_number: row.order_number.clone(),
@@ -84,7 +189,139 @@ fn build_blocker(
         reason_code: reason_code.to_string(),
         reason_text,
         suggested_fix,
+        severity: severity.as_str().to_string(),
+        difference_cents: (row.total_amount - row.settled_amount).as_i64(),
     }
+}
+
+/// Findings about the SHAPE of an order's settlement rather than its amount:
+/// too much money, the same transaction twice, or the right money in the
+/// wrong tender. Returns the most serious one, or `None` when the ledger's
+/// shape is sound (it may still be short — that is the caller's job).
+fn classify_settlement_shape(row: &RawBlockerRow) -> Option<UnsettledPaymentBlocker> {
+    // Ceiling for "how much may this order legitimately hold": its own total
+    // plus any tip recorded on the completed rows. Matches the server-side
+    // `validateCanonicalPaymentAmountForOrder` ceiling (orderTotal + tip), so
+    // a payment that the API accepted can never fail here.
+    let ceiling = row.total_amount + row.tip_total;
+
+    // 1. One real transaction settled twice. `transaction_ref` identifies a
+    //    single card authorisation / platform settlement, so two completed
+    //    rows sharing one are a replay by construction — no amount test can
+    //    argue with that, and it is reported even when the totals happen to
+    //    balance.
+    if row.duplicate_transaction_ref_groups > 0 {
+        return Some(build_blocker(
+            row,
+            "duplicate_payment",
+            format!(
+                "The same transaction is recorded more than once ({} recorded against an order of {}).",
+                format_money(row.settled_amount),
+                format_money(row.total_amount)
+            ),
+            "Void the duplicate payment row, keeping one payment per real transaction.".to_string(),
+        ));
+    }
+
+    // 2. Overpayment, measured NET of refunds so a refund-then-recollect
+    //    cycle is not mistaken for one. Duplicate (method, amount) rows are
+    //    too ambiguous to raise on their own — two guests really can pay 5.00
+    //    each in cash — but when the order is ALSO over its ceiling they name
+    //    the likely cause, so the operator knows what to void.
+    if row.net_settled_amount > ceiling {
+        let overpaid = row.net_settled_amount - ceiling;
+        let suggested_fix = if row.duplicate_amount_groups > 0 {
+            "Void the repeated payment row — two completed payments share the same method and amount."
+                .to_string()
+        } else {
+            "Refund or void the excess payment so the ledger matches the order total.".to_string()
+        };
+        return Some(build_blocker(
+            row,
+            "overpaid_order",
+            format!(
+                "Payments exceed the order by {}: {} recorded against an order of {}.",
+                format_money(overpaid),
+                format_money(row.net_settled_amount),
+                format_money(ceiling)
+            ),
+            suggested_fix,
+        ));
+    }
+
+    // 3. Platform settlement in the wrong direction.
+    if row.expected_platform_settlement.is_platform_held() {
+        // The platform is holding this money. Any cash/card row against it
+        // means the same euros are counted twice: once as bank settlement,
+        // once as drawer takings.
+        if row.drawer_tender_amount > Cents::ZERO {
+            return Some(build_blocker(
+                row,
+                "platform_settlement_mismatch",
+                format!(
+                    "The platform settles this order, but {} is recorded as cash/card in the till.",
+                    format_money(row.drawer_tender_amount)
+                ),
+                "Void the cash/card row: prepaid and platform-rider COD money never enters the drawer."
+                    .to_string(),
+            ));
+        }
+        // Platform-settled, and no settlement row at all: the
+        // `platform_settlement:*` write never happened (or was swept). This
+        // is the efood half of the 16/09/2026 incident.
+        //
+        // Deliberately NOT gated on `payment_status == "paid"` (founder
+        // review, 16/09/2026). The disposition already says the platform is
+        // holding this money, so the settlement row is owed whatever the
+        // order row claims. Gating on "paid" made the finding depend on the
+        // very field a failed settlement corrects downward — write the honest
+        // `pending` and the gap went silent exactly when it mattered most.
+        if row.platform_settled_amount <= Cents::ZERO {
+            return Some(build_blocker(
+                row,
+                "platform_settlement_missing",
+                format!(
+                    "The platform settles this order, but no platform settlement of {} is recorded.",
+                    format_money(row.total_amount)
+                ),
+                "Re-run platform settlement for this order so the money is recorded as platform revenue."
+                    .to_string(),
+            ));
+        }
+    } else if row.platform_settled_amount > Cents::ZERO && row.platform_disposition_known {
+        // The reverse: money we collect ourselves booked as platform-held.
+        // Either a store order carrying a settlement row, or a platform order
+        // OUR driver delivered — whose cash really did enter the drawer and
+        // must not be reported as bank money.
+        //
+        // Guarded by `platform_disposition_known` on purpose: this arm needs
+        // the order's OWN metadata to say the money is ours. A settlement row
+        // on an order with no metadata is missing evidence, not contrary
+        // evidence — and the reference is itself a record that the POS
+        // classified the order as platform-held when it collected. Flagging
+        // those would freeze every legacy platform order whose metadata
+        // predates the aggregator ingest.
+        let reason_text = if row.is_external_platform {
+            format!(
+                "This platform order is delivered by our own driver, but {} is booked as platform-settled money.",
+                format_money(row.platform_settled_amount)
+            )
+        } else {
+            format!(
+                "A store order is booked as platform-settled money ({}).",
+                format_money(row.platform_settled_amount)
+            )
+        };
+        return Some(build_blocker(
+            row,
+            "platform_settlement_mismatch",
+            reason_text,
+            "Void the platform settlement row and record the cash or card the store actually collected."
+                .to_string(),
+        ));
+    }
+
+    None
 }
 
 fn classify_blocker_row(row: RawBlockerRow) -> Option<UnsettledPaymentBlocker> {
@@ -98,6 +335,26 @@ fn classify_blocker_row(row: RawBlockerRow) -> Option<UnsettledPaymentBlocker> {
     }
 
     let remaining = std::cmp::max(row.total_amount - row.settled_amount, Cents::ZERO);
+
+    // --- Settlement-shape findings (16/09/2026 reconciliation work) --------
+    //
+    // These run BEFORE the `remaining.is_zero()` early return below. The
+    // shipped classifier only ever asked "is enough money recorded?", so an
+    // order carrying TOO MUCH money, the same transaction twice, or the right
+    // total in the wrong tender all read as perfectly settled and the Z closed
+    // silently over them. Each one is a real reconciliation break:
+    //
+    //   * overpaid_order            — the ledger holds more than the order is
+    //                                 worth; the day's takings are inflated.
+    //   * duplicate_payment         — one real transaction settled twice.
+    //   * platform_settlement_mismatch — money the platform is holding was
+    //                                 booked as drawer cash/card (or the
+    //                                 reverse). Cash counts would never
+    //                                 balance, and the founder's «platform
+    //                                 money is not drawer cash» rule breaks.
+    if let Some(blocker) = classify_settlement_shape(&row) {
+        return Some(blocker);
+    }
 
     if row.invalid_completed_method_count > 0 {
         let reason_text = if remaining.is_zero() {
@@ -261,8 +518,142 @@ fn order_blocker_row_select() -> String {
                 LOWER(TRIM(COALESCE(op.method, ''))) = 'other'
                 AND COALESCE(op.transaction_ref, '') LIKE 'platform_settlement:%'
               )
-        ), 0)"
-        .to_string()
+        ), 0),
+        -- 8: tips on completed rows. Part of the overpayment ceiling.
+        COALESCE((
+            SELECT SUM(COALESCE(op.tip_amount_cents, CAST(ROUND(op.tip_amount * 100) AS INTEGER), 0))
+            FROM order_payments op
+            WHERE op.order_id = o.id
+              AND op.status = 'completed'
+        ), 0),
+        -- 9: completed money NET of refund adjustments. Only this may be
+        -- tested for overpayment; the gross sum at column 3 double-counts a
+        -- refund-then-recollect cycle.
+        COALESCE((
+            SELECT SUM(
+                MAX(
+                    COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0)
+                    - COALESCE((
+                        SELECT SUM(COALESCE(pa.amount_cents, CAST(ROUND(pa.amount * 100) AS INTEGER), 0))
+                        FROM payment_adjustments pa
+                        WHERE pa.payment_id = op.id
+                          AND pa.adjustment_type = 'refund'
+                    ), 0),
+                    0
+                )
+            )
+            FROM order_payments op
+            WHERE op.order_id = o.id
+              AND op.status = 'completed'
+        ), 0),
+        -- 10: completed rows sharing one non-empty transaction_ref. A single
+        -- real transaction cannot settle twice, so any group of 2+ is a replay.
+        COALESCE((
+            SELECT COUNT(*) FROM (
+                SELECT 1
+                FROM order_payments op
+                WHERE op.order_id = o.id
+                  AND op.status = 'completed'
+                  AND TRIM(COALESCE(op.transaction_ref, '')) <> ''
+                GROUP BY TRIM(op.transaction_ref)
+                HAVING COUNT(*) > 1
+            )
+        ), 0),
+        -- 11: completed rows sharing (method, amount). Ambiguous alone; only
+        -- used to explain an overpayment.
+        COALESCE((
+            SELECT COUNT(*) FROM (
+                SELECT 1
+                FROM order_payments op
+                WHERE op.order_id = o.id
+                  AND op.status = 'completed'
+                  AND COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0) > 0
+                GROUP BY LOWER(TRIM(COALESCE(op.method, ''))),
+                         COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0)
+                HAVING COUNT(*) > 1
+            )
+        ), 0),
+        -- 12: how this order is EXPECTED to settle, mirroring
+        -- `payments::platform_settlement_kind`:
+        --   0 = the store collects it (store orders, and platform orders our
+        --       own driver delivers — that cash really does enter the drawer)
+        --   1 = prepaid online, 2 = COD collected by the platform's rider.
+        -- `json_valid` guards the extract: ghost_metadata is free-form text
+        -- on legacy rows and a raw json_extract would abort the whole query.
+        CASE
+            WHEN NOT (
+                $EXTERNAL_PLATFORM_PREDICATE
+                OR TRIM(COALESCE(o.external_plugin_order_id, '')) <> ''
+                OR (
+                    json_valid(COALESCE(o.ghost_metadata, ''))
+                    AND json_extract(o.ghost_metadata, '$.food_delivery') IS NOT NULL
+                )
+            ) THEN 0
+            WHEN NOT json_valid(COALESCE(o.ghost_metadata, '')) THEN 0
+            WHEN COALESCE(json_extract(o.ghost_metadata, '$.food_delivery.prepaid'), 0) IN (1, 'true')
+                 OR LOWER(TRIM(COALESCE(json_extract(o.ghost_metadata, '$.food_delivery.payment_method'), ''))) = 'online'
+                THEN 1
+            WHEN LOWER(TRIM(COALESCE(json_extract(o.ghost_metadata, '$.food_delivery.payment_method'), ''))) = 'cash'
+                 AND LOWER(TRIM(COALESCE(json_extract(o.ghost_metadata, '$.food_delivery.delivery_provider'), ''))) = 'platform_delivery'
+                THEN 2
+            ELSE 0
+        END,
+        -- 13: completed platform-settlement money (bank money the platform remits).
+        COALESCE((
+            SELECT SUM(COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0))
+            FROM order_payments op
+            WHERE op.order_id = o.id
+              AND op.status = 'completed'
+              AND COALESCE(op.transaction_ref, '') LIKE 'platform_settlement:%'
+        ), 0),
+        -- 14: completed cash/card money (what really passed through the till).
+        COALESCE((
+            SELECT SUM(COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0))
+            FROM order_payments op
+            WHERE op.order_id = o.id
+              AND op.status = 'completed'
+              AND LOWER(TRIM(COALESCE(op.method, ''))) IN ('cash', 'card')
+        ), 0),
+        -- 15: does this order come from a marketplace we can NAME? `plugin =
+        -- 'pos'` is our own till and must answer no; so must a slug we do not
+        -- recognise — see `crate::platforms`. Only used to word the
+        -- platform-settlement mismatch message, never to gate money.
+        CASE WHEN $EXTERNAL_PLATFORM_PREDICATE THEN 1 ELSE 0 END,
+        -- 16: do we actually KNOW how the platform settles this order?
+        CASE
+            WHEN json_valid(COALESCE(o.ghost_metadata, ''))
+                 AND json_extract(o.ghost_metadata, '$.food_delivery') IS NOT NULL
+                THEN 1
+            ELSE 0
+        END"
+        .replace(
+            "$EXTERNAL_PLATFORM_PREDICATE",
+            &crate::platforms::external_marketplace_sql_predicate("o.plugin"),
+        )
+}
+
+/// Reads the 17 columns of [`order_blocker_row_select`] into a [`RawBlockerRow`].
+fn read_blocker_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawBlockerRow> {
+    Ok(RawBlockerRow {
+        order_id: row.get(0)?,
+        order_number: row.get(1)?,
+        // W4b: cols 2 and 3 select INTEGER cents columns.
+        total_amount: Cents::new(row.get::<_, i64>(2)?),
+        settled_amount: Cents::new(row.get::<_, i64>(3)?),
+        payment_status: row.get(4)?,
+        payment_method: row.get(5)?,
+        completed_payment_count: row.get(6)?,
+        invalid_completed_method_count: row.get(7)?,
+        tip_total: Cents::new(row.get::<_, i64>(8)?),
+        net_settled_amount: Cents::new(row.get::<_, i64>(9)?),
+        duplicate_transaction_ref_groups: row.get(10)?,
+        duplicate_amount_groups: row.get(11)?,
+        expected_platform_settlement: ExpectedPlatformSettlement::from_sql(row.get::<_, i64>(12)?),
+        platform_settled_amount: Cents::new(row.get::<_, i64>(13)?),
+        drawer_tender_amount: Cents::new(row.get::<_, i64>(14)?),
+        is_external_platform: row.get::<_, i64>(15)? == 1,
+        platform_disposition_known: row.get::<_, i64>(16)? == 1,
+    })
 }
 
 fn map_blocker_rows<F>(
@@ -298,19 +689,7 @@ pub fn load_order_payment_blockers(
         .prepare(&sql)
         .map_err(|e| format!("prepare order payment blocker lookup: {e}"))?;
     let rows = stmt
-        .query_map(params![order_id], |row| {
-            Ok(RawBlockerRow {
-                order_id: row.get(0)?,
-                order_number: row.get(1)?,
-                // W4b: cols 2 and 3 now select INTEGER cents columns.
-                total_amount: Cents::new(row.get::<_, i64>(2)?),
-                settled_amount: Cents::new(row.get::<_, i64>(3)?),
-                payment_status: row.get(4)?,
-                payment_method: row.get(5)?,
-                completed_payment_count: row.get(6)?,
-                invalid_completed_method_count: row.get(7)?,
-            })
-        })
+        .query_map(params![order_id], read_blocker_row)
         .map_err(|e| format!("query order payment blocker lookup: {e}"))?;
 
     map_blocker_rows(rows)
@@ -335,12 +714,31 @@ pub fn load_branch_window_payment_blockers(
     // into this window (see business_day::paid_order_swept_by_last_z_expr).
     let swept_by_last_z_expr = business_day::paid_order_swept_by_last_z_expr("o", "?4");
     let last_z_anchor = business_day::last_z_anchor_utc(conn);
+    // Population parity with the Z aggregates (review item E, 16/09/2026).
+    // This loader feeds the day-close gate AND `integrity.findings`, so it must
+    // count the same orders the Z counts, or the panel shows a blocker behind a
+    // number that is not there.
+    //
+    // `is_test` (sandbox integration orders) is excluded everywhere in
+    // `zreport.rs` and was NOT excluded here: a sandbox order left `paid`
+    // without a ledger row blocked a real day close while contributing to
+    // neither `orderTurnover` nor `paymentCoverage`. Test data is not money, so
+    // dropping it cannot hide a real gap.
+    //
+    // `order_context = 'repair_settlement'` is deliberately NOT excluded. Those
+    // orders are outside the Z's SALES aggregates (the repairs workspace
+    // recognises them, see `load_server_repair_projection`), but they carry
+    // real `order_payments` rows and real money. A repair settlement claiming
+    // `paid` with no ledger row is a genuine gap, so it still blocks — it just
+    // moves neither side of the turnover/coverage difference, which is why a
+    // blocking finding can legitimately sit next to `unexplainedDifference` 0.
     let sql = format!(
         "{} FROM orders o
          WHERE {order_financial_expr} {operator} ?1
            AND (?2 IS NULL OR {order_financial_expr} <= ?2)
            AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
            AND COALESCE(o.is_ghost, 0) = 0
+           AND COALESCE(o.is_test, 0) = 0
            AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
            AND NOT {open_table_tab_expr}
            AND NOT {swept_by_last_z_expr}
@@ -353,19 +751,7 @@ pub fn load_branch_window_payment_blockers(
     let rows = stmt
         .query_map(
             params![period_start_at, cutoff_at, branch_id, last_z_anchor],
-            |row| {
-                Ok(RawBlockerRow {
-                    order_id: row.get(0)?,
-                    order_number: row.get(1)?,
-                    // W4b: cols 2 and 3 now select INTEGER cents columns.
-                    total_amount: Cents::new(row.get::<_, i64>(2)?),
-                    settled_amount: Cents::new(row.get::<_, i64>(3)?),
-                    payment_status: row.get(4)?,
-                    payment_method: row.get(5)?,
-                    completed_payment_count: row.get(6)?,
-                    invalid_completed_method_count: row.get(7)?,
-                })
-            },
+            read_blocker_row,
         )
         .map_err(|e| format!("query branch payment blocker lookup: {e}"))?;
 
@@ -731,5 +1117,474 @@ mod tests {
             blockers[0].suggested_fix.contains("Resume split payment"),
             "split payments should suggest resuming the split flow"
         );
+    }
+
+    /// Founder review, 16/09/2026, test 7: «το Z να μπλοκάρει missing platform
+    /// settlement ακόμα με payment_status=pending».
+    ///
+    /// The finding used to require `payment_status == "paid"`, which made it
+    /// depend on the very field a failed settlement honestly corrects
+    /// downward. Write the truthful `pending` and the gap went silent exactly
+    /// when it mattered most. The disposition is what owes the settlement row,
+    /// so the disposition is what raises the finding.
+    #[test]
+    fn missing_platform_settlement_blocks_the_z_whatever_the_payment_status_says() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        const PREPAID: &str = r#"{"food_delivery":{"payment_method":"online","prepaid":true}}"#;
+        const PLATFORM_COD: &str = r#"{"food_delivery":{"payment_method":"cash","prepaid":false,"delivery_provider":"platform_delivery"}}"#;
+
+        // Every ledger status a failed settlement can legitimately leave
+        // behind, plus the original 'paid' shape.
+        for (index, status) in ["pending", "paid", "partially_paid"].iter().enumerate() {
+            for (kind, metadata) in [("prepaid", PREPAID), ("platcod", PLATFORM_COD)] {
+                let id = format!("ord-{kind}-{index}");
+                seed_order(&conn, &id, 1450, status, Some("efood"), Some(metadata));
+            }
+        }
+
+        let blockers = load_branch_window_payment_blockers(
+            &conn,
+            "branch-1",
+            "2026-03-26T00:00:00Z",
+            Some("2026-03-27T00:00:00Z"),
+            true,
+        )
+        .expect("branch blockers");
+
+        assert_eq!(
+            blockers.len(),
+            6,
+            "every shape must be reported: {blockers:?}"
+        );
+        for blocker in &blockers {
+            assert_eq!(
+                blocker.reason_code, "platform_settlement_missing",
+                "{}: {blocker:?}",
+                blocker.order_id
+            );
+            assert!(
+                blocker.is_blocking(),
+                "{}: a missing settlement must BLOCK the close",
+                blocker.order_id
+            );
+            assert!(
+                !blocker.reason_text.contains("marked paid"),
+                "{}: the text must not claim a status the order may not have: {}",
+                blocker.order_id,
+                blocker.reason_text
+            );
+        }
+
+        // Control: once the canonical settlement row exists, the finding is
+        // gone — even though the order is still `pending`. Coverage, not
+        // status, is what clears it.
+        seed_order(
+            &conn,
+            "ord-settled",
+            1450,
+            "pending",
+            Some("efood"),
+            Some(PREPAID),
+        );
+        seed_payment(
+            &conn,
+            "pay-settled",
+            "ord-settled",
+            "other",
+            1450,
+            Some("platform_settlement:online:ord-settled"),
+        );
+        let settled = load_order_payment_blockers(&conn, "ord-settled").expect("order blockers");
+        assert!(
+            settled.is_empty(),
+            "a settled platform order is clean regardless of payment_status: {settled:?}"
+        );
+    }
+
+    #[test]
+    fn branch_window_blockers_skip_sandbox_orders_so_test_data_cannot_block_a_real_close() {
+        // Review item E (founder, 16/09/2026): the day-close gate and the Z
+        // aggregates must count the same orders. `is_test` orders are excluded
+        // from every aggregate in `zreport.rs`, so a sandbox order left `paid`
+        // with no ledger row used to block a real Z while contributing to
+        // neither `orderTurnover` nor `paymentCoverage` — a blocker with no
+        // number behind it, and no money behind it either.
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, order_number, branch_id, items, total_amount, total_amount_cents,
+                status, payment_status, integration_environment, is_test,
+                created_at, updated_at
+            ) VALUES (
+                'ord-sandbox-gate', 'TEST-1', 'branch-1', '[]', 44.0, 4400,
+                'completed', 'paid', 'sandbox', 1,
+                '2026-03-26T16:53:37Z', '2026-03-26T16:53:37Z'
+            )",
+            [],
+        )
+        .unwrap();
+        // The same shape on a PRODUCTION order still blocks — this is the
+        // control that proves the filter narrowed the population and did not
+        // silence the finding.
+        conn.execute(
+            "INSERT INTO orders (
+                id, order_number, branch_id, items, total_amount, total_amount_cents,
+                status, payment_status, created_at, updated_at
+            ) VALUES (
+                'ord-live-gate', 'LIVE-1', 'branch-1', '[]', 44.0, 4400,
+                'completed', 'paid',
+                '2026-03-26T16:53:37Z', '2026-03-26T16:53:37Z'
+            )",
+            [],
+        )
+        .unwrap();
+
+        let blockers = load_branch_window_payment_blockers(
+            &conn,
+            "branch-1",
+            "2026-03-26T00:00:00Z",
+            Some("2026-03-27T00:00:00Z"),
+            true,
+        )
+        .expect("branch blockers");
+
+        let ids: Vec<&str> = blockers.iter().map(|b| b.order_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["ord-live-gate"],
+            "only the production order may block: {blockers:?}"
+        );
+    }
+
+    #[test]
+    fn branch_window_blockers_still_catch_repair_settlement_orders() {
+        // The deliberate half of the same parity review: repair settlements sit
+        // outside the Z's SALES aggregates (the repairs workspace recognises
+        // them) but they carry real money, so a repair settlement claiming
+        // `paid` with no ledger row must still refuse to close the day.
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, order_number, branch_id, items, total_amount, total_amount_cents,
+                status, payment_status, order_context, created_at, updated_at
+            ) VALUES (
+                'ord-repair-gate', 'REP-1', 'branch-1', '[]', 60.0, 6000,
+                'completed', 'paid', 'repair_settlement',
+                '2026-03-26T16:53:37Z', '2026-03-26T16:53:37Z'
+            )",
+            [],
+        )
+        .unwrap();
+
+        let blockers = load_branch_window_payment_blockers(
+            &conn,
+            "branch-1",
+            "2026-03-26T00:00:00Z",
+            Some("2026-03-27T00:00:00Z"),
+            true,
+        )
+        .expect("branch blockers");
+
+        assert_eq!(blockers.len(), 1, "{blockers:?}");
+        assert_eq!(blockers[0].order_id, "ord-repair-gate");
+        assert!(
+            blockers[0].is_blocking(),
+            "repair-settlement money is still money: {:?}",
+            blockers[0]
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // 16/09/2026 reconciliation work: settlement-shape findings.
+    //
+    // Before this, `classify_blocker_row` only asked «is enough money
+    // recorded?», so an order holding TOO MUCH money, the same transaction
+    // twice, or the right total in the wrong tender all read as settled and
+    // the Z closed silently over them.
+    // ------------------------------------------------------------------
+
+    /// Seed one order plus its completed payments. `ghost_metadata` is raw so
+    /// a test can pin the "no disposition recorded" case exactly.
+    fn seed_order(
+        conn: &Connection,
+        id: &str,
+        total_cents: i64,
+        payment_status: &str,
+        plugin: Option<&str>,
+        ghost_metadata: Option<&str>,
+    ) {
+        conn.execute(
+            "INSERT INTO orders (
+                id, order_number, branch_id, items, total_amount, total_amount_cents,
+                status, payment_status, plugin, ghost_metadata, created_at, updated_at
+            ) VALUES (?1, ?2, 'branch-1', '[]', ?3, ?4, 'completed', ?5, ?6, ?7,
+                      '2026-03-26T16:53:37Z', '2026-03-26T17:19:54Z')",
+            params![
+                id,
+                format!("ORD-{id}"),
+                total_cents as f64 / 100.0,
+                total_cents,
+                payment_status,
+                plugin,
+                ghost_metadata,
+            ],
+        )
+        .unwrap();
+    }
+
+    fn seed_payment(
+        conn: &Connection,
+        id: &str,
+        order_id: &str,
+        method: &str,
+        amount_cents: i64,
+        transaction_ref: Option<&str>,
+    ) {
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, amount_cents, status, transaction_ref,
+                sync_status, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, 'completed', ?6, 'pending',
+                      '2026-03-26T17:00:00Z', '2026-03-26T17:00:00Z')",
+            params![
+                id,
+                order_id,
+                method,
+                amount_cents as f64 / 100.0,
+                amount_cents,
+                transaction_ref,
+            ],
+        )
+        .unwrap();
+    }
+
+    fn order_reason(conn: &Connection, order_id: &str) -> Option<String> {
+        load_order_payment_blockers(conn, order_id)
+            .expect("order blockers")
+            .first()
+            .map(|blocker| blocker.reason_code.clone())
+    }
+
+    #[test]
+    fn overpaid_order_is_a_blocking_finding() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        seed_order(&conn, "ord-over", 1000, "paid", Some("pos"), None);
+        seed_payment(&conn, "pay-over-a", "ord-over", "cash", 1000, None);
+        seed_payment(&conn, "pay-over-b", "ord-over", "cash", 1000, None);
+
+        let blockers = load_order_payment_blockers(&conn, "ord-over").expect("blockers");
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0].reason_code, "overpaid_order");
+        assert!(blockers[0].is_blocking());
+        // Negative difference: the ledger holds more than the order is worth.
+        assert_eq!(blockers[0].difference_cents, -1000);
+        assert!(
+            blockers[0].suggested_fix.contains("same method and amount"),
+            "the duplicate (method, amount) signal should name the likely cause"
+        );
+    }
+
+    #[test]
+    fn duplicate_transaction_reference_is_reported_even_when_totals_balance() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        // Two halves of a split that replayed under ONE card authorisation:
+        // the money adds up, but one real transaction settled twice.
+        seed_order(&conn, "ord-dup", 1000, "paid", Some("pos"), None);
+        seed_payment(&conn, "pay-dup-a", "ord-dup", "card", 500, Some("auth-123"));
+        seed_payment(&conn, "pay-dup-b", "ord-dup", "card", 500, Some("auth-123"));
+
+        assert_eq!(
+            order_reason(&conn, "ord-dup").as_deref(),
+            Some("duplicate_payment")
+        );
+    }
+
+    #[test]
+    fn two_guests_paying_the_same_amount_is_not_a_duplicate() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        seed_order(&conn, "ord-split-even", 1000, "paid", Some("pos"), None);
+        seed_payment(&conn, "pay-even-a", "ord-split-even", "cash", 500, None);
+        seed_payment(&conn, "pay-even-b", "ord-split-even", "cash", 500, None);
+
+        assert_eq!(order_reason(&conn, "ord-split-even"), None);
+    }
+
+    #[test]
+    fn a_refund_then_recollect_cycle_is_not_an_overpayment() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        seed_order(&conn, "ord-refund", 1000, "paid", Some("pos"), None);
+        seed_payment(&conn, "pay-refund-a", "ord-refund", "cash", 1000, None);
+        seed_payment(&conn, "pay-refund-b", "ord-refund", "card", 1000, None);
+        conn.execute(
+            "INSERT INTO payment_adjustments (
+                id, payment_id, order_id, adjustment_type, amount, amount_cents, reason,
+                created_at, updated_at
+            ) VALUES ('adj-1', 'pay-refund-a', 'ord-refund', 'refund', 10.0, 1000,
+                      'customer switched to card', '2026-03-26T17:05:00Z', '2026-03-26T17:05:00Z')",
+            [],
+        )
+        .unwrap();
+
+        // Gross is 20.00 against a 10.00 order, but NET is 10.00.
+        assert_eq!(order_reason(&conn, "ord-refund"), None);
+    }
+
+    #[test]
+    fn platform_held_money_recorded_as_drawer_cash_is_a_mismatch() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        seed_order(
+            &conn,
+            "ord-efood-cash",
+            1000,
+            "paid",
+            Some("efood"),
+            Some(r#"{"food_delivery":{"prepaid":true,"payment_method":"online"}}"#),
+        );
+        seed_payment(
+            &conn,
+            "pay-efood-cash",
+            "ord-efood-cash",
+            "cash",
+            1000,
+            None,
+        );
+
+        assert_eq!(
+            order_reason(&conn, "ord-efood-cash").as_deref(),
+            Some("platform_settlement_mismatch")
+        );
+    }
+
+    #[test]
+    fn our_own_drivers_cash_booked_as_platform_money_is_a_mismatch() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        // efood order OUR driver delivers: the cash is really in our drawer,
+        // so crediting the platform with it double-counts the money.
+        seed_order(
+            &conn,
+            "ord-efood-ours",
+            1000,
+            "paid",
+            Some("efood"),
+            Some(
+                r#"{"food_delivery":{"payment_method":"cash","delivery_provider":"vendor_delivery"}}"#,
+            ),
+        );
+        seed_payment(
+            &conn,
+            "pay-efood-ours",
+            "ord-efood-ours",
+            "other",
+            1000,
+            Some("platform_settlement:cod:ord-efood-ours"),
+        );
+
+        assert_eq!(
+            order_reason(&conn, "ord-efood-ours").as_deref(),
+            Some("platform_settlement_mismatch")
+        );
+    }
+
+    #[test]
+    fn a_platform_order_our_driver_settled_in_cash_is_clean() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        seed_order(
+            &conn,
+            "ord-efood-drawer",
+            1000,
+            "paid",
+            Some("efood"),
+            Some(
+                r#"{"food_delivery":{"payment_method":"cash","delivery_provider":"vendor_delivery"}}"#,
+            ),
+        );
+        seed_payment(&conn, "pay-drawer", "ord-efood-drawer", "cash", 1000, None);
+
+        assert_eq!(order_reason(&conn, "ord-efood-drawer"), None);
+    }
+
+    #[test]
+    fn a_paid_platform_order_with_no_settlement_is_reported_specifically() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        // The efood half of the 16/09/2026 incident: 13 orders, EUR 145,20,
+        // paid on the order row and absent from the ledger.
+        seed_order(
+            &conn,
+            "ord-efood-bare",
+            1120,
+            "paid",
+            Some("efood"),
+            Some(r#"{"food_delivery":{"prepaid":true}}"#),
+        );
+
+        let blockers = load_order_payment_blockers(&conn, "ord-efood-bare").expect("blockers");
+        assert_eq!(blockers.len(), 1, "one finding per order, most specific");
+        assert_eq!(blockers[0].reason_code, "platform_settlement_missing");
+        assert_eq!(blockers[0].difference_cents, 1120);
+    }
+
+    #[test]
+    fn a_settlement_row_without_a_recorded_disposition_is_left_alone() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        // Legacy platform rows (and rows a rollover stripped) carry no
+        // `food_delivery` metadata. The settlement reference is itself the
+        // POS's record that it classified the order as platform-held, so
+        // "unknown" must never be reported as "wrong".
+        seed_order(&conn, "ord-legacy-plat", 800, "paid", None, None);
+        seed_payment(
+            &conn,
+            "pay-legacy-plat",
+            "ord-legacy-plat",
+            "other",
+            800,
+            Some("platform_settlement:online:ord-legacy-plat"),
+        );
+
+        assert_eq!(order_reason(&conn, "ord-legacy-plat"), None);
+    }
+
+    #[test]
+    fn plugin_pos_is_never_treated_as_an_external_platform_by_the_gate() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        // «POS x37»: the store's own till must not be read as a platform,
+        // here or anywhere else.
+        seed_order(&conn, "ord-pos-plain", 1000, "paid", Some("pos"), None);
+        seed_payment(&conn, "pay-pos-plain", "ord-pos-plain", "cash", 1000, None);
+
+        assert_eq!(order_reason(&conn, "ord-pos-plain"), None);
+
+        seed_order(&conn, "ord-pos-unpaid", 1000, "paid", Some("pos"), None);
+        let blockers = load_order_payment_blockers(&conn, "ord-pos-unpaid").expect("blockers");
+        assert_eq!(blockers.len(), 1);
+        // Not `platform_settlement_missing` — a POS order has no platform.
+        assert_eq!(blockers[0].reason_code, "missing_local_payment_row");
+    }
+
+    #[test]
+    fn findings_carry_severity_and_a_signed_difference() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        seed_order(&conn, "ord-short", 2000, "paid", Some("pos"), None);
+        seed_payment(&conn, "pay-short", "ord-short", "cash", 1500, None);
+
+        let blockers = load_order_payment_blockers(&conn, "ord-short").expect("blockers");
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0].severity, "blocking");
+        assert!(blockers[0].is_blocking());
+        assert_eq!(blockers[0].difference_cents, 500);
     }
 }

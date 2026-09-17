@@ -1967,6 +1967,20 @@ pub fn create_order(
         })?;
     }
 
+    // Founder invariant (16/09/2026): an order may not be BORN paid. Until
+    // now `persisted_payment_status` was whatever the caller's payload said
+    // whenever it carried no `initialPayment`, so any client could mint an
+    // order that claimed money the ledger had never seen — the 37 POS orders
+    // (€385,93) behind the Z-report turnover gap. The guard settles platform
+    // money from the platform's own disposition and downgrades everything
+    // else to what the ledger can prove; it never invents a tender.
+    crate::payments::enforce_paid_status_requires_ledger_coverage(&conn, &order_id, &now).map_err(
+        |e| {
+            let _ = conn.execute_batch("ROLLBACK");
+            format!("enforce paid-status ledger coverage: {e}")
+        },
+    )?;
+
     // Enqueue for sync
     let mut sync_data = payload.clone();
     if let Value::Object(obj) = &mut sync_data {
@@ -2123,15 +2137,18 @@ pub fn create_order(
         &order_id,
         "INSERT",
         &sync_data,
-        Some(
-            if payment_method.as_deref() == Some("paid")
-                || payment_method.as_deref() == Some("partially_paid")
-            {
-                1
-            } else {
-                0
-            },
-        ),
+        // Priority 1 = "money rode in with this order, sync it first".
+        //
+        // This used to compare `payment_method` against "paid"/"partially_paid"
+        // — payment STATUS values that a payment METHOD (cash/card/other) can
+        // never hold, so no order ever earned the priority. The honest signal
+        // is whether the create carried a payment at all; after the
+        // paid-status guard above, a claimed status proves nothing on its own.
+        Some(if initial_payment_payload.is_some() {
+            1
+        } else {
+            0
+        }),
         Some("orders"),
         Some("server-wins"),
         Some(1),
@@ -18244,6 +18261,9 @@ async fn sync_loyalty_transaction(
                 "amount": Cents::new(amount_cents).to_f64_dp2(),
                 "amount_cents": amount_cents,
                 "description": payload.get("description").and_then(|v| v.as_str()),
+                // Replay-safe fallback for order-less awards (the admin route prefers its
+                // per-order key whenever order_id is present).
+                "idempotency_key": format!("loyalty:{entity_id}"),
             })
         }
         "redeem" => {
@@ -18258,6 +18278,7 @@ async fn sync_loyalty_transaction(
                 "points": points,
                 "order_id": payload.get("order_id").and_then(|v| v.as_str()),
                 "description": payload.get("description").and_then(|v| v.as_str()),
+                "idempotency_key": format!("loyalty:{entity_id}"),
             })
         }
         _ => unreachable!(),
@@ -22360,6 +22381,176 @@ mod tests {
             )
             .unwrap();
         assert_eq!(queued_count, 1);
+    }
+
+    // ------------------------------------------------------------------
+    // 16/09/2026: no order is BORN paid.
+    //
+    // `create_order` used to persist whatever `paymentStatus` the payload
+    // carried whenever no `initialPayment` came with it. That is how 37 POS
+    // orders worth EUR 385,93 claimed money the ledger had never seen, and
+    // how order-level turnover ran EUR 531,13 ahead of payment-level.
+    // ------------------------------------------------------------------
+
+    fn order_payment_state(db: &DbState, order_id: &str) -> (String, i64) {
+        let conn = db.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT LOWER(TRIM(COALESCE(o.payment_status, 'pending'))),
+                    (SELECT COUNT(*) FROM order_payments op
+                      WHERE op.order_id = o.id AND op.status = 'completed')
+             FROM orders o WHERE o.id = ?1",
+            params![order_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read order payment state")
+    }
+
+    #[test]
+    fn create_order_refuses_a_paid_claim_with_no_payment_behind_it() {
+        let db = test_db();
+        seed_active_cashier(&db, "branch-born-paid", "terminal-born-paid");
+        let payload = serde_json::json!({
+            "organizationId": "org-born-paid",
+            "branchId": "branch-born-paid",
+            "terminalId": "terminal-born-paid",
+            "items": [{ "name": "Coffee", "quantity": 1, "price": 10.0 }],
+            "totalAmount": 10.0,
+            "subtotal": 10.0,
+            "status": "completed",
+            "orderType": "takeaway",
+            // The claim, with nothing behind it.
+            "paymentStatus": "paid"
+        });
+
+        let created = create_order(&db, &payload, &crate::print::NoopPrintQueueInvalidator)
+            .expect("create order");
+        let order_id = created["orderId"].as_str().expect("order id");
+
+        let (status, completed_rows) = order_payment_state(&db, order_id);
+        assert_eq!(completed_rows, 0, "no tender may be invented");
+        assert_eq!(
+            status, "pending",
+            "an unbacked paid claim must be downgraded to what the ledger proves"
+        );
+    }
+
+    #[test]
+    fn create_order_keeps_paid_when_the_initial_payment_covers_it() {
+        let db = test_db();
+        seed_active_cashier(&db, "branch-real-paid", "terminal-real-paid");
+        let payload = serde_json::json!({
+            "organizationId": "org-real-paid",
+            "branchId": "branch-real-paid",
+            "terminalId": "terminal-real-paid",
+            "items": [{ "name": "Coffee", "quantity": 1, "price": 10.0 }],
+            "totalAmount": 10.0,
+            "subtotal": 10.0,
+            "status": "completed",
+            "orderType": "takeaway",
+            "paymentStatus": "paid",
+            "initialPayment": {
+                "method": "cash",
+                "amount": 10.0,
+                "currency": "EUR",
+                "idempotencyKey": "real-paid-1"
+            }
+        });
+
+        let created = create_order(&db, &payload, &crate::print::NoopPrintQueueInvalidator)
+            .expect("create order");
+        let order_id = created["orderId"].as_str().expect("order id");
+
+        let (status, completed_rows) = order_payment_state(&db, order_id);
+        assert_eq!(completed_rows, 1);
+        assert_eq!(status, "paid", "a real collection still lands as paid");
+    }
+
+    #[test]
+    fn create_order_settles_a_prepaid_platform_order_through_the_ledger() {
+        let db = test_db();
+        seed_active_cashier(&db, "branch-plat-paid", "terminal-plat-paid");
+        let payload = serde_json::json!({
+            "organizationId": "org-plat-paid",
+            "branchId": "branch-plat-paid",
+            "terminalId": "terminal-plat-paid",
+            "items": [{ "name": "Pizza", "quantity": 1, "price": 12.1 }],
+            "totalAmount": 12.1,
+            "subtotal": 12.1,
+            "status": "delivered",
+            "orderType": "delivery",
+            "plugin": "efood",
+            "paymentStatus": "paid",
+            // The platform's own disposition: it is holding the money. The
+            // amount and the tender are both determined, so the canonical
+            // `platform_settlement:*` row can be written without guessing.
+            "ghostMetadata": {
+                "food_delivery": { "prepaid": true, "payment_method": "online" }
+            }
+        });
+
+        let created = create_order(&db, &payload, &crate::print::NoopPrintQueueInvalidator)
+            .expect("create order");
+        let order_id = created["orderId"].as_str().expect("order id");
+
+        let (status, completed_rows) = order_payment_state(&db, order_id);
+        assert_eq!(status, "paid");
+        assert_eq!(
+            completed_rows, 1,
+            "the claim is backed by a real ledger row"
+        );
+
+        let conn = db.conn.lock().unwrap();
+        let (method, transaction_ref): (String, String) = conn
+            .query_row(
+                "SELECT method, COALESCE(transaction_ref, '') FROM order_payments
+                  WHERE order_id = ?1 AND status = 'completed'",
+                params![order_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read settlement row");
+        // Never cash/card: platform money must not read as drawer money.
+        assert_eq!(method, "other");
+        assert!(
+            transaction_ref.starts_with("platform_settlement:online:"),
+            "unexpected settlement reference: {transaction_ref}"
+        );
+    }
+
+    #[test]
+    fn create_order_leaves_a_platform_order_our_driver_carries_to_real_collection() {
+        let db = test_db();
+        seed_active_cashier(&db, "branch-plat-ours", "terminal-plat-ours");
+        let payload = serde_json::json!({
+            "organizationId": "org-plat-ours",
+            "branchId": "branch-plat-ours",
+            "terminalId": "terminal-plat-ours",
+            "items": [{ "name": "Pizza", "quantity": 1, "price": 12.1 }],
+            "totalAmount": 12.1,
+            "subtotal": 12.1,
+            "status": "delivered",
+            "orderType": "delivery",
+            "plugin": "efood",
+            "paymentStatus": "paid",
+            // OUR driver carries this COD: the cash really enters the drawer,
+            // and only the operator knows whether it came as cash or card.
+            "ghostMetadata": {
+                "food_delivery": {
+                    "payment_method": "cash",
+                    "delivery_provider": "vendor_delivery"
+                }
+            }
+        });
+
+        let created = create_order(&db, &payload, &crate::print::NoopPrintQueueInvalidator)
+            .expect("create order");
+        let order_id = created["orderId"].as_str().expect("order id");
+
+        let (status, completed_rows) = order_payment_state(&db, order_id);
+        assert_eq!(
+            completed_rows, 0,
+            "no tender may be guessed for our own driver"
+        );
+        assert_eq!(status, "pending");
     }
 
     #[test]

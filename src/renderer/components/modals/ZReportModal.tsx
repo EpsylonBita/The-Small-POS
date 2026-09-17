@@ -673,6 +673,32 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     }
   }, [branchId, bridge, clearShift, isPendingLocalSubmit, selectedDate, t]);
 
+  // Reconciliation from the report itself (1.4.114+). Until now the modal only
+  // learned about payment-integrity breaks when a SUBMIT was rejected, so a
+  // preview of a broken day looked perfectly healthy — the founder's Z showed
+  // order-level €1.636,16 against payment-level €1.105,73 with a green check
+  // list. The builder now ships its findings with the report, so the break is
+  // visible before anyone presses «Κλείσιμο».
+  const integrity = zReport?.integrity;
+  const integrityFindings = useMemo(
+    () => (Array.isArray(integrity?.findings) ? integrity.findings : []),
+    [integrity],
+  );
+  // Submit-time rejections and preview findings describe the same orders;
+  // merge on orderId + reasonCode so a rejected submit does not double-list.
+  const effectivePaymentBlockers = useMemo(() => {
+    const merged = new Map<string, UnsettledPaymentBlocker>();
+    for (const blocker of [...integrityFindings, ...paymentBlockers]) {
+      if (!blocker?.orderId) continue;
+      merged.set(`${blocker.orderId}:${blocker.reasonCode}`, blocker);
+    }
+    return [...merged.values()];
+  }, [integrityFindings, paymentBlockers]);
+  const blockingPaymentIssues = useMemo(
+    () => effectivePaymentBlockers.filter((blocker) => blocker.severity !== 'warning'),
+    [effectivePaymentBlockers],
+  );
+
   const closeoutDrawerVariance = summaryCashDrawer.totalVariance ?? 0;
   const closeoutUnreconciledDrawers = summaryCashDrawer.unreconciledCount ?? 0;
   const closeoutPendingExpenses = summaryExpenses.pendingCount ?? 0;
@@ -686,7 +712,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   const hasActiveStaffShifts = activeShiftCount > 0;
   const cashDrawerBlocksCloseout = !hasActiveStaffShifts && (closeoutUnreconciledDrawers > 0 || closeoutHasVariance);
   const closeoutIssueCount =
-    paymentBlockers.length +
+    blockingPaymentIssues.length +
     (hasActiveStaffShifts ? 1 : 0) +
     (cashDrawerBlocksCloseout ? closeoutUnreconciledDrawers : 0) +
     closeoutPendingExpenses +
@@ -701,13 +727,13 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     loading ||
     Boolean(error) ||
     hasActiveStaffShifts ||
-    paymentBlockers.length > 0;
+    blockingPaymentIssues.length > 0;
   const closeoutNeedsCashierCheckout =
     !loading &&
     !closeoutReady &&
     cashDrawerBlocksCloseout &&
     !closeoutHasVariance &&
-    paymentBlockers.length === 0 &&
+    blockingPaymentIssues.length === 0 &&
     closeoutPendingExpenses === 0 &&
     closeoutUnsettledDrivers === 0 &&
     !showMainTerminalWarning &&
@@ -716,7 +742,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     !loading &&
     !closeoutReady &&
     hasActiveStaffShifts &&
-    paymentBlockers.length === 0 &&
+    blockingPaymentIssues.length === 0 &&
     closeoutPendingExpenses === 0 &&
     closeoutUnsettledDrivers === 0 &&
     !showMainTerminalWarning &&
@@ -755,10 +781,10 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     {
       key: 'payments',
       label: t('modals.zReport.paymentsCaptured'),
-      description: paymentBlockers.length > 0
-        ? t('modals.zReport.paymentsNeedAction', { count: paymentBlockers.length })
+      description: blockingPaymentIssues.length > 0
+        ? t('modals.zReport.paymentsNeedAction', { count: blockingPaymentIssues.length })
         : t('modals.zReport.paymentsReady'),
-      state: paymentBlockers.length > 0 ? 'error' : 'ready',
+      state: blockingPaymentIssues.length > 0 ? 'error' : 'ready',
     },
     {
       key: 'cash-drawer',
@@ -1560,9 +1586,126 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                         </div>
                       ))}
 
-                      {paymentBlockers.length > 0 && (
+                      {/* Reconciliation: the order side of the day next to the
+                          payment side, and the money between them. The two are
+                          never added together -- platform turnover already
+                          lives inside both. Shown whenever they disagree or a
+                          closed day's orders were held back, so a EUR 531 gap
+                          can never again be invisible on a green checklist. */}
+                      {integrity && (integrity.blockingFindings > 0
+                        || Math.abs(integrity.unexplainedDifference ?? integrity.difference ?? 0) >= 0.01
+                        || (integrity.refundedOrders?.orders ?? 0) > 0
+                        || (integrity.carriedOverFromClosedDays?.orders ?? 0) > 0
+                        || (integrity.unclassifiedPlatforms?.length ?? 0) > 0) && (
+                        <section className={`rounded-2xl border p-4 ${integrity.reconciled
+                          ? dashboardInsetClass
+                          : 'border-rose-400/40 bg-rose-500/10'}`}>
+                          <div className={`mb-2 text-xs font-black uppercase tracking-[0.12em] ${softTextClass}`}>
+                            {t('modals.zReport.reconciliationTitle', { defaultValue: 'Reconciliation' })}
+                          </div>
+                          <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+                            <div className="min-w-0 rounded-xl border border-slate-900/[0.1] bg-white/55 p-2.5 dark:border-white/[0.1] dark:bg-white/[0.04]">
+                              <div className={`truncate text-[11px] font-bold ${softTextClass}`}>
+                                {t('modals.zReport.orderTurnover', { defaultValue: 'Order turnover' })}
+                              </div>
+                              <div className={`mt-1 truncate text-sm font-black ${strongTextClass}`}>
+                                {formatMoney(integrity.orderTurnover ?? 0)}
+                              </div>
+                            </div>
+                            <div className="min-w-0 rounded-xl border border-slate-900/[0.1] bg-white/55 p-2.5 dark:border-white/[0.1] dark:bg-white/[0.04]">
+                              <div className={`truncate text-[11px] font-bold ${softTextClass}`}>
+                                {t('modals.zReport.paymentCoverage', { defaultValue: 'Payment coverage' })}
+                              </div>
+                              <div className={`mt-1 truncate text-sm font-black ${strongTextClass}`}>
+                                {formatMoney(integrity.paymentCoverage ?? 0)}
+                              </div>
+                            </div>
+                            <div className="min-w-0 rounded-xl border border-slate-900/[0.1] bg-white/55 p-2.5 dark:border-white/[0.1] dark:bg-white/[0.04]">
+                              <div className={`truncate text-[11px] font-bold ${softTextClass}`}>
+                                {t('modals.zReport.reconciliationDifference', { defaultValue: 'Difference' })}
+                              </div>
+                              {/* Colour on what is UNEXPLAINED, not on raw
+                                  arithmetic: a normal refund leaves a real
+                                  difference and must not read as a gap. */}
+                              <div className={`mt-1 truncate text-sm font-black ${Math.abs(integrity.unexplainedDifference ?? integrity.difference ?? 0) >= 0.01
+                                ? 'text-rose-600 dark:text-rose-300'
+                                : 'text-emerald-600 dark:text-emerald-300'}`}>
+                                {formatMoney(integrity.difference ?? 0)}
+                              </div>
+                              {(integrity.refundedOrders?.orders ?? 0) > 0 && (
+                                <div className={`mt-0.5 truncate text-[11px] font-semibold ${mutedTextClass}`}>
+                                  {t('modals.zReport.reconciliationExplainedByRefunds', {
+                                    amount: formatMoney(integrity.explainedDifference ?? 0),
+                                    defaultValue: '{{amount}} explained by refunds',
+                                  })}
+                                </div>
+                              )}
+                            </div>
+                            <div className="min-w-0 rounded-xl border border-slate-900/[0.1] bg-white/55 p-2.5 dark:border-white/[0.1] dark:bg-white/[0.04]">
+                              <div className={`truncate text-[11px] font-bold ${softTextClass}`}>
+                                {t('modals.zReport.reconciliationOrdersAffected', { defaultValue: 'Orders affected' })}
+                              </div>
+                              <div className={`mt-1 truncate text-sm font-black ${strongTextClass}`}>
+                                {integrity.blockingFindings ?? 0}
+                              </div>
+                            </div>
+                          </div>
+                          {Array.isArray(integrity.findingsByReason) && integrity.findingsByReason.length > 0 && (
+                            <div className="mt-3 space-y-1">
+                              {integrity.findingsByReason.map((reason) => (
+                                <div key={reason.reasonCode} className={`flex items-center justify-between text-xs font-semibold ${mutedTextClass}`}>
+                                  <span className="truncate">
+                                    {t(`modals.zReport.reconciliationReason.${reason.reasonCode}`, {
+                                      defaultValue: reason.reasonCode.replace(/_/g, ' '),
+                                    })}
+                                  </span>
+                                  <span className="shrink-0 tabular-nums">
+                                    {reason.orders} · {formatMoney(reason.difference)}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                          {(integrity.carriedOverFromClosedDays?.orders ?? 0) > 0 && (
+                            <div className={`mt-3 text-xs font-semibold leading-5 ${mutedTextClass}`}>
+                              {t('modals.zReport.reconciliationCarriedOver', {
+                                count: integrity.carriedOverFromClosedDays?.orders ?? 0,
+                                amount: formatMoney(integrity.carriedOverFromClosedDays?.amount ?? 0),
+                                defaultValue:
+                                  '{{count}} order(s) worth {{amount}} belong to a day an earlier Z already closed and are excluded from these totals.',
+                              })}
+                            </div>
+                          )}
+                          {/* Sources we could not name. Their money IS in the
+                              totals above -- only the platform attribution is
+                              withheld, because `plugin` shares its namespace
+                              with payment/analytics/e-commerce integrations and
+                              guessing one into ΠΛΑΤΦΟΡΜΕΣ would be a
+                              fabrication. Named here so it can be classified. */}
+                          {(integrity.unclassifiedPlatforms?.length ?? 0) > 0 && (
+                            <div className={`mt-3 text-xs font-semibold leading-5 ${mutedTextClass}`}>
+                              <div>
+                                {t('modals.zReport.reconciliationUnclassifiedSources', {
+                                  defaultValue:
+                                    'Order sources not recognised as a platform. Their money is included in the totals above; only the platform attribution is withheld.',
+                                })}
+                              </div>
+                              {(integrity.unclassifiedPlatforms ?? []).map((entry) => (
+                                <div key={entry.source} className="mt-1 flex items-center justify-between">
+                                  <span className="truncate">{entry.source}</span>
+                                  <span className="shrink-0 tabular-nums">
+                                    ×{entry.orders} · {formatMoney(entry.amount)}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </section>
+                      )}
+
+                      {effectivePaymentBlockers.length > 0 && (
                         <UnsettledPaymentBlockersPanel
-                          blockers={paymentBlockers}
+                          blockers={effectivePaymentBlockers}
                           title={t('modals.zReport.paymentIntegrityTitle', {
                             defaultValue: 'Orders Blocking Z-Report Closeout',
                           })}

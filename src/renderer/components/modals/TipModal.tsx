@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Banknote, Bike, HandCoins, UserRound, WalletCards } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { formatCurrency } from '../../utils/format';
+import { roundMoney } from '@shared/utils/money';
 import {
   formatMoneyInputFromNumber,
   formatMoneyInputWithCents,
@@ -33,8 +34,7 @@ const TIP_RECIPIENT_ICON_CLASSES: Record<TipRecipientRole, string> = {
   cashier: 'tip-recipient-icon-cashier',
   driver: 'tip-recipient-icon-driver',
 };
-const roundMoney = (value: number) =>
-  Math.round((Number.isFinite(value) ? value : 0) * 100) / 100;
+// Module audit closure (2026-09-16): one rounding rule for the renderer.
 
 const defaultRecipientForOrder = (
   orderType?: 'pickup' | 'delivery' | 'dine-in',

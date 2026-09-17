@@ -40,10 +40,23 @@ export interface EfoodPartnerStatus {
   exists?: boolean;
   parked?: boolean;
   muted?: boolean;
+  /** The last mute request the webview did not accept. */
+  muteFailed?: boolean;
   url?: string | null;
 }
 
-const DEFAULT_SETTINGS: EfoodPartnerSettings = { enabled: true, muted: false };
+/**
+ * Silent by default.
+ *
+ * efood's page rings for a new order and the POS plugin's own modal rings
+ * straight after it, so the till alerts twice for one order. While efood ran in
+ * a browser, staff silenced its half in the browser's own site settings; inside
+ * the POS window those settings are out of reach, so the page starts silenced
+ * and the module's button turns it back on. A register that already chose is
+ * left alone: `readEfoodPartnerSettings` only falls back to this when nothing
+ * was stored.
+ */
+const DEFAULT_SETTINGS: EfoodPartnerSettings = { enabled: true, muted: true };
 
 function storage(): Storage | null {
   try {
@@ -93,16 +106,45 @@ export function isEfoodPartnerAvailable(args: {
   return args.pluginIntegrationsEnabled && args.efoodControllable && args.settings.enabled;
 }
 
-/** Whole logical pixels; null while the surface has no size (not laid out yet). */
-export function measureEfoodPartnerBounds(element: HTMLElement): EfoodPartnerBounds | null {
+/**
+ * Whole logical pixels, clipped to the visible viewport; null while the surface
+ * has no size (not laid out yet) or has been scrolled entirely out of view.
+ *
+ * The native webview is a sibling of the whole page, not a child of this
+ * container, so nothing in CSS can clip it: whatever rectangle we report is
+ * exactly where it is painted. An unclipped `getBoundingClientRect()` is
+ * therefore enough to push efood's page past the rounded container and over the
+ * chrome around it — which is what staff were seeing. Intersecting with the
+ * viewport here keeps it inside; `apply_bounds` on the Rust side clips it to the
+ * window again, because that side knows the real window and cannot be given a
+ * stale measurement.
+ */
+export function measureEfoodPartnerBounds(
+  element: HTMLElement,
+  viewport?: { width: number; height: number },
+): EfoodPartnerBounds | null {
   const rect = element.getBoundingClientRect();
-  const bounds = {
-    x: Math.round(rect.left),
-    y: Math.round(rect.top),
-    width: Math.round(rect.width),
-    height: Math.round(rect.height),
+  const limits = viewport ?? {
+    width: typeof window === 'undefined' ? 0 : window.innerWidth,
+    height: typeof window === 'undefined' ? 0 : window.innerHeight,
   };
-  if (bounds.width < 1 || bounds.height < 1 || bounds.x < 0 || bounds.y < 0) return null;
+  if (limits.width < 1 || limits.height < 1) return null;
+
+  // A real DOMRect always carries right/bottom; derive them when it does not,
+  // so a rect-like value can never turn the clip below into NaN.
+  const rectRight = Number.isFinite(rect.right) ? rect.right : rect.left + rect.width;
+  const rectBottom = Number.isFinite(rect.bottom) ? rect.bottom : rect.top + rect.height;
+  const left = Math.max(0, rect.left);
+  const top = Math.max(0, rect.top);
+  const right = Math.min(limits.width, rectRight);
+  const bottom = Math.min(limits.height, rectBottom);
+  const bounds = {
+    x: Math.round(left),
+    y: Math.round(top),
+    width: Math.round(right - left),
+    height: Math.round(bottom - top),
+  };
+  if (bounds.width < 1 || bounds.height < 1) return null;
   return bounds;
 }
 

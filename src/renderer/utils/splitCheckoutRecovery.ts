@@ -1,3 +1,5 @@
+import { roundMoney } from '@shared/utils/money';
+
 export type PersistedSplitDismissalKind = 'unpaid' | 'partial' | 'settled';
 
 export interface PersistedSplitDismissalResolution {
@@ -37,8 +39,7 @@ interface PersistedSplitDismissalInput {
   paymentsResult?: any;
 }
 
-const roundMoney = (value: number): number =>
-  Math.round((Number.isFinite(value) ? value : 0) * 100) / 100;
+// Module audit closure (2026-09-16): one rounding rule for the renderer.
 
 const readMoney = (...values: unknown[]): number | null => {
   for (const value of values) {

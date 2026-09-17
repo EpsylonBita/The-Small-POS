@@ -60,8 +60,16 @@ impl Cents {
     /// Convert a major-unit float to cents using half-away-from-zero
     /// rounding (the rule most POS receipt printers and consumer
     /// calculators use). Use this on user-facing display paths.
+    ///
+    /// The rounding decision is taken on the DECIMAL value, not on the
+    /// binary one: `(1.005 * 100.0).round()` is 100, because 1.005 is
+    /// 100.49999999999999 once multiplied in IEEE-754, while the decimal
+    /// answer — and the one the admin server, the Windows POS renderer and
+    /// the Android POS all produce — is 101. `shared/types/money-fixtures.json`
+    /// states the contract and `money_fixtures_match_every_platform` below
+    /// measures this function against it (module audit closure, 2026-09-16).
     pub fn round_half_up(major: f64) -> Self {
-        Self((major * 100.0).round() as i64)
+        Self(decimal_to_cents(major))
     }
 
     /// Convert back to a major-unit float at 2 decimal places.
@@ -167,6 +175,80 @@ impl serde::Serialize for Cents {
 impl<'de> serde::Deserialize<'de> for Cents {
     fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
         i64::deserialize(de).map(Self)
+    }
+}
+
+/// Integer cents of a major-unit amount, rounding half AWAY FROM ZERO on the
+/// decimal representation.
+///
+/// Rust's `Display` for `f64` prints the shortest string that round-trips —
+/// "1.005", never "1.00499999999999989" — which is the same value JavaScript's
+/// `String(value)` produces. Shifting the decimal point in that string and
+/// deciding on the third fractional digit therefore gives byte-for-byte the
+/// same cents as `toCents` in `shared/types/pricing.ts`.
+fn decimal_to_cents(major: f64) -> i64 {
+    if !major.is_finite() {
+        return 0;
+    }
+
+    let text = format!("{major}");
+    let (negative, digits) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text.as_str()),
+    };
+    let (int_part, frac_part) = match digits.split_once('.') {
+        Some((int_part, frac_part)) => (int_part, frac_part),
+        None => (digits, ""),
+    };
+
+    let int_value: i128 = int_part.parse().unwrap_or(0);
+    let digit_at = |index: usize| -> i128 {
+        frac_part
+            .as_bytes()
+            .get(index)
+            .map(|byte| i128::from(byte - b'0'))
+            .unwrap_or(0)
+    };
+
+    let mut cents = int_value * 100 + digit_at(0) * 10 + digit_at(1);
+    // Everything from the third fractional digit on is the remainder; it is at
+    // least half a cent exactly when that digit is 5 or more.
+    if digit_at(2) >= 5 {
+        cents += 1;
+    }
+
+    let cents = i64::try_from(cents).unwrap_or(i64::MAX);
+    if negative {
+        -cents
+    } else {
+        cents
+    }
+}
+
+/// Integer cents a discount of `value` takes off `subtotal`.
+///
+/// `percentage`: a share of the subtotal, the value clamped to 100, rounded
+/// half away from zero. Anything else: a fixed major-unit amount. Never more
+/// than the subtotal, never negative. Same rule as `discountCents` in
+/// `shared/types/pricing.ts` and the two POS renderers.
+pub fn discount_cents(discount_type: &str, value: f64, subtotal: Cents) -> Cents {
+    let subtotal_cents = subtotal.as_i64().max(0);
+    if subtotal_cents <= 0 {
+        return Cents::ZERO;
+    }
+
+    let amount = if value.is_finite() {
+        value.max(0.0)
+    } else {
+        0.0
+    };
+
+    if discount_type.eq_ignore_ascii_case("percentage") {
+        let percentage = amount.min(100.0);
+        let raw = (subtotal_cents as f64) * percentage / 100.0;
+        Cents::new(subtotal_cents.min(raw.round() as i64))
+    } else {
+        Cents::new(subtotal_cents.min(Cents::round_half_up(amount).as_i64()))
     }
 }
 
@@ -289,5 +371,147 @@ mod tests {
         assert!(Cents::new(100) > Cents::new(50));
         assert!(Cents::new(-10) < Cents::new(10));
         assert_eq!(Cents::new(42), Cents::new(42));
+    }
+
+    // ---------------------------------------------------------------------
+    // Cross-platform money contract (module audit closure, 2026-09-16)
+    // ---------------------------------------------------------------------
+
+    #[derive(serde::Deserialize)]
+    struct MoneyFixtures {
+        rule: String,
+        #[serde(rename = "toCents")]
+        to_cents: Vec<ToCentsCase>,
+        #[serde(rename = "couponDiscount")]
+        coupon_discount: Vec<CouponCase>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ToCentsCase {
+        amount: f64,
+        cents: i64,
+        why: String,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct CouponCase {
+        #[serde(rename = "subtotalCents")]
+        subtotal_cents: i64,
+        #[serde(rename = "type")]
+        kind: String,
+        value: f64,
+        #[serde(rename = "discountCents")]
+        discount_cents: i64,
+        why: String,
+    }
+
+    fn load_fixtures() -> MoneyFixtures {
+        // The one specification, shared with the admin server, the Windows POS renderer and
+        // the Android POS. Test-time read: the production build never touches the file.
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../shared/types/money-fixtures.json"
+        );
+        let raw = std::fs::read_to_string(path)
+            .unwrap_or_else(|error| panic!("money fixtures unreadable at {path}: {error}"));
+        serde_json::from_str(&raw).expect("money fixtures are valid JSON")
+    }
+
+    #[test]
+    fn money_fixtures_match_every_platform() {
+        let fixtures = load_fixtures();
+        assert_eq!(
+            fixtures.rule, "round half away from zero at two decimal places",
+            "the fixture file changed its rule; this core must follow it"
+        );
+        assert!(fixtures.to_cents.len() >= 20);
+
+        for case in &fixtures.to_cents {
+            assert_eq!(
+                Cents::round_half_up(case.amount).as_i64(),
+                case.cents,
+                "{} euros must be {} cents ({})",
+                case.amount,
+                case.cents,
+                case.why
+            );
+            // Round-tripping whole cents is lossless.
+            assert_eq!(
+                Cents::round_half_up(Cents::new(case.cents).to_f64_dp2()).as_i64(),
+                case.cents,
+                "{} cents did not survive a round trip",
+                case.cents
+            );
+        }
+    }
+
+    #[test]
+    fn coupon_fixtures_match_every_platform() {
+        let fixtures = load_fixtures();
+        assert!(fixtures.coupon_discount.len() >= 14);
+
+        for case in &fixtures.coupon_discount {
+            assert_eq!(
+                discount_cents(&case.kind, case.value, Cents::new(case.subtotal_cents)).as_i64(),
+                case.discount_cents,
+                "a {} cent subtotal with a {} discount of {} must give {} cents ({})",
+                case.subtotal_cents,
+                case.kind,
+                case.value,
+                case.discount_cents,
+                case.why
+            );
+        }
+    }
+
+    #[test]
+    fn decimal_rounding_beats_binary_multiplication() {
+        // The regression this closed: every one of these is wrong by a cent when the
+        // decision is taken on `(major * 100.0).round()`.
+        for (major, expected) in [
+            (1.005_f64, 101_i64),
+            (2.675, 268),
+            (10.125, 1013),
+            (9999.995, 1000000),
+        ] {
+            assert_eq!(Cents::round_half_up(major).as_i64(), expected);
+        }
+        assert_eq!(Cents::round_half_up(-1.005).as_i64(), -101);
+        assert_eq!(Cents::round_half_up(-0.004).as_i64(), 0);
+        assert_eq!(Cents::round_half_up(f64::NAN).as_i64(), 0);
+        assert_eq!(Cents::round_half_up(f64::INFINITY).as_i64(), 0);
+    }
+
+    #[test]
+    fn discount_cents_is_clamped_at_both_ends() {
+        assert_eq!(
+            discount_cents("percentage", 150.0, Cents::new(10000)).as_i64(),
+            10000
+        );
+        assert_eq!(
+            discount_cents("fixed", 80.0, Cents::new(5000)).as_i64(),
+            5000
+        );
+        assert_eq!(
+            discount_cents("percentage", -5.0, Cents::new(10000)).as_i64(),
+            0
+        );
+        assert_eq!(
+            discount_cents("fixed", f64::NAN, Cents::new(10000)).as_i64(),
+            0
+        );
+        assert_eq!(
+            discount_cents("percentage", 50.0, Cents::new(0)).as_i64(),
+            0
+        );
+        assert_eq!(
+            discount_cents("percentage", 50.0, Cents::new(-100)).as_i64(),
+            0
+        );
+        // The type match is case-insensitive, like the payload it reads.
+        assert_eq!(
+            discount_cents("PERCENTAGE", 10.0, Cents::new(1005)).as_i64(),
+            101
+        );
     }
 }

@@ -156,16 +156,17 @@ export const HousekeepingView: React.FC = memo(() => {
     const requestHousekeeping = async (pathSuffix: string) => {
       const path = `/api/pos/housekeeping${pathSuffix}`;
       const response = isBrowser()
-        ? await posApiGet<{ success: boolean; tasks?: HousekeepingTask[]; error?: string }>(path)
+        ? await posApiGet<{ success: boolean; tasks?: HousekeepingTask[]; staff?: StaffMember[]; error?: string }>(path)
         : (await bridge.adminApi.fetchFromAdmin(path, { method: 'GET' })) as {
             success: boolean;
-            data?: { success?: boolean; tasks?: HousekeepingTask[]; error?: string };
+            data?: { success?: boolean; tasks?: HousekeepingTask[]; staff?: StaffMember[]; error?: string };
             error?: string;
           };
       const ok = Boolean(response.success) && Boolean(response.data?.success);
       return {
         ok,
         tasks: ok ? response.data?.tasks || [] : [],
+        staff: ok && Array.isArray(response.data?.staff) ? response.data?.staff || [] : null,
         error: response.error || response.data?.error,
       };
     };
@@ -209,6 +210,11 @@ export const HousekeepingView: React.FC = memo(() => {
       statusOverridesRef.current.delete(id);
     }
     setTasks(mergedTasks);
+    // The housekeeping payload now carries the assignable branch staff (module audit
+    // 2026-09-16); the staff-schedule endpoint stays a fallback for older admin APIs.
+    if (result.staff && result.staff.length > 0) {
+      setStaff(result.staff.map((member) => ({ id: member.id, name: member.name })));
+    }
     if (!silent) {
       setIsLoading(false);
     }
@@ -486,7 +492,7 @@ export const HousekeepingView: React.FC = memo(() => {
               <div className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-700'}`}>
                 {t('housekeepingView.stats.totalTasks', { defaultValue: 'Total Tasks' })}
               </div>
-              <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{filteredTasks.length}</div>
+              <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{filteredTasks.filter((task) => task.status !== 'cancelled').length}</div>
             </motion.div>
             <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl border backdrop-blur-md ${isDark ? 'bg-zinc-900/60 border-white/10' : lightGlassSurface}`}>
               <div className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-700'}`}>

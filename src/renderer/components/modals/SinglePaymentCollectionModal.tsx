@@ -1,10 +1,15 @@
 import React, { useCallback, useMemo, useState } from 'react';
+import { roundMoney } from '@shared/utils/money';
 import { useTranslation } from 'react-i18next';
 import { AlertTriangle, Banknote, CreditCard, Loader2 } from 'lucide-react';
 import toast from 'react-hot-toast';
 
 import { getBridge } from '../../../lib';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
+import {
+  PlatformHeldPaymentNotice,
+  usePlatformHeldNoticeForOrderId,
+} from '../ui/PlatformHeldPaymentNotice';
 
 type PaymentOrigin = 'manual' | 'terminal';
 
@@ -31,7 +36,9 @@ interface SinglePaymentCollectionModalProps {
   totalAmount?: number;
 }
 
-const round2 = (value: number) => Math.round(value * 100) / 100;
+// Module audit closure (2026-09-16): one rounding rule for the renderer. The local copy
+// rounded on the binary product, so it sent 1.005 to 1.00.
+const round2 = (value: number) => roundMoney(value);
 
 const extractPaymentId = (result: any) =>
   typeof result?.paymentId === 'string'
@@ -219,15 +226,28 @@ export const SinglePaymentCollectionModal: React.FC<
     t,
   ]);
 
+  const platformHeldNotice = usePlatformHeldNoticeForOrderId(orderId, isOpen);
+
   return (
     <LiquidGlassModal
       isOpen={isOpen}
       onClose={onClose}
       title=""
       onEnterKey={handleCollect}
-      enterKeyEnabled={!isProcessing && amountToCollect > 0.009}
+      enterKeyEnabled={
+        !isProcessing && amountToCollect > 0.009 && platformHeldNotice === null
+      }
     >
       <div className="liquid-glass-modal-text space-y-5">
+        {/* Money the platform is holding: say so plainly instead of letting
+            the operator press Collect and meet the write path's refusal as a
+            generic error, with a customer waiting (founder request,
+            16/09/2026). Resolved from the order's own disposition, never from
+            `payment_status` — a failed settlement leaves that `pending`,
+            which reads exactly like money still owed. */}
+        {platformHeldNotice ? (
+          <PlatformHeldPaymentNotice notice={platformHeldNotice} showBlockedAction />
+        ) : (
         <div className="flex items-start gap-3 rounded-2xl border border-amber-400/20 bg-amber-500/10 p-4">
           <AlertTriangle className="mt-0.5 h-5 w-5 text-amber-300" />
           <div className="space-y-1">
@@ -249,6 +269,7 @@ export const SinglePaymentCollectionModal: React.FC<
             </p>
           </div>
         </div>
+        )}
 
         <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
           <div className="liquid-glass-modal-inset rounded-2xl p-4">
@@ -303,7 +324,9 @@ export const SinglePaymentCollectionModal: React.FC<
           <button
             type="button"
             onClick={handleCollect}
-            disabled={isProcessing || amountToCollect <= 0.009}
+            disabled={
+              isProcessing || amountToCollect <= 0.009 || platformHeldNotice !== null
+            }
             className="inline-flex flex-1 items-center justify-center gap-2 rounded-2xl border border-emerald-400/20 bg-emerald-500/15 px-4 py-3 text-sm font-semibold text-emerald-100 transition active:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-60"
           >
             {isProcessing ? (

@@ -101,6 +101,35 @@ fn branch_id(db: &db::DbState, payload: &Value) -> String {
         .unwrap_or_default()
 }
 
+/// Remember the server-origin `updated_at` of a cached row the first time it is
+/// changed offline, so the queued replay can carry it as `expected_updated_at`
+/// and the server can refuse to clobber a newer row (409 `STALE_WRITE`; module
+/// audit closure, 2026-09-16). Returns that stamp only on the first change: a
+/// row that already carries `server_updated_at` has a replay of this terminal's
+/// own earlier change ahead of it, and that replay must not make the next one
+/// look stale. The marker disappears when the cache is next rewritten from the
+/// server.
+pub(crate) fn capture_server_updated_at(object: &mut Map<String, Value>) -> Option<String> {
+    if object
+        .get("server_updated_at")
+        .and_then(Value::as_str)
+        .is_some()
+    {
+        return None;
+    }
+    let stamp = object
+        .get("updated_at")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)?;
+    object.insert(
+        "server_updated_at".to_string(),
+        Value::String(stamp.clone()),
+    );
+    Some(stamp)
+}
+
 fn set_object_field(object: &mut Map<String, Value>, key: &str, value: Value) {
     object.insert(key.to_string(), value);
 }
@@ -261,7 +290,7 @@ pub(crate) fn patch_menu_flag(
 fn patch_inventory_cache(
     db: &db::DbState,
     product_id: &str,
-    adjustment: i64,
+    adjustment: f64,
 ) -> Result<Option<Value>, String> {
     let mut updated: Option<Value> = None;
     patch_cached_admin_paths(db, "/api/pos/inventory", |_path, data| {
@@ -274,12 +303,14 @@ fn patch_inventory_cache(
         };
         let now = now_rfc3339();
         let result = update_array_record(items, product_id, |object| {
+            // Module audit 2026-09-16: quantities are numeric (2.5 kg); reading them as i64
+            // turned a fractional stock into 0 before applying the adjustment.
             let current = object
                 .get("stock_quantity")
                 .or_else(|| object.get("quantity"))
-                .and_then(Value::as_i64)
-                .unwrap_or(0);
-            let next_quantity = current.saturating_add(adjustment);
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+            let next_quantity = ((current + adjustment) * 1000.0).round() / 1000.0;
             set_object_field(object, "stock_quantity", Value::from(next_quantity));
             set_object_field(object, "quantity", Value::from(next_quantity));
             set_object_field(object, "updated_at", Value::String(now.clone()));
@@ -331,7 +362,7 @@ fn patch_coupon_active_state(
 struct InventoryAdjustPayload {
     #[serde(alias = "product_id", alias = "id")]
     product_id: String,
-    adjustment: i64,
+    adjustment: f64,
     #[serde(default)]
     reason: Option<String>,
     #[serde(default)]
@@ -354,11 +385,14 @@ pub async fn offline_inventory_adjust(
     }
 
     let _ = patch_inventory_cache(&db, &product_id, payload.adjustment)?;
+    // One idempotency key per queued adjustment (module audit 2026-09-16): a replay after a
+    // lost acknowledgement must not apply the delta twice.
     let queue_payload = json!({
         "product_id": product_id,
         "adjustment": payload.adjustment,
         "reason": payload.reason.unwrap_or_else(|| "count".to_string()),
         "notes": payload.notes,
+        "idempotency_key": format!("tauri-inventory-{}", Uuid::new_v4()),
         "organization_id": organization_id(&db, &payload_value),
         "branch_id": branch_id(&db, &payload_value),
     });
@@ -1615,18 +1649,34 @@ pub async fn offline_supplier_import_commit(
     Ok(response)
 }
 
+/// Patch one field of a cached housekeeping task. The second value is the
+/// `expected_updated_at` the queued replay should carry: the server stamp the
+/// row had before its first offline change, `None` once a replay is already
+/// pending for it (see [`capture_server_updated_at`]).
 fn patch_housekeeping_cache(
     db: &db::DbState,
     task_id: &str,
     field: &str,
     value: Value,
-) -> Result<Option<Value>, String> {
+) -> Result<(Option<Value>, Option<String>), String> {
     let mut updated: Option<Value> = None;
+    let mut captured: Option<String> = None;
+    let mut already_pending = false;
     patch_cached_admin_paths(db, "/api/pos/housekeeping", |_path, data| {
         let Some(items) = get_array_mut_path(data, &["tasks"]) else {
             return Ok(false);
         };
         let result = update_array_record(items, task_id, |object| {
+            let was_dirty = object
+                .get("server_updated_at")
+                .and_then(Value::as_str)
+                .is_some();
+            let stamp = capture_server_updated_at(object);
+            if was_dirty {
+                already_pending = true;
+            } else if captured.is_none() {
+                captured = stamp;
+            }
             set_object_field(object, field, value.clone());
             set_object_field(object, "updated_at", Value::String(now_rfc3339()));
         });
@@ -1636,7 +1686,8 @@ fn patch_housekeeping_cache(
         }
         Ok(false)
     })?;
-    Ok(updated)
+    let expected_updated_at = if already_pending { None } else { captured };
+    Ok((updated, expected_updated_at))
 }
 
 #[tauri::command]
@@ -1651,14 +1702,17 @@ pub async fn offline_housekeeping_update_status(
         .ok_or_else(|| "Missing housekeeping task id".to_string())?;
     let status = read_string(&payload, &["status"])
         .ok_or_else(|| "Missing housekeeping status".to_string())?;
-    let updated_task =
+    let (updated_task, expected_updated_at) =
         patch_housekeeping_cache(&db, &task_id, "status", Value::String(status.clone()))?;
-    let queue_payload = json!({
+    let mut queue_payload = json!({
         "task_id": task_id,
         "status": status,
         "organization_id": organization_id(&db, &payload),
         "branch_id": branch_id(&db, &payload),
     });
+    if let (Some(object), Some(stamp)) = (queue_payload.as_object_mut(), expected_updated_at) {
+        object.insert("expected_updated_at".to_string(), Value::String(stamp));
+    }
     let queue_id = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         enqueue_parity_item(
@@ -1701,14 +1755,17 @@ pub async fn offline_housekeeping_assign_staff(
         .or_else(|| payload.get("assignedStaffId"))
         .cloned()
         .unwrap_or(Value::Null);
-    let updated_task =
+    let (updated_task, expected_updated_at) =
         patch_housekeeping_cache(&db, &task_id, "assigned_staff_id", staff_id.clone())?;
-    let queue_payload = json!({
+    let mut queue_payload = json!({
         "id": task_id,
         "assigned_staff_id": staff_id,
         "organization_id": organization_id(&db, &payload),
         "branch_id": branch_id(&db, &payload),
     });
+    if let (Some(object), Some(stamp)) = (queue_payload.as_object_mut(), expected_updated_at) {
+        object.insert("expected_updated_at".to_string(), Value::String(stamp));
+    }
     let queue_id = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         enqueue_parity_item(
@@ -2597,5 +2654,161 @@ mod offline_supplier_import_commit_tests {
             })
             .expect("count queue rows");
         assert_eq!(queued, 0, "validation failures must not enqueue");
+    }
+}
+
+#[cfg(test)]
+mod inventory_cache_tests {
+    use super::*;
+    use crate::commands::api_bridge::cache_admin_get_response;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    fn test_db_state() -> db::DbState {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        db::run_migrations_for_test(&conn);
+        sync_queue::create_tables(&conn).expect("create parity queue tables");
+        db::DbState {
+            conn: Mutex::new(conn),
+            db_path: PathBuf::from(":memory:"),
+        }
+    }
+
+    /// Module audit 2026-09-16: fractional stock (2.5 kg) used to be read as 0 before the
+    /// delta was applied, so the offline cache showed `adjustment` instead of
+    /// `stock + adjustment`, and a fractional delta was rejected outright.
+    #[test]
+    fn patch_inventory_cache_keeps_fractional_quantities() {
+        let database = test_db_state();
+        let response = json!({
+            "success": true,
+            "inventory": [{
+                "id": "item-1",
+                "product_id": "item-1",
+                "stock_quantity": 2.5,
+                "quantity": 2.5,
+                "updated_at": "2026-01-01T00:00:00Z"
+            }]
+        });
+        cache_admin_get_response(&database, "/api/pos/inventory", &response)
+            .expect("seed inventory cache");
+
+        let updated = patch_inventory_cache(&database, "item-1", -0.75)
+            .expect("patch cache")
+            .expect("item found in cache");
+
+        assert_eq!(updated["stock_quantity"], json!(1.75));
+        assert_eq!(updated["quantity"], json!(1.75));
+    }
+
+    #[test]
+    fn inventory_adjust_payload_accepts_fractional_deltas() {
+        let payload: InventoryAdjustPayload =
+            serde_json::from_value(json!({ "product_id": "item-1", "adjustment": 0.5 }))
+                .expect("fractional adjustment deserializes");
+        assert_eq!(payload.adjustment, 0.5);
+    }
+}
+
+#[cfg(test)]
+mod stale_write_capture_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    fn row(updated_at: Option<&str>) -> Map<String, Value> {
+        let mut object = Map::new();
+        object.insert("id".into(), json!("task-1"));
+        object.insert("status".into(), json!("pending"));
+        if let Some(stamp) = updated_at {
+            object.insert("updated_at".into(), json!(stamp));
+        }
+        object
+    }
+
+    /// Real schema via the production migration chain + the parity queue DDL.
+    fn test_db_state() -> db::DbState {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        db::run_migrations_for_test(&conn);
+        sync_queue::create_tables(&conn).expect("create parity queue tables");
+        db::DbState {
+            conn: Mutex::new(conn),
+            db_path: PathBuf::from(":memory:"),
+        }
+    }
+
+    #[test]
+    fn first_offline_change_captures_the_server_stamp_and_marks_the_row() {
+        let mut object = row(Some("2026-09-16T10:00:00Z"));
+        assert_eq!(
+            capture_server_updated_at(&mut object).as_deref(),
+            Some("2026-09-16T10:00:00Z")
+        );
+        assert_eq!(
+            object.get("server_updated_at").and_then(Value::as_str),
+            Some("2026-09-16T10:00:00Z")
+        );
+    }
+
+    #[test]
+    fn a_second_offline_change_sends_no_expectation() {
+        let mut object = row(Some("2026-09-16T10:00:00Z"));
+        capture_server_updated_at(&mut object).expect("first capture");
+        object.insert("updated_at".into(), json!("2026-09-16T10:05:00Z"));
+        assert_eq!(capture_server_updated_at(&mut object), None);
+        assert_eq!(
+            object.get("server_updated_at").and_then(Value::as_str),
+            Some("2026-09-16T10:00:00Z")
+        );
+    }
+
+    #[test]
+    fn a_row_without_a_server_stamp_sends_no_expectation() {
+        let mut object = row(None);
+        assert_eq!(capture_server_updated_at(&mut object), None);
+        assert!(!object.contains_key("server_updated_at"));
+        let mut blank = row(Some("  "));
+        assert_eq!(capture_server_updated_at(&mut blank), None);
+    }
+
+    #[test]
+    fn housekeeping_cache_patch_returns_the_expectation_once() {
+        let db = test_db_state();
+        cache_admin_get_response(
+            &db,
+            "/api/pos/housekeeping",
+            &json!({
+                "success": true,
+                "tasks": [
+                    { "id": "task-1", "status": "pending", "updated_at": "2026-09-16T10:00:00Z" },
+                    { "id": "task-2", "status": "pending" }
+                ]
+            }),
+        )
+        .expect("seed housekeeping cache");
+
+        let (updated, expected) =
+            patch_housekeeping_cache(&db, "task-1", "status", json!("in_progress"))
+                .expect("first patch");
+        assert_eq!(expected.as_deref(), Some("2026-09-16T10:00:00Z"));
+        let updated = updated.expect("patched task");
+        assert_eq!(
+            updated.get("status").and_then(Value::as_str),
+            Some("in_progress")
+        );
+        assert_eq!(
+            updated.get("server_updated_at").and_then(Value::as_str),
+            Some("2026-09-16T10:00:00Z")
+        );
+
+        let (_, expected_again) =
+            patch_housekeeping_cache(&db, "task-1", "status", json!("completed"))
+                .expect("second patch");
+        assert_eq!(expected_again, None);
+
+        let (_, never_seen) =
+            patch_housekeeping_cache(&db, "task-2", "status", json!("in_progress"))
+                .expect("patch of a row without a server stamp");
+        assert_eq!(never_seen, None);
     }
 }

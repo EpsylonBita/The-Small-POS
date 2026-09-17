@@ -90,10 +90,28 @@ export function UnsettledPaymentBlockersPanel({
             Number(blocker.totalAmount || 0) - Number(blocker.settledAmount || 0),
             0,
           );
+          // Reason codes the operator must NOT "resolve here" by recording a
+          // cash/card payment.
+          //
+          // `platform_settlement_missing` looks like a plain outstanding
+          // balance — order total, nothing settled — but the money is sitting
+          // with efood/Wolt, not in the till. Offering the cash/card buttons
+          // would invite exactly the guess the 16/09/2026 reconciliation work
+          // exists to prevent: platform-held money booked as drawer cash,
+          // which then never reconciles at close. The same applies to a
+          // settlement recorded in the wrong tender — that one needs a void,
+          // not more money.
+          const NON_TENDER_REASON_CODES = [
+            "unsupported_payment_method",
+            "platform_settlement_missing",
+            "platform_settlement_mismatch",
+            "overpaid_order",
+            "duplicate_payment",
+          ];
           const canResolveHere =
             typeof onResolveBlocker === "function" &&
             outstanding > 0.009 &&
-            blocker.reasonCode !== "unsupported_payment_method";
+            !NON_TENDER_REASON_CODES.includes(blocker.reasonCode);
           const preferredMethod =
             blocker.reasonCode === "missing_cash_payment" ||
             blocker.reasonCode === "partial_cash_payment" ||

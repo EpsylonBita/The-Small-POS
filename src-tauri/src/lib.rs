@@ -59,6 +59,7 @@ mod order_ownership;
 mod panic_hook;
 mod payment_integrity;
 mod payments;
+mod platforms;
 mod print;
 mod print_dispatch;
 mod print_history;

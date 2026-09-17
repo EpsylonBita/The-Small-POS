@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { roundMoney } from '@shared/utils/money';
 import { AlertTriangle, RotateCcw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import toast from 'react-hot-toast';
@@ -24,7 +25,9 @@ interface RefundDraft {
   cashHandler: 'cashier_drawer' | 'driver_shift';
 }
 
-const round2 = (value: number) => Math.round(value * 100) / 100;
+// Module audit closure (2026-09-16): one rounding rule for the renderer. The local copy
+// rounded on the binary product, so it sent 1.005 to 1.00.
+const round2 = (value: number) => roundMoney(value);
 
 export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementModalProps> = ({
   isOpen,

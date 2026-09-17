@@ -565,6 +565,35 @@ pub(crate) fn cache_terminal_settings_snapshot(
         db::set_setting(&transaction, "terminal", "store_phone", &store_phone)?;
         updated.push("restaurant.phone".to_string());
     }
+
+    // The branch's ISO-3166 country, resolved server-side from the branch row
+    // (`shared/services/branch-phone-country.ts`). It is the terminal's only
+    // authoritative context for normalizing a national customer phone number
+    // such as "6912345678". The server omits the field when the branch has no
+    // country this platform recognises, and the absence is meaningful: the
+    // replay then refuses to guess instead of binding the customer to a
+    // country nobody chose. Only ever written from an explicit server value —
+    // a missing field leaves whatever was cached before untouched rather than
+    // clearing it, so a transient partial payload cannot strand a working
+    // terminal.
+    if let Some(phone_country) = nested_value_str(
+        resp,
+        &[
+            "/branch_info/phone_country_code",
+            "/settings/restaurant/phone_country_code",
+        ],
+    ) {
+        let normalized = phone_country.trim().to_ascii_uppercase();
+        if normalized.len() == 2 && normalized.chars().all(|ch| ch.is_ascii_alphabetic()) {
+            db::set_setting(
+                &transaction,
+                "restaurant",
+                "phone_country_code",
+                &normalized,
+            )?;
+            updated.push("restaurant.phone_country_code".to_string());
+        }
+    }
     if let Some(latitude) = nested_value_number_string(
         resp,
         &[

@@ -18,6 +18,15 @@ use crate::{
     resolve_order_id, shifts,
 };
 
+/// Prefix on the error a drawer-tender collection gets when the platform is
+/// holding the money (see the guard in [`record_payment_in_connection`]).
+///
+/// Callers and the renderer match on this to show the operator «the platform
+/// already has this money» instead of a generic payment failure. It is a
+/// refusal, not a transient error: retrying cannot make the money appear in
+/// this till.
+pub const PLATFORM_HELD_COLLECTION_ERROR: &str = "PLATFORM_HELD_NOT_COLLECTABLE";
+
 fn load_payment_items_for_payment(
     conn: &rusqlite::Connection,
     payment_id: &str,
@@ -1038,6 +1047,159 @@ pub(crate) fn recompute_order_payment_state(
     Ok(())
 }
 
+/// Outcome of [`enforce_paid_status_requires_ledger_coverage`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PaidStatusGuardOutcome {
+    /// The order never claimed to be paid, or the ledger already backs it.
+    AlreadyConsistent,
+    /// A platform settlement row was written, and the claim now holds. No
+    /// money was invented: the amount and tender come from the platform's own
+    /// disposition in `ghost_metadata.food_delivery`.
+    SettledFromPlatformDisposition,
+    /// The claim was not backed by anything and was downgraded to what the
+    /// ledger can actually prove.
+    Downgraded { from: String, to: String },
+}
+
+/// The founder's invariant, as one function (16/09/2026):
+///
+/// > «Αν ένα order θεωρείται οικονομικά `paid`, πρέπει να υπάρχει αντίστοιχη
+/// > canonical completed payment κάλυψη για το ποσό του.»
+///
+/// Every LOCAL write path that can persist `orders.payment_status` from
+/// caller-supplied input must end here before committing. The Z-report
+/// incident of 16/09/2026 (37 POS orders worth €385,93 and 13 efood orders
+/// worth €145,20 marked paid with no completed payment) happened because
+/// `sync::create_order` persisted whatever `paymentStatus` the payload
+/// carried whenever no `initialPayment` came with it — the order claimed the
+/// money, the ledger never saw it, and order-level turnover ran €531,13 ahead
+/// of payment-level turnover.
+///
+/// The guard NEVER invents a tender. It resolves the claim in exactly two
+/// ways:
+///
+///  1. the order is platform-settled — prepaid online, or COD the platform's
+///     own rider collected. That money is real, its amount is the order
+///     total, and its tender is fixed by the platform's disposition, so
+///     [`auto_settle_platform_order`] writes the canonical row. Nothing is
+///     guessed: a platform order OUR driver delivers is deliberately not
+///     eligible, because that cash genuinely belongs in the drawer and only
+///     the operator can say whether it arrived as cash or card;
+///  2. otherwise the claim is downgraded to whatever the ledger can prove
+///     (`pending`, or `partially_paid`). The operator is then asked to
+///     collect — which is the honest outcome, and is reversible, whereas a
+///     fabricated cash row is neither.
+///
+/// Remote-authoritative paths (a server snapshot that says a sibling terminal
+/// already collected) must NOT call this: there the money is real and merely
+/// un-mirrored, so the correct response is to pull the canonical rows. See
+/// `sync::flag_order_for_payment_mirror_repair`.
+pub(crate) fn enforce_paid_status_requires_ledger_coverage(
+    conn: &Connection,
+    order_id: &str,
+    now: &str,
+) -> Result<PaidStatusGuardOutcome, String> {
+    let claimed: String = conn
+        .query_row(
+            "SELECT LOWER(TRIM(COALESCE(payment_status, 'pending'))) FROM orders WHERE id = ?1",
+            params![order_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("load claimed payment status for {order_id}: {e}"))?;
+
+    if !matches!(claimed.as_str(), "paid" | "partially_paid") {
+        return Ok(PaidStatusGuardOutcome::AlreadyConsistent);
+    }
+
+    if ledger_backs_claimed_status(conn, order_id, &claimed)? {
+        return Ok(PaidStatusGuardOutcome::AlreadyConsistent);
+    }
+
+    // (1) Platform-held money: deterministic amount, deterministic tender.
+    //
+    // A settlement failure must never fail the ORDER. The order is real and
+    // the customer is waiting; the worst case is that the claim falls through
+    // to the downgrade below, the operator sees an uncollected order, and the
+    // Z-report integrity gate names it. Propagating the error here would roll
+    // back the whole create.
+    match auto_settle_platform_order(conn, order_id) {
+        Ok(true) if ledger_backs_claimed_status(conn, order_id, &claimed)? => {
+            tracing::info!(
+                order_id = %order_id,
+                claimed_status = %claimed,
+                "Paid-status guard settled a platform order from its own disposition"
+            );
+            return Ok(PaidStatusGuardOutcome::SettledFromPlatformDisposition);
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(
+                order_id = %order_id,
+                error = %error,
+                "Platform settlement failed inside the paid-status guard; falling back to the ledger's own answer"
+            );
+        }
+    }
+
+    // (2) Nothing backs the claim. Downgrade to what the ledger proves.
+    let snapshot = load_order_payment_balance_snapshot(conn, order_id)?;
+    let net_paid_cents = Cents::round_half_even(snapshot.net_paid).as_i64();
+    let order_total_cents = Cents::round_half_even(snapshot.order_total).as_i64();
+    let derived = if net_paid_cents <= 0 {
+        "pending"
+    } else if net_paid_cents >= order_total_cents {
+        "paid"
+    } else {
+        "partially_paid"
+    };
+
+    if derived == claimed {
+        return Ok(PaidStatusGuardOutcome::AlreadyConsistent);
+    }
+
+    conn.execute(
+        "UPDATE orders SET payment_status = ?1, updated_at = ?2 WHERE id = ?3",
+        params![derived, now, order_id],
+    )
+    .map_err(|e| format!("downgrade unbacked payment status for {order_id}: {e}"))?;
+
+    tracing::warn!(
+        order_id = %order_id,
+        claimed_status = %claimed,
+        persisted_status = %derived,
+        order_total_cents,
+        net_paid_cents,
+        "Paid-status guard refused an order that claimed payment with no ledger coverage"
+    );
+
+    Ok(PaidStatusGuardOutcome::Downgraded {
+        from: claimed,
+        to: derived.to_string(),
+    })
+}
+
+/// Does the completed ledger back this exact claim? `paid` needs the whole
+/// total, `partially_paid` needs some money to exist at all.
+fn ledger_backs_claimed_status(
+    conn: &Connection,
+    order_id: &str,
+    claimed: &str,
+) -> Result<bool, String> {
+    let snapshot = load_order_payment_balance_snapshot(conn, order_id)?;
+    let net_paid_cents = Cents::round_half_even(snapshot.net_paid).as_i64();
+    let order_total_cents = Cents::round_half_even(snapshot.order_total).as_i64();
+    // A zero-total order (comp, fully discounted) is coherent as paid with an
+    // empty ledger — there is no money to record.
+    if order_total_cents <= 0 {
+        return Ok(true);
+    }
+    Ok(match claimed {
+        "paid" => net_paid_cents >= order_total_cents,
+        "partially_paid" => net_paid_cents > 0,
+        _ => true,
+    })
+}
+
 fn resolve_tip_recipient(
     conn: &Connection,
     input: &PaymentRecordInput,
@@ -1244,6 +1406,34 @@ pub(crate) fn record_payment_in_connection(
             "Cannot record payment for ghost order: {}",
             input.order_id
         ));
+    }
+
+    // Store collectability is decided by the platform's own disposition, NOT
+    // by `orders.payment_status` (founder review, 16/09/2026).
+    //
+    // Before this, the only thing standing between the operator and a second
+    // collection was the order reading `paid` — so a failed settlement, which
+    // honestly downgrades the status, also re-opened the Collect button on
+    // money efood/Wolt is already holding. That cash is unrecoverable at the
+    // counter and invisible at the Z, because the second collection
+    // reconciles perfectly.
+    //
+    // `method = 'other'` is how settlement itself is recorded
+    // (`auto_settle_platform_order`), so only DRAWER tenders are refused:
+    // prepaid money and platform-rider COD never enter this till, whatever
+    // the order row says. A platform order OUR driver carries resolves to
+    // `None` here and collects normally.
+    if matches!(
+        input.method.trim().to_ascii_lowercase().as_str(),
+        "cash" | "card"
+    ) {
+        if let Some(kind) = platform_settlement_kind(conn, &input.order_id) {
+            return Err(format!(
+                "{PLATFORM_HELD_COLLECTION_ERROR}: order {} is settled by the platform ({}). The money is not in this till — it arrives by bank settlement.",
+                input.order_id,
+                kind.slug()
+            ));
+        }
     }
 
     let sync_state = options.sync_state.clone().unwrap_or_else(|| {
@@ -1664,6 +1854,14 @@ pub(crate) enum PlatformSettlementKind {
 }
 
 impl PlatformSettlementKind {
+    /// Short name for operator-facing messages.
+    pub(crate) fn slug(self) -> &'static str {
+        match self {
+            PlatformSettlementKind::PrepaidOnline => "prepaid online",
+            PlatformSettlementKind::PlatformCollectedCod => "platform-rider COD",
+        }
+    }
+
     /// Order-specific reference: sync forwards transaction_ref as the server's
     /// org-wide `external_transaction_id`, so a constant here would 409 every
     /// settlement after the first. The Z-report classifier matches on the
@@ -7193,6 +7391,110 @@ mod tests {
         assert_eq!(completed[0]["amount"], 12.00);
         assert_eq!(completed[0]["refundedAmount"], 2.00);
         assert_eq!(completed[0]["remainingRefundable"], 10.00);
+    }
+
+    /// Minimal `PaymentRecordInput` for a collection test.
+    fn collection_input(order_id: &str, method: &str) -> PaymentRecordInput {
+        PaymentRecordInput {
+            order_id: order_id.to_string(),
+            method: method.to_string(),
+            amount: 12.0,
+            currency: "EUR".to_string(),
+            tip_amount: 0.0,
+            cash_received: None,
+            change_given: None,
+            transaction_ref: None,
+            idempotency_key: None,
+            discount_amount: 0.0,
+            payment_origin: "manual".to_string(),
+            terminal_device_id: None,
+            table_session_id: None,
+            seat_number: None,
+            requested_staff_id: None,
+            requested_staff_shift_id: None,
+            requested_tip_recipient_role: None,
+            requested_tip_recipient_staff_id: None,
+            requested_tip_recipient_staff_shift_id: None,
+            collected_by: None,
+            items: Vec::new(),
+        }
+    }
+
+    /// Founder review, 16/09/2026, test 5: «σε όλες τις failure περιπτώσεις
+    /// Cash/Card collection να είναι αδύνατη».
+    ///
+    /// Collectability must come from the platform's disposition, not from
+    /// `orders.payment_status`. These orders are deliberately left `pending`
+    /// with NO settlement row — exactly the state a failed settlement leaves
+    /// behind — and the till must still refuse to take the money.
+    #[test]
+    fn platform_held_money_cannot_be_collected_as_cash_or_card() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        let insert = |id: &str, metadata: &str| {
+            conn.execute(
+                "INSERT INTO orders (id, items, total_amount, total_amount_cents, status,
+                    payment_status, sync_status, plugin, external_plugin_order_id,
+                    ghost_metadata, created_at, updated_at)
+                 VALUES (?1, '[]', 12.0, 1200, 'in_transit', 'pending', 'pending', 'efood',
+                         'ext-1', ?2, datetime('now'), datetime('now'))",
+                params![id, metadata],
+            )
+            .unwrap();
+        };
+
+        insert(
+            "ord-prepaid-fail",
+            r#"{"food_delivery":{"payment_method":"online","prepaid":true}}"#,
+        );
+        insert(
+            "ord-platcod-fail",
+            r#"{"food_delivery":{"payment_method":"cash","prepaid":false,"delivery_provider":"platform_delivery"}}"#,
+        );
+        // Control: a platform order OUR driver carries. That cash really is
+        // ours, so collection must still work.
+        insert(
+            "ord-ourdriver",
+            r#"{"food_delivery":{"payment_method":"cash","prepaid":false,"delivery_provider":"vendor_delivery"}}"#,
+        );
+
+        for order_id in ["ord-prepaid-fail", "ord-platcod-fail"] {
+            for method in ["cash", "card", "CASH", " Card "] {
+                let input = collection_input(order_id, method);
+                let error =
+                    record_payment_in_connection(&conn, &input, &PaymentInsertOptions::local())
+                        .expect_err("platform-held money must never be collectible at the till");
+                assert!(
+                    error.contains(PLATFORM_HELD_COLLECTION_ERROR),
+                    "{order_id}/{method}: expected a platform-held refusal, got: {error}"
+                );
+            }
+            // And nothing was written.
+            let rows: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM order_payments WHERE order_id = ?1",
+                    params![order_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                rows, 0,
+                "{order_id}: a refused collection must write nothing"
+            );
+        }
+
+        // The settlement itself is `other`, and must NOT be refused — that is
+        // the one write that legitimately records this money.
+        assert!(
+            auto_settle_platform_order(&conn, "ord-prepaid-fail").unwrap(),
+            "the guard must not block platform settlement itself"
+        );
+
+        // Our own driver's cash still collects normally.
+        let input = collection_input("ord-ourdriver", "cash");
+        record_payment_in_connection(&conn, &input, &PaymentInsertOptions::local())
+            .expect("a platform order our own driver carries is collected by us");
     }
 
     #[test]

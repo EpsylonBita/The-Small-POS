@@ -25,14 +25,16 @@
     "pagination": { "label": "Pagine riparazioni", "previous": "Precedente", "next": "Successiva", "summary": "{{start}}–{{end}} di {{total}}" },
     "timeline": { "created": "Riparazione creata", "status_changed": "Stato modificato", "note_added": "Nota aggiunta", "assignment_changed": "Assegnazione modificata", "diagnosis_updated": "Diagnosi aggiornata", "line_changed": "Riga riparazione modificata", "part_consumed": "Ricambio consumato", "part_reversed": "Consumo ricambio annullato", "estimate_created": "Preventivo creato", "approval_recorded": "Approvazione registrata", "attachment_added": "Allegato aggiunto", "attachment_retention_changed": "Conservazione allegato modificata", "settlement_linked": "Regolamento collegato", "branch_transferred": "Trasferimento di filiale", "reopened": "Riparazione riaperta", "unknown": "Attività di riparazione" },
     "fields": { "customer": "Cliente", "device": "Dispositivo", "assignedTo": "Assegnata a", "assigned": "Assegnata", "dueAt": "Data di scadenza", "intakeNotes": "Note di accettazione", "diagnosis": "Diagnosi", "anonymous": "Cliente anonimo", "unassigned": "Non assegnata", "notRecorded": "Non registrato" },
-    "actions": { "create": "Crea riparazione", "operations": "Azioni riparazione", "changeStatus": "Cambia stato", "transitionReason": "Motivo verificabile", "remainConsumed": "Mantieni consumati i ricambi utilizzati", "addNote": "Aggiungi nota", "assign": "Assegna", "assignToMe": "Assegna a me", "unassign": "Rimuovi assegnazione", "updateDiagnosis": "Salva bozza diagnosi", "finalizeDiagnosis": "Salva diagnosi finale", "planLine": "Aggiungi riga pianificata", "consumePart": "Consuma ricambio", "reversePart": "Annulla consumo", "reversalReason": "Motivo dell’annullamento", "lineType": "Tipo riga", "part": "Ricambio", "labour": "Manodopera", "charge": "Addebito", "lineName": "Nome riga", "sku": "SKU", "quantity": "Quantità", "unitPrice": "Prezzo unitario", "vatRate": "Aliquota IVA", "discount": "Sconto", "validUntil": "Valido fino al", "estimateNote": "Nota preventivo", "createEstimate": "Crea preventivo", "recordApproval": "Registra approvazione di persona", "stagePhoto": "Aggiungi foto", "openAttachment": "Apri allegato", "acceptServer": "Usa versione server", "rebase": "Riapplica le mie modifiche", "close": "Chiudi" },
+    "actions": {"create": "Crea riparazione", "operations": "Azioni riparazione", "changeStatus": "Cambia stato", "transitionReason": "Motivo verificabile", "remainConsumed": "Mantieni consumati i ricambi utilizzati", "addNote": "Aggiungi nota", "assign": "Assegna", "assignToMe": "Assegna a me", "unassign": "Rimuovi assegnazione", "updateDiagnosis": "Salva bozza diagnosi", "finalizeDiagnosis": "Salva diagnosi finale", "planLine": "Aggiungi riga pianificata", "consumePart": "Consuma ricambio", "reversePart": "Annulla consumo", "reversalReason": "Motivo dell’annullamento", "lineType": "Tipo riga", "part": "Ricambio", "labour": "Manodopera", "charge": "Addebito", "lineName": "Nome riga", "sku": "SKU", "quantity": "Quantità", "unitPrice": "Prezzo unitario", "vatRate": "Aliquota IVA", "discount": "Sconto", "validUntil": "Valido fino al", "estimateNote": "Nota preventivo", "createEstimate": "Crea preventivo", "recordApproval": "Registra approvazione di persona", "stagePhoto": "Aggiungi foto", "openAttachment": "Apri allegato", "acceptServer": "Usa versione server", "rebase": "Riapplica le mie modifiche", "close": "Chiudi", "catalogSearch": "Ricerca a catalogo", "printIntake": "Stampa accettazione", "printLabel": "Stampa etichetta", "searchCatalog": "Cerca nel catalogo"},
     "panels": { "partsEmpty": "Nessun ricambio, manodopera o addebito pianificato.", "estimateEmpty": "Nessun preventivo ancora emesso.", "timelineEmpty": "Nessun evento in cronologia.", "photosEmpty": "Nessun metadato allegato disponibile.", "conflictsTitle": "Conflitti di sincronizzazione", "conflictsEmpty": "Nessun conflitto di riparazione da verificare." },
-    "messages": { "readyQueued": "Lo stato «Pronta» è in coda per la sincronizzazione.", "noNotificationSent": "Non è ancora stata inviata alcuna notifica al cliente.", "offline": "Le modifiche offline restano in coda finché il terminale non si riconnette.", "onlineActionRequired": "Questa azione richiede una verifica online del server.", "activeShiftRequired": "Avvia un turno del personale per caricare dati e azioni delle riparazioni.", "selectorOnline": "La ricerca di clienti e dispositivi richiede una connessione nativa online. Un cliente e dispositivo canonici già selezionati possono comunque essere inviati offline.", "createUnavailable": "La creazione di riparazioni richiede un turno attivo e il permesso di creazione.", "conflictResolutionUnavailable": "La risoluzione dei conflitti richiede un turno attivo, una connessione nativa online e il permesso di aggiornamento.", "submitInProgress": "La riparazione è in fase di salvataggio. La chiusura è temporaneamente disabilitata.", "finalDiagnosisOnline": "La diagnosi finale richiede una verifica online; le bozze possono essere accodate offline.", "estimateOnline": "Preventivi e approvazioni richiedono una verifica online del server.", "estimateNeedsLines": "Aggiungi almeno una riga pianificata prima di creare un preventivo.", "photoOneShot": "La foto selezionata viene letta una volta e passata allo staging nativo cifrato; il renderer non la conserva.", "photoUnavailable": "Lo staging foto richiede impostazioni caricate, permesso riparazioni, stato di connessione noto e turno attivo.", "attachmentTypeInvalid": "Questo tipo di file non è consentito dalle impostazioni di riparazione.", "attachmentTooLarge": "La foto supera il limite degli allegati di riparazione.", "attachmentInvalid": "Seleziona una foto non vuota consentita dalle impostazioni.", "attachmentStageFailed": "Impossibile preparare la foto.", "attachmentOpenFailed": "Impossibile aprire l’allegato in modo sicuro.", "loadFailed": "Impossibile caricare le riparazioni.", "commandFailed": "Impossibile salvare la modifica.", "assignmentUnavailable": "L’auto-assegnazione richiede un’identità staff canonica e il permesso di assegnare riparazioni.", "settingsUnavailable": "L’accettazione riparazione resta disattivata finché non sono disponibili impostazioni autorevoli o memorizzate.", "invalidIntake": "Controlla i dati di accettazione e riprova.", "customerSearchFailed": "Impossibile completare la ricerca clienti.", "deviceLoadFailed": "Impossibile caricare i dispositivi del cliente.", "deviceCreateFailed": "Impossibile salvare il dispositivo.", "secureIdUnavailable": "Gli identificatori sicuri non sono disponibili. Riavvia l’applicazione prima di creare una riparazione." },
+    "messages": {"readyQueued": "Lo stato «Pronta» è in coda per la sincronizzazione.", "noNotificationSent": "Non è ancora stata inviata alcuna notifica al cliente.", "offline": "Le modifiche offline restano in coda finché il terminale non si riconnette.", "onlineActionRequired": "Questa azione richiede una verifica online del server.", "activeShiftRequired": "Avvia un turno del personale per caricare dati e azioni delle riparazioni.", "selectorOnline": "La ricerca di clienti e dispositivi richiede una connessione nativa online. Un cliente e dispositivo canonici già selezionati possono comunque essere inviati offline.", "createUnavailable": "La creazione di riparazioni richiede un turno attivo e il permesso di creazione.", "conflictResolutionUnavailable": "La risoluzione dei conflitti richiede un turno attivo, una connessione nativa online e il permesso di aggiornamento.", "submitInProgress": "La riparazione è in fase di salvataggio. La chiusura è temporaneamente disabilitata.", "finalDiagnosisOnline": "La diagnosi finale richiede una verifica online; le bozze possono essere accodate offline.", "estimateOnline": "Preventivi e approvazioni richiedono una verifica online del server.", "estimateNeedsLines": "Aggiungi almeno una riga pianificata prima di creare un preventivo.", "photoOneShot": "La foto selezionata viene letta una volta e passata allo staging nativo cifrato; il renderer non la conserva.", "photoUnavailable": "Lo staging foto richiede impostazioni caricate, permesso riparazioni, stato di connessione noto e turno attivo.", "attachmentTypeInvalid": "Questo tipo di file non è consentito dalle impostazioni di riparazione.", "attachmentTooLarge": "La foto supera il limite degli allegati di riparazione.", "attachmentInvalid": "Seleziona una foto non vuota consentita dalle impostazioni.", "attachmentStageFailed": "Impossibile preparare la foto.", "attachmentOpenFailed": "Impossibile aprire l’allegato in modo sicuro.", "loadFailed": "Impossibile caricare le riparazioni.", "commandFailed": "Impossibile salvare la modifica.", "assignmentUnavailable": "L’auto-assegnazione richiede un’identità staff canonica e il permesso di assegnare riparazioni.", "settingsUnavailable": "L’accettazione riparazione resta disattivata finché non sono disponibili impostazioni autorevoli o memorizzate.", "invalidIntake": "Controlla i dati di accettazione e riprova.", "customerSearchFailed": "Impossibile completare la ricerca clienti.", "deviceLoadFailed": "Impossibile caricare i dispositivi del cliente.", "deviceCreateFailed": "Impossibile salvare il dispositivo.", "secureIdUnavailable": "Gli identificatori sicuri non sono disponibili. Riavvia l’applicazione prima di creare una riparazione.", "catalogNoMatch": "Nessuna corrispondenza sicura trovata nel catalogo.", "catalogUnavailable": "La ricerca nel catalogo non è disponibile.", "printFailed": "Il documento di riparazione non è stato messo in coda in modo sicuro."},
     "locked": { "communication": "Customer Messaging non è attivo in questa build beta privata.", "money": "Pagamenti, rimborsi, fiscalizzazione e consegna restano bloccati finché non è disponibile il trasporto finanziario nativo tipizzato.", "approvalTransition": "Lo stato Approvata si raggiunge solo tramite l’azione di approvazione verificata in Preventivo e approvazione.", "assignment": "Le modifiche di assegnazione restano bloccate finché non è disponibile una proiezione del personale sicura e limitata allo scope.", "stockReversal": "L’annullamento del movimento di magazzino resta bloccato perché lo spazio nativo non espone il riferimento al movimento originale.", "catalog": "La ricerca di prodotti e servizi resta bloccata finché non è disponibile una proiezione nativa sicura in sola lettura.", "attachmentOpen": "L’apertura degli allegati esistenti resta bloccata finché non è disponibile il recupero nativo firmato.", "printing": "La stampa delle riparazioni resta bloccata finché non è disponibile la coda di stampa nativa tipizzata." },
-    "money": { "readiness": { "loading": "Verifica della prontezza fiscale…", "retry": "Riprova", "nonFiscalInfo": "myDATA è opzionale. I pagamenti di riparazione possono essere registrati senza il plugin.", "setupRequired": "La configurazione fiscale di questa filiale è incompleta.", "countryRequired": "È richiesto un paese della filiale prima di questa azione.", "providerRequired": "È richiesto un fornitore fiscale per le azioni fiscali.", "certificationRequired": "È richiesta la certificazione fiscale per le azioni fiscali.", "transportUnavailable": "L'invio di documenti fiscali non è disponibile per questa integrazione.", "statusUnavailable": "Non è stato possibile determinare la prontezza fiscale." } },
+    "money": {"readiness": {"loading": "Verifica della prontezza fiscale…", "retry": "Riprova", "nonFiscalInfo": "myDATA è opzionale. I pagamenti di riparazione possono essere registrati senza il plugin.", "setupRequired": "La configurazione fiscale di questa filiale è incompleta.", "countryRequired": "È richiesto un paese della filiale prima di questa azione.", "providerRequired": "È richiesto un fornitore fiscale per le azioni fiscali.", "certificationRequired": "È richiesta la certificazione fiscale per le azioni fiscali.", "transportUnavailable": "L'invio di documenti fiscali non è disponibile per questa integrazione.", "statusUnavailable": "Non è stato possibile determinare la prontezza fiscale."}, "title": "Pagamenti riparazione", "onlineRequired": "I pagamenti richiedono una connessione online.", "activeShiftRequired": "Apri un turno per eseguire operazioni di pagamento della riparazione.", "loading": "Caricamento del saldo…", "total": "Totale", "paid": "Pagato", "balance": "Residuo", "createSettlement": "Crea saldo", "fiscalize": "Emetti documento fiscale", "collect": "Incassa pagamento", "refund": "Rimborsa pagamento", "refundPayment": "Pagamento da rimborsare", "deliver": "Consegna riparazione", "delivery": "Consegna", "deliveryReason": "Motivo della deroga alla consegna", "paymentAmount": "Importo pagamento", "paymentMethod": "Metodo di pagamento", "refundAmount": "Importo rimborso", "refundMethod": "Metodo di rimborso", "refundReason": "Motivo del rimborso", "providerReference": "Riferimento del fornitore", "depositUnsupported": "Gli acconti parziali per le riparazioni non sono supportati da questo profilo fiscale."},
     "a11y": { "resultsUpdated": "{{count}} risultati di riparazione disponibili.", "currentRepair": "Riparazione corrente: {{number}}", "tabHint": "Usa le frecce sinistra e destra per cambiare scheda.", "statusLabel": "Stato riparazione: {{status}}" }
   },
   "common": {
+    "requiresOnline": "Questa azione richiede una connessione online.",
+    "savedLocallyQueued": "Salvato localmente e messo in coda",
     "all": "Tutti",
     "floorPresets": {
       "basementValue": "Seminterrato",
@@ -192,7 +194,13 @@
     },
     "close": "Chiudi",
     "retry": "Riprova",
-    "refresh": "Aggiorna"
+    "refresh": "Aggiorna",
+    "live": "In diretta",
+    "saveChanges": "Salva modifiche",
+    "apply": "Applica",
+    "more": "altri",
+    "creating": "Creazione...",
+    "saving": "Salvataggio..."
   },
   "dashboard": {
     "tabs": {
@@ -693,7 +701,11 @@
       "lineDiscountCleared": "Sconti degli articoli selezionati cancellati",
       "lineDiscountBadge": "Sconto riga",
       "lineDiscountTitle": "Sconto articoli selezionati",
-      "lineDiscountSelectionSummary": "{{count}} articoli - {{amount}}"
+      "lineDiscountSelectionSummary": "{{count}} articoli - {{amount}}",
+      "ghostModeBanner": "Ordine fantasma attivato. Questo carrello verrà solo stampato, resterà nascosto nel POS e sarà salvato come ordine di riferimento fantasma.",
+      "ghostModeHint": "Inserisci nome X e prezzo 1 per attivare la modalità fantasma solo per il carrello corrente.",
+      "manualDeliveryFeePlaceholder": "0,00",
+      "unitPrice": "Prezzo unitario"
     },
     "emptyState": {
       "title": "Nessun articolo nel menu",
@@ -738,7 +750,9 @@
       "from": "Da ",
       "readyIn": "Pronto in {{time}} min",
       "pickup": "Asporto",
-      "delivery": "Consegna"
+      "delivery": "Consegna",
+      "noDescription": "Nessuna descrizione disponibile",
+      "quantity": "Quantità"
     },
     "modifiers": {
       "title": "Modificatori",
@@ -815,7 +829,8 @@
       "updateItem": "Aggiorna articolo",
       "searchIngredients": "Cerca ingredienti...",
       "addNotes": "Aggiungi note",
-      "editNotes": "Modifica note"
+      "editNotes": "Modifica note",
+      "ingredients": "Ingredienti"
     },
     "ingredients": {
       "otherCategory": "Altro"
@@ -870,7 +885,8 @@
       "placeOrder": "Effettua ordine",
       "placingOrder": "Invio ordine...",
       "customerInfoRequired": "Fornisci le informazioni del cliente per effettuare l'ordine"
-    }
+    },
+    "customizable": "Personalizzabile"
   },
   "users": {
     "title": "Gestione utenti",
@@ -1232,6 +1248,13 @@
     }
   },
   "payment": {
+    "platformHeld": {
+      "title": "Pagamento già incassato dalla piattaforma",
+      "body": "Il pagamento è stato incassato dalla piattaforma. Non incassare contanti o carta dal cliente.",
+      "unsyncedTitle": "Pagamento della piattaforma non ancora riconciliato",
+      "unsyncedBody": "La piattaforma ha incassato il pagamento, ma la registrazione dell'incasso non è ancora stata sincronizzata. Non incassare di nuovo dal cliente. La giornata non potrà essere chiusa finché la riconciliazione non sarà completata.",
+      "blockedAction": "L'incasso è disabilitato per questo ordine."
+    },
     "title": "Pagamento",
     "subtitle": "Elabora pagamento",
     "paymentMethod": "Metodo di pagamento",
@@ -1744,6 +1767,16 @@
     }
   },
   "settings": {
+    "platforms": {
+      "efoodPartner": {
+        "reload": "Ricarica",
+        "home": "Ordini in tempo reale",
+        "soundOn": "Audio efood attivo",
+        "soundOff": "Audio efood disattivato",
+        "soundFailed": "La pagina efood non ha accettato la modifica dell'audio. Ricarica la pagina e riprova.",
+        "unavailable": "Non è stato possibile mostrare la pagina efood su questa cassa. Ricarica o riavvia il POS."
+      }
+    },
     "settingsHub": {
       "subtitle": "Configura e gestisci questa cassa",
       "status": {
@@ -3672,7 +3705,8 @@
       "customerInfo": "Info cliente (facoltativo)",
       "customerName": "Nome",
       "customerPhone": "Telefono",
-      "customerNotes": "Note"
+      "customerNotes": "Note",
+      "loadItemsFailed": "Impossibile caricare gli articoli dell'ordine"
     },
     "payment": {
       "title": "Pagamento",
@@ -4235,6 +4269,27 @@
       "cardTotalLabel": "Carta",
       "otherTender": "Altri pagamenti",
       "platformsTotal": "Piattaforme (efood ecc.)",
+      "reconciliationTitle": "Riconciliazione",
+      "orderTurnover": "Fatturato ordini",
+      "paymentCoverage": "Copertura pagamenti",
+      "reconciliationDifference": "Differenza",
+      "reconciliationOrdersAffected": "Ordini interessati",
+      "reconciliationCarriedOver": "{{count}} ordine/i per {{amount}} appartengono a una giornata già chiusa da uno Z precedente e non sono conteggiati qui.",
+      "reconciliationUnclassifiedSources": "Origini ordine non riconosciute come piattaforma. Il loro importo è incluso nei totali sopra; viene trattenuta solo l’attribuzione alla piattaforma.",
+      "reconciliationExplainedByRefunds": "{{amount}} spiegato da rimborsi",
+      "reconciliationReason": {
+        "missing_local_payment_row": "Ordine pagato senza registrazione di pagamento",
+        "no_persisted_payment": "Ordine completato senza pagamento registrato",
+        "partial_payment_remaining": "Pagamento parziale",
+        "partial_cash_payment": "Pagamento parziale in contanti",
+        "partial_card_payment": "Pagamento parziale con carta",
+        "split_payment_incomplete": "Pagamento diviso incompleto",
+        "unsupported_payment_method": "Metodo di pagamento non supportato",
+        "overpaid_order": "Pagamento in eccesso",
+        "duplicate_payment": "Pagamento duplicato",
+        "platform_settlement_mismatch": "Liquidazione piattaforma nel tender sbagliato",
+        "platform_settlement_missing": "Liquidazione piattaforma mancante"
+      },
       "revenueSplitHint": "Contanti + Carta + Piattaforme = Incassato reale",
       "liveShiftBreakdown": "Panoramica turni live",
       "liveCurrentWindow": "Finestra attuale live",
@@ -5056,6 +5111,7 @@
       "expiryWarning": "{{count}} articoli in scadenza"
     },
     "errors": {
+      "loadFailedTitle": "Magazzino non disponibile",
       "loadFailed": "Impossibile caricare l'inventario",
       "adjustmentNegative": "La rettifica produrrebbe scorte negative",
       "adjustmentFailed": "Impossibile rettificare le scorte"
@@ -5467,7 +5523,9 @@
       "floorPlan": "Pianta del piano",
       "switchToFloorPlan": "Passa alla planimetria",
       "switchToGrid": "Passa alla vista griglia"
-    }
+    },
+    "noTables": "Nessun tavolo configurato",
+    "configureInAdmin": "Configura i tavoli nella dashboard di amministrazione"
   },
   "reservations": {
     "title": "Prenotazioni",
@@ -6063,6 +6121,14 @@
         "cancelled": "Appuntamento annullato",
         "no_show": "Appuntamento contrassegnato come mancata presentazione"
       }
+    },
+    "status": {
+      "scheduled": "Programmato",
+      "confirmed": "Confermato",
+      "in_progress": "In corso",
+      "completed": "Completato",
+      "cancelled": "Annullato",
+      "no_show": "Non presentato"
     }
   },
   "reservationsView": {
@@ -6745,7 +6811,8 @@
       "title": "Contesto cucina mancante",
       "body": "Questo terminale non è assegnato al contesto richiesto. Controlla le impostazioni del terminale e riprova.",
       "action": "Riprova contesto"
-    }
+    },
+    "hoursAgo": "{{hours}} h {{mins}} min"
   },
   "loyalty": {
     "tier": {
@@ -6754,11 +6821,6 @@
       "silver": "Argento",
       "gold": "Oro",
       "platinum": "Platino"
-    },
-    "contextMissing": {
-      "title": "Contesto fedeltà mancante",
-      "body": "Questo terminale non ha le impostazioni dell'organizzazione. Controlla le impostazioni del terminale e riprova.",
-      "action": "Riprova contesto"
     },
     "pointsEarned": "+{{points}} punti fedeltà guadagnati",
     "customerFound": "Cliente fedeltà: {{name}}",
@@ -6784,9 +6846,6 @@
     "settingsUnavailable": "Le impostazioni fedeltà non sono disponibili su questo terminale",
     "noAccountForCustomer": "Questo cliente non ha un account fedeltà",
     "notEnoughRedeemablePoints": "Minimo {{min}} punti richiesti",
-    "lastSynced": "Ultima sincronizzazione: {{time}}",
-    "syncNow": "Sincronizza ora",
-    "offlineNote": "Dati in cache visualizzati",
     "noMembers": "Nessun membro fedeltà",
     "noMembersDesc": "I clienti appariranno qui quando si iscriveranno al programma fedeltà.",
     "unknownCustomer": "Cliente sconosciuto",
@@ -7769,6 +7828,11 @@
         "summary": "{{count}} aggiornamenti salvati attendono un nuovo tentativo riuscito.",
         "guidance": "Riprova una volta l’aggiornamento selezionato. Apri i dettagli di assistenza se fallisce ancora."
       },
+      "parityModuleConflict": {
+        "title": "Alcune modifiche sono bloccate",
+        "summary": "{{count}} modifiche in {{moduleLabel}} sono state rifiutate dall'ufficio e non possono essere inviate così come sono.",
+        "guidance": "Apri i dettagli di supporto per vedere il motivo. Il solo nuovo tentativo non sblocca una modifica rifiutata finché la causa non viene risolta."
+      },
       "parityModulePending": {
         "title": "Backlog parity in {{moduleLabel}}",
         "summary": "{{count}} elementi parity in {{moduleLabel}} sono ancora in attesa.",
@@ -8099,7 +8163,8 @@
       "checkoutFailed": "Impossibile completare la partenza",
       "paymentFailed": "Impossibile registrare il pagamento",
       "chargeFailed": "Impossibile aggiungere l'addebito"
-    }
+    },
+    "moduleRequired": "Il modulo Camere non è attivo per questa attività."
   },
   "guestBilling": {
     "room": "Camera",
@@ -8304,7 +8369,9 @@
       "timeRequired": "L'ora di prenotazione è obbligatoria",
       "partySizeMin": "Il numero di ospiti deve essere almeno 1",
       "partySizeExceedsCapacity": "Il numero di ospiti supera la capacità del tavolo di {{capacity}}"
-    }
+    },
+    "guests": "{{count}} ospiti",
+    "guestCount": "{{count}} ospiti"
   },
   "customerMessaging": {
     "title": "Messaggi cliente", "customerRequired": "Collega un cliente per usare i messaggi.", "onlineOnly": "Le azioni di messaggistica richiedono una connessione online.",
@@ -8316,5 +8383,61 @@
     "sendFailed": "Impossibile mettere il messaggio in coda.", "retryFailed": "Nuovo tentativo non accodato.", "linkOpened": "Link provider sicuro aperto.", "linkFailed": "Impossibile aprire il link sicuro.",
     "attemptCount": "{{count}} tentativo/i", "attempt": "Tentativo {{number}}",
     "status": { "queued": "In coda", "delayed": "In ritardo", "sending": "Invio", "accepted": "Accettato", "sent": "Inviato", "delivered": "Consegnato", "read": "Letto", "failed": "Fallito", "skipped": "Saltato", "dead_lettered": "Limite tentativi", "unknown": "Esito sconosciuto" }
+  },
+  "driveThru": {
+    "selectBranch": "Seleziona una sede per vedere il drive-through",
+    "activeOrders": "Ordini attivi",
+    "avgWaitTime": "Attesa media",
+    "activeLanes": "Corsie attive",
+    "muteNotifications": "Silenzia notifiche",
+    "enableNotifications": "Attiva notifiche",
+    "loading": "Caricamento dati drive-through...",
+    "noOrders": "Nessun ordine",
+    "ordersServedToday": "{{count}} ordini serviti oggi",
+    "cancelOrder": "Annulla ordine",
+    "stage": {
+      "waiting": "Ordinato",
+      "preparing": "In preparazione",
+      "ready": "Pronto",
+      "served": "Ritirato"
+    }
+  },
+  "modules": {
+    "kiosk": {
+      "completed": "Completato",
+      "description": "Gestisci gli ordini del kiosk self-service",
+      "disabled": "Gli ordini kiosk sono disattivati",
+      "enabled": "Gli ordini kiosk sono attivati",
+      "noOrders": "Ancora nessun ordine kiosk",
+      "openKiosk": "Apri",
+      "orderNumber": "Ordine",
+      "pending": "In sospeso",
+      "qrCodes": "Codici QR",
+      "qrCodesDescription": "Gestisci i codici QR nella dashboard admin",
+      "qrCodesInfo": "Crea e gestisci i codici QR per gli ordini kiosk nella dashboard admin. I clienti scansionano i codici QR per ordinare direttamente dal telefono.",
+      "recentOrders": "Ordini kiosk recenti",
+      "revenue": "Ricavi",
+      "status": "Stato kiosk",
+      "title": "Gestione kiosk",
+      "todayOrders": "Ordini di oggi",
+      "toggleError": "Aggiornamento dello stato del kiosk non riuscito"
+    }
+  },
+  "reservationInfoPanel": {
+    "title": "Tavolo",
+    "customerName": "Cliente",
+    "date": "Data",
+    "time": "Ora",
+    "partySize": "Ospiti",
+    "guests": "ospiti",
+    "phone": "Telefono",
+    "status": "Stato",
+    "specialRequests": "Richieste speciali",
+    "noReservation": "Nessuna prenotazione trovata per oggi",
+    "fetchError": "Impossibile caricare la prenotazione",
+    "seatGuest": "Accomoda gli ospiti",
+    "seatError": "Impossibile accomodare gli ospiti",
+    "cancelReservation": "Annulla prenotazione",
+    "lateWarning": "{{minutes}} minuti di ritardo"
   }
 }

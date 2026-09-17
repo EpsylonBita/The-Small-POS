@@ -30,6 +30,7 @@ import { formatCompactOrderNumberForDisplay } from '../../utils/orderNumberUtils
 import type { DeliveryBoundaryValidationResponse } from '../../../shared/types/delivery-validation';
 import type { MenuCombo } from '@shared/types/combo';
 import { getComboPrice } from '@shared/types/combo';
+import { discountCents, fromCents, toCents } from '@shared/utils/money';
 import { Pencil, Search, X, User, UserPlus } from 'lucide-react';
 import { formatCurrency } from '../../utils/format';
 import {
@@ -1927,33 +1928,44 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     toast.success(t('menu.cart.manualItemAdded', 'Manual item added'));
   };
 
+  // Order-level manual discount, in integer cents and on the same rule as the server and
+  // the Android POS (`shared/types/money-fixtures.json`).
   const calculateManualDiscount = useCallback((subtotal: number) => {
-    if (manualDiscountMode === 'percentage') {
-      const percentage = Math.max(0, Math.min(manualDiscountValue, 100));
-      return {
-        discountAmount: subtotal * (percentage / 100),
-        discountPercentage: percentage,
-      };
-    }
+    const discountAmount = fromCents(
+      discountCents(
+        manualDiscountMode === 'percentage' ? 'percentage' : 'fixed',
+        manualDiscountValue,
+        toCents(subtotal),
+      ),
+    );
     return {
-      discountAmount: Math.min(Math.max(manualDiscountValue, 0), subtotal),
-      discountPercentage: 0,
+      discountAmount,
+      discountPercentage: manualDiscountMode === 'percentage'
+        ? Math.max(0, Math.min(manualDiscountValue, 100))
+        : 0,
     };
   }, [manualDiscountMode, manualDiscountValue]);
 
-  // Calculate coupon discount
+  // Coupon discount, in integer cents and on the same rule as the server
+  // (`shared/types/money-fixtures.json`). The float version computed
+  // `afterManualDiscount * (value / 100)` with no rounding at all: a 10% coupon on EUR 10.05
+  // gave 1.0050000000000001 here and 1.01 on the server, and the two disagreed by a cent on
+  // the receipt.
   const calculateCouponDiscount = (): number => {
     if (!appliedCoupon) return 0;
     const subtotal = Math.max(
       cartItems.reduce((sum, item) => sum + (item.totalPrice || 0), 0) - (offerEvaluation?.discount_total ?? 0),
       0,
     );
-    const { discountAmount } = calculateManualDiscount(subtotal);
-    const afterManualDiscount = subtotal - discountAmount;
-    if (appliedCoupon.discount_type === 'percentage') {
-      return afterManualDiscount * (appliedCoupon.discount_value / 100);
-    }
-    return Math.min(appliedCoupon.discount_value, afterManualDiscount);
+    const { discountAmount: manualDiscountAmount } = calculateManualDiscount(subtotal);
+    const afterManualDiscountCents = Math.max(0, toCents(subtotal) - toCents(manualDiscountAmount));
+    return fromCents(
+      discountCents(
+        appliedCoupon.discount_type,
+        appliedCoupon.discount_value,
+        afterManualDiscountCents,
+      ),
+    );
   };
 
   const selectedAddressCoordinates =
