@@ -24,7 +24,7 @@ const printerSettingsSource = readFileSync(
   'utf8',
 );
 
-const LOCALES = ['en', 'el', 'de', 'fr', 'it'] as const;
+const LOCALES = ['en', 'el', 'de', 'fr', 'it', 'sq'] as const;
 
 test('after_edit receipt action defaults ON in the Rust action registry', () => {
   // The default-true match arm must include after_edit.

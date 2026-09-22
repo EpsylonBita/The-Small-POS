@@ -100,7 +100,7 @@ test('notes textarea handles Escape to close only the notes overlay (not the par
 
 test('notes overlay action uses a localized key present in every POS locale', () => {
   assert.match(source, /t\('common\.actions\.done'/);
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const done = loadLocale(lng)?.common?.actions?.done;
     assert.equal(typeof done, 'string', `${lng} missing common.actions.done`);
     assert.ok(done.length > 0, `${lng} empty common.actions.done`);
@@ -125,7 +125,7 @@ test('ingredient empty-state strings are routed through i18n (no hardcoded Engli
 
 test('ingredient empty-state keys exist in every locale, Greek is translated, and {{all}} is preserved', () => {
   const GREEK = new RegExp('[\\u0370-\\u03FF]');
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const im = loadLocale(lng)?.menu?.itemModal ?? {};
     assert.equal(typeof im.noIngredientsForFilter, 'string', `${lng} missing menu.itemModal.noIngredientsForFilter`);
     assert.equal(typeof im.noIngredientsForFilterHint, 'string', `${lng} missing menu.itemModal.noIngredientsForFilterHint`);

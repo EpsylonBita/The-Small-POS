@@ -183,7 +183,7 @@ test('Inventory adjustment-control label keys exist in every locale (Greek trans
   const loadLocale = (lng: string) =>
     JSON.parse(readFileSync(path.join(localesDir, `${lng}.json`), 'utf8'));
 
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const root = loadLocale(lng);
     assert.equal(typeof root.inventory?.adjustmentQuantity, 'string', `${lng} missing inventory.adjustmentQuantity`);
     assert.ok(root.inventory.adjustmentQuantity.length > 0, `${lng} empty inventory.adjustmentQuantity`);

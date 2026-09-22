@@ -74,7 +74,7 @@ test('Round 340: the raw-ID terminalContextLine locale key is removed; friendly 
   const added = ['thisTerminal', 'branchFallback', 'organizationFallback'];
   const en = loadLocale('en');
 
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const center = (loadLocale(lng)?.recovery?.center ?? {}) as Record<string, string>;
     assert.ok(!(removed in center), `${lng}: recovery.center.${removed} must be removed (it rendered the raw terminalId)`);
     for (const key of added) {

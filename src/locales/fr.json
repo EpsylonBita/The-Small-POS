@@ -17,15 +17,15 @@
     "searchPlaceholder": "Numéro de réparation, alias hors ligne ou libellé sûr de l’appareil",
     "filters": { "status": "Statut", "priority": "Priorité", "due": "Échéance", "sync": "Synchronisation", "all": "Tous", "overdue": "En retard" },
     "tabs": { "overview": "Aperçu", "diagnosis": "Diagnostic", "partsLabour": "Pièces et main-d’œuvre", "estimateApproval": "Devis et approbation", "timeline": "Historique", "photos": "Photos", "payments": "Paiements", "communication": "Communication" },
-    "status": { "received": "Reçue", "diagnosing": "En diagnostic", "waiting_customer_approval": "En attente de l’accord client", "approved": "Approuvée", "waiting_parts": "En attente de pièces", "repairing": "En réparation", "quality_check": "Contrôle qualité", "ready": "Prête", "delivered": "Remise", "cancelled": "Annulée", "unrepairable": "Irréparable" },
+    "status": { "received": "Reçue", "diagnosing": "En diagnostic", "waiting_customer_approval": "En attente de l’accord client", "approved": "Approuvée", "waiting_parts": "En attente de pièces", "repairing": "En réparation", "quality_check": "Contrôle qualité", "ready": "Prête", "delivered": "Restituée", "cancelled": "Annulée", "unrepairable": "Irréparable" },
     "priority": { "low": "Faible", "normal": "Normale", "high": "Élevée", "urgent": "Urgente" },
     "intake": { "standard": "Réparation standard", "quickService": "Service rapide", "anonymous": "Service rapide anonyme", "linked": "Associer un client", "mode": "Mode client du Service rapide", "customerDevice": "Client et appareil", "customerSearch": "Recherche de client", "searchCustomers": "Rechercher des clients", "customerResults": "Résultats clients", "deviceResults": "Appareils du client", "newDevice": "Nouvel appareil", "deviceType": "Type d’appareil", "deviceLabel": "Libellé de l’appareil", "manufacturer": "Fabricant", "model": "Modèle", "saveDevice": "Enregistrer l’appareil", "title": "Titre de la réparation", "customerRequired": "Sélectionnez un client et un appareil pour une réparation standard.", "quickCustomerRequired": "Sélectionnez un client pour le Service rapide associé.", "anonymousHelp": "Le service rapide anonyme n’a ni historique client ni messages automatiques." },
     "sync": { "synced": "Synchronisée", "pending": "En attente de synchronisation", "conflict": "Révision requise", "needs_refetch": "Actualisation requise", "local": "Locale" },
     "list": { "loading": "Chargement des réparations…", "empty": "Aucune réparation ne correspond à ces filtres.", "select": "Sélectionnez une réparation pour ouvrir son espace.", "overdue": "En retard", "due": "Échéance {{date}}", "aliases": "Également connue sous {{aliases}}" },
     "pagination": { "label": "Pages des réparations", "previous": "Précédente", "next": "Suivante", "summary": "{{start}}–{{end}} sur {{total}}" },
-    "timeline": { "created": "Réparation créée", "status_changed": "Statut modifié", "note_added": "Note ajoutée", "assignment_changed": "Assignation modifiée", "diagnosis_updated": "Diagnostic mis à jour", "line_changed": "Ligne de réparation modifiée", "part_consumed": "Pièce consommée", "part_reversed": "Consommation de pièce annulée", "estimate_created": "Devis créé", "approval_recorded": "Approbation enregistrée", "attachment_added": "Pièce jointe ajoutée", "attachment_retention_changed": "Conservation de la pièce jointe modifiée", "settlement_linked": "Règlement lié", "branch_transferred": "Transfert d’établissement", "reopened": "Réparation rouverte", "unknown": "Activité de réparation" },
+    "timeline": { "created": "Réparation créée", "status_changed": "Statut modifié", "note_added": "Note ajoutée", "assignment_changed": "Attribution modifiée", "diagnosis_updated": "Diagnostic mis à jour", "line_changed": "Ligne de réparation modifiée", "part_consumed": "Pièce consommée", "part_reversed": "Consommation de pièce annulée", "estimate_created": "Devis créé", "approval_recorded": "Approbation enregistrée", "attachment_added": "Pièce jointe ajoutée", "attachment_retention_changed": "Conservation de la pièce jointe modifiée", "settlement_linked": "Règlement lié", "branch_transferred": "Transfert d’établissement", "reopened": "Réparation rouverte", "unknown": "Activité de réparation" },
     "fields": { "customer": "Client", "device": "Appareil", "assignedTo": "Assignée à", "assigned": "Assignée", "dueAt": "Date d’échéance", "intakeNotes": "Notes de réception", "diagnosis": "Diagnostic", "anonymous": "Client anonyme", "unassigned": "Non assignée", "notRecorded": "Non renseigné" },
-    "actions": {"create": "Créer la réparation", "operations": "Actions de réparation", "changeStatus": "Changer le statut", "transitionReason": "Motif audité", "remainConsumed": "Conserver les pièces consommées comme consommées", "addNote": "Ajouter une note", "assign": "Assigner", "assignToMe": "M’assigner", "unassign": "Retirer l’attribution", "updateDiagnosis": "Enregistrer le brouillon du diagnostic", "finalizeDiagnosis": "Enregistrer le diagnostic final", "planLine": "Ajouter une ligne prévue", "consumePart": "Consommer la pièce", "reversePart": "Annuler la consommation", "reversalReason": "Motif de l’annulation", "lineType": "Type de ligne", "part": "Pièce", "labour": "Main-d’œuvre", "charge": "Frais", "lineName": "Nom de la ligne", "sku": "SKU", "quantity": "Quantité", "unitPrice": "Prix unitaire", "vatRate": "Taux de TVA", "discount": "Remise", "validUntil": "Valide jusqu’au", "estimateNote": "Note du devis", "createEstimate": "Créer le devis", "recordApproval": "Enregistrer l’accord en personne", "stagePhoto": "Ajouter une photo", "openAttachment": "Ouvrir la pièce jointe", "acceptServer": "Utiliser la version serveur", "rebase": "Réappliquer mes modifications", "close": "Fermer", "catalogSearch": "Recherche catalogue", "printIntake": "Imprimer la prise en charge", "printLabel": "Imprimer l'étiquette", "searchCatalog": "Rechercher dans le catalogue"},
+    "actions": {"create": "Créer la réparation", "operations": "Actions de réparation", "changeStatus": "Changer le statut", "transitionReason": "Motif audité", "remainConsumed": "Laisser les pièces consommées telles quelles", "addNote": "Ajouter une note", "assign": "Assigner", "assignToMe": "M’assigner", "unassign": "Retirer l’attribution", "updateDiagnosis": "Enregistrer le brouillon du diagnostic", "finalizeDiagnosis": "Enregistrer le diagnostic final", "planLine": "Ajouter une ligne prévue", "consumePart": "Consommer la pièce", "reversePart": "Annuler la consommation", "reversalReason": "Motif de l’annulation", "lineType": "Type de ligne", "part": "Pièce", "labour": "Main-d’œuvre", "charge": "Frais", "lineName": "Nom de la ligne", "sku": "SKU", "quantity": "Quantité", "unitPrice": "Prix unitaire", "vatRate": "Taux de TVA", "discount": "Remise", "validUntil": "Valide jusqu’au", "estimateNote": "Note du devis", "createEstimate": "Créer le devis", "recordApproval": "Enregistrer l’accord en personne", "stagePhoto": "Ajouter une photo", "openAttachment": "Ouvrir la pièce jointe", "acceptServer": "Utiliser la version serveur", "rebase": "Réappliquer mes modifications", "close": "Fermer", "catalogSearch": "Recherche catalogue", "printIntake": "Imprimer la prise en charge", "printLabel": "Imprimer l'étiquette", "searchCatalog": "Rechercher dans le catalogue"},
     "panels": { "partsEmpty": "Aucune pièce, main-d’œuvre ou charge prévue.", "estimateEmpty": "Aucun devis n’a encore été émis.", "timelineEmpty": "Aucun événement dans l’historique.", "photosEmpty": "Aucune métadonnée de pièce jointe disponible.", "conflictsTitle": "Conflits de synchronisation", "conflictsEmpty": "Aucun conflit de réparation à examiner." },
     "messages": {"readyQueued": "Le statut « Prête » est en attente de synchronisation.", "noNotificationSent": "Aucune notification client n’a encore été envoyée.", "offline": "Les modifications hors ligne restent en attente jusqu’à la reconnexion de ce terminal.", "onlineActionRequired": "Cette action nécessite une vérification en ligne du serveur.", "activeShiftRequired": "Démarrez un service du personnel pour charger les données et actions de réparation.", "selectorOnline": "La recherche de clients et d’appareils nécessite une connexion native en ligne. Un client et un appareil canoniques déjà sélectionnés peuvent toujours être envoyés hors ligne.", "createUnavailable": "La création d’une réparation nécessite un service actif et l’autorisation de création.", "conflictResolutionUnavailable": "La résolution des conflits nécessite un service actif, une connexion native en ligne et l’autorisation de mise à jour.", "submitInProgress": "La réparation est en cours d’enregistrement. La fermeture est temporairement désactivée.", "finalDiagnosisOnline": "Le diagnostic final nécessite une vérification en ligne ; les brouillons peuvent être mis en attente hors ligne.", "estimateOnline": "Les devis et approbations nécessitent une vérification en ligne du serveur.", "estimateNeedsLines": "Ajoutez au moins une ligne prévue avant de créer un devis.", "photoOneShot": "La photo sélectionnée est lue une seule fois et transmise au stockage natif chiffré ; le renderer ne la conserve pas.", "photoUnavailable": "La préparation d’une photo nécessite les paramètres chargés, l’autorisation de réparation, un état réseau connu et un service actif.", "attachmentTypeInvalid": "Ce type de fichier n’est pas autorisé par les paramètres de réparation.", "attachmentTooLarge": "Cette photo dépasse la taille maximale des pièces jointes de réparation.", "attachmentInvalid": "Sélectionnez une photo non vide autorisée par les paramètres.", "attachmentStageFailed": "Impossible de préparer la photo.", "attachmentOpenFailed": "Impossible d’ouvrir la pièce jointe de manière sécurisée.", "loadFailed": "Impossible de charger les réparations.", "commandFailed": "Impossible d’enregistrer la modification.", "assignmentUnavailable": "L’auto-attribution nécessite une identité employé canonique et l’autorisation d’attribuer les réparations.", "settingsUnavailable": "La réception d’une réparation reste désactivée jusqu’à la disponibilité de paramètres officiels ou mis en cache.", "invalidIntake": "Vérifiez les informations de réception et réessayez.", "customerSearchFailed": "La recherche de clients n’a pas abouti.", "deviceLoadFailed": "Impossible de charger les appareils du client.", "deviceCreateFailed": "Impossible d’enregistrer l’appareil.", "secureIdUnavailable": "Les identifiants sécurisés ne sont pas disponibles. Redémarrez l’application avant de créer une réparation.", "catalogNoMatch": "Aucune correspondance sûre trouvée dans le catalogue.", "catalogUnavailable": "La recherche dans le catalogue est indisponible.", "printFailed": "Le document de réparation n'a pas pu être mis en file d'attente de façon sécurisée."},
     "locked": { "communication": "Customer Messaging n’est pas activé dans cette version bêta privée.", "money": "Paiements, remboursements, fiscalisation et remise restent verrouillés jusqu’à la disponibilité du transport financier natif typé.", "approvalTransition": "Le statut Approuvée est atteint uniquement via l’action d’approbation auditée dans Devis et approbation.", "assignment": "Les changements d’assignation restent verrouillés jusqu’à la disponibilité d’une projection du personnel sûre et limitée au périmètre.", "stockReversal": "L’annulation du mouvement de stock reste verrouillée car l’espace natif n’expose pas la référence du mouvement d’origine.", "catalog": "La recherche de produits et services reste verrouillée jusqu’à une projection native sûre en lecture seule.", "attachmentOpen": "L’ouverture des pièces jointes existantes reste verrouillée jusqu’à la récupération native signée.", "printing": "L’impression des réparations reste verrouillée jusqu’à la disponibilité de la file d’impression native typée." },
@@ -84,7 +84,7 @@
       "success": "Succès",
       "error": "Erreur",
       "warning": "Avertissement",
-      "info": "Info",
+      "info": "Information",
       "typeToConfirm": "Tapez \"{{value}}\" pour confirmer",
       "preview": "Aperçu",
       "downloadPdf": "Télécharger PDF"
@@ -151,7 +151,7 @@
       "noResults": "Aucun résultat trouvé",
       "loadingData": "Chargement des données...",
       "savingChanges": "Enregistrement des modifications...",
-      "changesSaved": "Modifications enregistrées avec succès",
+      "changesSaved": "Modifications enregistrées",
       "errorOccurred": "Une erreur est survenue",
       "confirmDelete": "Êtes-vous sûr de vouloir supprimer cet élément ?",
       "confirmCancel": "Êtes-vous sûr de vouloir annuler ? Les modifications non enregistrées seront perdues.",
@@ -289,7 +289,7 @@
       "emailAddressPlaceholder": "Saisir l'adresse e-mail"
     },
     "tableInfo": {
-      "header": "Informations de table",
+      "header": "Informations sur la table",
       "tableNumber": "Numéro de table",
       "tableNumberPlaceholder": "Saisir le numéro de table"
     },
@@ -385,12 +385,12 @@
     "reports": "Rapports",
     "users": "Utilisateurs",
     "customers": "Utilisateurs",
-    "zReportV2": "Z-Report (Nouveau)",
+    "zReportV2": "Rapport Z (nouveau)",
     "preview": "Aperçu avant impression",
     "verificationWarning": "Veuillez vérifier soigneusement les montants du tiroir-caisse. Écart important détecté.",
-    "confirmSubmit": "Confirmer la soumission du Z-Report",
+    "confirmSubmit": "Confirmer l'envoi du rapport Z",
     "submitWarning": "Cela clôturera la journée en cours et ne pourra pas être annulé.",
-    "zReport": "Z-Report",
+    "zReport": "Rapport Z",
     "settings": "Paramètres",
     "endShift": "Fin de service",
     "checkIn": "Prise de service",
@@ -453,7 +453,7 @@
       "startPreparing": "Commencer la préparation",
       "markReady": "Marquer comme prête",
       "assignDriver": "Assigner un livreur",
-      "setAsPickup": "Set as Pickup",
+      "setAsPickup": "Définir comme à emporter",
       "completeOrder": "Terminer la commande",
       "markDelivered": "Marquer comme livrée",
       "processing": "Traitement...",
@@ -466,7 +466,7 @@
       "updateQuantity": "Modifier la quantité",
       "addNote": "Ajouter une note",
       "trackDelivery": "Suivre la livraison",
-      "notifyPlatformReady": "Notifier {{platform}} que c'est prêt",
+      "notifyPlatformReady": "Marquer prête sur {{platform}}",
       "reactivate": "Réactiver"
     },
     "fields": {
@@ -488,22 +488,22 @@
       "covers": "Couverts",
       "server": "Serveur",
       "createdAt": "Créée le",
-      "updatedAt": "Mise à jour",
+      "updatedAt": "Mise à jour le",
       "completedAt": "Terminée le"
     },
     "messages": {
       "noOrders": "Aucune commande trouvée",
       "noActiveOrders": "Aucune commande active",
-      "orderCreated": "Commande créée avec succès",
-      "orderUpdated": "Commande mise à jour avec succès",
+      "orderCreated": "Commande créée",
+      "orderUpdated": "Commande mise à jour",
       "orderCancelled": "Commande annulée",
       "orderCompleted": "Commande terminée",
       "orderApproved": "Commande approuvée",
       "orderRejected": "Commande rejetée",
-      "orderPlacedSuccess": "Commande passée avec succès",
+      "orderPlacedSuccess": "Commande passée",
       "orderPlacedError": "Échec de la commande",
       "sentToKitchen": "Commande envoyée en cuisine",
-      "printSuccess": "Reçu imprimé avec succès",
+      "printSuccess": "Reçu imprimé",
       "printError": "Échec de l'impression du reçu",
       "confirmCancel": "Êtes-vous sûr de vouloir annuler cette commande ?",
       "confirmComplete": "Marquer cette commande comme terminée ?",
@@ -517,7 +517,7 @@
       "statusUpdated": "Statut de la commande mis à jour : {{status}}",
       "statusUpdateFailed": "Échec de la mise à jour du statut",
       "platformNotified": "{{platform}} notifié que la commande est prête",
-      "platformNotifyFailed": "Échec de la notification de la plateforme"
+      "platformNotifyFailed": "Impossible de prévenir la plateforme"
     },
     "time": {
       "minutes": "{{minutes}}m"
@@ -537,7 +537,7 @@
       "completed": "Terminées",
       "cancelled": "Annulées",
       "revenue": "Chiffre d'affaires",
-      "averageValue": "Valeur moy. commande"
+      "averageValue": "Panier moyen"
     },
     "loadingOrders": "Chargement des commandes...",
     "ordersTotal": "{{count}} commandes au total",
@@ -556,10 +556,10 @@
       "orderType": "Type de commande",
       "allStatuses": "Tous les statuts",
       "allTypes": "Tous les types",
-      "dateFrom": "Date depuis",
+      "dateFrom": "Date de début",
       "clearAll": "Effacer tous les filtres"
     },
-    "sandboxPrintSkipped": "Commande de test — impression ignorée. Activez «Imprimer les commandes de test (sandbox)» dans les réglages imprimante."
+    "sandboxPrintSkipped": "Commande de test — impression ignorée. Activez « Imprimer les commandes de test (sandbox) » dans les Paramètres d'impression."
   },
   "menu": {
     "managementTabs": {
@@ -610,7 +610,7 @@
     "featuredShortcuts": {
       "quickAccess": "Accès rapide",
       "hint": "Catégories et filtres populaires",
-      "frequentItems": "Commandés fréquemment",
+      "frequentItems": "Souvent commandés",
       "openCategory": "Ouvrir {{category}}",
       "openSubcategory": "Ouvrir {{category}}, {{subcategory}}"
     },
@@ -637,15 +637,15 @@
       "discountAmount": "Remise",
       "tax": "Taxe ({{percent}}%) :",
       "deliveryFee": "Frais de livraison :",
-      "calculatingDeliveryFee": "Calculating...",
-      "deliveryFeeNeedsExactAddress": "Select exact address",
-      "deliveryFeeOutOfZone": "Out of delivery zone",
-      "deliveryFeeUnavailable": "Delivery fee unavailable",
+      "calculatingDeliveryFee": "Calcul...",
+      "deliveryFeeNeedsExactAddress": "Sélectionnez l'adresse exacte",
+      "deliveryFeeOutOfZone": "Hors zone de livraison",
+      "deliveryFeeUnavailable": "Frais de livraison indisponibles",
       "total": "Total :",
       "completeOrder": "Finaliser la commande",
       "qty": "Qté :",
       "without": "Sans",
-      "minimumNotMet": "Minimum de commande non atteint",
+      "minimumNotMet": "Montant minimum non atteint",
       "addMoreToOrder": "Ajoutez {{amount}} de plus pour finaliser la commande",
       "couponPlaceholder": "Code promo",
       "applyCoupon": "Appliquer",
@@ -761,7 +761,7 @@
       "choose": "Choisir {{count}}",
       "chooseUpTo": "Choisir jusqu'à {{count}}",
       "selectOne": "Sélectionner un",
-      "selectMultiple": "Sélection multiple",
+      "selectMultiple": "Sélectionner plusieurs",
       "noCharge": "Sans supplément",
       "extraCharge": "+{{price}} €"
     },
@@ -796,7 +796,7 @@
       "lastSync": "Dernière synchronisation : {{time}}",
       "syncNow": "Synchroniser maintenant",
       "syncing": "Synchronisation du menu...",
-      "syncSuccess": "Menu synchronisé avec succès",
+      "syncSuccess": "Menu synchronisé",
       "syncError": "Échec de la synchronisation du menu",
       "autoSync": "Synchronisation automatique activée",
       "manualSync": "Synchronisation manuelle requise"
@@ -821,7 +821,7 @@
       "total": "Total",
       "addToCart": "Ajouter au panier",
       "extrasTitle": "Suppléments et modifications",
-      "extrasHint": "Ajouter des suppléments ou marquer des ingrédients comme \"sans\"",
+      "extrasHint": "Ajoutez des suppléments ou marquez des ingrédients comme « sans »",
       "without": "Sans",
       "withoutHint": "Marquer les ingrédients à retirer (pas de changement de prix)",
       "withoutLabel": "Sans",
@@ -843,18 +843,18 @@
       "syncMenuData": "Synchroniser le menu"
     },
     "combos": {
-      "noCombos": "Aucun combo disponible",
-      "addedToCart": "Combo ajouté au panier",
+      "noCombos": "Aucune formule disponible",
+      "addedToCart": "Formule ajoutée au panier",
       "types": {
         "fixed": "Combo",
         "choice": "Au choix",
         "bogo": "Offre"
       },
       "bogo": {
-        "shortLabel": "Achetez {{buy}} Obtenez {{get}} {{discount}}",
+        "shortLabel": "{{buy}} acheté(s), {{get}} {{discount}}",
         "free": "GRATUIT",
         "autoApplied": "Appliqué automatiquement",
-        "infoToast": "L'offre BOGO sera appliquée lorsque les articles éligibles seront dans le panier"
+        "infoToast": "L'offre « 1 acheté, 1 offert » s'appliquera dès que les articles éligibles seront dans le panier"
       },
       "anyFrom": "Au choix parmi {{category}}",
       "choice": {
@@ -936,10 +936,10 @@
       "next": "Suivant",
       "pageOf": "Page {{current}} sur {{total}}"
     },
-    "deleteAddressSuccess": "Adresse supprimée avec succès",
+    "deleteAddressSuccess": "Adresse supprimée",
     "deleteAddressQueued": "Adresse supprimée et mise en attente de synchronisation",
     "deleteAddressError": "Échec de la suppression de l'adresse",
-    "updateAddressSuccess": "Adresse mise à jour avec succès",
+    "updateAddressSuccess": "Adresse mise à jour",
     "updateAddressError": "Échec de la mise à jour de l'adresse",
     "address": {
       "street": "Adresse",
@@ -1047,13 +1047,13 @@
     "messages": {
       "noCustomers": "Aucun client trouvé",
       "noAddresses": "Aucune adresse enregistrée",
-      "customerCreated": "Client créé avec succès",
-      "customerUpdated": "Client mis à jour avec succès",
+      "customerCreated": "Client créé",
+      "customerUpdated": "Client mis à jour",
       "customerDeleted": "Client supprimé",
       "customerFound": "Client {{name}} trouvé",
       "customerNotFound": "Client non trouvé",
-      "addressAdded": "Adresse ajoutée avec succès",
-      "addressUpdated": "Adresse mise à jour avec succès",
+      "addressAdded": "Adresse ajoutée",
+      "addressUpdated": "Adresse mise à jour",
       "addressDeleted": "Adresse supprimée",
       "selectCustomerFirst": "Veuillez d'abord sélectionner un client",
       "invalidPhone": "Numéro de téléphone invalide",
@@ -1091,7 +1091,7 @@
     "assignDriver": "Assigner un livreur",
     "assignSelected": "Assigner le livreur sélectionné",
     "noDriversAvailable": "Aucun livreur disponible",
-    "noDriversHint": "Tous les livreurs sont occupés ou non connectés",
+    "noDriversHint": "Tous les livreurs sont occupés ou n'ont pas pointé",
     "driverAssigned": "Livreur assigné",
     "assignFailed": "Échec de l'assignation du livreur",
     "statusUpdated": "Statut mis à jour",
@@ -1149,7 +1149,7 @@
       "validating": "Validation...",
       "valid": "✓ Zone de livraison valide",
       "invalid": "✗ Hors zone de livraison",
-      "warning": "⚠ Avertissement de validation de zone",
+      "warning": "⚠ Avertissement : vérification de la zone",
       "notCovered": "Adresse hors zone de livraison",
       "minimumNotMet": "Montant minimum de commande non atteint",
       "validationError": "Impossible de valider la zone de livraison",
@@ -1191,7 +1191,7 @@
     },
     "messages": {
       "noDeliveries": "Aucune livraison active",
-      "driverAssigned": "Livreur assigné avec succès",
+      "driverAssigned": "Livreur assigné",
       "driverUnassigned": "Livreur retiré",
       "statusUpdated": "Statut de livraison mis à jour",
       "deliveryCompleted": "Livraison terminée",
@@ -1208,7 +1208,7 @@
       "minimumOrderNotMet": "La commande n'atteint pas le minimum pour la livraison"
     },
     "validation": {
-      "addressValidated": "Adresse validée avec succès",
+      "addressValidated": "Adresse validée",
       "addressValidationFailed": "Échec de la validation de l'adresse",
       "addressRequired": "L'adresse est requise pour la livraison",
       "validating": "Validation...",
@@ -1319,7 +1319,7 @@
       "paymentSuccess": "Paiement réussi",
       "paymentFailed": "Échec du paiement",
       "paymentCancelled": "Paiement annulé",
-      "refundSuccess": "Remboursement effectué avec succès",
+      "refundSuccess": "Remboursement effectué",
       "refundFailed": "Échec du remboursement",
       "invalidAmount": "Montant invalide",
       "insufficientAmount": "Montant insuffisant",
@@ -1353,7 +1353,7 @@
       "footer": "À bientôt"
     },
     "split": {
-      "title": "Paiement Partagé",
+      "title": "Paiement partagé",
       "splitBy": "Partager par",
       "numberOfPeople": "Nombre de personnes",
       "customSplit": "Partage personnalisé",
@@ -1364,8 +1364,8 @@
       "addPayment": "Ajouter un paiement",
       "paymentAdded": "Paiement {{number}} sur {{total}} ajouté",
       "splitComplete": "Paiement partagé terminé",
-      "byAmount": "Par Montant",
-      "byItems": "Par Articles",
+      "byAmount": "Par montant",
+      "byItems": "Par article",
       "addPerson": "Ajouter une personne",
       "removePerson": "Supprimer",
       "confirm": "Confirmer le paiement partagé",
@@ -1471,15 +1471,15 @@
       "addExpense": "Ajouter une dépense",
       "viewExpenses": "Voir les dépenses",
       "addNote": "Ajouter une note",
-      "completeZReport": "Complete Z Report"
+      "completeZReport": "Terminer le rapport Z"
     },
     "labels": {
       "active": "Actif",
       "duration": "Durée"
     },
     "messages": {
-      "shiftStarted": "Service commencé avec succès",
-      "shiftEnded": "Service terminé avec succès",
+      "shiftStarted": "Service commencé",
+      "shiftEnded": "Service terminé",
       "shiftPaused": "Service suspendu",
       "shiftResumed": "Service repris",
       "drawerCounted": "Tiroir-caisse compté",
@@ -1494,8 +1494,8 @@
       "shiftRequired": "Veuillez d'abord commencer un service",
       "activeShiftExists": "Un service est déjà actif",
       "noActiveShift": "Aucun service actif trouvé",
-      "pendingZReportTitle": "Previous day still needs a Z Report",
-      "pendingZReportDetails": "The business day for {{date}} was checked out but not closed locally yet. You can finish the Z Report now or start the next shift and come back to it."
+      "pendingZReportTitle": "La journée précédente attend encore son rapport Z",
+      "pendingZReportDetails": "Les services de la journée du {{date}} sont clôturés, mais la journée n'est pas encore clôturée localement. Vous pouvez terminer le rapport Z maintenant, ou commencer le service suivant et y revenir plus tard."
     },
     "monitoring": {
       "title": "Suivi du service",
@@ -1504,7 +1504,7 @@
       "alerts": "Alertes",
       "metrics": "Indicateurs",
       "ordersPerHour": "Commandes/heure",
-      "avgOrderValue": "Valeur moy. commande",
+      "avgOrderValue": "Panier moyen",
       "salesRate": "Taux de ventes",
       "idleTime": "Temps d'inactivité",
       "activeTime": "Temps actif",
@@ -1569,7 +1569,7 @@
     "metrics": {
       "totalOrders": "Total des commandes",
       "totalRevenue": "Chiffre d'affaires total",
-      "avgOrderValue": "Valeur moy. commande",
+      "avgOrderValue": "Panier moyen",
       "completionRate": "Taux de réalisation"
     },
     "trends": {
@@ -1590,8 +1590,8 @@
       "totalOrders": "Total des commandes",
       "completedOrders": "Terminées",
       "cancelledOrders": "Annulées",
-      "avgOrderValue": "Valeur moy. commande",
-      "avgItems": "Moy. articles par commande",
+      "avgOrderValue": "Panier moyen",
+      "avgItems": "Articles moy. par commande",
       "ordersByType": "Commandes par type",
       "ordersByStatus": "Commandes par statut",
       "ordersByHour": "Commandes par heure",
@@ -1607,8 +1607,8 @@
       "discounts": "Remises",
       "tips": "Pourboires",
       "paymentMethods": "Modes de paiement",
-      "transactions": "[NEEDS FR TRANSLATION] συναλλαγές",
-      "orders": "[NEEDS FR TRANSLATION] παραγγελίες"
+      "transactions": "transactions",
+      "orders": "commandes"
     },
     "staff": {
       "title": "Performance du personnel",
@@ -1622,16 +1622,16 @@
       "topPerformers": "Meilleurs éléments"
     },
     "zReport": {
-      "title": "Z-Report",
+      "title": "Rapport Z",
       "subtitle": "Rapport de fin de journée",
       "reportNumber": "Rapport n°{{number}}",
       "reportDate": "Date du rapport",
       "terminal": "Terminal",
-      "generatingReport": "Génération du Z-Report...",
-      "reportGenerated": "Z-Report généré avec succès",
-      "reportError": "Échec de la génération du Z-Report",
+      "generatingReport": "Génération du rapport Z...",
+      "reportGenerated": "Rapport Z généré",
+      "reportError": "Impossible de générer le rapport Z",
       "submittingReport": "Soumission du rapport...",
-      "reportSubmitted": "Rapport soumis avec succès",
+      "reportSubmitted": "Rapport soumis",
       "submitError": "Échec de la soumission du rapport",
       "summary": {
         "title": "Résumé",
@@ -1654,7 +1654,7 @@
         "cashDifference": "Écart"
       },
       "actions": {
-        "generate": "Générer le Z-Report",
+        "generate": "Générer le rapport Z",
         "submit": "Soumettre à l'administrateur",
         "print": "Imprimer le rapport",
         "export": "Exporter le rapport",
@@ -1666,7 +1666,7 @@
       "printReport": "Imprimer le rapport",
       "exportReport": "Exporter le rapport",
       "exportCSV": "Exporter CSV",
-      "generateZReport": "Générer le Z-Report",
+      "generateZReport": "Générer le rapport Z",
       "emailReport": "Envoyer le rapport par e-mail",
       "scheduleReport": "Planifier le rapport",
       "viewDetails": "Voir les détails",
@@ -1675,7 +1675,7 @@
     "messages": {
       "noData": "Aucune donnée disponible pour la période sélectionnée",
       "generatingReport": "Génération du rapport...",
-      "reportGenerated": "Rapport généré avec succès",
+      "reportGenerated": "Rapport généré",
       "reportError": "Échec de la génération du rapport",
       "reportPrinted": "Rapport imprimé",
       "reportExported": "Rapport exporté",
@@ -1686,7 +1686,7 @@
     "errors": {
       "loadFailed": "Échec du chargement des données du rapport"
     },
-    "deliveryOrders": "[NEEDS FR TRANSLATION] Παραγγελίες Διανομής"
+    "deliveryOrders": "Commandes en livraison"
   },
   "expense": {
     "title": "Dépenses",
@@ -1715,7 +1715,7 @@
       "salaries": "Salaires",
       "rent": "Loyer",
       "insurance": "Assurance",
-      "taxes": "Taxes",
+      "taxes": "Impôts et taxes",
       "petty_cash": "Petite caisse",
       "refund": "Remboursement",
       "other": "Autre"
@@ -1738,9 +1738,9 @@
     },
     "messages": {
       "noExpenses": "Aucune dépense enregistrée",
-      "expenseAdded": "Dépense ajoutée avec succès",
+      "expenseAdded": "Dépense ajoutée",
       "staffPayoutDescription": "Paiement du personnel à la clôture",
-      "expenseUpdated": "Dépense mise à jour avec succès",
+      "expenseUpdated": "Dépense mise à jour",
       "expenseDeleted": "Dépense supprimée",
       "expenseApproved": "Dépense approuvée",
       "expenseRejected": "Dépense rejetée",
@@ -1755,7 +1755,7 @@
     "summary": {
       "totalExpenses": "Total des dépenses",
       "tipsReceived": "Pourboires reçus",
-      "tipAllocationHelp": "Crédités à ce membre du personnel pour cette période.",
+      "tipAllocationHelp": "Crédités à ce membre du personnel pour ce service.",
       "tipAllocations": "Attributions des pourboires",
       "tipOrder": "Commande",
       "thisMonth": "Ce mois-ci",
@@ -1819,7 +1819,7 @@
           "detail": "Terminaux de paiement par carte"
         },
         "waiter_devices": {
-          "label": "Appareils serveurs",
+          "label": "Appareils des serveurs",
           "detail": "Accès des appareils serveurs mobiles"
         },
         "about": {
@@ -1834,7 +1834,7 @@
       }
     },
     "waiterDevices": {
-      "title": "Appareils serveurs",
+      "title": "Appareils des serveurs",
       "helpText": "Appareils serveurs mobiles associés à cette caisse",
       "refresh": "Actualiser",
       "loading": "Chargement des appareils serveurs...",
@@ -1875,16 +1875,16 @@
         "invalidFormat": "Le PIN doit contenir 4 à 6 chiffres"
       },
       "messages": {
-        "saved": "PIN simple enregistré avec succès",
+        "saved": "PIN simple enregistré",
         "saveFailed": "Échec de l'enregistrement du PIN",
-        "cleared": "PIN effacé avec succès",
+        "cleared": "PIN effacé",
         "clearFailed": "Échec de l'effacement du PIN"
       }
     },
     "language": {
       "label": "Langue",
       "helpText": "Votre préférence de langue est enregistrée automatiquement et sera utilisée dans toute l'application.",
-      "changed": "Langue modifiée avec succès"
+      "changed": "Langue modifiée"
     },
     "database": {
       "label": "Réinitialisation d'usine",
@@ -1930,7 +1930,7 @@
       "factoryResetCheckbox": "Je comprends que toutes les données seront définitivement supprimées et que l'application redémarrera",
       "factoryResetConfirmButton": "Réinitialiser",
       "clearingOperational": "Effacement des données opérationnelles...",
-      "operationalCleared": "Toutes les données opérationnelles effacées avec succès",
+      "operationalCleared": "Toutes les données opérationnelles effacées",
       "operationalClearFailed": "Échec de l'effacement des données opérationnelles",
       "management": "Gestion de la base de données",
       "repairToolsTitle": "Corrections sûres",
@@ -1944,8 +1944,8 @@
       "dangerEraseDataButton": "Effacer les données opérationnelles",
       "dangerFactoryResetButton": "Réinitialisation d'usine",
       "repairQueueButton": "Réparer la file",
-      "repairOldOrdersButton": "Nettoyer anciennes commandes",
-      "repairDeletedOrdersButton": "Synchroniser supprimées",
+      "repairOldOrdersButton": "Nettoyer les anciennes commandes",
+      "repairDeletedOrdersButton": "Synchroniser les commandes supprimées",
       "clearSyncQueueLabel": "Vider la file de synchronisation",
       "clearSyncQueueHelp": "Efface les éléments de synchronisation bloqués sans supprimer les données",
       "clearSyncButton": "Effacer",
@@ -1965,7 +1965,7 @@
     "actions": {
       "save": "Enregistrer les paramètres",
       "cancel": "Annuler",
-      "reset": "Réinitialiser par défaut",
+      "reset": "Rétablir les valeurs par défaut",
       "testConnection": "Tester la connexion",
       "clearCache": "Vider le cache",
       "restartApp": "Redémarrer l'application",
@@ -1973,13 +1973,13 @@
       "importSettings": "Importer les paramètres"
     },
     "connection": {
-      "syncPolicy": "Synchroniser la politique"
+      "syncPolicy": "Politique de synchro"
     },
     "deviceSetup": {
       "overview": {
         "statusTitle": "Cette caisse est configurée",
         "statusHelp": "Tout ce que cette caisse peut faire est indiqué ci-dessous en termes simples.",
-        "statusTitleWarning": "La synchronisation nécessite une attention",
+        "statusTitleWarning": "Synchronisation : attention requise",
         "statusHelpWarning": "Lancez une synchronisation pour actualiser cette caisse avant de modifier les appareils ou les paramètres de paiement.",
         "registerType": "Type de caisse",
         "syncState": "Synchro",
@@ -1997,7 +1997,7 @@
       "posKey": "Clé POS",
       "connectionCodeHelp": "Collez le code de connexion depuis votre tableau de bord.",
       "dashboardAddressPlaceholder": "https://your-dashboard.example.com",
-      "syncStatus": "Sync",
+      "syncStatus": "Synchronisation",
       "allowedActions": "Actions autorisées",
       "noAllowedActions": "Aucune action autorisée pour le moment",
       "activeAreas": "Zones actives",
@@ -2009,25 +2009,25 @@
       "syncButton": "Synchroniser les paramètres",
       "synced": "Paramètres synchronisés",
       "syncFailed": "Échec de la synchronisation des paramètres",
-      "ghostModeOff": "Le mode Ghost est désactivé pour cette caisse.",
+      "ghostModeOff": "Le mode fantôme est désactivé pour cette caisse.",
       "enterDashboardAddress": "Saisissez une adresse de tableau de bord valide"
     },
     "managedByAdmin": {
       "title": "Géré par l'admin",
       "helpText": "L'admin contrôle la politique d'accès. Ce terminal contrôle le matériel et le comportement local.",
-      "terminalUnitLabel": "Unité terminal",
+      "terminalUnitLabel": "Unité de terminal",
       "ownerLabel": "Propriétaire {{owner}}",
       "connectionLabel": "Connexion",
       "unassignedTerminal": "Terminal non attribué",
       "noAdminUrl": "Aucune URL admin",
-      "syncStatusLabel": "Sync",
+      "syncStatusLabel": "Synchronisation",
       "enabledFeaturesLabel": "Fonctionnalités activées",
       "noRemoteFeaturesEnabled": "Aucune fonctionnalité distante activée",
       "enabledModulesLabel": "Modules activés",
       "coreModulesOnly": "Modules principaux uniquement",
       "pinResetRequired": "L'admin exige un nouveau PIN local à la prochaine connexion.",
       "pinResetClear": "Aucune réinitialisation de PIN distante en attente.",
-      "syncNow": "Synchroniser la politique",
+      "syncNow": "Politique de synchro",
       "syncHealth": {
         "offline": "Hors ligne",
         "polling": "Interrogation",
@@ -2098,7 +2098,7 @@
       "confirmReprintMessage": "Créer une nouvelle tâche d'impression depuis la copie enregistrée ?",
       "confirmReprintTitle": "Réimprimer la tâche POS ?",
       "countsLabel": "Compteurs de la file d'impression POS",
-      "freshnessLabel": "Actualité de la file d'impression",
+      "freshnessLabel": "Fraîcheur de la file d'impression",
       "hideDetails": "Masquer les détails",
       "hideIssueDetails": "Masquer les détails du problème",
       "initialLoadFailedSafe": "Impossible de charger la file d'impression POS. Actualisez pour réessayer.",
@@ -2154,7 +2154,7 @@
       },
       "entityType": {
         "order_receipt": "Reçu de commande",
-        "kitchen_ticket": "Bon de cuisine",
+        "kitchen_ticket": "Ticket de cuisine",
         "z_report": "Rapport Z",
         "shift_checkout": "Clôture de service",
         "delivery_slip": "Bon de livraison",
@@ -2258,8 +2258,8 @@
       "invalidTimeout": "Le délai d'écran doit être compris entre 1 et 120 minutes",
       "invalidBrightness": "La luminosité doit être comprise entre 10 et 100",
       "title": "Paramètres du terminal",
-      "helpText": "Préférences UX et opérateur locales pour cet appareil",
-      "terminalId": "ID du terminal (legacy)",
+      "helpText": "Préférences locales d'interface et d'utilisation pour cet appareil",
+      "terminalId": "ID du terminal",
       "terminalName": "Nom du terminal",
       "branchId": "ID de la succursale",
       "location": "Emplacement",
@@ -2282,7 +2282,7 @@
       "messages": {
         "featureDisabled": "Cette fonctionnalité est désactivée pour votre type de terminal",
         "orderCreationDisabled": "La création de commandes est désactivée pour ce terminal",
-        "zReportMainOnly": "Le Z-Report ne peut être exécuté que depuis le terminal POS principal",
+        "zReportMainOnly": "Le rapport Z ne peut être lancé que depuis le terminal POS principal",
         "cashDrawerMainOnly": "Les opérations du tiroir-caisse sont gérées par le POS principal",
         "noPaymentMethods": "Aucun mode de paiement disponible pour ce terminal",
         "contactManager": "Contactez votre gérant pour les modifications de configuration.",
@@ -2291,7 +2291,7 @@
     },
     "features": {
       "cashDrawer": "Tiroir-caisse",
-      "zReportExecution": "Z-Report",
+      "zReportExecution": "Rapport Z",
       "cashPayments": "Paiements en espèces",
       "cardPayments": "Paiements par carte",
       "orderCreation": "Création de commandes",
@@ -2362,7 +2362,7 @@
       "quickWizardConfirmPaperResult": "Le papier s'est-il imprimé correctement ?",
       "quickWizardStageVerified": "Fonctionnement confirmé",
       "quickWizardStageRejected": "Cette étape n'est pas encore fiable. Ajustez les paramètres ou laissez le profil non vérifié.",
-      "quickWizardVerifyTitle": "Étape 2 : Vérifier la compatibilité",
+      "quickWizardVerifyTitle": "Étape 2 : vérifier la compatibilité",
       "quickWizardVerifyDraftHint": "Chaque étape utilise uniquement un profil brouillon. L'imprimante n'est enregistrée qu'à la dernière étape.",
       "quickWizardVerificationSummary": "Résumé de la vérification",
       "quickWizardDiscoveredNotPrintableTitle": "Détectée, pas encore imprimable",
@@ -2370,7 +2370,7 @@
       "quickWizardWhyTitle": "Pourquoi cette recommandation",
       "quickWizardProbeOrder": "Ordre de sondage",
       "quickWizardSelectPrinterFirst": "Sélectionnez d'abord une imprimante.",
-      "quickWizardStyleTitle": "Étape 3 : Valeurs par défaut & lisibilité",
+      "quickWizardStyleTitle": "Étape 3 : valeurs par défaut et lisibilité",
       "quickWizardCompatibilityDefaults": "Valeurs par défaut sûres pour les nouveaux profils : modèle classique, mode de rendu texte et sélection automatique du protocole. La prise en charge optionnelle du logo / raster n'est fiable qu'après confirmation.",
       "quickWizardReadability": {
         "label": "Lisibilité",
@@ -2379,8 +2379,8 @@
         "large": "Grand"
       },
       "quickWizardLivePreview": "Aperçu du style en direct",
-      "quickWizardReadabilityHint": "Le réglage fin reste disponible dans les Paramètres avancés. Modifier ultérieurement le protocole, le mode de rendu ou les détails de connexion réinitialisera la vérification.",
-      "quickWizardSaveTitle": "Étape 4 : Enregistrer & Attribuer",
+      "quickWizardReadabilityHint": "Les réglages fins restent accessibles dans les Paramètres experts. Si vous modifiez ensuite le protocole, le mode de rendu ou les détails de connexion, la vérification sera réinitialisée.",
+      "quickWizardSaveTitle": "Étape 4 : enregistrer et attribuer",
       "quickWizardReadyVerifiedTitle": "Prêt à enregistrer comme vérifié",
       "quickWizardReadyUnverifiedTitle": "Prêt à enregistrer comme détecté uniquement",
       "quickWizardReadyVerifiedBody": "Cette imprimante dispose désormais d'un chemin de transport confirmé et peut être utilisée comme imprimante de reçus fonctionnelle.",
@@ -2428,7 +2428,7 @@
       "quickWizardEnqueueFailed": "Impossible de mettre l'échantillon en file. Vérifiez l'imprimante et réessayez.",
       "quickWizardSamplePhase": {
         "idle": "Non démarré",
-        "queued": "En file",
+        "queued": "En file d’attente",
         "printing": "Impression",
         "awaiting_confirmation": "En attente de confirmation papier",
         "confirmed": "Confirmé",
@@ -2452,7 +2452,7 @@
         "branding": "de marque"
       },
       "receiptPrinter": "Imprimante de reçus",
-      "kitchenPrinter": "Imprimante cuisine",
+      "kitchenPrinter": "Imprimante de cuisine",
       "labelPrinter": "Imprimante d'étiquettes",
       "printerName": "Nom de l'imprimante",
       "paperSize": "Format du papier",
@@ -2505,22 +2505,22 @@
       "discoveredPrinters": "Imprimantes découvertes",
       "discoveryFailed": "Échec de la découverte des imprimantes",
       "noPrintersConfigured": "Aucune imprimante configurée",
-      "saved": "Imprimante enregistrée avec succès",
-      "deleted": "Imprimante supprimée avec succès",
+      "saved": "Imprimante enregistrée",
+      "deleted": "Imprimante supprimée",
       "confirmDelete": "Êtes-vous sûr de vouloir supprimer cette imprimante ?",
       "name": "Nom de l'imprimante",
       "namePlaceholder": "Saisir le nom de l'imprimante",
       "role": "Rôle de l'imprimante",
       "roleReceipt": "Imprimante de reçus",
-      "roleKitchen": "Imprimante cuisine",
-      "roleBar": "Imprimante bar",
+      "roleKitchen": "Imprimante de cuisine",
+      "roleBar": "Imprimante de bar",
       "roleLabel": "Imprimante d'étiquettes",
       "characterSet": "Jeu de caractères",
       "characterSetHint": "Sélectionnez le jeu de caractères correspondant à la page de codes par défaut de votre imprimante. Pour le français, essayez PC850 ou PC1252.",
       "greekRenderMode": "Mode de rendu grec",
       "greekRenderModeText": "Texte (utiliser les polices de l'imprimante)",
       "greekRenderModeBitmap": "Bitmap (rendu en image)",
-      "greekRenderModeHint": "Utilisez \"Texte\" si votre imprimante dispose de polices grecques. Utilisez \"Bitmap\" si les caractères grecs s'impriment en charabia ou en carrés.",
+      "greekRenderModeHint": "Utilisez « Texte » si votre imprimante dispose de polices grecques. Utilisez « Bitmap » si les caractères grecs s'impriment en charabia ou sous forme de carrés.",
       "receiptTemplate": "Modèle de reçu",
       "receiptTemplateClassic": "Classique (mise en page texte simple)",
       "receiptTemplateModern": "Moderne (avec en-têtes stylisés)",
@@ -2593,8 +2593,8 @@
       "alreadyConfigured": "Déjà configurée",
       "testPrintSuccess": "Test d'impression réussi",
       "testPrintFailed": "Échec du test d'impression",
-      "greekTestPrint": "Greek Test Print",
-      "greekTestPrintSuccess": "Greek test print sent",
+      "greekTestPrint": "Impression de test grecque",
+      "greekTestPrintSuccess": "Impression de test grecque envoyée",
       "autoDetected": "Configuration auto-détectée",
       "detectedBrand": "Marque",
       "autoCharacterSet": "Jeu de caractères",
@@ -2635,7 +2635,7 @@
       "layoutDensitySpacious": "Spacieuse",
       "layoutDensity": "Densité de mise en page",
       "layoutDensityScaleHint": "Ajustez finement l'espacement autour du préréglage. Des valeurs plus basses resserrent le reçu, plus hautes l'aèrent.",
-      "headerEmphasis": "Emphase de l'en-tête",
+      "headerEmphasis": "Mise en valeur de l'en-tête",
       "headerEmphasisStrong": "Forte",
       "headerEmphasisNormal": "Normale",
       "logoScaleLabel": "Taille du logo",
@@ -2647,7 +2647,7 @@
       "sectionLogo": "Logo",
       "sectionEncoding": "Encodage",
       "sectionCalibration": "Calibrage",
-      "sectionRoleDefaults": "Rôle & Défauts",
+      "sectionRoleDefaults": "Rôle et valeurs par défaut",
       "livePreview": "Aperçu en direct",
       "previewExact": "Aperçu exact",
       "previewApproximate": "Aperçu approximatif",
@@ -2657,23 +2657,23 @@
       "previewRenderModeRasterExact": "Raster exact",
       "previewLoading": "Génération de l'aperçu...",
       "receiptActions": {
-        "sectionTitle": "[NEEDS TRANSLATION] Automatic Receipt Actions",
-        "afterOrder": "[NEEDS TRANSLATION] After order placed",
+        "sectionTitle": "Actions automatiques sur les reçus",
+        "afterOrder": "Après la prise de commande",
         "afterEdit": "Après modification de commande",
         "afterApprove": "Après acceptation d'une commande plateforme",
         "printSandboxOrders": "Imprimer les commandes de test (sandbox)",
-        "paymentReceipt": "[NEEDS TRANSLATION] After payment / checkout",
-        "splitReceipt": "[NEEDS TRANSLATION] After split payment",
-        "shiftClose": "[NEEDS TRANSLATION] After shift close",
-        "driverAssigned": "[NEEDS TRANSLATION] When driver assigned",
-        "zReport": "[NEEDS TRANSLATION] When Z-Report generated",
-        "kitchenTicket": "[NEEDS TRANSLATION] Kitchen ticket",
-        "onComplete": "[NEEDS TRANSLATION] When order completed / delivered",
-        "onCancel": "[NEEDS TRANSLATION] When order canceled",
-        "newTriggersLabel": "[NEEDS TRANSLATION] New triggers"
+        "paymentReceipt": "Après le paiement / l'encaissement",
+        "splitReceipt": "Après un paiement partagé",
+        "shiftClose": "Après la clôture du service",
+        "driverAssigned": "Quand un livreur est assigné",
+        "zReport": "Quand le rapport Z est généré",
+        "kitchenTicket": "Ticket cuisine",
+        "onComplete": "Quand la commande est terminée / livrée",
+        "onCancel": "Quand la commande est annulée",
+        "newTriggersLabel": "Nouveaux déclencheurs"
       },
-      "bodyBoldness": "[NEEDS TRANSLATION] Body Boldness",
-      "bodyBoldnessHint": "[NEEDS TRANSLATION] Controls the weight of body text on printed receipts."
+      "bodyBoldness": "Épaisseur du texte",
+      "bodyBoldnessHint": "Règle l'épaisseur du texte sur les reçus imprimés."
     },
     "display": {
       "title": "Paramètres d'affichage",
@@ -2681,14 +2681,15 @@
       "language": "Langue",
       "fontSize": "Taille de police",
       "brightness": "Luminosité",
-      "screenTimeout": "Mise en veille de l'écran",
+      "screenTimeout": "Délai d'extinction de l'écran",
       "showImages": "Afficher les images",
       "animationsEnabled": "Activer les animations",
       "langEnglish": "Anglais",
       "langGreek": "Grec",
       "langGerman": "Allemand",
       "langFrench": "Français",
-      "langItalian": "Italien"
+      "langItalian": "Italien",
+      "langAlbanian": "Albanais"
     },
     "payment": {
       "title": "Paramètres de paiement",
@@ -2726,7 +2727,7 @@
       "syncInProgress": "Synchronisation en cours..."
     },
     "messages": {
-      "settingsSaved": "Paramètres enregistrés avec succès",
+      "settingsSaved": "Paramètres enregistrés",
       "settingsError": "Échec de l'enregistrement des paramètres",
       "connectionSuccess": "Connexion réussie",
       "connectionError": "Échec de la connexion",
@@ -2736,8 +2737,8 @@
       "restartRequired": "Redémarrage requis pour appliquer les modifications",
       "invalidUrl": "URL invalide",
       "invalidPort": "Numéro de port invalide",
-      "settingsExported": "Paramètres exportés avec succès",
-      "settingsImported": "Paramètres importés avec succès"
+      "settingsExported": "Paramètres exportés",
+      "settingsImported": "Paramètres importés"
     },
     "restaurant": {
       "general": "Paramètres généraux",
@@ -2974,13 +2975,13 @@
         "singleSourceTitle": "Configurer l'identification de l'appelant sur un seul terminal source",
         "singleSourceBody": "Ce terminal capture les appels entrants et les transmet au reste du magasin. N'activez pas la même ligne sur plusieurs terminaux POS.",
         "providerPreset": "Préréglage",
-        "authUsername": "Nom d'utilisateur d'authentification",
+        "authUsername": "ID d'authentification",
         "authUsernamePlaceholder": "Laisser vide pour utiliser le nom d'utilisateur SIP",
         "transport": "Transport",
         "passwordStored": "Un mot de passe est déjà stocké de manière sécurisée sur ce terminal POS. Laissez ce champ vide pour le conserver.",
         "routerUnsupportedTitle": "Les comptes téléphoniques limités au routeur ne sont pas pris en charge dans v1",
         "routerUnsupported": "Si votre FAI/routeur n'affiche les paramètres de téléphonie qu'à l'intérieur du routeur et ne vous fournit pas d'identifiants SIP, ce module d'identification de l'appelant n'est pas pris en charge dans v1.",
-        "unsupportedProvider": "Cette ligne semble être verrouillée derrière un compte routeur d'un FAI. L'identification de l'appelant dans cette version nécessite des identifiants SIP standard ou un accès PBX.",
+        "unsupportedProvider": "Cette ligne semble verrouillée par un compte de box d'opérateur (FAI). Dans cette version, l'identification de l'appelant nécessite des identifiants SIP standard ou un accès PBX.",
         "advanced": "Paramètres avancés",
         "outboundProxy": "Proxy sortant",
         "legacyInfoTitle": "Mode de confiance PBX hérité",
@@ -3038,37 +3039,37 @@
         },
         "routerNoteCompact": "Ligne téléphonique qui n'existe que dans votre box internet, sans nom d'utilisateur ni mot de passe ? Ce n'est pas encore pris en charge.",
         "serverManaged": {
-          "step1": "Step 1 · Server configuration",
-          "step2": "Step 2 · FXO line details",
-          "step3": "Step 3 · Verify reception",
-          "centralTitle": "Managed from Admin Dashboard",
-          "centralBody": "Caller ID is configured centrally. This POS does not need SIP usernames, passwords, or a local save action.",
-          "synced": "Configuration synced",
-          "disabledTitle": "Caller ID is not enabled",
-          "disabledBody": "Enable and assign the line from the Admin Dashboard, then refresh this screen.",
-          "blockedTitle": "Source terminal is restricted",
-          "blockedBody": "IP-trusted FXO capture is currently limited by the server policy. Review the organization in Admin Dashboard.",
-          "loadFailed": "Could not load the central Caller ID configuration.",
-          "sourceLine": "Source line",
-          "receivingHere": "This POS also receives this line",
-          "sourceOnly": "This POS is the source for this line",
-          "readOnly": "Read-only",
-          "changeInDashboard": "Change these values in Admin Dashboard",
-          "profile": "Device profile",
-          "deviceIp": "FXO adapter LAN IP",
-          "channel": "Source channel",
-          "port": "POS listen port",
-          "receiverOnlyTitle": "This POS receives Caller ID from another terminal",
-          "receiverOnlyBody": "Source device details appear only on the assigned source terminal.",
-          "notAssignedTitle": "No Caller ID line assigned",
-          "notAssignedBody": "Assign this terminal as a source or receiver in Admin Dashboard, then refresh.",
-          "readinessTitle": "Local readiness",
-          "listening": "The local FXO listener is running and waiting for incoming calls.",
-          "notListening": "The local listener is not ready yet. Check the assignment and private-network access, then refresh.",
-          "realCallHint": "For the final check, start a readiness test in Admin Dashboard and make one real incoming call.",
-          "callsDetected": "Calls detected in this session",
-          "refresh": "Refresh status",
-          "refreshed": "Caller ID status refreshed."
+          "step1": "Étape 1 · Configuration du serveur",
+          "step2": "Étape 2 · Détails de la ligne FXO",
+          "step3": "Étape 3 · Vérifier la réception",
+          "centralTitle": "Géré depuis le tableau de bord d'administration",
+          "centralBody": "L'identification de l'appelant est configurée de façon centralisée. Ce POS n'a besoin ni de noms d'utilisateur SIP, ni de mots de passe, ni d'enregistrement local.",
+          "synced": "Configuration synchronisée",
+          "disabledTitle": "L'identification de l'appelant n'est pas activée",
+          "disabledBody": "Activez et attribuez la ligne depuis le tableau de bord d'administration, puis actualisez cet écran.",
+          "blockedTitle": "Le terminal source est restreint",
+          "blockedBody": "La capture FXO par IP de confiance est actuellement limitée par la politique du serveur. Vérifiez l'organisation dans le tableau de bord d'administration.",
+          "loadFailed": "Impossible de charger la configuration centrale de l'identification de l'appelant.",
+          "sourceLine": "Ligne source",
+          "receivingHere": "Ce POS reçoit aussi cette ligne",
+          "sourceOnly": "Ce POS est la source de cette ligne",
+          "readOnly": "Lecture seule",
+          "changeInDashboard": "Modifiez ces valeurs dans le tableau de bord d'administration",
+          "profile": "Profil de l'appareil",
+          "deviceIp": "IP locale de l'adaptateur FXO",
+          "channel": "Canal source",
+          "port": "Port d'écoute du POS",
+          "receiverOnlyTitle": "Ce POS reçoit l'identification de l'appelant d'un autre terminal",
+          "receiverOnlyBody": "Les détails de l'appareil source n'apparaissent que sur le terminal défini comme source.",
+          "notAssignedTitle": "Aucune ligne d'identification de l'appelant attribuée",
+          "notAssignedBody": "Définissez ce terminal comme source ou comme terminal de réception dans le tableau de bord d'administration, puis actualisez.",
+          "readinessTitle": "État local",
+          "listening": "L'écouteur FXO local est actif et attend les appels entrants.",
+          "notListening": "L'écouteur local n'est pas encore prêt. Vérifiez l'attribution et l'accès au réseau privé, puis actualisez.",
+          "realCallHint": "Pour la vérification finale, lancez un test de fonctionnement dans le tableau de bord d'administration et passez un véritable appel entrant.",
+          "callsDetected": "Appels détectés pendant cette session",
+          "refresh": "Actualiser le statut",
+          "refreshed": "Statut de l'identification de l'appelant actualisé."
         },
         "status": {
           "listening": "À l'écoute",
@@ -3171,7 +3172,7 @@
     },
     "messages": {
       "syncStarted": "Synchronisation démarrée",
-      "syncComplete": "Synchronisation terminée avec succès",
+      "syncComplete": "Synchronisation terminée",
       "syncFailed": "Échec de la synchronisation : {{error}}",
       "syncPartial": "Synchronisation partielle terminée avec des erreurs",
       "noConnection": "Aucune connexion Internet",
@@ -3207,9 +3208,9 @@
       "expenses": "Dépenses",
       "pending": "en attente",
       "failed": "échoué",
-      "deferred": "Deferred",
-      "queuedRemote": "Queued Remotely",
-      "inProgress": "In Progress",
+      "deferred": "Différé",
+      "queuedRemote": "En file sur le serveur",
+      "inProgress": "En cours",
       "complete": "Terminé",
       "allClear": "Tout en ordre",
       "noFailedItems": "Aucun élément en attente ou échoué à synchroniser",
@@ -3219,34 +3220,34 @@
       "retry": "Réessayer",
       "attempts": "Tentatives",
       "viewPayload": "Voir les données",
-      "failedGroupDesc": "These items stopped syncing and need intervention.",
-      "pendingGroupDesc": "These items are queued locally and still waiting to sync.",
-      "deferredGroupDesc": "These items were delayed by retry or backpressure handling.",
-      "queuedRemoteGroupDesc": "These items were accepted and are still waiting upstream.",
-      "inProgressGroupDesc": "These items are being processed right now.",
-      "queueDetailsUnavailable": "Financial sync still has actionable items.",
-      "queueDetailsUnavailableHint": "The local summary still reports pending or failed financial sync rows, but their queue details were not returned.",
-      "actionableItemsTitle": "Actionable financial queue items",
-      "actionableItemsSubtitle": "Grouped by sync status so pending and blocked rows are visible before they fail.",
-      "operation": "[NEEDS FR TRANSLATION] Λειτουργία",
-      "errorMessage": "[NEEDS FR TRANSLATION] Μήνυμα Σφάλματος",
-      "createdAt": "[NEEDS FR TRANSLATION] Δημιουργήθηκε"
+      "failedGroupDesc": "Ces éléments ne se synchronisent plus et nécessitent une intervention.",
+      "pendingGroupDesc": "Ces éléments sont dans la file d'attente locale et attendent encore d'être synchronisés.",
+      "deferredGroupDesc": "Ces éléments ont été retardés par de nouvelles tentatives ou par la gestion de la surcharge.",
+      "queuedRemoteGroupDesc": "Ces éléments ont été acceptés et attendent encore côté serveur.",
+      "inProgressGroupDesc": "Ces éléments sont en cours de traitement.",
+      "queueDetailsUnavailable": "La synchronisation financière a encore des éléments à traiter.",
+      "queueDetailsUnavailableHint": "Le résumé local signale encore des lignes de synchronisation financière en attente ou en échec, mais le détail de leur file n'a pas été renvoyé.",
+      "actionableItemsTitle": "Éléments à traiter dans la file financière",
+      "actionableItemsSubtitle": "Regroupés par statut de synchronisation pour repérer les lignes en attente ou bloquées avant qu'elles n'échouent.",
+      "operation": "Opération",
+      "errorMessage": "Message d'erreur",
+      "createdAt": "Créé le"
     },
     "health": {
       "label": "État de synchronisation",
-      "healthy": "Healthy",
-      "healthyDetail": "No local sync backlog or failures are currently visible.",
-      "pending": "Pending",
-      "pendingDetail": "Sync work is queued or currently processing.",
-      "blocked": "Blocked",
-      "blockedDetail": "A queue item is stuck and needs intervention.",
-      "error": "Sync Error",
+      "healthy": "Sain",
+      "healthyDetail": "Aucun retard ni échec de synchronisation locale n'est visible pour le moment.",
+      "pending": "En attente",
+      "pendingDetail": "Des synchronisations sont en file d'attente ou en cours de traitement.",
+      "blocked": "Bloqué",
+      "blockedDetail": "Un élément de la file est bloqué et nécessite une intervention.",
+      "error": "Erreur de synchro",
       "errorDetail": "Des éléments de synchronisation en échec empêchent d’obtenir un état à jour.",
-      "stale": "Telemetry Stale",
-      "staleDetail": "Reachability looks fine, but sync telemetry is older than expected.",
-      "staleMismatch": "Transport reachability and backend telemetry disagree.",
-      "staleAge": "Backend telemetry is older than the current local queue state.",
-      "staleMissing": "The queue still has actionable work, but telemetry freshness is unavailable."
+      "stale": "Télémétrie obsolète",
+      "staleDetail": "La connexion semble bonne, mais la télémétrie de synchronisation est plus ancienne que prévu.",
+      "staleMismatch": "L'état de la connexion et la télémétrie du serveur se contredisent.",
+      "staleAge": "La télémétrie du serveur est plus ancienne que l'état actuel de la file locale.",
+      "staleMissing": "La file contient encore des éléments à traiter, mais la date de la dernière télémétrie est inconnue."
     },
     "healthModal": {
       "syncDetails": "Détails de synchronisation",
@@ -3268,7 +3269,7 @@
       "lastChecked": "Dernière vérification : {{value}}",
       "notCheckedYet": "Pas encore vérifié",
       "sections": {
-        "recommendedActions": "Ce que tu dois faire",
+        "recommendedActions": "Ce que vous devez faire",
         "problemExplanation": "Ce qui se passe",
         "supportActions": "Actions d’assistance"
       },
@@ -3276,7 +3277,7 @@
         "healthy": {
           "title": "Tout fonctionne",
           "message": "Le POS est prêt à prendre des commandes.",
-          "messageNoShift": "Le POS est prêt. Démarre un service avant de prendre des commandes."
+          "messageNoShift": "Le POS est prêt. Démarrez un service avant de prendre des commandes."
         },
         "attention": {
           "title": "Vérification requise",
@@ -3284,17 +3285,17 @@
         },
         "supportNeeded": {
           "title": "Assistance requise",
-          "message": "Le POS a enregistré ton travail, mais l’assistance doit vérifier ce terminal."
+          "message": "Le POS a enregistré votre travail, mais l'assistance doit vérifier ce terminal."
         },
         "unavailable": {
           "title": "État indisponible",
-          "message": "Impossible de charger le dernier état du système. Le POS peut continuer à fonctionner en local pendant que tu actualises l’état ou contactes l’assistance."
+          "message": "Impossible de charger le dernier état du système. Le POS peut continuer à fonctionner en local pendant que vous actualisez le statut ou contactez l'assistance."
         }
       },
       "guidance": {
-        "startShift": "Démarre un service pour prendre des commandes.",
-        "contactSupportBeforeOrders": "Contacte l’assistance avant de commencer à prendre des commandes.",
-        "canContinueOrders": "Tu peux continuer à prendre des commandes."
+        "startShift": "Démarrez un service pour prendre des commandes.",
+        "contactSupportBeforeOrders": "Contactez l'assistance avant de commencer à prendre des commandes.",
+        "canContinueOrders": "Vous pouvez continuer à prendre des commandes."
       },
       "problems": {
         "failedPayments": "Certains paiements doivent être vérifiés par l’assistance. Le POS les a enregistrés localement.",
@@ -3305,20 +3306,20 @@
         "printerNotConfigured": "Aucune imprimante n’est configurée pour ce POS. Les commandes restent enregistrées, mais les reçus ne pourront être imprimés qu’après la configuration d’une imprimante.",
         "syncWaiting": "Certaines données attendent d’être synchronisées. Le POS les a enregistrées localement et réessaiera automatiquement.",
         "ready": "Les vérifications des commandes, de la synchronisation, d’Internet et de l’imprimante ont toutes réussi.",
-        "shiftInactive": "Aucun service n’est actif. Démarre un service avant de prendre des commandes."
+        "shiftInactive": "Aucun service n'est en cours. Démarrez un service avant de prendre des commandes."
       },
       "recommendations": {
-        "doNotClearData": "N’efface aucune donnée.",
-        "startShiftWhenReady": "Démarre un service quand tu es prêt.",
-        "checkInternet": "Vérifie la connexion Internet si cet avertissement persiste.",
-        "checkConnection": "Vérifie la connexion si cet avertissement persiste.",
-        "contactSupport": "Contacte l’assistance si elle ne t’a pas encore appelé.",
-        "contactSupportBeforeOrders": "Contacte l’assistance avant de prendre des commandes.",
-        "keepOpen": "Laisse le POS ouvert.",
-        "useNormally": "Continue à utiliser le POS normalement.",
-        "keepTakingOrders": "Continue à prendre des commandes.",
-        "startShift": "Démarre un service avant de prendre des commandes.",
-        "configurePrinter": "Configure une imprimante pour ce POS."
+        "doNotClearData": "N'effacez aucune donnée.",
+        "startShiftWhenReady": "Démarrez un service quand vous êtes prêt.",
+        "checkInternet": "Vérifiez la connexion Internet si cet avertissement persiste.",
+        "checkConnection": "Vérifiez la connexion si cet avertissement persiste.",
+        "contactSupport": "Contactez l'assistance si elle ne vous a pas encore appelé.",
+        "contactSupportBeforeOrders": "Contactez l'assistance avant de prendre des commandes.",
+        "keepOpen": "Laissez le POS ouvert.",
+        "useNormally": "Continuez à utiliser le POS normalement.",
+        "keepTakingOrders": "Continuez à prendre des commandes.",
+        "startShift": "Démarrez un service avant de prendre des commandes.",
+        "configurePrinter": "Configurez une imprimante pour ce POS."
       },
       "services": {
         "orders": "Commandes",
@@ -3360,11 +3361,11 @@
       },
       "support": {
         "sentToast": "Rapport de diagnostic envoyé à l’assistance.",
-        "sendFailedToast": "Impossible d’envoyer les diagnostics à l’assistance. Réessaie plus tard.",
+        "sendFailedToast": "Impossible d'envoyer les diagnostics à l'assistance. Réessayez plus tard.",
         "received": "L’assistance a reçu le rapport de diagnostic.",
         "incidentId": "ID de l’incident : {{id}}",
-        "sendFailed": "Les diagnostics ne peuvent pas être envoyés pour le moment. Le POS continuera à fonctionner et tu pourras réessayer plus tard.",
-        "safeLocal": "Le POS peut continuer à fonctionner en local. Ne le réinitialise pas et n’efface aucune donnée, sauf si l’assistance te le demande."
+        "sendFailed": "Les diagnostics n'ont pas pu être envoyés pour le moment. Le POS continue de fonctionner et vous pourrez réessayer plus tard.",
+        "safeLocal": "Le POS peut continuer à fonctionner en local. Ne le réinitialisez pas et n'effacez aucune donnée, sauf si l'assistance vous le demande."
       },
       "actions": {
         "openStatus": "Ouvrir l’état du système",
@@ -3378,7 +3379,7 @@
       },
       "advanced": {
         "title": "Détails avancés pour l’assistance",
-        "supportOnly": "Utilise cette section uniquement à la demande de l’assistance.",
+        "supportOnly": "N'utilisez cette section qu'à la demande de l'assistance.",
         "healthJson": "JSON de l’état du système",
         "recentSupportReport": "Dernier rapport à l’assistance",
         "fields": {
@@ -3404,10 +3405,10 @@
       },
       "stale": {
         "title": "L’état n’est peut-être plus à jour",
-        "message": "La dernière vérification du système est plus ancienne que prévu. Actualise l’état avant de te fier à ces informations."
+        "message": "La dernière vérification du système est plus ancienne que prévu. Actualisez le statut avant de vous fier à ces informations."
       },
       "failure": {
-        "safeError": "La synchronisation n’a pas pu se terminer. Ouvre les détails avancés ou contacte l’assistance.",
+        "safeError": "La synchronisation n'a pas pu se terminer. Ouvrez les détails avancés ou contactez l'assistance.",
         "titleValue": "{{entity}} — {{operation}}",
         "recordValue": "Enregistrement : {{id}}",
         "errorValue": "Erreur : {{value}}",
@@ -3421,7 +3422,7 @@
         "unknownTable": "Données",
         "unavailableValue": "Indisponible",
         "unavailableTime": "Heure indisponible",
-        "noFailureDetails": "Cet élément n’a pas pu être synchronisé et aucun autre détail n’est disponible. Ouvre le Recovery Center s’il reste bloqué."
+        "noFailureDetails": "Cet élément n'a pas pu être synchronisé et aucun détail supplémentaire n'est disponible. Ouvrez le Centre de récupération s'il reste bloqué."
       },
       "operation": {
         "insert": "Création",
@@ -3431,23 +3432,23 @@
       }
     },
     "blocker": {
-      "title": "Current blocker",
-      "entity": "Entity",
-      "retryProgress": "Retry",
-      "status": "Status",
-      "nextRetry": "Next retry",
-      "retryOrderNow": "Retry Order Now",
-      "retrying": "Retrying...",
-      "retryScheduled": "Order retry scheduled",
-      "retryFailed": "Failed to retry blocked order",
+      "title": "Blocage actuel",
+      "entity": "Entité",
+      "retryProgress": "Réessayer",
+      "status": "Statut",
+      "nextRetry": "Prochaine tentative",
+      "retryOrderNow": "Relancer la commande maintenant",
+      "retrying": "Nouvelle tentative...",
+      "retryScheduled": "Relance de la commande programmée",
+      "retryFailed": "Impossible de relancer la commande bloquée",
       "classification": {
-        "backpressure": "Backpressure",
-        "transient": "Transient",
+        "backpressure": "Surcharge",
+        "transient": "Temporaire",
         "permanent": "Permanent",
-        "unknown": "Unknown"
+        "unknown": "Inconnu"
       },
-      "recoveryTitle": "Recovery in progress",
-      "recoveryDetail": "This queue item is retryable and will be reprocessed automatically."
+      "recoveryTitle": "Récupération en cours",
+      "recoveryDetail": "Cet élément de la file peut être relancé et sera retraité automatiquement."
     },
     "system": {
       "syncBacklog": "File d'attente de synchronisation",
@@ -3458,7 +3459,7 @@
       "configured": "{{count}} configurée(s)",
       "notConfigured": "Non configurée",
       "defaultPrinter": "Par défaut",
-      "lastZReport": "Dernier Z-Report",
+      "lastZReport": "Dernier Rapport Z",
       "noReports": "Aucun rapport généré",
       "database": "Base de données",
       "lastSyncByEntity": "Dernière synchronisation par entité",
@@ -3481,7 +3482,7 @@
       "order": "Commande",
       "payment": "Paiement",
       "shift": "Service",
-      "zReport": "Z-Report",
+      "zReport": "Rapport Z",
       "paymentAdjustment": "Remboursement/Annulation",
       "shiftExpense": "Dépense de service",
       "driverEarning": "Revenu livreur",
@@ -3522,20 +3523,20 @@
       "versionsSubtitle": "Versions et rôle du terminal actuellement chargés sur cet appareil.",
       "financialSummaryTitle": "Synchronisation financière",
       "financialSummarySubtitle": "Revenus livreur, paiements du personnel et dépenses en attente de synchronisation depuis ce terminal.",
-      "parityProcessorTitle": "Processeur parity",
+      "parityProcessorTitle": "Processeur de parité",
       "missingAdminUrl": "URL admin",
       "missingApiKey": "Clé API POS",
       "parityCredentialsMissing": "Identifiants manquants",
-      "parityCredentialsMissingDetail": "{{items}} doivent être configurés avant que la file parity puisse se vider.",
-      "parityNoAttempts": "Aucune tentative parity enregistrée",
-      "parityNoAttemptsDetail": "Le processeur parity n'a encore signalé aucun démarrage ni aucune nouvelle tentative.",
+      "parityCredentialsMissingDetail": "{{items}} doivent être configurés pour que la file de parité puisse se vider.",
+      "parityNoAttempts": "Aucune tentative de parité enregistrée",
+      "parityNoAttemptsDetail": "Le processeur de parité n'a encore signalé aucun démarrage ni aucune nouvelle tentative.",
       "parityRunning": "En cours",
-      "parityRunningDetail": "Le terminal est en train de vider la file parity.",
-      "parityFailed": "La dernière synchro parity a échoué",
-      "parityFailedDetail": "La dernière tentative de synchro parity s'est terminée par une erreur.",
+      "parityRunningDetail": "Le terminal est en train de vider la file de parité.",
+      "parityFailed": "La dernière synchro de parité a échoué",
+      "parityFailedDetail": "La dernière tentative de synchro de parité s'est terminée par une erreur.",
       "paritySkipped": "Synchronisation ignorée",
-      "paritySkippedDetail": "La synchro parity n'a pas pu démarrer car les identifiants du terminal sont incomplets.",
-      "parityCompleted": "Dernière synchro parity terminée",
+      "paritySkippedDetail": "La synchro de parité n'a pas pu démarrer car les identifiants du terminal sont incomplets.",
+      "parityCompleted": "Dernière synchro de parité terminée",
       "parityCompletedDetail": "{{processed}} élément(s) traités ; {{remaining}} restants.",
       "advancedTitle": "Diagnostics avancés",
       "advancedSubtitle": "Signaux système détaillés pour un dépannage plus poussé.",
@@ -3576,7 +3577,7 @@
       "retryQueueRow": "Relancer la ligne de file",
       "retryQueueRowSuccess": "La ligne de file a été planifiée pour une nouvelle tentative.",
       "retryFinancialAllSuccess": "Les lignes de synchronisation financière échouées ont été planifiées pour une nouvelle tentative.",
-      "repairPaymentsSuccess": "La réparation des paiements a été planifiée avec succès.",
+      "repairPaymentsSuccess": "La réparation des paiements a été planifiée.",
       "lastAction": "Dernière action",
       "ordersSection": "Commandes",
       "paymentsSection": "Paiements",
@@ -3656,7 +3657,7 @@
     },
     "success": {
       "title": "Succès",
-      "message": "Opération terminée avec succès",
+      "message": "Opération terminée",
       "close": "Fermer"
     },
     "loading": {
@@ -3813,7 +3814,7 @@
       "deleteCustomer": "Supprimer le client",
       "confirmDelete": "Êtes-vous sûr de vouloir supprimer ce client ? Cette action est irréversible.",
       "deleteFailed": "Échec de la suppression du client",
-      "deleteSuccess": "Client supprimé avec succès",
+      "deleteSuccess": "Client supprimé",
       "clickToSelect": "Cliquez sur la fiche pour continuer avec ce client",
       "addresses": "Adresses",
       "continue": "Continuer",
@@ -3921,10 +3922,10 @@
       "checkOutTitle": "Pointage de départ du personnel",
       "selectStaff": "Sélectionner un membre du personnel",
       "loadingStaff": "Chargement du personnel...",
-      "noStaffAvailable": "Aucun personnel disponible pour la connexion au TPV",
+      "noStaffAvailable": "Aucun membre du personnel disponible pour se connecter au POS",
       "enterPIN": "Saisir le PIN",
       "selectRole": "Sélectionner le rôle",
-      "roleStepLabel": "Role",
+      "roleStepLabel": "Rôle",
       "openingCash": "Espèces d'ouverture",
       "authenticating": "Authentification en cours...",
       "invalidPIN": "PIN invalide",
@@ -3932,9 +3933,9 @@
       "busyTerminalFallback": "un autre terminal",
       "unavailable": "Indisponible",
       "noStaffSelected": "Veuillez sélectionner un membre du personnel",
-      "shiftStarted": "Service démarré avec succès",
+      "shiftStarted": "Service démarré",
       "drawerContinuityWarning": "Écart de caisse : fermée avec {{previous}} € mais ouverte avec {{opening}} €. Recomptez la caisse avant de continuer.",
-      "shiftEnded": "Service terminé avec succès",
+      "shiftEnded": "Service terminé",
       "failedToLoad": "Échec du chargement de la liste du personnel. Veuillez réessayer.",
       "shiftSummary": "Résumé du service",
       "duration": "Durée : {{duration}}",
@@ -3970,7 +3971,7 @@
       "actualCashReturnedRequired": "Saisissez les espèces réellement remises à la caisse avant la clôture.",
       "invalidOpeningCash": "Veuillez saisir un montant d'espèces d'ouverture valide (0 ou plus)",
       "invalidStartingAmount": "Veuillez saisir un montant de départ valide (0 ou plus)",
-      "zeroCashConfirmTitle": "Confirmer zéro espèce d'ouverture",
+      "zeroCashConfirmTitle": "Confirmer des espèces d'ouverture à 0 €",
       "zeroCashConfirmMessage": "Vous démarrez votre service avec 0 € dans le tiroir-caisse. Êtes-vous sûr de vouloir continuer ?",
       "confirmZeroCash": "Oui, démarrer avec 0 €",
       "electronRequired": "Cette fonctionnalité nécessite l'application POS de bureau. Ouvrez ce terminal dans l'application installée.",
@@ -4005,7 +4006,7 @@
       "totalCashAmount": "Montant total en espèces",
       "addExpense": "Ajouter une dépense",
       "noExpensesRecorded": "Aucune dépense enregistrée pour ce service",
-      "driverCheckout": "Clôture livreur",
+      "driverCheckout": "Clôture du livreur",
       "startingAmount": "Montant de départ (du tiroir)",
       "cashEarned": "Espèces encaissées",
       "driverPaymentOwed": "Paiement dû au livreur",
@@ -4039,16 +4040,16 @@
       "tableDetails": "Détails des tables",
       "tableNumber": "Table",
       "tableConsumption": "Consommation de la table",
-      "ordersCountValue": "{{count}} orders",
+      "ordersCountValue": "{{count}} commandes",
       "paymentHistory": "Historique des paiements",
-      "paymentHistoryToday": "Today's Payments",
+      "paymentHistoryToday": "Paiements du jour",
       "todayTotal": "Total du jour : {{amount}} €",
-      "paymentRecorded": "Payment recorded successfully",
-      "paymentFailed": "Failed to record payment",
-      "selectStaffPlaceholder": "-- Select Staff --",
-      "paymentType": "Payment Type",
-      "amountLabel": "Amount",
-      "notesOptional": "Notes (optional)",
+      "paymentRecorded": "Paiement enregistré",
+      "paymentFailed": "Impossible d'enregistrer le paiement",
+      "selectStaffPlaceholder": "-- Sélectionner un employé --",
+      "paymentType": "Type de paiement",
+      "amountLabel": "Montant",
+      "notesOptional": "Notes (facultatif)",
       "paymentTypes": {
         "wage": "Salaire",
         "tip": "Pourboire",
@@ -4132,11 +4133,11 @@
       "deletePayment": "Supprimer",
       "deleteStaffPaymentConfirmTitle": "Supprimer le paiement du personnel",
       "deleteStaffPaymentConfirmMessage": "Supprimer \"{{name}}\" ? Les totaux de clôture du caissier seront recalculés immédiatement.",
-      "recordedThisSession": "Recorded This Session",
-      "sessionTotal": "Session Total",
+      "recordedThisSession": "Enregistrés pendant cette session",
+      "sessionTotal": "Total de la session",
       "staffPaymentsTitle": "Décaissements du personnel",
       "totalStaffPayments": "Total des décaissements du personnel",
-      "paymentUpdated": "Paiement mis à jour avec succès",
+      "paymentUpdated": "Paiement mis à jour",
       "paymentDeleted": "Paiement supprimé et totaux de clôture recalculés",
       "paymentUpdateFailed": "Échec de la mise à jour du paiement",
       "paymentDeleteFailed": "Échec de la suppression du paiement",
@@ -4158,17 +4159,17 @@
       "enterPinAction": "Saisir le PIN",
       "enterPinHelper": "Utilisez le PIN POS à 4 chiffres de l'employé pour continuer.",
       "roleSelectionHelper": "Choisissez le rôle de ce service avant de continuer.",
-      "cashierFirstCheckInRequired": "Le premier check-in de cette journée de travail doit être effectué par un caissier.",
-      "cashierFirstCheckInHelper": "Démarrez d'abord un service de caisse. Les autres rôles se débloquent après le check-in du caissier.",
+      "cashierFirstCheckInRequired": "Le premier pointage de la journée doit être celui d'un caissier.",
+      "cashierFirstCheckInHelper": "Démarrez d'abord un service de caisse. Les autres rôles se débloquent une fois que le caissier a pointé.",
       "cashierFirstCheckInBlocked": "Cet employé n'a pas de rôle de caissier. Revenez en arrière et choisissez d'abord un caissier.",
-      "cashierFirstRoleLockedHelper": "Un caissier doit démarrer la journée de travail en cours avant que ce rôle puisse faire son check-in.",
+      "cashierFirstRoleLockedHelper": "Un caissier doit ouvrir la journée en cours avant que ce rôle puisse pointer.",
       "roleLockedUntilCashier": "Verrouillé jusqu'au démarrage du caissier",
       "cashierRoleHelper": "Service financier avec comptage du tiroir et rapprochement en fin de service.",
       "driverRoleHelper": "Service de livraison. Le fonds de départ venant du caissier actif est facultatif.",
       "serverRoleHelper": "Service en salle. Le fonds de départ venant du caissier actif est facultatif.",
       "kitchenRoleHelper": "Service opérationnel uniquement. Aucun montant de caisse n'est requis.",
       "managerRoleHelper": "Service de supervision uniquement. Démarre immédiatement sans montant de caisse.",
-      "checkInSummaryLabel": "Résumé du check-in",
+      "checkInSummaryLabel": "Résumé du pointage",
       "cashierOpeningCashTitle": "Saisissez le fonds d'ouverture de caisse",
       "cashierOpeningCashHelper": "Comptez la caisse et saisissez le montant qui démarre ce service de caisse.",
       "driverStartingCashTitle": "Saisissez le fonds de départ du livreur",
@@ -4179,15 +4180,15 @@
       "startShift": "Démarrer le service",
       "noCashierWarning": "Aucun caissier actif n'est disponible. Vous pouvez continuer uniquement avec €0.",
       "activeSince": "Actif depuis {{time}}",
-      "pinNotConfigured": "No POS PIN is configured for this staff member. Please set it in Admin first.",
-      "posLoginDisabled": "This staff member is not allowed to log in on POS.",
-      "staffAuthServerUpgradeRequired": "This POS is connected to an older Admin deployment that does not send staff PIN auth data yet. Deploy the latest Admin and reopen POS.",
-      "staffAuthUnavailable": "Staff auth data is not available offline yet. Open the staff list while online first.",
-      "cashierCashHelper": "[NEEDS FR TRANSLATION] Εισάγετε το ποσό στο ταμείο",
-      "driverCashHelper": "[NEEDS FR TRANSLATION] Προαιρετικό: Ποσό από το ταμείο. Εισάγετε 0 για παράλειψη.",
-      "startingCashOptional": "[NEEDS FR TRANSLATION] Αρχικά Μετρητά (Προαιρετικό)",
-      "confirmZeroTitle": "[NEEDS FR TRANSLATION] Επιβεβαίωση Μηδενικών Τελικών Μετρητών",
-      "confirmZeroMessage": "[NEEDS FR TRANSLATION] Είστε σίγουροι ότι θέλετε να κλείσετε τη βάρδια με 0,00€ τελικά μετρητά;",
+      "pinNotConfigured": "Aucun PIN POS n'est configuré pour ce membre du personnel. Définissez-le d'abord dans l'Admin.",
+      "posLoginDisabled": "Ce membre du personnel n'est pas autorisé à se connecter au POS.",
+      "staffAuthServerUpgradeRequired": "Ce POS est connecté à une ancienne version de l'Admin qui n'envoie pas encore les données d'authentification par PIN du personnel. Déployez la dernière version de l'Admin, puis rouvrez le POS.",
+      "staffAuthUnavailable": "Les données d'authentification du personnel ne sont pas encore disponibles hors ligne. Ouvrez d'abord la liste du personnel en étant en ligne.",
+      "cashierCashHelper": "Saisissez le montant présent dans le tiroir-caisse",
+      "driverCashHelper": "Facultatif : montant pris dans le tiroir-caisse. Saisissez 0 pour passer.",
+      "startingCashOptional": "Espèces de départ (facultatif)",
+      "confirmZeroTitle": "Confirmer des espèces de clôture à 0 €",
+      "confirmZeroMessage": "Voulez-vous vraiment clôturer le service avec 0,00 € d'espèces de clôture ?",
       "cashToHandToCashier": "Espèces à remettre à la caisse",
       "cashReturnHelper": "Remettez ces espèces à la caisse. Les pourboires sont enregistrés séparément.",
       "cashActuallyHandedOver": "Espèces réellement remises",
@@ -4219,7 +4220,7 @@
       }
     },
     "zReport": {
-      "title": "Z-Report - {{date}}",
+      "title": "Rapport Z - {{date}}",
       "clarity": {
         "totalSales": "Ventes totales",
         "expectedCash": "Espèces attendues",
@@ -4295,7 +4296,7 @@
       "liveCurrentWindow": "Fenêtre actuelle en direct",
       "historicalPreview": "Aperçu historique",
       "periodSince": "Période depuis : {{date}} {{time}}",
-      "loadFailed": "Échec du chargement du Z-Report",
+      "loadFailed": "Échec du chargement du Rapport Z",
       "loading": "Chargement du rapport…",
       "refresh": "Actualiser le rapport",
       "closeoutChecklist": "Checklist de clôture",
@@ -4451,10 +4452,10 @@
       "submitToAdmin": "Soumettre à l'administration",
       "completePendingLocalSubmit": "Clore localement la journée précédente",
       "submitting": "Soumission en cours…",
-      "submitSuccess": "Soumis avec succès. Fin de journée et déconnexion en cours…",
-      "submitSuccessQueued": "Day closed locally. Z-report queued for admin sync. Logging out…",
+      "submitSuccess": "Soumis. Fin de journée et déconnexion en cours…",
+      "submitSuccessQueued": "Journée clôturée localement. Rapport Z en file d'attente pour la synchronisation avec l'admin. Déconnexion…",
       "pendingLocalSubmitQueued": "La journée précédente a été clôturée localement. Le rapport Z est en file d'attente pour la synchronisation admin. Déconnexion…",
-      "submitSuccessSynced": "Day closed locally. Z-report already synced to admin. Logging out…",
+      "submitSuccessSynced": "Journée clôturée localement. Rapport Z déjà synchronisé avec l'admin. Déconnexion…",
       "submitFailed": "Échec : {{error}}",
       "resolveBlockerCash": "Enregistrer le Paiement Espèces",
       "resolveBlockerCard": "Enregistrer le Paiement Carte",
@@ -4464,7 +4465,7 @@
       "unknownError": "Erreur inconnue",
       "submissionFailed": "Échec de la soumission",
       "close": "Fermer",
-      "pendingDateLocked": "This date is locked because the previous business day is already closed and still waiting for local Z-report submission.",
+      "pendingDateLocked": "Cette date est verrouillée, car la journée précédente est déjà clôturée et attend encore l'envoi local de son rapport Z.",
       "pendingLocalSubmitTitle": "La journée précédente est clôturée mais attend encore la soumission locale du Z",
       "pendingLocalSubmitHelp": "Utilisez l'action principale ci-dessous pour terminer localement la journée précédente. La date reste verrouillée afin d'éviter l'envoi d'une mauvaise journée d'activité.",
       "paymentIntegrityResolveHelper": "Corrigez ici le solde manquant. La correction est enregistrée sur la caisse d'origine de la journée avant de réessayer le rapport Z."
@@ -4475,11 +4476,11 @@
       "drawerImpactNote": "Les deux onglets ci-dessous réduisent la caisse active de ce terminal.",
       "activeCashier": "Caisse active du caissier",
       "noActiveCashier": "Aucune caisse active du caissier",
-      "noActiveCashierDetail": "Démarrez un shift caissier sur ce terminal avant d'enregistrer des sorties de caisse.",
+      "noActiveCashierDetail": "Démarrez un service de caisse sur ce terminal avant d'enregistrer des sorties de caisse.",
       "cashierLabel": "Caissier",
       "branchLabel": "Site",
       "terminalLabel": "Terminal",
-      "shiftStartedLabel": "Début du shift",
+      "shiftStartedLabel": "Début du service",
       "tabs": {
         "expenses": "Dépenses",
         "staffPayments": "Paiements du personnel",
@@ -4518,18 +4519,18 @@
       "staffPlaceholder": "Sélectionnez un membre du personnel",
       "notes": "Notes",
       "notesPlaceholder": "Note facultative pour salaire, pourboire, avance ou prime.",
-      "staffPaymentHelper": "Utilisez ceci pour un auto-paiement du caissier ou un paiement d'un autre employé depuis la caisse.",
+      "staffPaymentHelper": "Utilisez cette option pour un paiement au caissier lui-même ou à un autre membre du personnel depuis le tiroir-caisse. Les totaux du tiroir sont mis à jour immédiatement après correction.",
       "totalExpenses": "Total des dépenses",
       "totalStaffPayments": "Total des paiements du personnel",
       "combinedOutflow": "Sortie totale de caisse",
       "combinedOutflowHelper": "Dépenses et paiements du personnel déjà imputés à ce caissier",
-      "sessionExpenseCount": "{{count}} dépenses enregistrées sur ce shift",
-      "sessionPaymentCount": "{{count}} paiements enregistrés sur ce shift",
+      "sessionExpenseCount": "{{count}} dépenses saisies sur ce service",
+      "sessionPaymentCount": "{{count}} paiements enregistrés sur ce service",
       "recentExpenses": "Dépenses récentes",
       "recentStaffPayments": "Paiements récents du personnel",
       "latestEntries": "Dernières écritures",
       "activityTitle": "Activité de caisse",
-      "activitySubtitle": "Dépenses et paiements du personnel enregistrés sur ce shift caissier",
+      "activitySubtitle": "Dépenses et paiements du personnel enregistrés sur ce service de caisse",
       "activityHelper": "Sortie totale en direct pour le shift caissier résolu",
       "noExpenses": "Aucune dépense enregistrée pour l'instant",
       "noExpensesDetail": "Les dépenses enregistrées apparaîtront ici immédiatement après l'enregistrement.",
@@ -4563,15 +4564,15 @@
       "noStaffSelected": "Sélectionnez un membre du personnel pour continuer",
       "staffDirectoryFailed": "Impossible de charger le répertoire du personnel",
       "staffDirectoryFallback": "Le répertoire du personnel est indisponible. Seul le caissier peut être sélectionné pour le moment.",
-      "cashierShiftIdLabel": "Shift caissier",
+      "cashierShiftIdLabel": "Service de caisse",
       "cashierShiftSyncStatusLabel": "Statut local de synchronisation",
-      "cashierShiftSyncDelayedTitle": "Synchronisation du shift caissier retardée",
-      "cashierShiftSyncDelayedWarning": "Ce shift caissier est toujours en cours de synchronisation. Les nouvelles dépenses et les paiements du personnel restent locaux jusqu'à ce que le shift atteigne le serveur.",
-      "cashierShiftSyncFailedTitle": "La synchronisation du shift caissier nécessite une attention",
+      "cashierShiftSyncDelayedTitle": "Synchronisation du service de caisse retardée",
+      "cashierShiftSyncDelayedWarning": "Ce service de caisse est encore en cours de synchronisation. Les nouvelles dépenses et les paiements du personnel restent en local jusqu'à ce que le service arrive sur le serveur.",
+      "cashierShiftSyncFailedTitle": "Synchronisation du service de caisse : attention requise",
       "cashierShiftSyncOfflineReason": "Le terminal est hors ligne ou ne peut pas joindre le serveur d'administration pour le moment.",
       "cashierShiftSyncRetryReason": "Nouvelle tentative planifiée à {{time}}.",
       "cashierShiftSyncNotConfiguredReason": "Ce terminal n'est pas encore entièrement configuré pour la synchronisation.",
-      "cashierShiftSyncUnknownReason": "Ce shift caissier est enregistré localement, mais sa synchronisation nécessite une attention."
+      "cashierShiftSyncUnknownReason": "Ce service de caisse est enregistré en local, mais sa synchronisation nécessite votre attention."
     },
     "orderCancellation": {
       "title": "Annuler des commandes",
@@ -4634,7 +4635,7 @@
       "minimumOrder": "Commande minimum",
       "estimatedTime": "Temps estimé",
       "validationError": "Impossible de valider l'adresse de livraison. Veuillez réessayer.",
-      "addressOutsideArea": "Cette adresse est en dehors de notre zone de livraison. Veuillez utiliser le remplacement ou choisir l'emporter.",
+      "addressOutsideArea": "Cette adresse est en dehors de notre zone de livraison. Utilisez la dérogation ou choisissez « À emporter ».",
       "nameRequired": "Le nom est obligatoire",
       "phoneRequired": "Le numéro de téléphone est obligatoire",
       "emailInvalid": "Veuillez saisir une adresse e-mail valide",
@@ -4646,8 +4647,8 @@
       "saveChanges": "Enregistrer les modifications",
       "saving": "Enregistrement en cours...",
       "cancel": "Annuler",
-      "success": "Client ajouté avec succès",
-      "addressAdded": "Adresse ajoutée avec succès",
+      "success": "Client ajouté",
+      "addressAdded": "Adresse ajoutée",
       "addressSaveFailed": "Impossible d’enregistrer l’adresse. Veuillez réessayer.",
       "addressSaveTimedOut": "L’enregistrement de l’adresse a expiré. Veuillez réessayer.",
       "failed": "Échec de la création du client. Veuillez réessayer."
@@ -4676,10 +4677,10 @@
       "floorRequired": "L’étage est obligatoire",
       "nameOnRingerRequired": "Le nom sur l’interphone est obligatoire",
       "resolveValidation": "Veuillez résoudre les problèmes de validation de livraison avant de continuer",
-      "deliveryNotAvailable": "La livraison n'est pas disponible à cette adresse. Veuillez utiliser le remplacement ou choisir l'emporter.",
+      "deliveryNotAvailable": "La livraison n'est pas possible à cette adresse. Utilisez la dérogation ou choisissez « À emporter ».",
       "cancel": "Annuler",
       "save": "Enregistrer",
-      "saveOverride": "Enregistrer (Remplacement appliqué)",
+      "saveOverride": "Enregistrer (dérogation appliquée)",
       "saveValidation": "Enregistrer (Validation requise)"
     },
     "editOptions": {
@@ -4841,15 +4842,15 @@
       "unavailable": "Indisponible",
       "title": "Paramètres",
       "connectionSettings": "Paramètres de connexion",
-      "terminalId": "ID du terminal",
+      "terminalId": "ID du terminal (ancien)",
       "terminalPlaceholder": "terminal-xxxx",
-      "apiKey": "Clé API du TPV (legacy)",
+      "apiKey": "Clé API POS (ancienne)",
       "apiKeyPlaceholder": "rempli depuis le code de connexion ou collez une ancienne clé",
       "test": "Tester",
       "save": "Enregistrer",
       "pasteBoth": "Coller le code de connexion",
       "pasteBothTooltip": "Collez le code de connexion complet depuis le tableau de bord d'administration",
-      "pastedBoth": "Code de connexion analysé avec succès",
+      "pastedBoth": "Code de connexion analysé",
       "pastedPartial": "Collage partiel - certains champs ont été remplis",
       "pasteFormatError": "Impossible d'analyser le presse-papiers. Un code de connexion complet est attendu",
       "pasteError": "Échec de la lecture du presse-papiers",
@@ -4882,7 +4883,7 @@
       "connectionSaved": "Paramètres de connexion enregistrés",
       "pinMinLength": "Le PIN doit comporter au moins 4 chiffres",
       "pinNoMatch": "Les PIN ne correspondent pas",
-      "pinSaved": "PIN enregistré avec succès",
+      "pinSaved": "PIN enregistré",
       "languageSaved": "Préférence de langue enregistrée",
       "themeUpdated": "Thème mis à jour",
       "enterToTest": "Collez le code de connexion ou renseignez les champs legacy du terminal pour tester",
@@ -4900,7 +4901,7 @@
       "sessionTimeoutSaved": "Délai d'expiration de session défini à {{minutes}} minutes",
       "sessionTimeoutInvalid": "Le délai doit être entre 1 et 480 minutes",
       "timeoutDuration": "Durée du délai",
-      "timeoutRange": "1-480 minutes"
+      "timeoutRange": "1 à 480 minutes"
     },
     "customerHistory": {
       "title": "Historique des commandes",
@@ -4915,36 +4916,36 @@
       "noPayments": "Aucun paiement trouvé pour cette commande",
       "tableSettledTitle": "Payée sur l'addition de table",
       "tableSettledBody": "Cette commande a été réglée via sa session de table. Il n'y a donc aucun paiement au niveau commande à annuler ou rembourser ici. Rouvrez l'addition de table pour ajuster ou rembourser le paiement.",
-      "activePayments": "Active Payments",
-      "closedPayments": "Voided / Refunded",
-      "adjustmentHistory": "Adjustment History",
-      "statusCompleted": "Completed",
-      "statusVoided": "Voided",
-      "statusRefunded": "Refunded",
-      "voidButton": "Void",
-      "refundButton": "Refund",
-      "voidWarning": "This will fully reverse the payment of",
-      "confirmVoid": "Confirm Void",
-      "confirmRefund": "Confirm Refund",
-      "refundAmount": "Refund Amount",
-      "maxRefund": "Maximum refundable: {{amount}}",
-      "reason": "Reason",
-      "reasonPlaceholder": "Reason for this adjustment...",
-      "reasonRequired": "A reason is required",
-      "invalidAmount": "Enter a valid refund amount",
-      "exceedsBalance": "Refund amount exceeds remaining balance of {{amount}}",
-      "refundLabel": "Refund",
-      "voidLabel": "Void",
-      "refunded": "Refunded",
-      "remaining": "Remaining",
-      "cashierCash": "Cashier drawer",
-      "driverCash": "Driver shift cash",
-      "cardRefund": "Card Refund",
-      "loadFailed": "Failed to load payment data",
-      "refundSuccess": "Refund recorded successfully",
-      "refundFailed": "Refund failed",
-      "voidSuccess": "Payment voided successfully",
-      "voidFailed": "Void failed"
+      "activePayments": "Paiements actifs",
+      "closedPayments": "Annulés / remboursés",
+      "adjustmentHistory": "Historique des ajustements",
+      "statusCompleted": "Terminé",
+      "statusVoided": "Annulé",
+      "statusRefunded": "Remboursé",
+      "voidButton": "Annulation",
+      "refundButton": "Remboursement",
+      "voidWarning": "Cela annulera entièrement le paiement de",
+      "confirmVoid": "Confirmer l'annulation",
+      "confirmRefund": "Confirmer le remboursement",
+      "refundAmount": "Montant du remboursement",
+      "maxRefund": "Maximum remboursable : {{amount}}",
+      "reason": "Motif",
+      "reasonPlaceholder": "Motif de cet ajustement...",
+      "reasonRequired": "Un motif est obligatoire",
+      "invalidAmount": "Saisissez un montant de remboursement valide",
+      "exceedsBalance": "Le montant du remboursement dépasse le solde restant de {{amount}}",
+      "refundLabel": "Remboursement",
+      "voidLabel": "Annulation",
+      "refunded": "Remboursé",
+      "remaining": "Restant",
+      "cashierCash": "Tiroir-caisse",
+      "driverCash": "Espèces du livreur",
+      "cardRefund": "Remboursement par carte",
+      "loadFailed": "Impossible de charger les données de paiement",
+      "refundSuccess": "Remboursement enregistré",
+      "refundFailed": "Remboursement échoué",
+      "voidSuccess": "Paiement annulé",
+      "voidFailed": "Annulation échouée"
     }
   },
   "errors": {
@@ -5010,7 +5011,7 @@
     "searchPlaceholder": "Rechercher des ingrédients...",
     "noItems": "Aucun article trouvé dans l'inventaire",
     "adjustStock": "Ajuster le stock",
-    "adjustmentSaved": "Stock ajusté avec succès",
+    "adjustmentSaved": "Stock ajusté",
     "reason": "Motif",
     "notes": "Notes",
     "notesPlaceholder": "Ajouter des notes sur cet ajustement...",
@@ -5098,12 +5099,12 @@
       "noItems": "Aucun article en inventaire",
       "lowStockAlert": "{{count}} articles en stock faible",
       "outOfStockAlert": "{{count}} articles en rupture de stock",
-      "stockUpdated": "Stock mis à jour avec succès",
-      "stockAdjusted": "Stock ajusté avec succès",
-      "wasteRecorded": "Pertes enregistrées avec succès",
-      "deliveryRecorded": "Livraison enregistrée avec succès",
+      "stockUpdated": "Stock mis à jour",
+      "stockAdjusted": "Stock ajusté",
+      "wasteRecorded": "Pertes enregistrées",
+      "deliveryRecorded": "Livraison enregistrée",
       "itemAdded": "Article ajouté à l'inventaire",
-      "itemUpdated": "Article mis à jour avec succès",
+      "itemUpdated": "Article mis à jour",
       "itemDeleted": "Article supprimé",
       "confirmDelete": "Supprimer cet article de l'inventaire ?",
       "invalidQuantity": "Quantité invalide",
@@ -5130,7 +5131,7 @@
     "themeToggle": {
       "title": "Thème : {{theme}} (cliquez pour changer)"
     },
-    "loading": "Chargement du système TPV...",
+    "loading": "Chargement du POS...",
     "settingsSynced": "Paramètres synchronisés",
     "settingsSyncStatus": "{{pending}} en attente • {{failed}} échoués",
     "refreshSettings": "Actualiser les paramètres",
@@ -5194,12 +5195,12 @@
   "orderFlow": {
     "walkInCustomer": "Client sans rendez-vous",
     "zoneValidationRequired": "La validation de zone de livraison nécessite votre attention",
-    "noValidationResult": "Aucun résultat de validation - procédure avec prudence",
+    "noValidationResult": "⚠️ Aucun résultat de validation - poursuite avec prudence",
     "addAddressComingSoon": "Ajout de nouvelle adresse bientôt disponible !",
     "customerAdded": "Client ajouté avec succès !",
     "customerUpdated": "Client mis à jour avec succès !",
     "addressAdded": "Adresse ajoutée avec succès !",
-    "overrideApproved": "Remplacement approuvé - commande en cours",
+    "overrideApproved": "Dérogation approuvée - poursuite de la commande",
     "switchedToPickup": "Basculé en commande à emporter",
     "noActiveShift": "Aucun service actif - la commande ne sera pas liée à un service",
     "noActiveCashierShift": "Impossible de créer des commandes tant qu'un caissier n'a pas ouvert la journée.",
@@ -5213,9 +5214,9 @@
     "pickupOrder": "Commande à emporter",
     "deliveryOrder": "Commande en livraison",
     "deliveryZoneValidation": "Validation de la zone de livraison",
-    "overrideRequested": "Le personnel du TPV a demandé un remplacement",
-    "overrideRequiresApproval": "Le remplacement nécessite l'approbation d'un responsable",
-    "tableOrder": "Commande sur place",
+    "overrideRequested": "Le personnel du POS a demandé une dérogation",
+    "overrideRequiresApproval": "La dérogation nécessite l'approbation d'un responsable",
+    "tableOrder": "Commande à table",
     "tableDescription": "Service à table",
     "roomOrder": "Chambre",
     "roomDescription": "Commande chambre, enregistrement ou réservation",
@@ -5263,7 +5264,7 @@
     "cityRequired": "La ville est obligatoire pour les commandes en livraison",
     "postalCodeRequired": "Le code postal est obligatoire pour les commandes en livraison",
     "customerNoAddress": "Ce client n'a pas d'adresse de livraison. Veuillez d'abord ajouter une adresse.",
-    "addressValidated": "Adresse validée avec succès",
+    "addressValidated": "Adresse validée",
     "addressValidationFailed": "Échec de la validation de l'adresse",
     "addressValidationError": "Échec de la validation de l'adresse",
     "orderCreated": "Commande créée avec succès !",
@@ -5271,12 +5272,12 @@
     "pickupDelivered": "{{count}} commande(s) à emporter marquée(s) comme livrée(s)",
     "platformReadySent": "Plateforme notifiée — le livreur arrive",
     "platformReadyFailed": "Échec de la notification de la plateforme pour {{orderNumber}}",
-    "deliveriesCompleted": "Completed {{count}} delivery order(s)",
-    "dispatchDeliveryBeforeComplete": "Assign a driver or convert delivery orders to pickup before completing them.",
+    "deliveriesCompleted": "{{count}} commande(s) en livraison terminée(s)",
+    "dispatchDeliveryBeforeComplete": "Assignez un livreur aux commandes en livraison, ou convertissez-les en commandes à emporter, avant de les terminer.",
     "noOrdersForCancel": "Aucune commande sélectionnée pour l'annulation",
     "noOrdersForEdit": "Aucune commande sélectionnée pour la modification",
     "cancelOrderFailed": "Échec de l'annulation de la commande {{orderNumber}}",
-    "ordersCancelled": "{{count}} commande(s) annulée(s) avec succès",
+    "ordersCancelled": "{{count}} commande(s) annulée(s)",
     "cancelFailed": "Échec de l'annulation des commandes",
     "customerInfoUpdated": "Informations client mises à jour pour {{count}} commande(s)",
     "customerInfoFailed": "Échec de la mise à jour des informations client",
@@ -5290,17 +5291,17 @@
     "paymentMethodEditUnavailable": "Le mode de paiement ne peut être modifié que pour une seule commande non annulée en espèces/carte",
     "paymentMethodEditChecking": "Vérification des paiements…",
     "paymentMethodEditRequiresSingleCompletedPayment": "Cette commande comporte des paiements fractionnés ou plusieurs paiements terminés. Leurs modes de paiement ne peuvent pas être modifiés ensemble comme un seul paiement.",
-    "conflictResolved": "Conflit résolu avec succès",
+    "conflictResolved": "Conflit résolu",
     "conflictFailed": "Échec de la résolution du conflit",
-    "bulkDeliveryDisabled": "Impossible de sélectionner en lot des types de commande différents",
-    "bulkPickupDisabled": "Impossible de sélectionner en lot des types de commande différents",
+    "bulkDeliveryDisabled": "Impossible de sélectionner ensemble des commandes de types différents",
+    "bulkPickupDisabled": "Impossible de sélectionner ensemble des commandes de types différents",
     "noDeliveryOrdersSelected": "Sélectionnez des commandes en livraison pour attribuer un livreur",
     "noCancelledOrdersSelected": "Aucune commande annulée sélectionnée",
     "returnToOrdersFailed": "Impossible de restaurer la commande {{orderNumber}}",
     "returnedToOrders": "{{count}} commandes restaurées",
-    "printFailed": "Receipt print failed",
-    "fiscalPrintFailed": "Cash register print failed",
-    "orderCreateFailed": "Failed to create order",
+    "printFailed": "Échec de l'impression du reçu",
+    "fiscalPrintFailed": "Échec de l'impression sur la caisse enregistreuse",
+    "orderCreateFailed": "Impossible de créer la commande",
     "collectPaymentFailed": "Un encaissement est requis avant de continuer.",
     "noAddressesForMap": "Sélectionnez au moins une commande en livraison avec une adresse valide.",
     "openedInMaps": "Google Maps ouvert pour {{count}} arrêt(s) de livraison.",
@@ -5384,10 +5385,10 @@
     "discount": "Remise",
     "printReceipt": "Imprimer le reçu",
     "printing": "Impression en cours...",
-    "printSuccess": "Reçu imprimé avec succès",
+    "printSuccess": "Reçu imprimé",
     "printFailed": "Échec de l'impression du reçu",
-    "printAlreadyQueued": "[NEEDS TRANSLATION] This receipt is already queued or printing — not reprinted.",
-    "printSkipped": "[NEEDS TRANSLATION] Receipt printing is turned off for this action.",
+    "printAlreadyQueued": "Ce reçu est déjà en file d'attente ou en cours d'impression — il n'a pas été réimprimé.",
+    "printSkipped": "L'impression du reçu est désactivée pour cette action.",
     "guestCustomer": "Client de passage",
     "loadingItems": "Chargement des articles...",
     "loadItemsFailed": "Échec du chargement des articles",
@@ -5415,8 +5416,8 @@
   "kioskAutoPrint": {
     "sourceFallback": "Kiosque",
     "newOrderToast": "Nouvelle commande kiosque #{{orderNumber}} reçue de {{sourceLabel}}.",
-    "printFailedToast": "[NEEDS TRANSLATION] Kiosk order #{{orderNumber}} received, but sending it to the printer failed. Check the print queue.",
-    "printedToast": "[NEEDS TRANSLATION] Kiosk order #{{orderNumber}} approved — sent to the printer."
+    "printFailedToast": "Commande kiosque #{{orderNumber}} reçue, mais l'envoi à l'imprimante a échoué. Vérifiez la file d'impression.",
+    "printedToast": "Commande kiosque #{{orderNumber}} approuvée — envoyée à l'imprimante."
   },
   "shiftManager": {
     "noActiveShift": "Aucun service actif à clôturer",
@@ -5498,7 +5499,7 @@
       "statusUpdateFailed": "Échec de la mise à jour du statut de la table",
       "tableAssigned": "Commande attribuée à la table {{number}}",
       "tableCleared": "Table {{number}} libérée",
-      "syncSuccess": "Tables synchronisées avec succès",
+      "syncSuccess": "Tables synchronisées",
       "syncError": "Échec de la synchronisation des tables",
       "lastSync": "Dernière synchronisation : {{time}}",
       "confirmClear": "Libérer cette table et la marquer comme disponible ?",
@@ -5538,7 +5539,7 @@
       "title": "Statut de la réservation",
       "pending": "En attente",
       "confirmed": "Confirmée",
-      "seated": "Installé",
+      "seated": "Installée",
       "completed": "Terminée",
       "noShow": "Absent",
       "cancelled": "Annulée"
@@ -5562,7 +5563,7 @@
       "assignedTable": "Table {{number}}",
       "noTableAssigned": "Aucune table attribuée",
       "duration": "Durée",
-      "estimatedDuration": "Est. {{minutes}} min",
+      "estimatedDuration": "Env. {{minutes}} min",
       "notes": "Notes",
       "specialRequests": "Demandes spéciales",
       "contactPhone": "Téléphone",
@@ -5591,7 +5592,7 @@
       "status": "Filtrer par statut",
       "allStatuses": "Tous les statuts",
       "partySize": "Filtrer par nombre de couverts",
-      "allSizes": "Tous les nombres",
+      "allSizes": "Tout nombre de couverts",
       "timeSlot": "Filtrer par créneau horaire",
       "allTimes": "Tous les horaires"
     },
@@ -5605,15 +5606,15 @@
       "statusUpdated": "Statut de la réservation mis à jour : {{status}}",
       "statusUpdateFailed": "Échec de la mise à jour du statut de la réservation",
       "guestsSeated": "Clients installés à la table {{table}}",
-      "markedNoShow": "Réservation marquée comme absent",
+      "markedNoShow": "Réservation marquée en absence",
       "reservationCancelled": "Réservation annulée",
       "tableAssigned": "Table {{number}} attribuée à la réservation",
       "reminderSent": "Rappel envoyé au client",
-      "syncSuccess": "Réservations synchronisées avec succès",
+      "syncSuccess": "Réservations synchronisées",
       "syncError": "Échec de la synchronisation des réservations",
       "lastSync": "Dernière synchronisation : {{time}}",
       "confirmSeat": "Installer les clients à la table {{table}} ?",
-      "confirmNoShow": "Marquer cette réservation comme absent ?",
+      "confirmNoShow": "Marquer cette réservation en absence ?",
       "confirmCancel": "Annuler cette réservation ?"
     },
     "stats": {
@@ -5679,8 +5680,8 @@
         "remove": "Retirer cette page",
         "rescan": "Scanner cette page à nouveau",
         "rescanned": "Page remplacée.",
-        "moveEarlier": "Déplacer avant",
-        "moveLater": "Déplacer après",
+        "moveEarlier": "Avancer",
+        "moveLater": "Reculer",
         "capReached": "C'est le maximum de pages pour une facture. Terminez celle-ci et commencez-en une autre pour le reste.",
         "stoppedEarly": "Le scanner s'est arrêté avant que le chargeur soit vide. S'il reste des pages dedans, ajoutez-les avant de terminer.",
         "finishAndStartAnother": "Terminer celle-ci et en commencer une autre",
@@ -5760,7 +5761,7 @@
         "ingested": "Un fichier est arrivé et a été pris en compte.",
         "skipped_duplicate": "Un fichier a été laissé de côté — c'est le même que celui que nous avons déjà.",
         "skipped_unsupported": "Un fichier a été laissé de côté — nous ne savons pas lire ce type de fichier.",
-        "skipped_oversize": "Un fichier a été laissé de côté — il est trop lourd à prendre.",
+        "skipped_oversize": "Un fichier a été laissé de côté — il est trop lourd pour être importé.",
         "captured": "Un scan a été commencé.",
         "page_added": "Une page a été ajoutée.",
         "page_removed": "Une page a été retirée.",
@@ -5905,7 +5906,7 @@
       "loadError": "Échec du chargement des fournisseurs",
       "noSuppliers": "Aucun fournisseur trouvé",
       "noSuppliersDescription": "Les fournisseurs apparaîtront ici une fois synchronisés depuis l'administration",
-      "syncSuccess": "Fournisseurs synchronisés avec succès",
+      "syncSuccess": "Fournisseurs synchronisés",
       "syncError": "Échec de la synchronisation des fournisseurs",
       "lastSync": "Dernière synchronisation : {{time}}"
     },
@@ -5946,13 +5947,13 @@
       "emptyDescription": "Les contacts et factures du fournisseur s’afficheront ici."
     },
     "import": {
-      "open": "Importer articles",
+      "open": "Importer des articles",
       "title": "Importer des articles fournisseur",
       "subtitle": "Vérifiez les lignes avant de les synchroniser avec le stock.",
       "supplierName": "Nom du fournisseur",
-      "supplierPlaceholder": "Fresh Farms",
+      "supplierPlaceholder": "Primeurs du Marché",
       "supplierPhone": "Téléphone",
-      "supplierEmail": "Email",
+      "supplierEmail": "E-mail",
       "supplierNotes": "Notes fournisseur depuis la facture",
       "invoiceNumber": "Numéro de facture",
       "invoiceDate": "Date de facture",
@@ -5965,7 +5966,7 @@
       "hardwareScanner": "Scanner code-barres",
       "hardwareHelp": "Ouvrez ce panneau et scannez. Le code-barres est ajouté automatiquement.",
       "barcodePlaceholder": "Code-barres",
-      "addBarcode": "Ajouter code-barres",
+      "addBarcode": "Ajouter un code-barres",
       "scanAdded": "Code-barres ajouté à la revue",
       "cameraUnavailable": "La détection de code-barres par caméra n’est pas disponible",
       "noBarcodeFound": "Aucun code-barres trouvé dans l’image",
@@ -5982,7 +5983,7 @@
       "saveFailed": "Impossible d’enregistrer les articles fournisseur",
       "draftRows": "Lignes brouillon",
       "rowCount": "{{count}} lignes",
-      "reviewBeforeSave": "Modifiez quantités, coûts et catégories avant l’aperçu.",
+      "reviewBeforeSave": "Modifiez les quantités, les coûts et les catégories avant l’aperçu.",
       "preview": "Aperçu",
       "review": "Revue de synchronisation du stock",
       "missingCategories": "Catégories manquantes",
@@ -5990,8 +5991,8 @@
       "saveAfterPreview": "Enregistrer après l’aperçu",
       "saveRequiresPreview": "Prévisualisez les lignes avant d’enregistrer dans le stock.",
       "previewThenSaveHelp": "L’aperçu valide le fournisseur, les catégories et les correspondances de stock. L’enregistrement devient disponible après cette vérification.",
-      "endpointUnavailable": "L’API d’import fournisseur n’est pas disponible sur le dashboard admin connecté. Redémarrez ou mettez à jour le dashboard admin, puis relancez l’aperçu.",
-      "adminHtmlError": "Le dashboard admin a renvoyé une page au lieu d’une réponse API. Vérifiez l’URL admin et réessayez.",
+      "endpointUnavailable": "L'API d'import des fournisseurs n'est pas disponible sur le tableau de bord d'administration connecté. Redémarrez ou mettez à jour le tableau de bord d'administration, puis relancez l'aperçu.",
+      "adminHtmlError": "Le tableau de bord d'administration a renvoyé une page au lieu d'une réponse API. Vérifiez l'URL d'administration et réessayez.",
       "itemName": "Nom de l’article",
       "sku": "SKU",
       "barcode": "Code-barres",
@@ -6034,7 +6035,7 @@
     },
     "flavor": {
       "inventory": "Stock",
-      "retail": "Détail",
+      "retail": "Vente au détail",
       "legacy": "Produit"
     },
     "detail": {
@@ -6106,7 +6107,7 @@
   },
   "appointmentsView": {
     "toasts": {
-      "created": "Rendez-vous créé avec succès",
+      "created": "Rendez-vous créé",
       "createFailed": "Échec de la création du rendez-vous",
       "updateStatusFailed": "Échec de la mise à jour du statut",
       "checkedIn": "Client enregistré",
@@ -6119,7 +6120,7 @@
         "in_progress": "Rendez-vous en cours",
         "completed": "Rendez-vous terminé",
         "cancelled": "Rendez-vous annulé",
-        "no_show": "Rendez-vous marqué comme absence"
+        "no_show": "Rendez-vous marqué en absence"
       }
     },
     "status": {
@@ -6133,7 +6134,7 @@
   },
   "reservationsView": {
     "toasts": {
-      "created": "Réservation créée avec succès",
+      "created": "Réservation créée",
       "createFailed": "Échec de la création de la réservation",
       "updateStatusFailed": "Échec de la mise à jour du statut",
       "tableAssigned": "Table attribuée",
@@ -6143,14 +6144,14 @@
         "confirmed": "Réservation confirmée",
         "seated": "Réservation installée",
         "completed": "Réservation terminée",
-        "no_show": "Réservation marquée comme absence",
+        "no_show": "Réservation marquée en absence",
         "cancelled": "Réservation annulée"
       }
     },
     "status": {
       "confirmed": "Confirmée",
       "pending": "En attente",
-      "seated": "Installé",
+      "seated": "Installée",
       "completed": "Terminée",
       "no_show": "Absent",
       "cancelled": "Annulée"
@@ -6159,7 +6160,7 @@
       "total": "Total",
       "confirmed": "Confirmées",
       "pending": "En attente",
-      "seated": "Installés",
+      "seated": "Installées",
       "guests": "Convives"
     },
     "tabs": {
@@ -6235,7 +6236,7 @@
     "noReservationsHint": "Essayez une autre date ou ajustez votre recherche",
     "noBranch": "Veuillez sélectionner une succursale pour voir les réservations",
     "noModules": "Aucun module de réservation disponible",
-    "noModulesHint": "Veuillez acquérir Tables, Chambres ou Services pour gérer les réservations.",
+    "noModulesHint": "Activez les modules Tables, Chambres ou Services pour gérer les réservations.",
     "detailTitle": "Détails de la réservation",
     "customer": "Client",
     "when": "Date et heure",
@@ -6254,7 +6255,7 @@
   },
   "onboarding": {
     "connectionString": "Code de connexion",
-    "connectionStringHelp": "Collez le code de connexion depuis le tableau de bord d'administration (Succursales → TPV → Régénérer les identifiants).",
+    "connectionStringHelp": "Collez le code de connexion depuis le tableau de bord d'administration (Établissements → POS → Régénérer les identifiants).",
     "connectionStringPlaceholder": "Collez le code de connexion ici...",
     "validationError": "Veuillez saisir le code de connexion",
     "invalidConnectionString": "Code de connexion invalide. Veuillez le copier à nouveau depuis le tableau de bord d'administration.",
@@ -6457,7 +6458,7 @@
       "paperSize": "Taille du papier :",
       "lineWidth": "Largeur de ligne :",
       "characterSet": "Jeu de caractères :",
-      "chars": "car.",
+      "chars": "caractères",
       "textFormatting": "Tests de formatage du texte",
       "normalText": "Texte normal",
       "boldText": "Texte en gras",
@@ -6471,7 +6472,7 @@
       "rightAligned": "Aligné à droite",
       "lineDrawing": "Tests de tracé de lignes",
       "dashedLine": "Ligne tiretée :",
-      "doubleLine": "Double ligne :",
+      "doubleLine": "Ligne double :",
       "dottedLine": "Ligne pointillée :",
       "twoColumn": "Disposition en deux colonnes :",
       "leftText": "Texte à gauche",
@@ -6481,7 +6482,7 @@
       "success": "Test d'impression réussi !"
     },
     "zreport": {
-      "title": "Z-REPORT",
+      "title": "RAPPORT Z",
       "terminal": "Terminal",
       "date": "Date",
       "terminalBreakdown": "Détail par terminal",
@@ -6496,7 +6497,7 @@
       "drawers": "Tiroirs",
       "daySummary": "Résumé de la journée",
       "submitted": "Soumis à l'administration",
-      "end": "FIN DU Z-REPORT",
+      "end": "FIN RAPPORT Z",
       "orders": "Commandes",
       "total": "Total",
       "cash": "Espèces",
@@ -6698,7 +6699,7 @@
       "waiter": "Départ + Collecté - Dépenses = Rendu",
       "waiterV1": "Départ + Collecté - Dépenses - Paiement = Rendu",
       "driver": "Départ + Collecté - Dépenses = Rendu",
-      "cashier": "Ouverture + Ventes - Remboursements - Dépenses - Retraits - Donné + Rendu + Hérité = Attendu",
+      "cashier": "Ouverture + Ventes - Remboursements - Dépenses - Décaissements - Retraits - Donné + Rendu + Hérité = Attendu",
       "note": {
         "staffPayments": "Les paiements du personnel sont affichés à titre informatif uniquement (NON déduits du montant attendu)",
         "staffPaymentsInfo": "Les paiements du personnel sont à titre informatif uniquement",
@@ -6898,12 +6899,12 @@
     "downloaded": {
       "ready": "La version {{version}} est prête !",
       "readyGeneric": "La mise à jour téléchargée est prête !",
-      "description": "La mise à jour a été téléchargée avec succès. Vous pouvez l'installer maintenant (nécessite un redémarrage) ou elle sera installée automatiquement au prochain redémarrage de l'application.",
+      "description": "La mise à jour a été téléchargée. Vous pouvez l'installer maintenant (nécessite un redémarrage) ou elle sera installée automatiquement au prochain redémarrage de l'application.",
       "warning": "Attention : L'application redémarrera immédiatement si vous choisissez « Installer maintenant »."
     },
     "upToDate": {
       "title": "Vous êtes à jour !",
-      "description": "The Small POS exécute la dernière version.",
+      "description": "The Small POS est à jour : vous utilisez la dernière version.",
       "currentVersion": "Version actuelle : v{{version}}"
     },
     "error": {
@@ -7045,11 +7046,11 @@
       "fiscalDeviceTitle": "Vous cherchez une RBS ou une caisse fiscale ?",
       "fiscalDeviceHelp": "Les imprimantes fiscales RBS, Datecs, Casio et similaires se configurent dans « Caisse / Imprimante fiscale », pas dans « Terminaux de paiement ».",
       "configureCashRegister": "Configurer la caisse",
-      "unsupportedBluetooth": "Bluetooth terminals can be discovered, but desktop Bluetooth pairing is not supported yet. Use manual setup instead.",
+      "unsupportedBluetooth": "Les terminaux Bluetooth peuvent être détectés, mais l'appairage Bluetooth sur ordinateur n'est pas encore pris en charge. Utilisez plutôt la configuration manuelle.",
       "warnings": {
-        "bluetoothDiscoveryOnly": "Bluetooth results are discovery-only for now. Add or connect them through manual setup after native support lands.",
-        "bluetoothWindowsOnly": "Bluetooth terminal discovery is currently available on Windows only. Use manual setup on this device.",
-        "networkWindowsOnly": "Automatic network terminal discovery is currently available on Windows only. Use manual setup on this device."
+        "bluetoothDiscoveryOnly": "Pour l'instant, les résultats Bluetooth servent uniquement à la détection. Ajoutez-les ou connectez-les via la configuration manuelle une fois la prise en charge native disponible.",
+        "bluetoothWindowsOnly": "La détection des terminaux Bluetooth n'est disponible que sous Windows pour le moment. Utilisez la configuration manuelle sur cet appareil.",
+        "networkWindowsOnly": "La détection automatique des terminaux réseau n'est disponible que sous Windows pour le moment. Utilisez la configuration manuelle sur cet appareil."
       },
       "manual": "Vous ne trouvez pas votre terminal ?",
       "addManually": "Ajouter un terminal manuellement"
@@ -7237,7 +7238,7 @@
         "evening": "Soir"
       },
       "selectStaffAvailability": "Sélectionnez un membre du personnel pour voir les disponibilités",
-      "selectStaffServiceAvailability": "Choisis d'abord le personnel et la prestation pour voir les vraies disponibilités",
+      "selectStaffServiceAvailability": "Choisissez d'abord le membre du personnel et la prestation pour voir les vraies disponibilités",
       "slotsEmpty": {
         "title": "Choisissez d'abord le personnel et le service",
         "help": "Choisissez d'abord un membre du personnel et un service, puis les vraies heures disponibles apparaîtront ici.",
@@ -7265,7 +7266,7 @@
     }
   },
   "integrations": {
-    "title": "Plugins",
+    "title": "Extensions",
     "subtitle": "Connecter des plugins tiers",
     "loading": "Chargement des plugins...",
     "error": "Erreur lors du chargement des plugins",
@@ -7315,20 +7316,20 @@
       "inventory": "Synchroniser l'inventaire"
     },
     "efood": {
-      "pendingProvider": "En attente de l’activation de cette succursale par efood. Les identifiants et secrets sont gérés dans l’Admin Dashboard.",
+      "pendingProvider": "En attente de l'activation de cet établissement par efood. Les identifiants et les secrets sont gérés dans le tableau de bord d'administration.",
       "targetTerminal": "Terminal cible",
       "lastError": "Dernière erreur",
-      "openAdmin": "Ouvrir l’Admin Dashboard",
-      "adminUrlMissing": "L’URL de l’Admin Dashboard n’est pas configurée sur ce terminal.",
-      "adminLinkCopied": "Lien de l’Admin Dashboard copié.",
-      "adminOpenFailed": "Impossible d’ouvrir l’Admin Dashboard."
+      "openAdmin": "Ouvrir le tableau de bord d'administration",
+      "adminUrlMissing": "L'URL du tableau de bord d'administration n'est pas configurée sur ce terminal.",
+      "adminLinkCopied": "Lien du tableau de bord d'administration copié.",
+      "adminOpenFailed": "Impossible d'ouvrir le tableau de bord d'administration."
     },
     "callerId": {
-      "setupInAdmin": "Configurer l’identification de l’appelant dans l’Admin Dashboard",
-      "manageInAdmin": "Gérer l’identification de l’appelant dans l’Admin Dashboard"
+      "setupInAdmin": "Configurer l'identification de l'appelant dans le tableau de bord d'administration",
+      "manageInAdmin": "Gérer l'identification de l'appelant dans le tableau de bord d'administration"
     },
     "adminSetup": {
-      "pendingFirstOrder": "[NEEDS TRANSLATION] Set up in the Admin Dashboard. The connection becomes active with the first order received."
+      "pendingFirstOrder": "La configuration se fait dans le tableau de bord d'administration. La connexion s'active à la première commande reçue."
     },
     "plugins": {
       "efood": {
@@ -7338,7 +7339,7 @@
         "description": "Plateforme de livraison et de découverte culinaire"
       },
       "box": {
-        "description": "[NEEDS TRANSLATION] BOX by COSMOTE — delivery orders at the till"
+        "description": "BOX by COSMOTE — les commandes en livraison directement en caisse"
       },
       "booking": {
         "description": "Principale plateforme de réservation hôtelière au monde"
@@ -7457,7 +7458,7 @@
         "empty": "Aucune caisse RBS/MAT trouvée. Vérifiez sa connexion réseau ou saisissez l’IP manuellement.",
         "select": "Sélectionner"
       },
-      "capTargetMismatch": "La cible du service CAP est inconnue ou diffère du formulaire. Ouvrez la configuration de connexion, définissez cette IP ou ce port COM dans le service du fabricant, puis actualisez l’état du support.",
+      "capTargetMismatch": "La cible du service CAP est indisponible ou ne correspond pas à ce formulaire. Ouvrez la configuration de connexion, définissez cette IP ou ce port COM dans le service du fabricant, puis actualisez l'état de prise en charge.",
       "capServiceTarget": "Cible du service du fabricant",
       "configSaved": "Configuration MyData enregistrée",
       "dashboardBanner": {
@@ -7486,34 +7487,34 @@
     "contactSupport": "Si le problème persiste, contactez le support"
   },
   "splitPayment": {
-    "title": "Split Payment",
-    "orderTotal": "Order Total",
-    "byAmount": "By Amount",
-    "byItems": "By Items",
-    "person": "Person",
+    "title": "Paiement partagé",
+    "orderTotal": "Total de la commande",
+    "byAmount": "Par montant",
+    "byItems": "Par articles",
+    "person": "Personne",
     "halfHalf": "50 / 50",
-    "threeWay": "3-Way Equal",
-    "custom": "Custom",
-    "addPerson": "Add Person",
-    "removePerson": "Remove person",
-    "remaining": "Remaining",
+    "threeWay": "3 parts égales",
+    "custom": "Personnalisé",
+    "addPerson": "Ajouter une personne",
+    "removePerson": "Retirer la personne",
+    "remaining": "Restant",
     "total": "Total",
-    "assigned": "Assigned",
-    "cash": "Cash",
-    "card": "Card",
-    "orderItems": "Order Items",
+    "assigned": "Attribué",
+    "cash": "Espèces",
+    "card": "Carte",
+    "orderItems": "Articles de la commande",
     "itemsCount": "{{count}} articles",
-    "people": "People",
-    "unassigned": "-- Unassigned --",
+    "people": "Personnes",
+    "unassigned": "-- Non attribué --",
     "unassignedWarning_one": "{{count}} article non attribué",
     "unassignedWarning_other": "{{count}} articles non attribués",
-    "noItems": "No items assigned",
-    "receiptCombined": "Combined",
-    "receiptIndividual": "Individual",
-    "confirm": "Confirm Split",
-    "processing": "Processing...",
-    "success": "Split payment completed successfully",
-    "failed": "Split payment failed. Please try again.",
+    "noItems": "Aucun article attribué",
+    "receiptCombined": "Combiné",
+    "receiptIndividual": "Individuel",
+    "confirm": "Confirmer le partage",
+    "processing": "Traitement...",
+    "success": "Paiement partagé effectué",
+    "failed": "Le paiement partagé a échoué. Réessayez.",
     "discountPersistFailed": "Paiement enregistré, mais la remise n'a pas pu être enregistrée sur la commande. Vérifiez le total de la commande avant de la clôturer.",
     "payable": "À payer",
     "discount": "Remise",
@@ -7532,7 +7533,7 @@
     "loadingHint": "Vérification des paiements partagés existants et des articles payés...",
     "manualCardFallback": "Aucun terminal de paiement prêt. Cette part sera enregistrée comme paiement par carte manuel lors de la confirmation.",
     "partialSuccess": "Paiement partagé enregistré. Solde restant : {{amount}}",
-    "portionPaid": "{{person}} a payé avec succès",
+    "portionPaid": "{{person}} a payé",
     "priorPayments": "Paiements antérieurs",
     "terminalApproved": "Terminal",
     "waitingForApproval": "En attente de l'approbation de la carte sur le terminal de paiement..."
@@ -7550,7 +7551,7 @@
       "paymentAmount": "Montant du paiement",
       "existingCompleted": "Déjà payé",
       "settlementMath": "Calcul du règlement",
-      "remotePayment": "Paiement distant",
+      "remotePayment": "Paiement à distance",
       "issueCount_one": "{{count}} problème",
       "issueCount_other": "{{count}} problèmes",
       "unknownActor": "Acteur inconnu"
@@ -7567,7 +7568,7 @@
       "error": "Erreur"
     },
     "messages": {
-      "actionSucceeded": "Action terminée avec succès.",
+      "actionSucceeded": "Action terminée.",
       "actionFailed": "L'action a échoué. Vérifiez les détails du problème et réessayez.",
       "orderPaymentOpenFailed": "Impossible d'ouvrir l'écran de paiement de la commande bloquée.",
       "actionPendingVerification": "Nouvelle tentative demandée. Un nouveau contrôle doit confirmer le rétablissement."
@@ -7605,9 +7606,9 @@
       },
       "repairOrderUpdateReplayBlockers": {
         "label": "Réparer les blocages de replay commande",
-        "description": "Lie les commandes distantes manquantes, réessaie les mises à jour de commande bloquées, puis archive les anciennes commandes de synchro quand la commande parente locale a disparu.",
+        "description": "Relie les commandes parentes distantes manquantes, réessaie les mises à jour de commande bloquées, puis archive les anciennes opérations de synchronisation quand la commande parente locale a disparu.",
         "confirmTitle": "Réparer les blocages de replay commande ?",
-        "confirmMessage": "Cette action peut archiver les anciennes commandes de synchronisation pour {{orderId}} lorsque la commande parente locale a disparu. Elle ne supprime pas les commandes, paiements ni Z-reports."
+        "confirmMessage": "Cette action peut archiver les anciennes opérations de synchronisation pour {{orderId}} lorsque la commande parente locale a disparu. Elle ne supprime ni commandes, ni paiements, ni rapports Z."
       },
       "retrySync": {
         "label": "Réessayer la ligne de synchro"
@@ -7693,7 +7694,7 @@
         "description": "Retire la ligne de caisse et enregistre le règlement dû par la plateforme, en une seule étape. Ne faire que la première laisse la journée bloquée pour la raison inverse.",
         "confirmTitle": "Corriger cette commande en argent de plateforme ?",
         "confirmMessage": "Le client a payé la plateforme, pas cette caisse : les informations de livraison de la commande indiquent un prépaiement en ligne, ou un encaissement par le livreur de la plateforme. Ceci annule la ligne espèces ou carte enregistrée dessus — avec un motif, pour que le bureau voie la correction — et enregistre le règlement à la place. Le comptage de caisse ne change pas, car cet argent n'y est jamais entré.",
-        "confirmCheckbox": "Je confirme qu'aucune espèce ni carte n'a été encaissée à cette caisse pour cette commande."
+        "confirmCheckbox": "Je confirme qu'aucun paiement en espèces ou par carte n'a été encaissé sur cette caisse pour cette commande."
       }
     },
     "context": {
@@ -7709,7 +7710,7 @@
       "title": "Récupération en libre-service",
       "subtitle": "Utilisez des actions de réparation guidées pour résoudre les problèmes de synchronisation bloqués sans quitter le POS.",
       "needsAttentionTitle": "Nécessite une attention",
-      "needsAttentionSubtitle": "Problèmes bloquants qui nécessitent actuellement une réparation ou l'aide de Dev.",
+      "needsAttentionSubtitle": "Problèmes bloquants qui nécessitent actuellement une réparation ou une intervention de l'opérateur.",
       "noBlockingIssues": "Aucun problème de récupération bloquant n'est actuellement visible.",
       "recoveringTitle": "En récupération",
       "recoveringSubtitle": "Problèmes en file, différés ou prêts pour une nouvelle tentative de synchronisation.",
@@ -7937,33 +7938,33 @@
     }
   },
   "features": {
-    "cashDrawer": "[NEEDS FR TRANSLATION] Συρτάρι Ταμείου",
-    "zReportExecution": "[NEEDS FR TRANSLATION] Έκδοση Ζ",
-    "cashPayments": "[NEEDS FR TRANSLATION] Πληρωμές Μετρητών",
-    "cardPayments": "[NEEDS FR TRANSLATION] Πληρωμές Κάρτας",
-    "orderCreation": "[NEEDS FR TRANSLATION] Δημιουργία Παραγγελίας",
-    "orderModification": "[NEEDS FR TRANSLATION] Τροποποίηση Παραγγελίας",
-    "discounts": "[NEEDS FR TRANSLATION] Εκπτώσεις",
-    "refunds": "[NEEDS FR TRANSLATION] Επιστροφές",
-    "expenses": "[NEEDS FR TRANSLATION] Έξοδα",
-    "staffPayments": "[NEEDS FR TRANSLATION] Πληρωμές Προσωπικού",
-    "reports": "[NEEDS FR TRANSLATION] Αναφορές",
-    "settings": "[NEEDS FR TRANSLATION] Ρυθμίσεις"
+    "cashDrawer": "Tiroir-caisse",
+    "zReportExecution": "Rapport Z",
+    "cashPayments": "Paiements en espèces",
+    "cardPayments": "Paiements par carte",
+    "orderCreation": "Création de commandes",
+    "orderModification": "Modification de commandes",
+    "discounts": "Remises",
+    "refunds": "Remboursements",
+    "expenses": "Dépenses",
+    "staffPayments": "Paiements du personnel",
+    "reports": "Rapports",
+    "settings": "Paramètres"
   },
   "terminal": {
     "type": {
-      "mobile_waiter": "[NEEDS FR TRANSLATION] Mobile POS",
-      "main": "[NEEDS FR TRANSLATION] Κεντρικό Τερματικό"
+      "mobile_waiter": "POS mobile",
+      "main": "Terminal principal"
     },
     "labels": {
-      "terminalConfig": "[NEEDS FR TRANSLATION] Ρύθμιση Τερματικού",
-      "terminalType": "[NEEDS FR TRANSLATION] Τύπος Τερματικού",
-      "parentTerminal": "[NEEDS FR TRANSLATION] Γονικό Τερματικό",
-      "enabledFeatures": "[NEEDS FR TRANSLATION] Ενεργές Λειτουργίες",
-      "mobileWaiterMode": "[NEEDS FR TRANSLATION] Λειτουργία Mobile Waiter"
+      "terminalConfig": "Configuration du terminal",
+      "terminalType": "Type de terminal",
+      "parentTerminal": "Terminal parent",
+      "enabledFeatures": "Fonctionnalités activées",
+      "mobileWaiterMode": "Mode serveur mobile"
     },
     "messages": {
-      "mobileWaiterInfo": "[NEEDS FR TRANSLATION] Ορισμένες λειτουργίες διαχειρίζονται από το κεντρικό τερματικό. Επικοινωνήστε με τον διευθυντή για αλλαγές."
+      "mobileWaiterInfo": "Certaines fonctionnalités sont gérées depuis le terminal principal. Contactez votre responsable pour les modifier."
     }
   },
   "deliveryZones": {
@@ -8001,23 +8002,23 @@
     }
   },
   "analytics": {
-    "title": "[NEEDS FR TRANSLATION] Αναλυτικά",
-    "subtitle": "[NEEDS FR TRANSLATION] Στατιστικά επιχειρηματικής απόδοσης",
-    "totalRevenue": "[NEEDS FR TRANSLATION] Συνολικά Έσοδα",
-    "totalOrders": "[NEEDS FR TRANSLATION] Συνολικές Παραγγελίες",
-    "avgOrder": "[NEEDS FR TRANSLATION] Μέση Αξία Παραγγελίας",
-    "customers": "[NEEDS FR TRANSLATION] Πελάτες",
-    "categoryBreakdown": "[NEEDS FR TRANSLATION] Πωλήσεις ανά Κατηγορία",
-    "hourlyOrders": "[NEEDS FR TRANSLATION] Παραγγελίες ανά Ώρα",
-    "peakHour": "[NEEDS FR TRANSLATION] Ώρα Αιχμής",
-    "topCategory": "[NEEDS FR TRANSLATION] Κορυφαία Κατηγορία",
+    "title": "Analyses",
+    "subtitle": "Statistiques de performance de votre activité",
+    "totalRevenue": "Chiffre d'affaires total",
+    "totalOrders": "Total des commandes",
+    "avgOrder": "Panier moyen",
+    "customers": "Clients",
+    "categoryBreakdown": "Ventes par catégorie",
+    "hourlyOrders": "Commandes par heure",
+    "peakHour": "Heure de pointe",
+    "topCategory": "Meilleure catégorie",
     "period": {
-      "today": "[NEEDS FR TRANSLATION] Σήμερα",
-      "week": "[NEEDS FR TRANSLATION] Εβδομάδα",
-      "month": "[NEEDS FR TRANSLATION] Μήνας"
+      "today": "Aujourd'hui",
+      "week": "Semaine",
+      "month": "Mois"
     },
     "errors": {
-      "loadFailed": "[NEEDS FR TRANSLATION] Αποτυχία φόρτωσης αναλυτικών"
+      "loadFailed": "Impossible de charger les analyses"
     }
   },
   "housekeepingView": {
@@ -8046,7 +8047,7 @@
       "unassigned": "Non attribué"
     },
     "priority": {
-      "urgent": "Urgent",
+      "urgent": "Urgente",
       "high": "Élevée",
       "normal": "Normale",
       "low": "Faible"
@@ -8082,7 +8083,7 @@
     }
   },
   "roomsView": {
-    "noBranch": "Veuillez sélectionner un établissement pour afficher les chambres",
+    "noBranch": "Sélectionnez un établissement pour voir les chambres",
     "loading": "Chargement des chambres...",
     "searchPlaceholder": "Rechercher une chambre ou un client...",
     "filters": "Filtres",
@@ -8106,7 +8107,7 @@
       "deluxe": "Deluxe",
       "suite": "Suite",
       "penthouse": "Penthouse",
-      "accessible": "Accessible"
+      "accessible": "Accessible PMR"
     },
     "outstandingBalance": "Solde dû",
     "paymentMethod": "Mode de paiement",
@@ -8180,16 +8181,16 @@
       "checkinQueued": "Enregistrement mis en file d'attente pour synchronisation",
       "checkinReceiptFailed": "Enregistrement terminé, mais le reçu a échoué",
       "checkinNoReceipt": "Chambre enregistrée sans réservation ni reçu",
-      "checkinSuccess": "Enregistrement effectué avec succès",
+      "checkinSuccess": "Enregistrement effectué",
       "reservationsModuleRequired": "Le module Réservations est requis pour créer des réservations de chambres",
-      "reservationCreated": "Réservation créée avec succès",
+      "reservationCreated": "Réservation créée",
       "reservationFailed": "Échec de la création de la réservation",
       "folioCheckoutOffline": "Le départ avec folio nécessite une connexion en ligne",
       "checkoutQueued": "Départ mis en file d'attente pour synchronisation",
       "statusUpdated": "Statut de la chambre mis à jour : {{status}}",
       "statusUpdateFailed": "Échec de la mise à jour du statut de la chambre",
       "checkoutHousekeepingFailed": "Départ terminé, mais la création de la tâche de ménage a échoué",
-      "folioSkipped": "Départ terminé; le règlement du folio a été ignoré car la facturation client n'est pas disponible",
+      "folioSkipped": "Départ effectué ; le règlement du folio a été ignoré car la facturation client n'est pas disponible",
       "checkoutAlreadyCompleted": "Départ déjà terminé",
       "checkoutCompleted": "Départ terminé",
       "invalidPaymentAmount": "Saisissez un montant de paiement valide",
@@ -8354,7 +8355,7 @@
     "reservationNotFound": "Aucune réservation active trouvée pour cette table",
     "reservationReleased": "La réservation n'est plus active ; table libérée",
     "reservationLoadFailed": "Échec du chargement de la réservation",
-    "noShowSuccess": "Réservation marquée comme absence",
+    "noShowSuccess": "Réservation marquée en absence",
     "noShowFailed": "Échec du marquage de la réservation comme absence",
     "cancelReason": "Annulée depuis les actions de table du POS",
     "cancelSuccess": "Réservation annulée",
@@ -8423,10 +8424,10 @@
     "sendReady": "Envoyer le message prêt au retrait", "retry": "Réessayer", "link": "Associer {{provider}}", "linkingUnavailable": "L’association client via {{provider}} n’est pas disponible.", "queued": "Message mis en file.",
     "sendFailed": "Le message n’a pas été mis en file.", "retryFailed": "La relance n’a pas été mise en file.", "linkOpened": "Lien fournisseur sécurisé ouvert.", "linkFailed": "Impossible d’ouvrir le lien sécurisé.",
     "attemptCount": "{{count}} tentative(s)", "attempt": "Tentative {{number}}",
-    "status": { "queued": "En file", "delayed": "Retardé", "sending": "Envoi", "accepted": "Accepté", "sent": "Envoyé", "delivered": "Livré", "read": "Lu", "failed": "Échec", "skipped": "Ignoré", "dead_lettered": "Limite atteinte", "unknown": "Résultat inconnu" }
+    "status": { "queued": "En file d’attente", "delayed": "Retardé", "sending": "Envoi", "accepted": "Accepté", "sent": "Envoyé", "delivered": "Livré", "read": "Lu", "failed": "Échec", "skipped": "Ignoré", "dead_lettered": "Limite atteinte", "unknown": "Résultat inconnu" }
   },
   "driveThru": {
-    "selectBranch": "Veuillez choisir un établissement pour voir le drive",
+    "selectBranch": "Sélectionnez un établissement pour voir le drive",
     "activeOrders": "Commandes actives",
     "avgWaitTime": "Attente moyenne",
     "activeLanes": "Voies actives",

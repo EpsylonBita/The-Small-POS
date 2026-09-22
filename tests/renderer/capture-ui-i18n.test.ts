@@ -15,7 +15,7 @@
  * 2. **No hardcoded user-facing text.** No literal `aria-label` / `placeholder`
  *    / `alt` / `title` attribute, and no bare JSX text node, in any of the new
  *    capture components.
- * 3. **Every key answers in all five locales** — including the *runtime-built*
+ * 3. **Every key answers in all six locales** — including the *runtime-built*
  *    families (status, reason, device, history/ingest, source kind, source
  *    status), which are the ones a locale walk over static strings would miss
  *    entirely. Those families are read from the vocabulary constants in
@@ -204,7 +204,7 @@ test('capture components carry no hardcoded user-facing strings', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 3. Every key answers in all five locales
+// 3. Every key answers in all six locales
 // ---------------------------------------------------------------------------
 
 test('every static capture key exists in every POS locale', () => {
@@ -373,7 +373,7 @@ test('capture copy uses plain words and never a confidence numeral', () => {
 // (R11.9, R19.6).
 //
 // If any of the three below fails, an origin surface has appeared: add the
-// plain-language `email` label to all five `src/locales/*.json` files (and to
+// plain-language `email` label to all six `src/locales/*.json` files (and to
 // `CAPTURE_SOURCE_KIND_KEYS` if the surface routes through `sourceKindKey`)
 // before relaxing anything here. A raw `email` in front of a shopkeeper is
 // exactly what R12.1 forbids.
@@ -442,6 +442,6 @@ test('the desktop capture vocabulary deliberately excludes the email door', () =
     !kinds.includes('email'),
     'CAPTURE_SOURCE_KIND_KEYS gained "email" — that family labels this till\'s own '
       + 'captures, which are never server-minted. If a supplier-invoice origin surface '
-      + 'now needs it, add the label to all five locales in the same change.',
+      + 'now needs it, add the label to all six locales in the same change.',
   );
 });

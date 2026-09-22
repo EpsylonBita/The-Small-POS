@@ -56,7 +56,7 @@ test('SimplePricingModal has no hardcoded visible pricing copy', () => {
 });
 
 test('SimplePricingModal i18n keys are present in all supported locales', () => {
-  for (const locale of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const locale of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const simplePricing = readLocale(locale).modals.simplePricing;
     for (const key of [
       'title',

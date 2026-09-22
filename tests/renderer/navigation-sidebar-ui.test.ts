@@ -176,7 +176,7 @@ test('navigation sidebar bakes the current-page state into the active module acc
   // The new key exists and carries the {{label}} placeholder in every POS locale.
   const loadLocale = (lng: string): Record<string, unknown> =>
     JSON.parse(readFileSync(path.join(projectRoot, 'src', 'locales', `${lng}.json`), 'utf8'));
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const value = (loadLocale(lng).navigation as Record<string, unknown>).currentPage;
     assert.equal(typeof value, 'string', `${lng} navigation.currentPage missing`);
     assert.ok((value as string).includes('{{label}}'), `${lng} navigation.currentPage must interpolate {{label}}`);

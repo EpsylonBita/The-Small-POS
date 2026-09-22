@@ -42,7 +42,7 @@ test('RefundVoidModal payment status badges are localized rather than hardcoded 
 });
 
 test('RefundVoidModal table-session explanation has locale coverage', () => {
-  for (const language of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const language of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const refund = locale(language).modals.refund;
     assert.equal(typeof refund.title, 'string');
     assert.equal(typeof refund.subtitle, 'string');

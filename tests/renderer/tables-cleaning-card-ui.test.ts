@@ -89,7 +89,7 @@ test('OrderDashboard dine-in header label uses the shared display helper, not th
   );
 
   // Locale copy keeps the {{table}} token and never hardcodes a leading '#'.
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const value = JSON.parse(read(`src/locales/${lng}.json`)).orderFlow.tableCustomer;
     assert.match(value, /\{\{table\}\}/, `${lng} orderFlow.tableCustomer must keep the {{table}} token`);
     assert.doesNotMatch(value, /#\{\{table\}\}/, `${lng} orderFlow.tableCustomer must not hardcode a '#'`);

@@ -456,7 +456,7 @@ test('Round 297/320: modal stays portaled/blurred (LiquidGlassModal shell + cont
   assert.match(source, /onClick=\{onClose\}/);
 });
 
-test('Round 320: new redesign copy is translation-keyed in all five POS locales (no raw literals; Greek is real Greek)', () => {
+test('Round 320: new redesign copy is translation-keyed in all six POS locales (no raw literals; Greek is real Greek)', () => {
   // Every clarity.* key the redesign uses must resolve to a real string in every POS locale -- so no new
   // visible text is hardcoded as a raw English/Greek JSX literal.
   const used = Array.from(
@@ -472,7 +472,7 @@ test('Round 320: new redesign copy is translation-keyed in all five POS locales 
   const load = (lng: string): any => JSON.parse(readFileSync(path.join(localesDir, `${lng}.json`), 'utf8'));
   const en = load('en');
   const el = load('el');
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const c = load(lng).modals?.zReport?.clarity;
     assert.ok(c, `${lng} missing modals.zReport.clarity`);
     for (const k of used) {

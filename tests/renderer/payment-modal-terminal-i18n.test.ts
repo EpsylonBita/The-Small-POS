@@ -29,7 +29,7 @@ test('PaymentModal does not reference the missing top-level terminal.messages ke
 });
 
 test('PaymentModal terminal-disabled messages are localized in every POS locale', () => {
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const messages = loadSettingsTerminalMessages(lng);
     for (const key of REQUIRED_KEYS) {
       assert.equal(typeof messages[key], 'string', `${lng}.settings.terminal.messages.${key} missing`);
@@ -89,7 +89,7 @@ test('PaymentModal amounts format locale-aware: Greek "18,50 €", not "€18.50
 });
 
 test('below-minimum message drops the baked-in € and keeps the {{amount}} placeholder in every locale', () => {
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const msg = loadPaymentMessages(lng).belowMinimumMessage;
     assert.equal(typeof msg, 'string', `${lng}.modals.payment.belowMinimumMessage missing`);
     assert.match(msg, /\{\{amount\}\}/, `${lng} must keep the {{amount}} placeholder`);

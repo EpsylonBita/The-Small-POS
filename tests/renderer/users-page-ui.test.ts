@@ -322,7 +322,7 @@ test('UsersPage filter locale keys exist in every locale (Greek translated)', ()
   ];
   const get = (obj: any, dotted: string) => dotted.split('.').reduce((o, k) => (o == null ? o : o[k]), obj);
 
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const users = loadLocale(lng).users;
     for (const key of requiredKeys) {
       const value = get(users, key);

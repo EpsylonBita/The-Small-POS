@@ -53,6 +53,17 @@ import elSupport from './support/el.json';
 import deSupport from './support/de.json';
 import frSupport from './support/fr.json';
 import itSupport from './support/it.json';
+import sqBase from './sq.json';
+import sqPlatforms from './overlays/sq.platforms.json';
+import sqShiftWorkflow from './overlays/sq.shift-workflow-fixes.json';
+import sqRoomWorkflow from './overlays/sq.room-workflow-fixes.json';
+import sqScheduleWorkflow from './overlays/sq.schedule-workflow-fixes.json';
+import sqWorkflowAudit from './overlays/sq.workflow-audit.json';
+import sqHotfix from './overlays/sq.sync-hotfix.json';
+import sqTableCheck from './overlays/sq.table-check.json';
+import sqSettingsWorkflow from './overlays/sq.settings-workflow.json';
+import sqOnboarding from './overlays/sq.onboarding.json';
+import sqSupport from './support/sq.json';
 
 type LocaleBundle = Record<string, unknown>;
 
@@ -86,4 +97,5 @@ export const localeBundles = {
   de: mergeLocaleLayers(deBase, deHotfix, deTableCheck, { support: deSupport }, deSettingsWorkflow, deOnboarding, deShiftWorkflow, deRoomWorkflow, deScheduleWorkflow, deWorkflowAudit, dePlatforms),
   fr: mergeLocaleLayers(frBase, frHotfix, frTableCheck, { support: frSupport }, frSettingsWorkflow, frOnboarding, frShiftWorkflow, frRoomWorkflow, frScheduleWorkflow, frWorkflowAudit, frPlatforms),
   it: mergeLocaleLayers(itBase, itHotfix, itTableCheck, { support: itSupport }, itSettingsWorkflow, itOnboarding, itShiftWorkflow, itRoomWorkflow, itScheduleWorkflow, itWorkflowAudit, itPlatforms),
+  sq: mergeLocaleLayers(sqBase, sqHotfix, sqTableCheck, { support: sqSupport }, sqSettingsWorkflow, sqOnboarding, sqShiftWorkflow, sqRoomWorkflow, sqScheduleWorkflow, sqWorkflowAudit, sqPlatforms),
 } as const;

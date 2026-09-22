@@ -1,12 +1,12 @@
 {
   "paymentIntegrity": {
-    "multipleOrdersSummary": "{{count}} Bestellungen sind blockiert. Erster Blocker {{orderNumber}}: {{reason}}",
+    "multipleOrdersSummary": "{{count}} Bestellungen sind blockiert. Erste blockierte Bestellung {{orderNumber}}: {{reason}}",
     "methods": {
       "cash": "Bar",
       "card": "Karte",
       "split": "Geteilt",
       "pending": "Ausstehend",
-      "other": "Andere",
+      "other": "Sonstiges",
       "unknown": "Unbekannt"
     },
     "statuses": {
@@ -17,7 +17,7 @@
       "applied": "Übernommen",
       "failed": "Fehlgeschlagen",
       "in_progress": "In Bearbeitung",
-      "waiting_parent": "Wartet auf Elternzahlung"
+      "waiting_parent": "Wartet auf übergeordnete Zahlung"
     },
     "reasonCodes": {
       "missing_cash_payment": "Für Bestellung {{orderNumber}} fehlt die erfasste Barzahlung.",
@@ -38,13 +38,13 @@
       "platform_settlement_mismatch__store_collects_platform_order": "{{orderNumber}} hat unser eigener Fahrer ausgeliefert, doch {{platformSettledAmount}} sind als von der Plattform abgerechnetes Geld verbucht."
     },
     "fixCodes": {
-      "missing_cash_payment": "Die fehlende Barzahlung erfassen oder bestätigen.",
-      "missing_card_payment": "Die fehlende Kartenzahlung erfassen oder bestätigen.",
-      "missing_local_payment_row": "Payment-Mirrors aktualisieren oder den fehlenden Zahlungseintrag neu anlegen.",
-      "partial_cash_payment": "Den restlichen Barzahlungsbetrag erfassen, um fortzufahren.",
-      "partial_card_payment": "Den restlichen Kartenzahlungsbetrag erfassen, um fortzufahren.",
-      "split_payment_incomplete": "Alle Teile der geteilten Zahlung abschließen, bevor Sie fortfahren.",
-      "unsupported_payment_method": "Bestellung prüfen und die Zahlung manuell kassieren.",
+      "missing_cash_payment": "Erfassen oder bestätigen Sie die fehlende Barzahlung.",
+      "missing_card_payment": "Erfassen oder bestätigen Sie die fehlende Kartenzahlung.",
+      "missing_local_payment_row": "Aktualisieren Sie die gespiegelten Zahlungen oder legen Sie den fehlenden Zahlungseintrag neu an.",
+      "partial_cash_payment": "Erfassen Sie die restliche Barzahlung, um fortzufahren.",
+      "partial_card_payment": "Erfassen Sie die restliche Kartenzahlung, um fortzufahren.",
+      "split_payment_incomplete": "Schließen Sie alle Teile der geteilten Zahlung ab, bevor Sie fortfahren.",
+      "unsupported_payment_method": "Prüfen Sie die Bestellung und kassieren Sie die Zahlung manuell.",
       "no_persisted_payment": "Erfassen Sie die Zahlung, die für diese Bestellung tatsächlich angenommen wurde.",
       "partial_payment_remaining": "Kassieren Sie die verbleibenden {{outstandingAmount}}, um fortzufahren.",
       "duplicate_payment": "Stornieren Sie die doppelte Zahlungszeile; pro echter Transaktion bleibt eine Zahlung.",
@@ -66,7 +66,7 @@
       "ambiguous_canonical_remote_payment": "Mehrere reparierte Zahlungen passen zu dieser Anpassung. Manuelle Prüfung erforderlich."
     },
     "closeoutStages": {
-      "pre_z_report_sync": "Vor-Z-Bericht-Synchronisierung",
+      "pre_z_report_sync": "Sync vor dem Z-Bericht",
       "z_report_submission": "Z-Bericht-Übermittlung",
       "closeout_sync": "Abschluss-Synchronisierung"
     },

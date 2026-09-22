@@ -63,7 +63,7 @@
     "blockerReasons": {
       "parent_payment_not_synced": "En attente de la synchronisation du paiement parent.",
       "parent_payment_missing_canonical_remote_id": "En attente de l'identifiant de paiement distant du paiement parent.",
-      "ambiguous_canonical_remote_payment": "Plusieurs paiements réparés correspondent à cet ajustement. Vérification manuelle requise."
+      "ambiguous_canonical_remote_payment": "Plusieurs paiements corrigés correspondent à cet ajustement. Une vérification manuelle est nécessaire."
     },
     "closeoutStages": {
       "pre_z_report_sync": "synchronisation avant rapport Z",

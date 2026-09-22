@@ -40,7 +40,7 @@ test('StaffShiftModal humanizes unknown role slugs instead of leaking raw codes'
 });
 
 test('known staff role slugs resolve to localized labels in every locale', () => {
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const roleNames = loadLocale(lng).common?.roleNames ?? {};
     for (const slug of ROLE_SLUGS) {
       assert.equal(typeof roleNames[slug], 'string', `${lng}.common.roleNames.${slug} missing`);

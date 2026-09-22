@@ -155,7 +155,7 @@
       "financial_queue_failed": {
         "title": "Elementi finanziari di sincronizzazione falliti",
         "summary": "Uno o più record finanziari non sono riusciti a sincronizzarsi.",
-        "why": "Compensi rider, pagamenti staff o spese turno includono elementi di sincronizzazione falliti. I dati finanziari devono essere considerati incompleti finché questi errori non vengono verificati.",
+        "why": "I compensi dei fattorini, i pagamenti al personale o le spese del turno includono elementi la cui sincronizzazione non è riuscita. Considera i dati finanziari incompleti finché questi errori non vengono verificati.",
         "steps": [
           "Apri il pannello finanziario per vedere quale coda finanziaria è coinvolta.",
           "Verifica se le voci fallite stanno aumentando o sono già risolte.",
@@ -190,7 +190,7 @@
       },
       "pending_zreport_submit": {
         "title": "Un report Z locale deve ancora essere inviato",
-        "summary": "Questo terminale mostra un invio locale di fine giornata ancora in attesa.",
+        "summary": "La giornata precedente è già chiusa su questo terminale, ma l'invio locale del suo Rapporto Z è ancora in attesa.",
         "why": "Il contesto congelato di fine giornata non ha ancora completato l’invio locale. I dati di chiusura giornata della filiale possono restare incompleti finché questo invio non viene chiuso.",
         "steps": [
           "Aggiorna lo stato per verificare se il report in attesa si è sbloccato.",
@@ -245,7 +245,7 @@
       "offline_or_error": {
         "title": "La stampante è offline o segnala un errore",
         "summary": "La stampante selezionata non è sufficientemente sana per un output affidabile.",
-        "why": "Lo stato live della stampante riporta offline o error e il dispositivo può rifiutare o bloccare i lavori finché problemi di connettività o hardware non sono risolti.",
+        "why": "Lo stato in tempo reale della stampante risulta offline o in errore, e il dispositivo potrebbe rifiutare o bloccare i lavori di stampa finché i problemi di connettività o hardware non vengono risolti.",
         "steps": [
           "Controlla alimentazione, cavo, raggiungibilità di rete e indicatori di errore della stampante.",
           "Aggiorna la diagnostica stampante quando il dispositivo torna raggiungibile.",
@@ -281,7 +281,7 @@
       "unverified": {
         "title": "La configurazione stampante non è verificata",
         "summary": "Il profilo stampante esiste, ma non ha ancora superato la verifica.",
-        "why": "Uno stato unverified o unresolved significa che il profilo salvato non ha ancora completato un controllo diagnostico pulito con il dispositivo.",
+        "why": "Uno stato della stampante non verificato o non risolto significa che il profilo salvato non ha ancora completato un controllo diagnostico pulito con il dispositivo.",
         "steps": [
           "Apri configurazione rapida o modifica stampante per confermare i valori di trasporto salvati.",
           "Esegui la diagnostica dopo ogni modifica per verificare il dispositivo.",

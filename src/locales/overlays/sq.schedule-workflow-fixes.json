@@ -1,0 +1,24 @@
+{
+  "appointments": {
+    "workflow": {
+      "unavailable": "Jo në dispozicion",
+      "availabilityUnavailable": "Oraret e lira s'u kontrolluan dot. Kontrollo lidhjen dhe provo përsëri.",
+      "notScheduled": "Asnjë turn pune i sinkronizuar s'e mbulon këtë orë. Shto ose ndrysho orarin e stafit dhe prit të sinkronizohet.",
+      "pastSlot": "Zgjidh një orë në të ardhmen.",
+      "noSlots": "S'ka orare të lira për këtë punonjës dhe këtë shërbim. Kontrollo orarin e sinkronizuar ose zgjidh një ditë tjetër."
+    }
+  },
+  "staffSchedule": {
+    "workflow": {
+      "identityPending": "Prit të sinkronizohet ky orar, pastaj rifresko para se ta ndryshosh.",
+      "deleted": "Turni u fshi",
+      "saveFailed": "Orari s'u ruajt dot. Provo përsëri.",
+      "updated": "Turni u përditësua",
+      "edit": "Ndrysho turnin",
+      "delete": "Fshi turnin",
+      "updatedAction": "Ruaj ndryshimet",
+      "confirmDelete": "Konfirmo fshirjen",
+      "deleteConfirm": "Do ta fshish këtë turn të planifikuar? Para se të konfirmosh, shiko më poshtë punonjësin dhe oraret."
+    }
+  }
+}

@@ -4,6 +4,7 @@ import el from '../../../../locales/el.json'
 import de from '../../../../locales/de.json'
 import fr from '../../../../locales/fr.json'
 import italian from '../../../../locales/it.json'
+import albanian from '../../../../locales/sq.json'
 
 const requiredRepairKeys = [
   'title',
@@ -126,6 +127,7 @@ describe.each([
   ['de', de],
   ['fr', fr],
   ['it', italian],
+  ['sq', albanian],
 ])('%s repair locale', (_locale, bundle) => {
   it.each(requiredRepairKeys)('defines repairs.%s as visible copy', (key) => {
     const value = readKey((bundle as Record<string, unknown>).repairs, key)

@@ -312,14 +312,14 @@ test('orders.clearSearch accessible label is localized in every POS locale', () 
   const en = loadLocale('en').orders.clearSearch;
   assert.equal(typeof en, 'string', 'en missing orders.clearSearch');
 
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const value = loadLocale(lng).orders?.clearSearch;
     assert.equal(typeof value, 'string', `${lng} missing orders.clearSearch`);
     assert.ok(value.length > 0, `${lng} empty orders.clearSearch`);
   }
   // Greek + de/fr/it must be real translations, not the English fallback (an
   // invisible leak that source-key parity alone cannot catch).
-  for (const lng of ['el', 'de', 'fr', 'it']) {
+  for (const lng of ['el', 'de', 'fr', 'it', 'sq']) {
     assert.notEqual(
       loadLocale(lng).orders.clearSearch,
       en,
@@ -580,7 +580,7 @@ test('OrdersPage localizes room_service order type and gives it a Bed icon, neve
   assert.match(iconFn, /case 'dine-in': return <TableOrderIcon className="w-6 h-6" \/>;/);
 
   // --- Locales: every POS locale defines orders.type.roomService; Greek is a real translation ---
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const val = loadLocale(lng).orders.type.roomService;
     assert.equal(typeof val, 'string', `${lng} orders.type.roomService must be a string`);
     assert.ok(val.trim().length > 0, `${lng} orders.type.roomService must be non-empty`);
@@ -999,7 +999,7 @@ test('table dashboards expose list and 2D floor-plan modes', () => {
       readFileSync(path.join(process.cwd(), 'src', 'locales', 'overlays', `${lng}.table-check.json`), 'utf8'),
     );
   const GREEK = new RegExp('[\\u0370-\\u03FF]');
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const viewMode = loadOverlay(lng).tablesDashboard?.viewMode;
     assert.ok(viewMode, `${lng} overlay missing tablesDashboard.viewMode`);
     assert.equal(typeof viewMode.list, 'string', `${lng} viewMode.list must be a string`);
@@ -1012,7 +1012,7 @@ test('table dashboards expose list and 2D floor-plan modes', () => {
   assert.match(elList, GREEK, `el viewMode.list should be Greek: "${elList}"`);
   assert.notEqual(elList, 'List', 'el viewMode.list must not be the English fallback');
   // No non-English locale may leave the list label as the English fallback "List".
-  for (const lng of ['el', 'de', 'fr', 'it']) {
+  for (const lng of ['el', 'de', 'fr', 'it', 'sq']) {
     assert.notEqual(
       loadOverlay(lng).tablesDashboard.viewMode.list,
       'List',
@@ -1735,13 +1735,13 @@ test('reservationReleased recovery toast is localized in every POS locale', () =
 
   const en = loadLocale('en').tableActionModal.reservationReleased;
 
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const value = loadLocale(lng).tableActionModal?.reservationReleased;
     assert.equal(typeof value, 'string', `${lng} missing tableActionModal.reservationReleased`);
     assert.ok(value.length > 0, `${lng} empty tableActionModal.reservationReleased`);
   }
   // Greek + de/fr/it must be real translations, not the English fallback.
-  for (const lng of ['el', 'de', 'fr', 'it']) {
+  for (const lng of ['el', 'de', 'fr', 'it', 'sq']) {
     assert.notEqual(
       loadLocale(lng).tableActionModal.reservationReleased,
       en,
@@ -1817,7 +1817,7 @@ test('OrderTabsBar bakes the selected state into each tab accessible name (deriv
   // The two new keys exist with both placeholders, and selectedTab carries a state suffix, in every locale.
   const loadLocale = (lng: string): Record<string, unknown> =>
     JSON.parse(readFileSync(path.join(process.cwd(), 'src', 'locales', `${lng}.json`), 'utf8'));
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const tabs = (loadLocale(lng).dashboard as Record<string, Record<string, unknown>>).tabs;
     const tab = tabs.tab as string;
     const selectedTab = tabs.selectedTab as string;
@@ -2358,7 +2358,7 @@ test('Round 238: the new selector titles + empty states exist in every POS local
     'roomCheckinEmptyHint',
     'roomReservationEmpty',
   ];
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const orderFlow = loadLocale(lng).orderFlow;
     for (const key of keys) {
       assert.equal(typeof orderFlow?.[key], 'string', `${lng} missing orderFlow.${key}`);
@@ -2460,7 +2460,7 @@ test('Round 238: Room Order empty state explains the open-folio requirement + a 
 
   // Both keys exist in every locale; English names the folio requirement + Check-in; Greek is translated.
   const GREEK = new RegExp('[\\u0370-\\u03FF]');
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const orderFlow = loadLocale(lng).orderFlow;
     for (const key of ['roomOrderEmpty', 'roomOrderEmptyHint']) {
       assert.equal(typeof orderFlow?.[key], 'string', `${lng} missing orderFlow.${key}`);
@@ -2803,11 +2803,11 @@ test('Round 231: standalone TablesPage has a touch-first floor selector composin
   assert.match(sel, /t\('tableSelector\.floorNumber', \{ defaultValue: 'Floor \{\{floor\}\}', floor \}\)/);
   assert.doesNotMatch(sel, new RegExp('[\\u0370-\\u03FF]'));
 
-  // The used floor labels exist in all five POS locales (Greek a real translation, {{floor}} preserved).
+  // The used floor labels exist in all six POS locales (Greek a real translation, {{floor}} preserved).
   const localesDir = path.join(process.cwd(), 'src', 'locales');
   const loadLocale = (lng: string): Record<string, any> =>
     JSON.parse(readFileSync(path.join(localesDir, `${lng}.json`), 'utf8'));
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const ts = loadLocale(lng).tableSelector;
     for (const key of ['floor', 'allFloors', 'floorNumber']) {
       assert.equal(typeof ts[key], 'string', `${lng} tableSelector.${key} missing`);

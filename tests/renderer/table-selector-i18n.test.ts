@@ -14,7 +14,7 @@ const localesDir = path.join(process.cwd(), 'src', 'locales');
 const loadLocale = (lng: string): Record<string, any> =>
   JSON.parse(readFileSync(path.join(localesDir, `${lng}.json`), 'utf8'));
 
-const POS_LOCALES = ['en', 'el', 'de', 'fr', 'it'] as const;
+const POS_LOCALES = ['en', 'el', 'de', 'fr', 'it', 'sq'] as const;
 const GREEK_LETTER = new RegExp('[\\u0370-\\u03FF]');
 
 const flatten = (obj: Record<string, any>, prefix = ''): Record<string, string> => {

@@ -246,7 +246,7 @@ test('Round 352: Add/Save is disabled until required visible fields are valid, w
   // The new hint key exists, is non-empty, and is a real translation in every POS locale (el is Greek, != en).
   const loadLocale = (lng: string): Record<string, any> =>
     JSON.parse(readFileSync(path.join(projectRoot, 'src', 'locales', `${lng}.json`), 'utf8'));
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const v = loadLocale(lng)?.ecr?.config?.missingRequired;
     assert.equal(typeof v, 'string', `${lng} missing ecr.config.missingRequired`);
     assert.ok((v as string).length > 0, `${lng} empty ecr.config.missingRequired`);

@@ -148,7 +148,7 @@ test('ReservationsView translation keys are present in every locale', () => {
   ];
   const tabKeys = ['tables', 'rooms', 'services'];
 
-  for (const language of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const language of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const view = locale(language).reservationsView;
     assert.ok(view, `${language} is missing reservationsView`);
     for (const key of flatKeys) {
@@ -208,7 +208,7 @@ test('ReservationsView assign + create table controls are selectors bound to the
 });
 
 test('ReservationsView table-selector locale keys exist in every locale and Greek is translated', () => {
-  for (const language of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const language of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const view = locale(language).reservationsView;
     assert.equal(typeof view.selectTable, 'string', `${language} missing reservationsView.selectTable`);
     assert.ok(view.selectTable.length > 0, `${language} empty reservationsView.selectTable`);
@@ -246,7 +246,7 @@ test('create-reservation duration is labeled with units, not just a raw prefille
     'duration input must be wrapped in a <label> with a visible units label',
   );
   // The duration label text carries the unit hint in every locale.
-  for (const language of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const language of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const value = locale(language).reservationsView.form.duration;
     assert.equal(typeof value, 'string', `${language} missing reservationsView.form.duration`);
     assert.ok(value.length > 0, `${language} empty reservationsView.form.duration`);
@@ -254,7 +254,7 @@ test('create-reservation duration is labeled with units, not just a raw prefille
 });
 
 test('create-reservation date/time labels exist in every locale and Greek is translated', () => {
-  for (const language of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const language of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const form = locale(language).reservationsView.form;
     assert.equal(typeof form.reservationDate, 'string', `${language} missing form.reservationDate`);
     assert.ok(form.reservationDate.length > 0, `${language} empty form.reservationDate`);
@@ -340,7 +340,7 @@ test('reservation toast keys (incl. all status enums) exist in every locale, Gre
   const STATUSES = ['pending', 'confirmed', 'seated', 'completed', 'no_show', 'cancelled'];
   const GREEK = new RegExp('[\\u0370-\\u03FF]');
 
-  for (const lang of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lang of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const toasts = locale(lang).reservationsView?.toasts;
     assert.ok(toasts, `${lang} missing reservationsView.toasts`);
     for (const k of FLAT) {
@@ -439,7 +439,7 @@ test('Service modal Escape closes only the modal via the close-only path, never 
 
 test('service booking locale keys exist in every locale and Greek is translated', () => {
   const GREEK_LETTER = new RegExp('[\\u0370-\\u03FF]');
-  for (const language of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const language of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const view = locale(language).reservationsView;
     assert.equal(typeof view.createServiceTitle, 'string', `${language} missing reservationsView.createServiceTitle`);
     assert.ok(view.createServiceTitle.length > 0, `${language} empty reservationsView.createServiceTitle`);
@@ -500,7 +500,7 @@ test('Reservations room create uses a room selector populated from room inventor
 
 test('Reservations room selector locale keys exist in every locale and Greek is translated', () => {
   const GREEK_LETTER = new RegExp('[\\u0370-\\u03FF]');
-  for (const language of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const language of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const form = locale(language).reservationsView.form;
     for (const key of ['room', 'selectRoom']) {
       assert.equal(typeof form?.[key], 'string', `${language} missing reservationsView.form.${key}`);

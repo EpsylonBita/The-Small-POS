@@ -11,7 +11,7 @@ import {
   COUPON_ERROR_FALLBACKS,
 } from '../../src/renderer/utils/couponErrors.ts';
 
-const LOCALES = ['en', 'el', 'de', 'fr', 'it'] as const;
+const LOCALES = ['en', 'el', 'de', 'fr', 'it', 'sq'] as const;
 const NEW_KEYS = [
   'couponNotFound',
   'couponInactive',

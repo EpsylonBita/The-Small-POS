@@ -187,7 +187,7 @@ const loadLocale = (lng: string): unknown =>
 const DISCOUNT_MODAL_KEYS = ['manualDiscount', 'removeDiscount', 'applyDiscount', 'discountAmount'] as const;
 
 test('discount modal menu.cart.* labels exist and never leak the raw key in any POS locale', () => {
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const json = loadLocale(lng);
     for (const key of DISCOUNT_MODAL_KEYS) {
       const dotted = `menu.cart.${key}`;
@@ -249,7 +249,7 @@ test('MenuCart manual item submit button routes through a localized menu.cart ke
 
 test('menu.cart.manualItemSubmit exists and is localized (Greek not "Add") in every POS locale', () => {
   const greek = new RegExp('[\\u0370-\\u03FF]');
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const value = getKey(loadLocale(lng), 'menu.cart.manualItemSubmit');
     assert.equal(typeof value, 'string', `${lng} missing menu.cart.manualItemSubmit`);
     assert.ok((value as string).length > 0, `${lng} empty menu.cart.manualItemSubmit`);

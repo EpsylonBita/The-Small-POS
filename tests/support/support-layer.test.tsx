@@ -1910,7 +1910,7 @@ const orderServicePath = path.join(process.cwd(), 'src', 'services', 'OrderServi
 const nativePaymentsPath = path.join(process.cwd(), 'src-tauri', 'src', 'payments.rs');
 const nativeSyncPath = path.join(process.cwd(), 'src-tauri', 'src', 'sync.rs');
 const localeDirectoryPath = path.join(process.cwd(), 'src', 'locales');
-const posLocaleCodes = ['de', 'el', 'en', 'fr', 'it'] as const;
+const posLocaleCodes = ['de', 'el', 'en', 'fr', 'it', 'sq'] as const;
 
 const readRoomsViewSource = () => readFileSync(roomsViewPath, 'utf8');
 const readRoomsServiceSource = () => readFileSync(roomsServicePath, 'utf8');

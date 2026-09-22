@@ -2553,6 +2553,38 @@ fn load_local_order_insert_fallback(
     .map_err(|e| format!("sync_queue load_local_order_insert_fallback: {e}"))
 }
 
+/// The register number this terminal printed and showed for the order
+/// (`ORD-DDMMYYYY-NNNNN`). The server keeps it in `orders.display_order_number`
+/// so the order can be found by the number on the receipt, while its
+/// `order_number` stays the canonical server hash. It travels as
+/// `local_order_number`, not `display_order_number`: servers without this field
+/// accept only satellite codes there and answer anything else with a 400, which
+/// fails the order's sync for good, whereas they drop an unknown field. A server
+/// hash, a satellite code or any other value is never sent.
+pub(crate) fn register_order_number_for_sync<'a>(
+    candidates: impl IntoIterator<Item = Option<&'a str>>,
+) -> Option<String> {
+    candidates
+        .into_iter()
+        .flatten()
+        .map(|value| value.trim().to_ascii_uppercase())
+        .find(|value| is_register_order_number(value))
+}
+
+fn is_register_order_number(value: &str) -> bool {
+    let mut parts = value.split('-');
+    let (Some(prefix), Some(date), Some(sequence), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    prefix == "ORD"
+        && date.len() == 8
+        && date.bytes().all(|byte| byte.is_ascii_digit())
+        && (4..=6).contains(&sequence.len())
+        && sequence.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 fn build_order_insert_body(
     conn: &Connection,
     record_id: &str,
@@ -2765,6 +2797,12 @@ fn build_order_insert_body(
             Value::Object(_) => Some(value),
             _ => None,
         });
+    let order_number = string_field_from_sources(&sources, &["order_number", "orderNumber"]);
+    let local_order_number = register_order_number_for_sync([
+        string_field_from_sources(&sources, &["display_order_number", "displayOrderNumber"])
+            .as_deref(),
+        order_number.as_deref(),
+    ]);
 
     // W4d-iv additive emission: every monetary float key gets a `_cents`
     // sibling so admin-dashboard can read either shape during the bake
@@ -2861,7 +2899,8 @@ fn build_order_insert_body(
         "customer_name": customer_name,
         "customer_phone": customer_phone,
         "customer_email": customer_email,
-        "order_number": string_field_from_sources(&sources, &["order_number", "orderNumber"]),
+        "order_number": order_number,
+        "local_order_number": local_order_number,
         "status": string_field_from_sources(&sources, &["status"])
             .unwrap_or_else(|| "pending".to_string()),
         "table_number": string_field_from_sources(&sources, &["table_number", "tableNumber"]),
@@ -2891,11 +2930,10 @@ fn build_order_insert_body(
     });
 
     if let Value::Object(object) = &mut body {
-        if object
-            .get("fiscal_receipt_number")
-            .is_some_and(Value::is_null)
-        {
-            object.remove("fiscal_receipt_number");
+        for optional_key in ["fiscal_receipt_number", "local_order_number"] {
+            if object.get(optional_key).is_some_and(Value::is_null) {
+                object.remove(optional_key);
+            }
         }
     }
 
@@ -14246,6 +14284,91 @@ mod tests {
         let body = serde_json::from_str::<Value>(request.body.as_deref().expect("request body"))
             .expect("parse request body");
         assert_eq!(body.get("fiscal_receipt_number"), None);
+    }
+
+    #[test]
+    fn prepare_order_request_sends_the_register_number_as_local_order_number() {
+        let conn = test_connection();
+        let insert_body = |record_id: &str, order_number: &str| {
+            let item = queue_item(
+                "orders",
+                "INSERT",
+                record_id,
+                json!({
+                    "branchId": TEST_BRANCH_ID,
+                    "orderType": "delivery",
+                    "paymentMethod": "cash",
+                    "paymentStatus": "paid",
+                    "orderNumber": order_number,
+                    "displayOrderNumber": order_number,
+                    "items": [{
+                        "menuItemId": TEST_MENU_ITEM_ID,
+                        "quantity": 1,
+                        "price": 5.0,
+                        "name": "Crepe"
+                    }]
+                }),
+            );
+            let payload = serde_json::from_str::<Value>(&item.data).expect("parse payload");
+            let request = match prepare_order_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+                .expect("prepare request")
+            {
+                RequestPreparation::Ready(spec) => spec,
+                other => panic!("expected ready request, got {other:?}"),
+            };
+            serde_json::from_str::<Value>(request.body.as_deref().expect("request body"))
+                .expect("parse request body")
+        };
+
+        // Order #00044 (2026-09-21): the cloud row kept only the server hash, so
+        // nobody could find the order by the number on its receipt.
+        let body = insert_body("order-register-number", "ORD-21092026-00044");
+        assert_eq!(
+            body.get("local_order_number").and_then(Value::as_str),
+            Some("ORD-21092026-00044")
+        );
+        assert_eq!(
+            body.get("display_order_number"),
+            None,
+            "servers before local_order_number answer a register number there with a 400"
+        );
+
+        let body = insert_body(
+            "order-server-hash",
+            "ORD-20260921-553ddc57e2d750e596a800e3cfaf38fb",
+        );
+        assert_eq!(body.get("local_order_number"), None);
+    }
+
+    #[test]
+    fn register_order_number_for_sync_sends_only_register_numbers() {
+        assert_eq!(
+            register_order_number_for_sync([Some(" ord-21092026-00044 ")]),
+            Some("ORD-21092026-00044".to_string())
+        );
+        assert_eq!(
+            register_order_number_for_sync([
+                Some("ORD-20260921-553ddc57e2d750e596a800e3cfaf38fb"),
+                Some("ORD-21092026-00044"),
+            ]),
+            Some("ORD-21092026-00044".to_string())
+        );
+        for rejected in [
+            "M1-0042",
+            "ORD-2109-00044",
+            "ORD-21092026-044",
+            "ORD-21092026-0000044",
+            "KSK-21092026-00044",
+            "ORD-21092026-00044-2",
+            "",
+        ] {
+            assert_eq!(
+                register_order_number_for_sync([Some(rejected)]),
+                None,
+                "{rejected}"
+            );
+        }
+        assert_eq!(register_order_number_for_sync([None, None]), None);
     }
 
     #[test]

@@ -41,7 +41,7 @@ test('PrintPreviewModal owns visible strings through i18n', () => {
 test('print preview labels exist in every supported locale', () => {
   const keys = ['zoomOut', 'zoomIn', 'receiptFrame', 'previewUnavailable', 'defaultPrinter'];
 
-  for (const language of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const language of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const printPreview = locale(language).modals?.printPreview;
     assert.ok(printPreview, `${language} is missing modals.printPreview`);
     for (const key of keys) {

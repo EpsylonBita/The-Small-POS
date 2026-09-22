@@ -12,7 +12,7 @@
     "saveFailed": "Die Änderung wurde nicht gespeichert. Die Eingaben bleiben erhalten. Erneut versuchen oder die Reservierung vor einer Neuanlage prüfen.",
     "loadingBooking": "Zimmerreservierung wird geladen…",
     "resumeBooking": "Reservierung {{number}} fortsetzen",
-    "noBillingNotice": "Nur Anreise: Es wird keine Zahlung oder Übernachtungsgebühr erfasst. Ein Zimmerkonto erfordert Guest Billing.",
+    "noBillingNotice": "Nur Anreise: Es werden keine Zahlung und keine Übernachtungskosten erfasst. Für ein Zimmerkonto ist die Gästefakturierung nötig.",
     "costPreview": "{{nights}} Nächte × {{rate}} = {{total}} geschätzte Aufenthaltskosten",
     "editBooking": "Zimmer / Daten ändern",
     "staying": "Anwesend",

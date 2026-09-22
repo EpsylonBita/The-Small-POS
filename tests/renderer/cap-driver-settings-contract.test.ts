@@ -7,7 +7,7 @@ import path from 'node:path';
 // selectable (installers set to ANSI 1253 vs UTF-8), the cashier TCP probe
 // must be opt-in (RBS ELIO links are often UDP/serial behind the service),
 // and the service requirement must be switchable off for the rehearsal
-// script. This pins the UI, the Rust adapter, and the five locales together.
+// script. This pins the UI, the Rust adapter, and the six locales together.
 
 const read = (...segments: string[]) => readFileSync(path.join(process.cwd(), ...segments), 'utf8');
 
@@ -82,7 +82,7 @@ test('CAP adapter reads the same setting keys and gates the TCP probe', () => {
 });
 
 test('CAP setting labels exist in every POS locale', () => {
-  for (const language of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const language of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const values = locale(language).settings?.peripherals?.cashRegister;
     assert.ok(values, `${language}.settings.peripherals.cashRegister missing`);
     for (const key of CAP_SETTING_KEYS) {

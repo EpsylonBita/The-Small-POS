@@ -1,0 +1,78 @@
+{
+  "paymentIntegrity": {
+    "multipleOrdersSummary": "{{count}} porosi janë të bllokuara. Bllokimi i parë {{orderNumber}}: {{reason}}",
+    "methods": {
+      "cash": "Kesh",
+      "card": "Kartë",
+      "split": "E ndarë",
+      "pending": "Në pritje",
+      "other": "Tjetër",
+      "unknown": "I panjohur"
+    },
+    "statuses": {
+      "pending": "Në pritje",
+      "paid": "Paguar",
+      "partially_paid": "Paguar pjesërisht",
+      "completed": "Përfunduar",
+      "applied": "Aplikuar",
+      "failed": "Dështoi",
+      "in_progress": "Në vazhdim",
+      "waiting_parent": "Pret pagesën fillestare"
+    },
+    "reasonCodes": {
+      "missing_cash_payment": "Porosisë {{orderNumber}} i mungon pagesa e regjistruar me kesh.",
+      "missing_card_payment": "Porosisë {{orderNumber}} i mungon pagesa e regjistruar me kartë.",
+      "missing_local_payment_row": "Porosia {{orderNumber}} është shënuar si e paguar, por pagesa e saj lokale mungon.",
+      "partial_cash_payment": "Porosia {{orderNumber}} ka ende një pjesë kesh pa paguar.",
+      "partial_card_payment": "Porosia {{orderNumber}} ka ende një pjesë me kartë pa paguar.",
+      "split_payment_incomplete": "Porosia {{orderNumber}} ka ende një pagesë të ndarë të papërfunduar.",
+      "unsupported_payment_method": "Porosia {{orderNumber}} ka një mënyrë pagese që duhet arkëtuar me dorë.",
+      "no_persisted_payment": "Porosia {{orderNumber}} u përfundua pa një pagesë të ruajtur me kesh ose kartë.",
+      "partial_payment_remaining": "Te porosia {{orderNumber}} mbeten ende pa arkëtuar {{outstandingAmount}} nga {{totalAmount}}.",
+      "duplicate_payment": "I njëjti transaksion është regjistruar më shumë se një herë te {{orderNumber}}: {{settledAmount}} për një porosi prej {{totalAmount}}.",
+      "overpaid_order": "Pagesat te {{orderNumber}} e kalojnë porosinë me {{overpaidAmount}}: janë regjistruar {{netSettledAmount}} për një porosi prej {{ceilingAmount}}.",
+      "platform_settlement_missing": "Porosinë {{orderNumber}} e shlyen platforma, por s'është regjistruar asnjë shlyerje nga platforma prej {{totalAmount}}.",
+      "platform_settlement_mismatch": "Paratë e {{orderNumber}} janë regjistruar në anën e gabuar: s'mund t'i kenë njëkohësisht edhe platforma, edhe arka.",
+      "platform_settlement_mismatch__platform_holds": "Porosinë {{orderNumber}} e shlyen platforma, por {{drawerAmount}} janë regjistruar si kesh ose kartë në arkë.",
+      "platform_settlement_mismatch__store_collects": "{{orderNumber}} është porosi e dyqanit, por {{platformSettledAmount}} janë regjistruar si para që i shlyen platforma.",
+      "platform_settlement_mismatch__store_collects_platform_order": "{{orderNumber}} u dorëzua nga korrieri ynë, por {{platformSettledAmount}} janë regjistruar si para që i shlyen platforma."
+    },
+    "fixCodes": {
+      "missing_cash_payment": "Regjistro ose konfirmo pagesën me kesh që mungon.",
+      "missing_card_payment": "Regjistro ose konfirmo pagesën me kartë që mungon.",
+      "missing_local_payment_row": "Rifresko kopjet e pagesave ose rikrijo pagesën që mungon.",
+      "partial_cash_payment": "Regjistro pjesën e mbetur me kesh për të vazhduar.",
+      "partial_card_payment": "Regjistro pjesën e mbetur me kartë për të vazhduar.",
+      "split_payment_incomplete": "Përfundo të gjitha pjesët e pagesës së ndarë para se të vazhdosh.",
+      "unsupported_payment_method": "Kontrollo porosinë dhe arkëtoje pagesën me dorë.",
+      "no_persisted_payment": "Regjistro pagesën që u mor vërtet për këtë porosi.",
+      "partial_payment_remaining": "Arkëto edhe {{outstandingAmount}} që mbeten për të vazhduar.",
+      "duplicate_payment": "Anulo rreshtin e dyfishtë të pagesës dhe mbaj vetëm një pagesë për çdo transaksion real.",
+      "overpaid_order": "Rimburso ose anulo pagesën e tepërt, që regjistri të përputhet me totalin e porosisë.",
+      "platform_settlement_missing": "Bëje sërish shlyerjen nga platforma për këtë porosi, që paratë të regjistrohen si xhiro nga platforma.",
+      "platform_settlement_mismatch": "Anulo rreshtin në anën e gabuar, që paratë të regjistrohen aty ku janë vërtet.",
+      "platform_settlement_mismatch__platform_holds": "Anulo rreshtin kesh ose kartë: paratë e parapaguara dhe ato që merr korrieri i platformës s'hyjnë kurrë në arkë.",
+      "platform_settlement_mismatch__store_collects": "Anulo rreshtin e shlyerjes nga platforma dhe regjistro keshin ose kartën që mori vërtet dyqani.",
+      "platform_settlement_mismatch__store_collects_platform_order": "Anulo rreshtin e shlyerjes nga platforma dhe regjistro keshin ose kartën që solli vërtet korrieri."
+    }
+  },
+  "sync": {
+    "system": {
+      "blockingItems": "Elemente që bllokojnë"
+    },
+    "blockerReasons": {
+      "parent_payment_not_synced": "Pret që më parë të sinkronizohet pagesa fillestare.",
+      "parent_payment_missing_canonical_remote_id": "Pret që pagesa fillestare të marrë ID-në e saj në server.",
+      "ambiguous_canonical_remote_payment": "Disa pagesa të rregulluara përputhen me këtë korrigjim. Duhet parë me dorë."
+    },
+    "closeoutStages": {
+      "pre_z_report_sync": "sinkronizimi para raportit Z",
+      "z_report_submission": "dërgimi i raportit Z",
+      "closeout_sync": "sinkronizimi i mbylljes"
+    },
+    "closeoutBlocked": {
+      "single": "Mbyllja e ditës ngeci te {{stage}}, sepse {{orderReference}} ka mbetur bllokuar: {{reason}}.",
+      "multiple": "Mbyllja e ditës ngeci te {{stage}}, sepse {{count}} elemente sinkronizimi kanë mbetur bllokuar."
+    }
+  }
+}

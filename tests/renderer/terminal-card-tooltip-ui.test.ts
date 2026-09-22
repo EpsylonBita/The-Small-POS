@@ -119,7 +119,7 @@ test('Round 228: TerminalConfigModal has red-cancel/green-add footer, a green gl
 
 // Round 229 (live QA): the payment-terminals refresh icon button was exposed in accessibility as an empty
 // unnamed button, and the bottom "Add Terminal" CTA was still yellow. The refresh button is now a 44x44
-// centred glass icon button with a localized aria-label (ecr.refreshStatus in all five POS locales), and
+// centred glass icon button with a localized aria-label (ecr.refreshStatus in all six POS locales), and
 // the Add CTA is semantic green (Discover stays neutral/secondary). No title tooltips, no hover; the
 // refresh behaviour (handleRefresh) is unchanged.
 test('Round 229: PaymentTerminalsSection refresh button is named + 44px, and Add Terminal CTA is green', () => {
@@ -152,7 +152,7 @@ test('Round 229: PaymentTerminalsSection refresh button is named + 44px, and Add
   // The localized refresh-status accessible name exists in every POS locale (Greek a real translation).
   const localesDir = path.join(process.cwd(), 'src', 'locales');
   const loadLocale = (lng: string): any => JSON.parse(readFileSync(path.join(localesDir, `${lng}.json`), 'utf8'));
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const val = loadLocale(lng).ecr.refreshStatus;
     assert.equal(typeof val, 'string', `${lng} ecr.refreshStatus missing`);
     assert.ok(val.trim().length > 0, `${lng} ecr.refreshStatus empty`);

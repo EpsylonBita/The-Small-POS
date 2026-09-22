@@ -1,0 +1,157 @@
+{
+  "center": {
+    "eyebrow": "Qendra e rikuperimit",
+    "title": "Rikuperim direkt nga POS-i",
+    "subtitle": "Përdor veprimet e udhëzuara të rregullimit për të zgjidhur porosi, pagesa, turne e raporte Z të bllokuara, si dhe probleme printeri, pa dalë nga POS-i.",
+    "needsAttentionTitle": "Do vëmendje tani",
+    "needsAttentionSubtitle": "Problemet bllokuese duan veprim nga përdoruesi para se sinkronizimi të kthehet në gjendje të pastër.",
+    "noBlockingIssues": "Për momentin s'duket asnjë problem bllokues.",
+    "recoveringTitle": "Po rikuperohet vetë",
+    "recoveringSubtitle": "Këto probleme po provohen përsëri ose mund të shtyhen përpara pa rrezik, pa fshirë asgjë.",
+    "noRecoveringIssues": "Për momentin s'ka asnjë rikuperim automatik në vazhdim.",
+    "recentActionsTitle": "Zgjidhur së fundmi",
+    "recentActionsSubtitle": "Çdo përpjekje rregullimi regjistrohet lokalisht, që stafi të shohë çfarë u provua dhe çfarë pati sukses.",
+    "noRecentActions": "Ende s'është regjistruar asnjë veprim rikuperimi."
+  },
+  "context": {
+    "terminalId": "ID e terminalit",
+    "branchId": "ID e degës",
+    "organizationId": "ID e organizatës",
+    "syncHealthState": "Gjendja e sinkronizimit"
+  },
+  "status": {
+    "blocking": "Bllokon",
+    "recovering": "Në rikuperim",
+    "resolved": "Zgjidhur",
+    "healthy": "Në rregull",
+    "pending": "Në pritje",
+    "blocked": "Bllokuar",
+    "error": "Gabim",
+    "stale": "Vjetruar"
+  },
+  "common": {
+    "reference": "Referenca",
+    "entityId": "ID e entitetit",
+    "order": "Porosia",
+    "payment": "Pagesa",
+    "adjustment": "Korrigjim",
+    "issueCount_one": "{{count}} problem",
+    "issueCount_other": "{{count}} probleme",
+    "unknownActor": "Përdorues i panjohur"
+  },
+  "messages": {
+    "actionSucceeded": "Veprimi «{{action}}» u krye.",
+    "actionFailed": "Veprimi «{{action}}» dështoi. Shiko detajet e problemit dhe provo përsëri.",
+    "orderNotFound": "Porosia e kërkuar {{orderNumber}} s'u gjet lokalisht."
+  },
+  "issues": {
+    "genericSyncBlocker": {
+      "title": "Një element sinkronizimi duhet parë",
+      "summary": "Një element lokal sinkronizimi është ende i bllokuar dhe do vëmendje para se terminali të rikuperohet plotësisht.",
+      "guidance": "Përdor veprimet që ke për të provuar përsëri, për ta kthyer në radhë ose për të hapur elementin përkatës dhe për të përfunduar rregullimin."
+    },
+    "paymentAdjustmentOrderNotFound": {
+      "title": "Rimbursimi ose anulimi s'e gjen porosinë e vet",
+      "summary": "Korrigjimi financiar lokal për {{orderNumber}} tregon te një porosi që s'është më në server.",
+      "guidance": "Hap porosinë për të konfirmuar historikun e saj. Nëse porosia s'rikuperohet dot, hidhe poshtë korrigjimin lokal nga ky terminal."
+    },
+    "paymentAdjustmentMissingParent": {
+      "title": "Korrigjimi pret pagesën e tij fillestare",
+      "summary": "Korrigjimi financiar për {{orderNumber}} s'mund të sinkronizohet pa u sinkronizuar më parë pagesa fillestare.",
+      "guidance": "Provo përsëri sinkronizimin ose hap shlyerjen e porosisë dhe kontrollo që pagesa fillestare ekziston dhe është e përfunduar."
+    },
+    "paymentAdjustmentMissingCanonicalParent": {
+      "title": "Korrigjimi pret regjistrimin e pagesës në server",
+      "summary": "Terminali e gjeti pagesën fillestare për {{orderNumber}}, por ajo ende s'ka një ID të vlefshme pagese në server.",
+      "guidance": "Fillimisht provo përsëri sinkronizimin. Nëse problemi mbetet i bllokuar, hap shlyerjen e porosisë dhe rregullo zinxhirin e pagesave para se të nxjerrësh raportin Z."
+    },
+    "paymentAdjustmentAmbiguousParent": {
+      "title": "Korrigjimi ka më shumë se një pagesë fillestare të mundshme",
+      "summary": "Terminali rregulloi disa pagesa për {{orderNumber}} dhe s'mund ta vendosë me siguri se cilës i përket ky korrigjim.",
+      "guidance": "Hap shlyerjen e porosisë, mbaj pagesën e saktë dhe hiq ose anulo zinxhirin e dyfishtë para se të provosh përsëri sinkronizimin."
+    },
+    "orderSyncBlocked": {
+      "title": "Sinkronizimi i porosisë është i bllokuar",
+      "summary": "Porosia {{orderNumber}} pret ende në radhën e sinkronizimit dhe po bllokon punët që varen prej saj.",
+      "guidance": "Hap porosinë, kontrollo të dhënat e fundit dhe nga ky ekran provo përsëri ose ktheje në radhë elementin e sinkronizimit."
+    },
+    "shiftSyncConflict": {
+      "title": "Konflikt në sinkronizimin e turnit",
+      "summary": "Ky turn s'mund të sinkronizohet, sepse serveri sheh ende një turn tjetër aktiv të pazgjidhur për të njëjtin punonjës.",
+      "guidance": "Hap rregullimin e turnit për ta mbyllur ose rregulluar turnin në konflikt para se të vazhdosh me sinkronizimet e tjera."
+    },
+    "zReportSubmissionFailed": {
+      "title": "Dërgimi i raportit Z dështoi",
+      "summary": "Raporti Z lokal për {{reportDate}} s'u dërgua dot.",
+      "guidance": "Hap raportin Z të ditës së prekur, shiko elementet që bllokojnë dhe provo përsëri; draftin lokal hidhe poshtë vetëm nëse rikuperimi është i pamundur."
+    },
+    "invalidOrderReference": {
+      "title": "Porosia ka artikuj që s'ekzistojnë më",
+      "summary": "Një porosi lokale ka referenca menuje që s'përputhen më me katalogun e ruajtur në pajisje.",
+      "guidance": "Hap porosinë për të parë artikujt e pavlefshëm. Nëse porosia s'rikuperohet më, fshije porosinë lokale të dështuar pasi ta konfirmosh."
+    },
+    "printerNotConfigured": {
+      "title": "Printeri i kuponëve s'është konfiguruar",
+      "summary": "Terminali s'mund të printojë dokumentet e punës, sepse s'është konfiguruar asnjë profil i përshtatshëm printeri kuponësh.",
+      "guidance": "Hap konfigurimin e printerit, konfiguro një printer kuponësh dhe pastaj provo përsëri printimin që dështoi."
+    }
+  },
+  "actions": {
+    "confirmTitle": "Konfirmo veprimin e rikuperimit",
+    "confirmMessage": "Ky veprim ndryshon të dhënat lokale të rikuperimit për problemin e zgjedhur.",
+    "refresh": {
+      "label": "Rifresko problemet"
+    },
+    "retrySync": {
+      "label": "Sinkronizo përsëri"
+    },
+    "openOrder": {
+      "label": "Hap porosinë"
+    },
+    "openOrderPaymentFix": {
+      "label": "Hap rregullimin e pagesës"
+    },
+    "openOrderSettlementFix": {
+      "label": "Hap rregullimin e shlyerjes"
+    },
+    "retryZReportSubmit": {
+      "label": "Provo përsëri dërgimin e raportit Z"
+    },
+    "openZReport": {
+      "label": "Hap raportin Z"
+    },
+    "openShiftRepair": {
+      "label": "Hap rregullimin e turnit"
+    },
+    "forceCloseShift": {
+      "label": "Mbyll me detyrim turnin e ngecur",
+      "confirmTitle": "Do ta mbyllësh me detyrim këtë turn?",
+      "confirmMessage": "Kjo e shënon turnin e ngecur si të braktisur dhe i zeron fushat e keshit. Veprimi regjistrohet dhe s'kthehet mbrapsht.",
+      "confirmCheckbox": "E kuptoj që kjo e mbyll përgjithmonë turnin me të dhëna financiare të zeruara."
+    },
+    "openPrinterSetup": {
+      "label": "Hap konfigurimin e printerit"
+    },
+    "requeueSyncItem": {
+      "label": "Ktheje elementin në radhë"
+    },
+    "discardLocalAdjustment": {
+      "label": "Hidh poshtë korrigjimin lokal",
+      "confirmTitle": "Do ta hedhësh poshtë korrigjimin financiar lokal?",
+      "confirmMessage": "Kjo heq nga ky terminal korrigjimin financiar vetëm lokal që lidhet me {{orderNumber}}. Veprimi regjistrohet dhe s'kthehet mbrapsht pa rikthyer një backup lokal.",
+      "confirmCheckbox": "E kuptoj që kjo e fshin korrigjimin lokal vetëm nga ky terminal."
+    },
+    "discardLocalZReport": {
+      "label": "Hidh poshtë draftin lokal të raportit Z",
+      "confirmTitle": "Do ta hedhësh poshtë draftin lokal të raportit Z?",
+      "confirmMessage": "Kjo heq nga ky terminal draftin lokal të raportit Z për {{reportDate}}. Përdore vetëm kur raporti s'rikuperohet dot pa rrezik.",
+      "confirmCheckbox": "E kuptoj që kjo e fshin draftin lokal të raportit Z vetëm nga ky terminal."
+    },
+    "deleteLocalFailedOrder": {
+      "label": "Fshi porosinë lokale të dështuar",
+      "confirmTitle": "Do ta fshish porosinë lokale të dështuar?",
+      "confirmMessage": "Kjo heq përgjithmonë nga ky terminal porosinë lokale të dështuar {{orderNumber}} dhe rreshtat lokalë të sinkronizimit që varen prej saj.",
+      "confirmCheckbox": "E kuptoj që kjo e fshin porosinë lokale të dështuar dhe s'kthehet mbrapsht pa një backup."
+    }
+  }
+}

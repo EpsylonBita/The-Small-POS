@@ -29,7 +29,7 @@ const flatten = (obj: Record<string, any>, prefix = ''): Record<string, string> 
   return out;
 };
 
-const POS_LOCALES = ['en', 'el', 'de', 'fr', 'it'] as const;
+const POS_LOCALES = ['en', 'el', 'de', 'fr', 'it', 'sq'] as const;
 // Greek and Coptic Unicode block (U+0370-U+03FF), built from escapes so this
 // source file stays pure ASCII.
 const GREEK_LETTER = new RegExp('[\\u0370-\\u03FF]');
@@ -373,7 +373,7 @@ test('ReservationForm guest steppers are centered 44px touch targets with active
   assert.match(source, /<Minus className="h-4 w-4" \/>/);
   assert.match(source, /<Plus className="h-4 w-4" \/>/);
   // Each icon-only stepper carries a localized accessible label via the reservationForm.* keys
-  // (real translations in all five locales, not a defaultValue-only fallback).
+  // (real translations in all six locales, not a defaultValue-only fallback).
   assert.match(source, /aria-label=\{t\('reservationForm\.decreaseGuests'/);
   assert.match(source, /aria-label=\{t\('reservationForm\.increaseGuests'/);
 });

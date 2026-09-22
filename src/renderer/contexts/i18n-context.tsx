@@ -6,7 +6,7 @@ import { TFunction } from 'i18next'
 import i18n from '../../lib/i18n'
 import { getBridge } from '../../lib'
 
-type SupportedLanguage = 'en' | 'el' | 'de' | 'fr' | 'it'
+type SupportedLanguage = 'en' | 'el' | 'de' | 'fr' | 'it' | 'sq'
 
 interface I18nContextType {
   language: string
@@ -75,7 +75,7 @@ const I18nProviderContent: React.FC<{ children: ReactNode }> = ({ children }) =>
         console.log(`[i18n-context] Sync check - localStorage: "${localLanguage}", database: "${dbLanguage}"`)
 
         // If localStorage has a valid language that differs from database, save to database
-        if (localLanguage && ['en', 'el', 'de', 'fr', 'it'].includes(localLanguage) && localLanguage !== dbLanguage) {
+        if (localLanguage && ['en', 'el', 'de', 'fr', 'it', 'sq'].includes(localLanguage) && localLanguage !== dbLanguage) {
           console.log(`[i18n-context] Syncing localStorage language "${localLanguage}" to database`)
           const result = await bridge.settings.setLanguage(localLanguage)
           assertLanguageSaved(result)
@@ -85,7 +85,7 @@ const I18nProviderContent: React.FC<{ children: ReactNode }> = ({ children }) =>
             await i18nInstance.changeLanguage(localLanguage)
             setLanguageState(localLanguage)
           }
-        } else if (dbLanguage && ['en', 'el', 'de', 'fr', 'it'].includes(dbLanguage)) {
+        } else if (dbLanguage && ['en', 'el', 'de', 'fr', 'it', 'sq'].includes(dbLanguage)) {
           // Database has the authoritative value, sync to localStorage and i18n
           if (i18nInstance.language !== dbLanguage) {
             await i18nInstance.changeLanguage(dbLanguage)

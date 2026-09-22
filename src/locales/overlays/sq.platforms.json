@@ -1,0 +1,145 @@
+{
+  "settings": {
+    "settingsHub": {
+      "sections": {
+        "platforms": {
+          "label": "Platformat",
+          "detail": "Statusi i platformave të dërgesave"
+        }
+      }
+    },
+    "platforms": {
+      "title": "Platformat e dërgesave",
+      "helpText": "Hap ose mbyll platformat e dërgesave të lidhura me këtë dyqan",
+      "refresh": "Rifresko",
+      "loading": "Duke ngarkuar platformat...",
+      "loadFailed": "Platformat s'u ngarkuan dot",
+      "empty": "S'ka platforma dërgesash të lidhura",
+      "emptyHelp": "Lidh një platformë dërgesash nga paneli i adminit që ta menaxhosh këtu.",
+      "offline": "Kjo kasë është offline. Lidhu sërish që të hapësh ose mbyllësh platformat.",
+      "uncertain": "Rezultati s'u konfirmua dot. Rifresko për të parë statusin aktual.",
+      "open": "Hap",
+      "close": "Mbyll",
+      "manualClosureNote": "efood hapet vetë kur arkëtari i parë fillon turnin dhe mbyllet kur nxirret raporti Z. Po ta mbyllësh këtu, mbetet i mbyllur deri në fillimin e turnit tjetër, përveç nëse e hap sërish vetë.",
+      "acceptingOrders": "Po merr porosi",
+      "notAcceptingOrders": "Tani për tani s'po merr porosi",
+      "lastKnown": "Statusi i fundit i njohur: {{status}}",
+      "closedUntil": "Mbyllur deri në {{time}}",
+      "closureStatus": "Statusi i efood: {{status}}",
+      "status": {
+        "open": "Hapur",
+        "closed": "Mbyllur",
+        "unknown": "Nuk dihet",
+        "opening": "Po hapet…",
+        "closing": "Po mbyllet…"
+      },
+      "reason": {
+        "moduleDisabled": "Një modul i nevojshëm s'është aktivizuar në këtë kasë.",
+        "unsupported": "Kjo platformë s'mund të hapet ose mbyllet nga këtu.",
+        "wrongTerminal": "Menaxhoje këtë platformë nga kasa që i është caktuar.",
+        "productionNotConnected": "Kjo platformë s'është lidhur ende me një dyqan real.",
+        "providerUnavailable": "Platforma përkohësisht s'është në dispozicion.",
+        "busy": "Platforma është e zënë. Provo përsëri pas pak.",
+        "outcomeUnknown": "Status i panjohur. Rifresko për ta kontrolluar sërish.",
+        "outsideHours": "Online, por jashtë orarit të caktuar të porosive — s'po merr porosi.",
+        "providerForbidden": "Platforma e refuzoi këtë ndryshim (403). Përdor aplikacionin e saj dhe kërkoji suportit të saj të kontrollojë lejet e API-së për statusin e dyqanit.",
+        "awaitingProviderConfirmation": "Platforma e pranoi ndryshimin. Statusit mund t'i duhen disa minuta që të përditësohet.",
+        "providerRejected": "Platforma e refuzoi këtë ndryshim. Nëse je jashtë orarit të punës, provo përsëri brenda orarit ose përdor aplikacionin e vetë platformës.",
+        "providerReportsClosed": "Platforma e tregon dyqanin si të mbyllur. Kontrollo tabletin ose aplikacionin e platformës.",
+        "closedUntilDayStart": "Hapet vetë kur arkëtari i parë fillon turnin.",
+        "reopensAtOpening": "Hapet vetë në orën {{time}}.",
+        "closedByProvider": "efood e mbylli sërish dyqanin pasi e pranoi hapjen. Zakonisht kjo do të thotë që aplikacioni efood Partner është shkëputur: hape atë ose kërkoji efood-it të mos kërkojë më pajisje."
+      },
+      "sound": {
+        "title": "Tingulli i njoftimit për porosi",
+        "help": "Zgjidh tingullin që bie në këtë kasë kur një porosi e re nga platforma pret miratim.",
+        "mutedNote": "Zëri i aplikacionit është hequr, prandaj prova s'mund të dëgjohet. Njoftimet me zë rifillojnë kur ta kthesh sërish zërin.",
+        "preview": "Pamje paraprake",
+        "stop": "Ndalo",
+        "chooseFile": "Zgjidh skedarin…",
+        "fileHelp": "MP3 ose WAV, deri në 5 MB dhe 30 sekonda.",
+        "options": {
+          "custom": "Importuar: {{name}}"
+        },
+        "presets": {
+          "default": "Porosi e re (parazgjedhje)",
+          "spiderman": "Spider-Man",
+          "onePiece": "One Piece",
+          "superMario": "Super Mario"
+        },
+        "errors": {
+          "invalidType": "Ky skedar s'është në një format audio që mbështetet. Zgjidh një skedar MP3 ose WAV.",
+          "tooLarge": "Ky skedar është shumë i madh. Zgjidh një skedar nën 5 MB.",
+          "tooLong": "Ky klip është shumë i gjatë. Zgjidh një klip nën 30 sekonda.",
+          "decodeFailed": "Ky skedar s'u lexua dot si audio. Zgjidh një skedar tjetër.",
+          "saveFailed": "Zgjedhja e tingullit s'u ruajt dot. Mbetet aktive zgjedhja e mëparshme.",
+          "noImportedClip": "S'ka asnjë klip të importuar për të zgjedhur.",
+          "cancelled": "Importimi u anulua. Mbetet aktive zgjedhja e mëparshme."
+        }
+      },
+      "weeklySchedule": {
+        "action": "Orari javor",
+        "title": "Orari javor i efood",
+        "close": "Mbyll",
+        "explain": "Ky orar përsëritet çdo javë dhe vlen vetëm për orarin e porosive në efood. Oraret që kalojnë mesnatën duhen ndarë në të dyja ditët që përfshijnë.",
+        "loading": "Duke ngarkuar orarin e efood...",
+        "loadFailed": "Orari i efood s'u ngarkua dot",
+        "refresh": "Rifresko",
+        "save": "Dërgo te efood",
+        "closed": "Mbyllur",
+        "from": "Nga",
+        "to": "Deri më",
+        "addInterval": "Shto orar",
+        "removeInterval": "Hiq orarin",
+        "allDay": "Gjithë ditën (00:00–23:59)",
+        "offline": "Lidhu sërish që të ngarkosh ose ndryshosh orarin e efood.",
+        "validationError": "Kontrollo oraret më poshtë: orët duhet të jenë në formatin HH:mm, mbarimi pas fillimit dhe intervalet s'mund të mbivendosen.",
+        "waitingConfirmation": "Në pritje që efood t'i zbatojë ndryshimet; rifresko pas disa minutash.",
+        "confirmed": "efood e konfirmoi orarin e ri.",
+        "staleBanner": "Nga efood u ngarkua një orar më i ri. Ringarko për ta parë, ose vazhdo me ndryshimet.",
+        "discardReload": "Hidhi poshtë ndryshimet e mia dhe ringarko",
+        "days": {
+          "monday": "E hënë",
+          "tuesday": "E martë",
+          "wednesday": "E mërkurë",
+          "thursday": "E enjte",
+          "friday": "E premte",
+          "saturday": "E shtunë",
+          "sunday": "E diel"
+        },
+        "errors": {
+          "providerForbidden": "efood s'e ka lejuar këtë ndryshim; kontakto suportin.",
+          "invalidSchedule": "Ky orar s'u pranua. Kontrolloje dhe provo përsëri.",
+          "providerUnavailable": "efood përkohësisht s'është në dispozicion. Provo përsëri pas pak.",
+          "outcomeUnknown": "Rezultati s'u konfirmua dot. Rifresko për të parë orarin aktual.",
+          "productionNotConnected": "Kjo platformë s'është lidhur ende me një dyqan real.",
+          "wrongTerminal": "Menaxhoje këtë platformë nga kasa që i është caktuar.",
+          "moduleDisabled": "Një modul i nevojshëm s'është aktivizuar në këtë kasë.",
+          "moduleRequired": "Një modul i nevojshëm s'është aktivizuar në këtë kasë.",
+          "generic": "Diçka shkoi keq. Rifresko për të parë orarin aktual."
+        }
+      },
+      "efoodPartner": {
+        "pageToggle": "Faqja e efood brenda POS-it",
+        "mute": "Hiq zërin e efood",
+        "help": "efood e mban dyqanin të mbyllur nëse s'është i lidhur aplikacioni i vet. POS-i e mban këtu të hapur faqen «Live Orders» të efood, prandaj s'të duhet browser tjetër: hape nga ikona e efood në menunë anësore.",
+        "reload": "Ringarko",
+        "home": "Porosi live",
+        "unavailable": "Faqja e efood s'u shfaq dot në këtë kasë. Ringarkoje ose rinise POS-in."
+      }
+    }
+  },
+  "cancellationNotice": {
+    "eyebrow": "Porosia u anulua nga platforma",
+    "stopPreparing": "Ndalo përgatitjen e kësaj porosie",
+    "explain": "Platforma e dërgesave e anuloi këtë porosi. Mos vazhdo ta përgatitësh apo ta nisësh.",
+    "orderNumber": "Porosia",
+    "platform": "Platforma",
+    "externalOrderId": "ID e porosisë në platformë",
+    "queueCount": "Edhe {{count}} porosi të tjera të anuluara presin t'i konfirmosh që i lexove.",
+    "ackFailed": "S'u ruajt dot që e lexove. Provo përsëri.",
+    "acknowledge": "E lexova",
+    "persistPending": "Ky njoftim s'u ruajt dot ende. Provo përsëri para se ta konfirmosh.",
+    "retry": "Provo përsëri"
+  }
+}

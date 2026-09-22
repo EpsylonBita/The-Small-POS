@@ -6,7 +6,7 @@
  * whether either POS client renders a source-kind label for a *supplier
  * invoice's origin*. If one did, the new `'email'` member of the shared
  * `CaptureSourceKind` union (decision E1) would need a plain-language label in
- * all five desktop locale files.
+ * all six desktop locale files.
  *
  * **It does not, and this file is what keeps that answer true.** The two
  * `sourceKindKey(...)` label sites on this client both describe a *locally
@@ -24,7 +24,7 @@
  * server-minted capture did somehow reach the queue panel.
  *
  * If either assertion fails, an origin surface has appeared. Add the
- * plain-language `email` label to all five `src/locales/*.json` files and to
+ * plain-language `email` label to all six `src/locales/*.json` files and to
  * `CAPTURE_SOURCE_KIND_KEYS`, in the same change.
  */
 

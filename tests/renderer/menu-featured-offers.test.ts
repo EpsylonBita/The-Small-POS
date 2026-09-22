@@ -172,7 +172,7 @@ test('MenuModal hides the legacy Combos & Offers category while preserving autom
 });
 
 test('offer reward chips are localized consistently in every POS locale', () => {
-  const locales = ['en', 'el', 'de', 'fr', 'it'];
+  const locales = ['en', 'el', 'de', 'fr', 'it', 'sq'];
   for (const locale of locales) {
     const translations = JSON.parse(
       readFileSync(

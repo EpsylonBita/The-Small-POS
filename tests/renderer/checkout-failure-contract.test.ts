@@ -290,7 +290,7 @@ test('OrderDashboard never emits a second toast when a payment-integrity blocker
   );
 
   // collectPaymentFailed is a real localized key in every POS locale.
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const value = JSON.parse(
       readFileSync(path.join(process.cwd(), 'src', 'locales', `${lng}.json`), 'utf8'),
     ).orderDashboard.collectPaymentFailed;

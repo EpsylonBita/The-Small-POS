@@ -6,6 +6,7 @@ import elPlatforms from '../../../../locales/overlays/el.platforms.json';
 import enPlatforms from '../../../../locales/overlays/en.platforms.json';
 import frPlatforms from '../../../../locales/overlays/fr.platforms.json';
 import itPlatforms from '../../../../locales/overlays/it.platforms.json';
+import sqPlatforms from '../../../../locales/overlays/sq.platforms.json';
 
 const { posApiGet, posApiPost } = vi.hoisted(() => ({
   posApiGet: vi.fn(),
@@ -847,6 +848,7 @@ describe('platforms locale overlays', () => {
     de: dePlatforms,
     fr: frPlatforms,
     it: itPlatforms,
+    sq: sqPlatforms,
   };
   const newCopyKeys = [
     'settings.platforms.manualClosureNote',
@@ -869,7 +871,7 @@ describe('platforms locale overlays', () => {
   ];
 
 
-  it('keeps all five overlays on the same keys', () => {
+  it('keeps all six overlays on the same keys', () => {
     const englishKeys = flattenKeys(enPlatforms).sort();
     for (const [locale, overlay] of Object.entries(overlays)) {
       expect({ locale, keys: flattenKeys(overlay).sort() }).toEqual({ locale, keys: englishKeys });

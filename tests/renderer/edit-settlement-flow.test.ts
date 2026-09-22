@@ -63,7 +63,7 @@ test('edit-settlement collect + table-update toasts are routed through i18n (no 
 test('edit-settlement payment/table toast keys exist in every locale and Greek is translated', () => {
   const KEYS = ['orderEditPaymentRequiredToSave', 'tableOrderUpdated'];
   const GREEK = new RegExp('[\\u0370-\\u03FF]');
-  for (const lang of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lang of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const od = locale(lang).orderDashboard;
     assert.ok(od, `${lang} missing orderDashboard`);
     for (const key of KEYS) {

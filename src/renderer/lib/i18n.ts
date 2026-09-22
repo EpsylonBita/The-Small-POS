@@ -23,6 +23,9 @@ i18n
       },
       it: {
         translation: localeBundles.it
+      },
+      sq: {
+        translation: localeBundles.sq
       }
     },
     lng: savedLanguage, // Use persisted language or default to 'en'

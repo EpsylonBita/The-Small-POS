@@ -15292,6 +15292,9 @@ async fn sync_order_batch_via_direct_api(
 
         let body = serde_json::json!({
             "client_order_id": entity_id,
+            "local_order_number": sync_queue::register_order_number_for_sync([
+                str_any(&data, &["order_number", "orderNumber"]).as_deref(),
+            ]),
             "branch_id": branch_id,
             "items": direct_items,
             "order_type": order_type_normalized,

@@ -286,6 +286,8 @@ impl EscPosBuilder {
     // -----------------------------------------------------------------------
 
     /// Append text. Characters are encoded as ASCII or CP737 (Greek mode).
+    /// Accented Latin letters (Albanian `ë`/`ç`, German umlauts, French and
+    /// Italian accents) are folded to their base letter — see `latin_fold`.
     ///
     /// Euro sign (€) is handled via inline code page switching to CP858
     /// (page 19) which has € at 0xD5, then restoring the active code page.
@@ -309,6 +311,8 @@ impl EscPosBuilder {
                     let code = ch as u32;
                     if code < 0x80 {
                         self.buffer.push(code as u8);
+                    } else if let Some(b) = unicode_fallback(ch).or_else(|| latin_fold(ch)) {
+                        self.buffer.push(b);
                     } else {
                         self.buffer.push(b'?');
                     }
@@ -552,7 +556,8 @@ impl EscPosBuilder {
 
 /// Encode a string to CP737 bytes. ASCII characters pass through; Greek
 /// characters (U+0370–U+03FF) are mapped to their CP737 byte values.
-/// Unknown characters are replaced with `?` (0x3F).
+/// Accented Latin letters fold to their base letter; anything else unknown is
+/// replaced with `?` (0x3F).
 fn encode_cp737(text: &str) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(text.len());
     for ch in text.chars() {
@@ -576,11 +581,60 @@ fn encode_cp737(text: &str) -> Vec<u8> {
         // Greek character lookup
         if let Some(b) = greek_to_cp737(ch) {
             bytes.push(b);
+        } else if let Some(b) = latin_fold(ch) {
+            // CP737 has no accented Latin letters at all, so an Albanian,
+            // German, French or Italian word on a Greek-configured printer
+            // keeps its base letter instead of printing `?`.
+            bytes.push(b);
         } else {
             bytes.push(b'?');
         }
     }
     bytes
+}
+
+/// Fold an accented Latin letter to its unaccented ASCII base letter.
+///
+/// The text path sends one byte per character and the layout engine measures
+/// columns in characters, so the fold is strictly one-to-one (`ß` becomes `s`,
+/// not `ss`) to keep receipt columns aligned. Raster rendering is unaffected:
+/// it draws the real glyphs. Albanian needs `ë`/`Ë` and `ç`/`Ç`; the rest of the
+/// table covers the other shipped locales and the neighbouring markets.
+fn latin_fold(ch: char) -> Option<u8> {
+    let folded = match ch {
+        'À' | 'Á' | 'Â' | 'Ã' | 'Ä' | 'Å' | 'Ā' | 'Ă' | 'Ą' | 'Æ' => b'A',
+        'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' | 'æ' => b'a',
+        'Ç' | 'Ć' | 'Č' => b'C',
+        'ç' | 'ć' | 'č' => b'c',
+        'Ď' | 'Đ' => b'D',
+        'ď' | 'đ' => b'd',
+        'È' | 'É' | 'Ê' | 'Ë' | 'Ē' | 'Ę' | 'Ě' => b'E',
+        'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ę' | 'ě' => b'e',
+        'Ğ' => b'G',
+        'ğ' => b'g',
+        'Ì' | 'Í' | 'Î' | 'Ï' | 'Ī' | 'İ' => b'I',
+        'ì' | 'í' | 'î' | 'ï' | 'ī' | 'ı' => b'i',
+        'Ł' => b'L',
+        'ł' => b'l',
+        'Ñ' | 'Ń' | 'Ň' => b'N',
+        'ñ' | 'ń' | 'ň' => b'n',
+        'Ò' | 'Ó' | 'Ô' | 'Õ' | 'Ö' | 'Ø' | 'Ő' | 'Œ' => b'O',
+        'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' | 'ő' | 'œ' => b'o',
+        'Ř' => b'R',
+        'ř' => b'r',
+        'Ś' | 'Š' | 'Ş' | 'Ș' => b'S',
+        'ś' | 'š' | 'ş' | 'ș' | 'ß' => b's',
+        'Ť' | 'Ţ' | 'Ț' => b'T',
+        'ť' | 'ţ' | 'ț' => b't',
+        'Ù' | 'Ú' | 'Û' | 'Ü' | 'Ū' | 'Ů' | 'Ű' => b'U',
+        'ù' | 'ú' | 'û' | 'ü' | 'ū' | 'ů' | 'ű' => b'u',
+        'Ý' | 'Ÿ' => b'Y',
+        'ý' | 'ÿ' => b'y',
+        'Ź' | 'Ż' | 'Ž' => b'Z',
+        'ź' | 'ż' | 'ž' => b'z',
+        _ => return None,
+    };
+    Some(folded)
 }
 
 /// Map Unicode box-drawing characters to CP737/CP437 byte positions.
@@ -825,6 +879,47 @@ mod tests {
         };
         // ESC @ + ESC t 14 + 0x80 0x81 LF
         assert_eq!(data, vec![0x1B, 0x40, 0x1B, 0x74, 14, 0x80, 0x81, 0x0A]);
+    }
+
+    #[test]
+    fn test_text_folds_accented_latin_letters_instead_of_question_marks() {
+        // Albanian "Çmimi i përgjithshëm", plus one letter from each other
+        // shipped Latin locale, on a printer that is NOT in Greek mode.
+        let data = {
+            let mut b = EscPosBuilder::new();
+            b.text("\u{00C7}mimi i p\u{00EB}rgjithsh\u{00EB}m \u{00FC}\u{00E9}\u{00F2}\n");
+            b.build()
+        };
+        assert_eq!(data, b"Cmimi i pergjithshem ueo\n".to_vec());
+        assert!(!data.contains(&b'?'));
+    }
+
+    #[test]
+    fn test_greek_mode_folds_accented_latin_letters_and_keeps_greek() {
+        // A Greek-configured printer (CP737 has no accented Latin letters)
+        // printing an Albanian label next to a Greek product name.
+        let data = {
+            let mut b = EscPosBuilder::new().with_greek();
+            b.greek_mode().text("Dërgesë \u{0391}\n");
+            b.build()
+        };
+        let tail = &data[data.len() - 10..];
+        assert_eq!(
+            tail,
+            &[b'D', b'e', b'r', b'g', b'e', b's', b'e', b' ', 0x80, 0x0A]
+        );
+    }
+
+    #[test]
+    fn test_latin_fold_is_one_byte_per_character() {
+        // Column alignment depends on one output byte per input character.
+        let source = "Stra\u{00DF}e \u{0152}uvre \u{00C6}";
+        let data = {
+            let mut b = EscPosBuilder::new();
+            b.text(source);
+            b.build()
+        };
+        assert_eq!(data.len(), source.chars().count());
     }
 
     #[test]

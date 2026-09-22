@@ -114,7 +114,7 @@ test('missing-payment repair reports one truthful payment outcome and treats ref
 });
 
 test('per-payment edit instructions exist in every POS locale', () => {
-  const languages = ['en', 'el', 'de', 'fr', 'it'];
+  const languages = ['en', 'el', 'de', 'fr', 'it', 'sq'];
   const values = languages.map((language) => {
     const locale = JSON.parse(
       readFileSync(path.join(projectRoot, 'src', 'locales', `${language}.json`), 'utf8'),

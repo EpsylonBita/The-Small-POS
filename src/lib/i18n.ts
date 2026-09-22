@@ -19,6 +19,9 @@ const resources = {
   it: {
     translation: localeBundles.it,
   },
+  sq: {
+    translation: localeBundles.sq,
+  },
 };
 
 // Get language from localStorage or default to 'en'
@@ -27,7 +30,7 @@ const getInitialLanguage = (): string => {
   try {
     if (typeof localStorage !== 'undefined') {
       const stored = localStorage.getItem('language');
-      if (stored && ['en', 'el', 'de', 'fr', 'it'].includes(stored)) {
+      if (stored && ['en', 'el', 'de', 'fr', 'it', 'sq'].includes(stored)) {
         return stored;
       }
     }
@@ -64,6 +67,7 @@ i18n.addResourceBundle('el', 'translation', localeBundles.el, true, true);
 i18n.addResourceBundle('de', 'translation', localeBundles.de, true, true);
 i18n.addResourceBundle('fr', 'translation', localeBundles.fr, true, true);
 i18n.addResourceBundle('it', 'translation', localeBundles.it, true, true);
+i18n.addResourceBundle('sq', 'translation', localeBundles.sq, true, true);
 
 /**
  * Update i18n language from database
@@ -72,7 +76,7 @@ i18n.addResourceBundle('it', 'translation', localeBundles.it, true, true);
 export function updateLanguageFromDatabase(settingsService: any): void {
   try {
     const language = settingsService.getLanguage();
-    if (language && ['en', 'el', 'de', 'fr', 'it'].includes(language)) {
+    if (language && ['en', 'el', 'de', 'fr', 'it', 'sq'].includes(language)) {
       i18n.changeLanguage(language);
       console.log(`[i18n] Language updated from database: ${language}`);
     }

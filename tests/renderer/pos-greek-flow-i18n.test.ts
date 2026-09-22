@@ -11,7 +11,7 @@ const read = (rel: string): string => readFileSync(path.join(root, rel), 'utf8')
 const loadLocale = (lng: string): unknown => JSON.parse(read(`src/locales/${lng}.json`));
 const get = (obj: unknown, dotted: string): unknown =>
   dotted.split('.').reduce<unknown>((o, k) => (o == null ? o : (o as Record<string, unknown>)[k]), obj);
-const LOCALES = ['en', 'el', 'de', 'fr', 'it'];
+const LOCALES = ['en', 'el', 'de', 'fr', 'it', 'sq'];
 
 const paymentSource = read('src/renderer/components/modals/PaymentModal.tsx');
 const orderDetailsSource = read('src/renderer/components/modals/OrderDetailsModal.tsx');
@@ -20,8 +20,8 @@ const splitPaymentSource = read('src/renderer/components/modals/SplitPaymentModa
 const zReportSource = read('src/renderer/components/modals/ZReportModal.tsx');
 
 // Round 236: the Orders hub adds Rooms/Services tabs and a Room flow (Room Order / Check-in /
-// Create Reservation). Every new user-facing string must exist (translated) in all five locales.
-test('Round 236: hub tab + room flow keys exist and are translated in all five locales', () => {
+// Create Reservation). Every new user-facing string must exist (translated) in all six locales.
+test('Round 236: hub tab + room flow keys exist and are translated in all six locales', () => {
   const keys = [
     'dashboard.tabs.rooms',
     'dashboard.tabs.services',
@@ -99,7 +99,7 @@ test('Round 317: Greek New Order -> Room workflow strings contain no Latin "chec
   }
 });
 
-test('Round 317: orderFlow room-flow key set stays in parity across all five locales', () => {
+test('Round 317: orderFlow room-flow key set stays in parity across all six locales', () => {
   const roomKeys = (lng: string): string[] => {
     const of = (get(loadLocale(lng), 'orderFlow') ?? {}) as Record<string, unknown>;
     return Object.keys(of).filter((k) => /^room/i.test(k)).sort();

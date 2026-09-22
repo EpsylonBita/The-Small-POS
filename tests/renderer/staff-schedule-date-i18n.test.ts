@@ -64,7 +64,7 @@ test('StaffScheduleView resolves the add-shift duration label through i18n keys'
 });
 
 test('duration keys exist in every POS locale and Greek localizes the units', () => {
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const { duration, durationHoursOnly } = loadDuration(lng);
     assert.equal(typeof duration, 'string', `${lng}.shift.duration missing`);
     assert.equal(typeof durationHoursOnly, 'string', `${lng}.shift.durationHoursOnly missing`);

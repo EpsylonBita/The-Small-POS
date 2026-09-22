@@ -142,8 +142,8 @@ test('MenuManagementPage renders availability toggles as 44px semantic glass tou
 
 // Round 235 (live QA): Menu Management -> Offers used to render a bare black grid when there were no
 // offers/combos (none synced, or filtered to nothing). It now renders a small centered glass empty
-// state that distinguishes no-data from no-search-results, with localized copy in all five locales.
-const MENU_LOCALES = ['en', 'el', 'de', 'fr', 'it'];
+// state that distinguishes no-data from no-search-results, with localized copy in all six locales.
+const MENU_LOCALES = ['en', 'el', 'de', 'fr', 'it', 'sq'];
 const loadMenuLocale = (lang: string) =>
   JSON.parse(
     readFileSync(path.join(process.cwd(), 'src', 'locales', `${lang}.json`), 'utf8'),
@@ -185,7 +185,7 @@ test('MenuManagementPage renders a localized glass empty state for the offers ta
   assert.doesNotMatch(emptyRegion, /\btitle=/);
 });
 
-test('MenuManagementPage offers empty-state keys exist in all five POS locales', () => {
+test('MenuManagementPage offers empty-state keys exist in all six POS locales', () => {
   for (const lang of MENU_LOCALES) {
     const menu = loadMenuLocale(lang).menu;
     assert.ok(menu, `${lang}.json must have a menu namespace`);

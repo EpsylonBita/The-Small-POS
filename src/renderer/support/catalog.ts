@@ -36,4 +36,4 @@ export const SUPPORT_REQUIRED_COPY_FIELDS = [
   'ctaLabels',
 ] as const;
 
-export const SUPPORTED_POS_LOCALES = ['en', 'el', 'de', 'fr', 'it'] as const;
+export const SUPPORTED_POS_LOCALES = ['en', 'el', 'de', 'fr', 'it', 'sq'] as const;

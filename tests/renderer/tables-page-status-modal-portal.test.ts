@@ -109,7 +109,7 @@ test('TablesPage View Order opens the existing table check, not a blank new orde
 
 test('terminal order-creation-disabled message is localized in every POS locale', () => {
   const en = loadOrderCreationDisabled('en');
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const value = loadOrderCreationDisabled(lng);
     assert.equal(typeof value, 'string', `${lng}.settings.terminal.messages.orderCreationDisabled missing`);
     assert.ok((value as string).length > 0, `${lng} order-creation-disabled value is empty`);

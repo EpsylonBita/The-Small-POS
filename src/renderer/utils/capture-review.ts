@@ -259,7 +259,7 @@ export function doubleCheckCount(tiers: ConfidenceTier[]): number {
 
 /**
  * Every capture lifecycle status, as the queue view enumerates them.
- * Each one owns a `suppliers.capture.status.<status>` key in all five locales.
+ * Each one owns a `suppliers.capture.status.<status>` key in all six locales.
  */
 export const CAPTURE_STATUS_KEYS = [
   'capturing',
@@ -328,7 +328,7 @@ export const CAPTURE_SOURCE_STATUS_KEYS = ['ready', 'unavailable', 'watching'] a
 /**
  * Every `capture_events.event_type` the Rust side writes, plus the `generic`
  * catch-all. These are the sentences the history section renders (R13.4), so
- * each one owns a `suppliers.capture.history.<type>` key in all five locales.
+ * each one owns a `suppliers.capture.history.<type>` key in all six locales.
  *
  * Kept in step with the `record_event` call sites in `capture/store.rs`,
  * `capture/watcher.rs`, `capture/worker.rs`, and

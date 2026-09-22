@@ -226,7 +226,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
     }
   }
 
-  const handleLanguageChange = async (language: 'en' | 'el' | 'de' | 'fr' | 'it') => {
+  const handleLanguageChange = async (language: 'en' | 'el' | 'de' | 'fr' | 'it' | 'sq') => {
     if (savingLanguage || language === currentLanguage) return
     setSavingLanguage(true)
     try {
@@ -1498,6 +1498,17 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                 aria-label={t('settings.display.langItalian')}
               >
                 IT
+              </button>
+              <button
+                disabled={savingLanguage}
+                onClick={() => void handleLanguageChange('sq')}
+                className={`px-3 py-2 rounded-lg transition-all font-medium text-sm inline-flex items-center justify-center text-center ${currentLanguage === 'sq'
+                  ? 'bg-yellow-400/25 border-2 border-yellow-400 text-yellow-900 dark:text-yellow-200'
+                  : 'bg-white/10 border border-gray-600 active:bg-white/20 text-gray-400'
+                  }`}
+                aria-label={t('settings.display.langAlbanian')}
+              >
+                SQ
               </button>
             </div>
           </div>

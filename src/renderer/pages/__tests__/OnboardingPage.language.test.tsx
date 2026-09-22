@@ -47,3 +47,14 @@ it('stays on language selection and reports a failed save', async () => {
   expect(screen.getByRole('heading', { name: 'Select Language' })).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'English' })).not.toBeDisabled();
 });
+
+it('lays the six language cards out in equal-sized pairs — the last card never stretches across the row', () => {
+  render(<OnboardingPage />);
+  const names = ['English', 'Ελληνικά', 'Deutsch', 'Français', 'Italiano', 'Shqip'];
+  const cards = names.map((name) => screen.getByRole('button', { name }));
+  expect(cards).toHaveLength(6);
+  for (const card of cards) expect(card.className).not.toContain('col-span-2');
+  // Every card carries the same layout classes, so none renders wider than its neighbours.
+  const layout = (el: HTMLElement) => el.className.split(/\s+/).filter((c) => !/^(border-|bg-|text-|active:)/.test(c)).sort().join(' ');
+  for (const card of cards) expect(layout(card)).toBe(layout(cards[0]));
+});

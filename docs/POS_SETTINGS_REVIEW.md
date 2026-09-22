@@ -17,7 +17,7 @@ Scope: `ConnectionSettingsModal`, its child setup screens, and the runtime consu
 | Data | Existing recovery/reset commands remain connected with their confirmation and privilege checks. Reviewed without executing destructive actions. |
 | Information | Native diagnostics and update entry point remain connected. Loading errors offer Retry; copying falls back to the native clipboard and reports failure. |
 
-Navigation retains the existing section structure, with visible thin scrollbars for discoverability on shorter screens. New workflow copy is translated in English, Greek, German, French and Italian.
+Navigation retains the existing section structure, with visible thin scrollbars for discoverability on shorter screens. New workflow copy is translated in English, Greek, German, French, Italian and Albanian.
 
 Within Devices, cash-register probes now distinguish reachable from connected. Explicit Connect/Disconnect use the existing native API; Test print requires a registered connection. The initial manager-only status snapshot restores already active connections without protocol polling. Read/save/delete failures are visible and preserve edits. Caller ID status read failures clear stale green UI without stopping or changing its production listener or central configuration.
 

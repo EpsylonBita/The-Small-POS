@@ -16,7 +16,7 @@ const typesPath = path.join(projectRoot, 'src', 'renderer', 'types', 'reports.ts
 const exportPath = path.join(projectRoot, 'src', 'renderer', 'utils', 'reportExport.ts');
 const zreportRsPath = path.join(projectRoot, 'src-tauri', 'src', 'zreport.rs');
 const localesDir = path.join(projectRoot, 'src', 'locales');
-const LOCALES = ['el', 'en', 'de', 'fr', 'it'] as const;
+const LOCALES = ['el', 'en', 'de', 'fr', 'it', 'sq'] as const;
 
 const read = (file: string) => readFileSync(file, 'utf8');
 const loadLocale = (lng: string) =>
@@ -102,7 +102,7 @@ test('Z report types expose the day list', () => {
   assert.match(types, /dayOrders\?: ZReportDayOrder\[\];\s*dayOrdersTruncated\?: boolean;/);
 });
 
-test('new Orders-tab keys exist in all five locales, Greek translated', () => {
+test('new Orders-tab keys exist in all six locales, Greek translated', () => {
   const KEYS = ['filters.platform', 'paymentLabels.platformOnline', 'paymentLabels.platformCod', 'platformOrderSource', 'ordersListTruncated'] as const;
   for (const lng of LOCALES) {
     const locale = loadLocale(lng);

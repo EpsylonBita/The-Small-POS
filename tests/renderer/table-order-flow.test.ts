@@ -586,6 +586,52 @@ describe('table order flow helpers', () => {
     assert.equal(getTableNumberForTableServiceOrder(orphanedOrder), '1')
   })
 
+  it('keeps a delivery for a customer named with a number in the order lane', () => {
+    // Order #00044 (2026-09-21): the customer name of a delivery was a two-digit
+    // number, so the order was read as that table's check. It left the Orders
+    // lane without appearing on any table and stayed pending through the Z.
+    const delivery = {
+      id: 'order-delivery',
+      status: 'pending',
+      orderType: 'delivery',
+      order_type: 'delivery',
+      paymentStatus: 'paid',
+      customerName: '12',
+      customer_name: '12',
+    }
+
+    assert.equal(isTableServiceOrder(delivery), false)
+    assert.equal(shouldShowInStandardOrderLane(delivery), true)
+    assert.equal(getTableNumberForTableServiceOrder(delivery), null)
+    assert.equal(
+      findOpenTableOrderForTable([{ ...delivery, paymentStatus: 'pending' }], {
+        id: 'table-12',
+        tableNumber: '12',
+      }),
+      null,
+    )
+    assert.equal(
+      isTableServiceOrder({ ...delivery, customerName: 'Τραπέζι T3', customer_name: 'Τραπέζι T3' }),
+      false,
+    )
+    assert.equal(
+      isTableServiceOrder({ ...delivery, customerName: 'Maria', customer_name: 'Maria', notes: '3' }),
+      false,
+    )
+  })
+
+  it('reads only table labels from the free text of orders outside dine-in', () => {
+    const pickup = { id: 'order-pickup', status: 'pending', orderType: 'pickup' }
+
+    for (const customerName of ['15', '#15', 'T15', '6912345678']) {
+      assert.equal(shouldShowInStandardOrderLane({ ...pickup, customerName }), true, customerName)
+    }
+    assert.equal(shouldShowInStandardOrderLane({ ...pickup, customerName: 'Maria', notes: '2' }), true)
+    assert.equal(isTableServiceOrder({ ...pickup, orderType: 'room_service', customerName: '12' }), false)
+    assert.equal(getTableNumberForTableServiceOrder({ ...pickup, customerName: 'Table T05' }), '05')
+    assert.equal(getTableNumberForTableServiceOrder({ ...pickup, orderType: 'dine-in', customerName: '5' }), '5')
+  })
+
   it('builds an optimistic occupied table after saving a check', () => {
     assert.deepEqual(
       buildOptimisticOccupiedTable({

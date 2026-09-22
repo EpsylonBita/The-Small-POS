@@ -42,7 +42,7 @@ test('Greek formatCurrency contract: 16,65 € (comma + euro suffix), not €16.
 });
 
 test('split-payment interpolated locale strings no longer hardcode a currency symbol', () => {
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const sp = loadLocale(lng).splitPayment ?? {};
     for (const key of ['partialSuccess', 'alreadyPaidSummary', 'balanceChanged']) {
       const value = String(sp[key] ?? '');

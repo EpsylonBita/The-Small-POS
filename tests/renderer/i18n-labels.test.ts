@@ -63,12 +63,12 @@ test('resolveNavigationLabel localizes DB/module-backed sidebar labels (el)', as
   assert.equal(resolveNavigationLabel(t, 'tables', 'Tables'), 'Τραπέζια');
   assert.equal(resolveNavigationLabel(t, 'appointments', 'Appointments'), 'Ραντεβού');
   assert.equal(resolveNavigationLabel(t, 'housekeeping', 'Housekeeping'), 'Καθαριότητα');
-  assert.equal(resolveNavigationLabel(t, 'staff_schedule', 'Staff Schedule'), 'Πρόγραμμα Προσωπικού');
+  assert.equal(resolveNavigationLabel(t, 'staff_schedule', 'Staff Schedule'), 'Πρόγραμμα προσωπικού');
   assert.equal(resolveNavigationLabel(t, 'reservations', 'Reservations'), 'Κρατήσεις');
   assert.equal(resolveNavigationLabel(t, 'service_catalog', 'Services'), 'Υπηρεσίες');
-  assert.equal(resolveNavigationLabel(t, 'suppliers', 'Supplier Management'), 'Διαχείριση Προμηθευτών');
-  assert.equal(resolveNavigationLabel(t, 'inventory', 'Inventory Management'), 'Διαχείριση Αποθέματος');
-  assert.equal(resolveNavigationLabel(t, 'loyalty', 'Loyalty & Rewards'), 'Πιστότητα & Επιβραβεύσεις');
+  assert.equal(resolveNavigationLabel(t, 'suppliers', 'Supplier Management'), 'Διαχείριση προμηθευτών');
+  assert.equal(resolveNavigationLabel(t, 'inventory', 'Inventory Management'), 'Διαχείριση αποθέματος');
+  assert.equal(resolveNavigationLabel(t, 'loyalty', 'Loyalty & Rewards'), 'Πιστότητα & επιβραβεύσεις');
 });
 
 test('resolveNavigationLabel keeps the English DB names in en mode', async () => {
@@ -84,7 +84,7 @@ test('module-backed sidebar labels exist (localized) in every POS locale', () =>
     'reservations', 'service_catalog', 'suppliers', 'inventory', 'loyalty',
   ];
   const locales: Record<string, any> = {};
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     locales[lng] = JSON.parse(
       readFileSync(path.join(projectRoot, 'src', 'locales', `${lng}.json`), 'utf8'),
     );

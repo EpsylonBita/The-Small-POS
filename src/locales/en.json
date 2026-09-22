@@ -1607,8 +1607,8 @@
       "discounts": "Discounts",
       "tips": "Tips",
       "paymentMethods": "Payment Methods",
-      "transactions": "[NEEDS EN TRANSLATION] συναλλαγές",
-      "orders": "[NEEDS EN TRANSLATION] παραγγελίες"
+      "transactions": "transactions",
+      "orders": "orders"
     },
     "staff": {
       "title": "Staff Performance",
@@ -1686,7 +1686,7 @@
     "errors": {
       "loadFailed": "Failed to load report data"
     },
-    "deliveryOrders": "[NEEDS EN TRANSLATION] Παραγγελίες Διανομής"
+    "deliveryOrders": "Delivery Orders"
   },
   "expense": {
     "title": "Expenses",
@@ -2688,7 +2688,8 @@
       "langGreek": "Greek",
       "langGerman": "German",
       "langFrench": "French",
-      "langItalian": "Italian"
+      "langItalian": "Italian",
+      "langAlbanian": "Albanian"
     },
     "payment": {
       "title": "Payment Settings",
@@ -3228,9 +3229,9 @@
       "queueDetailsUnavailableHint": "The local summary still reports pending or failed financial sync rows, but their queue details were not returned.",
       "actionableItemsTitle": "Actionable financial queue items",
       "actionableItemsSubtitle": "Grouped by sync status so pending and blocked rows are visible before they fail.",
-      "operation": "[NEEDS EN TRANSLATION] Λειτουργία",
-      "errorMessage": "[NEEDS EN TRANSLATION] Μήνυμα Σφάλματος",
-      "createdAt": "[NEEDS EN TRANSLATION] Δημιουργήθηκε"
+      "operation": "Operation",
+      "errorMessage": "Error Message",
+      "createdAt": "Created"
     },
     "system": {
       "syncBacklog": "Sync Backlog",
@@ -4183,11 +4184,11 @@
       "startShift": "Start shift",
       "noCashierWarning": "No active cashier is available. You can only continue with €0.",
       "activeSince": "Active since {{time}}",
-      "cashierCashHelper": "[NEEDS EN TRANSLATION] Εισάγετε το ποσό στο ταμείο",
-      "driverCashHelper": "[NEEDS EN TRANSLATION] Προαιρετικό: Ποσό από το ταμείο. Εισάγετε 0 για παράλειψη.",
-      "startingCashOptional": "[NEEDS EN TRANSLATION] Αρχικά Μετρητά (Προαιρετικό)",
-      "confirmZeroTitle": "[NEEDS EN TRANSLATION] Επιβεβαίωση Μηδενικών Τελικών Μετρητών",
-      "confirmZeroMessage": "[NEEDS EN TRANSLATION] Είστε σίγουροι ότι θέλετε να κλείσετε τη βάρδια με 0,00€ τελικά μετρητά;",
+      "cashierCashHelper": "Enter the amount in the cash drawer",
+      "driverCashHelper": "Optional: amount taken from the cash drawer. Enter 0 to skip.",
+      "startingCashOptional": "Starting Cash (Optional)",
+      "confirmZeroTitle": "Confirm Zero Closing Cash",
+      "confirmZeroMessage": "Are you sure you want to close the shift with €0.00 closing cash?",
       "cashToHandToCashier": "Cash To Hand To Cashier",
       "cashReturnHelper": "Hand this cash to the cashier. Tips are recorded separately.",
       "cashActuallyHandedOver": "Cash Actually Handed Over",
@@ -7937,33 +7938,33 @@
     }
   },
   "features": {
-    "cashDrawer": "[NEEDS EN TRANSLATION] Συρτάρι Ταμείου",
-    "zReportExecution": "[NEEDS EN TRANSLATION] Έκδοση Ζ",
-    "cashPayments": "[NEEDS EN TRANSLATION] Πληρωμές Μετρητών",
-    "cardPayments": "[NEEDS EN TRANSLATION] Πληρωμές Κάρτας",
-    "orderCreation": "[NEEDS EN TRANSLATION] Δημιουργία Παραγγελίας",
-    "orderModification": "[NEEDS EN TRANSLATION] Τροποποίηση Παραγγελίας",
-    "discounts": "[NEEDS EN TRANSLATION] Εκπτώσεις",
-    "refunds": "[NEEDS EN TRANSLATION] Επιστροφές",
-    "expenses": "[NEEDS EN TRANSLATION] Έξοδα",
-    "staffPayments": "[NEEDS EN TRANSLATION] Πληρωμές Προσωπικού",
-    "reports": "[NEEDS EN TRANSLATION] Αναφορές",
-    "settings": "[NEEDS EN TRANSLATION] Ρυθμίσεις"
+    "cashDrawer": "Cash Drawer",
+    "zReportExecution": "Z Report",
+    "cashPayments": "Cash Payments",
+    "cardPayments": "Card Payments",
+    "orderCreation": "Order Creation",
+    "orderModification": "Order Modification",
+    "discounts": "Discounts",
+    "refunds": "Refunds",
+    "expenses": "Expenses",
+    "staffPayments": "Staff Payments",
+    "reports": "Reports",
+    "settings": "Settings"
   },
   "terminal": {
     "type": {
-      "mobile_waiter": "[NEEDS EN TRANSLATION] Mobile POS",
-      "main": "[NEEDS EN TRANSLATION] Κεντρικό Τερματικό"
+      "mobile_waiter": "Mobile POS",
+      "main": "Main Terminal"
     },
     "labels": {
-      "terminalConfig": "[NEEDS EN TRANSLATION] Ρύθμιση Τερματικού",
-      "terminalType": "[NEEDS EN TRANSLATION] Τύπος Τερματικού",
-      "parentTerminal": "[NEEDS EN TRANSLATION] Γονικό Τερματικό",
-      "enabledFeatures": "[NEEDS EN TRANSLATION] Ενεργές Λειτουργίες",
-      "mobileWaiterMode": "[NEEDS EN TRANSLATION] Λειτουργία Mobile Waiter"
+      "terminalConfig": "Terminal Setup",
+      "terminalType": "Terminal Type",
+      "parentTerminal": "Parent Terminal",
+      "enabledFeatures": "Enabled Features",
+      "mobileWaiterMode": "Mobile Waiter Mode"
     },
     "messages": {
-      "mobileWaiterInfo": "[NEEDS EN TRANSLATION] Ορισμένες λειτουργίες διαχειρίζονται από το κεντρικό τερματικό. Επικοινωνήστε με τον διευθυντή για αλλαγές."
+      "mobileWaiterInfo": "Some features are managed from the main terminal. Contact your manager to change them."
     }
   },
   "deliveryZones": {
@@ -8001,23 +8002,23 @@
     }
   },
   "analytics": {
-    "title": "[NEEDS EN TRANSLATION] Αναλυτικά",
-    "subtitle": "[NEEDS EN TRANSLATION] Στατιστικά επιχειρηματικής απόδοσης",
-    "totalRevenue": "[NEEDS EN TRANSLATION] Συνολικά Έσοδα",
-    "totalOrders": "[NEEDS EN TRANSLATION] Συνολικές Παραγγελίες",
-    "avgOrder": "[NEEDS EN TRANSLATION] Μέση Αξία Παραγγελίας",
-    "customers": "[NEEDS EN TRANSLATION] Πελάτες",
-    "categoryBreakdown": "[NEEDS EN TRANSLATION] Πωλήσεις ανά Κατηγορία",
-    "hourlyOrders": "[NEEDS EN TRANSLATION] Παραγγελίες ανά Ώρα",
-    "peakHour": "[NEEDS EN TRANSLATION] Ώρα Αιχμής",
-    "topCategory": "[NEEDS EN TRANSLATION] Κορυφαία Κατηγορία",
+    "title": "Analytics",
+    "subtitle": "Business performance statistics",
+    "totalRevenue": "Total Revenue",
+    "totalOrders": "Total Orders",
+    "avgOrder": "Average Order Value",
+    "customers": "Customers",
+    "categoryBreakdown": "Sales by Category",
+    "hourlyOrders": "Orders per Hour",
+    "peakHour": "Peak Hour",
+    "topCategory": "Top Category",
     "period": {
-      "today": "[NEEDS EN TRANSLATION] Σήμερα",
-      "week": "[NEEDS EN TRANSLATION] Εβδομάδα",
-      "month": "[NEEDS EN TRANSLATION] Μήνας"
+      "today": "Today",
+      "week": "Week",
+      "month": "Month"
     },
     "errors": {
-      "loadFailed": "[NEEDS EN TRANSLATION] Αποτυχία φόρτωσης αναλυτικών"
+      "loadFailed": "Failed to load analytics"
     }
   },
   "housekeepingView": {

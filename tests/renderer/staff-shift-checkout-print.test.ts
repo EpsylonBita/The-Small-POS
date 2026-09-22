@@ -70,7 +70,7 @@ test('StaffShiftModal shows raw close-shift IPC rejection messages to the operat
 
 test('StaffShiftModal separates cash handover from tip allocation in every checkout role', () => {
   const modal = source(staffShiftModalPath);
-  const locales = ['en', 'el', 'de', 'fr', 'it'];
+  const locales = ['en', 'el', 'de', 'fr', 'it', 'sq'];
   const requiredKeys = [
     'cashToHandToCashier',
     'cashReturnHelper',
@@ -257,7 +257,7 @@ test('cashier-first role gate copy exists in every POS locale and Greek is not E
     'cashierFirstRoleLockedHelper',
     'roleLockedUntilCashier',
   ];
-  const locales = ['en', 'el', 'de', 'fr', 'it'];
+  const locales = ['en', 'el', 'de', 'fr', 'it', 'sq'];
   const english = JSON.parse(source(path.join(projectRoot, 'src', 'locales', 'en.json'))).modals.staffShift;
 
   for (const locale of locales) {

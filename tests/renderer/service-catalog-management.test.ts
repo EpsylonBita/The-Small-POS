@@ -85,7 +85,7 @@ test('Round 393: ServiceCatalogView uses the shared page title and touch-first r
 
 test('common.minutes is a real translation in every POS locale (Greek prevents "45min" leaks)', () => {
   const loadLocale = (lng: string) => JSON.parse(read(`src/locales/${lng}.json`));
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const value = loadLocale(lng).common?.minutes;
     assert.equal(typeof value, 'string', `${lng} missing common.minutes`);
     assert.ok(value.length > 0, `${lng} empty common.minutes`);

@@ -9,6 +9,7 @@ import el from '../../locales/el.json'
 import de from '../../locales/de.json'
 import fr from '../../locales/fr.json'
 import italian from '../../locales/it.json'
+import albanian from '../../locales/sq.json'
 
 describe('Tauri primary action contract', () => {
   it('uses the terminal-filtered module set and exposes the implemented repair workflow', () => {
@@ -26,7 +27,7 @@ describe('Tauri primary action contract', () => {
     expect(POS_IMPLEMENTED_MODULES.has('repairs')).toBe(true)
   })
 
-  it.each([en, el, de, fr, italian])('translates every rendered shared action key', (locale) => {
+  it.each([en, el, de, fr, italian, albanian])('translates every rendered shared action key', (locale) => {
     const actions = resolveTauriPrimaryActions(['orders', 'appointments', 'repairs'], true)
     const translations = (locale as unknown as {
       primaryActions?: Record<string, string | { comingSoon?: string }>

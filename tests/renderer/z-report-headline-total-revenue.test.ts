@@ -19,7 +19,7 @@ const projectRoot = process.cwd();
 const modalPath = path.join(projectRoot, 'src', 'renderer', 'components', 'modals', 'ZReportModal.tsx');
 const typesPath = path.join(projectRoot, 'src', 'renderer', 'types', 'reports.ts');
 const localesDir = path.join(projectRoot, 'src', 'locales');
-const LOCALES = ['el', 'en', 'de', 'fr', 'it'] as const;
+const LOCALES = ['el', 'en', 'de', 'fr', 'it', 'sq'] as const;
 const NEW_KEYS = [
   'platformOnlineSales',
   'platformCodSales',
@@ -83,7 +83,7 @@ test('Z report types expose the payment-level day summary the modal reads', () =
   assert.match(types, /paymentsBreakdown\?: Partial<[\s\S]*?'cash' \| 'card' \| 'other' \| 'platform_online' \| 'platform_cod'/);
 });
 
-test('Z modal cash-flow row keys exist in all five locales (no raw keys on the till)', () => {
+test('Z modal cash-flow row keys exist in all six locales (no raw keys on the till)', () => {
   // Live 05/09/2026: the cash-flow row printed "modals.zReport.platformOnlineSales" and
   // "modals.zReport.platformCodSales" verbatim — the strings lived only under
   // reports.zReport.summary.*, not where the modal reads them.

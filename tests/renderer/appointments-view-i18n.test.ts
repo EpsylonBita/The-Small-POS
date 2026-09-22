@@ -226,7 +226,7 @@ test('appointments translation keys are present in every locale', () => {
   const topKeys = ['walkIn', 'service', 'staff', 'noAppointments', 'noAppointmentsHint', 'newAppointment', 'selectStaffService'];
   const modalKeys = ['customer', 'bannedCustomer', 'clearCustomer', 'searchCustomer', 'walkInName', 'walkInPhone'];
 
-  for (const language of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const language of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const a = locale(language).appointments;
     assert.ok(a, `${language} missing appointments`);
     for (const key of statusKeys) {
@@ -308,7 +308,7 @@ test('appointment toast keys (incl. all status enums) exist in every locale, Gre
   const STATUSES = ['scheduled', 'confirmed', 'in_progress', 'completed', 'cancelled', 'no_show'];
   const GREEK = new RegExp('[\\u0370-\\u03FF]');
 
-  for (const lang of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lang of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const toasts = locale(lang).appointmentsView?.toasts;
     assert.ok(toasts, `${lang} missing appointmentsView.toasts`);
     for (const k of FLAT) {
@@ -396,7 +396,7 @@ test('Round 230: AppointmentsView icon buttons are named + touch-safe, with no h
 
 test('Round 230: appointment date/month nav + reused refresh/close accessible names exist in every locale', () => {
   const GREEK = new RegExp('[\\u0370-\\u03FF]');
-  for (const language of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const language of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const j = locale(language);
     const a = j.appointments;
     for (const key of ['previousDay', 'nextDay']) {
@@ -520,7 +520,7 @@ test('Round 240: modal Cancel is soft-destructive red, Create is green primary w
 
 test('Round 240: appointment modal section-header keys exist and are translated in every locale', () => {
   const GREEK = new RegExp('[\\u0370-\\u03FF]');
-  for (const language of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const language of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const sections = locale(language).appointments.modal.sections;
     assert.ok(sections, `${language} missing appointments.modal.sections`);
     for (const key of ['guestService', 'dateTime']) {
@@ -825,7 +825,7 @@ test('Round 285/307: New Appointment slots stay gated on staff + service (in-con
 
 test('Round 285: the staff+service availability guidance key exists in every locale (Greek is real Greek)', () => {
   const GREEK = new RegExp('[\\u0370-\\u03FF]');
-  for (const language of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const language of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const v = locale(language).appointments.modal.selectStaffServiceAvailability;
     assert.equal(typeof v, 'string', `${language} missing appointments.modal.selectStaffServiceAvailability`);
     assert.ok(v.length > 0, `${language} empty selectStaffServiceAvailability`);
@@ -998,7 +998,7 @@ test('Round 333: an open GlassSelect listbox overlays the Notes card (stacking f
 
 test('Round 307: the slot-empty-state copy + checklist labels exist in every locale (Greek is real Greek)', () => {
   const GREEK = new RegExp('[\\u0370-\\u03FF]');
-  for (const language of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const language of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const s = locale(language).appointments.modal.slotsEmpty;
     assert.ok(s, `${language} missing appointments.modal.slotsEmpty`);
     for (const key of ['title', 'help', 'staffStep', 'serviceStep']) {

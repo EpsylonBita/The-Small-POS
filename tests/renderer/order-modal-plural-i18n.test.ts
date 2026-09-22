@@ -57,7 +57,7 @@ test('Greek order modal count copy uses natural i18next plurals', async () => {
 });
 
 test('order modal count keys are pluralized in every POS locale', () => {
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const locale = loadLocale(lng);
     for (const key of countKeys) {
       const parentPath = key.split('.');

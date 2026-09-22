@@ -51,7 +51,7 @@ test('the sidebar shows an efood entry only when the efood Partner page is avail
 });
 
 test('the efood label is the brand name in every locale', () => {
-  for (const locale of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const locale of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const messages = JSON.parse(read('src', 'locales', `${locale}.json`)) as { navigation?: Record<string, unknown> };
     assert.equal(messages.navigation?.efood_partner, 'efood', `${locale}: navigation.efood_partner`);
   }

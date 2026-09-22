@@ -20,7 +20,7 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const MODAL_SOURCE = readFileSync(resolve(__dirname, '..', 'StaffShiftModal.tsx'), 'utf8');
-const LOCALES = ['en', 'el', 'de', 'fr', 'it'] as const;
+const LOCALES = ['en', 'el', 'de', 'fr', 'it', 'sq'] as const;
 
 describe('StaffShiftModal busy-elsewhere refusal', () => {
   it('reads busyCheckedInAt off the failure payload', () => {

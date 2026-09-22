@@ -97,7 +97,7 @@
         "waitingConfirmation": "In attesa che efood applichi le modifiche; aggiorna tra qualche minuto.",
         "confirmed": "efood ha confermato il nuovo orario.",
         "staleBanner": "È stato caricato un orario più recente da efood. Ricarica per vederlo, oppure continua a modificare.",
-        "discardReload": "Annulla le mie modifiche e ricarica",
+        "discardReload": "Ignora le mie modifiche e ricarica",
         "days": {
           "monday": "Lunedì",
           "tuesday": "Martedì",
@@ -109,7 +109,7 @@
         },
         "errors": {
           "providerForbidden": "efood non ha consentito questa modifica; contatta l'assistenza.",
-          "invalidSchedule": "Questo orario non è stato accettato. Controlla il programma e riprova.",
+          "invalidSchedule": "Questi orari non sono stati accettati. Controllali e riprova.",
           "providerUnavailable": "efood è temporaneamente non disponibile. Riprova a breve.",
           "outcomeUnknown": "Impossibile confermare il risultato. Aggiorna per controllare l'orario attuale.",
           "productionNotConnected": "Questa piattaforma non è ancora collegata a un negozio attivo.",

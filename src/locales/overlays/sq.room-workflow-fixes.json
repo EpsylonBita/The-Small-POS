@@ -1,0 +1,24 @@
+{
+  "roomWorkflow": {
+    "phoneRequired": "Shkruaj emrin dhe numrin e telefonit të mysafirit.",
+    "invalidDates": "Zgjidh një datë të saktë mbërritjeje dhe një datë largimi më të vonë.",
+    "unavailable": "Kjo dhomë s'është e lirë për këto data. Zgjidh një dhomë tjetër ose ndrysho datat.",
+    "checkoutRequired": "Hap «Dhoma», zgjidh dhomën dhe shtyp «Largim» për të parë llogarinë dhe për të përfunduar largimin.",
+    "checkinRequired": "Hap «Mbërritje» për të regjistruar mbërritjen në dhomë dhe për t'i hapur llogarinë.",
+    "moduleRequired": "Ky terminal s'e ka modulin e nevojshëm. Kërkoji një administratori ta aktivizojë.",
+    "reservationRequired": "Krijo një rezervim dhome para se të regjistrosh mbërritjen e mysafirit.",
+    "locked": "Ky qëndrim ka filluar ose ka mbaruar tashmë. Rezervimi mund të ndryshohet vetëm para mbërritjes.",
+    "connectionError": "S'ka lidhje. Mbaje këtë dritare hapur dhe provo përsëri kur të lidhesh.",
+    "saveFailed": "Ndryshimi s'u ruajt dot. Të dhënat që shkrove nuk humbën. Provo përsëri ose kontrollo rezervimin para se të krijosh një tjetër.",
+    "loadingBooking": "Duke ngarkuar rezervimin e dhomës…",
+    "resumeBooking": "Po vazhdon rezervimi {{number}}",
+    "noBillingNotice": "Vetëm mbërritje: s'do të regjistrohet asnjë pagesë apo tarifim qëndrimi. Për llogari dhome duhet moduli «Faturimi i mysafirëve».",
+    "costPreview": "{{nights}} net × {{rate}} = {{total}} kosto e parashikuar e qëndrimit",
+    "editBooking": "Ndrysho dhomën / datat",
+    "staying": "Po qëndrojnë",
+    "departed": "U larguan",
+    "arrival": "Mbërritje",
+    "departure": "Largim",
+    "cancelBooking": "Anulo rezervimin"
+  }
+}

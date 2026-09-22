@@ -1,7 +1,7 @@
 /**
  * Module audit 2026-09-16: KioskManagementPage rendered English in every locale because
- * none of the five locale files carried a `modules.kiosk` block. Pin the keys the page uses
- * against all five files so the gap cannot come back.
+ * none of the six locale files carried a `modules.kiosk` block. Pin the keys the page uses
+ * against all six files so the gap cannot come back.
  */
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -10,7 +10,7 @@ import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
-const LOCALES = ['en', 'el', 'de', 'fr', 'it']
+const LOCALES = ['en', 'el', 'de', 'fr', 'it', 'sq']
 
 function usedKeys(): string[] {
   const source = readFileSync(join(ROOT, 'src', 'renderer', 'pages', 'KioskManagementPage.tsx'), 'utf8')
@@ -30,7 +30,7 @@ function lookup(locale: Record<string, unknown>, key: string): unknown {
   }, locale)
 }
 
-test('every modules.kiosk key the page uses exists in all five locales', () => {
+test('every modules.kiosk key the page uses exists in all six locales', () => {
   const keys = usedKeys()
   assert.ok(keys.length >= 15, `expected the page to use the kiosk keys, found ${keys.length}`)
   for (const locale of LOCALES) {

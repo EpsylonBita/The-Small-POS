@@ -1,0 +1,7 @@
+{
+  "modals": {
+    "staffShift": {
+      "unsupportedShiftRole": "Me këtë rol s'mund të hapësh turn në POS. Kërkoji menaxherit të të caktojë një rol që mbështetet në POS."
+    }
+  }
+}

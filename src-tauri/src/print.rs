@@ -4041,7 +4041,9 @@ pub fn resolve_layout_config(
             // Default currency symbol based on language when not explicitly set
             let lang = setting_text(&conn, "general", "language").unwrap_or_default();
             match lang.as_str() {
-                "el" | "de" | "fr" | "it" | "es" | "pt" | "nl" => Some(" \u{20AC}".to_string()),
+                "el" | "de" | "fr" | "it" | "es" | "pt" | "nl" | "sq" => {
+                    Some(" \u{20AC}".to_string())
+                }
                 _ => None,
             }
         })
@@ -4401,7 +4403,7 @@ pub fn resolve_layout_config(
         layout_density_scale,
         decimal_comma: matches!(
             app_language.as_str(),
-            "el" | "de" | "fr" | "it" | "es" | "pt" | "nl"
+            "el" | "de" | "fr" | "it" | "es" | "pt" | "nl" | "sq"
         ),
         classic_customer_render_mode,
         emulation_mode,

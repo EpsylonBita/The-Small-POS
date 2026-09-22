@@ -326,7 +326,7 @@ test('Round 194: admin "This register" section is an operator-friendly overview 
   assert.doesNotMatch(overviewChips, /hover:/);
 
   // The "+N more" label is localized in every POS locale and interpolates the count.
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const value = getKey(loadLocale(lng), 'settings.deviceSetup.overview.moreCount') as string;
     assert.equal(typeof value, 'string', `${lng} missing settings.deviceSetup.overview.moreCount`);
     assert.match(value, /\{\{count\}\}/, `${lng} moreCount must interpolate {{count}}`);
@@ -375,7 +375,7 @@ test('Round 194: register-overview new keys are localized in every POS locale (G
     'settings.deviceSetup.overview.pinResetShort',
     'settings.deviceSetup.overview.pinOkShort',
   ];
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const json = loadLocale(lng);
     for (const key of keys) {
       const value = getKey(json, key);
@@ -425,7 +425,7 @@ test('Round 347: the register technical-details disclosure is removed and its lo
 
   // Locale guard: the obsolete deviceSetup overview technicalDetails keys are absent in every POS locale, so a
   // rebuilt renderer bundle no longer carries the "Technical details" / "For support" strings.
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const overview = getKey(loadLocale(lng), 'settings.deviceSetup.overview') as Record<string, unknown>;
     assert.equal(typeof overview, 'object', `${lng} settings.deviceSetup.overview must exist`);
     assert.ok(!('technicalDetails' in overview), `${lng}: settings.deviceSetup.overview.technicalDetails must be removed`);
@@ -508,7 +508,7 @@ test('Round 325: Data section is three zones — recovery, green safe fixes, the
   assert.doesNotMatch(db, /\btitle=/);
 
   // New/updated zone copy localized in every POS locale (Greek not English, no raw-key leak).
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     for (const key of [
       'settings.database.advancedResetTitle',
       'settings.database.advancedResetSummary',
@@ -663,7 +663,7 @@ test('settings help keys exist and are localized in every POS locale', () => {
     'settings.peripherals.helpText',
     'settings.peripherals.saveButton',
   ];
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const json = loadLocale(lng);
     for (const key of keys) {
       const value = getKey(json, key);
@@ -705,7 +705,7 @@ test('language switcher buttons read accessible names from settings.display.lang
     );
   }
   // The layout fix must not have touched the language-switch behavior or save toast.
-  for (const code of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const code of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     assert.match(source, new RegExp(`handleLanguageChange\\('${code}'\\)`), `${code} must invoke the language-change handler`);
   }
   assert.match(source, /await setLanguage\(language\)/);
@@ -715,7 +715,7 @@ test('language switcher buttons read accessible names from settings.display.lang
 });
 
 test('settings.display.lang* names exist and never leak the raw key in any POS locale', () => {
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const json = loadLocale(lng);
     for (const { key } of LANGUAGE_BUTTONS) {
       const dotted = `settings.display.${key}`;
@@ -826,7 +826,7 @@ test('Round 217: runtime sync-health states are localized in every POS locale (n
     'synced',
     'degraded',
   ];
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const json = loadLocale(lng);
     for (const key of runtimeKeys) {
       const value = getKey(json, `settings.managedByAdmin.syncHealth.${key}`);
@@ -1011,7 +1011,7 @@ test('CallerId uses one non-sticky refresh action instead of retired save/test c
 
 test('server-managed CallerId labels exist in every locale and Greek copy is translated', () => {
   const GREEK = new RegExp('[\\u0370-\\u03FF]');
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const c = getKey(loadLocale(lng), 'settings.peripherals.callerId') as Record<string, any>;
     assert.ok(c, `${lng} missing callerId`);
     for (const key of ['step1', 'step2', 'step3', 'centralBody', 'deviceIp', 'channel', 'port', 'refresh']) {
@@ -1096,7 +1096,7 @@ test('Round 280: non-healthy status title/help keys are localized in every POS l
     'settings.deviceSetup.overview.statusTitleWarning',
     'settings.deviceSetup.overview.statusHelpWarning',
   ];
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const json = loadLocale(lng);
     for (const key of keys) {
       const value = getKey(json, key);
@@ -1576,7 +1576,7 @@ test('Greek settings test print reports only a validated managed-queue enqueue',
 
 test('Greek managed test-print queued copy is complete and translated in every POS locale', () => {
   const key = 'settings.printer.greekTestPrintQueued';
-  const locales = ['en', 'el', 'de', 'fr', 'it'] as const;
+  const locales = ['en', 'el', 'de', 'fr', 'it', 'sq'] as const;
   const values = Object.fromEntries(locales.map((locale) => [locale, getKey(loadLocale(locale), key)]));
 
   for (const locale of locales) {
@@ -1586,7 +1586,7 @@ test('Greek managed test-print queued copy is complete and translated in every P
     assert.doesNotMatch(value as string, /\[NEEDS TRANSLATION\]/, `${locale} has placeholder ${key}`);
   }
 
-  for (const locale of ['el', 'de', 'fr', 'it'] as const) {
+  for (const locale of ['el', 'de', 'fr', 'it', 'sq'] as const) {
     assert.notEqual(values[locale], values.en, `${locale} ${key} must not leak English copy`);
   }
   assert.match(values.el as string, /[\u0370-\u03FF]/, `el ${key} must contain real Greek`);

@@ -26,7 +26,7 @@ const zreportRsPath = path.join(projectRoot, 'src-tauri', 'src', 'zreport.rs');
 const platformsRsPath = path.join(projectRoot, 'src-tauri', 'src', 'platforms.rs');
 const printRsPath = path.join(projectRoot, 'src-tauri', 'src', 'print.rs');
 const localesDir = path.join(projectRoot, 'src', 'locales');
-const LOCALES = ['el', 'en', 'de', 'fr', 'it'] as const;
+const LOCALES = ['el', 'en', 'de', 'fr', 'it', 'sq'] as const;
 
 const read = (file: string) => readFileSync(file, 'utf8');
 const loadLocale = (lng: string) =>

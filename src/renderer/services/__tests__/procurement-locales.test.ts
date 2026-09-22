@@ -4,7 +4,7 @@
  * The purchase-orders surface builds keys dynamically from statuses
  * (`procurement.status.${status}`) and flavors
  * (`procurement.flavor.${flavor}`), so every runtime variant must exist
- * in ALL five pos-tauri locale files — a missing variant would render a
+ * in ALL six pos-tauri locale files — a missing variant would render a
  * raw key at the counter. Complements `npm run locale:parity`, which
  * checks whole-file key parity against `en.json`. [R15.2, R15.3]
  */
@@ -15,6 +15,7 @@ import el from '../../../locales/el.json';
 import de from '../../../locales/de.json';
 import fr from '../../../locales/fr.json';
 import it_ from '../../../locales/it.json';
+import sq from '../../../locales/sq.json';
 
 const LOCALES: Array<[string, Record<string, unknown>]> = [
   ['en', en as Record<string, unknown>],
@@ -22,6 +23,7 @@ const LOCALES: Array<[string, Record<string, unknown>]> = [
   ['de', de as Record<string, unknown>],
   ['fr', fr as Record<string, unknown>],
   ['it', it_ as Record<string, unknown>],
+  ['sq', sq as Record<string, unknown>],
 ];
 
 /** Every PurchaseOrderStatus variant (mirrors shared/types/procurement.ts). */

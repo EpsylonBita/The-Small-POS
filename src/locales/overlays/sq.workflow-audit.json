@@ -1,0 +1,20 @@
+{
+  "orderDashboard": {
+    "paymentMethodAdjustedOrder": "Kjo porosi ka një rimbursim ose anulim. Mënyrat e saj të pagesës s'mund të ndryshohen. Hap historikun e pagesave për të parë korrigjimin."
+  },
+  "tableCheckManager": {
+    "messages": {
+      "mergeCompatibleChecks": "Tavolinat e zëna mund të bashkohen kur kanë pjesë të së njëjtës porosi. Llogaritë nga porosi të ndryshme duhet të rrinë veç."
+    }
+  },
+  "sync": {
+    "healthModal": {
+      "problems": {
+        "syncFailed": "Sinkronizimi dështoi. Hap Rikuperimin për të parë cilat të dhëna duan vëmendje."
+      },
+      "recommendations": {
+        "openRecovery": "Hap Rikuperimin dhe shiko të dhënën që dështoi para se të provosh përsëri."
+      }
+    }
+  }
+}

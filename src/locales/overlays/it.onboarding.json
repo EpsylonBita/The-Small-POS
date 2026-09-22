@@ -28,7 +28,7 @@
     "validating": "Verifica della connessione…",
     "syncing": "Sincronizzazione delle impostazioni del terminale…",
     "ready": "Il tuo terminale è pronto",
-    "success": "Terminale configurato con successo!",
+    "success": "Terminale configurato!",
     "opening": "Apertura del POS…",
     "configureFailed": "Impossibile connettere questo terminale.",
     "syncFailed": "La connessione è stata salvata, ma non è stato possibile sincronizzare le impostazioni.",

@@ -174,7 +174,7 @@ test('TableSelector has a floor selector wired to floor data, state, and filteri
 });
 
 test('TableSelector floor labels are localized in every POS locale with {{floor}} interpolation', () => {
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const ts = loadLocale(lng).tableSelector;
     for (const key of ['floor', 'allFloors', 'floorNumber']) {
       assert.ok(typeof ts[key] === 'string' && ts[key].trim().length, `${lng} tableSelector.${key} missing/empty`);
@@ -238,7 +238,7 @@ test('TableSelector text is localized via tableSelector.* keys (no hardcoded Gre
   }
 
   // Every POS locale defines tableSelector.title + minCapacity, and Greek is a real translation.
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const ts = loadLocale(lng).tableSelector;
     assert.ok(ts && typeof ts.title === 'string' && ts.title.trim().length, `${lng} tableSelector.title`);
     assert.ok(typeof ts.minCapacity === 'string' && ts.minCapacity.trim().length, `${lng} tableSelector.minCapacity`);

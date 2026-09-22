@@ -41,7 +41,7 @@ export interface OptimizedDeliveryRoutePlan {
   warnings: string[]
   /**
    * Machine codes for the same notices, translated on this side under
-   * `orderDashboard.routeWarnings.<code>` (all five locales). A code this
+   * `orderDashboard.routeWarnings.<code>` (all six locales). A code this
    * build does not know renders the `generic` sentence, never raw English.
    */
   warningDetails?: Array<{ code: string; params?: Record<string, number> }>

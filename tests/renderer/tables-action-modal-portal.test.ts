@@ -130,7 +130,7 @@ test('TableActionModal renders capacity guests through i18next plurals', async (
     'TableActionModal must pass count when rendering the capacity guest noun',
   );
 
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const modal = loadLocale(lng).tableActionModal;
     assert.equal(typeof modal.guests_one, 'string', `${lng}.tableActionModal.guests_one missing`);
     assert.equal(typeof modal.guests_other, 'string', `${lng}.tableActionModal.guests_other missing`);
@@ -145,7 +145,7 @@ test('TableActionModal renders capacity guests through i18next plurals', async (
 test('de/fr/it TableActionModal action copy no longer leaks English source strings', () => {
   const en = loadLocale('en').tableActionModal;
 
-  for (const lng of ['de', 'fr', 'it']) {
+  for (const lng of ['de', 'fr', 'it', 'sq']) {
     const modal = loadLocale(lng).tableActionModal;
     for (const key of untranslatedTableActionKeys) {
       assert.notEqual(

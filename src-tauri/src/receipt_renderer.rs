@@ -1558,6 +1558,156 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Category" => "Categoria",
             _ => key,
         },
+        // Albanian. Written with real `ë`/`ç`: raster receipts draw them as-is,
+        // and the ESC/POS text path folds them to `e`/`c` (escpos::latin_fold).
+        "sq" => match key {
+            "Order" => "Porosia",
+            "Type" => "Lloji",
+            "Date" => "Data",
+            "Table" => "Tavolina",
+            "Customer" => "Klienti",
+            "DELIVERY" => "DËRGESË",
+            "DELIVERY SLIP" => "FLETË DËRGESE",
+            "Driver" => "Korrieri",
+            "Driver ID" => "ID e korrierit",
+            "Address" => "Adresa",
+            "City" => "Qyteti",
+            "Postal Code" => "Kodi postar",
+            "Floor" => "Kati",
+            "Name on ringer" => "Emri te zilja",
+            "ITEMS" => "ARTIKUJT",
+            "TOTALS" => "TOTALET",
+            "Subtotal" => "Nëntotali",
+            "Discount" => "Ulje",
+            "Tax" => "TVSH",
+            "Delivery" => "Dërgesa",
+            "Repairs" => "Riparime",
+            "Tip" => "Bakshish",
+            "TOTAL" => "TOTALI",
+            "PAYMENT" => "PAGESA",
+            "METHOD" => "MËNYRA",
+            "Cash" => "Kesh",
+            "Card" => "Kartë",
+            "Received" => "Marrë",
+            "Change" => "Kusuri",
+            "Other" => "Tjetër",
+            "ADJUSTMENTS" => "RREGULLIME",
+            "Void" => "Anulim",
+            "Refund" => "Rimbursim",
+            "VOID" => "ANULIM",
+            "REFUND" => "RIMBURSIM",
+            "Thank you" => "Faleminderit",
+            "Thank you visit" => "Faleminderit për vizitën!",
+            "Thank you preference" => "Faleminderit që na zgjodhët!",
+            "Payment method" => "Mënyra e pagesës",
+            "VAT" => "NIPT",
+            "TAX_OFFICE" => "Zyra tatimore",
+            "Shift" => "Turni",
+            "Staff" => "Stafi",
+            "SHIFT CHECKOUT" => "MBYLLJE TURNI",
+            "Z REPORT" => "RAPORTI Z",
+            "Role" => "Roli",
+            "Cashier" => "Arkëtar",
+            "Manager" => "Menaxher",
+            "Kitchen" => "Kuzhina",
+            "Server" => "Kamarier",
+            "Shifts" => "Turnet",
+            "Terminal" => "Terminali",
+            "Check-in" => "Hyrja",
+            "Check-out" => "Dalja",
+            "Orders" => "Porosi",
+            "Sales" => "Shitje",
+            "Expenses" => "Shpenzime",
+            "Expense" => "Shpenzim",
+            "Refunds" => "Rimbursime",
+            "Opening" => "Hapja",
+            "Expected" => "Pritet",
+            "Closing" => "Mbyllja",
+            "Variance" => "Diferenca",
+            "DRIVER DELIVERIES" => "DËRGESAT E KORRIERIT",
+            "Generated" => "Krijuar",
+            "Gross" => "Bruto",
+            "Net" => "Neto",
+            "Voids" => "Anulime",
+            "Discounts" => "Ulje",
+            "DELIVERIES" => "DËRGESAT",
+            "DRIVER SUMMARY" => "PËRMBLEDHJE KORRIERI",
+            "Cash Collected" => "Mbledhur kesh",
+            "Card Collected" => "Mbledhur me kartë",
+            "Delivery Fees" => "Tarifat e dërgesës",
+            "Starting" => "Fillimi",
+            "Starting Amount" => "Shuma fillestare",
+            "Total Sells" => "Shitjet gjithsej",
+            "+ Cash" => "+ Kesh",
+            "- Expenses" => "- Shpenzime",
+            "= To Return" => "= Për t'u kthyer",
+            "Amount to be Returned" | "Return" => "Për t'u kthyer",
+            "Actual Returned" => "Kthyer realisht",
+            "Canceled/Refunded" => "Anuluar/Rimbursuar",
+            "SALES" => "SHITJET",
+            "PAYMENTS" => "PAGESAT",
+            "Tips" => "Bakshishe",
+            "Tips Received" => "Bakshishe të marra",
+            "ORDER BREAKDOWN" => "NDARJA E POROSIVE",
+            "EXPENSE ANALYSIS" => "DETAJET E SHPENZIMEVE",
+            "EXPENSES" => "SHPENZIMET",
+            "PLATFORMS" => "PLATFORMAT",
+            "Platforms Total" => "Totali i platformave",
+            "Collected" => "Mbledhur",
+            "Total Expenses" => "Shpenzimet gjithsej",
+            "Dine-in" => "Në lokal",
+            "Takeaway" => "Me vete",
+            "CASH DRAWER" => "ARKA",
+            "STAFF" => "STAFI",
+            "Cash Sales" => "Shitje kesh",
+            "Platform Online" => "Platformë online",
+            "Platform COD" => "Platformë në dorëzim",
+            "Rider tip" => "Bakshish korrieri",
+            "Order Code" => "Kodi i porosisë",
+            "Platform rider" => "Korrier i platformës",
+            "Store driver" => "Korrieri i dyqanit",
+            "Cash on delivery" => "Pagesë në dorëzim",
+            "Cash payment" => "Pagesë kesh",
+            "Paid" => "Paguar",
+            "Paid online" => "Paguar online",
+            "Partial subtotal" => "Nëntotal i pjesshëm",
+            "Thank you for your order" => "Faleminderit për porosinë",
+            "Till Cash Sales" => "Shitje kesh në arkë",
+            "Net Driver Cash" => "Kesh neto nga korrierët",
+            "All Cash Out" => "Gjithë daljet e keshit",
+            "Money In Drawer" => "Para në arkë",
+            "Drawer" => "Arka",
+            "Card Sales" => "Shitje me kartë",
+            "Cash Drops" => "Tërheqje keshi",
+            "Driver Given" => "Dhënë korrierit",
+            "Driver Returned" => "Kthyer nga korrieri",
+            "Transferred Staff" => "Staf i transferuar",
+            "Transferred Staff Returns" => "Kthime nga stafi i transferuar",
+            "Expected In Drawer" => "Pritet në arkë",
+            "Counted Cash" => "Kesh i numëruar",
+            "Staff Payment" => "Pagesë stafi",
+            "Staff Payments" => "Pagesa stafi",
+            "STAFF PAYMENT" => "PAGESË STAFI",
+            "STAFF PAYMENTS" => "PAGESA STAFI",
+            "Staff Payouts" => "Dalje për stafin",
+            "Staff Payouts*" => "Dalje për stafin*",
+            "STAFF PAYOUTS" => "DALJE PËR STAFIN",
+            "Payout" => "Dalje",
+            "Staff Payments*" => "Dalje për stafin*",
+            "Informational only" => "Vetëm për informacion",
+            "KITCHEN TICKET" => "FLETË KUZHINE",
+            "Phone" => "Tel.",
+            "Road" => "Rruga",
+            "Ringer" => "Zilja",
+            "Postal" => "K. postar",
+            "No items" => "S'ka artikuj",
+            "No payment recorded" => "S'ka pagesë të regjistruar",
+            "Note" => "Shënim",
+            "Without" => "Pa",
+            "Little" => "Pak",
+            "Category" => "Kategoria",
+            _ => key,
+        },
         _ => key,
     }
 }
@@ -1778,6 +1928,13 @@ fn translate_order_type(lang: &str, order_type: &str) -> String {
             "delivery" => "CONSEGNA",
             "dine_in" => "AL TAVOLO",
             "takeaway" => "DA ASPORTO",
+            _ => return order_type.to_uppercase(),
+        },
+        "sq" => match normalized.as_str() {
+            "pickup" => "MARRJE NË LOKAL",
+            "delivery" => "DËRGESË",
+            "dine_in" => "NË LOKAL",
+            "takeaway" => "ME VETE",
             _ => return order_type.to_uppercase(),
         },
         _ => return order_type.to_uppercase(),
@@ -3060,7 +3217,12 @@ pub fn apply_character_set_for_test(
 /// the best default character set for that language.
 pub fn language_to_character_set(language: &str) -> &'static str {
     match language.trim().to_ascii_lowercase().as_str() {
-        "el" => "PC737_GREEK",
+        // Albanian rides on the Greek code page on purpose. Its own letters
+        // (`ë`, `ç`) are folded to ASCII on the text path whatever the code
+        // page, so nothing is lost — while an Albanian-speaking cashier in a
+        // Greek shop keeps Greek product and customer names printing correctly
+        // instead of turning into `?` the moment the UI language changes.
+        "el" | "sq" => "PC737_GREEK",
         "de" | "fr" | "it" | "es" | "pt" | "nl" => "PC850_MULTILINGUAL",
         "ru" | "uk" | "bg" => "PC866_CYRILLIC",
         "pl" | "cs" | "sk" | "hr" | "hu" | "ro" => "PC852_LATIN2",
@@ -13489,6 +13651,29 @@ mod tests {
         assert_eq!(receipt_label("de", "Expense"), "Ausgabe");
         assert_eq!(receipt_label("it", "Variance"), "Differenza");
         assert_eq!(receipt_label("it", "Expense"), "Spesa");
+    }
+
+    #[test]
+    fn receipt_label_covers_albanian() {
+        assert_eq!(receipt_label("sq", "SHIFT CHECKOUT"), "MBYLLJE TURNI");
+        assert_eq!(receipt_label("sq", "Z REPORT"), "RAPORTI Z");
+        assert_eq!(receipt_label("sq", "Tip"), "Bakshish");
+        assert_eq!(receipt_label("sq", "Change"), "Kusuri");
+        assert_eq!(receipt_label("sq", "Cash"), "Kesh");
+        assert_eq!(receipt_label("sq", "Without"), "Pa");
+        assert_eq!(receipt_label("sq", "Little"), "Pak");
+        assert_eq!(translate_order_type("sq", "dine-in"), "NË LOKAL");
+        assert_eq!(translate_order_type("sq", "delivery"), "DËRGESË");
+        // An unknown key still falls back to the key itself, never to blank.
+        assert_eq!(receipt_label("sq", "Not A Real Label"), "Not A Real Label");
+    }
+
+    #[test]
+    fn albanian_keeps_greek_content_printable_on_the_auto_code_page() {
+        // Albanian labels fold to ASCII on the text path, so the auto code page
+        // stays Greek: product names typed in Greek must not turn into `?`.
+        assert_eq!(language_to_character_set("sq"), "PC737_GREEK");
+        assert_eq!(language_to_character_set("SQ "), "PC737_GREEK");
     }
 
     #[test]

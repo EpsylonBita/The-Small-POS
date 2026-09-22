@@ -5,7 +5,7 @@ import path from 'node:path';
 
 const projectRoot = process.cwd();
 const localesDir = path.join(projectRoot, 'src', 'locales');
-const supportedLocales = ['en', 'el', 'de', 'fr', 'it'] as const;
+const supportedLocales = ['en', 'el', 'de', 'fr', 'it', 'sq'] as const;
 
 const releaseKeys = [
   'modals.orderDetails.copyFailed',

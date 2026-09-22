@@ -29,7 +29,7 @@ import type { UnsettledPaymentBlocker } from '../../src/lib/ipc-contracts';
 const projectRoot = process.cwd();
 const overlaysDir = path.join(projectRoot, 'src', 'locales', 'overlays');
 const rustPath = path.join(projectRoot, 'src-tauri', 'src', 'payment_integrity.rs');
-const LOCALES = ['el', 'en', 'de', 'fr', 'it'] as const;
+const LOCALES = ['el', 'en', 'de', 'fr', 'it', 'sq'] as const;
 
 const overlay = (lng: string) =>
   JSON.parse(readFileSync(path.join(overlaysDir, `${lng}.sync-hotfix.json`), 'utf8')) as {
@@ -117,7 +117,8 @@ test('the blocker that stopped the shift reads in Greek, with the money in it', 
   assert.equal(reason.includes('The platform settles'), false, reason);
   assert.equal(/\{\{\w+\}\}/.test(reason), false, `no placeholder may leak: ${reason}`);
 
-  assert.ok(fix.includes('Ακύρωσε'), fix);
+  // Polite plural, like every other instruction in the product.
+  assert.ok(fix.includes('Ακυρώστε'), fix);
   assert.equal(fix.includes('Void the cash/card row'), false, fix);
   assert.equal(/\{\{\w+\}\}/.test(fix), false, `no placeholder may leak: ${fix}`);
 });

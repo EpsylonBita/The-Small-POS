@@ -3,7 +3,7 @@ import path from 'node:path'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-const localeNames = ['en', 'el', 'de', 'fr', 'it'] as const
+const localeNames = ['en', 'el', 'de', 'fr', 'it', 'sq'] as const
 const projectRoot = process.cwd()
 const localesRoot = path.resolve(projectRoot, 'src', 'locales')
 

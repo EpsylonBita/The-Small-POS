@@ -40,7 +40,7 @@
     "fixCodes": {
       "missing_cash_payment": "Registra o conferma il pagamento in contanti mancante.",
       "missing_card_payment": "Registra o conferma il pagamento con carta mancante.",
-      "missing_local_payment_row": "Aggiorna i payment mirror o ricrea la riga di pagamento mancante.",
+      "missing_local_payment_row": "Aggiorna le copie locali dei pagamenti o ricrea la registrazione di pagamento mancante.",
       "partial_cash_payment": "Registra l'importo residuo in contanti per continuare.",
       "partial_card_payment": "Registra l'importo residuo con carta per continuare.",
       "split_payment_incomplete": "Completa tutte le parti del pagamento misto prima di continuare.",

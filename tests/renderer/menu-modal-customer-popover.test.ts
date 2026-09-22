@@ -57,7 +57,7 @@ test('pickup customer popover close key is translated in every POS locale', () =
   const en = loadLocale('en').common?.actions?.close;
   assert.equal(typeof en, 'string', 'en missing common.actions.close');
 
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const value = loadLocale(lng).common?.actions?.close;
     assert.equal(typeof value, 'string', `${lng} missing common.actions.close`);
     assert.ok(value.length > 0, `${lng} empty common.actions.close`);
@@ -253,7 +253,7 @@ test('MenuModal discard confirmation copy exists in every POS locale (Greek tran
   const load = (lng: string): Record<string, any> =>
     JSON.parse(readFileSync(path.join(localesDir, `${lng}.json`), 'utf8'));
   const keys = ['title', 'message', 'keepEditing', 'discard'];
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const d = load(lng)?.modals?.menu?.discardOrder ?? {};
     for (const k of keys) {
       assert.equal(typeof d[k], 'string', `${lng} missing modals.menu.discardOrder.${k}`);

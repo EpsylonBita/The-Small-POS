@@ -1,0 +1,337 @@
+{
+  "actions": {
+    "explain": "Shpjego",
+    "troubleshoot": "Zgjidh problemin",
+    "running": "Duke punuar...",
+    "refreshStatus": "Rifresko statusin",
+    "exportDiagnostics": "Eksporto diagnostikën",
+    "openFinancialPanel": "Hap panelin financiar",
+    "refreshPrinterDiagnostics": "Rifresko diagnostikën e printerit",
+    "openQuickSetup": "Hap konfigurimin e shpejtë",
+    "editPrinter": "Ndrysho printerin",
+    "backToPrinters": "Mbrapa te printerët"
+  },
+  "panel": {
+    "why": "Pse",
+    "evidence": "Të dhënat",
+    "nextSteps": "Hapat e tjerë",
+    "whenToEscalate": "Kur të njoftosh suportin",
+    "englishFallback": "Po shfaqen udhëzimet rezervë në anglisht"
+  },
+  "severity": {
+    "info": "Info",
+    "warning": "Kujdes",
+    "high": "I lartë",
+    "critical": "Kritik"
+  },
+  "evidence": {
+    "connectivity": "Lidhja",
+    "pendingQueue": "Radha në pritje",
+    "syncError": "Gabim sinkronizimi",
+    "failedPayments": "Pagesa të dështuara",
+    "lastSync": "Sinkronizimi i fundit",
+    "telemetryLastSync": "Sinkronizimi i fundit i telemetrisë",
+    "blockedEntity": "Entiteti i bllokuar",
+    "queueFailure": "Dështim në radhë",
+    "retryProgress": "Ecuria e provave të reja",
+    "failedFinancialItems": "Elemente financiare të dështuara",
+    "pendingFinancialItems": "Zëra financiarë në pritje",
+    "invalidOrders": "Porosi të pavlefshme",
+    "invalidOrderIds": "Porositë e prekura",
+    "pendingReportDate": "Data e raportit në pritje",
+    "configuredPrinters": "Printerë të konfiguruar",
+    "defaultPrinter": "Printeri i paracaktuar",
+    "printerName": "Printeri",
+    "printerState": "Gjendja e printerit",
+    "printerError": "Gabim printeri",
+    "resolvedTransport": "Lidhja e përcaktuar",
+    "resolvedAddress": "Adresa e përcaktuar",
+    "verificationStatus": "Statusi i verifikimit",
+    "recentJobsFailed": "Printime të fundit që dështuan",
+    "printerQueueLength": "Radha e printerit"
+  },
+  "fallbacks": {
+    "health": {
+      "title": "Sistemi duket gati",
+      "summary": "Për momentin s'është gjetur asnjë problem bllokues në sistem.",
+      "why": "Terminali është online, radha e sinkronizimit s'tregon asnjë bllokim kritik dhe s'ka asnjë rregull diagnostikimi aktiv që do veprim nga operatori.",
+      "steps": [
+        "Rifresko statusin nëse treguesit në ekran duken të vjetruar.",
+        "Nëse stafi vazhdon të raportojë mospërputhje, eksporto diagnostikën para se të njoftosh suportin."
+      ],
+      "whenToEscalate": [
+        "Njofto suportin nëse porositë, pagesat ose mbyllja e turnit sillen ndryshe nga statusi që shfaqet këtu."
+      ],
+      "ctaLabels": {}
+    },
+    "printer": {
+      "title": "Konfigurimi i printerit duket në rregull",
+      "summary": "Për momentin s'është gjetur asnjë problem bllokues printeri për këtë pamje.",
+      "why": "Printeri i zgjedhur për momentin s'përputhet me asnjë rregull diagnostikimi me prioritet të lartë.",
+      "steps": [
+        "Rifresko diagnostikën nëse ajo që printohet s'përputhet me këtë status.",
+        "Hap cilësimet e printerit nëse të duhet të kontrollosh sërish lidhjen e caktuar ose profilin e paracaktuar."
+      ],
+      "whenToEscalate": [
+        "Njofto suportin nëse kuponët vazhdojnë të dështojnë, të ngecin ose të dalin pa formatimin e duhur."
+      ],
+      "ctaLabels": {}
+    }
+  },
+  "issues": {
+    "health": {
+      "offline": {
+        "title": "Terminali është offline",
+        "summary": "Ky terminal s'është i lidhur, prandaj puna lokale rri në radhë derisa të kthehet lidhja.",
+        "why": "Monitori i sinkronizimit tregon që s'ka lidhje online. Porositë mund të mbeten lokale, por ngarkimet, rakordimet dhe një pjesë e gjendjes së degës do të vonohen.",
+        "steps": [
+          "Kontrollo lidhjen e terminalit me rrjetin dhe routerin ose hotspot-in lokal.",
+          "Vazhdo të marrësh porosi lokalisht, por mos e merr si të mirëqenë që panelet qendrore janë të përditësuara.",
+          "Rifresko statusin pasi të kthehet lidhja."
+        ],
+        "whenToEscalate": [
+          "Njofto suportin nëse terminali mbetet offline edhe pasi u konfirmua që rrjeti punon.",
+          "Njofto menjëherë suportin nëse janë bllokuar pagesat ose mbyllja e turnit."
+        ],
+        "ctaLabels": {
+          "refresh_status": "Rifresko statusin",
+          "export_diagnostics": "Eksporto diagnostikën"
+        }
+      },
+      "sync_error_active": {
+        "title": "Sinkronizimi ka një gabim aktiv",
+        "summary": "Sinkronizimi po raporton një dështim aktiv që duhet parë nga operatori.",
+        "why": "Radha ose sinkronizimi i pagesave raportoi një gabim, ose ka zëra pagesash të dështuar që presin. Derisa kjo të zgjidhet, të dhënat financiare dhe ato të porosive mund të ndryshojnë nga serveri.",
+        "steps": [
+          "Rifresko statusin për të parë nëse dështimi vazhdon ende.",
+          "Shiko te diagnostika detajet e fundit të dështimit të radhës ose të pagesës.",
+          "Nëse problemi vazhdon, eksporto diagnostikën para se të bësh hapa të gjerë rikuperimi."
+        ],
+        "whenToEscalate": [
+          "Njofto suportin nëse zërat e pagesave të dështuara mbeten edhe pas rifreskimit.",
+          "Njofto suportin para se të pastrosh gjë me dorë, nëse gabimi ka të bëjë me saktësinë e pagesave."
+        ],
+        "ctaLabels": {
+          "refresh_status": "Rifresko statusin",
+          "export_diagnostics": "Eksporto diagnostikën"
+        }
+      },
+      "sync_stale": {
+        "title": "Telemetria e sinkronizimit është e vjetruar",
+        "summary": "Terminali është online, por kopja e telemetrisë s'është përditësuar së fundmi.",
+        "why": "Oraret e sinkronizimit të fundit duken më të vjetra se ç'pritej, që mund të thotë se sinkronizimi po vonohet ose se kopja e statusit është e vjetruar.",
+        "steps": [
+          "Rifresko statusin për të kërkuar një kopje të re.",
+          "Kontrollo që radha po ecën ende dhe që porositë e reja po sinkronizohen.",
+          "Eksporto diagnostikën nëse oraret mbeten të vjetruara edhe pas rifreskimit."
+        ],
+        "whenToEscalate": [
+          "Njofto suportin nëse oraret s'ecin përpara edhe pas disa rifreskimesh.",
+          "Njofto suportin nëse stafi sheh në të njëjtën kohë mospërputhje mes terminaleve."
+        ],
+        "ctaLabels": {
+          "refresh_status": "Rifresko statusin",
+          "export_diagnostics": "Eksporto diagnostikën"
+        }
+      },
+      "backlog_blocked": {
+        "title": "Një element në radhë po bllokon punën",
+        "summary": "Te sinkronizimet e prapambetura ka një element që ka ngecur pas provave të përsëritura ose pas një dështimi të rëndë.",
+        "why": "Monitori i radhës tregon një entitet të bllokuar me histori provash të përsëritura. Puna më e re mund të grumbullohet pas elementit që dështon derisa ai të zgjidhet.",
+        "steps": [
+          "Rifresko statusin për të konfirmuar elementin e bllokuar dhe gjendjen e provave.",
+          "Përdor ID-në e entitetit te diagnostika për të gjetur porosinë ose të dhënën që po dështon.",
+          "Eksporto diagnostikën para se të provosh ndonjë rregullim me dorë të radhës."
+        ],
+        "whenToEscalate": [
+          "Njofto suportin nëse i njëjti entitet mbetet i bllokuar edhe pas rifreskimeve.",
+          "Njofto menjëherë suportin nëse elementi i bllokuar ka të bëjë me pagesa ose me të dhënat e mbylljes së ditës."
+        ],
+        "ctaLabels": {
+          "refresh_status": "Rifresko statusin",
+          "export_diagnostics": "Eksporto diagnostikën"
+        }
+      },
+      "financial_queue_failed": {
+        "title": "Disa zëra financiarë s'u sinkronizuan",
+        "summary": "Një ose më shumë të dhëna financiare s'u sinkronizuan.",
+        "why": "Te fitimet e korrierëve, pagesat e stafit ose shpenzimet e turnit ka zëra që s'u sinkronizuan. Të dhënat financiare duhen konsideruar të paplota derisa të shihen këto dështime.",
+        "steps": [
+          "Hap panelin financiar për të parë cila radhë financiare është prekur.",
+          "Shiko nëse zërat e dështuar po shtohen apo janë zgjidhur tashmë.",
+          "Eksporto diagnostikën nëse dështimet s'zhduken pas rifreskimit."
+        ],
+        "whenToEscalate": [
+          "Njofto suportin para se të ndryshosh totalet me dorë.",
+          "Njofto suportin nëse pagat, shpenzimet ose rakordimi varen nga të dhënat që mungojnë."
+        ],
+        "ctaLabels": {
+          "open_financial_panel": "Hap panelin financiar",
+          "export_diagnostics": "Eksporto diagnostikën"
+        }
+      },
+      "invalid_orders_present": {
+        "title": "U gjetën porosi në pritje të pavlefshme",
+        "summary": "Diagnostika gjeti porosi në pritje që s'e kalojnë validimin.",
+        "why": "Një ose më shumë porosi në radhën lokale kanë të dhëna të pavlefshme. Këto porosi mund ta bllokojnë sinkronizimin ose të krijojnë mospërputhje derisa të korrigjohen.",
+        "steps": [
+          "Përdor ID-të e porosive të prekura për të gjetur porositë me probleme.",
+          "Pas çdo korrigjimi rifresko statusin për të parë që porositë e pavlefshme po pakësohen.",
+          "Eksporto diagnostikën nëse të njëjtat porosi shfaqen sërish ose s'rregullohen dot."
+        ],
+        "whenToEscalate": [
+          "Njofto suportin nëse porositë e pavlefshme bllokojnë pagesën normale ose punën e kuzhinës.",
+          "Njofto suportin nëse porositë e pavlefshme shfaqen sërish pasi e rinis aplikacionin."
+        ],
+        "ctaLabels": {
+          "refresh_status": "Rifresko statusin",
+          "export_diagnostics": "Eksporto diagnostikën"
+        }
+      },
+      "pending_zreport_submit": {
+        "title": "Një raport Z lokal duhet ende dërguar",
+        "summary": "Dita e mëparshme e punës është mbyllur tashmë në këtë terminal, por dërgimi i raportit të saj Z lokal është ende në pritje.",
+        "why": "Mbyllja e ditës ka ngelur pezull: raporti Z ende s'është dërguar nga ky terminal. Kjo ka të bëjë me mbylljen e ditës së mëparshme të punës, jo me ndonjë problem të përgjithshëm sinkronizimi.",
+        "steps": [
+          "Rifresko statusin për të parë nëse raporti në pritje kaloi.",
+          "Mos nis rakordim manual nga një terminal tjetër derisa të zgjidhet kjo.",
+          "Eksporto diagnostikën nëse data e raportit në pritje mbetet e bllokuar."
+        ],
+        "whenToEscalate": [
+          "Njofto suportin nëse raporti mbetet në pritje edhe pas rilidhjeve ose rinisjes së aplikacionit.",
+          "Njofto suportin para se të hapësh një ditë të re pune, nëse të dhënat e mbylljes s'përputhen."
+        ],
+        "ctaLabels": {
+          "refresh_status": "Rifresko statusin",
+          "export_diagnostics": "Eksporto diagnostikën"
+        }
+      }
+    },
+    "printer": {
+      "not_configured": {
+        "title": "S'është konfiguruar asnjë printer",
+        "summary": "Ky terminal s'ka asnjë profil printeri gati për kuponë ose fletë porosie.",
+        "why": "Lista e printerëve te cilësimet është bosh, ndaj POS-i s'ka ku t'i dërgojë printimet.",
+        "steps": [
+          "Hap konfigurimin e shpejtë dhe shto printerin që përdoret në këtë terminal.",
+          "Kur krijon profilin, sigurohu që roli dhe lloji i lidhjes janë të saktë.",
+          "Pas konfigurimit nis diagnostikën, para se ta përdorësh printerin për punë."
+        ],
+        "whenToEscalate": [
+          "Njofto suportin nëse printeri duhej të ishte tashmë gati për këtë terminal.",
+          "Njofto suportin nëse konfigurimi s'e gjen ose s'e ruan dot pajisjen."
+        ],
+        "ctaLabels": {
+          "open_quick_setup": "Hap konfigurimin e shpejtë"
+        }
+      },
+      "no_default_profile": {
+        "title": "S'ka printer të paracaktuar",
+        "summary": "Ka printerë, por asnjëri s'është vënë si i paracaktuar.",
+        "why": "Pa një profil të paracaktuar, kuponët mund të dalin herë te një printer e herë te një tjetër, ose duhet ta zgjedhësh printerin me dorë.",
+        "steps": [
+          "Ndrysho printerin që duhet të nxjerrë kuponët kryesorë.",
+          "Caktoje si profil të paracaktuar për këtë terminal.",
+          "Pasi ta ruash, rifresko diagnostikën për të parë nëse i paracaktuari është aktiv."
+        ],
+        "whenToEscalate": [
+          "Njofto suportin nëse zgjedhja si i paracaktuar nuk ruhet.",
+          "Njofto suportin nëse fletët e porosive dalin te pajisja e gabuar edhe pasi ke caktuar printerin e paracaktuar."
+        ],
+        "ctaLabels": {
+          "edit_printer": "Ndrysho printerin"
+        }
+      },
+      "offline_or_error": {
+        "title": "Printeri është offline ose po jep gabim",
+        "summary": "Printeri i zgjedhur tani s'është në gjendje të printojë pa probleme.",
+        "why": "Printeri tani del offline ose me gabim, dhe mund t'i refuzojë ose t'i lërë pezull printimet derisa të rregullohet lidhja ose pajisja.",
+        "steps": [
+          "Kontrollo korrentin, kabllon, lidhjen me rrjetin dhe treguesit e gabimit në printer.",
+          "Rifresko diagnostikën e printerit sapo pajisja të lidhet sërish.",
+          "Shiko cilësimet e printerit, mos është vënë lloj lidhjeje ose adresë e gabuar."
+        ],
+        "whenToEscalate": [
+          "Njofto suportin nëse pajisja mbetet offline edhe pasi ke kontrolluar korrentin dhe rrjetin.",
+          "Njofto suportin menjëherë nëse duhen kuponë dhe s'ke printer rezervë."
+        ],
+        "ctaLabels": {
+          "refresh_printer_diagnostics": "Rifresko diagnostikën e printerit",
+          "edit_printer": "Ndrysho printerin"
+        }
+      },
+      "transport_unresolved": {
+        "title": "Lidhja e printerit s'u përcaktua dot",
+        "summary": "POS-i s'e konfirmon dot llojin e lidhjes ose adresën reale të printerit të zgjedhur.",
+        "why": "Diagnostika s'gjeti dot një lidhje ose adresë ku printeri arrihet, ndaj sistemi i printimit s'e di me siguri ku t'i dërgojë printimet.",
+        "steps": [
+          "Hap cilësimet e printerit dhe kontrollo IP-në, USB-në ose të dhënat e tjera të lidhjes.",
+          "Pasi të ruash lidhjen e duhur, nis sërish diagnostikën.",
+          "Përdor konfigurimin e shpejtë nëse profili aktual është i vjetruar ose i paplotë."
+        ],
+        "whenToEscalate": [
+          "Njofto suportin nëse lidhja vazhdon të dalë bosh ose e paarritshme.",
+          "Njofto suportin nëse printeri punon me dorë, por POS-i s'e gjen dot."
+        ],
+        "ctaLabels": {
+          "edit_printer": "Ndrysho printerin",
+          "refresh_printer_diagnostics": "Rifresko diagnostikën e printerit"
+        }
+      },
+      "unverified": {
+        "title": "Konfigurimi i printerit s'është verifikuar",
+        "summary": "Profili i printerit ekziston, por ende s'e ka kaluar verifikimin.",
+        "why": "Kur printeri del i paverifikuar ose me lidhje të papërcaktuar, do të thotë se profili i ruajtur ende s'ka kaluar një diagnostikim të pastër me pajisjen.",
+        "steps": [
+          "Hap konfigurimin e shpejtë ose ndryshimin e printerit për të kontrolluar të dhënat e ruajtura të lidhjes.",
+          "Pas çdo ndryshimi nis diagnostikën për ta verifikuar pajisjen.",
+          "Përdore printerin me kujdes derisa të kalojë verifikimi."
+        ],
+        "whenToEscalate": [
+          "Njofto suportin nëse verifikimi vazhdon të dështojë në një pajisje që dihet se punon mirë.",
+          "Njofto suportin nëse puna varet nga ky printer dhe s'ka printer rezervë."
+        ],
+        "ctaLabels": {
+          "open_quick_setup": "Hap konfigurimin e shpejtë",
+          "edit_printer": "Ndrysho printerin"
+        }
+      },
+      "recent_job_failures": {
+        "title": "Printimet e fundit dështuan",
+        "summary": "Printeri ka pranuar punë së fundmi, por printimet e fundit po dështojnë.",
+        "why": "Diagnostika tregon printime të dështuara së fundmi ose një radhë që s'po zbrazet. Zakonisht kjo do të thotë problem që shfaqet herë pas here te pajisja, lidhja ose profili.",
+        "steps": [
+          "Rifresko diagnostikën për të parë nëse dështimet po shtohen ende.",
+          "Kontrollo radhën e printerit dhe gjendjen e pajisjes për printime të bllokuara ose të ngecura.",
+          "Ndrysho profilin e printerit nëse lidhja ose adresa mund të jetë e vjetruar."
+        ],
+        "whenToEscalate": [
+          "Njofto suportin nëse dështimet vazhdojnë edhe pas rifreskimit të diagnostikës.",
+          "Njofto suportin nëse gjatë punës vonohen printimet e kuzhinës ose kuponët."
+        ],
+        "ctaLabels": {
+          "refresh_printer_diagnostics": "Rifresko diagnostikën e printerit",
+          "edit_printer": "Ndrysho printerin"
+        }
+      },
+      "degraded": {
+        "title": "Printeri s'po punon si duhet",
+        "summary": "Printeri është i lidhur, por gjendja e tij s'është plotësisht në rregull.",
+        "why": "Printeri s'është krejt offline, por diagnostika prapë tregon gjendje jo të mirë ose konfigurim jo plotësisht të sigurt.",
+        "steps": [
+          "Rifresko diagnostikën për të parë nëse gjendja rregullohet.",
+          "Shiko cilësimet e printerit dhe gjendjen e verifikimit, mos ka mbetur konfigurimi i paplotë.",
+          "Mbaj gati një printer rezervë derisa gjendja të kthehet në normale."
+        ],
+        "whenToEscalate": [
+          "Njofto suportin nëse problemi vazhdon edhe pas disa kontrolleve.",
+          "Njofto suportin nëse preket cilësia e printimit ose printimet dalin me vonesë."
+        ],
+        "ctaLabels": {
+          "refresh_printer_diagnostics": "Rifresko diagnostikën e printerit",
+          "edit_printer": "Ndrysho printerin"
+        }
+      }
+    }
+  }
+}

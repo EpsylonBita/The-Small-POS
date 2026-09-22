@@ -166,7 +166,7 @@ test('Round 327: the selected detail renders no raw IDs anywhere; a non-interact
   const get = (obj: unknown, dotted: string): unknown =>
     dotted.split('.').reduce<unknown>((o, k) => (o == null ? o : (o as Record<string, unknown>)[k]), obj);
   const keys = ['settings.recovery.supportNoteTitle', 'settings.recovery.supportNoteHelp'];
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     for (const key of keys) {
       const value = get(load(lng), key);
       assert.equal(typeof value, 'string', `${lng} missing ${key}`);
@@ -244,7 +244,7 @@ test('Round 339: obsolete settings.recovery technical-detail keys are removed fr
   const removed = ['technicalDetails', 'technicalDetailsHelper', 'recoveryPointId', 'terminalLabel', 'branchLabel'];
   const kept = ['businessDay', 'supportNoteTitle', 'supportNoteHelp'];
 
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const j = load(lng);
     const recovery = (j.settings?.recovery ?? {}) as Record<string, unknown>;
 

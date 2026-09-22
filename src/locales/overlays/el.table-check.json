@@ -39,7 +39,7 @@
       "totalAmount": "Σύνολο {{amount}}",
       "discount": "Έκπτωση",
       "discountAmount": "Έκπτωση {{amount}}",
-      "totalAndQty": "Σύνολο {{amount}} · Ποσ. {{quantity}}",
+      "totalAndQty": "Σύνολο {{amount}} · ποσ. {{quantity}}",
       "tips": "Φιλοδωρήματα",
       "tip": "Φιλοδώρημα",
       "tipAmount": "Φιλοδώρημα {{amount}}",

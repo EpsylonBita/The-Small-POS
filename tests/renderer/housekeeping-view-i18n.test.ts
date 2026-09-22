@@ -239,7 +239,7 @@ test('housekeepingView translation keys are present in every locale', () => {
     toasts: ['loadFailed', 'updateFailed', 'assignFailed', 'createSuccess', 'createFailed'],
   };
 
-  for (const language of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const language of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const h = locale(language).housekeepingView;
     assert.ok(h, `${language} missing housekeepingView`);
     for (const key of flatKeys) {

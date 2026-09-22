@@ -7,7 +7,7 @@ const localesDir = path.join(process.cwd(), 'src', 'locales');
 const loadLocale = (lng: string): Record<string, any> =>
   JSON.parse(readFileSync(path.join(localesDir, `${lng}.json`), 'utf8'));
 
-const POS_LOCALES = ['en', 'el', 'de', 'fr', 'it'] as const;
+const POS_LOCALES = ['en', 'el', 'de', 'fr', 'it', 'sq'] as const;
 // Greek and Coptic Unicode block, built from escapes so this file stays ASCII.
 const GREEK_LETTER = new RegExp('[\\u0370-\\u03FF]');
 
@@ -39,6 +39,7 @@ test('Greek connectivity status is localized, not the English "Online"/"Offline"
   assert.match(el.offline, GREEK_LETTER, `el.common.offline should be Greek: "${el.offline}"`);
 });
 
+// Albanian shops really say "Online"/"Offline", so sq keeps the loanwords on purpose and is not checked here.
 test('de/fr/it connectivity status are real translations, not the English source', () => {
   const en = loadLocale('en').common;
   for (const lng of ['de', 'fr', 'it'] as const) {

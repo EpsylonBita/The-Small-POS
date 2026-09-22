@@ -48,7 +48,7 @@
       "loyaltyInputHelp": "Für Lesegeräte, die die Kartennummer wie eine Tastatur eingeben. Der Status Aktiv bedeutet, dass die Eingabeerkennung läuft; er bestätigt keine Verbindung zu einem NFC-Gerät.",
       "aboutLoadFailed": "Die Geräteinformationen konnten nicht geladen werden.",
       "copyFailed": "Die Geräteinformationen konnten nicht kopiert werden. Bitte versuchen Sie es erneut.",
-      "connectionUnverified": "Verbindung nicht bestätigt",
+      "connectionUnverified": "Verbindung nicht verifiziert",
       "deviceReachable": "Gerät erreichbar",
       "deviceUnreachable": "Das Gerät hat beim Verbindungstest nicht geantwortet",
       "deviceLoadFailed": "Die gespeicherten Geräteeinstellungen konnten nicht gelesen werden. Versuchen Sie es erneut, bevor Sie die Geräteverbindungen ändern.",

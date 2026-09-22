@@ -57,7 +57,7 @@ test('MyData fiscal-device setup supports LAN and performs a native protocol tes
 });
 
 test('MyData fiscal-device labels exist in every POS locale', () => {
-  for (const language of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const language of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const values = locale(language).integrations?.mydata;
     assert.ok(values, `${language}.integrations.mydata missing`);
     for (const key of REQUIRED_KEYS) {
@@ -104,7 +104,7 @@ test('fiscal plugin does not claim RBS uses the bundled legacy protocol', () => 
     'the legacy STX/ETX profile must not be advertised as an RBS driver',
   );
 
-  for (const language of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const language of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const values = locale(language).settings?.peripherals?.cashRegister;
     for (const key of [
       'protocolRequired',

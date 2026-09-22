@@ -132,7 +132,7 @@ test('roomsView translation keys are present in every locale', () => {
     ],
   };
 
-  for (const language of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const language of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const view = locale(language).roomsView;
     assert.ok(view, `${language} missing roomsView`);
     for (const key of flatKeys) {
@@ -167,7 +167,7 @@ const flattenStrings = (obj: Record<string, any>, prefix = ''): Record<string, s
 test('non-English roomsView copy never leaks raw English "check-out"/"checkout"', () => {
   const CHECKOUT_EN = /check-?out|checkout/i;
   // English keeps "Checkout"; every other locale must use native wording.
-  for (const language of ['el', 'de', 'fr', 'it']) {
+  for (const language of ['el', 'de', 'fr', 'it', 'sq']) {
     const flat = flattenStrings(locale(language).roomsView ?? {});
     for (const [key, value] of Object.entries(flat)) {
       assert.ok(
@@ -195,7 +195,7 @@ test('roomsView checkout action/CTA/toasts are real translations, not the Englis
     'toasts.checkoutFailed',
   ];
   const enFlat = flattenStrings(en);
-  for (const language of ['el', 'de', 'fr', 'it']) {
+  for (const language of ['el', 'de', 'fr', 'it', 'sq']) {
     const flat = flattenStrings(locale(language).roomsView);
     for (const key of checkoutKeys) {
       assert.equal(typeof flat[key], 'string', `${language}.roomsView.${key} missing`);
@@ -235,7 +235,7 @@ test('RoomsView create-choice modal is portaled (blur/high-z) with separate chec
   assert.match(viewSource, /bg-black\/50 backdrop-blur-sm/);
 
   // newCheckinOrReservation is now also a modal title, so it must exist everywhere.
-  for (const language of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const language of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const value = locale(language).roomsView?.newCheckinOrReservation;
     assert.equal(typeof value, 'string', `${language} missing roomsView.newCheckinOrReservation`);
     assert.ok(value.length > 0, `${language} empty roomsView.newCheckinOrReservation`);
@@ -348,7 +348,7 @@ test('RoomsView status change updates the open modal summary status AND effectiv
 
 test('roomsView status-update toasts exist in every locale with {{status}} kept and Greek translated', () => {
   const GREEK = new RegExp('[\\u0370-\\u03FF]');
-  for (const language of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const language of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const toasts = locale(language).roomsView?.toasts;
     assert.equal(typeof toasts?.statusUpdated, 'string', `${language} missing roomsView.toasts.statusUpdated`);
     assert.equal(typeof toasts?.statusUpdateFailed, 'string', `${language} missing roomsView.toasts.statusUpdateFailed`);

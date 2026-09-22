@@ -34,7 +34,7 @@ const singlePath = path.join(
   projectRoot, 'src', 'renderer', 'components', 'modals', 'SinglePaymentCollectionModal.tsx',
 );
 const localesDir = path.join(projectRoot, 'src', 'locales');
-const LOCALES = ['el', 'en', 'de', 'fr', 'it'] as const;
+const LOCALES = ['el', 'en', 'de', 'fr', 'it', 'sq'] as const;
 
 const read = (file: string) => readFileSync(file, 'utf8');
 const loadLocale = (lng: string) =>

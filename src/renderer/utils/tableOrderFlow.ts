@@ -144,6 +144,21 @@ function tablePaymentLooksSettled(table: TableLike): boolean {
   return orderTotal > 0 && outstandingBalance <= 0.005 && paidTotal + 0.005 >= orderTotal;
 }
 
+const TABLE_LABEL_PATTERN = /(?:table|τραπέζι)\s*#?\s*T?(\d+)/i;
+
+// Order types that are never a table check, whatever the customer name or notes say.
+const NEVER_TABLE_ORDER_TYPES = new Set(['delivery', 'room_service', 'drive-through', 'drive_through']);
+
+function isDineInOrderType(orderType: string): boolean {
+  return orderType === 'dine-in' || orderType === 'dine_in' || orderType === 'table';
+}
+
+// A table named inside free text: "Τραπέζι T1", "Table T05".
+function readTableLabel(value: unknown): string | null {
+  const raw = String(value ?? '').trim();
+  return raw.match(TABLE_LABEL_PATTERN)?.[1] ?? null;
+}
+
 export function normalizeTableNumberForMatch(value: unknown): string | null {
   const raw = String(value ?? '').trim();
   if (!raw) {
@@ -155,12 +170,7 @@ export function normalizeTableNumberForMatch(value: unknown): string | null {
     return direct[1];
   }
 
-  const labeled = raw.match(/(?:table|τραπέζι)\s*#?\s*T?(\d+)/i);
-  if (labeled?.[1]) {
-    return labeled[1];
-  }
-
-  return null;
+  return readTableLabel(raw);
 }
 
 export function getTableNumberForTableServiceOrder(order: OrderLike | null | undefined): string | null {
@@ -168,12 +178,29 @@ export function getTableNumberForTableServiceOrder(order: OrderLike | null | und
     return null;
   }
 
-  return (
+  const tableNumber =
     normalizeTableNumberForMatch(order.table_number) ||
-    normalizeTableNumberForMatch(order.tableNumber) ||
-    normalizeTableNumberForMatch(order.customer_name) ||
-    normalizeTableNumberForMatch(order.customerName) ||
-    normalizeTableNumberForMatch(order.notes)
+    normalizeTableNumberForMatch(order.tableNumber);
+  if (tableNumber) {
+    return tableNumber;
+  }
+
+  // The customer name and notes only stand in for a table the check was saved
+  // without (such checks were stored as pickup orders named "Τραπέζι T1"). A
+  // delivery is never one of them, and outside dine-in only a table label
+  // counts: a bare number there is the customer's name, call number or phone,
+  // or a note such as the floor. Reading it as a table took the order out of
+  // every order lane without putting it on a table.
+  const orderType = normalizeOrderType(order.order_type ?? order.orderType);
+  if (NEVER_TABLE_ORDER_TYPES.has(orderType)) {
+    return null;
+  }
+
+  const readFreeText = isDineInOrderType(orderType) ? normalizeTableNumberForMatch : readTableLabel;
+  return (
+    readFreeText(order.customer_name) ||
+    readFreeText(order.customerName) ||
+    readFreeText(order.notes)
   );
 }
 
@@ -183,7 +210,7 @@ export function isTableServiceOrder(order: OrderLike | null | undefined): boolea
   }
 
   const orderType = normalizeOrderType(order.order_type ?? order.orderType);
-  if (orderType === 'dine-in' || orderType === 'dine_in' || orderType === 'table') {
+  if (isDineInOrderType(orderType)) {
     return true;
   }
 

@@ -63,7 +63,7 @@
       "intoTable": "Nel tavolo {{number}}",
       "adjusted": "Modificato",
       "unassignedWaiter": "Non assegnato",
-      "staffMember": "Membro staff",
+      "staffMember": "Dipendente",
       "batchSelectedCount": "{{count}} selezionati",
       "batchSelectedTotal": "{{amount}} non pagato selezionato",
       "batchSelectedSummary": "{{count}} articoli · {{amount}} non pagato"
@@ -163,7 +163,7 @@
     },
     "occupied": "Occupati",
     "openDue": "Residuo aperto",
-    "rate": "Tasso",
+    "rate": "Occupazione",
     "covers": "Coperti",
     "waiter": "Cameriere",
     "unassigned": "Non assegnato",

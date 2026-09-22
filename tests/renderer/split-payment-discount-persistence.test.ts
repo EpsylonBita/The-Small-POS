@@ -304,7 +304,7 @@ test('SplitPaymentModal unassigned-item warning uses real i18next plurals, no pa
   const loadLocale = (lng: string) =>
     JSON.parse(readFileSync(path.join(process.cwd(), 'src', 'locales', `${lng}.json`), 'utf8'));
 
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const sp = loadLocale(lng).splitPayment;
     // Plural keys exist; the flat parenthetical key is gone.
     assert.equal(typeof sp.unassignedWarning_one, 'string', `${lng} missing unassignedWarning_one`);
@@ -322,7 +322,7 @@ test('SplitPaymentModal unassigned-item warning uses real i18next plurals, no pa
   const el = loadLocale('el').splitPayment;
   assert.doesNotMatch(el.unassignedWarning_one, /προϊόν\(τα\)/);
   assert.doesNotMatch(el.unassignedWarning_other, /προϊόν\(τα\)/);
-  for (const lng of ['de', 'fr', 'it']) {
+  for (const lng of ['de', 'fr', 'it', 'sq']) {
     const sp = loadLocale(lng).splitPayment;
     assert.doesNotMatch(sp.unassignedWarning_other, /item.*not assigned/i, `${lng} leaks English`);
   }

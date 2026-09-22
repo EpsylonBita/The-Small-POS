@@ -9,7 +9,7 @@ import { decodeConnectionString, looksLikeRawApiKey, normalizeAdminDashboardUrl 
 import { getErrorMessage } from '../utils/privileged-actions';
 import { requireSettingsSuccess } from '../utils/settings-operation';
 
-type SupportedLanguage = 'en' | 'el' | 'de' | 'fr' | 'it';
+type SupportedLanguage = 'en' | 'el' | 'de' | 'fr' | 'it' | 'sq';
 type ConnectionPhase = 'idle' | 'validating' | 'syncing' | 'complete';
 
 const languages: { code: SupportedLanguage; name: string }[] = [
@@ -18,6 +18,7 @@ const languages: { code: SupportedLanguage; name: string }[] = [
     { code: 'de', name: 'Deutsch' },
     { code: 'fr', name: 'Français' },
     { code: 'it', name: 'Italiano' },
+  { code: 'sq', name: 'Shqip' },
 ];
 
 const OnboardingPage: React.FC = () => {
@@ -194,7 +195,7 @@ const OnboardingPage: React.FC = () => {
                                         <motion.button key={option.code} type="button" lang={option.code} aria-label={option.name} aria-pressed={language === option.code}
                                             onClick={() => void handleLanguageSelect(option.code)} disabled={isSubmitting}
                                             whileTap={reduceMotion ? undefined : { scale: 0.985 }} transition={transition}
-                                            className={`flex min-h-16 items-center gap-3 rounded-2xl border px-4 py-3 text-left outline-none focus-visible:ring-2 focus-visible:ring-yellow-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900 disabled:cursor-wait disabled:opacity-60 ${index === languages.length - 1 ? 'sm:col-span-2' : ''} ${language === option.code ? 'border-yellow-400 bg-yellow-400/15 text-yellow-200' : 'border-zinc-700 bg-zinc-950/40 text-zinc-200 active:bg-zinc-800'}`}>
+                                            className={`flex min-h-16 items-center gap-3 rounded-2xl border px-4 py-3 text-left outline-none focus-visible:ring-2 focus-visible:ring-yellow-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900 disabled:cursor-wait disabled:opacity-60 ${index === languages.length - 1 && languages.length % 2 === 1 ? 'sm:col-span-2' : ''} ${language === option.code ? 'border-yellow-400 bg-yellow-400/15 text-yellow-200' : 'border-zinc-700 bg-zinc-950/40 text-zinc-200 active:bg-zinc-800'}`}>
                                             <span className="flex h-8 w-9 shrink-0 items-center justify-center rounded-lg border border-current/15 text-xs font-semibold uppercase tracking-wide" aria-hidden="true">{option.code === 'el' ? 'GR' : option.code}</span>
                                             <span className="flex-1 text-base font-medium">{option.name}</span>
                                             {language === option.code ? <Check className="h-5 w-5" aria-hidden="true" /> : <ArrowRight className="h-4 w-4 text-zinc-500" aria-hidden="true" />}
@@ -212,32 +213,38 @@ const OnboardingPage: React.FC = () => {
                                     <h2 ref={stepHeading} tabIndex={-1} className="text-xl font-semibold outline-none">{t('onboarding.connectionTitle', { defaultValue: 'Connect your terminal' })}</h2>
                                     <p className="mt-1 text-sm text-zinc-400">{t('onboarding.connectionIntro', { defaultValue: 'Link this POS to your business using its connection code.' })}</p>
                                 </div>
-                                <div className="grid items-start gap-5 md:grid-cols-[1.15fr_1fr]">
-                                    <div>
+                                {/* Both columns are label + box: the grid stretches the two boxes to one height so the
+                                    preview card sits level with the code field instead of floating above it. */}
+                                <div className="grid gap-5 md:grid-cols-[1.15fr_1fr]">
+                                    <div className="flex flex-col">
                                         <label htmlFor="onboarding-connection-code" className="mb-2 block text-sm font-medium text-zinc-200">{t('onboarding.connectionString', { defaultValue: 'Connection code' })}</label>
                                         <textarea id="onboarding-connection-code" value={connectionString} rows={3} disabled={isSubmitting}
                                             onChange={(event) => { setConnectionString(event.target.value); setError(null); }}
                                             aria-invalid={Boolean(inputError || (error && !decoded))}
                                             aria-describedby={`onboarding-code-help onboarding-key-hint${inputError && !error ? ' onboarding-code-invalid' : ''}${error ? ' onboarding-error' : ''}`}
                                             autoComplete="off" autoCapitalize="none" spellCheck={false}
-                                            className="min-h-28 w-full resize-y rounded-2xl border border-zinc-600 bg-zinc-950 px-4 py-3 font-mono text-sm text-zinc-200 outline-none placeholder:font-sans placeholder:text-zinc-500 focus:border-yellow-400 focus:ring-2 focus:ring-yellow-400/30 disabled:opacity-60"
+                                            className="min-h-28 w-full flex-1 resize-y rounded-2xl border border-zinc-600 bg-zinc-950 px-4 py-3 font-mono text-sm text-zinc-200 outline-none placeholder:font-sans placeholder:text-zinc-500 focus:border-yellow-400 focus:ring-2 focus:ring-yellow-400/30 disabled:opacity-60"
                                             placeholder={t('onboarding.connectionStringPlaceholder', { defaultValue: 'Paste your full connection code here' })} />
-                                        <p id="onboarding-code-help" className="mt-2 text-xs leading-relaxed text-zinc-400">{t('onboarding.connectionStringHelp', { defaultValue: 'In the Admin Dashboard, open Branches → POS and copy this terminal’s full connection code.' })}</p>
-                                        <p id="onboarding-key-hint" className="mt-2 text-xs leading-relaxed text-zinc-400">{t('onboarding.rawKeyHint', { defaultValue: 'Use the full connection code, not the API key shown separately.' })}</p>
                                     </div>
-                                    <aside aria-label={t('onboarding.previewTitle', { defaultValue: 'Review your connection' })} className="rounded-2xl border border-zinc-700/80 bg-zinc-950/40 p-4">
-                                        <div className="flex items-center gap-2 text-sm font-medium text-zinc-200"><Monitor className="h-4 w-4 text-yellow-300" aria-hidden="true" />{t('onboarding.previewTitle', { defaultValue: 'Review your connection' })}</div>
-                                        {decoded ? (
-                                            <motion.div key="decoded" initial={entry} animate={{ opacity: 1, y: 0 }} transition={transition}>
-                                                <p className="mt-2 text-xs leading-relaxed text-zinc-400">{t('onboarding.previewHelp', { defaultValue: 'Check the terminal and server before connecting.' })}</p>
-                                                <dl className="mt-4 space-y-3">
-                                                    <div><dt className="text-xs text-zinc-500">{t('onboarding.terminalLabel', { defaultValue: 'Terminal' })}</dt><dd className="mt-1 break-all font-mono text-sm text-zinc-100">{decoded.terminalId}</dd></div>
-                                                    <div><dt className="text-xs text-zinc-500">{t('onboarding.serverLabel', { defaultValue: 'Admin server' })}</dt><dd className="mt-1 break-all text-sm text-zinc-100">{normalizeAdminDashboardUrl(decoded.adminUrl)}</dd></div>
-                                                </dl>
-                                            </motion.div>
-                                        ) : <p className="mt-3 text-sm leading-relaxed text-zinc-500">{t('onboarding.previewPending', { defaultValue: 'Your terminal and server will appear here when you paste a valid code.' })}</p>}
-                                        <p aria-live="polite" className="mt-3 text-xs font-medium text-yellow-200">{decoded ? t('onboarding.codeReady', { defaultValue: 'Code ready' }) : ''}</p>
-                                    </aside>
+                                    <div className="flex flex-col">
+                                        <div id="onboarding-preview-title" className="mb-2 flex items-center gap-2 text-sm font-medium text-zinc-200"><Monitor className="h-4 w-4 text-yellow-300" aria-hidden="true" />{t('onboarding.previewTitle', { defaultValue: 'Review your connection' })}</div>
+                                        <aside aria-labelledby="onboarding-preview-title" className="min-h-28 flex-1 rounded-2xl border border-zinc-700/80 bg-zinc-950/40 px-4 py-3">
+                                            {decoded ? (
+                                                <motion.div key="decoded" initial={entry} animate={{ opacity: 1, y: 0 }} transition={transition}>
+                                                    <p className="text-xs leading-relaxed text-zinc-400">{t('onboarding.previewHelp', { defaultValue: 'Check the terminal and server before connecting.' })}</p>
+                                                    <dl className="mt-3 space-y-3">
+                                                        <div><dt className="text-xs text-zinc-500">{t('onboarding.terminalLabel', { defaultValue: 'Terminal' })}</dt><dd className="mt-1 break-all font-mono text-sm text-zinc-100">{decoded.terminalId}</dd></div>
+                                                        <div><dt className="text-xs text-zinc-500">{t('onboarding.serverLabel', { defaultValue: 'Admin server' })}</dt><dd className="mt-1 break-all text-sm text-zinc-100">{normalizeAdminDashboardUrl(decoded.adminUrl)}</dd></div>
+                                                    </dl>
+                                                </motion.div>
+                                            ) : <p className="text-sm leading-relaxed text-zinc-500">{t('onboarding.previewPending', { defaultValue: 'Your terminal and server will appear here when you paste a valid code.' })}</p>}
+                                            <p aria-live="polite" className="mt-3 text-xs font-medium text-yellow-200">{decoded ? t('onboarding.codeReady', { defaultValue: 'Code ready' }) : ''}</p>
+                                        </aside>
+                                    </div>
+                                </div>
+                                <div>
+                                    <p id="onboarding-code-help" className="text-xs leading-relaxed text-zinc-400">{t('onboarding.connectionStringHelp', { defaultValue: 'In the Admin Dashboard, open Branches → POS and copy this terminal’s full connection code.' })}</p>
+                                    <p id="onboarding-key-hint" className="mt-2 text-xs leading-relaxed text-zinc-400">{t('onboarding.rawKeyHint', { defaultValue: 'Use the full connection code, not the API key shown separately.' })}</p>
                                 </div>
                                 {inputError && !error && <p id="onboarding-code-invalid" role="status" className="flex items-start gap-2 text-sm text-amber-200"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />{inputError}</p>}
                                 {errorContent}

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { localeBundles } from '../../../locales/bundles'
 
-const POS_LOCALES = ['en', 'el', 'de', 'fr', 'it'] as const
+const POS_LOCALES = ['en', 'el', 'de', 'fr', 'it', 'sq'] as const
 
 const REQUIRED_HEALTH_MODAL_KEYS = [
   'eyebrow',

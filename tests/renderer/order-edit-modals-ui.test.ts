@@ -131,7 +131,7 @@ test('both order-edit modals preserve LiquidGlassModal title props + business ca
 const localesDir = path.join(projectRoot, 'src', 'locales');
 const loadLocale = (lng: string): Record<string, any> =>
   JSON.parse(readFileSync(path.join(localesDir, `${lng}.json`), 'utf8'));
-const POS_LOCALES = ['en', 'el', 'de', 'fr', 'it'] as const;
+const POS_LOCALES = ['en', 'el', 'de', 'fr', 'it', 'sq'] as const;
 
 test('Round 316: OrderCancellationModal safe button is keep/dismiss copy; red confirm + all guards unchanged', () => {
   // SAFE/dismiss button now reads the dedicated non-destructive key, NOT the reused generic cancel word.

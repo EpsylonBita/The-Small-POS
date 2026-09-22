@@ -175,7 +175,7 @@ describe('table floor-plan display labels', () => {
 })
 
 describe('table floor-plan capacity (pax) label', () => {
-  const POS_LOCALES = ['en', 'el', 'de', 'fr', 'it'] as const
+  const POS_LOCALES = ['en', 'el', 'de', 'fr', 'it', 'sq'] as const
   const GREEK_LETTER = new RegExp('[\\u0370-\\u03FF]')
 
   it('renders the capacity label via the count-aware floorPlan.tableProperties.pax key', () => {

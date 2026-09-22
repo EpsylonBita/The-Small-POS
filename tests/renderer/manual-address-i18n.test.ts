@@ -25,7 +25,7 @@ const keys = [
 ];
 
 test('manual address fallback copy is localized in every POS locale', () => {
-  for (const lng of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const locale = loadLocale(lng);
     for (const key of keys) {
       const value = getKey(locale, key);

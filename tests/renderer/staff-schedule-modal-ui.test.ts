@@ -88,7 +88,7 @@ test('preview and submit share one duration validator so they cannot disagree', 
 });
 
 test('staffSchedule.validation.tooLong exists in every locale with the {{hours}} token and Greek is translated', () => {
-  for (const language of ['en', 'el', 'de', 'fr', 'it']) {
+  for (const language of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
     const value = loadLocale(language).staffSchedule?.validation?.tooLong;
     assert.equal(typeof value, 'string', `${language} missing staffSchedule.validation.tooLong`);
     assert.match(value, /\{\{hours\}\}/, `${language} tooLong must keep the {{hours}} token`);
