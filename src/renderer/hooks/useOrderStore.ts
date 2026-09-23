@@ -17,6 +17,7 @@ import { pollFiscalReceiptStatus } from '../services/fiscal-status';
 import { sortOrdersOldestFirst } from '../utils/order-sorting';
 import { debugLog } from '../utils/debugLog';
 import { getVisibleOrderNumber } from '../utils/orderNumberUtils';
+import { orderNeedsApproval } from '../../../../shared/order-approval';
 
 // Track self-created order IDs to suppress "new order received" toasts for own orders.
 // Since Rust no longer emits order_created for self-created orders, this is a safety net
@@ -189,8 +190,6 @@ let isStoreInitialized = false;
 const errorHandler = ErrorHandler.getInstance();
 const bridge = getBridge();
 
-const INTERNAL_PLUGINS = new Set(['pos', 'web', 'android-ios', 'kiosk']);
-
 const getOrderPlugin = (order: Order): string | null => {
   return (
     order.plugin ||
@@ -220,33 +219,10 @@ const getExternalPluginOrderId = (order: Order): string | null => {
   return null;
 };
 
-const hasCustomerOrderMetadata = (order: Order): boolean => {
-  const metadata = order.ghost_metadata;
-  if (!metadata || typeof metadata !== 'object') return false;
-  return Boolean(
-    (metadata as Record<string, unknown>).kiosk ||
-      (metadata as Record<string, unknown>).customer ||
-      (metadata as Record<string, unknown>).entry_mode
-  );
-};
-
-const isPendingExternalOrder = (order: Order): boolean => {
-  const plugin = getOrderPlugin(order)?.toLowerCase() || null;
-  const externalId = getExternalPluginOrderId(order);
-  const source = String(order.source || '').toLowerCase();
-  const isExternalPluginOrder = !!externalId && !!plugin && !INTERNAL_PLUGINS.has(plugin);
-  const isCustomerOriginOrder =
-    source === 'webapp-customer' ||
-    source === 'customer-web' ||
-    source === 'customer-mobile' ||
-    hasCustomerOrderMetadata(order) ||
-    ((plugin === 'kiosk' || plugin === 'web') && !!externalId);
-
-  return (
-    order?.status === 'pending' &&
-    (isExternalPluginOrder || isCustomerOriginOrder)
-  );
-};
+// Pending platform orders and customer self-orders (QR / web / kiosk) wait for
+// accept / decline. The rule lives in root shared/order-approval.ts so the
+// Android POS applies exactly the same one.
+const isPendingExternalOrder = (order: Order): boolean => orderNeedsApproval(order);
 
 const isGhostOrder = (order?: Partial<Order> | null): boolean => {
   if (!order) return false;

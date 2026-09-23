@@ -1118,6 +1118,16 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Road" => "\u{039F}\u{03B4}\u{03CC}\u{03C2}",
             "Ringer" => "\u{039A}\u{03BF}\u{03C5}\u{03B4}\u{03BF}\u{03CD}\u{03BD}\u{03B9}",
             "Postal" => "\u{03A4}.\u{039A}.",
+            // Repair intake slip and label (THE-439). Same words as Android.
+            "NOT A FISCAL RECEIPT" => "ΔΕΝ ΑΠΟΤΕΛΕΙ ΦΟΡΟΛΟΓΙΚΗ ΑΠΟΔΕΙΞΗ",
+            "REPAIR INTAKE" => "ΠΑΡΑΛΑΒΗ ΕΠΙΣΚΕΥΗΣ",
+            "Repair" => "Επισκευή",
+            "Device" => "Συσκευή",
+            "Identifier" => "Αναγνωριστικό",
+            "Received on" => "Παραλαβή",
+            "Due" => "Προθεσμία",
+            "Branch" => "Κατάστημα",
+            "Contact" => "Επικοινωνία",
             _ => key,
         },
         "de" => match key {
@@ -1264,6 +1274,15 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Road" => "Stra\u{00DF}e",
             "Ringer" => "Klingel",
             "Postal" => "PLZ",
+            "NOT A FISCAL RECEIPT" => "KEIN FISKALBELEG",
+            "REPAIR INTAKE" => "REPARATURANNAHME",
+            "Repair" => "Reparatur",
+            "Device" => "Gerät",
+            "Identifier" => "Kennung",
+            "Received on" => "Angenommen am",
+            "Due" => "Fällig am",
+            "Branch" => "Filiale",
+            "Contact" => "Kontakt",
             _ => key,
         },
         "fr" => match key {
@@ -1410,6 +1429,16 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Without" => "Sans",
             "Little" => "Peu",
             "Category" => "Categorie",
+            "NOT A FISCAL RECEIPT" => "DOCUMENT NON FISCAL",
+            "REPAIR INTAKE" => "PRISE EN CHARGE RÉPARATION",
+            "Repair" => "Réparation",
+            "Device" => "Appareil",
+            "Identifier" => "Identifiant",
+            "Received on" => "Reçu le",
+            "Due" => "Échéance",
+            "Branch" => "Établissement",
+            // Same word in French and English.
+            "Contact" => "Contact",
             _ => key,
         },
         "it" => match key {
@@ -1556,6 +1585,15 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Without" => "Senza",
             "Little" => "Poco",
             "Category" => "Categoria",
+            "NOT A FISCAL RECEIPT" => "DOCUMENTO NON FISCALE",
+            "REPAIR INTAKE" => "ACCETTAZIONE RIPARAZIONE",
+            "Repair" => "Riparazione",
+            "Device" => "Dispositivo",
+            "Identifier" => "Identificativo",
+            "Received on" => "Ricevuto il",
+            "Due" => "Scadenza",
+            "Branch" => "Punto vendita",
+            "Contact" => "Contatto",
             _ => key,
         },
         // Albanian. Written with real `ë`/`ç`: raster receipts draw them as-is,
@@ -1706,6 +1744,15 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Without" => "Pa",
             "Little" => "Pak",
             "Category" => "Kategoria",
+            "NOT A FISCAL RECEIPT" => "NUK ËSHTË KUPON FISKAL",
+            "REPAIR INTAKE" => "PRANIM PËR RIPARIM",
+            "Repair" => "Riparimi",
+            "Device" => "Pajisja",
+            "Identifier" => "Identifikuesi",
+            "Received on" => "Pranuar më",
+            "Due" => "Afati",
+            "Branch" => "Dega",
+            "Contact" => "Kontakti",
             _ => key,
         },
         _ => key,
@@ -3989,22 +4036,30 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
         }
         ReceiptDocument::RepairIntake(doc) => {
             let mut body = String::new();
-            body.push_str("<div class=\"status-banner canceled\">NON-FISCAL / ΔΕΝ ΑΠΟΤΕΛΕΙ ΦΟΡΟΛΟΓΙΚΗ ΑΠΟΔΕΙΞΗ</div>");
-            body.push_str("<div class=\"sec-head\">REPAIR INTAKE / ΠΑΡΑΛΑΒΗ ΣΥΣΚΕΥΗΣ</div><div class=\"meta-grid\">");
+            body.push_str(&format!(
+                "<div class=\"status-banner canceled\">{}</div>",
+                esc(receipt_label(lang, "NOT A FISCAL RECEIPT"))
+            ));
+            body.push_str(&format!(
+                "<div class=\"sec-head\">{}</div><div class=\"meta-grid\">",
+                esc(receipt_label(lang, "REPAIR INTAKE"))
+            ));
+            let received_at = format_datetime_human(&doc.received_at);
+            let due_at = doc.due_at.as_deref().map(format_datetime_human);
             for (label, value) in [
                 ("Repair", Some(doc.repair_number.as_str())),
                 ("Customer", doc.customer_display_name.as_deref()),
                 ("Device", Some(doc.safe_device_label.as_str())),
                 ("Identifier", doc.masked_identifier.as_deref()),
-                ("Received", Some(doc.received_at.as_str())),
-                ("Due", doc.due_at.as_deref()),
+                ("Received on", Some(received_at.as_str())),
+                ("Due", due_at.as_deref()),
                 ("Branch", Some(doc.branch_name.as_str())),
                 ("Contact", doc.branch_contact.as_deref()),
             ] {
                 if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
                     body.push_str(&format!(
                         "<span class=\"k\">{}</span><span class=\"v\">{}</span>",
-                        esc(label),
+                        esc(receipt_label(lang, label)),
                         esc(value)
                     ));
                 }
@@ -4023,7 +4078,10 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
         }
         ReceiptDocument::RepairLabel(doc) => {
             let mut body = String::new();
-            body.push_str("<div class=\"status-banner canceled\">NON-FISCAL / ΔΕΝ ΑΠΟΤΕΛΕΙ ΦΟΡΟΛΟΓΙΚΗ ΑΠΟΔΕΙΞΗ</div>");
+            body.push_str(&format!(
+                "<div class=\"status-banner canceled\">{}</div>",
+                esc(receipt_label(lang, "NOT A FISCAL RECEIPT"))
+            ));
             body.push_str(&format!(
                 "<div class=\"center\"><strong>{}</strong><br>{}</div>",
                 esc(&doc.repair_number),
@@ -6626,20 +6684,42 @@ impl TtfReceiptComposer {
     }
 
     fn draw_reverse_banner(&mut self, text: &str) {
+        self.draw_reverse_banner_lines(&[text.to_string()]);
+    }
+
+    /// Lines of a reverse banner that is wider than the paper, broken at
+    /// spaces, so the whole text stays inside one black block instead of
+    /// running off the edge (the Greek repair notice at banner size).
+    fn reverse_banner_lines(&self, text: &str) -> Vec<String> {
         let style = self.preset.banner_style;
-        let banner_h = style.line_height + self.preset.banner_padding_y * 2;
+        wrap_pixels(text, self.content_width, |line| {
+            self.text_width(line, style)
+        })
+    }
+
+    fn draw_wrapped_reverse_banner(&mut self, text: &str) {
+        let lines = self.reverse_banner_lines(text);
+        self.draw_reverse_banner_lines(&lines);
+    }
+
+    fn draw_reverse_banner_lines(&mut self, lines: &[String]) {
+        let style = self.preset.banner_style;
+        let line_count = lines.len().max(1) as i32;
+        let banner_h = style.line_height * line_count + self.preset.banner_padding_y * 2;
         let top = self.y;
         for py in top..(top + banner_h) {
             for px in self.left_margin..(self.left_margin + self.content_width) {
                 self.blend_pixel(px, py, 0, 1.0);
             }
         }
-        self.draw_text_at_y(
-            text,
-            BitmapAlign::Center,
-            style.with_ink(255),
-            top + self.preset.banner_padding_y,
-        );
+        for (index, line) in lines.iter().enumerate() {
+            self.draw_text_at_y(
+                line,
+                BitmapAlign::Center,
+                style.with_ink(255),
+                top + self.preset.banner_padding_y + style.line_height * index as i32,
+            );
+        }
         self.y += banner_h + self.preset.small_gap;
     }
 
@@ -8101,32 +8181,33 @@ fn render_classic_non_customer_raster_exact_ttf(
 
     match document {
         ReceiptDocument::RepairIntake(doc) => {
-            canvas.draw_reverse_banner("NON-FISCAL / ΔΕΝ ΑΠΟΤΕΛΕΙ ΦΟΡΟΛΟΓΙΚΗ ΑΠΟΔΕΙΞΗ");
-            canvas.draw_text_line(
-                "REPAIR INTAKE / ΠΑΡΑΛΑΒΗ",
+            let label = |key: &str| format!("{}:", receipt_label(lang, key));
+            canvas.draw_wrapped_reverse_banner(receipt_label(lang, "NOT A FISCAL RECEIPT"));
+            canvas.draw_wrapped(
+                receipt_label(lang, "REPAIR INTAKE"),
                 BitmapAlign::Center,
                 preset.section_style,
             );
-            canvas.draw_pair("Repair:", &doc.repair_number, preset.meta_style);
+            canvas.draw_pair(&label("Repair"), &doc.repair_number, preset.meta_style);
             if let Some(value) = doc
                 .customer_display_name
                 .as_deref()
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
             {
-                canvas.draw_pair("Customer:", value, preset.meta_style);
+                canvas.draw_pair(&label("Customer"), value, preset.meta_style);
             }
-            canvas.draw_pair("Device:", &doc.safe_device_label, preset.meta_style);
+            canvas.draw_pair(&label("Device"), &doc.safe_device_label, preset.meta_style);
             if let Some(value) = doc
                 .masked_identifier
                 .as_deref()
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
             {
-                canvas.draw_pair("Identifier:", value, preset.meta_style);
+                canvas.draw_pair(&label("Identifier"), value, preset.meta_style);
             }
             canvas.draw_pair(
-                "Received:",
+                &label("Received on"),
                 &format_datetime_human(&doc.received_at),
                 preset.meta_style,
             );
@@ -8136,16 +8217,20 @@ fn render_classic_non_customer_raster_exact_ttf(
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
             {
-                canvas.draw_pair("Due:", &format_datetime_human(value), preset.meta_style);
+                canvas.draw_pair(
+                    &label("Due"),
+                    &format_datetime_human(value),
+                    preset.meta_style,
+                );
             }
-            canvas.draw_pair("Branch:", &doc.branch_name, preset.meta_style);
+            canvas.draw_pair(&label("Branch"), &doc.branch_name, preset.meta_style);
             if let Some(value) = doc
                 .branch_contact
                 .as_deref()
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
             {
-                canvas.draw_pair("Contact:", value, preset.meta_style);
+                canvas.draw_pair(&label("Contact"), value, preset.meta_style);
             }
             canvas.draw_rule();
             canvas.draw_wrapped(
@@ -8156,7 +8241,7 @@ fn render_classic_non_customer_raster_exact_ttf(
             canvas.draw_repair_barcode(&doc.repair_id)?;
         }
         ReceiptDocument::RepairLabel(doc) => {
-            canvas.draw_reverse_banner("NON-FISCAL / ΔΕΝ ΑΠΟΤΕΛΕΙ ΦΟΡΟΛΟΓΙΚΗ ΑΠΟΔΕΙΞΗ");
+            canvas.draw_wrapped_reverse_banner(receipt_label(lang, "NOT A FISCAL RECEIPT"));
             canvas.draw_text_line(
                 &doc.repair_number,
                 BitmapAlign::Center,
@@ -10386,42 +10471,35 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
             }
         }
         ReceiptDocument::RepairIntake(doc) => {
+            let label = |key: &'static str| receipt_label(lang, key);
             builder.center().bold(true).reverse(true);
-            emit_centered_wrapped(
-                &mut builder,
-                "NON-FISCAL / ΔΕΝ ΑΠΟΤΕΛΕΙ ΦΟΡΟΛΟΓΙΚΗ ΑΠΟΔΕΙΞΗ",
-                width,
-            );
+            emit_centered_wrapped(&mut builder, label("NOT A FISCAL RECEIPT"), width);
             builder.reverse(false).bold(false).left();
             emit_rule(&mut builder, width, '-');
-            builder
-                .center()
-                .bold(true)
-                .text("REPAIR INTAKE / ΠΑΡΑΛΑΒΗ")
-                .lf()
-                .bold(false)
-                .left();
-            emit_pair(&mut builder, "Repair", &doc.repair_number, width);
+            builder.bold(true);
+            emit_centered_wrapped(&mut builder, label("REPAIR INTAKE"), width);
+            builder.bold(false).left();
+            emit_pair(&mut builder, label("Repair"), &doc.repair_number, width);
             if let Some(value) = doc
                 .customer_display_name
                 .as_deref()
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
             {
-                emit_pair(&mut builder, "Customer", value, width);
+                emit_pair(&mut builder, label("Customer"), value, width);
             }
-            emit_pair(&mut builder, "Device", &doc.safe_device_label, width);
+            emit_pair(&mut builder, label("Device"), &doc.safe_device_label, width);
             if let Some(value) = doc
                 .masked_identifier
                 .as_deref()
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
             {
-                emit_pair(&mut builder, "Identifier", value, width);
+                emit_pair(&mut builder, label("Identifier"), value, width);
             }
             emit_pair(
                 &mut builder,
-                "Received",
+                label("Received on"),
                 &format_datetime_human(&doc.received_at),
                 width,
             );
@@ -10431,16 +10509,21 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
             {
-                emit_pair(&mut builder, "Due", &format_datetime_human(value), width);
+                emit_pair(
+                    &mut builder,
+                    label("Due"),
+                    &format_datetime_human(value),
+                    width,
+                );
             }
-            emit_pair(&mut builder, "Branch", &doc.branch_name, width);
+            emit_pair(&mut builder, label("Branch"), &doc.branch_name, width);
             if let Some(value) = doc
                 .branch_contact
                 .as_deref()
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
             {
-                emit_pair(&mut builder, "Contact", value, width);
+                emit_pair(&mut builder, label("Contact"), value, width);
             }
             emit_rule(&mut builder, width, '-');
             builder
@@ -10453,7 +10536,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
             builder.center().bold(true).reverse(true);
             emit_centered_wrapped(
                 &mut builder,
-                "NON-FISCAL / ΔΕΝ ΑΠΟΤΕΛΕΙ ΦΟΡΟΛΟΓΙΚΗ ΑΠΟΔΕΙΞΗ",
+                receipt_label(lang, "NOT A FISCAL RECEIPT"),
                 width,
             );
             builder.reverse(false).bold(false).left();
@@ -11690,15 +11773,63 @@ mod tests {
         }
     }
 
+    fn safe_repair_label_doc() -> RepairLabelDoc {
+        RepairLabelDoc {
+            projection_source: "repair_authorized_projection_v1".into(),
+            projection_version: 7,
+            projected_at: "2026-08-25T09:10:12Z".into(),
+            repair_id: "11111111-1111-4111-8111-111111111111".into(),
+            repair_number: "R-ATH-26-000001".into(),
+            safe_device_label: "Apple iPhone 15 - Black".into(),
+            masked_identifier: Some("IMEI **** 1234".into()),
+            ..RepairLabelDoc::default()
+        }
+    }
+
+    /// The words on the repair intake slip and label, as `receipt_label` keys
+    /// (THE-439). English prints the key itself.
+    const REPAIR_PRINT_KEYS: [&str; 10] = [
+        "NOT A FISCAL RECEIPT",
+        "REPAIR INTAKE",
+        "Repair",
+        "Customer",
+        "Device",
+        "Identifier",
+        "Received on",
+        "Due",
+        "Branch",
+        "Contact",
+    ];
+
+    /// The bytes a Greek-code-page printer receives for this text.
+    fn cp737(text: &str) -> Vec<u8> {
+        let mut builder = EscPosBuilder::new().with_greek();
+        builder.text(text);
+        builder.build()
+    }
+
+    fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+        count_sequence(haystack, needle) > 0
+    }
+
+    /// A terminal in `language`, on the Greek code page a non-English terminal
+    /// auto-selects for a default profile.
+    fn repair_print_cfg(language: &str, paper_width: PaperWidth) -> LayoutConfig {
+        LayoutConfig {
+            paper_width,
+            language: language.into(),
+            character_set: "PC737_GREEK".into(),
+            show_logo: false,
+            ..LayoutConfig::default()
+        }
+    }
+
     #[test]
     fn repair_intake_and_label_are_deterministic_non_fiscal_58_and_80mm() {
         for paper_width in [PaperWidth::Mm58, PaperWidth::Mm80] {
             let cfg = LayoutConfig {
-                paper_width,
-                language: "el".into(),
-                show_logo: false,
                 footer_text: Some("VAT 123 / receipt 999 / diagnosis secret".into()),
-                ..LayoutConfig::default()
+                ..repair_print_cfg("el", paper_width)
             };
             let intake = ReceiptDocument::RepairIntake(safe_repair_intake_doc());
             let label = ReceiptDocument::RepairLabel(RepairLabelDoc {
@@ -11714,7 +11845,12 @@ mod tests {
             let first = render_escpos(&intake, &cfg).bytes;
             assert_eq!(first, render_escpos(&intake, &cfg).bytes);
             let intake_text = String::from_utf8_lossy(&first);
-            assert!(intake_text.contains("NON-FISCAL"));
+            // THE-439: the notice is in the terminal language only.
+            assert!(contains_bytes(
+                &first,
+                &cp737("ΔΕΝ ΑΠΟΤΕΛΕΙ ΦΟΡΟΛΟΓΙΚΗ ΑΠΟΔΕΙΞΗ")
+            ));
+            assert!(!intake_text.contains("NON-FISCAL"));
             assert!(intake_text.contains("R-ATH-26-000001"));
             assert!(intake_text.contains("repair:11111111-1111-4111-8111-111111111111"));
             for forbidden in [
@@ -11728,10 +11864,17 @@ mod tests {
             }
             let label_bytes = render_escpos(&label, &cfg).bytes;
             assert_eq!(label_bytes, render_escpos(&label, &cfg).bytes);
-            assert!(String::from_utf8_lossy(&label_bytes).contains("NON-FISCAL"));
+            assert!(contains_bytes(
+                &label_bytes,
+                &cp737("ΔΕΝ ΑΠΟΤΕΛΕΙ ΦΟΡΟΛΟΓΙΚΗ ΑΠΟΔΕΙΞΗ")
+            ));
+            assert!(!String::from_utf8_lossy(&label_bytes).contains("NON-FISCAL"));
 
             let html = render_html(&intake, &cfg);
-            assert!(html.contains("NON-FISCAL / ΔΕΝ ΑΠΟΤΕΛΕΙ ΦΟΡΟΛΟΓΙΚΗ ΑΠΟΔΕΙΞΗ"));
+            assert!(html.contains(
+                "<div class=\"status-banner canceled\">ΔΕΝ ΑΠΟΤΕΛΕΙ ΦΟΡΟΛΟΓΙΚΗ ΑΠΟΔΕΙΞΗ</div>"
+            ));
+            assert!(!html.contains("NON-FISCAL"));
             assert!(!html.contains("diagnosis secret"));
             assert!(html
                 .contains("data-repair-barcode=\"repair:11111111-1111-4111-8111-111111111111\""));
@@ -11746,6 +11889,277 @@ mod tests {
                     > 100
             );
         }
+    }
+
+    #[test]
+    fn repair_print_words_translate_in_every_language() {
+        for key in REPAIR_PRINT_KEYS {
+            assert_eq!(receipt_label("en", key), key);
+        }
+        for lang in ["el", "de", "fr", "it", "sq"] {
+            for key in REPAIR_PRINT_KEYS {
+                let translated = receipt_label(lang, key);
+                assert!(!translated.trim().is_empty(), "{lang}: {key} is empty");
+                if (lang, key) == ("fr", "Contact") {
+                    // The same word in French.
+                    assert_eq!(translated, "Contact");
+                } else {
+                    assert_ne!(translated, key, "{lang}: {key} falls back to English");
+                }
+            }
+            // Printed in capitals; Greek capitals carry no tonos.
+            for key in ["NOT A FISCAL RECEIPT", "REPAIR INTAKE"] {
+                let text = receipt_label(lang, key);
+                assert_eq!(
+                    text,
+                    text.to_uppercase(),
+                    "{lang}: {key} is not in capitals"
+                );
+                assert!(
+                    !text.chars().any(|ch| "ΆΈΉΊΌΎΏΐΰ".contains(ch)),
+                    "{lang}: {key} carries a tonos"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn repair_intake_and_label_print_greek_and_albanian_only() {
+        let intake = ReceiptDocument::RepairIntake(safe_repair_intake_doc());
+        let label = ReceiptDocument::RepairLabel(safe_repair_label_doc());
+        let old_english = [
+            "NON-FISCAL",
+            "REPAIR INTAKE",
+            "Repair",
+            "Customer",
+            "Device",
+            "Identifier",
+            "Received",
+            "Due",
+            "Branch",
+            "Contact",
+        ];
+        let old_greek = [
+            "ΔΕΝ ΑΠΟΤΕΛΕΙ",
+            "ΦΟΡΟΛΟΓΙΚΗ ΑΠΟΔΕΙΞΗ",
+            "ΠΑΡΑΛΑΒΗ",
+            "Επισκευή",
+            "Πελάτης",
+            "Συσκευή",
+            "Παραλαβή",
+            "Προθεσμία",
+            "Κατάστημα",
+            "Επικοινωνία",
+        ];
+        let greek = [
+            "ΔΕΝ ΑΠΟΤΕΛΕΙ ΦΟΡΟΛΟΓΙΚΗ ΑΠΟΔΕΙΞΗ",
+            "ΠΑΡΑΛΑΒΗ ΕΠΙΣΚΕΥΗΣ",
+            "Επισκευή",
+            "Πελάτης",
+            "Συσκευή",
+            "Αναγνωριστικό",
+            "Παραλαβή",
+            "Προθεσμία",
+            "Κατάστημα",
+            "Επικοινωνία",
+        ];
+        let albanian = [
+            "NUK ËSHTË KUPON FISKAL",
+            "PRANIM PËR RIPARIM",
+            "Riparimi",
+            "Klienti",
+            "Pajisja",
+            "Identifikuesi",
+            "Pranuar më",
+            "Afati",
+            "Dega",
+            "Kontakti",
+        ];
+
+        for (lang, expected) in [("el", greek), ("sq", albanian)] {
+            for paper_width in [PaperWidth::Mm58, PaperWidth::Mm80] {
+                let cfg = repair_print_cfg(lang, paper_width);
+                let intake_bytes = render_escpos(&intake, &cfg).bytes;
+                let label_bytes = render_escpos(&label, &cfg).bytes;
+                let intake_html = render_html(&intake, &cfg);
+                let label_html = render_html(&label, &cfg);
+
+                let [notice, title, labels @ ..] = expected;
+                for text in [notice, title] {
+                    assert!(
+                        contains_bytes(&intake_bytes, &cp737(text)),
+                        "{lang}: ESC/POS intake lacks {text}"
+                    );
+                    assert!(
+                        intake_html.contains(text),
+                        "{lang}: HTML intake lacks {text}"
+                    );
+                }
+                for text in labels {
+                    assert!(
+                        contains_bytes(&intake_bytes, &cp737(text)),
+                        "{lang}: ESC/POS intake lacks {text}"
+                    );
+                    assert!(
+                        intake_html.contains(&format!("<span class=\"k\">{text}</span>")),
+                        "{lang}: HTML intake lacks {text}"
+                    );
+                }
+                assert!(contains_bytes(&label_bytes, &cp737(notice)));
+                assert!(label_html.contains(notice));
+
+                for old in old_english {
+                    for (kind, bytes) in [("intake", &intake_bytes), ("label", &label_bytes)] {
+                        assert!(
+                            !contains_bytes(bytes, old.as_bytes()),
+                            "{lang}: ESC/POS {kind} still prints {old}"
+                        );
+                    }
+                    assert!(
+                        !intake_html.contains(&format!("<span class=\"k\">{old}</span>")),
+                        "{lang}: HTML intake still labels {old}"
+                    );
+                }
+                for html in [&intake_html, &label_html] {
+                    assert!(!html.contains("NON-FISCAL") && !html.contains("REPAIR INTAKE"));
+                }
+                if lang == "sq" {
+                    for old in old_greek {
+                        for (kind, bytes) in [("intake", &intake_bytes), ("label", &label_bytes)] {
+                            assert!(
+                                !contains_bytes(bytes, &cp737(old)),
+                                "sq: ESC/POS {kind} still prints {old}"
+                            );
+                        }
+                        assert!(!intake_html.contains(old) && !label_html.contains(old));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn repair_data_prints_the_same_bytes_in_every_language() {
+        let intake = ReceiptDocument::RepairIntake(safe_repair_intake_doc());
+        let label = ReceiptDocument::RepairLabel(safe_repair_label_doc());
+        let reverse_off = [0x1d, 0x42, 0x00];
+        // Everything the label prints after its notice is repair data.
+        let label_data = |bytes: &[u8]| {
+            let end = bytes
+                .windows(reverse_off.len())
+                .position(|window| window == reverse_off)
+                .expect("the notice closes its reverse block");
+            bytes[end + reverse_off.len()..].to_vec()
+        };
+        for paper_width in [PaperWidth::Mm58, PaperWidth::Mm80] {
+            let english_label =
+                label_data(&render_escpos(&label, &repair_print_cfg("en", paper_width)).bytes);
+            assert!(contains_bytes(&english_label, b"R-ATH-26-000001"));
+            assert!(contains_bytes(&english_label, b"IMEI **** 1234"));
+            for lang in ["en", "el", "de", "fr", "it", "sq"] {
+                let cfg = repair_print_cfg(lang, paper_width);
+                let intake_bytes = render_escpos(&intake, &cfg).bytes;
+                for value in [
+                    "R-ATH-26-000001",
+                    "Alex P.",
+                    "Apple iPhone 15 - Black",
+                    "IMEI **** 1234",
+                    "Athens Central",
+                    "+30 210 000 0000",
+                    "repair:11111111-1111-4111-8111-111111111111",
+                ] {
+                    assert!(
+                        contains_bytes(&intake_bytes, value.as_bytes()),
+                        "{lang}: intake changed {value}"
+                    );
+                }
+                assert_eq!(
+                    label_data(&render_escpos(&label, &cfg).bytes),
+                    english_label,
+                    "{lang}: label data differs from English"
+                );
+                for html in [render_html(&intake, &cfg), render_html(&label, &cfg)] {
+                    assert!(html.contains(
+                        "data-repair-barcode=\"repair:11111111-1111-4111-8111-111111111111\""
+                    ));
+                    assert!(html.contains("R-ATH-26-000001"));
+                }
+            }
+        }
+    }
+
+    /// Repair documents print raster only on the classic template, whose text
+    /// grows with the user's text scale (0.8–2.0, default 1.25).
+    fn repair_raster_cfg(language: &str, paper_width: PaperWidth, text_scale: f32) -> LayoutConfig {
+        LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            classic_customer_render_mode: ClassicCustomerRenderMode::RasterExact,
+            text_scale,
+            ..repair_print_cfg(language, paper_width)
+        }
+    }
+
+    #[test]
+    fn repair_notice_stays_inside_the_raster_banner_in_every_language() {
+        for paper_width in [PaperWidth::Mm58, PaperWidth::Mm80] {
+            for text_scale in [0.8, 1.25, 2.0] {
+                for lang in ["en", "el", "de", "fr", "it", "sq"] {
+                    let cfg = repair_raster_cfg(lang, paper_width, text_scale);
+                    let composer = TtfReceiptComposer::try_new(&cfg).expect("raster fonts");
+                    let notice = receipt_label(lang, "NOT A FISCAL RECEIPT");
+                    let lines = composer.reverse_banner_lines(notice);
+                    assert_eq!(lines.join(" "), notice, "{lang}: the banner lost words");
+                    for line in &lines {
+                        let width = composer.text_width(line, composer.preset.banner_style);
+                        assert!(
+                            width <= composer.content_width,
+                            "{lang}: «{line}» is {width} dots on a {} dot banner",
+                            composer.content_width
+                        );
+                    }
+                }
+            }
+        }
+        // At the default scale the whole Greek notice is wider than a 58 mm and
+        // an 80 mm roll: on one banner line it would run off the paper.
+        for paper_width in [PaperWidth::Mm58, PaperWidth::Mm80] {
+            let cfg = repair_raster_cfg("el", paper_width, 1.25);
+            let composer = TtfReceiptComposer::try_new(&cfg).expect("raster fonts");
+            let notice = receipt_label("el", "NOT A FISCAL RECEIPT");
+            assert!(
+                composer.text_width(notice, composer.preset.banner_style) > composer.content_width
+            );
+            assert_eq!(composer.reverse_banner_lines(notice).len(), 2);
+        }
+
+        // Both documents really take the raster path, in Greek and in Albanian.
+        let intake = ReceiptDocument::RepairIntake(safe_repair_intake_doc());
+        let label = ReceiptDocument::RepairLabel(safe_repair_label_doc());
+        for lang in ["el", "sq"] {
+            let cfg = repair_raster_cfg(lang, PaperWidth::Mm58, 1.25);
+            for document in [&intake, &label] {
+                // A failed raster render falls back to text mode.
+                assert_eq!(
+                    render_escpos(document, &cfg).body_mode,
+                    EscPosBodyMode::RasterExact,
+                    "{lang}"
+                );
+            }
+            let (raster, _) = render_classic_raster_exact_preview_data_url(&intake, &cfg)
+                .expect("repair raster preview");
+            assert!(raster.starts_with("data:image/png;base64,"));
+        }
+    }
+
+    #[test]
+    fn a_fitting_reverse_banner_is_not_wrapped() {
+        let cfg = repair_print_cfg("en", PaperWidth::Mm80);
+        let mut wrapped = TtfReceiptComposer::try_new(&cfg).expect("raster fonts");
+        let mut plain = TtfReceiptComposer::try_new(&cfg).expect("raster fonts");
+        wrapped.draw_wrapped_reverse_banner("NOT A FISCAL RECEIPT");
+        plain.draw_reverse_banner("NOT A FISCAL RECEIPT");
+        assert_eq!(wrapped.y, plain.y);
+        assert_eq!(wrapped.image.as_raw(), plain.image.as_raw());
     }
 
     #[test]
