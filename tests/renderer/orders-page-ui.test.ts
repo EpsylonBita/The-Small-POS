@@ -3017,3 +3017,35 @@ test('a fresh New Order remounts MenuModal and clears the previous customer draf
   assert.match(handler, /setPhoneNumber\(""\)/);
   assert.match(dashboard, /<MenuModal\s+key=\{menuSessionKey\}/);
 });
+
+// A store without the tables module has no Τραπέζια tab, so an order classified
+// as a table check used to leave the Orders tab and appear nowhere at all. The
+// dashboard now passes the module through to the lane predicates, and its tab
+// counters call the very same predicates as the lists they label.
+test('the dashboard lanes and their counters share one table-module gate', () => {
+  const source = orderDashboardSource();
+
+  // One options object, built from the module context's own flag.
+  assert.match(source, /const laneOptions = \{ tablesModuleAvailable: hasTablesModule \};/);
+  assert.equal(source.match(/tablesModuleAvailable:/g)?.length, 1);
+
+  // Both lists take it.
+  assert.match(source, /shouldShowInStandardOrderLane\(order as any, laneOptions\)/);
+  assert.match(source, /shouldShowInCompletedOrderLane\(order as any, laneOptions\)/);
+
+  // Both counters call the same two predicates, not a second copy of the rule.
+  const countStart = source.indexOf('baseOrders.forEach((order) => {');
+  const countEnd = source.indexOf('setOrderCounts(counts);', countStart);
+  assert.ok(countStart >= 0 && countEnd > countStart, 'tab counters must exist');
+  const counter = source.slice(countStart, countEnd);
+  assert.match(counter, /counts\.orders\+\+/);
+  assert.match(counter, /shouldShowInStandardOrderLane\(order as any, laneOptions\)/);
+  assert.match(counter, /shouldShowInCompletedOrderLane\(order as any, laneOptions\)/);
+  assert.doesNotMatch(counter, /isTableServiceOrder|order\.status === "delivered"/);
+
+  // Acquiring or losing the module re-runs the effect, so no restart is needed.
+  assert.match(
+    source,
+    /\}, \[orders, filter, activeTab, orderFilter, displayTables, hasTablesModule\]\);/,
+  );
+});

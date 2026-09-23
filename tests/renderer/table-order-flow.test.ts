@@ -8,9 +8,11 @@ import {
   findOpenTableOrderForTable,
   findTableOrderForTable,
   getTableNumberForTableServiceOrder,
+  isHandledByTablesWorkspace,
   isTableServiceOrder,
   isUnsettledOrderPaymentStatus,
   normalizeTableNumberForMatch,
+  shouldShowInCompletedOrderLane,
   shouldShowInStandardOrderLane,
   shouldBypassPaymentForTableOrder,
   isUuidLike,
@@ -49,6 +51,13 @@ const tableCheckOverlayPath = (locale: string) => path.join(
   'overlays',
   `${locale}.table-check.json`,
 )
+
+// The tables module decides only WHERE a table check is shown. `WITH_TABLES` is a
+// store that owns it and therefore has a Tables tab; `WITHOUT_TABLES` is a store
+// that never bought it (or whose module list has not loaded yet), where hiding a
+// table check would lose the order instead of relocating it.
+const WITH_TABLES = { tablesModuleAvailable: true }
+const WITHOUT_TABLES = { tablesModuleAvailable: false }
 
 describe('table order flow helpers', () => {
   it('bypasses checkout payment for dine-in table orders', () => {
@@ -453,20 +462,40 @@ describe('table order flow helpers', () => {
     )
   })
 
-  it('keeps dine-in checks out of the standard order lane', () => {
-    assert.equal(shouldShowInStandardOrderLane({
+  it('keeps dine-in checks out of the standard order lane of a store with tables', () => {
+    const check = {
       id: 'order-1',
       status: 'pending',
       order_type: 'dine-in',
       table_id: 'table-1',
       table_number: '1',
-    }), false)
+    }
+
+    assert.equal(shouldShowInStandardOrderLane(check, WITH_TABLES), false)
+    assert.equal(isHandledByTablesWorkspace(check, WITH_TABLES), true)
 
     assert.equal(shouldShowInStandardOrderLane({
       id: 'order-2',
       status: 'pending',
       orderType: 'pickup',
-    }), true)
+    }, WITH_TABLES), true)
+  })
+
+  it('keeps the same dine-in check in the order lane of a store without the tables module', () => {
+    // A creperie that never bought the tables module has no Tables tab. Two paid
+    // dine-in orders (29/08 and 03/09/2026) were classified as table checks,
+    // left every lane and were still pending weeks later.
+    const check = {
+      id: 'order-1',
+      status: 'pending',
+      order_type: 'dine-in',
+      payment_status: 'paid',
+      customer_name: 'ΠΟΥΛΙΔΗΣ',
+    }
+
+    assert.equal(isTableServiceOrder(check), true, 'classification does not depend on the module')
+    assert.equal(isHandledByTablesWorkspace(check, WITHOUT_TABLES), false)
+    assert.equal(shouldShowInStandardOrderLane(check, WITHOUT_TABLES), true)
   })
 
   it('recognizes legacy table-labeled orders as table-service checks', () => {
@@ -573,17 +602,40 @@ describe('table order flow helpers', () => {
     assert.equal(findTableOrderForTable([paidOrder], table), paidOrder)
   })
 
-  it('recognizes orphaned table customer labels as table-service checks', () => {
-    const orphanedOrder = {
-      id: 'order-orphaned',
+  it('never reads a table out of a customer name or a note', () => {
+    // A "Τραπέζι T1" label is text staff typed, not a table. It used to
+    // classify the order as that table's check and link it there, so a pickup
+    // whose note mentioned a table left every order lane.
+    const labelledPickup = {
+      id: 'order-labelled',
       status: 'pending',
       orderType: 'pickup',
       customerName: 'Τραπέζι T1',
     }
 
-    assert.equal(isTableServiceOrder(orphanedOrder), true)
-    assert.equal(shouldShowInStandardOrderLane(orphanedOrder), false)
-    assert.equal(getTableNumberForTableServiceOrder(orphanedOrder), '1')
+    assert.equal(isTableServiceOrder(labelledPickup), false)
+    assert.equal(getTableNumberForTableServiceOrder(labelledPickup), null)
+    assert.equal(shouldShowInStandardOrderLane(labelledPickup, WITH_TABLES), true)
+    assert.equal(shouldShowInStandardOrderLane(labelledPickup, WITHOUT_TABLES), true)
+
+    // It is not linked to table 1 either, in a store that really has tables.
+    assert.equal(
+      findOpenTableOrderForTable([labelledPickup], { id: 'table-1', tableNumber: 'T1' }),
+      null,
+    )
+
+    // The delivery note of a real delivery mentions a table all the time.
+    const noted = {
+      id: 'order-noted',
+      status: 'pending',
+      order_type: 'delivery',
+      customer_name: 'Maria',
+      notes: 'τραπέζι 5, δίπλα στο παράθυρο',
+    }
+
+    assert.equal(isTableServiceOrder(noted), false)
+    assert.equal(getTableNumberForTableServiceOrder(noted), null)
+    assert.equal(shouldShowInStandardOrderLane(noted, WITH_TABLES), true)
   })
 
   it('keeps a delivery for a customer named with a number in the order lane', () => {
@@ -601,7 +653,7 @@ describe('table order flow helpers', () => {
     }
 
     assert.equal(isTableServiceOrder(delivery), false)
-    assert.equal(shouldShowInStandardOrderLane(delivery), true)
+    assert.equal(shouldShowInStandardOrderLane(delivery, WITH_TABLES), true)
     assert.equal(getTableNumberForTableServiceOrder(delivery), null)
     assert.equal(
       findOpenTableOrderForTable([{ ...delivery, paymentStatus: 'pending' }], {
@@ -620,16 +672,82 @@ describe('table order flow helpers', () => {
     )
   })
 
-  it('reads only table labels from the free text of orders outside dine-in', () => {
+  it('gives every tab the same list its badge counts, with and without the module', () => {
+    // The dashboard counts each tab by calling these same lane predicates, so
+    // this is what keeps a badge from disagreeing with its own list.
+    const orders = [
+      { id: 'a', status: 'pending', order_type: 'delivery', customer_name: '12' },
+      { id: 'b', status: 'ready', order_type: 'pickup', notes: '\u03c4\u03c1\u03b1\u03c0\u03ad\u03b6\u03b9 5, \u03b4\u03af\u03c0\u03bb\u03b1 \u03c3\u03c4\u03bf \u03c0\u03b1\u03c1\u03ac\u03b8\u03c5\u03c1\u03bf' },
+      { id: 'c', status: 'pending', order_type: 'dine-in', table_id: 'table-5', table_number: '5' },
+      { id: 'd', status: 'completed', order_type: 'dine-in', table_id: 'table-6', table_number: '6' },
+      { id: 'e', status: 'delivered', order_type: 'delivery' },
+      { id: 'f', status: 'cancelled', order_type: 'dine-in', table_id: 'table-7' },
+      { id: 'g', status: 'pending', order_type: 'dine-in' },
+    ]
+    const isCancelled = (order: { status?: string }) =>
+      ['cancelled', 'canceled'].includes(String(order.status || '').toLowerCase())
+
+    for (const options of [WITH_TABLES, WITHOUT_TABLES]) {
+      const active = orders.filter((order) => shouldShowInStandardOrderLane(order, options))
+      const completed = orders.filter((order) => shouldShowInCompletedOrderLane(order, options))
+      const cancelled = orders.filter(isCancelled)
+
+      // The counter walks the orders once and stops at the first lane that takes
+      // the order, exactly as the dashboard does.
+      const counts = { orders: 0, delivered: 0, canceled: 0 }
+      for (const order of orders) {
+        if (shouldShowInStandardOrderLane(order, options)) counts.orders++
+        else if (shouldShowInCompletedOrderLane(order, options)) counts.delivered++
+        else if (isCancelled(order)) counts.canceled++
+      }
+
+      assert.equal(counts.orders, active.length)
+      assert.equal(counts.delivered, completed.length)
+      assert.equal(counts.canceled, cancelled.length)
+      // No order is in two lanes at once.
+      assert.equal(
+        new Set([...active, ...completed, ...cancelled].map((order) => order.id)).size,
+        active.length + completed.length + cancelled.length,
+      )
+    }
+
+    // Losing the module only ever adds orders to the lanes.
+    assert.deepEqual(
+      orders.filter((order) => shouldShowInStandardOrderLane(order, WITHOUT_TABLES)).map((o) => o.id),
+      ['a', 'b', 'c', 'g'],
+    )
+    assert.deepEqual(
+      orders.filter((order) => shouldShowInStandardOrderLane(order, WITH_TABLES)).map((o) => o.id),
+      ['a', 'b'],
+    )
+    assert.deepEqual(
+      orders.filter((order) => shouldShowInCompletedOrderLane(order, WITHOUT_TABLES)).map((o) => o.id),
+      ['d', 'e'],
+    )
+    assert.deepEqual(
+      orders.filter((order) => shouldShowInCompletedOrderLane(order, WITH_TABLES)).map((o) => o.id),
+      ['e'],
+    )
+  })
+
+  it('keeps every free-text customer name in the order lane', () => {
     const pickup = { id: 'order-pickup', status: 'pending', orderType: 'pickup' }
 
-    for (const customerName of ['15', '#15', 'T15', '6912345678']) {
-      assert.equal(shouldShowInStandardOrderLane({ ...pickup, customerName }), true, customerName)
+    for (const customerName of ['15', '#15', 'T15', '6912345678', 'Table T05', 'Τραπέζι 5']) {
+      assert.equal(shouldShowInStandardOrderLane({ ...pickup, customerName }, WITH_TABLES), true, customerName)
+      assert.equal(getTableNumberForTableServiceOrder({ ...pickup, customerName }), null, customerName)
     }
-    assert.equal(shouldShowInStandardOrderLane({ ...pickup, customerName: 'Maria', notes: '2' }), true)
+    assert.equal(shouldShowInStandardOrderLane({ ...pickup, customerName: 'Maria', notes: '2' }, WITH_TABLES), true)
     assert.equal(isTableServiceOrder({ ...pickup, orderType: 'room_service', customerName: '12' }), false)
-    assert.equal(getTableNumberForTableServiceOrder({ ...pickup, customerName: 'Table T05' }), '05')
-    assert.equal(getTableNumberForTableServiceOrder({ ...pickup, orderType: 'dine-in', customerName: '5' }), '5')
+
+    // A dine-in order is a table check by its own type, but with no structured
+    // table field it still has no table number - its name is not one.
+    const unseatedDineIn = { ...pickup, orderType: 'dine-in', customerName: '5' }
+    assert.equal(isTableServiceOrder(unseatedDineIn), true)
+    assert.equal(getTableNumberForTableServiceOrder(unseatedDineIn), null)
+
+    // Only the structured field names the table.
+    assert.equal(getTableNumberForTableServiceOrder({ ...pickup, table_number: 'T05' }), '05')
   })
 
   it('builds an optimistic occupied table after saving a check', () => {

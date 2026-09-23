@@ -192,6 +192,7 @@ import {
   isUnsettledOrderPaymentStatus,
   normalizeTableNumberForMatch,
   resolveTableDisplayStatus,
+  shouldShowInCompletedOrderLane,
   shouldShowInStandardOrderLane,
   tableHasOpenCheckReference,
 } from "../utils/tableOrderFlow";
@@ -1789,18 +1790,20 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         );
       }
 
-      // Apply tab-specific filters
+      // Apply tab-specific filters. The tables module decides visibility only:
+      // without it there is no Tables tab, so a table check stays in the lanes
+      // instead of disappearing from the terminal.
+      const laneOptions = { tablesModuleAvailable: hasTablesModule };
+
       switch (activeTab) {
         case "orders":
           filtered = filtered.filter((order) =>
-            shouldShowInStandardOrderLane(order as any),
+            shouldShowInStandardOrderLane(order as any, laneOptions),
           );
           break;
         case "delivered":
-          filtered = filtered.filter(
-            (order) =>
-              !isTableServiceOrder(order as any) &&
-              (order.status === "delivered" || order.status === "completed"),
+          filtered = filtered.filter((order) =>
+            shouldShowInCompletedOrderLane(order as any, laneOptions),
           );
           break;
         case "canceled":
@@ -1819,14 +1822,15 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         tables: openTableCount,
       };
 
+      // Counters call the same lane predicates as the lists above, so a tab's
+      // badge can never disagree with what that tab renders.
       baseOrders.forEach((order) => {
-        const isTableOrder = isTableServiceOrder(order as any);
-        if (!isTableOrder && shouldShowInStandardOrderLane(order as any)) {
+        if (shouldShowInStandardOrderLane(order as any, laneOptions)) {
           counts.orders++;
           return;
         }
 
-        if (!isTableOrder && (order.status === "delivered" || order.status === "completed")) {
+        if (shouldShowInCompletedOrderLane(order as any, laneOptions)) {
           counts.delivered++;
           return;
         }
@@ -1837,7 +1841,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       });
 
       setOrderCounts(counts);
-    }, [orders, filter, activeTab, orderFilter, displayTables]);
+      // hasTablesModule is a dependency: acquiring or losing the module has to
+      // move the orders between the lanes and the Tables tab immediately, with
+      // no restart.
+    }, [orders, filter, activeTab, orderFilter, displayTables, hasTablesModule]);
 
     // Handle tab change
     const handleTabChange = useCallback(

@@ -7,7 +7,8 @@ import OrderCard from './order/OrderCard';
 import SkeletonLoader from './ui/SkeletonLoader';
 import LoadingSpinner from './ui/LoadingSpinner';
 import type { StoreMapOrigin } from '../utils/delivery-routing';
-import { isTableServiceOrder, shouldShowInStandardOrderLane } from '../utils/tableOrderFlow';
+import { shouldShowInCompletedOrderLane, shouldShowInStandardOrderLane } from '../utils/tableOrderFlow';
+import { useAcquiredModules } from '../hooks/useAcquiredModules';
 import { useTheme } from '../contexts/theme-context';
 
 const isCancelledOrderStatus = (status: unknown): boolean => {
@@ -37,6 +38,13 @@ const OrderGrid = memo<OrderGridProps>(({
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const { orders: storeOrders, filter, isLoading } = useOrderStore();
+  // Visibility only: table checks belong to the Tables tab, which exists only
+  // while the tables module is available. Without it they stay in the lanes.
+  const { hasTablesModule } = useAcquiredModules();
+  const laneOptions = useMemo(
+    () => ({ tablesModuleAvailable: hasTablesModule }),
+    [hasTablesModule],
+  );
   const baseOrders = ordersProp ?? storeOrders ?? [];
   const shouldApplyFilters = !ordersProp;
 
@@ -81,20 +89,17 @@ const OrderGrid = memo<OrderGridProps>(({
     // Then apply tab-based filtering
     if (activeTab === 'orders') {
       // Show pending, confirmed, preparing, and ready orders
-      filtered = filtered.filter(order => shouldShowInStandardOrderLane(order as any));
+      filtered = filtered.filter(order => shouldShowInStandardOrderLane(order as any, laneOptions));
     } else if (activeTab === 'delivered') {
       // Show delivered orders (include completed)
-      filtered = filtered.filter(order => {
-        const status = (order.status || '').toLowerCase();
-        return !isTableServiceOrder(order as any) && (status === 'delivered' || status === 'completed');
-      });
+      filtered = filtered.filter(order => shouldShowInCompletedOrderLane(order as any, laneOptions));
     } else if (activeTab === 'canceled') {
       // Show cancelled orders
       filtered = filtered.filter(order => isCancelledOrderStatus(order.status));
     }
 
     return filtered;
-  }, [baseOrders, filter, activeTab, shouldApplyFilters]); // Use orders directly, not getFilteredOrders
+  }, [baseOrders, filter, activeTab, shouldApplyFilters, laneOptions]); // Use orders directly, not getFilteredOrders
 
   // Memoized order cards with sequential indexing
   const orderCards = useMemo(() => 

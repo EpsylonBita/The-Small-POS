@@ -49,6 +49,10 @@ vi.mock('../../hooks/useOrderStore', () => ({
   }),
 }));
 
+vi.mock('../../hooks/useAcquiredModules', () => ({
+  useAcquiredModules: () => ({ hasTablesModule: true }),
+}));
+
 import OrderGrid from '../OrderGrid';
 
 afterEach(() => cleanup());

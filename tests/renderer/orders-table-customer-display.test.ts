@@ -50,15 +50,26 @@ test('resolveTableServiceCustomerNumber returns null for pickup/delivery/normal 
   assert.equal(resolveTableServiceCustomerNumber({ order_type: 'pickup', customer_name: 'Agent 7' }), null);
 });
 
-test('resolveTableServiceCustomerNumber recovers the table from the pseudo-customer name when table_number is absent', () => {
-  // Live repro shape: stored customer_name "Τραπέζι B01" with no separate table_number.
+test('resolveTableServiceCustomerNumber reads no table out of the customer name', () => {
+  // A table is read only from the order's structured table field, for display as
+  // much as for matching. A dine-in order that carries no table field keeps the
+  // customer text exactly as staff typed it (OrdersPage falls back to
+  // order.customer_name), which for these rows already reads "Τραπέζι B01".
   assert.equal(
     resolveTableServiceCustomerNumber({ order_type: 'dine-in', customer_name: 'Τραπέζι B01' }),
-    '#TB01',
+    null,
   );
-  // An already-formatted label is idempotent.
   assert.equal(
     resolveTableServiceCustomerNumber({ order_type: 'dine-in', customer_name: 'Τραπέζι #TB01' }),
+    null,
+  );
+  // With the structured field present, the shared display convention applies.
+  assert.equal(
+    resolveTableServiceCustomerNumber({
+      order_type: 'dine-in',
+      table_number: 'B01',
+      customer_name: 'Τραπέζι B01',
+    }),
     '#TB01',
   );
 });

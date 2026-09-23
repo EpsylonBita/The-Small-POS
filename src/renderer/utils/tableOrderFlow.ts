@@ -146,14 +146,13 @@ function tablePaymentLooksSettled(table: TableLike): boolean {
 
 const TABLE_LABEL_PATTERN = /(?:table|τραπέζι)\s*#?\s*T?(\d+)/i;
 
-// Order types that are never a table check, whatever the customer name or notes say.
-const NEVER_TABLE_ORDER_TYPES = new Set(['delivery', 'room_service', 'drive-through', 'drive_through']);
-
 function isDineInOrderType(orderType: string): boolean {
   return orderType === 'dine-in' || orderType === 'dine_in' || orderType === 'table';
 }
 
-// A table named inside free text: "Τραπέζι T1", "Table T05".
+// A table named inside a table's own label: "Τραπέζι T1", "Table T05". Only ever
+// applied to a table record or to an order's structured table_number — never to
+// a customer name or an order note.
 function readTableLabel(value: unknown): string | null {
   const raw = String(value ?? '').trim();
   return raw.match(TABLE_LABEL_PATTERN)?.[1] ?? null;
@@ -173,37 +172,37 @@ export function normalizeTableNumberForMatch(value: unknown): string | null {
   return readTableLabel(raw);
 }
 
+/**
+ * The table a table-service order sits at, read ONLY from the order's structured
+ * table fields.
+ *
+ * A customer name or an order note never names a table here. Staff type real
+ * text into those fields — a call number, a phone, a surname, "τραπέζι 5,
+ * δίπλα στο παράθυρο" as a delivery instruction — and reading a table out of
+ * it took orders out of every order lane and attached them to a table they had
+ * nothing to do with (#00044, a paid delivery for a customer named "12").
+ */
 export function getTableNumberForTableServiceOrder(order: OrderLike | null | undefined): string | null {
   if (!order) {
     return null;
   }
 
-  const tableNumber =
-    normalizeTableNumberForMatch(order.table_number) ||
-    normalizeTableNumberForMatch(order.tableNumber);
-  if (tableNumber) {
-    return tableNumber;
-  }
-
-  // The customer name and notes only stand in for a table the check was saved
-  // without (such checks were stored as pickup orders named "Τραπέζι T1"). A
-  // delivery is never one of them, and outside dine-in only a table label
-  // counts: a bare number there is the customer's name, call number or phone,
-  // or a note such as the floor. Reading it as a table took the order out of
-  // every order lane without putting it on a table.
-  const orderType = normalizeOrderType(order.order_type ?? order.orderType);
-  if (NEVER_TABLE_ORDER_TYPES.has(orderType)) {
-    return null;
-  }
-
-  const readFreeText = isDineInOrderType(orderType) ? normalizeTableNumberForMatch : readTableLabel;
   return (
-    readFreeText(order.customer_name) ||
-    readFreeText(order.customerName) ||
-    readFreeText(order.notes)
+    normalizeTableNumberForMatch(order.table_number) ||
+    normalizeTableNumberForMatch(order.tableNumber)
   );
 }
 
+/**
+ * Classification only: is this order a table check?
+ *
+ * True for the dine-in order types and for an order carrying a structured link
+ * to a table (table id, table session, table number). Nothing else — a customer
+ * name or a note is text staff typed, not a table.
+ *
+ * Classification does not decide where the order is shown. That is
+ * `isHandledByTablesWorkspace`, which also needs the tables module.
+ */
 export function isTableServiceOrder(order: OrderLike | null | undefined): boolean {
   if (!order) {
     return false;
@@ -220,8 +219,7 @@ export function isTableServiceOrder(order: OrderLike | null | undefined): boolea
     hasValue(order.table_session_id) ||
     hasValue(order.tableSessionId) ||
     hasValue(order.table_number) ||
-    hasValue(order.tableNumber) ||
-    Boolean(getTableNumberForTableServiceOrder(order))
+    hasValue(order.tableNumber)
   );
 }
 
@@ -256,23 +254,70 @@ export function resolveTableServiceCustomerNumber(order: OrderLike | null | unde
     return formatTableDisplayNumber(numericTable);
   }
 
-  // Last resort: a table-like trailing token inside the pseudo-customer name
-  // ("Table B01" / "Τραπέζι B01" / "Τραπέζι #TB01"). Guarded to a token that
-  // contains a digit so real customer names are never reformatted.
-  const token = String(order?.customer_name ?? order?.customerName ?? '')
-    .trim()
-    .split(/\s+/)
-    .pop() ?? '';
-  return /\d/.test(token) ? formatTableDisplayNumber(token) : null;
+  // No structured table on the order: show the order's own customer text as it
+  // was typed. A table is never read out of that text — not even for display.
+  return null;
 }
 
-export function shouldShowInStandardOrderLane(order: OrderLike): boolean {
-  if (isTableServiceOrder(order)) {
+export interface OrderLaneVisibilityOptions {
+  /**
+   * Whether the tables module is available to this organization/terminal right
+   * now. Read from the module context (`useAcquiredModules().hasTablesModule`),
+   * never re-derived here.
+   *
+   * False while modules are still loading or a refresh failed. That is the safe
+   * direction: an order can only become visible, never disappear, because module
+   * data was momentarily missing.
+   */
+  tablesModuleAvailable: boolean;
+}
+
+/**
+ * Display filter: does the Tables workspace own this order instead of the order
+ * lanes?
+ *
+ * Only true when the order is a table check AND the tables module is available,
+ * because only then does a Tables tab exist to show it on. A store without the
+ * module has no such tab, so hiding a table check there loses the order
+ * completely — that is what kept two paid dine-in orders pending at a creperie
+ * that never bought the module.
+ *
+ * This is visibility only. It never grants access to any table feature; those
+ * stay gated by the module on their own.
+ */
+export function isHandledByTablesWorkspace(
+  order: OrderLike,
+  options: OrderLaneVisibilityOptions,
+): boolean {
+  return options.tablesModuleAvailable && isTableServiceOrder(order);
+}
+
+export function shouldShowInStandardOrderLane(
+  order: OrderLike,
+  options: OrderLaneVisibilityOptions,
+): boolean {
+  if (isHandledByTablesWorkspace(order, options)) {
     return false;
   }
 
   const status = String(order.status || '').toLowerCase();
   return ['pending', 'confirmed', 'preparing', 'ready'].includes(status);
+}
+
+/**
+ * The delivered/completed lane. Same table gate as the active lane, so a settled
+ * check follows its open check to the same place.
+ */
+export function shouldShowInCompletedOrderLane(
+  order: OrderLike,
+  options: OrderLaneVisibilityOptions,
+): boolean {
+  if (isHandledByTablesWorkspace(order, options)) {
+    return false;
+  }
+
+  const status = String(order.status || '').toLowerCase();
+  return status === 'delivered' || status === 'completed';
 }
 
 export function isUnsettledOrderPaymentStatus(order: OrderLike): boolean {
