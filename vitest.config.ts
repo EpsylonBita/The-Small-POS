@@ -14,6 +14,9 @@ export default defineConfig({
       '@services': path.resolve(__dirname, 'src/services'),
       '@lib': path.resolve(__dirname, 'src/lib'),
     },
+    // Same single libphonenumber-js copy as vite.config.ts: renderer code and
+    // ../shared/services/phone-* resolve it from pos-tauri/node_modules.
+    dedupe: ['libphonenumber-js'],
   },
   test: {
     environment: 'jsdom',

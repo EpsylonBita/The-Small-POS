@@ -38,6 +38,13 @@ export default defineConfig(({ command }) => {
         '@services': path.resolve(__dirname, 'src/services'),
         '@lib': path.resolve(__dirname, 'src/lib'),
       },
+      // The renderer imports libphonenumber-js directly (resolved from
+      // pos-tauri/node_modules) and through ../shared/services/phone-* (which
+      // would resolve from shared/node_modules). Resolve every import from this
+      // package's root so the bundle ships one copy of the library and its
+      // metadata. shared/services/phone-customer-lengths.test.ts pins the same
+      // version in both installs.
+      dedupe: ['libphonenumber-js'],
     },
 
     // Vite options tailored for Tauri development

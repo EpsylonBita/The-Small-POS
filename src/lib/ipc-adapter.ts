@@ -52,9 +52,6 @@ import type {
   RecoveryListResponse,
   RecoveryPoint,
   RecoveryRestoreResponse,
-  ScreenCaptureGetSourcesRequest,
-  ScreenCaptureGetSourcesResponse,
-  ScreenCaptureSignalPollingResponse,
   SettingsConfiguredResponse,
   SettingsCredentialStatus,
   SettingsGetRequest,
@@ -1622,7 +1619,14 @@ export interface PlatformBridge {
     invalidateCache(phone: string): Promise<void>;
     getCacheStats(): Promise<any>;
     clearCache(): Promise<void>;
-    lookupByPhone(phone: string): Promise<Customer | null>;
+    /**
+     * `cacheOnly` reads this terminal's customer cache without any network
+     * request (used by Caller ID so a known caller appears offline).
+     */
+    lookupByPhone(
+      phone: string,
+      options?: { cacheOnly?: boolean },
+    ): Promise<Customer | null>;
     lookupById(customerId: string): Promise<Customer | null>;
     search(query: string): Promise<Customer[]>;
     create(data: Partial<Customer>): Promise<IpcResult<Customer>>;
@@ -2188,20 +2192,6 @@ export interface PlatformBridge {
     show(data: any): Promise<void>;
   };
 
-  // -- Screen capture --------------------------------------------------------
-  screenCapture: {
-    getSources(
-      options: ScreenCaptureGetSourcesRequest,
-    ): Promise<ScreenCaptureGetSourcesResponse>;
-    startSignalPolling(
-      requestId: string,
-      after?: string,
-    ): Promise<ScreenCaptureSignalPollingResponse>;
-    stopSignalPolling(
-      requestId?: string,
-    ): Promise<ScreenCaptureSignalPollingResponse>;
-  };
-
   // -- Geolocation -----------------------------------------------------------
   geo: {
     ip(): Promise<any>;
@@ -2732,11 +2722,6 @@ export const CHANNEL_MAP: Record<string, string> = {
   // Notifications
   "show-notification": "notifications.show",
 
-  // Screen capture
-  "screen-capture:get-sources": "screenCapture.getSources",
-  "screen-capture:start-signal-polling": "screenCapture.startSignalPolling",
-  "screen-capture:stop-signal-polling": "screenCapture.stopSignalPolling",
-
   // Refunds / Adjustments
   "refund:payment": "refunds.refundPayment",
   "refund:void-payment": "refunds.voidPayment", // W8 H26: was missing — the method existed on the typed bridge (this.inv at line ~3166) but the `CHANNEL_MAP` entry was not there, so `check-parity-contract.mjs` and any tooling that walks the map missed this channel.
@@ -3220,8 +3205,10 @@ export class TauriBridge implements PlatformBridge {
       this.inv("customer:invalidate-cache", phone),
     getCacheStats: () => this.inv("customer:get-cache-stats"),
     clearCache: () => this.inv("customer:clear-cache"),
-    lookupByPhone: (phone: string) =>
-      this.inv("customer:lookup-by-phone", phone),
+    lookupByPhone: (phone: string, options?: { cacheOnly?: boolean }) =>
+      options?.cacheOnly
+        ? this.inv("customer:lookup-by-phone", { phone, cacheOnly: true })
+        : this.inv("customer:lookup-by-phone", phone),
     lookupById: (id: string) => this.inv("customer:lookup-by-id", id),
     search: (q: string) => this.inv("customer:search", q),
     create: (d: Partial<Customer>) => this.inv("customer:create", d),
@@ -3831,18 +3818,6 @@ export class TauriBridge implements PlatformBridge {
 
   notifications = {
     show: (data: any) => this.inv("show-notification", data),
-  };
-
-  screenCapture = {
-    getSources: (opts: ScreenCaptureGetSourcesRequest) =>
-      this.inv("screen-capture:get-sources", opts),
-    startSignalPolling: (requestId: string, after?: string) =>
-      this.inv("screen-capture:start-signal-polling", { requestId, after }),
-    stopSignalPolling: (requestId?: string) =>
-      this.inv(
-        "screen-capture:stop-signal-polling",
-        requestId ? { requestId } : undefined,
-      ),
   };
 
   geo = {

@@ -639,6 +639,9 @@
       "deliveryFee": "Costo di consegna:",
       "calculatingDeliveryFee": "Calcolo in corso...",
       "deliveryFeeNeedsExactAddress": "Seleziona l'indirizzo esatto",
+      "deliveryFeeZoneNotChecked": "Zona non verificata",
+      "deliveryZoneNotCheckedNotice": "La zona di consegna non è stata verificata. Seleziona di nuovo l'indirizzo.",
+      "repickDeliveryAddress": "Seleziona di nuovo l'indirizzo",
       "deliveryFeeOutOfZone": "Fuori zona di consegna",
       "deliveryFeeUnavailable": "Costo di consegna non disponibile",
       "total": "Totale:",
@@ -940,6 +943,7 @@
     "deleteAddressQueued": "Indirizzo eliminato e messo in coda per la sincronizzazione",
     "deleteAddressError": "Impossibile eliminare l'indirizzo",
     "updateAddressSuccess": "Indirizzo aggiornato",
+    "savedLocallyQueued": "Indirizzo salvato su questa cassa e messo in coda per la sincronizzazione",
     "updateAddressError": "Impossibile aggiornare l'indirizzo",
     "address": {
       "street": "Indirizzo",
@@ -2973,7 +2977,7 @@
         "statusStopped": "Arrestato",
         "callsDetected": "Chiamate rilevate",
         "singleSourceTitle": "Configura l'identificazione chiamante su un solo terminale sorgente",
-        "singleSourceBody": "Questo terminale acquisisce le chiamate in arrivo e le inoltra al resto del punto vendita. Non abilitare la stessa linea su più terminali POS.",
+        "singleSourceBody": "Questo terminale acquisisce le chiamate in arrivo e le mostra qui. Gli altri terminali non mostrano la chiamata. Non abilitare la stessa linea su più terminali POS.",
         "providerPreset": "Preimpostazione",
         "authUsername": "Nome utente di autenticazione",
         "authUsernamePlaceholder": "Lascia vuoto per usare il nome utente SIP",
@@ -4651,7 +4655,39 @@
       "addressAdded": "Indirizzo aggiunto",
       "addressSaveFailed": "Impossibile salvare l’indirizzo. Riprova.",
       "addressSaveTimedOut": "Il salvataggio dell’indirizzo è scaduto. Riprova.",
-      "failed": "Impossibile creare il cliente. Riprova."
+      "failed": "Impossibile creare il cliente. Riprova.",
+      "phoneLengthExact": "Il numero di telefono deve avere {{expected}} cifre (ne hai inserite {{entered}})",
+      "phoneLengthEither": "Il numero di telefono deve avere {{first}} o {{second}} cifre (ne hai inserite {{entered}})",
+      "phoneLengthRange": "Il numero di telefono deve avere da {{min}} a {{max}} cifre (ne hai inserite {{entered}})",
+      "phoneInvalid": "Questo numero di telefono non è valido. Per un numero estero inizia con + e il prefisso del paese.",
+      "phoneInvalidCharacters": "Nel numero usa solo cifre e spazi, con il + solo all’inizio.",
+      "phoneTooWide": "Il numero è troppo lungo da salvare (al massimo {{max}} caratteri). Togli spazi o parentesi in più.",
+      "phoneKeptAsSaved": "Il numero salvato resta com’è, quindi puoi comunque salvare le altre modifiche.",
+      "phoneRejected": "L’ufficio non ha accettato questo numero di telefono. Controllalo e riprova.",
+      "customerExists": "Esiste già un cliente con questo numero di telefono o email. Chiudi il modulo, cerca il cliente e selezionalo.",
+      "addressLocationRejected": "L’ufficio non ha potuto usare la posizione di questo indirizzo. Scegli di nuovo l’indirizzo dai suggerimenti.",
+      "customerNotFound": "Questo cliente non esiste più in ufficio. Chiudi il modulo e cercalo di nuovo.",
+      "saveRejected": "L’ufficio non ha accettato la modifica (codice {{code}}). Controlla i dati e riprova.",
+      "addressNotFound": "Questo indirizzo salvato non esiste più in ufficio. Chiudi il modulo e seleziona di nuovo il cliente.",
+      "customerSyncInProgress": "Questo cliente è in fase di invio all’ufficio. Attendi un momento e salva di nuovo.",
+      "customerNotSynced": "Questo cliente non è ancora nell’elenco clienti dell’ufficio, quindi non può essere modificato qui. Chiudi il modulo e aggiungilo come nuovo cliente.",
+      "saveRefusedLocally": "Questa cassa non è riuscita a salvare la modifica (codice {{code}}). Riprova; se succede di nuovo, contatta l’assistenza.",
+      "minimize": "Riduci a icona",
+      "floorTooLong": "Il piano può avere al massimo {{max}} caratteri.",
+      "updateFailed": "Impossibile salvare le modifiche. Riprova.",
+      "zoneNotChecked": "La zona di consegna non è stata verificata. Seleziona di nuovo l'indirizzo.",
+      "repickAddress": "Seleziona di nuovo l'indirizzo",
+      "selectAddressForValidation": "Scegli un indirizzo reale dai suggerimenti per verificare la consegna.",
+      "outOfZoneOverrideRequired": "L’indirizzo è fuori zona. Tocca «Accetta consegna fuori zona» e indica un motivo per continuare.",
+      "acceptOutOfZone": "Accetta consegna fuori zona",
+      "offlineOverrideRequired": "L’indirizzo non è verificato perché sei offline. Conferma l’avviso e indica un motivo per continuare.",
+      "acceptOfflineUnverified": "Accetta consegna non verificata offline",
+      "overrideReasonRequired": "Il motivo dell’override deve avere almeno 6 caratteri.",
+      "overrideReasonPlaceholder": "Scrivi il motivo dell’override (almeno 6 caratteri)",
+      "specialAddressModeTitle": "Rilevata un’etichetta di indirizzo speciale",
+      "specialAddressModeDescription": "Questo indirizzo sarà salvato come «{{address}}». La verifica della zona di consegna non viene fatta per questa voce.",
+      "conflictError": "Il cliente è stato aggiornato da un’altra cassa. Aggiorna e riprova.",
+      "versionRequired": "Questa cassa non ha la versione più recente di questo cliente. Chiudi il modulo, cerca di nuovo il cliente e ripeti la modifica."
     },
     "customerInfo": {
       "title": "Informazioni cliente",
@@ -5264,6 +5300,7 @@
     "cityRequired": "La città è obbligatoria per gli ordini di consegna",
     "postalCodeRequired": "Il codice postale è obbligatorio per gli ordini di consegna",
     "customerNoAddress": "Questo cliente non ha un indirizzo di consegna. Aggiungi prima un indirizzo.",
+    "deliveryZoneNotCheckedNotice": "La zona di consegna non è stata verificata. Seleziona di nuovo l'indirizzo per verificarla.",
     "addressValidated": "Indirizzo verificato",
     "addressValidationFailed": "Validazione indirizzo non riuscita",
     "addressValidationError": "Impossibile validare l'indirizzo",
@@ -7291,7 +7328,13 @@
     "category": {
       "food": "Piattaforme alimentari",
       "hotel": "Piattaforme alberghiere",
-      "government": "Enti governativi e conformità"
+      "government": "Enti governativi e conformità",
+      "delivery": "Piattaforme di consegna",
+      "payment": "Gateway di pagamento",
+      "analytics": "Analisi",
+      "ecommerce": "E-commerce",
+      "communications": "Comunicazioni",
+      "other": "Altri plugin"
     },
     "fields": {
       "storeUrl": "URL negozio",
@@ -7326,7 +7369,56 @@
     },
     "callerId": {
       "setupInAdmin": "Configura l'ID chiamante nel pannello di amministrazione",
-      "manageInAdmin": "Gestisci l'ID chiamante nel pannello di amministrazione"
+      "manageInAdmin": "Gestisci l'ID chiamante nel pannello di amministrazione",
+      "openInAdmin": "Apri l'ID chiamante nel pannello di amministrazione",
+      "state": {
+        "checking": "Verifica in corso…",
+        "listeningHere": "Attivo su questo terminale",
+        "notVerified": "Non verificato con il server",
+        "configuredNotListening": "Configurato — non in ascolto",
+        "listenerError": "Errore di ascolto",
+        "lineSetupIncomplete": "Configurazione della linea telefonica incompleta",
+        "otherTerminal": "Attivo su un altro terminale",
+        "switchedOff": "Disattivato per l'attività",
+        "notAssigned": "Non assegnato a questo terminale",
+        "unknown": "Stato non disponibile"
+      },
+      "short": {
+        "checking": "Verifica…",
+        "listeningHere": "In ascolto",
+        "notVerified": "Non verificato",
+        "configuredNotListening": "Non in ascolto",
+        "listenerError": "Errore",
+        "lineSetupIncomplete": "Incompleta",
+        "otherTerminal": "Altro terminale",
+        "switchedOff": "Disattivato",
+        "notAssigned": "Non assegnato",
+        "unknown": "Sconosciuto"
+      },
+      "detail": {
+        "listeningFrom": "In ascolto delle chiamate da {{device}}",
+        "listening": "In ascolto delle chiamate in arrivo",
+        "lastCall": "Ultima chiamata: {{time}}",
+        "callsThisSession": "Chiamate dall'avvio del POS: {{calls}}",
+        "noCallsYet": "Nessuna chiamata dall'avvio del POS",
+        "notListening": "Questo terminale ha una linea ID chiamante, ma non è in ascolto delle chiamate.",
+        "checkSettings": "Controlla {{path}}.",
+        "otherTerminal": "Le chiamate in arrivo compaiono sul terminale a cui è collegata la linea telefonica.",
+        "notAssigned": "Per vedere qui le chiamate in arrivo, assegna questo terminale a una linea telefonica nel pannello di amministrazione.",
+        "notVerified": "Questo terminale non è riuscito a confermare la configurazione dell'ID chiamante con il server. Le chiamate possono continuare a comparire per un po' con l'ultima configurazione confermata e la verifica riparte automaticamente.",
+        "lineSetupIncomplete": "Questo terminale è la sorgente di una linea telefonica, ma la configurazione della linea è incompleta, quindi non è in ascolto. Controlla la linea telefonica nel pannello di amministrazione.",
+        "switchedOff": "L'ID chiamante è disattivato per l'attività. Attivalo dal pannello di amministrazione.",
+        "lastKnown": "Ultimo stato noto: {{state}}. Non è stato possibile aggiornare lo stato.",
+        "unknown": "Impossibile leggere lo stato dell'ID chiamante su questo terminale. Tocca Aggiorna per riprovare."
+      },
+      "reason": {
+        "portInUse": "Un altro programma sta usando la porta dell'ID chiamante su questo terminale.",
+        "authFailed": "Il server non ha consentito l'ID chiamante su questo terminale, quindi ha smesso di ascoltare. Controlla l'ID chiamante nel pannello di amministrazione.",
+        "unsupported": "L'ID chiamante non supporta questa versione del POS o questo servizio telefonico. Aggiorna il POS o controlla la configurazione nel pannello di amministrazione.",
+        "timeout": "Il servizio telefonico non ha risposto in tempo. L'ID chiamante riprova automaticamente.",
+        "invalidConfig": "La configurazione dell'ID chiamante su questo terminale è incompleta o non aggiornata.",
+        "failed": "Non è stato possibile avviare l'ID chiamante su questo terminale."
+      }
     },
     "adminSetup": {
       "pendingFirstOrder": "Configurato dal pannello di amministrazione. La connessione diventa attiva al primo ordine ricevuto."
@@ -7352,6 +7444,12 @@
       },
       "mydata": {
         "description": "Conformità fatturazione elettronica AADE greca"
+      },
+      "caller_id": {
+        "description": "Identificazione del chiamante e ricerca del cliente"
+      },
+      "customer_messaging": {
+        "description": "Messaggi transazionali ai clienti, gestiti dal pannello di amministrazione"
       }
     },
     "empty": {
@@ -7932,8 +8030,20 @@
       },
       "duplicateCustomerConflict": {
         "title": "Questo cliente esiste già in ufficio",
-        "summary": "Un cliente salvato su questa cassa ha lo stesso numero di telefono di uno che l'ufficio conserva già, quindi la modifica non può essere inviata. Blocca la sincronizzazione da quando è stata salvata.",
+        "summary": "Un cliente salvato su questa cassa ha lo stesso numero di telefono di uno che l’ufficio conserva già, quindi la modifica non può essere inviata. Non impedisce la chiusura della giornata, ma l’ufficio non avrà questo cliente finché non lo colleghi.",
         "guidance": "Se è la stessa persona, collega questa cassa alla scheda esistente. Riprovare non serve: l'ufficio risponde ogni volta con lo stesso rifiuto."
+      },
+      "customerPhoneRejected": {
+        "title": "L’ufficio ha rifiutato il numero di telefono di un cliente",
+        "summary_one": "Una modifica a un cliente salvata su questa cassa è stata rifiutata per il numero di telefono. Non impedisce la chiusura della giornata e gli ordini conservano nome e telefono del cliente.",
+        "summary_other": "{{count}} modifiche ai clienti salvate su questa cassa sono state rifiutate per il numero di telefono. Non impediscono la chiusura della giornata e gli ordini conservano nome e telefono del cliente.",
+        "guidance": "Riprova la modifica una volta. Se viene rifiutata di nuovo, puoi comunque chiudere la giornata: correggi il telefono del cliente al suo prossimo ordine e chiedi all’assistenza di rimuovere questa modifica."
+      },
+      "customerDirectoryNotSynced": {
+        "title": "Una modifica cliente non è stata salvata in ufficio",
+        "summary_one": "Una modifica a un cliente salvata su questa cassa non è stata inviata. Non impedisce la chiusura della giornata e gli ordini conservano nome e telefono del cliente.",
+        "summary_other": "{{count}} modifiche ai clienti salvate su questa cassa non sono state inviate. Non impediscono la chiusura della giornata e gli ordini conservano nome e telefono del cliente.",
+        "guidance": "Riprova la modifica una volta. Se fallisce ancora, apri i dettagli di assistenza; puoi comunque chiudere la giornata."
       }
     }
   },

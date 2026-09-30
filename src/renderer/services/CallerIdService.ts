@@ -69,6 +69,13 @@ export interface CallerIdStatus {
   callerIdCandidates?: number
   rejectedCandidates?: number
   lastRejectionStage?: CallerIdRejectionStage
+  /**
+   * RFC 3339 time of the last Caller ID call this terminal showed. Only a
+   * timestamp — never the caller number or packet data. Optional because
+   * older native runtimes do not report it; null/absent means no call is
+   * known.
+   */
+  lastCallAt?: string | null
 }
 
 export interface CallerIdTestResult {

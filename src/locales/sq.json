@@ -867,6 +867,9 @@
       "deliveryFee": "Tarifa e dërgesës:",
       "calculatingDeliveryFee": "Duke llogaritur...",
       "deliveryFeeNeedsExactAddress": "Zgjidh adresën e saktë",
+      "deliveryFeeZoneNotChecked": "Zona nuk u kontrollua",
+      "deliveryZoneNotCheckedNotice": "Zona e dërgesës nuk u kontrollua. Zgjidhe përsëri adresën.",
+      "repickDeliveryAddress": "Zgjidhe përsëri adresën",
       "deliveryFeeOutOfZone": "Jashtë zonës së dërgesës",
       "deliveryFeeUnavailable": "Tarifa e dërgesës nuk u llogarit",
       "total": "Totali:",
@@ -1168,6 +1171,7 @@
     "deleteAddressQueued": "Adresa u fshi dhe hyri në radhë për sinkronizim",
     "deleteAddressError": "Adresa nuk u fshi",
     "updateAddressSuccess": "Adresa u përditësua",
+    "savedLocallyQueued": "Adresa u ruajt në këtë kasë dhe hyri në radhë për sinkronizim",
     "updateAddressError": "Adresa nuk u përditësua",
     "address": {
       "street": "Rruga",
@@ -3201,7 +3205,7 @@
         "statusStopped": "Ndalur",
         "callsDetected": "Thirrje të kapura",
         "singleSourceTitle": "Konfiguro Caller ID vetëm në një terminal burim",
-        "singleSourceBody": "Ky terminal kap thirrjet hyrëse dhe ua përcjell terminaleve të tjera të dyqanit. Mos e aktivizo të njëjtën linjë në disa terminale POS.",
+        "singleSourceBody": "Ky terminal kap thirrjet hyrëse dhe i shfaq këtu. Terminalet e tjera nuk e shfaqin thirrjen. Mos e aktivizo të njëjtën linjë në disa terminale POS.",
         "providerPreset": "Profil i gatshëm",
         "authUsername": "Përdoruesi i autentikimit",
         "authUsernamePlaceholder": "Lëre bosh për të përdorur përdoruesin SIP",
@@ -4879,7 +4883,39 @@
       "addressAdded": "Adresa u shtua",
       "addressSaveFailed": "Adresa s'u ruajt dot. Provo përsëri.",
       "addressSaveTimedOut": "Ruajtja e adresës zgjati shumë. Provo përsëri.",
-      "failed": "Klienti nuk u krijua. Provo përsëri."
+      "failed": "Klienti nuk u krijua. Provo përsëri.",
+      "phoneLengthExact": "Numri i telefonit duhet të ketë {{expected}} shifra (shkrove {{entered}})",
+      "phoneLengthEither": "Numri i telefonit duhet të ketë {{first}} ose {{second}} shifra (shkrove {{entered}})",
+      "phoneLengthRange": "Numri i telefonit duhet të ketë {{min}}–{{max}} shifra (shkrove {{entered}})",
+      "phoneInvalid": "Ky numër telefoni nuk është i vlefshëm. Për një numër të huaj, fillo me + dhe kodin e shtetit.",
+      "phoneInvalidCharacters": "Te numri i telefonit përdor vetëm shifra dhe hapësira, me + vetëm në fillim.",
+      "phoneTooWide": "Numri është shumë i gjatë për t’u ruajtur (deri në {{max}} karaktere). Hiq hapësirat ose kllapat e tepërta.",
+      "phoneKeptAsSaved": "Numri i ruajtur mbetet siç është, kështu që mund t’i ruash gjithsesi ndryshimet e tjera.",
+      "phoneRejected": "Zyra nuk e pranoi këtë numër telefoni. Kontrolloje dhe provo përsëri.",
+      "customerExists": "Ekziston tashmë një klient me këtë numër telefoni ose email. Mbylle formularin, kërko klientin dhe zgjidhe.",
+      "addressLocationRejected": "Zyra nuk mundi ta përdorë vendndodhjen e kësaj adrese. Zgjidhe përsëri adresën nga sugjerimet.",
+      "customerNotFound": "Ky klient nuk ekziston më në zyrë. Mbylle formularin dhe kërko përsëri.",
+      "saveRejected": "Zyra nuk e pranoi ndryshimin (kodi {{code}}). Kontrollo të dhënat dhe provo përsëri.",
+      "addressNotFound": "Kjo adresë e ruajtur nuk ekziston më në zyrë. Mbylle formularin dhe zgjidhe përsëri klientin.",
+      "customerSyncInProgress": "Ky klient po i dërgohet zyrës pikërisht tani. Prit pak dhe ruaje përsëri.",
+      "customerNotSynced": "Ky klient nuk është ende në listën e klientëve të zyrës, prandaj nuk mund ta ndryshosh këtu. Mbylle formularin dhe shtoje si klient të ri.",
+      "saveRefusedLocally": "Kjo kasë nuk e ruajti dot ndryshimin (kodi {{code}}). Provo përsëri; nëse ndodh sërish, kontakto suportin.",
+      "minimize": "Minimizo",
+      "floorTooLong": "Kati mund të ketë deri në {{max}} karaktere.",
+      "updateFailed": "Ndryshimet s’u ruajtën dot. Provo përsëri.",
+      "zoneNotChecked": "Zona e dërgesës nuk u kontrollua. Zgjidhe përsëri adresën.",
+      "repickAddress": "Zgjidhe përsëri adresën",
+      "selectAddressForValidation": "Zgjidh një adresë të vërtetë nga sugjerimet që të verifikohet dërgesa.",
+      "outOfZoneOverrideRequired": "Adresa është jashtë zonës. Prek «Prano dërgesën jashtë zonës» dhe shkruaj një arsye që të vazhdosh.",
+      "acceptOutOfZone": "Prano dërgesën jashtë zonës",
+      "offlineOverrideRequired": "Adresa nuk u verifikua sepse s’ka lidhje. Konfirmo paralajmërimin dhe shkruaj një arsye që të vazhdosh.",
+      "acceptOfflineUnverified": "Prano dërgesën e paverifikuar pa lidhje",
+      "overrideReasonRequired": "Arsyeja e anashkalimit duhet të ketë të paktën 6 karaktere.",
+      "overrideReasonPlaceholder": "Shkruaj arsyen e anashkalimit (të paktën 6 karaktere)",
+      "specialAddressModeTitle": "U gjet një etiketë e veçantë adrese",
+      "specialAddressModeDescription": "Kjo adresë do të ruhet si «{{address}}». Për këtë regjistrim nuk kontrollohet zona e dërgesës.",
+      "conflictError": "Klienti u përditësua nga një kasë tjetër. Rifresko dhe provo përsëri.",
+      "versionRequired": "Kjo kasë nuk e ka versionin më të fundit të këtij klienti. Mbylle formularin, kërkoje përsëri klientin dhe përsërite ndryshimin."
     },
     "customerInfo": {
       "title": "Të dhënat e klientit",
@@ -5492,6 +5528,7 @@
     "cityRequired": "Për porositë me dërgesë duhet qyteti",
     "postalCodeRequired": "Për porositë me dërgesë duhet kodi postar",
     "customerNoAddress": "Ky klient s'ka adresë dërgese. Shto më parë një adresë.",
+    "deliveryZoneNotCheckedNotice": "Zona e dërgesës nuk u kontrollua. Zgjidhe përsëri adresën që të kontrollohet.",
     "addressValidated": "Adresa u verifikua",
     "addressValidationFailed": "Adresa nuk u verifikua",
     "addressValidationError": "Adresa nuk u verifikua",
@@ -7519,7 +7556,13 @@
     "category": {
       "food": "Platforma ushqimi",
       "hotel": "Platforma hotelesh",
-      "government": "Shteti dhe detyrimet ligjore"
+      "government": "Shteti dhe detyrimet ligjore",
+      "delivery": "Platforma dërgesash",
+      "payment": "Sisteme pagesash",
+      "analytics": "Analitika",
+      "ecommerce": "Tregti online",
+      "communications": "Komunikime",
+      "other": "Integrime të tjera"
     },
     "fields": {
       "storeUrl": "URL e dyqanit",
@@ -7554,7 +7597,56 @@
     },
     "callerId": {
       "setupInAdmin": "Konfiguro Caller ID te paneli i adminit",
-      "manageInAdmin": "Menaxho Caller ID te paneli i adminit"
+      "manageInAdmin": "Menaxho Caller ID te paneli i adminit",
+      "openInAdmin": "Hap Caller ID te paneli i adminit",
+      "state": {
+        "checking": "Po kontrollohet…",
+        "listeningHere": "Aktiv në këtë terminal",
+        "notVerified": "Nuk u konfirmua me serverin",
+        "configuredNotListening": "I konfiguruar — nuk dëgjon",
+        "listenerError": "Gabim dëgjimi",
+        "lineSetupIncomplete": "Konfigurimi i linjës së telefonit është i paplotë",
+        "otherTerminal": "Punon në një terminal tjetër",
+        "switchedOff": "I fikur për biznesin",
+        "notAssigned": "Nuk i është caktuar këtij terminali",
+        "unknown": "Gjendja nuk dihet"
+      },
+      "short": {
+        "checking": "Po kontrollohet…",
+        "listeningHere": "Në dëgjim",
+        "notVerified": "Pa konfirmim",
+        "configuredNotListening": "Nuk dëgjon",
+        "listenerError": "Gabim",
+        "lineSetupIncomplete": "I paplotë",
+        "otherTerminal": "Terminal tjetër",
+        "switchedOff": "I fikur",
+        "notAssigned": "Pa caktim",
+        "unknown": "E panjohur"
+      },
+      "detail": {
+        "listeningFrom": "Dëgjon thirrjet nga {{device}}",
+        "listening": "Dëgjon thirrjet hyrëse",
+        "lastCall": "Thirrja e fundit: {{time}}",
+        "callsThisSession": "Thirrje që kur u ndez POS-i: {{calls}}",
+        "noCallsYet": "Asnjë thirrje që kur u ndez POS-i",
+        "notListening": "Ky terminal ka një linjë Caller ID, por nuk po dëgjon thirrjet.",
+        "checkSettings": "Kontrollo {{path}}.",
+        "otherTerminal": "Thirrjet hyrëse shfaqen te terminali ku është lidhur linja e telefonit.",
+        "notAssigned": "Që thirrjet hyrëse të shfaqen këtu, caktoje këtë terminal te një linjë telefoni nga paneli i adminit.",
+        "notVerified": "Ky terminal nuk e konfirmoi dot konfigurimin e Caller ID me serverin. Thirrjet mund të vazhdojnë të shfaqen edhe për pak kohë me konfigurimin e fundit të konfirmuar, dhe kontrolli provohet sërish vetë.",
+        "lineSetupIncomplete": "Ky terminal është burimi i një linje telefoni, por konfigurimi i linjës është i paplotë, prandaj nuk po dëgjon thirrjet. Kontrollo linjën e telefonit te paneli i adminit.",
+        "switchedOff": "Caller ID është i fikur për biznesin. Ndize te paneli i adminit.",
+        "lastKnown": "Gjendja e fundit e njohur: {{state}}. Gjendja nuk u rifreskua dot.",
+        "unknown": "Gjendja e Caller ID në këtë terminal nuk u lexua dot. Shtyp rifresko për ta provuar sërish."
+      },
+      "reason": {
+        "portInUse": "Një program tjetër po përdor portën e Caller ID në këtë terminal.",
+        "authFailed": "Serveri nuk e lejoi Caller ID në këtë terminal, prandaj ai ndaloi së dëgjuari. Kontrollo Caller ID te paneli i adminit.",
+        "unsupported": "Caller ID nuk e mbështet këtë version të POS-it ose këtë shërbim telefonik. Përditëso POS-in ose kontrollo konfigurimin te paneli i adminit.",
+        "timeout": "Shërbimi telefonik nuk u përgjigj në kohë. Caller ID provon sërish vetë.",
+        "invalidConfig": "Konfigurimi i Caller ID në këtë terminal është i paplotë ose i vjetër.",
+        "failed": "Caller ID nuk u nis dot në këtë terminal."
+      }
     },
     "adminSetup": {
       "pendingFirstOrder": "Konfigurohet te paneli i adminit. Lidhja aktivizohet me porosinë e parë që vjen."
@@ -7580,6 +7672,12 @@
       },
       "mydata": {
         "description": "Faturim elektronik sipas rregullave të AADE-së në Greqi"
+      },
+      "caller_id": {
+        "description": "Njohja e thirrësit dhe kërkimi i klientit"
+      },
+      "customer_messaging": {
+        "description": "Mesazhe transaksionale për klientët, të menaxhuara te paneli i adminit"
       }
     },
     "empty": {
@@ -8150,7 +8248,7 @@
       },
       "duplicateCustomerConflict": {
         "title": "Ky klient ekziston tashmë në zyrë",
-        "summary": "Një klient i ruajtur në këtë terminal ka të njëjtin numër telefoni me një që zyra e ka tashmë, prandaj ndryshimi s'mund të dërgohet. Që kur u ruajt, po e bllokon sinkronizimin.",
+        "summary": "Një klient i ruajtur në këtë terminal ka të njëjtin numër telefoni me një që zyra e ka tashmë, prandaj ndryshimi s’mund të dërgohet. Nuk e pengon mbylljen e ditës, por zyra nuk e ka këtë klient derisa ta lidhësh.",
         "guidance": "Nëse është i njëjti person, lidhe këtë terminal me kartelën ekzistuese. Të provosh përsëri s'ndihmon: zyra përgjigjet çdo herë me të njëjtin refuzim."
       },
       "customerAddressDefaultConflict": {
@@ -8162,6 +8260,18 @@
         "title": "Duhet ndërhyrja e zhvilluesve",
         "summary": "Ka sinkronizime të prapambetura, por për këtë dështim konkret s'ka ende zgjidhje të udhëzuar.",
         "guidance": "Kontakto zhvilluesit dhe bashkëngjit paketën e diagnostikës, që herën tjetër ky rast të ketë një zgjidhje të udhëzuar."
+      },
+      "customerPhoneRejected": {
+        "title": "Zyra refuzoi numrin e telefonit të një klienti",
+        "summary_one": "Një ndryshim klienti i ruajtur në këtë kasë u refuzua për shkak të numrit të telefonit. Nuk e pengon mbylljen e ditës dhe porositë e mbajnë emrin dhe telefonin e klientit.",
+        "summary_other": "{{count}} ndryshime klientësh të ruajtura në këtë kasë u refuzuan për shkak të numrit të telefonit. Nuk e pengojnë mbylljen e ditës dhe porositë e mbajnë emrin dhe telefonin e klientit.",
+        "guidance": "Provoje edhe një herë ndryshimin. Nëse refuzohet përsëri, mund ta mbyllësh gjithsesi ditën: korrigjoje telefonin e klientit herën tjetër që porosit dhe kërkoji suportit ta heqë këtë ndryshim."
+      },
+      "customerDirectoryNotSynced": {
+        "title": "Një ndryshim klienti nuk u ruajt në zyrë",
+        "summary_one": "Një ndryshim klienti i ruajtur në këtë kasë nuk u dërgua dot. Nuk e pengon mbylljen e ditës dhe porositë e mbajnë emrin dhe telefonin e klientit.",
+        "summary_other": "{{count}} ndryshime klientësh të ruajtura në këtë kasë nuk u dërguan dot. Nuk e pengojnë mbylljen e ditës dhe porositë e mbajnë emrin dhe telefonin e klientit.",
+        "guidance": "Provoje edhe një herë ndryshimin. Nëse dështon përsëri, hap detajet për suportin; ditën mund ta mbyllësh gjithsesi."
       }
     }
   },

@@ -22,6 +22,7 @@ import {
 import {
   callerIdGetServerConfig,
   callerIdGetStatus,
+  callerIdStart,
   type CallerIdServerConfig,
   type CallerIdServerSourceLine,
   type CallerIdStatus,
@@ -193,6 +194,14 @@ const CallerIdSection: React.FC = () => {
   }, [refreshLocalStatus])
 
   const handleRefresh = useCallback(async () => {
+    // The explicit refresh is the on-demand activation check: the native
+    // runtime restarts from its stored lease and checks the server once, so a
+    // line assigned in the Admin Dashboard applies without a POS restart.
+    try {
+      await callerIdStart()
+    } catch {
+      // The status and configuration refresh below report what is wrong.
+    }
     const refreshed = await refreshState()
     if (refreshed) {
       toast.success(
@@ -252,7 +261,7 @@ const CallerIdSection: React.FC = () => {
         <p className="text-xs">
           {t(
             'settings.peripherals.callerId.singleSourceBody',
-            'This terminal captures incoming calls and forwards them to the rest of the store. Do not enable the same line on multiple POS terminals.',
+            'This terminal captures incoming calls and shows them here. Other terminals do not show the call. Do not enable the same line on multiple POS terminals.',
           )}
         </p>
       </div>

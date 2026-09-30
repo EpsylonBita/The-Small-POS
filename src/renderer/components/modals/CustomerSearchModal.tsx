@@ -32,6 +32,11 @@ import {
   withMaterializedCustomerAddresses,
 } from '../../utils/customer-addresses';
 import { getBridge } from '../../../lib';
+import { toValidLatLng } from '../../utils/coordinates';
+import {
+  customerAddressWriteErrorText,
+  expectCustomerAddressWrite,
+} from '../../utils/customer-address-write-refusal';
 import type { CallerIdRequestedOrderType } from '../../services/caller-id-order-flow';
 
 interface CustomerAddress {
@@ -72,6 +77,8 @@ interface Customer {
   longitude?: number | null;
   version?: number;
   addresses?: CustomerAddress[];
+  /** The saved address the order goes to (and that a full edit edits). */
+  selected_address_id?: string | null;
   is_banned?: boolean;
   ban_reason?: string;
   banned_at?: string;
@@ -137,13 +144,12 @@ const resolveAddressStreet = (address?: Partial<CustomerAddress> | null): string
   return typeof address.street === 'string' ? address.street.trim() : '';
 };
 
-const normalizeCustomerAddress = (address: any): CustomerAddress => {
+export const normalizeCustomerAddress = (address: any): CustomerAddress => {
   const normalizedStreet = resolveAddressStreet(address);
-  const coordinates =
-    address?.coordinates ||
-    (Number.isFinite(Number(address?.latitude)) && Number.isFinite(Number(address?.longitude))
-      ? { lat: Number(address.latitude), lng: Number(address.longitude) }
-      : undefined);
+  // Strict: an address without coordinates keeps none. Number(null) === 0
+  // used to hand the address editor the point (0,0), which the zone check
+  // then reported as "out of delivery area".
+  const point = toValidLatLng(address?.coordinates, address?.latitude, address?.longitude);
   return {
     ...address,
     id: address?.id ?? '',
@@ -155,9 +161,9 @@ const normalizeCustomerAddress = (address: any): CustomerAddress => {
     name_on_ringer: typeof address?.name_on_ringer === 'string' ? address.name_on_ringer : '',
     notes: address?.notes ?? address?.delivery_notes ?? '',
     delivery_notes: address?.notes ?? address?.delivery_notes ?? '',
-    coordinates,
-    latitude: address?.latitude ?? null,
-    longitude: address?.longitude ?? null,
+    coordinates: point ?? undefined,
+    latitude: point?.lat ?? null,
+    longitude: point?.lng ?? null,
     address_type: typeof address?.address_type === 'string' ? address.address_type : 'delivery',
     is_default: Boolean(address?.is_default),
     created_at: typeof address?.created_at === 'string' ? address.created_at : '',
@@ -169,6 +175,36 @@ const normalizeCustomerAddresses = (addresses: any): CustomerAddress[] => {
   if (!Array.isArray(addresses)) return [];
   return addresses.map((address) => normalizeCustomerAddress(address));
 };
+
+/** Maps a customer from the POS API or the terminal's local cache. */
+export const toCustomerRecord = (c: any): Customer =>
+  withMaterializedCustomerAddresses({
+    id: c.id,
+    phone: c.phone,
+    name: c.name,
+    email: c.email,
+    address: c.address,
+    city: c.city,
+    postal_code: c.postal_code,
+    floor_number: c.floor_number,
+    notes: c.notes,
+    name_on_ringer: c.name_on_ringer,
+    ...(() => {
+      const point = toValidLatLng(c.coordinates, c.latitude, c.longitude);
+      return {
+        coordinates: point ?? undefined,
+        latitude: point?.lat ?? null,
+        longitude: point?.lng ?? null,
+      };
+    })(),
+    version: c.version,
+    addresses: normalizeCustomerAddresses(c.addresses),
+    is_banned: c.is_banned,
+    ban_reason: c.ban_reason,
+    banned_at: c.banned_at,
+  }) as Customer;
+
+const PHONE_LIKE_QUERY = /^[0-9+\-\s()]+$/;
 
 const ModalDisplayedReporter: React.FC<{
   requestKey?: string;
@@ -217,6 +253,10 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
   const searchRequestSeqRef = useRef(0);
   const suppressAutomaticLookupRef = useRef(Boolean(initialCustomer));
   const displayedRequestRef = useRef<string | null>(null);
+  // Caller ID looks a number up in this terminal's customer cache first, so a
+  // known customer appears without the number leaving the POS (and offline).
+  const localFirstPhoneLookupRef = useRef(Boolean(callerIdWorkspace));
+  localFirstPhoneLookupRef.current = Boolean(callerIdWorkspace);
   const [selectedAddressId, setSelectedAddressId] = useState<string | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
@@ -308,6 +348,26 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
     setCustomers([]);
 
     try {
+      if (localFirstPhoneLookupRef.current && PHONE_LIKE_QUERY.test(query.trim())) {
+        // A customer already stored on this terminal is resolved locally: no
+        // request, so it also works offline. Only a local miss falls through
+        // to the regular customer search below.
+        try {
+          const cached = await getBridge().customers.lookupByPhone(query.trim(), {
+            cacheOnly: true,
+          });
+          if (isSearchRequestStale(requestId)) return;
+          if (cached && typeof cached === 'object' && (cached as { id?: unknown }).id) {
+            setError(null);
+            setCustomer(toCustomerRecord(cached));
+            setCustomers([]);
+            return;
+          }
+        } catch {
+          if (isSearchRequestStale(requestId)) return;
+        }
+      }
+
       const { posKey, termId } = await resolvePosCredentials();
       if (isSearchRequestStale(requestId)) return;
 
@@ -360,60 +420,13 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
 
       // Handle multiple results
       if (payload?.success && payload.multiple && payload.customers) {
-        const customersList = payload.customers.map((c: any) =>
-          withMaterializedCustomerAddresses({
-            id: c.id,
-            phone: c.phone,
-            name: c.name,
-            email: c.email,
-            address: c.address,
-            city: c.city,
-            postal_code: c.postal_code,
-            floor_number: c.floor_number,
-            notes: c.notes,
-            name_on_ringer: c.name_on_ringer,
-            coordinates: c.coordinates ||
-              (Number.isFinite(Number(c.latitude)) && Number.isFinite(Number(c.longitude))
-                ? { lat: Number(c.latitude), lng: Number(c.longitude) }
-                : undefined),
-            latitude: c.latitude ?? null,
-            longitude: c.longitude ?? null,
-            version: c.version,
-            addresses: normalizeCustomerAddresses(c.addresses),
-            is_banned: c.is_banned,
-            ban_reason: c.ban_reason,
-            banned_at: c.banned_at,
-          })
-        );
+        const customersList = payload.customers.map((c: any) => toCustomerRecord(c));
         setError(null);
         setCustomers(customersList);
         setCustomer(null);
       } else if (payload?.success && payload.customer) {
         // Single customer result
-        const customerObj = withMaterializedCustomerAddresses({
-          id: payload.customer.id,
-          phone: payload.customer.phone,
-          name: payload.customer.name,
-          email: payload.customer.email,
-          address: payload.customer.address,
-          city: payload.customer.city,
-          postal_code: payload.customer.postal_code,
-          floor_number: payload.customer.floor_number,
-          notes: payload.customer.notes,
-          name_on_ringer: payload.customer.name_on_ringer,
-          coordinates: payload.customer.coordinates ||
-            (Number.isFinite(Number(payload.customer.latitude)) &&
-              Number.isFinite(Number(payload.customer.longitude))
-              ? { lat: Number(payload.customer.latitude), lng: Number(payload.customer.longitude) }
-              : undefined),
-          latitude: payload.customer.latitude ?? null,
-          longitude: payload.customer.longitude ?? null,
-          version: payload.customer.version,
-          addresses: normalizeCustomerAddresses(payload.customer.addresses),
-          is_banned: payload.customer.is_banned,
-          ban_reason: payload.customer.ban_reason,
-          banned_at: payload.customer.banned_at,
-        }) as Customer;
+        const customerObj = toCustomerRecord(payload.customer);
 
         // Clear error when customer is found
         setError(null);
@@ -516,7 +529,14 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
 
   const handleEditCustomer = () => {
     if (customer && onEditCustomer) {
-      onEditCustomer(customer);
+      // Founder decision 5 (29/09/2026): the full "Edit customer" form edits
+      // the address the cashier picked here, not the default one, so it is
+      // handed on as the selected address (AddCustomerModal edit mode
+      // prefills and writes that address).
+      onEditCustomer({
+        ...customer,
+        selected_address_id: selectedAddressId ?? customer.selected_address_id,
+      });
     }
   };
 
@@ -962,27 +982,32 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                                     onClick={async () => {
                                       toast.dismiss(toastInstance.id);
                                       try {
-                                        const result = await bridge.customers.deleteAddress(customer.id, addr.id);
-                                        if (result?.success !== false) {
-                                          setCustomer(prev => prev ? {
-                                            ...prev,
-                                            addresses: prev.addresses?.filter(a => a.id !== addr.id)
-                                          } : null);
-                                          if (isSelected) {
-                                            const remaining = customer.addresses?.filter(a => a.id !== addr.id);
-                                            setSelectedAddressId(remaining?.[0]?.id || null);
-                                          }
-                                          toast.success(
-                                            result?.queued
-                                              ? t('modals.customerSearch.deleteAddressQueued', 'Address deleted and queued for sync')
-                                              : t('modals.customerSearch.deleteAddressSuccess', 'Address deleted'),
-                                          );
-                                        } else {
-                                          toast.error(t('modals.customerSearch.deleteAddressFailed', 'Failed to delete address'));
+                                        // A refusal (the address or customer is gone at the
+                                        // office, this register's own refusals) is named and
+                                        // the address stays listed; its `error` is a machine
+                                        // code and is never shown.
+                                        const result = expectCustomerAddressWrite(
+                                          t,
+                                          await bridge.customers.deleteAddress(customer.id, addr.id),
+                                          'delete',
+                                          'modals.customerSearch.deleteAddressFailed',
+                                        );
+                                        setCustomer(prev => prev ? {
+                                          ...prev,
+                                          addresses: prev.addresses?.filter(a => a.id !== addr.id)
+                                        } : null);
+                                        if (isSelected) {
+                                          const remaining = customer.addresses?.filter(a => a.id !== addr.id);
+                                          setSelectedAddressId(remaining?.[0]?.id || null);
                                         }
+                                        toast.success(
+                                          result.queued
+                                            ? t('modals.customerSearch.deleteAddressQueued', 'Address deleted and queued for sync')
+                                            : t('modals.customerSearch.deleteAddressSuccess', 'Address deleted'),
+                                        );
                                       } catch (err) {
                                         console.error('Error deleting address:', err);
-                                        toast.error(t('modals.customerSearch.deleteAddressFailed', 'Failed to delete address'));
+                                        toast.error(customerAddressWriteErrorText(t, err, 'modals.customerSearch.deleteAddressFailed'));
                                       }
                                     }}
                                     className="px-3 py-1.5 text-xs font-medium bg-red-500 text-white rounded-md active:bg-red-600 transition-colors"

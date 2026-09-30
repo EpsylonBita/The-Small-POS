@@ -175,6 +175,11 @@ pub struct CallerIdStatus {
     pub caller_id_candidates: u64,
     pub rejected_candidates: u64,
     pub last_rejection_stage: Option<CallerIdRejectionStage>,
+    /// When this terminal last detected an incoming call in the current app
+    /// session (serialized as `lastCallAt`, RFC 3339 UTC). Timestamp only:
+    /// never the caller's number or any packet content.
+    #[serde(default)]
+    pub last_call_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 // ---------------------------------------------------------------------------

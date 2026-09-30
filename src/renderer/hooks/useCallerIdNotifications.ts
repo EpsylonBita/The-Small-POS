@@ -1,19 +1,15 @@
 /**
- * useCallerIdNotifications — Displays validated local Caller ID events
- * immediately, then merges their terminal-scoped cloud delivery evidence.
- * Legacy native SIP events are intentionally outside this hook.
+ * useCallerIdNotifications — Displays Caller ID events emitted by the local
+ * native runtime on this terminal. No cloud subscription or polling is used.
  *
  * Gated by `plugin_integrations`; caller_id itself is a plugin integration.
  */
 import { useEffect, useRef, useCallback } from 'react'
 import { offEvent, onEvent } from '../../lib'
 import { useModules } from '../contexts/module-context'
-import { getCachedTerminalCredentials } from '../services/terminal-credentials'
-import {
-  subscribeToCallerIdEvents,
-  type CallerIdBroadcastEvent,
-  type CallerIdReceipt,
-  type CallerIdRealtimeClient,
+import type {
+  CallerIdBroadcastEvent,
+  CallerIdReceipt,
 } from '../services/CallerIdRealtimeService'
 import { showCallerIdToast } from '../components/callerid/CallerIdPopup'
 import {
@@ -25,8 +21,6 @@ import {
 interface CallerIdNotificationsOptions {
   /** The signed-in POS session is allowed to receive caller events. */
   active?: boolean
-  realtimeReady?: boolean
-  realtimeClient?: CallerIdRealtimeClient | null
   onOpenCustomerSearch?: (request: CallerIdCustomerSearchRequest) => void
 }
 
@@ -58,7 +52,7 @@ interface ValidatedLocalCallPayload {
   providerEventId: string
   callerNumber: string | null
   countryCode?: string | null
-  presentation: 'allowed' | 'restricted'
+  presentation: 'allowed' | 'restricted' | 'unknown'
   occurredAt: string
 }
 
@@ -90,8 +84,6 @@ export function useCallerIdNotifications(options?: CallerIdNotificationsOptions)
   const enabled = isModuleEnabled('plugin_integrations' as any)
   const active = options?.active !== false
   const notificationsActive = enabled && active
-  const realtimeReady = options?.realtimeReady === true
-  const realtimeClient = options?.realtimeClient ?? null
   const onOpenCustomerSearch = options?.onOpenCustomerSearch
   const callEventsRef = useRef(new Map<string, AcceptedCallState>())
   const cleanupTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>())
@@ -205,31 +197,6 @@ export function useCallerIdNotifications(options?: CallerIdNotificationsOptions)
     }
   }, [notificationsActive, handleCallEvent])
 
-  useEffect(() => {
-    if (!notificationsActive) {
-      return
-    }
-
-    const creds = getCachedTerminalCredentials()
-    if (!creds.organizationId || !creds.branchId) {
-      return
-    }
-
-    return subscribeToCallerIdEvents(
-      realtimeReady ? realtimeClient : null,
-      creds.organizationId,
-      creds.terminalId,
-      handleCallEvent,
-      () => {
-        const current = getCachedTerminalCredentials()
-        return (
-          current.organizationId === creds.organizationId &&
-          current.terminalId === creds.terminalId &&
-          current.branchId === creds.branchId
-        )
-      },
-    )
-  }, [notificationsActive, handleCallEvent, realtimeClient, realtimeReady])
 }
 
 function parseValidatedLocalCall(value: unknown): CallerIdBroadcastEvent | null {
@@ -261,7 +228,9 @@ function parseValidatedLocalCall(value: unknown): CallerIdBroadcastEvent | null 
     payload.lineVersion <= 0 ||
     typeof payload.providerEventId !== 'string' ||
     !PROVIDER_EVENT_ID_REGEX.test(payload.providerEventId) ||
-    !['allowed', 'restricted'].includes(payload.presentation) ||
+    // `unknown` is a device that reported no number and no privacy flag; it is
+    // shown like a withheld number, without a customer lookup.
+    !['allowed', 'restricted', 'unknown'].includes(payload.presentation) ||
     (payload.presentation === 'allowed'
       ? typeof payload.callerNumber !== 'string' ||
         !LOCAL_PHONE_REGEX.test(payload.callerNumber)

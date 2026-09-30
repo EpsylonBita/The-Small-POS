@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
   posApiGet: vi.fn(),
+  lookupByPhone: vi.fn(),
   posApiDelete: vi.fn(),
   getResolvedTerminalCredentials: vi.fn(),
   deleteAddress: vi.fn(),
@@ -34,7 +35,7 @@ vi.mock('../../../../lib', () => ({
     customers: {
       deleteAddress: mocks.deleteAddress,
       invalidateCache: vi.fn(),
-      lookupByPhone: vi.fn(),
+      lookupByPhone: mocks.lookupByPhone,
     },
     terminalConfig: { getBranchId: mocks.getBranchId },
   }),
@@ -179,6 +180,8 @@ describe('CustomerSearchModal Caller ID lookup', () => {
     mocks.renderModalContent = true
     mocks.addCustomerModalProps.mockClear()
     mocks.customerServiceAddCustomerAddress.mockReset()
+    mocks.lookupByPhone.mockReset()
+    mocks.lookupByPhone.mockResolvedValue(null)
     mocks.getBranchId.mockResolvedValue(null)
     mocks.getResolvedTerminalCredentials.mockResolvedValue({
       apiKey: 'terminal-api-key',
@@ -202,6 +205,104 @@ describe('CustomerSearchModal Caller ID lookup', () => {
 
   afterEach(() => {
     cleanup()
+  })
+
+  it('shows a caller already stored on this terminal without any request', async () => {
+    mocks.lookupByPhone.mockResolvedValue({
+      id: 'customer-local',
+      name: 'Τοπικός Πελάτης',
+      phone: '+30 210 123 4567',
+      addresses: [{
+        id: 'address-local',
+        street_address: 'Τοπική Οδός 7',
+        city: 'Athens',
+        is_default: true,
+      }],
+    })
+
+    render(
+      <CallerIdCustomerSearchModalHostUnderContract
+        request={{
+          displayPhone: '2101234567',
+          lookupPhone: '2101234567',
+          requestKey: 'call-local-customer',
+          onDisplayed: vi.fn(),
+        }}
+        onClose={vi.fn()}
+      />,
+    )
+
+    expect(await screen.findByText('Τοπικός Πελάτης')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Τοπική Οδός 7/ }))
+        .toHaveAttribute('aria-pressed', 'true')
+    })
+    expect(mocks.lookupByPhone).toHaveBeenCalledWith('2101234567', { cacheOnly: true })
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    expect(mocks.posApiGet).not.toHaveBeenCalled()
+    expect(mocks.getResolvedTerminalCredentials).not.toHaveBeenCalled()
+  })
+
+  it('still shows a known local caller while the network is down', async () => {
+    mocks.posApiGet.mockRejectedValue(new Error('Failed to fetch'))
+    mocks.getResolvedTerminalCredentials.mockRejectedValue(new Error('offline'))
+    mocks.lookupByPhone.mockResolvedValue({
+      id: 'customer-offline',
+      name: 'Offline Πελάτης',
+      phone: '2101234567',
+      addresses: [],
+    })
+
+    render(
+      <CallerIdCustomerSearchModalHostUnderContract
+        request={{
+          displayPhone: '+302101234567',
+          lookupPhone: '2101234567',
+          requestKey: 'call-offline',
+          onDisplayed: vi.fn(),
+        }}
+        onClose={vi.fn()}
+      />,
+    )
+
+    expect(await screen.findByText('Offline Πελάτης')).toBeInTheDocument()
+    expect(screen.queryByText('modals.customerSearch.searchError')).not.toBeInTheDocument()
+    expect(mocks.posApiGet).not.toHaveBeenCalled()
+  })
+
+  it('falls back to the regular customer search only when the local cache has no match', async () => {
+    render(
+      <CallerIdCustomerSearchModalHostUnderContract
+        request={{
+          displayPhone: '2101234567',
+          lookupPhone: '2101234567',
+          requestKey: 'call-local-miss',
+          onDisplayed: vi.fn(),
+        }}
+        onClose={vi.fn()}
+      />,
+    )
+
+    expect(await screen.findByText('Μαρία Παπαδοπούλου')).toBeInTheDocument()
+    expect(mocks.lookupByPhone).toHaveBeenCalledWith('2101234567', { cacheOnly: true })
+    expect(mocks.posApiGet).toHaveBeenCalledTimes(1)
+    expect(mocks.lookupByPhone.mock.invocationCallOrder[0])
+      .toBeLessThan(mocks.posApiGet.mock.invocationCallOrder[0])
+  })
+
+  it('keeps non-Caller ID searches on the existing request path', async () => {
+    render(
+      <CustomerSearchModal
+        isOpen
+        lookupOnly
+        initialSearchTerm="2101234567"
+        searchRequestKey="plain-search"
+        onClose={vi.fn()}
+      />,
+    )
+
+    await waitFor(() => expect(mocks.posApiGet).toHaveBeenCalledTimes(1))
+    expect(mocks.lookupByPhone).not.toHaveBeenCalled()
   })
 
   it('prefills the incoming number, searches automatically, and renders details read-only', async () => {

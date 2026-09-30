@@ -5,6 +5,13 @@ import type {
   DeliveryOverrideResponse,
 } from '../types/delivery-validation';
 import { getBridge } from '../../lib';
+import { toValidLatLng } from '../../renderer/utils/coordinates';
+import {
+  createUncheckedDeliveryZoneResult,
+  isDeliveryZoneUnchecked,
+  ZONE_VALIDATION_CONTRACT_FIELD,
+  ZONE_VALIDATION_CONTRACT_VERSION,
+} from '../../renderer/utils/delivery-fee';
 
 type LatLng = { lat: number; lng: number };
 
@@ -85,6 +92,13 @@ export class DeliveryValidationService {
         };
       }
 
+      // A coordinate-only request whose point is unusable ((0,0), a coerced
+      // null, out of range): the zone cannot be checked. Answer locally; never
+      // send it, never cache it, never call it out of zone.
+      if (!preparedRequest.coordinates && this.isCoordinateOnlyAddress(preparedRequest.address)) {
+        return createUncheckedDeliveryZoneResult();
+      }
+
       const cacheKey = this.getCacheKey(preparedRequest);
 
       if (cacheKey) {
@@ -100,7 +114,7 @@ export class DeliveryValidationService {
 
       const result = await this.performBoundaryValidation(preparedRequest);
 
-      if (cacheKey && result.success !== false) {
+      if (cacheKey && this.isCacheableResult(preparedRequest, result)) {
         this.cache.set(cacheKey, {
           expiresAt: Date.now() + CACHE_TTL_MS,
           result,
@@ -176,23 +190,43 @@ export class DeliveryValidationService {
     };
   }
 
+  /**
+   * The point to check, read strictly: null/'' are absent (never 0) and
+   * (0,0), non-finite or out-of-range values are dropped before any request.
+   */
   private extractCoordinates(request: DeliveryBoundaryValidationRequest): LatLng | undefined {
-    if (this.isLatLng(request.address)) {
-      return request.address;
+    if (request.address && typeof request.address === 'object') {
+      const fromAddress = toValidLatLng(request.address);
+      if (fromAddress) {
+        return fromAddress;
+      }
     }
 
-    const extraCoordinates = (request as any).coordinates;
-    if (this.isLatLng(extraCoordinates)) {
-      return extraCoordinates;
-    }
+    const extra = request as { coordinates?: unknown; latitude?: unknown; longitude?: unknown };
+    return toValidLatLng(extra.coordinates, extra.latitude, extra.longitude) ?? undefined;
+  }
 
-    const latitude = Number((request as any).latitude);
-    const longitude = Number((request as any).longitude);
-    if (Number.isFinite(latitude) && Number.isFinite(longitude)) {
-      return { lat: latitude, lng: longitude };
-    }
+  private isCoordinateOnlyAddress(address: unknown): boolean {
+    return Boolean(address) && typeof address === 'object';
+  }
 
-    return undefined;
+  /**
+   * A cached verdict must never outlive a zone change or hide a re-pick: only
+   * a positive answer is cached for a point; anything else (out of zone, not
+   * checked, errors) is asked again. Text keys keep caching every successful
+   * answer (the server answers text without a point deterministically).
+   */
+  private isCacheableResult(
+    request: DeliveryBoundaryValidationRequest & { coordinates?: LatLng },
+    result: DeliveryBoundaryValidationResponse
+  ): boolean {
+    if (result.success === false) {
+      return false;
+    }
+    if (!request.coordinates) {
+      return true;
+    }
+    return result.isValid === true && !isDeliveryZoneUnchecked(result);
   }
 
   private getBridge() {
@@ -234,6 +268,7 @@ export class DeliveryValidationService {
     const requestBody = {
       ...request,
       coordinates: request.coordinates,
+      [ZONE_VALIDATION_CONTRACT_FIELD]: ZONE_VALIDATION_CONTRACT_VERSION,
     };
     const bridge = this.getBridge();
 
@@ -338,9 +373,7 @@ export class DeliveryValidationService {
     const shortfall = apiResponse?.shortfall ?? apiResponse?.validation?.shortfall ?? 0;
 
     const coordinates =
-      this.isLatLng(apiResponse?.coordinates)
-        ? apiResponse.coordinates
-        : request.coordinates;
+      toValidLatLng(apiResponse?.coordinates) ?? request.coordinates;
 
     return {
       ...apiResponse,
@@ -490,15 +523,6 @@ export class DeliveryValidationService {
     }
 
     return cached.result;
-  }
-
-  private isLatLng(value: unknown): value is LatLng {
-    if (!value || typeof value !== 'object') {
-      return false;
-    }
-
-    const record = value as Record<string, unknown>;
-    return Number.isFinite(Number(record.lat)) && Number.isFinite(Number(record.lng));
   }
 
   private isCustomDeliveryAddress(value: unknown): boolean {

@@ -2,6 +2,12 @@ import { getBridge, onEvent } from '../../lib';
 import { posApiPost } from '../utils/api-helpers';
 import { resolveAddressLanguage } from '../utils/address-language';
 import { parseSpecialAddressInput } from '../utils/specialAddress';
+import { toValidLatLng } from '../utils/coordinates';
+import {
+  isDeliveryZoneUnchecked,
+  ZONE_VALIDATION_CONTRACT_FIELD,
+  ZONE_VALIDATION_CONTRACT_VERSION,
+} from '../utils/delivery-fee';
 import {
   extractStreetNumber,
   selectResolvedStreetNumber,
@@ -53,6 +59,14 @@ export interface ResolvedAddressDetails {
   resolvedStreetNumber?: string;
   addressFingerprint: string;
   validationSource: 'online' | 'offline_cache';
+  /** Street name from the place's `route` component, when known. */
+  route?: string;
+  /**
+   * Every municipality/area name the place carries (locality, postal town,
+   * sublocality, administrative levels 3-5; long and short names). Automatic
+   * geolocation of a saved address matches its municipality against these.
+   */
+  areaNames?: string[];
 }
 
 export interface DeliveryValidationResult {
@@ -134,16 +148,14 @@ function extractPrimaryStreetText(value: unknown): string {
   return sanitizeString(firstSegment);
 }
 
+/**
+ * A suggestion's point, read strictly: (0,0) — what the offline customer cache
+ * of 1.4.118-era builds gives an address without coordinates — and any
+ * non-finite or out-of-range pair mean "no point", so the pick asks for a
+ * real address instead of zone-checking Null Island.
+ */
 function normalizeSuggestionLocation(value: any): { lat: number; lng: number } | undefined {
-  const lat = value?.lat ?? value?.latitude;
-  const lng = value?.lng ?? value?.longitude;
-  if (Number.isFinite(lat) && Number.isFinite(lng)) {
-    return {
-      lat: Number(lat),
-      lng: Number(lng),
-    };
-  }
-  return undefined;
+  return toValidLatLng(value) ?? undefined;
 }
 
 export function getSuggestionStreetLabel(
@@ -370,12 +382,7 @@ function normalizeLocalPlaces(raw: any): AddressSuggestion[] {
     formatted_address: sanitizeString(place.formatted_address || place.name || place.street_address),
     city: sanitizeString(place.city),
     postal_code: sanitizeString(place.postal_code),
-    location:
-      place.location &&
-      Number.isFinite(place.location.lat) &&
-      Number.isFinite(place.location.lng)
-        ? { lat: Number(place.location.lat), lng: Number(place.location.lng) }
-        : undefined,
+    location: normalizeSuggestionLocation(place.location),
     types: Array.isArray(place.types) ? place.types : [],
     verified: place?.verified === true,
     source: 'offline_cache',
@@ -395,7 +402,10 @@ async function fetchOnlineSuggestions(
     query: query.trim(),
     branchId: options.branchId || creds.branchId || undefined,
     branch_id: options.branchId || creds.branchId || undefined,
-    location: options.location || undefined,
+    // A (0,0) or invalid store point is no location bias.
+    location: options.location && toValidLatLng(options.location)
+      ? options.location
+      : undefined,
     radius: options.radius || undefined,
     language,
     session_token: options.sessionToken || undefined,
@@ -459,11 +469,23 @@ export async function searchAddressSuggestions(
   return fetchLocalSuggestions(query, options);
 }
 
+/** Place components that name the municipality or area (same list as Android). */
+const AREA_COMPONENT_TYPES = [
+  'locality',
+  'postal_town',
+  'sublocality',
+  'sublocality_level_1',
+  'administrative_area_level_5',
+  'administrative_area_level_4',
+  'administrative_area_level_3',
+];
+
 function extractFromAddressComponents(components: any[]): {
   route: string;
   streetNumber?: string;
   city: string;
   postalCode: string;
+  areaNames: string[];
 } {
   const findComp = (type: string) =>
     components.find((component: any) => Array.isArray(component?.types) && component.types.includes(type));
@@ -476,7 +498,21 @@ function extractFromAddressComponents(components: any[]): {
     sanitizeString(findComp('administrative_area_level_2')?.long_name);
   const postalCode = sanitizeString(findComp('postal_code')?.long_name);
 
-  return { route, streetNumber, city, postalCode };
+  const areaNames: string[] = [];
+  for (const component of components) {
+    const types: unknown[] = Array.isArray(component?.types) ? component.types : [];
+    if (!types.some((type) => AREA_COMPONENT_TYPES.includes(String(type)))) {
+      continue;
+    }
+    for (const name of [component?.long_name, component?.short_name]) {
+      const value = sanitizeString(name);
+      if (value && !areaNames.includes(value)) {
+        areaNames.push(value);
+      }
+    }
+  }
+
+  return { route, streetNumber, city, postalCode, areaNames };
 }
 
 export function buildResolvedAddressDetails(
@@ -485,11 +521,8 @@ export function buildResolvedAddressDetails(
 ): ResolvedAddressDetails {
   const components = Array.isArray(result?.address_components) ? result.address_components : [];
   const extracted = extractFromAddressComponents(components);
-  const geometry = result?.geometry?.location;
   const coordinates =
-    geometry && Number.isFinite(geometry.lat) && Number.isFinite(geometry.lng)
-      ? { lat: Number(geometry.lat), lng: Number(geometry.lng) }
-      : suggestion.location;
+    normalizeSuggestionLocation(result?.geometry?.location) ?? normalizeSuggestionLocation(suggestion.location);
   const selectedStreet = getSuggestionStreetLabel(suggestion);
   const formattedAddress = sanitizeString(result?.formatted_address || suggestion.formatted_address);
   const resolvedStreetNumber = selectResolvedStreetNumber(
@@ -517,6 +550,8 @@ export function buildResolvedAddressDetails(
     resolvedStreetNumber,
     addressFingerprint: buildAddressFingerprint(streetAddress, coordinates),
     validationSource: 'online',
+    ...(extracted.route ? { route: extracted.route } : {}),
+    ...(extracted.areaNames.length > 0 ? { areaNames: extracted.areaNames } : {}),
   };
 }
 
@@ -525,7 +560,7 @@ export async function resolveAddressSuggestion(
   input: string,
   options: ResolveOptions = {}
 ): Promise<ResolvedAddressDetails> {
-  const coords = suggestion.location;
+  const coords = normalizeSuggestionLocation(suggestion.location);
   const fallbackStreet = getSuggestionStreetLabel(suggestion) || extractPrimaryStreetText(suggestion.formatted_address);
 
   if (suggestion.source === 'offline_cache') {
@@ -551,7 +586,7 @@ export async function resolveAddressSuggestion(
   const language = resolveAddressLanguage(input, suggestion.formatted_address, getSuggestionStreetLabel(suggestion));
   const payload = {
     place_id: suggestion.place_id,
-    location: suggestion.location || undefined,
+    location: coords || undefined,
     formatted_address: suggestion.formatted_address || undefined,
     language,
     session_token: options.sessionToken || undefined,
@@ -571,11 +606,19 @@ export async function resolveAddressSuggestion(
 }
 
 function normalizeDeliveryValidation(raw: any, fallbackSource: 'online' | 'offline_cache'): DeliveryValidationResult {
-  const status: ValidationStatus =
+  const reportedStatus: ValidationStatus =
     raw?.validation_status === 'module_disabled'
       ? 'module_disabled'
       : raw?.validation_status || (raw?.isValid ? 'in_zone' : 'out_of_zone');
-  const requiresOverride = Boolean(
+  // A verdict for an unusable point (zone_checked: false) is "not checked",
+  // even in the legacy out_of_zone shape a server keeps for old clients.
+  const zoneUnchecked = raw?.zone_checked === false || (
+    reportedStatus === 'out_of_zone' && isDeliveryZoneUnchecked(raw)
+  );
+  const status: ValidationStatus = zoneUnchecked && reportedStatus === 'out_of_zone'
+    ? 'requires_selection'
+    : reportedStatus;
+  const requiresOverride = zoneUnchecked ? false : Boolean(
     raw?.requires_override ?? (status === 'out_of_zone' || status === 'unverified_offline')
   );
   return {
@@ -594,7 +637,7 @@ function normalizeDeliveryValidation(raw: any, fallbackSource: 'online' | 'offli
     message: sanitizeString(raw?.message || raw?.reason) || undefined,
     suggestedAction: sanitizeString(raw?.suggestedAction),
     selectedZone: raw?.selectedZone,
-    coordinates: raw?.coordinates,
+    coordinates: toValidLatLng(raw?.coordinates) ?? undefined,
     address_fingerprint: sanitizeString(raw?.address_fingerprint) || undefined,
     validation_source: raw?.validation_source || fallbackSource,
     meetsMinimumOrder: typeof raw?.meetsMinimumOrder === 'boolean' ? raw.meetsMinimumOrder : undefined,
@@ -624,17 +667,20 @@ export async function validateAddressForDelivery(
   }
 
   const creds = await getResolvedTerminalCredentials();
+  // Never zone-check a point that is not one ((0,0), NaN, out of range).
+  const coordinates = toValidLatLng(options.coordinates) ?? undefined;
   const payload = {
     address,
     orderAmount: options.orderAmount ?? 0,
-    coordinates: options.coordinates || undefined,
+    coordinates,
     branchId: options.branchId || creds.branchId || undefined,
     place_id: options.placeId || undefined,
     input_street_number: options.inputStreetNumber || extractStreetNumber(address) || undefined,
     resolved_street_number: options.resolvedStreetNumber || undefined,
     address_fingerprint:
-      options.addressFingerprint || buildAddressFingerprint(address, options.coordinates),
+      options.addressFingerprint || buildAddressFingerprint(address, coordinates),
     validation_source: options.validationSource || 'online',
+    [ZONE_VALIDATION_CONTRACT_FIELD]: ZONE_VALIDATION_CONTRACT_VERSION,
   };
 
   if (isOnline()) {

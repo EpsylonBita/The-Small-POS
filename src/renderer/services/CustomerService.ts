@@ -4,6 +4,10 @@ import {
   getCachedTerminalCredentials,
   refreshTerminalCredentialCache,
 } from './terminal-credentials';
+import { normalizeCustomerWriteResult, type CustomerWriteResult } from './customer-write-result';
+
+export { normalizeCustomerWriteResult } from './customer-write-result';
+export type { CustomerWriteResult } from './customer-write-result';
 
 /**
  * CustomerService - Renderer-side customer service
@@ -163,20 +167,35 @@ class CustomerService {
       return null;
     }
   }
-  // Create customer
-  async createCustomer(data: Partial<Customer>): Promise<Customer> {
-    const result = await this.bridge.customers.create(data as any);
-    const created = (result?.data ?? (result as any)?.customer ?? result) as Customer;
-    if (created?.id) {
-      this.trackUpdate(created.id);
+  /**
+   * Create a customer. Resolves with the whole outcome: a rejected write is
+   * `success:false` with the office's code (see CustomerWriteResult), never
+   * an object the caller could mistake for the created customer. A native
+   * failure (IPC error) still rejects.
+   */
+  async createCustomer(data: Partial<Customer>): Promise<CustomerWriteResult<Customer>> {
+    const result = normalizeCustomerWriteResult<Customer>(
+      await this.bridge.customers.create(data as any),
+    );
+    if (result.success && typeof result.data?.id === 'string' && result.data.id) {
+      this.trackUpdate(result.data.id);
     }
-    return created;
+    return result;
   }
 
-  // Update customer with optimistic locking
-  async updateCustomer(customerId: string, updates: Partial<Customer>, currentVersion: number): Promise<any> {
-    const result = await this.bridge.customers.update(customerId, updates as any, currentVersion);
-    if ((result as any)?.success !== false) {
+  /**
+   * Update a customer with optimistic locking. Same outcome contract as
+   * createCustomer: `success:false` carries the office's code and `conflict`.
+   */
+  async updateCustomer(
+    customerId: string,
+    updates: Partial<Customer>,
+    currentVersion: number,
+  ): Promise<CustomerWriteResult<Customer>> {
+    const result = normalizeCustomerWriteResult<Customer>(
+      await this.bridge.customers.update(customerId, updates as any, currentVersion),
+    );
+    if (result.success) {
       this.trackUpdate(customerId);
     }
     return result;

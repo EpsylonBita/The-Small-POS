@@ -258,3 +258,88 @@ test('BOX brand renders as "BOX" in shared plugin names and logo labels', () => 
   assert.match(pluginIcons, /box: \{\s*url: boxLogo,\s*label: 'BOX',/);
   assert.doesNotMatch(pluginIcons, /'Box'/);
 });
+
+// Caller ID card incident (2026-09): the card said «Μη συνδεδεμένο» / «Ανενεργό» and 0/1 while
+// popups worked, because it rendered the billing-owned branch_plugin_configs status. Since PR #214
+// Caller ID is local to the terminal, so the card is terminal-owned. Rendering behaviour is pinned
+// in src/renderer/pages/__tests__/IntegrationsPage.caller-id-status.test.tsx (vitest); this guard
+// pins the source-level contract so the card cannot drift back to the server status or re-create
+// the /api/pos/caller-id/config polling that PR #214 removed.
+test('Caller ID card is terminal-owned and never reads the billing-owned server status', () => {
+  // caller_id never maps the server status / last sync / last error.
+  assert.match(source, /const isCallerId = id === 'caller_id';/);
+  assert.match(source, /status: isCallerId\s*\?\s*'unknown'\s*:\s*requiresPartnerCredentials \? 'pending' : mapRemoteStatus\(remote\)/);
+  assert.match(source, /lastSyncedAt: !isCallerId && /);
+  assert.match(source, /lastError: isCallerId \? null : /);
+
+  // The assignment (entitlement check + queries + lease signature on the server) is loaded by the
+  // dedicated hook, never inside the 30 s plugins refresh.
+  const loadStart = source.indexOf('const loadIntegrations = useCallback(');
+  const loadEnd = source.indexOf('}, [refreshMyDataReportingFlag]);', loadStart);
+  assert.ok(loadStart > 0 && loadEnd > loadStart, 'loadIntegrations body found');
+  assert.doesNotMatch(source.slice(loadStart, loadEnd), /callerIdGetServerConfig|caller-id\/config/);
+  const configCalls = source.match(/callerIdGetServerConfig\(\)/g) ?? [];
+  assert.equal(configCalls.length, 1, 'one call site: the once-per-visit assignment load');
+  // Only the local listener IPC is polled.
+  assert.match(source, /const CALLER_ID_LISTENER_POLL_MS = 5_000;/);
+  assert.match(source, /window\.setInterval\(\(\) => \{\s*if \(document\.visibilityState !== 'hidden'\) void fetchListener\(\);\s*\}, CALLER_ID_LISTENER_POLL_MS\)/);
+
+  // Stats and "N/M connected" count the overlaid state.
+  assert.match(source, /calculateStats\(displayedIntegrations\)/);
+  assert.match(source, /displayedIntegrations\.forEach\(integration =>/);
+
+  // Admin-managed cards show the resolved state, never the generic On/Off label.
+  const sideLabelStart = source.indexOf('const sideStatusLabel = isLocked');
+  const sideLabelEnd = source.indexOf(": t('common.off', 'Off');", sideLabelStart);
+  assert.ok(sideLabelStart > 0 && sideLabelEnd > sideLabelStart, 'side status label found');
+  const sideLabel = source.slice(sideLabelStart, sideLabelEnd);
+  assert.ok(
+    sideLabel.indexOf(': isAdminDashboardSetup') < sideLabel.indexOf("t('common.on', 'On')"),
+    'the admin-managed branch resolves before the On/Off fallback',
+  );
+
+  // A network failure of the native server re-check (cached lease may keep the listener running) is
+  // "not verified", never a listener error; an organization switched off is its own state, not
+  // "not assigned" (review 2026-09-29).
+  assert.match(source, /return listenerNow\.reason === 'network_error' \? 'not_verified' : 'listener_error';/);
+  assert.match(source, /if \(hints\.orgEnabled === false\) return 'switched_off';/);
+  assert.match(source, /not_verified: 'pending',/);
+
+  // Unknown never counts as connected, disconnected or pending.
+  assert.match(source, /unknown: 'unknown',\n\};/);
+});
+
+test('Caller ID card copy and plugin categories are localized in every POS locale', () => {
+  const locales = ['en', 'el', 'de', 'fr', 'it', 'sq'].map((lng) => [
+    lng,
+    JSON.parse(readFileSync(path.join(process.cwd(), 'src', 'locales', `${lng}.json`), 'utf8')).integrations,
+  ]);
+  const en = locales[0][1];
+  for (const [lng, integrations] of locales) {
+    for (const category of ['delivery', 'hotel', 'government', 'payment', 'analytics', 'ecommerce', 'communications', 'other']) {
+      assert.equal(typeof integrations.category[category], 'string', `${lng}.integrations.category.${category}`);
+    }
+    assert.equal(typeof integrations.plugins.caller_id.description, 'string', `${lng} caller_id description`);
+    for (const group of ['state', 'short', 'detail', 'reason']) {
+      assert.deepEqual(
+        Object.keys(integrations.callerId[group]).sort(),
+        Object.keys(en.callerId[group]).sort(),
+        `${lng}.integrations.callerId.${group} keys`,
+      );
+    }
+    if (lng !== 'en') {
+      // (Some category names are legitimately identical across languages, e.g. fr "Communications".)
+      assert.notEqual(integrations.callerId.state.notAssigned, en.callerId.state.notAssigned, `${lng} not-assigned state translated`);
+      assert.notEqual(integrations.callerId.state.listeningHere, en.callerId.state.listeningHere, `${lng} listening state translated`);
+      assert.doesNotMatch(JSON.stringify(integrations.callerId), /NEEDS TRANSLATION/);
+    }
+  }
+  const el = locales[1][1];
+  assert.equal(el.category.communications, 'Επικοινωνίες');
+  assert.equal(el.callerId.state.listeningHere, 'Ενεργό σε αυτό το τερματικό');
+  assert.equal(el.callerId.detail.listeningFrom, 'Ακούει κλήσεις από {{device}}');
+  assert.equal(el.callerId.detail.lastCall, 'Τελευταία κλήση: {{time}}');
+  assert.equal(el.callerId.state.notVerified, 'Δεν επιβεβαιώθηκε με τον διακομιστή');
+  assert.equal(el.callerId.state.switchedOff, 'Απενεργοποιημένο για την επιχείρηση');
+  assert.equal('serverCheck' in en.callerId.reason, false, 'server-check failures are the not-verified state, not a listener error reason');
+});

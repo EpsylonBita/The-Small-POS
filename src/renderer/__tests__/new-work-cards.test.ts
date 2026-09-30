@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { hasLaunchableNewWork, resolveNewWorkCards } from '../new-work-cards'
+import { hasLaunchableNewWork, resolveDirectNewWorkCard, resolveNewWorkCards } from '../new-work-cards'
 import { resolveTauriPrimaryActions } from '../primary-actions'
 
 function cards(overrides: Partial<Parameters<typeof resolveNewWorkCards>[0]> & {
@@ -63,5 +63,34 @@ describe('resolveNewWorkCards — the (+) shows what this business can do', () =
 
   it('reports nothing launchable for a sales-only store without a shift', () => {
     expect(hasLaunchableNewWork(cards({ modules: ['orders'], isShiftActive: false }))).toBe(false)
+  })
+})
+
+describe('resolveDirectNewWorkCard — one kind of work needs no picker', () => {
+  // Founder, 24/09/2026: «όταν είναι μόνο ένα module δεν χρειάζεται επιλογή».
+  it.each([
+    [['orders'], 'pickup'],
+    [['tables'], 'table'],
+    [['delivery'], 'delivery'],
+    [['rooms'], 'room'],
+    [['appointments'], 'service'],
+  ])('opens %j straight away as the %s card', (modules, cardId) => {
+    expect(resolveDirectNewWorkCard(cards({ modules }), true)?.id).toBe(cardId)
+  })
+
+  it('keeps the picker when there is a choice to make', () => {
+    expect(resolveDirectNewWorkCard(cards({ modules: ['orders', 'tables'] }), true)).toBeUndefined()
+    expect(resolveDirectNewWorkCard(cards({ modules: ['orders', 'repairs'] }), true)).toBeUndefined()
+    expect(resolveDirectNewWorkCard(cards({ modules: ['menu'] }), true)).toBeUndefined()
+  })
+
+  it('waits until the repair settings answered', () => {
+    expect(resolveDirectNewWorkCard(cards({ modules: ['orders'] }), false)).toBeUndefined()
+  })
+
+  it('never opens a card that cannot start', () => {
+    expect(
+      resolveDirectNewWorkCard(cards({ modules: ['orders'], isShiftActive: false }), true),
+    ).toBeUndefined()
   })
 })

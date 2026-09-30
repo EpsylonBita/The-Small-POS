@@ -27,13 +27,22 @@ import {
   getCachedTerminalCredentials,
   refreshTerminalCredentialCache,
 } from '../../services/terminal-credentials';
-import { getDeliveryFeeStatus, resolveDeliveryFee } from '../../utils/delivery-fee';
+import {
+  canCheckoutWithDeliveryFeeStatus,
+  getDeliveryFeeStatus,
+  isDeliveryZoneUnchecked,
+  resolveDeliveryFee,
+  type DeliveryFeeStatus,
+} from '../../utils/delivery-fee';
 import { formatMoneyInputWithCents, parseMoneyInputValue } from '../../utils/moneyInput';
 import {
   buildSavedAddressQuery,
   extractSavedAddressCoordinates,
+  persistGeocodedSavedAddressCoordinates,
   resolveSavedAddressCoordinates,
+  savedAddressIdentityKey,
 } from '../../utils/saved-address-geolocation';
+import { parseSpecialAddressInput } from '../../utils/specialAddress';
 import { isLegacyFallbackAddress } from '../../utils/customer-addresses';
 import { resolvePersistedCustomerId } from '../../utils/persisted-customer-id';
 import {
@@ -103,6 +112,8 @@ interface ProductCatalogModalProps {
   isProcessingOrder?: boolean;
   deliveryZoneInfo?: DeliveryBoundaryValidationResponse | null;
   roomChargeContext?: RoomChargeContext | null;
+  /** "Pick the address again" from the zone-not-checked notice. */
+  onRepickDeliveryAddress?: () => void;
   onOrderComplete?: (orderData: {
     items: any[];
     total: number;
@@ -127,6 +138,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
   isProcessingOrder = false,
   deliveryZoneInfo,
   roomChargeContext = null,
+  onRepickDeliveryAddress,
   onOrderComplete
 }) => {
   const { t } = useTranslation();
@@ -229,17 +241,30 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
     enableRealtime: true,
   });
 
+  // Parents rebuild the address object on every render; the zone check keys
+  // on its content so an identical address is never searched again.
+  const zoneAddressKey = savedAddressIdentityKey(selectedAddress);
+  const zoneAddressRef = useRef<{ key: string; address: any }>({ key: zoneAddressKey, address: selectedAddress });
+  if (zoneAddressRef.current.key !== zoneAddressKey) {
+    zoneAddressRef.current = { key: zoneAddressKey, address: selectedAddress };
+  }
+  const zoneSelectedAddress = zoneAddressRef.current.address;
+  // A caller's "not checked" verdict does not stop this modal from
+  // geolocating the address and checking the zone itself.
+  const isProvidedZoneInfoUsable = Boolean(deliveryZoneInfo) && !isDeliveryZoneUnchecked(deliveryZoneInfo);
+
   useEffect(() => {
     let cancelled = false;
 
     const resolveCoordinates = async () => {
-      if (!isOpen || orderType !== 'delivery' || !selectedAddress) {
+      // Geolocation only serves the zone check (a billable lookup).
+      if (!isOpen || orderType !== 'delivery' || !zoneSelectedAddress || !hasDeliveryPro) {
         setResolvedSelectedAddressCoordinates(null);
         setIsResolvingSelectedAddressCoordinates(false);
         return;
       }
 
-      const existingCoordinates = extractSavedAddressCoordinates(selectedAddress);
+      const existingCoordinates = extractSavedAddressCoordinates(zoneSelectedAddress);
       if (existingCoordinates) {
         setResolvedSelectedAddressCoordinates(existingCoordinates);
         setIsResolvingSelectedAddressCoordinates(false);
@@ -252,7 +277,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
       try {
         const refreshed = await refreshTerminalCredentialCache();
         const resolved = await resolveSavedAddressCoordinates(
-          selectedAddress,
+          zoneSelectedAddress,
           branchId || refreshed.branchId || getCachedTerminalCredentials().branchId || undefined
         );
 
@@ -267,30 +292,21 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
 
         setResolvedSelectedAddressCoordinates(resolved.coordinates);
 
-        const addressVersion = Number((selectedAddress as any)?.version);
-        const customerId = resolvePersistedCustomerId(
-          selectedCustomer?.id,
-          (selectedAddress as any)?.customer_id,
-        );
-        if (
-          typeof (selectedAddress as any)?.id === 'string'
-          && customerId
-          && !isLegacyFallbackAddress(selectedAddress)
-        ) {
-          try {
-            await bridge.customers.updateAddress(
-              (selectedAddress as any).id,
-              {
-                customer_id: customerId,
-                coordinates: resolved.coordinates,
-                latitude: resolved.coordinates.lat,
-                longitude: resolved.coordinates.lng,
-              },
-              Number.isFinite(addressVersion) ? addressVersion : -1
-            );
-          } catch (error) {
-            console.warn('[ProductCatalogModal] Failed to persist resolved address coordinates:', error);
-          }
+        // Only a point accepted by the area rule is written back.
+        try {
+          await persistGeocodedSavedAddressCoordinates({
+            address: zoneSelectedAddress,
+            customerId: resolvePersistedCustomerId(
+              selectedCustomer?.id,
+              (zoneSelectedAddress as any)?.customer_id,
+            ),
+            resolved,
+            isLegacyFallback: isLegacyFallbackAddress(zoneSelectedAddress),
+            updateAddress: (addressId, updates, expectedVersion) =>
+              bridge.customers.updateAddress(addressId, updates, expectedVersion),
+          });
+        } catch (error) {
+          console.warn('[ProductCatalogModal] Failed to persist resolved address coordinates:', error);
         }
       } catch (error) {
         if (!cancelled) {
@@ -309,7 +325,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [branchId, bridge.customers, isOpen, orderType, selectedAddress, selectedCustomer?.id]);
+  }, [branchId, bridge.customers, hasDeliveryPro, isOpen, orderType, selectedCustomer?.id, zoneSelectedAddress]);
 
   useEffect(() => {
     if (!hasDeliveryPro) {
@@ -321,13 +337,13 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
       return;
     }
 
-    if (deliveryZoneInfo) {
+    if (isProvidedZoneInfoUsable) {
       setLocalDeliveryZoneInfo(null);
       return;
     }
 
       const exactCoordinates =
-        resolvedSelectedAddressCoordinates || extractSavedAddressCoordinates(selectedAddress);
+        resolvedSelectedAddressCoordinates || extractSavedAddressCoordinates(zoneSelectedAddress);
 
       if (!exactCoordinates) {
         setLocalDeliveryZoneInfo(null);
@@ -355,7 +371,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [deliveryZoneInfo, hasDeliveryPro, isOpen, orderType, resolvedSelectedAddressCoordinates, selectedAddress, validateDeliveryAddress]);
+  }, [hasDeliveryPro, isOpen, isProvidedZoneInfoUsable, orderType, resolvedSelectedAddressCoordinates, validateDeliveryAddress, zoneSelectedAddress]);
 
   useEffect(() => {
     if (!hasDeliveryPro) {
@@ -669,22 +685,33 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
   const offerDiscountAmount = offerEvaluation?.discount_total ?? 0;
   const discountableSubtotal = Math.max(subtotal - offerDiscountAmount, 0);
   const discountAmount = discountableSubtotal * (discountPercentage / 100);
-  const effectiveDeliveryZoneInfo = deliveryZoneInfo || localDeliveryZoneInfo;
+  const effectiveDeliveryZoneInfo = isProvidedZoneInfoUsable
+    ? deliveryZoneInfo
+    : localDeliveryZoneInfo || deliveryZoneInfo || null;
   const exactDeliveryCoordinates =
-    resolvedSelectedAddressCoordinates || extractSavedAddressCoordinates(selectedAddress);
+    resolvedSelectedAddressCoordinates || extractSavedAddressCoordinates(zoneSelectedAddress);
   const deliveryValidationTarget =
-    exactDeliveryCoordinates || buildSavedAddressQuery(selectedAddress) || null;
+    exactDeliveryCoordinates || buildSavedAddressQuery(zoneSelectedAddress) || null;
   const hasExactDeliveryCoordinates = !!exactDeliveryCoordinates;
-  const deliveryFeeStatus =
+  const isSpecialDeliveryAddress = parseSpecialAddressInput(
+    String(zoneSelectedAddress?.street_address || zoneSelectedAddress?.street || '')
+  ).shouldSkipZoneValidation;
+  // An address without a usable point (and no geolocation match) is "zone
+  // not checked": the sale proceeds with a notice, never as out of zone.
+  const deliveryFeeStatus: DeliveryFeeStatus =
       orderType !== 'delivery'
         ? 'resolved'
         : !hasDeliveryPro
           ? 'resolved'
           : !deliveryValidationTarget
             ? 'requires_selection'
-            : !hasExactDeliveryCoordinates
-              ? (isResolvingSelectedAddressCoordinates ? 'loading' : 'requires_selection')
-              : getDeliveryFeeStatus(orderType, effectiveDeliveryZoneInfo, isValidatingDeliveryFee || isResolvingSelectedAddressCoordinates);
+            : isProvidedZoneInfoUsable
+              ? getDeliveryFeeStatus(orderType, effectiveDeliveryZoneInfo, false)
+              : isSpecialDeliveryAddress
+                ? 'resolved'
+                : !hasExactDeliveryCoordinates
+                  ? (isResolvingSelectedAddressCoordinates ? 'loading' : 'not_checked')
+                  : getDeliveryFeeStatus(orderType, effectiveDeliveryZoneInfo, isValidatingDeliveryFee || isResolvingSelectedAddressCoordinates);
   const deliveryFee =
     orderType !== 'delivery'
       ? 0
@@ -711,6 +738,8 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
   const deliveryFeeText =
     deliveryFeeStatus === 'resolved'
       ? `€${deliveryFee.toFixed(2)}`
+      : deliveryFeeStatus === 'not_checked'
+        ? t('menu.cart.deliveryFeeZoneNotChecked')
       : deliveryFeeStatus === 'requires_selection'
         ? t('menu.cart.deliveryFeeNeedsExactAddress')
         : deliveryFeeStatus === 'out_of_zone'
@@ -722,7 +751,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
   const handleCheckout = async () => {
     if (cartItems.length === 0) return;
 
-    if (orderType === 'delivery' && hasDeliveryPro && deliveryFeeStatus !== 'resolved') {
+    if (orderType === 'delivery' && hasDeliveryPro && !canCheckoutWithDeliveryFeeStatus(deliveryFeeStatus)) {
         if (!deliveryValidationTarget || !hasExactDeliveryCoordinates) {
           return;
         }
@@ -730,7 +759,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
       try {
         const result = await validateDeliveryAddress(exactDeliveryCoordinates, subtotalAfterDiscount);
         setLocalDeliveryZoneInfo(result);
-        if (getDeliveryFeeStatus(orderType, result, false) !== 'resolved') {
+        if (!canCheckoutWithDeliveryFeeStatus(getDeliveryFeeStatus(orderType, result, false))) {
           return;
         }
       } catch (error) {
@@ -1095,6 +1124,25 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
                   <span>€{depositTotal.toFixed(2)}</span>
                 </div>
               )}
+              {orderType === 'delivery' && hasDeliveryPro && deliveryFeeStatus === 'not_checked' && (
+                <p
+                  role="status"
+                  data-testid="product-catalog-zone-not-checked"
+                  className="mb-1 rounded-lg border border-sky-400/30 bg-sky-500/15 px-2 py-1.5 text-xs text-sky-100"
+                >
+                  {t('menu.cart.deliveryZoneNotCheckedNotice')}
+                  {onRepickDeliveryAddress && (
+                    <button
+                      type="button"
+                      onClick={onRepickDeliveryAddress}
+                      data-testid="product-catalog-zone-repick"
+                      className="mt-1.5 block min-h-[36px] rounded-lg border border-sky-300/40 px-3 py-1 text-xs font-semibold text-sky-100 active:bg-sky-400/20"
+                    >
+                      {t('menu.cart.repickDeliveryAddress')}
+                    </button>
+                  )}
+                </p>
+              )}
               {orderType === 'delivery' && (
                 <div className="flex justify-between text-gray-400 mb-1">
                   <span>{t('menu.cart.deliveryFee')}</span>
@@ -1127,7 +1175,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
               disabled={
                 cartItems.length === 0 ||
                 isProcessingOrder ||
-                (orderType === 'delivery' && hasDeliveryPro && deliveryFeeStatus !== 'resolved')
+                (orderType === 'delivery' && hasDeliveryPro && !canCheckoutWithDeliveryFeeStatus(deliveryFeeStatus))
               }
               className="mt-4 w-full py-3 rounded-2xl bg-green-600 active:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold flex items-center justify-center gap-2 transition-transform duration-150 active:scale-[0.98] disabled:active:scale-100"
             >

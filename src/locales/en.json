@@ -639,6 +639,9 @@
       "deliveryFee": "Delivery Fee:",
       "calculatingDeliveryFee": "Calculating...",
       "deliveryFeeNeedsExactAddress": "Select exact address",
+      "deliveryFeeZoneNotChecked": "Zone not checked",
+      "deliveryZoneNotCheckedNotice": "The delivery zone was not checked. Pick the address again.",
+      "repickDeliveryAddress": "Pick the address again",
       "deliveryFeeOutOfZone": "Out of delivery zone",
       "deliveryFeeUnavailable": "Delivery fee unavailable",
       "total": "Total:",
@@ -940,6 +943,7 @@
     "deleteAddressQueued": "Address deleted and queued for sync",
     "deleteAddressError": "Failed to delete address",
     "updateAddressSuccess": "Address updated successfully",
+    "savedLocallyQueued": "Address saved on this register and queued for sync",
     "updateAddressError": "Failed to update address",
     "address": {
       "street": "Street Address",
@@ -2973,7 +2977,7 @@
         "statusStopped": "Stopped",
         "callsDetected": "Calls detected",
         "singleSourceTitle": "Configure Caller ID on one source terminal only",
-        "singleSourceBody": "This terminal captures incoming calls and forwards them to the rest of the store. Do not enable the same line on multiple POS terminals.",
+        "singleSourceBody": "This terminal captures incoming calls and shows them here. Other terminals do not show the call. Do not enable the same line on multiple POS terminals.",
         "providerPreset": "Preset",
         "authUsername": "Auth Username",
         "authUsernamePlaceholder": "Leave blank to use the SIP username",
@@ -4651,7 +4655,39 @@
       "addressAdded": "Address added successfully",
       "addressSaveFailed": "Unable to save the address. Please try again.",
       "addressSaveTimedOut": "Address save timed out. Please try again.",
-      "failed": "Failed to create customer. Please try again."
+      "failed": "Failed to create customer. Please try again.",
+      "phoneLengthExact": "Phone number must have {{expected}} digits (you entered {{entered}})",
+      "phoneLengthEither": "Phone number must have {{first}} or {{second}} digits (you entered {{entered}})",
+      "phoneLengthRange": "Phone number must have {{min}}–{{max}} digits (you entered {{entered}})",
+      "phoneInvalid": "This is not a valid phone number. For a foreign number, start with + and the country code.",
+      "phoneInvalidCharacters": "Use only digits and spaces in the phone number, with + only at the start.",
+      "phoneTooWide": "The phone number is too long to save (at most {{max}} characters). Remove extra spaces or brackets.",
+      "phoneKeptAsSaved": "The saved number stays as it is, so you can still save the other changes.",
+      "phoneRejected": "The office did not accept this phone number. Check it and try again.",
+      "customerExists": "A customer with this phone number or email already exists. Close this form, search for the customer and select them.",
+      "addressLocationRejected": "The office could not use this address’s location. Pick the address again from the suggestions.",
+      "customerNotFound": "This customer no longer exists at the office. Close the form and search again.",
+      "saveRejected": "The office did not accept the change (code {{code}}). Check the details and try again.",
+      "addressNotFound": "This saved address no longer exists at the office. Close the form and pick the customer again.",
+      "customerSyncInProgress": "This customer is being sent to the office right now. Wait a moment and save again.",
+      "customerNotSynced": "This customer is not in the office’s customer list yet, so it cannot be changed here. Close the form and add them as a new customer.",
+      "saveRefusedLocally": "This register could not save the change (code {{code}}). Try again; if it happens again, contact support.",
+      "minimize": "Minimize",
+      "floorTooLong": "The floor can be at most {{max}} characters long.",
+      "updateFailed": "Could not save the changes. Please try again.",
+      "zoneNotChecked": "The delivery zone was not checked. Pick the address again.",
+      "repickAddress": "Pick the address again",
+      "selectAddressForValidation": "Select a real address from suggestions to validate delivery.",
+      "outOfZoneOverrideRequired": "Address is out of zone. Tap accept out-of-zone and provide a reason to continue.",
+      "acceptOutOfZone": "Accept out-of-zone delivery",
+      "offlineOverrideRequired": "Address is unverified offline. Confirm warning and provide a reason to continue.",
+      "acceptOfflineUnverified": "Accept offline unverified delivery",
+      "overrideReasonRequired": "Override reason must be at least 6 characters.",
+      "overrideReasonPlaceholder": "Add override reason (minimum 6 characters)",
+      "specialAddressModeTitle": "Special address label detected",
+      "specialAddressModeDescription": "This address will be saved as \"{{address}}\". Delivery zone validation is skipped for this entry.",
+      "conflictError": "Customer was updated by another terminal. Please refresh.",
+      "versionRequired": "This register does not have the latest version of this customer. Close the form, search for the customer again and repeat the change."
     },
     "customerInfo": {
       "title": "Customer Information",
@@ -5264,6 +5300,7 @@
     "cityRequired": "City is required for delivery orders",
     "postalCodeRequired": "Postal code is required for delivery orders",
     "customerNoAddress": "This customer has no delivery address. Please add an address first.",
+    "deliveryZoneNotCheckedNotice": "The delivery zone was not checked. Pick the address again so it can be checked.",
     "addressValidated": "Address validated successfully",
     "addressValidationFailed": "Address validation failed",
     "addressValidationError": "Failed to validate address",
@@ -7291,7 +7328,13 @@
     "category": {
       "food": "Food Platforms",
       "hotel": "Hotel Platforms",
-      "government": "Government & Compliance"
+      "government": "Government & Compliance",
+      "delivery": "Delivery Platforms",
+      "payment": "Payment Gateways",
+      "analytics": "Analytics",
+      "ecommerce": "E-commerce",
+      "communications": "Communications",
+      "other": "Other Plugins"
     },
     "fields": {
       "storeUrl": "Store URL",
@@ -7326,7 +7369,56 @@
     },
     "callerId": {
       "setupInAdmin": "Set up Caller ID in Admin Dashboard",
-      "manageInAdmin": "Manage Caller ID in Admin Dashboard"
+      "manageInAdmin": "Manage Caller ID in Admin Dashboard",
+      "openInAdmin": "Open Caller ID in Admin Dashboard",
+      "state": {
+        "checking": "Checking…",
+        "listeningHere": "Active on this terminal",
+        "notVerified": "Not verified with the server",
+        "configuredNotListening": "Configured — not listening",
+        "listenerError": "Listener error",
+        "lineSetupIncomplete": "Phone line setup incomplete",
+        "otherTerminal": "Runs on another terminal",
+        "switchedOff": "Switched off for this business",
+        "notAssigned": "Not assigned to this terminal",
+        "unknown": "Status unavailable"
+      },
+      "short": {
+        "checking": "Checking…",
+        "listeningHere": "Listening",
+        "notVerified": "Not verified",
+        "configuredNotListening": "Not listening",
+        "listenerError": "Error",
+        "lineSetupIncomplete": "Incomplete",
+        "otherTerminal": "Other terminal",
+        "switchedOff": "Switched off",
+        "notAssigned": "Not assigned",
+        "unknown": "Unknown"
+      },
+      "detail": {
+        "listeningFrom": "Listening for calls from {{device}}",
+        "listening": "Listening for incoming calls",
+        "lastCall": "Last call: {{time}}",
+        "callsThisSession": "Calls since the POS started: {{calls}}",
+        "noCallsYet": "No calls since the POS started",
+        "notListening": "This terminal has a Caller ID line, but it is not listening for calls.",
+        "checkSettings": "Check {{path}}.",
+        "otherTerminal": "Incoming calls are shown on the terminal the phone line is connected to.",
+        "notAssigned": "To show incoming calls here, assign this terminal to a phone line in the Admin Dashboard.",
+        "notVerified": "This terminal could not confirm its Caller ID setup with the server. Calls may keep appearing for a while from the last confirmed setup, and the check retries automatically.",
+        "lineSetupIncomplete": "This terminal is the source of a phone line, but the line's setup is incomplete, so it is not listening. Check the phone line in the Admin Dashboard.",
+        "switchedOff": "Caller ID is switched off for this business. Turn it on in the Admin Dashboard.",
+        "lastKnown": "Last known: {{state}}. The status could not be refreshed.",
+        "unknown": "Could not read the Caller ID status on this terminal. Tap refresh to try again."
+      },
+      "reason": {
+        "portInUse": "Another program is using the Caller ID port on this terminal.",
+        "authFailed": "The server did not allow Caller ID on this terminal, so it stopped listening. Check Caller ID in the Admin Dashboard.",
+        "unsupported": "Caller ID does not support this POS version or phone service. Update the POS or check the setup in the Admin Dashboard.",
+        "timeout": "The phone service did not answer in time. Caller ID retries automatically.",
+        "invalidConfig": "The Caller ID setup on this terminal is incomplete or out of date.",
+        "failed": "Caller ID could not start on this terminal."
+      }
     },
     "adminSetup": {
       "pendingFirstOrder": "Set up in the Admin Dashboard. The connection becomes active with the first order received."
@@ -7352,6 +7444,12 @@
       },
       "mydata": {
         "description": "Greek AADE e-invoicing compliance"
+      },
+      "caller_id": {
+        "description": "Caller ID recognition and customer lookup"
+      },
+      "customer_messaging": {
+        "description": "Transactional customer messaging managed in the Admin Dashboard"
       }
     },
     "empty": {
@@ -7922,7 +8020,7 @@
       },
       "duplicateCustomerConflict": {
         "title": "This customer already exists at the office",
-        "summary": "A customer saved on this terminal has the same phone number as one the office already holds, so the change cannot be sent. It has been blocking the sync since it was saved.",
+        "summary": "A customer saved on this terminal has the same phone number as one the office already holds, so the change cannot be sent. It does not stop the end of day, but the office does not have this customer until you link it.",
         "guidance": "If it is the same person, link this terminal to the existing record. Retrying will not help: the office answers with the same rejection every time."
       },
       "customerAddressDefaultConflict": {
@@ -7934,6 +8032,18 @@
         "title": "Dev attention required",
         "summary": "Sync backlog is visible, but there is no guided fix mapped for this exact failure yet.",
         "guidance": "Contact Dev and include the diagnostics bundle so the next occurrence can be mapped to a guided fix."
+      },
+      "customerPhoneRejected": {
+        "title": "The office refused a customer’s phone number",
+        "summary_one": "One customer change saved on this register was refused because of the phone number. It does not stop the end of day, and orders keep the customer’s name and phone.",
+        "summary_other": "{{count}} customer changes saved on this register were refused because of the phone number. They do not stop the end of day, and orders keep the customer’s name and phone.",
+        "guidance": "Try the change once more. If it is refused again, you can still close the day: correct the customer’s phone the next time they order, and ask support to remove this change."
+      },
+      "customerDirectoryNotSynced": {
+        "title": "A customer change was not saved at the office",
+        "summary_one": "One customer change saved on this register could not be sent. It does not stop the end of day, and orders keep the customer’s name and phone.",
+        "summary_other": "{{count}} customer changes saved on this register could not be sent. They do not stop the end of day, and orders keep the customer’s name and phone.",
+        "guidance": "Try the change once more. If it fails again, open support details; you can still close the day."
       }
     }
   },

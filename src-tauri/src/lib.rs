@@ -964,7 +964,6 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             app.manage(UpdaterRuntimeState::default());
             app.manage(ecr::DeviceManager::new());
             app.manage(Arc::clone(&caller_id_manager));
-            app.manage(commands::runtime::ScreenCaptureSignalPollingState::default());
 
             let updater_app = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -1520,10 +1519,7 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             commands::print::receipt_sample_preview,
             commands::print::label_print,
             commands::print::label_print_batch,
-            // Screen capture / Geo
-            commands::runtime::screen_capture_get_sources,
-            commands::runtime::screen_capture_start_signal_polling,
-            commands::runtime::screen_capture_stop_signal_polling,
+            // Geolocation
             commands::runtime::geo_ip,
             // Legacy printer manager channels
             commands::print::printer_scan_network,

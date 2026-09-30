@@ -34,8 +34,12 @@ import { discountCents, fromCents, toCents } from '@shared/utils/money';
 import { Pencil, Search, X, User, UserPlus } from 'lucide-react';
 import { formatCurrency } from '../../utils/format';
 import {
+  canCheckoutWithDeliveryFeeStatus,
+  createUncheckedDeliveryZoneResult,
   getDeliveryFeeStatus,
+  isDeliveryZoneUnchecked,
   resolveDeliveryFee,
+  type DeliveryFeeStatus,
 } from '../../utils/delivery-fee';
 import {
   isOfferRewardLine,
@@ -46,7 +50,10 @@ import {
 import {
   buildSavedAddressQuery,
   extractSavedAddressCoordinates,
+  isUnlocatedZoneAddress,
+  persistGeocodedSavedAddressCoordinates,
   resolveSavedAddressCoordinates,
+  savedAddressIdentityKey,
 } from '../../utils/saved-address-geolocation';
 import { isLegacyFallbackAddress } from '../../utils/customer-addresses';
 import { resolvePersistedCustomerId } from '../../utils/persisted-customer-id';
@@ -339,6 +346,35 @@ interface LoyaltyCustomerState {
 
 type CheckoutPhase = 'editing' | 'payment' | 'finishing';
 
+/**
+ * True when the menu's own dialog is the top-most `[role="dialog"]` and the
+ * keystroke is not aimed at another dialog. The "type to search" redirect
+ * runs only then: with the address re-pick (or any other modal) stacked over
+ * the menu, printable keys must stay in that modal, not jump into the hidden
+ * menu search behind it.
+ */
+export function isMenuTopMostDialog(
+  menuElement: Element,
+  keyTargets: ReadonlyArray<EventTarget | Element | null | undefined> = [],
+): boolean {
+  if (typeof document === 'undefined') {
+    return true;
+  }
+  const menuDialog = menuElement.closest('[role="dialog"]');
+  const dialogs = document.querySelectorAll('[role="dialog"]');
+  const topMost = dialogs.length > 0 ? dialogs[dialogs.length - 1] : null;
+  if (topMost && topMost !== menuDialog) {
+    return false;
+  }
+  return !keyTargets.some((target) => {
+    if (!target || typeof (target as Element).closest !== 'function') {
+      return false;
+    }
+    const dialog = (target as Element).closest('[role="dialog"]');
+    return Boolean(dialog && dialog !== menuDialog);
+  });
+}
+
 interface MenuModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -347,6 +383,11 @@ interface MenuModalProps {
   orderType?: 'pickup' | 'delivery' | 'dine-in';
   isProcessingOrder?: boolean;
   deliveryZoneInfo?: DeliveryBoundaryValidationResponse | null;
+  /**
+   * Re-opens the delivery address so the cashier can pick it again from the
+   * suggestions. Offered with the "delivery zone not checked" notice.
+   */
+  onRepickDeliveryAddress?: () => void;
   roomChargeContext?: RoomChargeContext | null;
   onOrderComplete?: (orderData: {
     items: any[];
@@ -408,6 +449,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   orderType = 'delivery',
   isProcessingOrder = false,
   deliveryZoneInfo,
+  onRepickDeliveryAddress,
   roomChargeContext = null,
   onOrderComplete,
   // Edit mode props
@@ -521,7 +563,13 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       if (e.key.length !== 1) return; // only printable characters
       const active = document.activeElement;
       if (active?.tagName === 'INPUT' || active?.tagName === 'TEXTAREA') return;
-      menuSearchRef.current?.focus();
+      const searchInput = menuSearchRef.current;
+      if (!searchInput) return;
+      // Another dialog stacked over the menu (the address re-pick, a customer
+      // form) owns the keyboard: its keystrokes must never land in the hidden
+      // menu search behind it.
+      if (!isMenuTopMostDialog(searchInput, [e.target, active])) return;
+      searchInput.focus();
     };
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
@@ -699,8 +747,13 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     return false;
   };
 
-  // Effective delivery zone info - use prop if available, otherwise use locally fetched
-  const effectiveDeliveryZoneInfo = deliveryZoneInfo || localDeliveryZoneInfo;
+  // Effective delivery zone info - use the caller's verdict when it actually
+  // checked the zone; a "not checked" verdict (no usable point) lets the menu
+  // try the address's automatic geolocation and check the zone itself.
+  const isProvidedZoneInfoUsable = Boolean(deliveryZoneInfo) && !isDeliveryZoneUnchecked(deliveryZoneInfo);
+  const effectiveDeliveryZoneInfo = isProvidedZoneInfoUsable
+    ? deliveryZoneInfo
+    : localDeliveryZoneInfo || deliveryZoneInfo || null;
 
   // Effective minimum order amount - prefer zone-specific, fallback to default
   const effectiveMinimumOrderAmount = hasDeliveryPro
@@ -778,13 +831,23 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     selectedCustomerName,
   ]);
 
+  // Parents rebuild the address object on every render. The zone check keys
+  // on the address's content, so an identical address is never searched or
+  // checked again just because the parent re-rendered.
+  const zoneAddressKey = savedAddressIdentityKey(selectedAddress);
+  const zoneAddressRef = useRef<{ key: string; address: any }>({ key: zoneAddressKey, address: selectedAddress });
+  if (zoneAddressRef.current.key !== zoneAddressKey) {
+    zoneAddressRef.current = { key: zoneAddressKey, address: selectedAddress };
+  }
+  const zoneSelectedAddress = zoneAddressRef.current.address;
+
   const buildSelectedAddressString = useCallback(() => {
-    return buildSavedAddressQuery(selectedAddress);
-  }, [selectedAddress]);
+    return buildSavedAddressQuery(zoneSelectedAddress);
+  }, [zoneSelectedAddress]);
 
   const getSelectedAddressCoordinates = useCallback(() => {
-    return extractSavedAddressCoordinates(selectedAddress) ?? undefined;
-  }, [selectedAddress]);
+    return extractSavedAddressCoordinates(zoneSelectedAddress) ?? undefined;
+  }, [zoneSelectedAddress]);
 
   const getSelectedAddressValidationTarget = useCallback(() => {
     return (resolvedSelectedAddressCoordinates ?? getSelectedAddressCoordinates()) ?? buildSelectedAddressString();
@@ -794,7 +857,9 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     let cancelled = false;
 
     const resolveCoordinates = async () => {
-      if (!isOpen || orderType !== 'delivery' || !selectedAddress) {
+      // Geolocation only serves the zone check: never search (a billable
+      // lookup) when this store has no delivery zones or an order is edited.
+      if (!isOpen || orderType !== 'delivery' || !zoneSelectedAddress || !hasDeliveryPro || editMode) {
         setResolvedSelectedAddressCoordinates(null);
         setIsResolvingSelectedAddressCoordinates(false);
         return;
@@ -813,7 +878,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       try {
         const refreshed = await refreshTerminalCredentialCache();
         const resolved = await resolveSavedAddressCoordinates(
-          selectedAddress,
+          zoneSelectedAddress,
           staff?.branchId || refreshed.branchId || getCachedTerminalCredentials().branchId || undefined
         );
 
@@ -828,30 +893,22 @@ export const MenuModal: React.FC<MenuModalProps> = ({
 
         setResolvedSelectedAddressCoordinates(resolved.coordinates);
 
-        const addressVersion = Number((selectedAddress as any)?.version);
-        const customerId = resolvePersistedCustomerId(
-          selectedCustomer?.id,
-          (selectedAddress as any)?.customer_id,
-        );
-        if (
-          typeof (selectedAddress as any)?.id === 'string'
-          && customerId
-          && !isLegacyFallbackAddress(selectedAddress)
-        ) {
-          try {
-            await bridge.customers.updateAddress(
-              (selectedAddress as any).id,
-              {
-                customer_id: customerId,
-                coordinates: resolved.coordinates,
-                latitude: resolved.coordinates.lat,
-                longitude: resolved.coordinates.lng,
-              },
-              Number.isFinite(addressVersion) ? addressVersion : -1
-            );
-          } catch (error) {
-            console.warn('[MenuModal] Failed to persist resolved address coordinates:', error);
-          }
+        // Only a point accepted by the area rule (municipality or postal code
+        // matches the saved address) is written back.
+        try {
+          await persistGeocodedSavedAddressCoordinates({
+            address: zoneSelectedAddress,
+            customerId: resolvePersistedCustomerId(
+              selectedCustomer?.id,
+              (zoneSelectedAddress as any)?.customer_id,
+            ),
+            resolved,
+            isLegacyFallback: isLegacyFallbackAddress(zoneSelectedAddress),
+            updateAddress: (addressId, updates, expectedVersion) =>
+              bridge.customers.updateAddress(addressId, updates, expectedVersion),
+          });
+        } catch (error) {
+          console.warn('[MenuModal] Failed to persist resolved address coordinates:', error);
         }
       } catch (error) {
         if (!cancelled) {
@@ -870,7 +927,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [bridge.customers, getSelectedAddressCoordinates, isOpen, orderType, selectedAddress, selectedCustomer?.id, staff?.branchId]);
+  }, [bridge.customers, editMode, getSelectedAddressCoordinates, hasDeliveryPro, isOpen, orderType, selectedCustomer?.id, staff?.branchId, zoneSelectedAddress]);
 
   // Fetch order items from backend
   const fetchOrderItems = useCallback(async (orderId: string, supabaseId?: string): Promise<any[]> => {
@@ -977,7 +1034,12 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   }, [cartItems.length, ghostModeArmedAt, shouldApplyGhostMode]);
 
   // Fetch delivery zone info when modal opens for delivery orders (if not provided via props)
+  const zoneValidationRequestRef = useRef(0);
   useEffect(() => {
+    // Only the latest check may set the verdict: an earlier answer (for the
+    // address text, or another address) must not overwrite a newer one.
+    const requestId = zoneValidationRequestRef.current + 1;
+    zoneValidationRequestRef.current = requestId;
     const fetchDeliveryZoneInfo = async () => {
       // Skip delivery zone validation if the delivery_zones module is not acquired.
       // Orders can still be placed with fee = 0.
@@ -991,19 +1053,35 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         return;
       }
 
-      if (deliveryZoneInfo) {
+      if (isProvidedZoneInfoUsable) {
         setLocalDeliveryZoneInfo(null);
         return;
       }
 
-      if (!selectedAddress) {
+      if (!zoneSelectedAddress) {
         setLocalDeliveryZoneInfo(null);
         return;
       }
 
-      const validationTarget =
-        (resolvedSelectedAddressCoordinates ?? getSelectedAddressCoordinates()) ??
-        buildSelectedAddressString();
+      // The address is being geolocated: check the zone with its point once
+      // that settles, instead of checking the bare text first.
+      if (isResolvingSelectedAddressCoordinates) {
+        setLocalDeliveryZoneInfo(null);
+        return;
+      }
+
+      const point = resolvedSelectedAddressCoordinates ?? getSelectedAddressCoordinates();
+      if (!point && isUnlocatedZoneAddress(zoneSelectedAddress)) {
+        // The geolocation effect above runs first in the same commit and marks
+        // the address as resolving, so reaching here means it settled without
+        // a point: the zone was not checked. A text-only request could only
+        // answer requires_selection, so it is answered here without a network
+        // call (same as Android's needs_selection).
+        setLocalDeliveryZoneInfo(createUncheckedDeliveryZoneResult());
+        return;
+      }
+
+      const validationTarget = point ?? buildSelectedAddressString();
       if (!validationTarget) {
         setLocalDeliveryZoneInfo(null);
         return;
@@ -1011,7 +1089,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
 
       try {
         const result = await validateDeliveryAddress(validationTarget, 0);
-        if (result) {
+        if (result && zoneValidationRequestRef.current === requestId) {
           setLocalDeliveryZoneInfo(result);
         }
       } catch (error) {
@@ -1020,7 +1098,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     };
 
     fetchDeliveryZoneInfo();
-  }, [buildSelectedAddressString, deliveryZoneInfo, editMode, getSelectedAddressCoordinates, hasDeliveryPro, isOpen, orderType, resolvedSelectedAddressCoordinates, selectedAddress, validateDeliveryAddress]);
+  }, [buildSelectedAddressString, editMode, getSelectedAddressCoordinates, hasDeliveryPro, isOpen, isProvidedZoneInfoUsable, isResolvingSelectedAddressCoordinates, orderType, resolvedSelectedAddressCoordinates, validateDeliveryAddress, zoneSelectedAddress]);
 
   // Fetch delivery zones to get default minimum order amount (fallback when validation doesn't work)
   useEffect(() => {
@@ -1978,19 +2056,20 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       : hasDeliveryPro
         ? resolveDeliveryFee(effectiveDeliveryZoneInfo)
         : Math.max(0, manualDeliveryFee);
-  const deliveryFeeStatus =
+  const deliveryFeeStatus: DeliveryFeeStatus =
       orderType !== 'delivery'
         ? 'resolved'
         : !hasDeliveryPro
           ? 'resolved'
           : !selectedAddressValidationTarget
             ? 'requires_selection'
-            : hasResolvedDeliveryValidation
-              ? getDeliveryFeeStatus(orderType, effectiveDeliveryZoneInfo, false)
-              : (isValidatingDeliveryFee || isResolvingSelectedAddressCoordinates)
-                ? 'loading'
-                : 'requires_selection';
-  const deliveryFeeResolved = deliveryFeeStatus === 'resolved';
+            : (isResolvingSelectedAddressCoordinates && !isProvidedZoneInfoUsable)
+              ? 'loading'
+              : hasResolvedDeliveryValidation
+                ? getDeliveryFeeStatus(orderType, effectiveDeliveryZoneInfo, false)
+                : isValidatingDeliveryFee
+                  ? 'loading'
+                  : 'requires_selection';
   const cartSubtotal = cartItems.reduce((sum, item) => sum + (item.totalPrice || 0), 0);
   const offerDiscountAmount = offerEvaluation?.discount_total ?? 0;
   const matchedOfferNames: string[] = Array.from(
@@ -2193,7 +2272,9 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       return null;
     }
 
-    if (deliveryFeeResolved) {
+    // A known fee, or a zone that was not checked (non-blocking, with the
+    // notice): nothing to re-check at checkout.
+    if (canCheckoutWithDeliveryFeeStatus(deliveryFeeStatus)) {
       return effectiveDeliveryZoneInfo;
     }
 
@@ -2210,7 +2291,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       return null;
     }
   }, [
-    deliveryFeeResolved,
+    deliveryFeeStatus,
     discountedSubtotal,
     effectiveDeliveryZoneInfo,
     hasDeliveryPro,
@@ -2258,7 +2339,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         toast.error(t('orderFlow.zoneValidationRequired'));
         return;
       }
-      if (getDeliveryFeeStatus(orderType, validationResult, false) !== 'resolved') {
+      if (!canCheckoutWithDeliveryFeeStatus(getDeliveryFeeStatus(orderType, validationResult, false))) {
         toast.error(validationResult?.message || t('orderFlow.zoneValidationRequired'));
         return;
       }
@@ -2708,6 +2789,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
               minimumOrderAmount={effectiveMinimumOrderAmount}
               deliveryFee={resolvedDeliveryFee}
               deliveryFeeStatus={deliveryFeeStatus}
+              onRepickDeliveryAddress={editMode ? undefined : onRepickDeliveryAddress}
               allowManualDeliveryFee={orderType === 'delivery' && hasDeliveryModule && !hasDeliveryPro}
               manualDeliveryFeeValue={manualDeliveryFee}
               onManualDeliveryFeeChange={editMode ? undefined : setManualDeliveryFee}

@@ -41,7 +41,39 @@ const HT813_SYSLOG_CALLER_ID_MARKER: &[u8] = b"SigCtrl::processFxoCallerIdReceiv
 const MAX_CALL_ID_BYTES: usize = 255;
 const DEFAULT_SIP_PORT: u16 = 5060;
 const FXO_DESTINATION_USER: &str = "callerid";
-const CONFIG_POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// Event name of a validated call, delivered only to this terminal's renderer.
+const LOCAL_CALL_EVENT: &str = "caller_id_validated_local_call";
+/// Activation is checked online when the runtime starts or is explicitly
+/// restarted. After a verified server snapshot the next check only renews the
+/// signed offline lease (72h): halfway through its remaining lifetime, capped
+/// at once a day. Incoming calls never reach this schedule.
+const ACTIVATION_RENEWAL_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+const ACTIVATION_MIN_RECHECK: Duration = Duration::from_secs(5 * 60);
+/// A check that could not reach a verdict (network, 5xx, 429) retries with a
+/// capped backoff, so an offline terminal renews its lease soon after the
+/// server is reachable again. These requests mostly never leave the terminal.
+const ACTIVATION_RETRY_DELAYS: [Duration; 6] = [
+    Duration::from_secs(30),
+    Duration::from_secs(60),
+    Duration::from_secs(2 * 60),
+    Duration::from_secs(5 * 60),
+    Duration::from_secs(15 * 60),
+    Duration::from_secs(30 * 60),
+];
+/// A refused check (401/403/404/426 or an unusable policy) backs off to one
+/// check a day: a transient refusal still recovers within minutes, while a
+/// terminal of an organization without Caller ID settles at once a day.
+const ACTIVATION_REFUSED_RETRY_DELAYS: [Duration; 6] = [
+    Duration::from_secs(60),
+    Duration::from_secs(5 * 60),
+    Duration::from_secs(30 * 60),
+    Duration::from_secs(2 * 60 * 60),
+    Duration::from_secs(6 * 60 * 60),
+    ACTIVATION_RENEWAL_INTERVAL,
+];
+/// Local-only worker supervision: a listener that died or could not bind its
+/// port is restarted from the current activation without a network call.
+const LOCAL_WORKER_HEALTH_INTERVAL: Duration = Duration::from_secs(15);
 const RECENT_CALL_TTL: Duration = Duration::from_secs(120);
 const RECENT_CALL_CAPACITY: usize = 512;
 const EVENT_RATE_LIMIT: usize = 20;
@@ -479,9 +511,9 @@ fn requires_udp_rebind(
     current: &GrandstreamFxoSourceLine,
     desired: &GrandstreamFxoSourceLine,
 ) -> bool {
-    current.source != desired.source
-        || current.source_kind != desired.source_kind
-        || current.is_receiving_target != desired.is_receiving_target
+    // `is_receiving_target` is a legacy cloud-delivery flag. The activated
+    // source always shows its own calls, so the flag never rebinds a worker.
+    current.source != desired.source || current.source_kind != desired.source_kind
 }
 
 fn build_source_readiness_ack(
@@ -1311,6 +1343,84 @@ pub fn start_connector_supervisor(
     )
 }
 
+/// Schedule of online activation checks. Pure, so the cadence is testable with
+/// a simulated clock and without a network or a Tauri runtime.
+#[derive(Debug, Default)]
+struct ActivationCadence {
+    consecutive_failures: usize,
+}
+
+impl ActivationCadence {
+    /// Delay after a check that stored a verified server snapshot: renew the
+    /// signed lease halfway through its remaining lifetime, at most once a day.
+    fn after_verified_snapshot(
+        &mut self,
+        lease_expires_at: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Duration {
+        self.consecutive_failures = 0;
+        let remaining = (lease_expires_at - now).to_std().unwrap_or(Duration::ZERO);
+        (remaining / 2).clamp(ACTIVATION_MIN_RECHECK, ACTIVATION_RENEWAL_INTERVAL)
+    }
+
+    /// Delay after a check that reached no verdict (network, 5xx, 429).
+    fn after_unavailable_check(&mut self) -> Duration {
+        self.next_retry(&ACTIVATION_RETRY_DELAYS)
+    }
+
+    /// Delay after a check the server or the policy refused.
+    fn after_refused_check(&mut self) -> Duration {
+        self.next_retry(&ACTIVATION_REFUSED_RETRY_DELAYS)
+    }
+
+    fn next_retry(&mut self, delays: &[Duration]) -> Duration {
+        let index = self.consecutive_failures.min(delays.len() - 1);
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        delays[index]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActivationCheck {
+    Verified {
+        lease_expires_at: DateTime<Utc>,
+    },
+    /// No verdict: the server was unreachable, failed or throttled.
+    Unavailable,
+    /// A definitive refusal or a policy this build cannot use.
+    Refused,
+}
+
+/// The activation the runtime is currently applying. Kept so worker health
+/// checks and lease expiry are handled locally, without a network call.
+#[derive(Debug, Default)]
+struct AppliedActivation {
+    desired: Vec<GrandstreamFxoSourceLine>,
+    lease_expires_at: Option<DateTime<Utc>>,
+}
+
+impl AppliedActivation {
+    fn lease_deadline(&self, now: DateTime<Utc>) -> Option<tokio::time::Instant> {
+        let expires_at = self.lease_expires_at?;
+        Some(tokio::time::Instant::now() + (expires_at - now).to_std().unwrap_or(Duration::ZERO))
+    }
+
+    fn needs_worker_restart(&self, active: &HashMap<Uuid, ActiveLine>) -> bool {
+        self.desired.iter().any(|line| {
+            !active
+                .get(&line.source.line_id)
+                .is_some_and(ActiveLine::is_healthy)
+        })
+    }
+}
+
+async fn sleep_until_deadline(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
 async fn run_connector_supervisor(
     app_handle: tauri::AppHandle,
     manager: Arc<CallerIdManager>,
@@ -1318,8 +1428,8 @@ async fn run_connector_supervisor(
     cancel: CancellationToken,
 ) {
     let mut active = HashMap::<Uuid, ActiveLine>::new();
-    let mut ticker = tokio::time::interval(CONFIG_POLL_INTERVAL);
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut applied = AppliedActivation::default();
+    let mut cadence = ActivationCadence::default();
 
     // The native runtime is always part of the POS binary.  On a cold offline
     // boot it may activate only from a terminal-bound, unexpired lease that
@@ -1327,7 +1437,7 @@ async fn run_connector_supervisor(
     if let Some(terminal_id) = crate::storage::get_credential("terminal_id") {
         match activation::load_cached_snapshot(terminal_id.trim(), Utc::now()) {
             Ok(Some(decision)) => {
-                if let Err(error) = reconcile_activation_decision(
+                match reconcile_activation_decision(
                     &app_handle,
                     &manager,
                     generation,
@@ -1337,8 +1447,11 @@ async fn run_connector_supervisor(
                 )
                 .await
                 {
-                    cancel_active_lines(&mut active).await;
-                    manager.set_error(generation, error, CallerIdStatusReason::InvalidConfig);
+                    Ok(next) => applied = next,
+                    Err(error) => {
+                        cancel_active_lines(&mut active).await;
+                        manager.set_error(generation, error, CallerIdStatusReason::InvalidConfig);
+                    }
                 }
             }
             Ok(None) => {}
@@ -1352,123 +1465,206 @@ async fn run_connector_supervisor(
         }
     }
 
+    // One online check now; later checks only renew the lease or retry a
+    // failure. There is no periodic configuration polling.
+    let mut next_check = tokio::time::Instant::now();
+    let mut worker_health = tokio::time::interval_at(
+        tokio::time::Instant::now() + LOCAL_WORKER_HEALTH_INTERVAL,
+        LOCAL_WORKER_HEALTH_INTERVAL,
+    );
+    worker_health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
     loop {
+        let lease_deadline = applied.lease_deadline(Utc::now());
         tokio::select! {
             _ = cancel.cancelled() => {
                 cancel_active_lines(&mut active).await;
                 return;
             }
-            _ = ticker.tick() => {
-                let result = await_current_generation(
+            _ = tokio::time::sleep_until(next_check) => {
+                let Some(check) = run_activation_check(
+                    &app_handle,
                     &manager,
                     generation,
                     &cancel,
-                    async {
-                        let db_state = app_handle.state::<crate::db::DbState>();
-                        crate::admin_fetch_detailed(
-                            Some(&db_state),
-                            "/api/pos/caller-id/config",
-                            "GET",
-                            None,
-                        ).await
-                    },
-                ).await;
-                let Some(result) = result else {
+                    &mut active,
+                    &mut applied,
+                )
+                .await
+                else {
                     cancel_active_lines(&mut active).await;
                     return;
                 };
-                match result {
-                    Ok(config) => {
-                        let Some(terminal_id) = crate::storage::get_credential("terminal_id") else {
-                            cancel_active_lines(&mut active).await;
-                            manager.set_error(
-                                generation,
-                                "Caller ID terminal identity is unavailable".into(),
-                                CallerIdStatusReason::AuthFailed,
-                            );
-                            continue;
-                        };
-                        let decision = match activation::store_online_snapshot(
-                            &config,
-                            terminal_id.trim(),
-                            Utc::now(),
-                        ) {
-                            Ok(decision) => decision,
-                            Err(_) => {
-                                cancel_active_lines(&mut active).await;
-                                manager.set_error(
-                                    generation,
-                                    "Caller ID activation policy is invalid".into(),
-                                    CallerIdStatusReason::InvalidConfig,
-                                );
-                                continue;
-                            }
-                        };
-                        if let Err(error) = reconcile_activation_decision(
-                            &app_handle,
-                            &manager,
-                            generation,
-                            &cancel,
-                            &mut active,
-                            decision,
-                        ).await {
-                            cancel_active_lines(&mut active).await;
-                            manager.set_error(
-                                generation,
-                                error,
-                                CallerIdStatusReason::InvalidConfig,
-                            );
-                        }
+                let delay = match check {
+                    ActivationCheck::Verified { lease_expires_at } => {
+                        cadence.after_verified_snapshot(lease_expires_at, Utc::now())
                     }
-                    Err(error) => {
-                        if configuration_error_requires_worker_shutdown(error.status()) {
-                            if let Some(terminal_id) = crate::storage::get_credential("terminal_id") {
-                                if let Err(cache_error) = activation::persist_online_revocation(
-                                    terminal_id.trim(),
-                                    Utc::now(),
-                                ) {
-                                    warn!(
-                                        error = %cache_error,
-                                        "Caller ID online revocation could not be persisted"
-                                    );
-                                }
-                            }
-                            cancel_active_lines(&mut active).await;
-                        } else if let Some(terminal_id) = crate::storage::get_credential("terminal_id") {
-                            // Ordinary network failures preserve the source only while the
-                            // last server-issued lease remains valid.  Expiry transitions
-                            // to bridge-only and stops Caller ID emission.
-                            match activation::load_cached_snapshot(terminal_id.trim(), Utc::now()) {
-                                Ok(Some(decision)) => {
-                                    if let Err(cache_error) = reconcile_activation_decision(
-                                        &app_handle,
-                                        &manager,
-                                        generation,
-                                        &cancel,
-                                        &mut active,
-                                        decision,
-                                    ).await {
-                                        warn!(error = %cache_error, "Caller ID cached activation could not be applied");
-                                        cancel_active_lines(&mut active).await;
-                                    }
-                                }
-                                Ok(None) | Err(_) => {
-                                    cancel_active_lines(&mut active).await;
-                                }
-                            }
-                        }
+                    ActivationCheck::Unavailable => cadence.after_unavailable_check(),
+                    ActivationCheck::Refused => cadence.after_refused_check(),
+                };
+                next_check = tokio::time::Instant::now() + delay;
+            }
+            _ = sleep_until_deadline(lease_deadline) => {
+                // The last verified lease expired without a successful renewal.
+                // Re-resolving the cached snapshot applies the existing policy:
+                // an expired lease is bridge-only and stops Caller ID emission.
+                reapply_cached_activation(
+                    &app_handle,
+                    &manager,
+                    generation,
+                    &cancel,
+                    &mut active,
+                    &mut applied,
+                )
+                .await;
+            }
+            _ = worker_health.tick() => {
+                if applied.needs_worker_restart(&active) {
+                    reconcile_active_lines(
+                        &app_handle,
+                        &manager,
+                        generation,
+                        &cancel,
+                        &mut active,
+                        applied.desired.clone(),
+                    )
+                    .await;
+                }
+            }
+        }
+    }
+}
+
+/// Fetches the terminal's activation once and applies it. Returns `None` only
+/// when this supervisor generation was superseded or cancelled.
+async fn run_activation_check(
+    app_handle: &tauri::AppHandle,
+    manager: &Arc<CallerIdManager>,
+    generation: u64,
+    cancel: &CancellationToken,
+    active: &mut HashMap<Uuid, ActiveLine>,
+    applied: &mut AppliedActivation,
+) -> Option<ActivationCheck> {
+    let result = await_current_generation(manager, generation, cancel, async {
+        let db_state = app_handle.state::<crate::db::DbState>();
+        crate::admin_fetch_detailed(Some(&db_state), "/api/pos/caller-id/config", "GET", None).await
+    })
+    .await?;
+
+    match result {
+        Ok(config) => {
+            let Some(terminal_id) = crate::storage::get_credential("terminal_id") else {
+                cancel_active_lines(active).await;
+                *applied = AppliedActivation::default();
+                manager.set_error(
+                    generation,
+                    "Caller ID terminal identity is unavailable".into(),
+                    CallerIdStatusReason::AuthFailed,
+                );
+                return Some(ActivationCheck::Refused);
+            };
+            let decision =
+                match activation::store_online_snapshot(&config, terminal_id.trim(), Utc::now()) {
+                    Ok(decision) => decision,
+                    Err(_) => {
+                        cancel_active_lines(active).await;
+                        *applied = AppliedActivation::default();
                         manager.set_error(
                             generation,
-                            "Caller ID configuration is unavailable".into(),
-                            match error.status() {
-                                Some(401 | 403) => CallerIdStatusReason::AuthFailed,
-                                Some(426) => CallerIdStatusReason::UnsupportedProvider,
-                                _ => CallerIdStatusReason::NetworkError,
-                            },
+                            "Caller ID activation policy is invalid".into(),
+                            CallerIdStatusReason::InvalidConfig,
+                        );
+                        return Some(ActivationCheck::Refused);
+                    }
+                };
+            let lease_expires_at = decision.expires_at;
+            match reconcile_activation_decision(
+                app_handle, manager, generation, cancel, active, decision,
+            )
+            .await
+            {
+                Ok(next) => {
+                    *applied = next;
+                    Some(ActivationCheck::Verified { lease_expires_at })
+                }
+                Err(error) => {
+                    cancel_active_lines(active).await;
+                    *applied = AppliedActivation::default();
+                    manager.set_error(generation, error, CallerIdStatusReason::InvalidConfig);
+                    Some(ActivationCheck::Refused)
+                }
+            }
+        }
+        Err(error) => {
+            let refused = configuration_error_requires_worker_shutdown(error.status());
+            if refused {
+                if let Some(terminal_id) = crate::storage::get_credential("terminal_id") {
+                    if let Err(cache_error) =
+                        activation::persist_online_revocation(terminal_id.trim(), Utc::now())
+                    {
+                        warn!(
+                            error = %cache_error,
+                            "Caller ID online revocation could not be persisted"
                         );
                     }
                 }
+                cancel_active_lines(active).await;
+                *applied = AppliedActivation::default();
+            } else if crate::storage::get_credential("terminal_id").is_some() {
+                // Ordinary network failures preserve the source only while the
+                // last server-issued lease remains valid.  Expiry transitions
+                // to bridge-only and stops Caller ID emission.
+                reapply_cached_activation(app_handle, manager, generation, cancel, active, applied)
+                    .await;
             }
+            manager.set_error(
+                generation,
+                "Caller ID configuration is unavailable".into(),
+                match error.status() {
+                    Some(401 | 403) => CallerIdStatusReason::AuthFailed,
+                    Some(426) => CallerIdStatusReason::UnsupportedProvider,
+                    _ => CallerIdStatusReason::NetworkError,
+                },
+            );
+            Some(if refused {
+                ActivationCheck::Refused
+            } else {
+                ActivationCheck::Unavailable
+            })
+        }
+    }
+}
+
+/// Applies the last verified snapshot from the OS credential vault. An expired
+/// or revoked lease resolves to bridge-only, which stops Caller ID emission.
+async fn reapply_cached_activation(
+    app_handle: &tauri::AppHandle,
+    manager: &Arc<CallerIdManager>,
+    generation: u64,
+    cancel: &CancellationToken,
+    active: &mut HashMap<Uuid, ActiveLine>,
+    applied: &mut AppliedActivation,
+) {
+    let cached = crate::storage::get_credential("terminal_id")
+        .map(|terminal_id| activation::load_cached_snapshot(terminal_id.trim(), Utc::now()));
+    match cached {
+        Some(Ok(Some(decision))) => {
+            match reconcile_activation_decision(
+                app_handle, manager, generation, cancel, active, decision,
+            )
+            .await
+            {
+                Ok(next) => *applied = next,
+                Err(cache_error) => {
+                    warn!(error = %cache_error, "Caller ID cached activation could not be applied");
+                    cancel_active_lines(active).await;
+                    *applied = AppliedActivation::default();
+                }
+            }
+        }
+        _ => {
+            cancel_active_lines(active).await;
+            *applied = AppliedActivation::default();
         }
     }
 }
@@ -1480,7 +1676,7 @@ async fn reconcile_activation_decision(
     supervisor_cancel: &CancellationToken,
     active: &mut HashMap<Uuid, ActiveLine>,
     decision: ActivationDecision,
-) -> Result<(), String> {
+) -> Result<AppliedActivation, String> {
     match decision.mode {
         RuntimeActivation::CallerIdSource => {
             let desired = parse_runtime_source_lines(&decision.config)
@@ -1491,13 +1687,22 @@ async fn reconcile_activation_decision(
                 generation,
                 supervisor_cancel,
                 active,
-                desired,
+                desired.clone(),
             )
             .await;
+            // A transitional server without offline leases reports an expiry of
+            // "now"; it gets no local deadline and is simply checked again soon.
+            let lease_expires_at =
+                (decision.expires_at > Utc::now()).then_some(decision.expires_at);
+            Ok(AppliedActivation {
+                desired,
+                lease_expires_at,
+            })
         }
         RuntimeActivation::InactiveTerminal => {
             cancel_active_lines(active).await;
             manager.set_listening(generation, 0);
+            Ok(AppliedActivation::default())
         }
         RuntimeActivation::BridgeOnly => {
             // Subscription/lease state gates Caller ID only.  The future
@@ -1509,9 +1714,9 @@ async fn reconcile_activation_decision(
                 expires_at = %decision.expires_at,
                 "Caller ID runtime entered bridge-only safety mode"
             );
+            Ok(AppliedActivation::default())
         }
     }
-    Ok(())
 }
 
 async fn reconcile_active_lines(
@@ -1601,7 +1806,7 @@ async fn reconcile_active_lines(
         let publisher_cancel = line_cancel.clone();
         let publisher_task = tauri::async_runtime::spawn(async move {
             run_event_publisher(
-                publisher_app,
+                move |payload| publisher_app.emit(LOCAL_CALL_EVENT, payload).is_ok(),
                 publisher_line,
                 event_receiver,
                 publisher_cancel,
@@ -1907,12 +2112,16 @@ async fn run_udp_line(
     }
 }
 
-async fn run_event_publisher(
-    app_handle: tauri::AppHandle,
+/// Delivers each accepted call to this terminal's renderer. The activated
+/// source always shows its own calls; nothing on this path reaches the network.
+async fn run_event_publisher<E>(
+    emit_local: E,
     line: GrandstreamFxoSourceLine,
     mut events: mpsc::Receiver<PendingEvent>,
     cancel: CancellationToken,
-) {
+) where
+    E: Fn(Value) -> bool + Send + 'static,
+{
     loop {
         tokio::select! {
             _ = cancel.cancelled() => return,
@@ -1920,89 +2129,15 @@ async fn run_event_publisher(
                 let Some(pending) = pending else {
                     return;
                 };
-                if let Some(payload) = build_local_event_body_for_target(&line, &pending) {
-                    if app_handle
-                        .emit("caller_id_validated_local_call", payload)
-                        .is_err()
-                    {
-                        warn!(
-                            line_id = %line.source.line_id,
-                            "Validated local Caller ID event could not reach the renderer"
-                        );
-                    }
+                if !emit_local(build_local_event_body(&line, &pending)) {
+                    warn!(
+                        line_id = %line.source.line_id,
+                        "Validated local Caller ID event could not reach the renderer"
+                    );
                 }
-                publish_event(&app_handle, &line.source, pending, &cancel).await;
             }
         }
     }
-}
-
-async fn publish_event(
-    app_handle: &tauri::AppHandle,
-    source: &CallerIdSourceConfig,
-    pending: PendingEvent,
-    cancel: &CancellationToken,
-) {
-    let body = build_event_body(source, &pending);
-    let line_id = source.line_id;
-    let path = format!("/api/pos/caller-id/lines/{line_id}/events");
-    let retry_delays = [
-        Duration::ZERO,
-        Duration::from_millis(250),
-        Duration::from_millis(750),
-    ];
-    for delay in retry_delays {
-        if cancel.is_cancelled() {
-            return;
-        }
-        if !delay.is_zero() {
-            tokio::select! {
-                _ = cancel.cancelled() => return,
-                _ = tokio::time::sleep(delay) => {}
-            }
-        }
-        let request = async {
-            let db_state = app_handle.state::<crate::db::DbState>();
-            crate::admin_fetch_detailed(Some(&db_state), &path, "POST", Some(body.clone())).await
-        };
-        let result = tokio::select! {
-            _ = cancel.cancelled() => return,
-            result = tokio::time::timeout(EVENT_POST_TIMEOUT, request) => result,
-        };
-        match result {
-            Ok(Ok(_)) => return,
-            Ok(Err(error)) if matches!(error.status(), Some(400..=499)) => {
-                warn!(
-                    line_id = %line_id,
-                    status = ?error.status(),
-                    "Caller ID event publication was rejected"
-                );
-                return;
-            }
-            _ => {}
-        }
-    }
-    warn!(
-        line_id = %line_id,
-        "Caller ID event publication failed after bounded retries"
-    );
-}
-
-fn build_event_body(source: &CallerIdSourceConfig, pending: &PendingEvent) -> Value {
-    let presentation = match pending.invite.presentation {
-        Presentation::Allowed => "allowed",
-        Presentation::Restricted => "restricted",
-        Presentation::Unknown => "unknown",
-    };
-    serde_json::json!({
-        "sourceId": source.source_id,
-        "sourceVersion": source.source_version,
-        "sourceChannel": source.source_channel,
-        "providerEventId": pending.invite.provider_event_id,
-        "callerNumber": pending.invite.caller_number,
-        "presentation": presentation,
-        "occurredAt": pending.occurred_at.to_rfc3339_opts(SecondsFormat::Millis, true),
-    })
 }
 
 fn build_local_event_body(line: &GrandstreamFxoSourceLine, pending: &PendingEvent) -> Value {
@@ -2024,14 +2159,6 @@ fn build_local_event_body(line: &GrandstreamFxoSourceLine, pending: &PendingEven
         "presentation": presentation,
         "occurredAt": pending.occurred_at.to_rfc3339_opts(SecondsFormat::Millis, true),
     })
-}
-
-fn build_local_event_body_for_target(
-    line: &GrandstreamFxoSourceLine,
-    pending: &PendingEvent,
-) -> Option<Value> {
-    line.is_receiving_target
-        .then(|| build_local_event_body(line, pending))
 }
 
 #[cfg(test)]
@@ -3653,28 +3780,7 @@ mod tests {
     }
 
     #[test]
-    fn event_body_omits_readiness_metadata_resolved_by_the_server() {
-        let occurred_at = DateTime::parse_from_rfc3339("2026-07-28T12:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        let pending = PendingEvent {
-            invite: ParsedInvite {
-                caller_number: Some("2101234567".into()),
-                presentation: Presentation::Allowed,
-                provider_event_id: "body-call@ht813".into(),
-            },
-            occurred_at,
-        };
-
-        let source = parse_source_line(&source_line()).unwrap().source;
-        let body = build_event_body(&source, &pending);
-        assert_eq!(body["providerEventId"], "body-call@ht813");
-        assert_eq!(body["presentation"], "allowed");
-        assert!(body.get("readinessAttemptId").is_none());
-    }
-
-    #[test]
-    fn event_body_reports_a_missing_non_restricted_whozz_number_as_unknown() {
+    fn local_event_body_reports_a_missing_non_restricted_whozz_number_as_unknown() {
         let pending = PendingEvent {
             invite: ParsedInvite {
                 caller_number: None,
@@ -3686,40 +3792,11 @@ mod tests {
                 .with_timezone(&Utc),
         };
 
-        let source = parse_source_line(&whozz_source_line()).unwrap().source;
-        let body = build_event_body(&source, &pending);
+        let line = parse_source_line(&whozz_source_line()).unwrap();
+        let body = build_local_event_body(&line, &pending);
 
         assert_eq!(body["presentation"], "unknown");
         assert!(body["callerNumber"].is_null());
-    }
-
-    #[test]
-    fn event_body_posts_the_exact_current_source_version_and_channel_identity() {
-        let line = parse_source_line(&reviewed_source_line(
-            "grandstream_ht841_fxo",
-            3,
-            "fxo-3",
-            5063,
-        ))
-        .unwrap();
-        let pending = PendingEvent {
-            invite: ParsedInvite {
-                caller_number: Some("2101234567".into()),
-                presentation: Presentation::Allowed,
-                provider_event_id: "source-bound-call@grandstream".into(),
-            },
-            occurred_at: DateTime::parse_from_rfc3339("2026-07-28T12:00:00Z")
-                .unwrap()
-                .with_timezone(&Utc),
-        };
-
-        let body = build_event_body(&line.source, &pending);
-
-        assert_eq!(body["sourceId"], SOURCE_ID);
-        assert_eq!(body["sourceVersion"], 7);
-        assert_eq!(body["sourceChannel"], "fxo-3");
-        assert!(body.get("trustedDeviceIp").is_none());
-        assert!(body.get("deviceProfileKey").is_none());
     }
 
     #[test]
@@ -3771,21 +3848,82 @@ mod tests {
         assert!(body["callerNumber"].is_null());
     }
 
-    #[test]
-    fn source_only_terminal_does_not_build_a_local_display_event() {
+    #[tokio::test]
+    async fn source_terminal_displays_its_calls_without_the_legacy_receiving_target_flag() {
         let mut source_only = source_line();
         source_only["isReceivingTarget"] = json!(false);
         let source_only = parse_source_line(&source_only).unwrap();
-        let pending = PendingEvent {
-            invite: ParsedInvite {
-                caller_number: Some("2101234567".into()),
-                presentation: Presentation::Allowed,
-                provider_event_id: "source-only-call@ht813".into(),
+        let emitted = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let recorder = Arc::clone(&emitted);
+        let (sender, receiver) = mpsc::channel(EVENT_QUEUE_CAPACITY);
+        let cancel = CancellationToken::new();
+        let publisher = tokio::spawn(run_event_publisher(
+            move |payload| {
+                recorder.lock().unwrap().push(payload);
+                true
             },
-            occurred_at: Utc::now(),
-        };
+            source_only,
+            receiver,
+            cancel.clone(),
+        ));
 
-        assert!(build_local_event_body_for_target(&source_only, &pending).is_none());
+        for (provider_event_id, presentation, caller_number) in [
+            (
+                "first-call@ht813",
+                Presentation::Allowed,
+                Some("2101234567"),
+            ),
+            (
+                "second-call@ht813",
+                Presentation::Allowed,
+                Some("2101234567"),
+            ),
+            ("private-call@ht813", Presentation::Restricted, None),
+        ] {
+            sender
+                .send(PendingEvent {
+                    invite: ParsedInvite {
+                        caller_number: caller_number.map(str::to_string),
+                        presentation,
+                        provider_event_id: provider_event_id.into(),
+                    },
+                    occurred_at: Utc::now(),
+                })
+                .await
+                .unwrap();
+        }
+        drop(sender);
+        publisher.await.unwrap();
+
+        let emitted = emitted.lock().unwrap();
+        let ids = emitted
+            .iter()
+            .map(|payload| payload["providerEventId"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        // Every accepted call reaches the local renderer exactly once, a second
+        // call from the same number included; a private call carries no number.
+        assert_eq!(
+            ids,
+            vec![
+                "first-call@ht813",
+                "second-call@ht813",
+                "private-call@ht813"
+            ]
+        );
+        assert!(emitted[2]["callerNumber"].is_null());
+        assert_eq!(emitted[2]["presentation"], "restricted");
+        drop(emitted);
+        cancel.cancel();
+    }
+
+    #[test]
+    fn legacy_receiving_target_flag_changes_do_not_rebind_the_listener() {
+        let current = parse_source_line(&source_line()).unwrap();
+        let mut next_value = source_line();
+        next_value["isReceivingTarget"] = json!(false);
+        let next = parse_source_line(&next_value).unwrap();
+
+        assert!(!requires_udp_rebind(&current, &next));
     }
 
     #[test]
@@ -3891,5 +4029,247 @@ mod tests {
         assert!(limiter.allow(now + Duration::from_secs(30)));
         assert!(!limiter.allow(now + Duration::from_secs(30)));
         assert!(limiter.allow(now + Duration::from_secs(60)));
+    }
+
+    fn lease(hours: i64) -> (DateTime<Utc>, DateTime<Utc>) {
+        let issued_at = DateTime::parse_from_rfc3339("2026-09-27T08:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        (issued_at, issued_at + chrono::Duration::hours(hours))
+    }
+
+    #[test]
+    fn verified_activation_is_renewed_at_most_once_a_day() {
+        let mut cadence = ActivationCadence::default();
+        let (now, expires_at) = lease(72);
+
+        // A fresh 72h lease is renewed after 24h, never sooner.
+        assert_eq!(
+            cadence.after_verified_snapshot(expires_at, now),
+            ACTIVATION_RENEWAL_INTERVAL
+        );
+        // Closer to expiry the renewal moves to half the remaining lifetime...
+        assert_eq!(
+            cadence.after_verified_snapshot(expires_at, expires_at - chrono::Duration::hours(10)),
+            Duration::from_secs(5 * 60 * 60)
+        );
+        // ...but never below the floor, even for an expiry of "now".
+        assert_eq!(
+            cadence.after_verified_snapshot(expires_at, expires_at),
+            ACTIVATION_MIN_RECHECK
+        );
+    }
+
+    #[test]
+    fn unavailable_activation_checks_back_off_to_a_capped_retry() {
+        let mut cadence = ActivationCadence::default();
+        let delays = (0..8)
+            .map(|_| cadence.after_unavailable_check().as_secs())
+            .collect::<Vec<_>>();
+        assert_eq!(delays, vec![30, 60, 120, 300, 900, 1_800, 1_800, 1_800]);
+
+        let (now, expires_at) = lease(72);
+        cadence.after_verified_snapshot(expires_at, now);
+        assert_eq!(cadence.after_unavailable_check(), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn refused_activation_checks_settle_at_once_a_day() {
+        let mut cadence = ActivationCadence::default();
+        let delays = (0..8)
+            .map(|_| cadence.after_refused_check().as_secs())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            delays,
+            vec![60, 300, 1_800, 7_200, 21_600, 86_400, 86_400, 86_400]
+        );
+    }
+
+    /// Simulated clock: drives the real cadence the way the supervisor does and
+    /// counts `/api/pos/caller-id/config` requests. `online(t)` decides whether
+    /// the check at simulated second `t` receives a verified 72h lease.
+    fn simulate_activation_checks(
+        horizon: Duration,
+        online: impl Fn(Duration) -> bool,
+    ) -> (usize, Vec<Duration>) {
+        simulate_activation_outcomes(horizon, |clock| {
+            if online(clock) {
+                SimulatedAnswer::Verified
+            } else {
+                SimulatedAnswer::Unavailable
+            }
+        })
+    }
+
+    #[derive(Clone, Copy)]
+    enum SimulatedAnswer {
+        Verified,
+        Unavailable,
+        Refused,
+    }
+
+    fn simulate_activation_outcomes(
+        horizon: Duration,
+        answer: impl Fn(Duration) -> SimulatedAnswer,
+    ) -> (usize, Vec<Duration>) {
+        let mut cadence = ActivationCadence::default();
+        let (start, _) = lease(72);
+        let mut clock = Duration::ZERO;
+        let mut checks = Vec::new();
+        while clock <= horizon {
+            checks.push(clock);
+            let now = start + chrono::Duration::from_std(clock).unwrap();
+            let delay = match answer(clock) {
+                SimulatedAnswer::Verified => {
+                    cadence.after_verified_snapshot(now + chrono::Duration::hours(72), now)
+                }
+                SimulatedAnswer::Unavailable => cadence.after_unavailable_check(),
+                SimulatedAnswer::Refused => cadence.after_refused_check(),
+            };
+            clock += delay;
+        }
+        (checks.len(), checks)
+    }
+
+    #[test]
+    fn a_terminal_without_caller_id_entitlement_settles_at_one_check_a_day() {
+        let week = Duration::from_secs(7 * 24 * 60 * 60);
+        let (checks, at) = simulate_activation_outcomes(week, |_| SimulatedAnswer::Refused);
+
+        // 403 on every check: 1m, 5m, 30m, 2h, 6h, then daily. The installed
+        // runtime asks every 2 s regardless: 302,400 requests a week.
+        assert!(checks <= 12, "checks in a week: {checks}");
+        let last_day = at
+            .iter()
+            .filter(|clock| **clock >= week - Duration::from_secs(24 * 60 * 60))
+            .count();
+        assert!(last_day <= 1, "checks on the last day: {last_day}");
+    }
+
+    #[test]
+    fn a_transient_refusal_recovers_within_minutes() {
+        let (_, at) = simulate_activation_outcomes(Duration::from_secs(60 * 60), |clock| {
+            if clock < Duration::from_secs(90) {
+                SimulatedAnswer::Refused
+            } else {
+                SimulatedAnswer::Verified
+            }
+        });
+
+        // Refused at start and at +1 min; verified again at +6 min.
+        assert_eq!(
+            at,
+            vec![
+                Duration::ZERO,
+                Duration::from_secs(60),
+                Duration::from_secs(6 * 60)
+            ]
+        );
+    }
+
+    #[test]
+    fn an_online_source_checks_activation_once_a_day_instead_of_every_two_seconds() {
+        let week = Duration::from_secs(7 * 24 * 60 * 60);
+        let (checks, at) = simulate_activation_checks(week, |_| true);
+
+        // Startup plus one renewal per day: 8 requests in a week. The installed
+        // 1.4.118 runtime polls every 2s: 302,400 requests in the same week.
+        assert_eq!(checks, 8);
+        assert_eq!(at[0], Duration::ZERO);
+        assert!(at
+            .windows(2)
+            .all(|pair| pair[1] - pair[0] == ACTIVATION_RENEWAL_INTERVAL));
+        assert_eq!(week.as_secs() / 2, 302_400);
+    }
+
+    #[test]
+    fn an_offline_source_retries_boundedly_and_recovers_when_the_server_returns() {
+        let offline_until = Duration::from_secs(80 * 60 * 60);
+        let horizon = Duration::from_secs(96 * 60 * 60);
+        let (checks, at) = simulate_activation_checks(horizon, |clock| clock >= offline_until);
+
+        // 80h offline: the backoff reaches its 30-minute cap, so the failed
+        // checks stay near two per hour (all local network errors).
+        let offline_checks = at.iter().filter(|clock| **clock < offline_until).count();
+        assert!(
+            offline_checks <= 80 * 2 + 6,
+            "offline checks: {offline_checks}"
+        );
+        // The first check after the network returns renews within 30 minutes...
+        let first_online = at.iter().find(|clock| **clock >= offline_until).unwrap();
+        assert!(*first_online - offline_until <= Duration::from_secs(30 * 60));
+        // ...and the schedule returns to one renewal per day.
+        let online_checks = at.iter().filter(|clock| **clock >= offline_until).count();
+        assert_eq!(online_checks, 1);
+        assert_eq!(checks, offline_checks + online_checks);
+    }
+
+    #[test]
+    fn an_expired_lease_has_a_local_deadline_and_no_lease_has_none() {
+        let applied = AppliedActivation::default();
+        assert!(applied.lease_deadline(Utc::now()).is_none());
+
+        let now = Utc::now();
+        let applied = AppliedActivation {
+            desired: Vec::new(),
+            lease_expires_at: Some(now + chrono::Duration::hours(72)),
+        };
+        let deadline = applied.lease_deadline(now).expect("lease deadline");
+        let remaining = deadline - tokio::time::Instant::now();
+        assert!(remaining > Duration::from_secs(71 * 60 * 60));
+        assert!(remaining <= Duration::from_secs(72 * 60 * 60));
+
+        let expired = AppliedActivation {
+            desired: Vec::new(),
+            lease_expires_at: Some(now - chrono::Duration::minutes(1)),
+        };
+        assert!(expired.lease_deadline(now).unwrap() <= tokio::time::Instant::now());
+    }
+
+    #[tokio::test]
+    async fn local_health_check_restarts_only_missing_or_dead_listeners() {
+        let desired = parse_source_lines(&reviewed_source("grandstream_ht841_fxo", 2))
+            .expect("two desired workers");
+        let applied = AppliedActivation {
+            desired: desired.clone(),
+            lease_expires_at: Some(Utc::now() + chrono::Duration::hours(72)),
+        };
+        let mut active = HashMap::new();
+        // Nothing running (for example the port was still held at startup).
+        assert!(applied.needs_worker_restart(&active));
+
+        for line in &desired {
+            let cancel = CancellationToken::new();
+            let listener_cancel = cancel.clone();
+            let publisher_cancel = cancel.clone();
+            active.insert(
+                line.source.line_id,
+                ActiveLine {
+                    config: line.clone(),
+                    cancel,
+                    worker_stopped: CancellationToken::new(),
+                    listener_task: tauri::async_runtime::spawn(async move {
+                        listener_cancel.cancelled().await;
+                    }),
+                    publisher_task: tauri::async_runtime::spawn(async move {
+                        publisher_cancel.cancelled().await;
+                    }),
+                    readiness_acknowledged: None,
+                },
+            );
+        }
+        // Every desired listener is healthy: the health tick does nothing.
+        assert!(!applied.needs_worker_restart(&active));
+
+        active
+            .get(&desired[0].source.line_id)
+            .unwrap()
+            .worker_stopped
+            .cancel();
+        assert!(applied.needs_worker_restart(&active));
+
+        cancel_active_lines(&mut active).await;
+        // A bridge-only or inactive terminal has nothing to restart.
+        assert!(!AppliedActivation::default().needs_worker_restart(&active));
     }
 }

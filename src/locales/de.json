@@ -639,6 +639,9 @@
       "deliveryFee": "Liefergebühr:",
       "calculatingDeliveryFee": "Wird berechnet...",
       "deliveryFeeNeedsExactAddress": "Genaue Adresse wählen",
+      "deliveryFeeZoneNotChecked": "Zone nicht geprüft",
+      "deliveryZoneNotCheckedNotice": "Die Lieferzone wurde nicht geprüft. Wählen Sie die Adresse erneut aus.",
+      "repickDeliveryAddress": "Adresse erneut auswählen",
       "deliveryFeeOutOfZone": "Außerhalb der Lieferzone",
       "deliveryFeeUnavailable": "Liefergebühr nicht verfügbar",
       "total": "Gesamt:",
@@ -940,6 +943,7 @@
     "deleteAddressQueued": "Adresse gelöscht und zur Synchronisierung vorgemerkt",
     "deleteAddressError": "Adresse konnte nicht gelöscht werden",
     "updateAddressSuccess": "Adresse erfolgreich aktualisiert",
+    "savedLocallyQueued": "Adresse an dieser Kasse gespeichert und zur Synchronisierung vorgemerkt",
     "updateAddressError": "Adresse konnte nicht aktualisiert werden",
     "address": {
       "street": "Straße",
@@ -2973,7 +2977,7 @@
         "statusStopped": "Gestoppt",
         "callsDetected": "Erkannte Anrufe",
         "singleSourceTitle": "Anruferkennung nur auf einem Quellterminal konfigurieren",
-        "singleSourceBody": "Dieses Terminal erfasst eingehende Anrufe und leitet sie an den Rest des Standorts weiter. Aktivieren Sie dieselbe Leitung nicht auf mehreren POS-Terminals.",
+        "singleSourceBody": "Dieses Terminal erfasst eingehende Anrufe und zeigt sie hier an. Andere Terminals zeigen den Anruf nicht an. Aktivieren Sie dieselbe Leitung nicht auf mehreren POS-Terminals.",
         "providerPreset": "Voreinstellung",
         "authUsername": "Authentifizierungs-Benutzername",
         "authUsernamePlaceholder": "Leer lassen, um den SIP-Benutzernamen zu verwenden",
@@ -4651,7 +4655,39 @@
       "addressAdded": "Adresse erfolgreich hinzugefügt",
       "addressSaveFailed": "Die Adresse konnte nicht gespeichert werden. Bitte versuchen Sie es erneut.",
       "addressSaveTimedOut": "Das Speichern der Adresse hat zu lange gedauert. Bitte versuchen Sie es erneut.",
-      "failed": "Kunde konnte nicht erstellt werden. Bitte versuchen Sie es erneut."
+      "failed": "Kunde konnte nicht erstellt werden. Bitte versuchen Sie es erneut.",
+      "phoneLengthExact": "Die Telefonnummer muss {{expected}} Ziffern haben (Sie haben {{entered}} eingegeben)",
+      "phoneLengthEither": "Die Telefonnummer muss {{first}} oder {{second}} Ziffern haben (Sie haben {{entered}} eingegeben)",
+      "phoneLengthRange": "Die Telefonnummer muss {{min}}–{{max}} Ziffern haben (Sie haben {{entered}} eingegeben)",
+      "phoneInvalid": "Das ist keine gültige Telefonnummer. Beginnen Sie eine ausländische Nummer mit + und der Ländervorwahl.",
+      "phoneInvalidCharacters": "Verwenden Sie in der Telefonnummer nur Ziffern und Leerzeichen, ein + nur am Anfang.",
+      "phoneTooWide": "Die Telefonnummer ist zum Speichern zu lang (höchstens {{max}} Zeichen). Entfernen Sie überflüssige Leerzeichen oder Klammern.",
+      "phoneKeptAsSaved": "Die gespeicherte Nummer bleibt unverändert, Sie können die übrigen Änderungen also trotzdem speichern.",
+      "phoneRejected": "Das Büro hat diese Telefonnummer nicht angenommen. Prüfen Sie sie und versuchen Sie es erneut.",
+      "customerExists": "Ein Kunde mit dieser Telefonnummer oder E-Mail existiert bereits. Schließen Sie das Formular, suchen Sie den Kunden und wählen Sie ihn aus.",
+      "addressLocationRejected": "Das Büro konnte den Standort dieser Adresse nicht verwenden. Wählen Sie die Adresse erneut aus den Vorschlägen.",
+      "customerNotFound": "Diesen Kunden gibt es im Büro nicht mehr. Schließen Sie das Formular und suchen Sie erneut.",
+      "saveRejected": "Das Büro hat die Änderung nicht angenommen (Code {{code}}). Prüfen Sie die Angaben und versuchen Sie es erneut.",
+      "addressNotFound": "Diese gespeicherte Adresse gibt es im Büro nicht mehr. Schließen Sie das Formular und wählen Sie den Kunden erneut aus.",
+      "customerSyncInProgress": "Dieser Kunde wird gerade an das Büro gesendet. Warten Sie einen Moment und speichern Sie erneut.",
+      "customerNotSynced": "Dieser Kunde steht noch nicht in der Kundenliste des Büros und kann hier nicht geändert werden. Schließen Sie das Formular und legen Sie ihn als neuen Kunden an.",
+      "saveRefusedLocally": "Diese Kasse konnte die Änderung nicht speichern (Code {{code}}). Versuchen Sie es erneut; wenn es wieder passiert, wenden Sie sich an den Support.",
+      "minimize": "Minimieren",
+      "floorTooLong": "Die Etage darf höchstens {{max}} Zeichen lang sein.",
+      "updateFailed": "Die Änderungen konnten nicht gespeichert werden. Bitte versuchen Sie es erneut.",
+      "zoneNotChecked": "Die Lieferzone wurde nicht geprüft. Wählen Sie die Adresse erneut aus.",
+      "repickAddress": "Adresse erneut auswählen",
+      "selectAddressForValidation": "Wählen Sie eine echte Adresse aus den Vorschlägen, um die Lieferung zu prüfen.",
+      "outOfZoneOverrideRequired": "Die Adresse liegt außerhalb der Zone. Tippen Sie auf „Lieferung außerhalb der Zone akzeptieren“ und geben Sie einen Grund an, um fortzufahren.",
+      "acceptOutOfZone": "Lieferung außerhalb der Zone akzeptieren",
+      "offlineOverrideRequired": "Die Adresse konnte offline nicht geprüft werden. Bestätigen Sie den Hinweis und geben Sie einen Grund an, um fortzufahren.",
+      "acceptOfflineUnverified": "Offline ungeprüfte Lieferung akzeptieren",
+      "overrideReasonRequired": "Der Grund für die Ausnahme muss mindestens 6 Zeichen lang sein.",
+      "overrideReasonPlaceholder": "Grund für die Ausnahme eingeben (mindestens 6 Zeichen)",
+      "specialAddressModeTitle": "Spezielle Adressbezeichnung erkannt",
+      "specialAddressModeDescription": "Diese Adresse wird als „{{address}}“ gespeichert. Die Lieferzonenprüfung entfällt für diesen Eintrag.",
+      "conflictError": "Der Kunde wurde an einer anderen Kasse geändert. Bitte aktualisieren Sie die Ansicht.",
+      "versionRequired": "Diese Kasse hat nicht den neuesten Stand dieses Kunden. Schließen Sie das Formular, suchen Sie den Kunden erneut und wiederholen Sie die Änderung."
     },
     "customerInfo": {
       "title": "Kundeninformationen",
@@ -5264,6 +5300,7 @@
     "cityRequired": "Stadt ist für Lieferbestellungen erforderlich",
     "postalCodeRequired": "Postleitzahl ist für Lieferbestellungen erforderlich",
     "customerNoAddress": "Dieser Kunde hat keine Lieferadresse. Bitte fügen Sie zuerst eine Adresse hinzu.",
+    "deliveryZoneNotCheckedNotice": "Die Lieferzone wurde nicht geprüft. Wählen Sie die Adresse erneut aus, damit sie geprüft werden kann.",
     "addressValidated": "Adresse erfolgreich überprüft",
     "addressValidationFailed": "Adressüberprüfung fehlgeschlagen",
     "addressValidationError": "Adresse konnte nicht überprüft werden",
@@ -7291,7 +7328,13 @@
     "category": {
       "food": "Essensplattformen",
       "hotel": "Hotelplattformen",
-      "government": "Staat & Compliance"
+      "government": "Staat & Compliance",
+      "delivery": "Lieferplattformen",
+      "payment": "Zahlungsanbieter",
+      "analytics": "Analysen",
+      "ecommerce": "E-Commerce",
+      "communications": "Kommunikation",
+      "other": "Weitere Plugins"
     },
     "fields": {
       "storeUrl": "Shop-URL",
@@ -7326,7 +7369,56 @@
     },
     "callerId": {
       "setupInAdmin": "Anruferkennung im Admin Dashboard einrichten",
-      "manageInAdmin": "Anruferkennung im Admin Dashboard verwalten"
+      "manageInAdmin": "Anruferkennung im Admin Dashboard verwalten",
+      "openInAdmin": "Anruferkennung im Admin Dashboard öffnen",
+      "state": {
+        "checking": "Wird geprüft…",
+        "listeningHere": "Aktiv auf diesem Terminal",
+        "notVerified": "Nicht mit dem Server bestätigt",
+        "configuredNotListening": "Eingerichtet – empfängt nicht",
+        "listenerError": "Empfangsfehler",
+        "lineSetupIncomplete": "Einrichtung der Telefonleitung unvollständig",
+        "otherTerminal": "Läuft auf einem anderen Terminal",
+        "switchedOff": "Für dieses Unternehmen ausgeschaltet",
+        "notAssigned": "Diesem Terminal nicht zugewiesen",
+        "unknown": "Status nicht verfügbar"
+      },
+      "short": {
+        "checking": "Wird geprüft…",
+        "listeningHere": "Empfängt",
+        "notVerified": "Nicht bestätigt",
+        "configuredNotListening": "Empfängt nicht",
+        "listenerError": "Fehler",
+        "lineSetupIncomplete": "Unvollständig",
+        "otherTerminal": "Anderes Terminal",
+        "switchedOff": "Ausgeschaltet",
+        "notAssigned": "Nicht zugewiesen",
+        "unknown": "Unbekannt"
+      },
+      "detail": {
+        "listeningFrom": "Empfängt Anrufe von {{device}}",
+        "listening": "Empfängt eingehende Anrufe",
+        "lastCall": "Letzter Anruf: {{time}}",
+        "callsThisSession": "Anrufe seit dem Start des POS: {{calls}}",
+        "noCallsYet": "Keine Anrufe seit dem Start des POS",
+        "notListening": "Dieses Terminal hat eine Leitung für die Anruferkennung, empfängt aber keine Anrufe.",
+        "checkSettings": "Prüfen Sie {{path}}.",
+        "otherTerminal": "Eingehende Anrufe werden auf dem Terminal angezeigt, an dem die Telefonleitung angeschlossen ist.",
+        "notAssigned": "Damit eingehende Anrufe hier erscheinen, weisen Sie dieses Terminal im Admin Dashboard einer Telefonleitung zu.",
+        "notVerified": "Dieses Terminal konnte die Einrichtung der Anruferkennung nicht mit dem Server bestätigen. Anrufe können mit der zuletzt bestätigten Einrichtung noch eine Weile erscheinen, und die Prüfung wird automatisch wiederholt.",
+        "lineSetupIncomplete": "Dieses Terminal ist die Quelle einer Telefonleitung, aber die Einrichtung der Leitung ist unvollständig, daher empfängt es keine Anrufe. Prüfen Sie die Telefonleitung im Admin Dashboard.",
+        "switchedOff": "Die Anruferkennung ist für dieses Unternehmen ausgeschaltet. Schalten Sie sie im Admin Dashboard ein.",
+        "lastKnown": "Zuletzt bekannt: {{state}}. Der Status konnte nicht aktualisiert werden.",
+        "unknown": "Der Status der Anruferkennung auf diesem Terminal konnte nicht gelesen werden. Tippen Sie auf Aktualisieren, um es erneut zu versuchen."
+      },
+      "reason": {
+        "portInUse": "Ein anderes Programm verwendet den Port der Anruferkennung auf diesem Terminal.",
+        "authFailed": "Der Server hat die Anruferkennung auf diesem Terminal nicht zugelassen, daher empfängt es keine Anrufe mehr. Prüfen Sie die Anruferkennung im Admin Dashboard.",
+        "unsupported": "Die Anruferkennung unterstützt diese POS-Version oder diesen Telefondienst nicht. Aktualisieren Sie das POS oder prüfen Sie die Einrichtung im Admin Dashboard.",
+        "timeout": "Der Telefondienst hat nicht rechtzeitig geantwortet. Die Anruferkennung versucht es automatisch erneut.",
+        "invalidConfig": "Die Einrichtung der Anruferkennung auf diesem Terminal ist unvollständig oder veraltet.",
+        "failed": "Die Anruferkennung konnte auf diesem Terminal nicht starten."
+      }
     },
     "adminSetup": {
       "pendingFirstOrder": "Die Einrichtung erfolgt im Admin-Dashboard. Die Verbindung wird mit der ersten eingegangenen Bestellung aktiv."
@@ -7352,6 +7444,12 @@
       },
       "mydata": {
         "description": "Griechische AADE E-Rechnungskonformität"
+      },
+      "caller_id": {
+        "description": "Anruferkennung und Kundensuche"
+      },
+      "customer_messaging": {
+        "description": "Transaktionsnachrichten an Kunden, verwaltet im Admin Dashboard"
       }
     },
     "empty": {
@@ -7932,8 +8030,20 @@
       },
       "duplicateCustomerConflict": {
         "title": "Diesen Kundensatz führt das Büro bereits",
-        "summary": "Ein an dieser Kasse gespeicherter Kundensatz hat dieselbe Telefonnummer wie einer, den das Büro bereits führt; die Änderung lässt sich deshalb nicht senden. Sie blockiert die Synchronisierung seit dem Speichern.",
+        "summary": "Ein an dieser Kasse gespeicherter Kundensatz hat dieselbe Telefonnummer wie einer, den das Büro bereits führt; die Änderung lässt sich deshalb nicht senden. Sie verhindert den Tagesabschluss nicht, aber das Büro kennt diesen Kunden erst, wenn Sie ihn verknüpfen.",
         "guidance": "Handelt es sich um dieselbe Person, verknüpfen Sie diese Kasse mit dem vorhandenen Satz. Ein erneuter Versuch hilft nicht: Das Büro antwortet jedes Mal mit derselben Ablehnung."
+      },
+      "customerPhoneRejected": {
+        "title": "Das Büro hat die Telefonnummer eines Kunden abgelehnt",
+        "summary_one": "Eine an dieser Kasse gespeicherte Kundenänderung wurde wegen der Telefonnummer abgelehnt. Sie verhindert den Tagesabschluss nicht, und Bestellungen behalten Name und Telefonnummer des Kunden.",
+        "summary_other": "{{count}} an dieser Kasse gespeicherte Kundenänderungen wurden wegen der Telefonnummer abgelehnt. Sie verhindern den Tagesabschluss nicht, und Bestellungen behalten Name und Telefonnummer des Kunden.",
+        "guidance": "Versuchen Sie die Änderung noch einmal. Wird sie erneut abgelehnt, können Sie den Tag trotzdem abschließen: Korrigieren Sie die Telefonnummer bei der nächsten Bestellung des Kunden und bitten Sie den Support, diese Änderung zu entfernen."
+      },
+      "customerDirectoryNotSynced": {
+        "title": "Eine Kundenänderung wurde im Büro nicht gespeichert",
+        "summary_one": "Eine an dieser Kasse gespeicherte Kundenänderung konnte nicht gesendet werden. Sie verhindert den Tagesabschluss nicht, und Bestellungen behalten Name und Telefonnummer des Kunden.",
+        "summary_other": "{{count}} an dieser Kasse gespeicherte Kundenänderungen konnten nicht gesendet werden. Sie verhindern den Tagesabschluss nicht, und Bestellungen behalten Name und Telefonnummer des Kunden.",
+        "guidance": "Versuchen Sie die Änderung noch einmal. Schlägt sie erneut fehl, öffnen Sie die Supportdetails; den Tag können Sie trotzdem abschließen."
       }
     }
   },

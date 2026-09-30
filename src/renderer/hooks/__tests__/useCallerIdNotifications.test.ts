@@ -1,16 +1,19 @@
 import { act, renderHook } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
   isModuleEnabled: vi.fn(),
+  listeners: new Map<string, Set<(payload: unknown) => void>>(),
   onEvent: vi.fn(),
   offEvent: vi.fn(),
-  getCachedTerminalCredentials: vi.fn(),
-  subscribeToCallerIdEvents: vi.fn(),
-  reportCallerIdReceipt: vi.fn(),
-  unsubscribeRealtime: vi.fn(),
   showCallerIdToast: vi.fn(),
   openCustomerSearch: vi.fn(),
+  // Network spies: the local Caller ID path must never reach any of them.
+  posApiGet: vi.fn(),
+  posApiPost: vi.fn(),
+  posApiFetch: vi.fn(),
+  subscribeToCallerIdEvents: vi.fn(),
+  reportCallerIdReceipt: vi.fn(),
 }))
 
 vi.mock('../../../lib', () => ({
@@ -24,8 +27,14 @@ vi.mock('../../contexts/module-context', () => ({
   }),
 }))
 
-vi.mock('../../services/terminal-credentials', () => ({
-  getCachedTerminalCredentials: mocks.getCachedTerminalCredentials,
+vi.mock('../../components/callerid/CallerIdPopup', () => ({
+  showCallerIdToast: mocks.showCallerIdToast,
+}))
+
+vi.mock('../../utils/api-helpers', () => ({
+  posApiGet: mocks.posApiGet,
+  posApiPost: mocks.posApiPost,
+  posApiFetch: mocks.posApiFetch,
 }))
 
 vi.mock('../../services/CallerIdRealtimeService', () => ({
@@ -33,256 +42,110 @@ vi.mock('../../services/CallerIdRealtimeService', () => ({
   reportCallerIdReceipt: mocks.reportCallerIdReceipt,
 }))
 
-vi.mock('../../components/callerid/CallerIdPopup', () => ({
-  showCallerIdToast: mocks.showCallerIdToast,
-}))
-
 import { useCallerIdNotifications } from '../useCallerIdNotifications'
 
-describe('useCallerIdNotifications', () => {
-  const realtimeClient = {
-    channel: vi.fn(),
-    removeChannel: vi.fn(),
-  }
+const CHANNEL = 'callerid:validated-local-call'
+
+const validLocalCall = (overrides: Record<string, unknown> = {}) => ({
+  schemaVersion: 1,
+  sourceId: '10000000-0000-4000-8000-000000000001',
+  sourceVersion: 7,
+  lineId: '20000000-0000-4000-8000-000000000002',
+  lineName: 'Main line',
+  lineVersion: 4,
+  providerEventId: 'local-call@fxo',
+  callerNumber: '2101234567',
+  presentation: 'allowed',
+  occurredAt: new Date().toISOString(),
+  ...overrides,
+})
+
+function registeredHandlers(): Array<(payload: unknown) => void> {
+  return [...(mocks.listeners.get(CHANNEL) ?? [])]
+}
+
+function deliver(payload: unknown) {
+  const handlers = registeredHandlers()
+  act(() => {
+    for (const handler of handlers) handler(payload)
+  })
+}
+
+function expectNoNetwork(fetchSpy: ReturnType<typeof vi.fn>) {
+  expect(fetchSpy).not.toHaveBeenCalled()
+  expect(mocks.posApiGet).not.toHaveBeenCalled()
+  expect(mocks.posApiPost).not.toHaveBeenCalled()
+  expect(mocks.posApiFetch).not.toHaveBeenCalled()
+  expect(mocks.subscribeToCallerIdEvents).not.toHaveBeenCalled()
+  expect(mocks.reportCallerIdReceipt).not.toHaveBeenCalled()
+}
+
+describe('useCallerIdNotifications local delivery', () => {
+  let fetchSpy: ReturnType<typeof vi.fn>
 
   beforeEach(() => {
     vi.clearAllMocks()
+    mocks.listeners.clear()
     mocks.isModuleEnabled.mockReturnValue(true)
-    mocks.getCachedTerminalCredentials.mockReturnValue({
-      terminalId: 'terminal-1',
-      apiKey: 'terminal-api-key',
-      organizationId: 'org-1',
-      branchId: 'branch-1',
+    mocks.onEvent.mockImplementation((channel: string, handler: (payload: unknown) => void) => {
+      const handlers = mocks.listeners.get(channel) ?? new Set()
+      handlers.add(handler)
+      mocks.listeners.set(channel, handlers)
     })
-    mocks.subscribeToCallerIdEvents.mockReturnValue(mocks.unsubscribeRealtime)
-  })
-
-  const renderNotifications = (overrides: Record<string, unknown> = {}) =>
-    renderHook(() =>
-      useCallerIdNotifications({
-        realtimeReady: false,
-        realtimeClient: null,
-        onOpenCustomerSearch: mocks.openCustomerSearch,
-        ...overrides,
-      } as any),
-    )
-
-  it('starts authenticated cloud polling before Realtime is available', () => {
-    renderHook(() =>
-      useCallerIdNotifications({
-        realtimeReady: false,
-        realtimeClient: null,
-      }),
-    )
-
-    expect(mocks.subscribeToCallerIdEvents).toHaveBeenCalledWith(
-      null,
-      'org-1',
-      'terminal-1',
-      expect.any(Function),
-      expect.any(Function),
-    )
-  })
-
-  it('does not listen while the POS session is inactive and clears accepted calls', () => {
-    const occurredAt = new Date().toISOString()
-    const localCall = {
-      schemaVersion: 1,
-      sourceId: '10000000-0000-4000-8000-000000000001',
-      sourceVersion: 7,
-      lineId: '20000000-0000-4000-8000-000000000002',
-      lineName: 'Cosmote line',
-      lineVersion: 4,
-      providerEventId: 'inactive-session-call@ht813',
-      callerNumber: '2101234567',
-      presentation: 'allowed',
-      occurredAt,
-    }
-    const { rerender } = renderHook(
-      ({ active }) =>
-        useCallerIdNotifications({
-          active,
-          realtimeReady: false,
-          realtimeClient: null,
-          onOpenCustomerSearch: mocks.openCustomerSearch,
-        }),
-      { initialProps: { active: false } },
-    )
-
-    expect(mocks.onEvent).not.toHaveBeenCalled()
-    expect(mocks.subscribeToCallerIdEvents).not.toHaveBeenCalled()
-
-    rerender({ active: true })
-    const firstHandler = mocks.onEvent.mock.calls.find(
-      ([eventName]) => eventName === 'callerid:validated-local-call',
-    )?.[1]
-    act(() => firstHandler?.(localCall))
-    expect(mocks.openCustomerSearch).toHaveBeenCalledTimes(1)
-
-    rerender({ active: false })
-    act(() => firstHandler?.(localCall))
-    expect(mocks.openCustomerSearch).toHaveBeenCalledTimes(1)
-
-    rerender({ active: true })
-    const latestHandler = mocks.onEvent.mock.calls
-      .filter(([eventName]) => eventName === 'callerid:validated-local-call')
-      .at(-1)?.[1]
-    act(() => latestHandler?.(localCall))
-    expect(mocks.openCustomerSearch).toHaveBeenCalledTimes(2)
-  })
-
-  it('invalidates the subscription when only the terminal branch changes', () => {
-    renderHook(() =>
-      useCallerIdNotifications({ realtimeReady: true, realtimeClient } as any),
-    )
-    const identityCurrent =
-      mocks.subscribeToCallerIdEvents.mock.calls[0]?.[4]
-    expect(identityCurrent()).toBe(true)
-
-    mocks.getCachedTerminalCredentials.mockReturnValue({
-      terminalId: 'terminal-1',
-      apiKey: 'terminal-api-key',
-      organizationId: 'org-1',
-      branchId: 'branch-2',
+    mocks.offEvent.mockImplementation((channel: string, handler: (payload: unknown) => void) => {
+      mocks.listeners.get(channel)?.delete(handler)
     })
-
-    expect(identityCurrent()).toBe(false)
+    fetchSpy = vi.fn(() => Promise.reject(new Error('network is not allowed here')))
+    vi.stubGlobal('fetch', fetchSpy)
   })
 
-  it('never subscribes to or displays legacy native caller events', () => {
-    const { rerender, unmount } = renderHook(
-      ({ realtimeReady }) =>
-        useCallerIdNotifications({ realtimeReady, realtimeClient } as any),
-      { initialProps: { realtimeReady: false } },
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+  })
+
+  it('registers only the hardened native local event channel', () => {
+    const { unmount } = renderHook(() =>
+      useCallerIdNotifications({ onOpenCustomerSearch: mocks.openCustomerSearch }),
     )
 
-    expect(mocks.subscribeToCallerIdEvents).toHaveBeenCalledWith(
-      null,
-      'org-1',
-      'terminal-1',
-      expect.any(Function),
-      expect.any(Function),
-    )
-
-    const legacyRegistration = mocks.onEvent.mock.calls.find(
-      ([eventName]) => eventName === 'callerid:incoming-call',
-    )
-    if (legacyRegistration) {
-      act(() => {
-        legacyRegistration[1]({
-          callerNumber: '+15551234567',
-          sipCallId: 'local-call-1',
-          timestamp: '2026-07-27T10:00:00.000Z',
-        })
-      })
-    }
-
-    expect(legacyRegistration).toBeUndefined()
-    expect(mocks.showCallerIdToast).not.toHaveBeenCalled()
-
-    rerender({ realtimeReady: true })
-    expect(mocks.subscribeToCallerIdEvents).toHaveBeenCalledWith(
-      realtimeClient,
-      'org-1',
-      'terminal-1',
-      expect.any(Function),
-      expect.any(Function),
-    )
-    const identityCurrent =
-      mocks.subscribeToCallerIdEvents.mock.calls.at(-1)?.[4]
-    expect(identityCurrent()).toBe(true)
-    mocks.getCachedTerminalCredentials.mockReturnValue({
-      terminalId: 'terminal-2',
-      apiKey: 'replacement-terminal-api-key',
-      organizationId: 'org-1',
-      branchId: 'branch-1',
-    })
-    expect(identityCurrent()).toBe(false)
-
-    rerender({ realtimeReady: false })
-    expect(mocks.unsubscribeRealtime).toHaveBeenCalledTimes(2)
+    expect(mocks.onEvent).toHaveBeenCalledTimes(1)
+    expect(mocks.onEvent).toHaveBeenCalledWith(CHANNEL, expect.any(Function))
 
     unmount()
-    expect(mocks.offEvent).not.toHaveBeenCalledWith(
-      'callerid:incoming-call',
-      expect.any(Function),
-    )
+    expect(mocks.offEvent).toHaveBeenCalledWith(CHANNEL, expect.any(Function))
+    expect(registeredHandlers()).toHaveLength(0)
   })
 
-  it('displays a fresh hardened local call without waiting for Realtime', () => {
-    const { unmount } = renderNotifications()
-    const localRegistration = mocks.onEvent.mock.calls.find(
-      ([eventName]) => eventName === 'callerid:validated-local-call',
+  it('opens the customer lookup for a known number without any request', () => {
+    renderHook(() =>
+      useCallerIdNotifications({ onOpenCustomerSearch: mocks.openCustomerSearch }),
     )
-    const occurredAt = new Date().toISOString()
 
-    expect(localRegistration).toBeDefined()
-    act(() => {
-      localRegistration?.[1]({
-        schemaVersion: 1,
-        sourceId: '10000000-0000-4000-8000-000000000001',
-        sourceVersion: 7,
-        lineId: '20000000-0000-4000-8000-000000000002',
-        lineName: 'Cosmote line',
-        lineVersion: 4,
-        providerEventId: '40000000-0000-4000-8000-000000000004',
-        callerNumber: '2101234567',
-        presentation: 'allowed',
-        occurredAt,
-      })
-    })
+    deliver(validLocalCall())
 
-    expect(mocks.subscribeToCallerIdEvents).toHaveBeenCalledWith(
-      null,
-      'org-1',
-      'terminal-1',
-      expect.any(Function),
-      expect.any(Function),
-    )
-    expect(mocks.showCallerIdToast).not.toHaveBeenCalled()
     expect(mocks.openCustomerSearch).toHaveBeenCalledTimes(1)
     expect(mocks.openCustomerSearch).toHaveBeenCalledWith(
       expect.objectContaining({
         displayPhone: '2101234567',
         lookupPhone: '2101234567',
-        requestKey: `call:20000000-0000-4000-8000-000000000002:${Date.parse(occurredAt)}:allowed:01234567`,
         onDisplayed: expect.any(Function),
       }),
     )
-    const modalRequest = mocks.openCustomerSearch.mock.calls[0]?.[0]
-    act(() => {
-      modalRequest.onDisplayed()
-    })
-    expect(mocks.reportCallerIdReceipt).not.toHaveBeenCalled()
-
-    unmount()
-    expect(mocks.offEvent).toHaveBeenCalledWith(
-      'callerid:validated-local-call',
-      localRegistration?.[1],
-    )
+    act(() => mocks.openCustomerSearch.mock.calls[0][0].onDisplayed())
+    expectNoNetwork(fetchSpy)
   })
 
-  it('keeps the international caller number for display and emits a separate local lookup number', () => {
-    renderNotifications()
-    const localHandler = mocks.onEvent.mock.calls.find(
-      ([eventName]) => eventName === 'callerid:validated-local-call',
-    )?.[1]
+  it('keeps the international caller number for display and a separate lookup number', () => {
+    renderHook(() =>
+      useCallerIdNotifications({ onOpenCustomerSearch: mocks.openCustomerSearch }),
+    )
 
-    act(() => {
-      localHandler?.({
-        schemaVersion: 1,
-        sourceId: '10000000-0000-4000-8000-000000000001',
-        sourceVersion: 7,
-        lineId: '20000000-0000-4000-8000-000000000002',
-        lineName: 'Athens line',
-        lineVersion: 4,
-        providerEventId: 'swiss-caller@ht813',
-        callerNumber: '+41779990214',
-        countryCode: 'GR',
-        presentation: 'allowed',
-        occurredAt: new Date().toISOString(),
-      })
-    })
+    deliver(validLocalCall({
+      providerEventId: 'swiss-caller@ht813',
+      callerNumber: '+41779990214',
+      countryCode: 'GR',
+    }))
 
     expect(mocks.openCustomerSearch).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -290,168 +153,134 @@ describe('useCallerIdNotifications', () => {
         canonicalPhone: '+41779990214',
         lookupPhone: '779990214',
         homeCountryCode: 'GR',
-        requestKey: expect.any(String),
-        onDisplayed: expect.any(Function),
       }),
     )
   })
 
-  it('rejects malformed, stale, and privacy-inconsistent local calls', () => {
-    renderNotifications()
-    const localHandler = mocks.onEvent.mock.calls.find(
-      ([eventName]) => eventName === 'callerid:validated-local-call',
-    )?.[1]
-    const validBase = {
-      schemaVersion: 1,
-      sourceId: '10000000-0000-4000-8000-000000000001',
-      sourceVersion: 7,
-      lineId: '20000000-0000-4000-8000-000000000002',
-      lineName: 'Cosmote line',
-      lineVersion: 4,
-      providerEventId: 'local-call-2@ht813',
-      callerNumber: '2101234567',
-      presentation: 'allowed',
-      occurredAt: new Date().toISOString(),
-    }
-
-    expect(localHandler).toBeTypeOf('function')
-    act(() => {
-      localHandler?.({ ...validBase, sourceId: 'not-a-uuid' })
-      localHandler?.({
-        ...validBase,
-        occurredAt: new Date(Date.now() - 31_000).toISOString(),
-      })
-      localHandler?.({
-        ...validBase,
-        presentation: 'restricted',
-        callerNumber: '2101234567',
-      })
-      localHandler?.({ ...validBase, callerNumber: '+30<script>' })
-    })
-
-    expect(mocks.showCallerIdToast).not.toHaveBeenCalled()
-    expect(mocks.openCustomerSearch).not.toHaveBeenCalled()
-  })
-
-  it('deduplicates the local card when the normalized cloud event arrives', () => {
-    renderNotifications({ realtimeReady: true, realtimeClient })
-    const localHandler = mocks.onEvent.mock.calls.find(
-      ([eventName]) => eventName === 'callerid:validated-local-call',
-    )?.[1]
-    const realtimeHandler = mocks.subscribeToCallerIdEvents.mock.calls[0]?.[3]
-    const occurredAt = new Date().toISOString()
-    const reportReceipt = vi.fn().mockResolvedValue(true)
-
-    act(() => {
-      localHandler?.({
-        schemaVersion: 1,
-        sourceId: '10000000-0000-4000-8000-000000000001',
-        sourceVersion: 7,
-        lineId: '20000000-0000-4000-8000-000000000002',
-        lineName: 'Cosmote line',
-        lineVersion: 4,
-        providerEventId: 'local-call-3@ht813',
-        callerNumber: '2101234567',
-        presentation: 'allowed',
-        occurredAt,
-      })
-    })
-    const modalRequest = mocks.openCustomerSearch.mock.calls[0]?.[0]
-    act(() => {
-      modalRequest.onDisplayed()
-    })
-    expect(reportReceipt).not.toHaveBeenCalled()
-
-    act(() => {
-      realtimeHandler({
-        callerNumber: '+302101234567',
-        sipCallId: '30000000-0000-4000-8000-000000000003',
-        timestamp: occurredAt.replace('Z', '+00:00'),
-        lineId: '20000000-0000-4000-8000-000000000002',
-        lineName: 'Cosmote line',
-        presentation: 'allowed',
-        reportReceipt,
-      })
-    })
-
-    expect(mocks.showCallerIdToast).not.toHaveBeenCalled()
-    expect(mocks.openCustomerSearch).toHaveBeenCalledTimes(1)
-    expect(reportReceipt).toHaveBeenCalledTimes(1)
-    expect(reportReceipt).toHaveBeenCalledWith({ status: 'displayed' })
-  })
-
-  it('does not report displayed at enqueue and reports it only from the mounted card callback', () => {
-    renderNotifications({ realtimeReady: true, realtimeClient })
-    const realtimeHandler = mocks.subscribeToCallerIdEvents.mock.calls[0]?.[3]
-    const reportReceipt = vi.fn()
-
-    act(() => {
-      realtimeHandler({
-        callerNumber: '+15551234567',
-        sipCallId: '20000000-0000-4000-8000-000000000008',
-        timestamp: '2026-07-27T10:00:30.000Z',
-        reportReceipt,
-      })
-    })
-
-    expect(mocks.showCallerIdToast).not.toHaveBeenCalled()
-    expect(mocks.openCustomerSearch).toHaveBeenCalledTimes(1)
-    expect(reportReceipt).not.toHaveBeenCalled()
-    expect(mocks.reportCallerIdReceipt).not.toHaveBeenCalledWith(
-      '20000000-0000-4000-8000-000000000008',
-      { status: 'displayed' },
-      '2026-07-27T10:00:30.000Z',
+  it('shows withheld and unknown numbers as a toast without a customer lookup', () => {
+    renderHook(() =>
+      useCallerIdNotifications({ onOpenCustomerSearch: mocks.openCustomerSearch }),
     )
 
-    const modalRequest = mocks.openCustomerSearch.mock.calls[0]?.[0]
-    act(() => {
-      modalRequest.onDisplayed()
-    })
-    expect(reportReceipt).toHaveBeenCalledTimes(1)
-    expect(reportReceipt).toHaveBeenCalledWith({ status: 'displayed' })
-  })
-
-  it('reports only DISPLAY_FAILED when the centered modal cannot be opened', () => {
-    mocks.openCustomerSearch.mockImplementationOnce(() => {
-      throw new Error('modal unavailable')
-    })
-    renderNotifications({ realtimeReady: true, realtimeClient })
-    const realtimeHandler = mocks.subscribeToCallerIdEvents.mock.calls[0]?.[3]
-    const reportReceipt = vi.fn()
-
-    act(() => {
-      realtimeHandler({
-        callerNumber: '+15551234567',
-        sipCallId: '20000000-0000-4000-8000-000000000009',
-        timestamp: '2026-07-27T10:00:30.000Z',
-        reportReceipt,
-      })
-    })
-
-    expect(reportReceipt).toHaveBeenCalledTimes(1)
-    expect(reportReceipt).toHaveBeenCalledWith({
-      status: 'failed',
-      failureCode: 'DISPLAY_FAILED',
-    })
-    expect(reportReceipt).not.toHaveBeenCalledWith({ status: 'displayed' })
-  })
-
-  it('keeps restricted calls out of customer lookup and shows only the privacy toast', () => {
-    renderNotifications({ realtimeReady: true, realtimeClient })
-    const realtimeHandler = mocks.subscribeToCallerIdEvents.mock.calls[0]?.[3]
-
-    act(() => {
-      realtimeHandler({
-        callerNumber: 'Private number',
-        sipCallId: '20000000-0000-4000-8000-000000000010',
-        timestamp: '2026-07-27T10:00:30.000Z',
-        lineId: '20000000-0000-4000-8000-000000000002',
-        lineName: 'Cosmote line',
-        presentation: 'restricted',
-      })
-    })
+    deliver(validLocalCall({
+      providerEventId: 'private@ht813',
+      presentation: 'restricted',
+      callerNumber: null,
+    }))
+    deliver(validLocalCall({
+      providerEventId: 'whozz-unknown',
+      presentation: 'unknown',
+      callerNumber: null,
+      occurredAt: new Date(Date.now() + 1).toISOString(),
+    }))
 
     expect(mocks.openCustomerSearch).not.toHaveBeenCalled()
-    expect(mocks.showCallerIdToast).toHaveBeenCalledTimes(1)
+    expect(mocks.showCallerIdToast).toHaveBeenCalledTimes(2)
+    const shown = mocks.showCallerIdToast.mock.calls.map(([event]) => event)
+    expect(shown.map((event) => event.presentation)).toEqual(['restricted', 'unknown'])
+    for (const event of shown) {
+      expect(event.callerNumber).toBe('Private number')
+      expect(event.reportReceipt).toBeUndefined()
+    }
+    for (const [, options] of mocks.showCallerIdToast.mock.calls) {
+      expect(options.onSearchCustomer).toBeUndefined()
+    }
+    expectNoNetwork(fetchSpy)
+  })
+
+  it('rejects malformed, stale, and privacy-inconsistent local calls', () => {
+    renderHook(() =>
+      useCallerIdNotifications({ onOpenCustomerSearch: mocks.openCustomerSearch }),
+    )
+
+    deliver(validLocalCall({ sourceId: 'not-a-uuid' }))
+    deliver(validLocalCall({ occurredAt: new Date(Date.now() - 31_000).toISOString() }))
+    deliver(validLocalCall({ presentation: 'restricted', callerNumber: '2101234567' }))
+    deliver(validLocalCall({ presentation: 'unknown', callerNumber: '2101234567' }))
+    deliver(validLocalCall({ callerNumber: '+30<script>' }))
+    deliver(validLocalCall({ presentation: 'blocked', callerNumber: null }))
+
+    expect(mocks.showCallerIdToast).not.toHaveBeenCalled()
+    expect(mocks.openCustomerSearch).not.toHaveBeenCalled()
+  })
+
+  it('shows one card for repeated delivery of the same call and a new card for the next call', async () => {
+    vi.useFakeTimers()
+    renderHook(() =>
+      useCallerIdNotifications({ onOpenCustomerSearch: mocks.openCustomerSearch }),
+    )
+    const firstCall = validLocalCall({ providerEventId: 'call-1@ht813' })
+
+    deliver(firstCall)
+    deliver({ ...firstCall })
+    expect(mocks.openCustomerSearch).toHaveBeenCalledTimes(1)
+
+    // The same customer calls again eight seconds later: a new native call
+    // with its own id and time must not be swallowed by deduplication.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(8_000)
+    })
+    deliver(validLocalCall({ providerEventId: 'call-2@ht813' }))
+    expect(mocks.openCustomerSearch).toHaveBeenCalledTimes(2)
+    const [first, second] = mocks.openCustomerSearch.mock.calls.map(([request]) => request)
+    expect(first.lookupPhone).toBe(second.lookupPhone)
+    expect(first.requestKey).not.toBe(second.requestKey)
+  })
+
+  it('keeps a single listener across logout and login and ignores calls while logged out', () => {
+    const { rerender, unmount } = renderHook(
+      ({ active }) =>
+        useCallerIdNotifications({ active, onOpenCustomerSearch: mocks.openCustomerSearch }),
+      { initialProps: { active: true } },
+    )
+    expect(registeredHandlers()).toHaveLength(1)
+
+    rerender({ active: false })
+    expect(registeredHandlers()).toHaveLength(0)
+    deliver(validLocalCall({ providerEventId: 'while-logged-out' }))
+    expect(mocks.openCustomerSearch).not.toHaveBeenCalled()
+
+    rerender({ active: true })
+    rerender({ active: true })
+    expect(registeredHandlers()).toHaveLength(1)
+    deliver(validLocalCall({ providerEventId: 'after-login' }))
+    expect(mocks.openCustomerSearch).toHaveBeenCalledTimes(1)
+
+    unmount()
+    expect(registeredHandlers()).toHaveLength(0)
+    expect(mocks.onEvent).toHaveBeenCalledTimes(2)
+    expect(mocks.offEvent).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not listen on inactive or non-entitled terminals', () => {
+    const { rerender } = renderHook(
+      ({ active }) => useCallerIdNotifications({ active }),
+      { initialProps: { active: false } },
+    )
+    expect(mocks.onEvent).not.toHaveBeenCalled()
+
+    mocks.isModuleEnabled.mockReturnValue(false)
+    rerender({ active: true })
+    expect(mocks.onEvent).not.toHaveBeenCalled()
+  })
+
+  it('schedules no polling while idle and makes no request over a simulated day', async () => {
+    vi.useFakeTimers()
+    renderHook(() =>
+      useCallerIdNotifications({ onOpenCustomerSearch: mocks.openCustomerSearch }),
+    )
+    // Nothing is scheduled while waiting for calls: no config or event poll.
+    expect(vi.getTimerCount()).toBe(0)
+
+    deliver(validLocalCall({ providerEventId: 'idle-day-call' }))
+    // Only the 30-second duplicate window of the accepted call is pending.
+    expect(vi.getTimerCount()).toBe(1)
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1_000)
+    })
+    expect(vi.getTimerCount()).toBe(0)
+    expect(mocks.openCustomerSearch).toHaveBeenCalledTimes(1)
+    expectNoNetwork(fetchSpy)
   })
 })

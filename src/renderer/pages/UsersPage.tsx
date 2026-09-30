@@ -8,6 +8,10 @@ import toast from 'react-hot-toast';
 import { getBridge, offEvent, onEvent } from '../../lib';
 import { parseSpecialAddressInput } from '../utils/specialAddress';
 import {
+  customerAddressWriteErrorText,
+  expectCustomerAddressWrite,
+} from '../utils/customer-address-write-refusal';
+import {
   getLoyaltyTierKey,
   hasActiveUserDirectoryFilters,
   matchesUserDirectoryFilters,
@@ -631,51 +635,57 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
         resolved_street_number: isSpecialAddress ? null : editedAddress.resolved_street_number,
         address_fingerprint: editedAddress.address_fingerprint || fallbackFingerprint,
       };
-      const result: any = await bridge.customers.updateAddress(
+      const raw = await bridge.customers.updateAddress(
         addressId,
         addressUpdatePayload,
         currentAddress?.version || 0,
       );
+      // A refusal is named and the address stays in edit mode, so the
+      // cashier can fix it (INVALID_COORDINATES: pick it again from the
+      // suggestions); its `error` is a machine code and is never shown.
+      const result = expectCustomerAddressWrite<Partial<CustomerAddress>>(
+        t,
+        raw,
+        'update',
+        'users.updateAddressError',
+      );
 
-      if (result?.success !== false) {
-        toast.success(
-          result?.queued
-            ? t('users.savedLocallyQueued', 'Saved locally and queued for sync')
-            : t('users.updateAddressSuccess', 'Address updated successfully'),
-        );
+      toast.success(
+        result.queued
+          ? t('users.savedLocallyQueued', 'Address saved on this register and queued for sync')
+          : t('users.updateAddressSuccess', 'Address updated successfully'),
+      );
 
-        // Update local state with the returned address data
-        setUserAddresses(prev => prev.map(addr =>
-          addr.id === addressId
-            ? {
-                ...addr,
-                version: result?.data?.version ?? addr.version,
-                street_address: editedAddress.street_address || addr.street_address,
-                city: isSpecialAddress ? '' : editedAddress.city || addr.city,
-                postal_code: editedAddress.postal_code || addr.postal_code,
-                floor_number: editedAddress.floor_number || addr.floor_number,
-                delivery_notes: editedAddress.delivery_notes || addr.delivery_notes,
-                address_type: editedAddress.address_type || addr.address_type,
-                is_default: editedAddress.is_default !== undefined ? editedAddress.is_default : addr.is_default,
-                latitude: isSpecialAddress ? undefined : editedAddress.latitude ?? addr.latitude,
-                longitude: isSpecialAddress ? undefined : editedAddress.longitude ?? addr.longitude,
-                place_id: isSpecialAddress ? undefined : editedAddress.place_id || addr.place_id,
-                formatted_address: isSpecialAddress ? combinedAddress : editedAddress.formatted_address || combinedAddress || addr.formatted_address,
-                resolved_street_number: isSpecialAddress ? undefined : editedAddress.resolved_street_number || addr.resolved_street_number,
-                address_fingerprint: editedAddress.address_fingerprint || fallbackFingerprint || addr.address_fingerprint,
-              }
-            : addr
-        ));
+      // Update local state with the returned address data
+      setUserAddresses(prev => prev.map(addr =>
+        addr.id === addressId
+          ? {
+              ...addr,
+              version: result.data?.version ?? addr.version,
+              street_address: editedAddress.street_address || addr.street_address,
+              city: isSpecialAddress ? '' : editedAddress.city || addr.city,
+              postal_code: editedAddress.postal_code || addr.postal_code,
+              floor_number: editedAddress.floor_number || addr.floor_number,
+              delivery_notes: editedAddress.delivery_notes || addr.delivery_notes,
+              address_type: editedAddress.address_type || addr.address_type,
+              is_default: editedAddress.is_default !== undefined ? editedAddress.is_default : addr.is_default,
+              latitude: isSpecialAddress ? undefined : editedAddress.latitude ?? addr.latitude,
+              longitude: isSpecialAddress ? undefined : editedAddress.longitude ?? addr.longitude,
+              place_id: isSpecialAddress ? undefined : editedAddress.place_id || addr.place_id,
+              formatted_address: isSpecialAddress ? combinedAddress : editedAddress.formatted_address || combinedAddress || addr.formatted_address,
+              resolved_street_number: isSpecialAddress ? undefined : editedAddress.resolved_street_number || addr.resolved_street_number,
+              address_fingerprint: editedAddress.address_fingerprint || fallbackFingerprint || addr.address_fingerprint,
+            }
+          : addr
+      ));
 
-        setEditingAddressId(null);
-        setEditedAddress({});
-        addressSessionTokenRef.current = null;
-      } else {
-        throw new Error(result?.error || 'Failed to update address');
-      }
+      setEditingAddressId(null);
+      setEditedAddress({});
+      addressSessionTokenRef.current = null;
     } catch (error) {
       console.error('Error updating address:', error);
-      toast.error(t('users.updateAddressError', 'Failed to update address'));
+      // Never a native error's raw text: the refusal's own message, else the generic one.
+      toast.error(customerAddressWriteErrorText(t, error, 'users.updateAddressError'));
     }
   };
 
@@ -691,21 +701,24 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
     setAddressPendingDelete(null);
 
     try {
-      const result = await bridge.customers.deleteAddress(selectedUser.id, addressId);
-
-      if (result?.success === false) {
-        throw new Error(result.error || 'Failed to delete address');
-      }
+      // A refusal (the address or customer is gone at the office, this
+      // register's own refusals) is named and the address stays listed.
+      const result = expectCustomerAddressWrite(
+        t,
+        await bridge.customers.deleteAddress(selectedUser.id, addressId),
+        'delete',
+        'users.deleteAddressError',
+      );
 
       toast.success(
-        result?.queued
+        result.queued
           ? t('users.deleteAddressQueued', 'Address deleted and queued for sync')
           : t('users.deleteAddressSuccess', 'Address deleted successfully'),
       );
       setUserAddresses(prev => prev.filter(addr => addr.id !== addressId));
     } catch (error) {
       console.error('Error deleting address:', error);
-      toast.error(t('users.deleteAddressError', 'Failed to delete address'));
+      toast.error(customerAddressWriteErrorText(t, error, 'users.deleteAddressError'));
     }
   };
 

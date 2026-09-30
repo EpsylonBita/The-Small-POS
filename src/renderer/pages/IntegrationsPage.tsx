@@ -20,10 +20,18 @@ import { useAcquiredModules, MODULE_IDS } from '../hooks/useAcquiredModules';
 import { LiquidGlassModal, POSGlassButton, POSGlassInput } from '../components/ui/pos-glass-components';
 import { formatTime } from '../utils/format';
 import {
+  callerIdGetServerConfig,
+  callerIdGetStatus,
+  type CallerIdServerConfig,
+  type CallerIdStatus,
+} from '../services/CallerIdService';
+import {
   Plug,
   CheckCircle,
   XCircle,
   AlertCircle,
+  HelpCircle,
+  Info,
   RefreshCw,
   Settings,
   Truck,
@@ -83,8 +91,13 @@ interface Integration {
   requiresPartnerCredentials?: boolean;
 }
 
+// 'unknown' is used only where the till cannot observe the real state (today:
+// the terminal-owned Caller ID card while its local status cannot be read). It
+// is never counted as connected, disconnected or pending.
+type IntegrationStatus = 'connected' | 'disconnected' | 'pending' | 'unknown';
+
 interface IntegrationWithStatus extends Integration {
-  status: 'connected' | 'disconnected' | 'pending';
+  status: IntegrationStatus;
   environment?: 'test' | 'production';
   lastSyncedAt?: string;
   settings?: {
@@ -100,6 +113,22 @@ interface IntegrationWithStatus extends Integration {
   diagnostics?: Record<string, unknown>;
   lastError?: string | null;
   readOnlyAdminSetup?: boolean;
+  /** caller_id only: server facts the terminal-owned card status is resolved from. */
+  callerIdHints?: CallerIdServerHints;
+  /** caller_id only: the terminal-local card state overlaid by the page. */
+  callerIdCard?: CallerIdCardView;
+}
+
+/**
+ * Optional per-terminal Caller ID facts from GET /pos/integrations
+ * (`caller_id` block on the caller_id entry). Older servers do not send it.
+ * It carries no IP addresses and no phone numbers.
+ */
+interface RemoteCallerIdBlock {
+  status_owner?: string | null;
+  configured_line_count?: number | null;
+  this_terminal_is_source?: boolean | null;
+  this_terminal_receives?: boolean | null;
 }
 
 interface RemoteIntegrationPayload {
@@ -123,6 +152,7 @@ interface RemoteIntegrationPayload {
   production_status?: string | null;
   diagnostics?: Record<string, unknown> | null;
   last_error?: string | null;
+  caller_id?: RemoteCallerIdBlock | null;
 }
 
 interface IntegrationStats {
@@ -525,10 +555,28 @@ const mapRemoteStatus = (integration: RemoteIntegrationPayload): IntegrationWith
   return integration.is_active ? 'connected' : 'disconnected';
 };
 
+const readCallerIdServerHints = (remote: RemoteIntegrationPayload): CallerIdServerHints => {
+  const block = remote.caller_id && typeof remote.caller_id === 'object' ? remote.caller_id : null;
+  const lineCount = block?.configured_line_count;
+  return {
+    orgEnabled: typeof remote.is_enabled === 'boolean' ? remote.is_enabled : null,
+    configuredLineCount:
+      typeof lineCount === 'number' && Number.isFinite(lineCount) && lineCount >= 0 ? lineCount : null,
+    thisTerminalIsSource:
+      typeof block?.this_terminal_is_source === 'boolean' ? block.this_terminal_is_source : null,
+  };
+};
+
 const mapPurchasedIntegration = (remote: RemoteIntegrationPayload): IntegrationWithStatus | null => {
   const id = getRemoteIntegrationId(remote);
   if (!id) return null;
 
+  // Caller ID runs locally on the terminal since PR #214. For caller_id the
+  // server `status`, `last_sync_at` and `last_error` come from the
+  // billing-owned branch_plugin_configs row, which says nothing about whether
+  // this terminal shows calls, so they are never read. The page overlays the
+  // terminal-local state instead (see resolveCallerIdCardState).
+  const isCallerId = id === 'caller_id';
   const fallback = INTEGRATION_CATALOG_BY_ID.get(id);
   const readOnlyAdminSetup = usesAdminDashboardSetup(id, remote.read_only_admin_setup === true);
   // An admin-managed plugin is never "locked behind partner credentials" on the
@@ -547,16 +595,19 @@ const mapPurchasedIntegration = (remote: RemoteIntegrationPayload): IntegrationW
     category: normalizeIntegrationCategory(remote.category, fallback?.category || 'other'),
     requiredModule: fallback?.requiredModule,
     requiresPartnerCredentials,
-    status: requiresPartnerCredentials ? 'pending' : mapRemoteStatus(remote),
+    status: isCallerId
+      ? 'unknown'
+      : requiresPartnerCredentials ? 'pending' : mapRemoteStatus(remote),
     environment: environment === 'test' || environment === 'production' ? environment : undefined,
-    lastSyncedAt: typeof remote.last_sync_at === 'string' ? remote.last_sync_at : undefined,
+    lastSyncedAt: !isCallerId && typeof remote.last_sync_at === 'string' ? remote.last_sync_at : undefined,
     settings: remote.settings || undefined,
     onboardingStatus: remote.onboarding_status || undefined,
     sandboxStatus: remote.sandbox_status || undefined,
     productionStatus: remote.production_status || undefined,
     diagnostics: remote.diagnostics || undefined,
-    lastError: remote.last_error || null,
+    lastError: isCallerId ? null : remote.last_error || null,
     readOnlyAdminSetup,
+    ...(isCallerId ? { callerIdHints: readCallerIdServerHints(remote) } : {}),
   };
 };
 
@@ -606,6 +657,282 @@ const deriveMyDataReportingEnabled = (result: MyDataConfigFetchResult): boolean 
 };
 
 // ============================================================
+// CALLER ID: TERMINAL-OWNED CARD STATUS
+// ============================================================
+//
+// Symptom (2026-09): the Caller ID card said «Μη συνδεδεμένο» / «Ανενεργό» and
+// 0/1 connected while incoming-call popups worked on the source terminal.
+// Root cause: the card was bound to GET /pos/integrations `status`, which for
+// caller_id is the billing marker in branch_plugin_configs — not whether this
+// terminal listens. Since PR #214 Caller ID is local to the terminal, so the
+// card is resolved here from the terminal's own assignment
+// (/api/pos/caller-id/config, loaded once per page visit or manual refresh —
+// never on a timer) and the native listener status (local IPC, polled).
+// Regression tests: pages/__tests__/IntegrationsPage.caller-id-status.test.tsx.
+
+export type CallerIdCardState =
+  /** First observations have not arrived yet. */
+  | 'checking'
+  /** The local listener runs: this terminal shows incoming calls. */
+  | 'listening_here'
+  /**
+   * Source terminal whose native re-check with the server failed on the
+   * network. A still-valid cached lease can keep the listener running, so this
+   * is neither "listening" nor a listener failure.
+   */
+  | 'not_verified'
+  /** This terminal is the source of a line, but the listener is not running. */
+  | 'configured_not_listening'
+  /** The listener failed on this terminal (bind failure, refused by the server, ...). */
+  | 'listener_error'
+  /** The server says this terminal is a line source, but the line's setup cannot run here. */
+  | 'line_setup_incomplete'
+  /** A line exists for the branch, but another terminal is its source. */
+  | 'other_terminal'
+  /** Caller ID is switched off for the organization (organization_plugins.is_enabled = false). */
+  | 'switched_off'
+  /** No Caller ID line is assigned to this terminal. */
+  | 'not_assigned'
+  /** The state cannot be read (bridge or assignment load failed). */
+  | 'unknown';
+
+export type CallerIdConclusiveState = Exclude<CallerIdCardState, 'checking' | 'unknown'>;
+
+export interface CallerIdServerHints {
+  /** organization_plugins.is_enabled for caller_id; false = switched off for the organization. */
+  orgEnabled: boolean | null;
+  /** Lines configured for this branch (server `caller_id` block); null when not sent. */
+  configuredLineCount: number | null;
+  /** Whether the server says this terminal is a line source; null when not sent. */
+  thisTerminalIsSource: boolean | null;
+}
+
+export type CallerIdObservation<T> =
+  | { phase: 'idle' | 'loading'; value: T | null }
+  | { phase: 'ok'; value: T }
+  | { phase: 'failed'; value: T | null };
+
+export interface CallerIdCardInput {
+  hints: CallerIdServerHints;
+  config: CallerIdObservation<CallerIdServerConfig>;
+  listener: CallerIdObservation<CallerIdStatus>;
+}
+
+export interface CallerIdCardView {
+  state: CallerIdCardState;
+  /** Set only for 'unknown': the last state observed in this page visit, shown as stale. */
+  lastKnown: CallerIdConclusiveState | null;
+  /** Latest listener reading (fresh or last known) for the detail lines. */
+  listener: CallerIdStatus | null;
+  /** Adapter name for "Listening for calls from …"; null when unknown. */
+  deviceLabel: string | null;
+}
+
+/**
+ * Listener errors whose fix is on the server side (Admin Dashboard or a POS
+ * update), so the card does not point to the local Caller ID settings.
+ */
+const CALLER_ID_ADMIN_SIDE_REASONS = new Set<CallerIdStatus['reason']>(['auth_failed', 'unsupported_provider']);
+const CALLER_ID_LISTENER_POLL_MS = 5_000;
+
+const CALLER_ID_DEVICE_LABELS: Record<string, string> = {
+  grandstream_ht813_fxo: 'Grandstream HT813',
+  grandstream_ht841_fxo: 'Grandstream HT841',
+  grandstream_ht881_fxo: 'Grandstream HT881',
+};
+
+/** Card counting status: only listening counts as connected; unknown is never connected or disconnected. */
+export const CALLER_ID_CARD_STATUS: Record<CallerIdCardState, IntegrationStatus> = {
+  checking: 'unknown',
+  listening_here: 'connected',
+  not_verified: 'pending',
+  configured_not_listening: 'pending',
+  listener_error: 'pending',
+  line_setup_incomplete: 'pending',
+  other_terminal: 'disconnected',
+  switched_off: 'disconnected',
+  not_assigned: 'disconnected',
+  unknown: 'unknown',
+};
+
+export const isConclusiveCallerIdState = (state: CallerIdCardState): state is CallerIdConclusiveState =>
+  state !== 'checking' && state !== 'unknown';
+
+/** The native bridge is untyped; accept only the fields the card reads. */
+const normalizeCallerIdListenerStatus = (value: unknown): CallerIdStatus | null => {
+  if (!value || typeof value !== 'object') return null;
+  const record = value as Record<string, unknown>;
+  const status = record.status;
+  if (status !== 'listening' && status !== 'registering' && status !== 'error' && status !== 'stopped') {
+    return null;
+  }
+  return {
+    status,
+    error: typeof record.error === 'string' ? record.error : undefined,
+    reason: typeof record.reason === 'string' ? record.reason as CallerIdStatus['reason'] : undefined,
+    registered: record.registered === true,
+    callsDetected:
+      typeof record.callsDetected === 'number' && Number.isFinite(record.callsDetected) ? record.callsDetected : 0,
+    lastCallAt: typeof record.lastCallAt === 'string' && record.lastCallAt ? record.lastCallAt : null,
+  };
+};
+
+const sameCallerIdListenerStatus = (left: CallerIdStatus, right: CallerIdStatus): boolean =>
+  left.status === right.status
+  && left.reason === right.reason
+  && left.error === right.error
+  && left.callsDetected === right.callsDetected
+  && (left.lastCallAt ?? null) === (right.lastCallAt ?? null);
+
+/**
+ * Pure resolver for the Caller ID card. Local listener truth wins; the
+ * assignment decides the rest. It returns 'unknown' instead of guessing
+ * connected or disconnected when a needed observation failed
+ * (.claude/rules/health-recovery.md).
+ */
+export function resolveCallerIdCardState({ hints, config, listener }: CallerIdCardInput): CallerIdCardState {
+  const listenerNow = listener.phase === 'ok' ? listener.value : null;
+  if (listenerNow?.status === 'listening') return 'listening_here';
+  // A bound port failure only happens on a terminal that runs a source line.
+  if (listenerNow?.status === 'error' && listenerNow.reason === 'port_in_use') return 'listener_error';
+  // /api/pos/caller-id/config requires the organization switch, so no line can help here.
+  if (hints.orgEnabled === false) return 'switched_off';
+
+  const assignment = config.phase === 'ok' ? config.value : null;
+  if (!assignment) return config.phase === 'failed' ? 'unknown' : 'checking';
+
+  if (assignment.sourceLines.length > 0) {
+    if (!listenerNow) return listener.phase === 'failed' ? 'unknown' : 'checking';
+    if (listenerNow.status !== 'error') return 'configured_not_listening';
+    // network_error = the native re-check of /api/pos/caller-id/config failed
+    // on the network. The Rust side re-applies the cached lease (up to 72 h)
+    // and then reports this error over 'listening', so the workers may still
+    // show calls: not verified, not a listener failure. auth_failed and
+    // unsupported_provider (401/403/426) stop the workers: a real error.
+    return listenerNow.reason === 'network_error' ? 'not_verified' : 'listener_error';
+  }
+  // The server's caller_id block says this terminal is a line source, but
+  // /config projects no source line: the line's adapter is disabled or its
+  // settings do not validate, so nothing listens here.
+  if (hints.thisTerminalIsSource === true) return 'line_setup_incomplete';
+  // After PR #214 a receiving-only terminal shows no calls: the source terminal does.
+  if (assignment.receivingLines.length > 0) return 'other_terminal';
+  if ((hints.configuredLineCount ?? 0) > 0) return 'other_terminal';
+  return 'not_assigned';
+}
+
+const callerIdDeviceLabel = (config: CallerIdServerConfig | null): string | null => {
+  const line = config?.sourceLines[0];
+  if (!line) return null;
+  return CALLER_ID_DEVICE_LABELS[line.deviceProfileKey] || line.name || null;
+};
+
+export function buildCallerIdCardView(
+  input: CallerIdCardInput,
+  lastKnown: CallerIdConclusiveState | null,
+): CallerIdCardView {
+  const state = resolveCallerIdCardState(input);
+  return {
+    state,
+    lastKnown: state === 'unknown' ? lastKnown : null,
+    listener: input.listener.value,
+    deviceLabel: callerIdDeviceLabel(input.config.value),
+  };
+}
+
+/**
+ * Terminal-local observations for the Caller ID card. The assignment
+ * (/api/pos/caller-id/config: entitlement check, several queries, a lease
+ * signature) is loaded once per page visit and scope, on a manual refresh, or
+ * when the connection returns after a failed load — never on a timer. The
+ * listener status is a local IPC call and is polled while the page is visible.
+ */
+function useCallerIdTerminalObservations({
+  watchListener,
+  loadAssignment,
+  scopeKey,
+}: {
+  watchListener: boolean;
+  loadAssignment: boolean;
+  scopeKey: string;
+}) {
+  const [config, setConfig] = useState<CallerIdObservation<CallerIdServerConfig>>({ phase: 'idle', value: null });
+  const [listener, setListener] = useState<CallerIdObservation<CallerIdStatus>>({ phase: 'idle', value: null });
+  const configRequest = useRef(0);
+  const listenerRequest = useRef(0);
+  const loadedScope = useRef<string | null>(null);
+  const loadAssignmentRef = useRef(loadAssignment);
+  loadAssignmentRef.current = loadAssignment;
+
+  const fetchAssignment = useCallback(async () => {
+    const request = ++configRequest.current;
+    setConfig((previous) => (previous.phase === 'idle' ? { phase: 'loading', value: null } : previous));
+    try {
+      const value = await callerIdGetServerConfig();
+      if (request === configRequest.current) setConfig({ phase: 'ok', value });
+    } catch {
+      if (request === configRequest.current) {
+        setConfig((previous) => ({ phase: 'failed', value: previous.value }));
+      }
+    }
+  }, []);
+
+  const fetchListener = useCallback(async () => {
+    const request = ++listenerRequest.current;
+    try {
+      const value = normalizeCallerIdListenerStatus(await callerIdGetStatus());
+      if (request !== listenerRequest.current) return;
+      setListener((previous) => {
+        if (!value) return { phase: 'failed', value: previous.value };
+        // An unchanged reading keeps the same object, so the 5 s poll does not re-render the page.
+        if (previous.phase === 'ok' && sameCallerIdListenerStatus(previous.value, value)) return previous;
+        return { phase: 'ok', value };
+      });
+    } catch {
+      if (request === listenerRequest.current) {
+        setListener((previous) => ({ phase: 'failed', value: previous.value }));
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!loadAssignment || loadedScope.current === scopeKey) return;
+    loadedScope.current = scopeKey;
+    setConfig({ phase: 'idle', value: null });
+    void fetchAssignment();
+  }, [loadAssignment, scopeKey, fetchAssignment]);
+
+  // Retry a failed assignment load when the connection comes back (event, not timer).
+  useEffect(() => {
+    if (!loadAssignment || config.phase !== 'failed') return;
+    const retry = () => { void fetchAssignment(); };
+    window.addEventListener('online', retry);
+    return () => window.removeEventListener('online', retry);
+  }, [loadAssignment, config.phase, fetchAssignment]);
+
+  useEffect(() => {
+    if (!watchListener) return;
+    void fetchListener();
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== 'hidden') void fetchListener();
+    }, CALLER_ID_LISTENER_POLL_MS);
+    return () => {
+      window.clearInterval(timer);
+      listenerRequest.current += 1;
+    };
+  }, [watchListener, fetchListener]);
+
+  const refresh = useCallback(async () => {
+    await Promise.all([
+      loadAssignmentRef.current ? fetchAssignment() : Promise.resolve(),
+      fetchListener(),
+    ]);
+  }, [fetchAssignment, fetchListener]);
+
+  return { config, listener, refresh };
+}
+
+// ============================================================
 // INTEGRATION CARD COMPONENT
 // ============================================================
 
@@ -641,6 +968,202 @@ const IntegrationLogo: React.FC<IntegrationLogoProps> = ({ integration, isDark }
   );
 };
 
+type Translate = ReturnType<typeof useTranslation>['t'];
+
+const CALLER_ID_CHECKING_VIEW: CallerIdCardView = {
+  state: 'checking',
+  lastKnown: null,
+  listener: null,
+  deviceLabel: null,
+};
+
+const CALLER_ID_VISUALS: Record<CallerIdCardState, { color: string; icon: typeof Plug }> = {
+  checking: { color: '#71717a', icon: Loader2 },
+  listening_here: { color: '#22c55e', icon: CheckCircle },
+  not_verified: { color: '#f59e0b', icon: AlertCircle },
+  configured_not_listening: { color: '#f59e0b', icon: AlertCircle },
+  listener_error: { color: '#f59e0b', icon: AlertCircle },
+  line_setup_incomplete: { color: '#f59e0b', icon: AlertCircle },
+  other_terminal: { color: '#6b7280', icon: Info },
+  switched_off: { color: '#6b7280', icon: XCircle },
+  not_assigned: { color: '#6b7280', icon: XCircle },
+  unknown: { color: '#71717a', icon: HelpCircle },
+};
+
+const callerIdStateLabel = (t: Translate, state: CallerIdCardState): string => {
+  switch (state) {
+    case 'checking': return t('integrations.callerId.state.checking', 'Checking…');
+    case 'listening_here': return t('integrations.callerId.state.listeningHere', 'Active on this terminal');
+    case 'not_verified': return t('integrations.callerId.state.notVerified', 'Not verified with the server');
+    case 'configured_not_listening': return t('integrations.callerId.state.configuredNotListening', 'Configured — not listening');
+    case 'listener_error': return t('integrations.callerId.state.listenerError', 'Listener error');
+    case 'line_setup_incomplete': return t('integrations.callerId.state.lineSetupIncomplete', 'Phone line setup incomplete');
+    case 'other_terminal': return t('integrations.callerId.state.otherTerminal', 'Runs on another terminal');
+    case 'switched_off': return t('integrations.callerId.state.switchedOff', 'Switched off for this business');
+    case 'not_assigned': return t('integrations.callerId.state.notAssigned', 'Not assigned to this terminal');
+    case 'unknown': return t('integrations.callerId.state.unknown', 'Status unavailable');
+  }
+};
+
+const callerIdShortLabel = (t: Translate, state: CallerIdCardState): string => {
+  switch (state) {
+    case 'checking': return t('integrations.callerId.short.checking', 'Checking…');
+    case 'listening_here': return t('integrations.callerId.short.listeningHere', 'Listening');
+    case 'not_verified': return t('integrations.callerId.short.notVerified', 'Not verified');
+    case 'configured_not_listening': return t('integrations.callerId.short.configuredNotListening', 'Not listening');
+    case 'listener_error': return t('integrations.callerId.short.listenerError', 'Error');
+    case 'line_setup_incomplete': return t('integrations.callerId.short.lineSetupIncomplete', 'Incomplete');
+    case 'other_terminal': return t('integrations.callerId.short.otherTerminal', 'Other terminal');
+    case 'switched_off': return t('integrations.callerId.short.switchedOff', 'Switched off');
+    case 'not_assigned': return t('integrations.callerId.short.notAssigned', 'Not assigned');
+    case 'unknown': return t('integrations.callerId.short.unknown', 'Unknown');
+  }
+};
+
+const callerIdReasonText = (t: Translate, reason: CallerIdStatus['reason']): string => {
+  switch (reason) {
+    case 'port_in_use':
+      return t('integrations.callerId.reason.portInUse', 'Another program is using the Caller ID port on this terminal.');
+    case 'invalid_config':
+      return t('integrations.callerId.reason.invalidConfig', 'The Caller ID setup on this terminal is incomplete or out of date.');
+    case 'auth_failed':
+      return t(
+        'integrations.callerId.reason.authFailed',
+        'The server did not allow Caller ID on this terminal, so it stopped listening. Check Caller ID in the Admin Dashboard.',
+      );
+    case 'unsupported_provider':
+      return t(
+        'integrations.callerId.reason.unsupported',
+        'Caller ID does not support this POS version or phone service. Update the POS or check the setup in the Admin Dashboard.',
+      );
+    case 'timeout':
+      return t('integrations.callerId.reason.timeout', 'The phone service did not answer in time. Caller ID retries automatically.');
+    default:
+      return t('integrations.callerId.reason.failed', 'Caller ID could not start on this terminal.');
+  }
+};
+
+const isSameLocalDay = (left: Date, right: Date): boolean =>
+  left.getFullYear() === right.getFullYear()
+  && left.getMonth() === right.getMonth()
+  && left.getDate() === right.getDate();
+
+/** Time only for a call today, day/month and time otherwise. Null for a missing or invalid value. */
+const formatCallerIdLastCall = (value: string | null | undefined, now: Date = new Date()): string | null => {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return isSameLocalDay(date, now)
+    ? formatTime(date, { hour: '2-digit', minute: '2-digit' })
+    : formatTime(date, { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+};
+
+interface CallerIdCardDetailsProps {
+  view: CallerIdCardView;
+  isDark: boolean;
+}
+
+/** Plain-language lines under the Caller ID badge: what happens here and what to do next. */
+const CallerIdCardDetails: React.FC<CallerIdCardDetailsProps> = ({ view, isDark }) => {
+  const { t } = useTranslation();
+  const muted = isDark ? 'text-gray-400' : 'text-gray-600';
+  const amber = isDark ? 'text-amber-300' : 'text-amber-700';
+  const red = isDark ? 'text-red-300' : 'text-red-600';
+  const settingsPath = [
+    t('modals.connectionSettings.title', 'Settings'),
+    t('settings.settingsHub.sections.hardware.label', 'Devices'),
+    t('settings.peripherals.callerId.title', 'Caller ID'),
+  ].join(' → ');
+  const checkSettings = t('integrations.callerId.detail.checkSettings', 'Check {{path}}.', { path: settingsPath });
+
+  switch (view.state) {
+    case 'listening_here': {
+      const lastCall = formatCallerIdLastCall(view.listener?.lastCallAt);
+      const callsDetected = view.listener?.callsDetected ?? 0;
+      return (
+        <div className={`mt-2 space-y-0.5 text-xs ${muted}`} data-testid="caller-id-card-details">
+          <p>
+            {view.deviceLabel
+              ? t('integrations.callerId.detail.listeningFrom', 'Listening for calls from {{device}}', { device: view.deviceLabel })
+              : t('integrations.callerId.detail.listening', 'Listening for incoming calls')}
+          </p>
+          <p>
+            {lastCall
+              ? t('integrations.callerId.detail.lastCall', 'Last call: {{time}}', { time: lastCall })
+              : callsDetected > 0
+              ? t('integrations.callerId.detail.callsThisSession', 'Calls since the POS started: {{calls}}', { calls: callsDetected })
+              : t('integrations.callerId.detail.noCallsYet', 'No calls since the POS started')}
+          </p>
+        </div>
+      );
+    }
+    case 'not_verified':
+      return (
+        <p className={`mt-2 text-xs font-medium ${amber}`} data-testid="caller-id-card-details">
+          {t(
+            'integrations.callerId.detail.notVerified',
+            'This terminal could not confirm its Caller ID setup with the server. Calls may keep appearing for a while from the last confirmed setup, and the check retries automatically.',
+          )}
+        </p>
+      );
+    case 'configured_not_listening':
+      return (
+        <p className={`mt-2 text-xs font-medium ${amber}`} data-testid="caller-id-card-details">
+          {t('integrations.callerId.detail.notListening', 'This terminal has a Caller ID line, but it is not listening for calls.')}{' '}
+          {checkSettings}
+        </p>
+      );
+    case 'listener_error':
+      return (
+        <div className="mt-2 space-y-0.5 text-xs" data-testid="caller-id-card-details">
+          <p className={red}>{callerIdReasonText(t, view.listener?.reason)}</p>
+          {!CALLER_ID_ADMIN_SIDE_REASONS.has(view.listener?.reason) && (
+            <p className={`font-medium ${amber}`}>{checkSettings}</p>
+          )}
+        </div>
+      );
+    case 'line_setup_incomplete':
+      return (
+        <p className={`mt-2 text-xs font-medium ${amber}`} data-testid="caller-id-card-details">
+          {t(
+            'integrations.callerId.detail.lineSetupIncomplete',
+            "This terminal is the source of a phone line, but the line's setup is incomplete, so it is not listening. Check the phone line in the Admin Dashboard.",
+          )}
+        </p>
+      );
+    case 'other_terminal':
+      return (
+        <p className={`mt-2 text-xs ${muted}`} data-testid="caller-id-card-details">
+          {t('integrations.callerId.detail.otherTerminal', 'Incoming calls are shown on the terminal the phone line is connected to.')}
+        </p>
+      );
+    case 'switched_off':
+      return (
+        <p className={`mt-2 text-xs ${muted}`} data-testid="caller-id-card-details">
+          {t('integrations.callerId.detail.switchedOff', 'Caller ID is switched off for this business. Turn it on in the Admin Dashboard.')}
+        </p>
+      );
+    case 'not_assigned':
+      return (
+        <p className={`mt-2 text-xs ${muted}`} data-testid="caller-id-card-details">
+          {t('integrations.callerId.detail.notAssigned', 'To show incoming calls here, assign this terminal to a phone line in the Admin Dashboard.')}
+        </p>
+      );
+    case 'unknown':
+      return (
+        <p className={`mt-2 text-xs ${amber}`} data-testid="caller-id-card-details">
+          {view.lastKnown
+            ? t('integrations.callerId.detail.lastKnown', 'Last known: {{state}}. The status could not be refreshed.', {
+                state: callerIdStateLabel(t, view.lastKnown),
+              })
+            : t('integrations.callerId.detail.unknown', 'Could not read the Caller ID status on this terminal. Tap refresh to try again.')}
+        </p>
+      );
+    case 'checking':
+      return null;
+  }
+};
+
 interface IntegrationCardProps {
   integration: IntegrationWithStatus;
   isDark: boolean;
@@ -666,6 +1189,7 @@ const IntegrationCard = memo<IntegrationCardProps>(({
       case 'connected': return '#22c55e';
       case 'pending': return '#f59e0b';
       case 'disconnected': return '#6b7280';
+      case 'unknown': return '#71717a';
     }
   };
 
@@ -674,11 +1198,16 @@ const IntegrationCard = memo<IntegrationCardProps>(({
       case 'connected': return CheckCircle;
       case 'pending': return AlertCircle;
       case 'disconnected': return XCircle;
+      case 'unknown': return HelpCircle;
     }
   };
 
-  const StatusIcon = isLocked ? AlertCircle : getStatusIcon(integration.status);
-  const statusColor = isLocked ? '#f59e0b' : getStatusColor(integration.status);
+  // Caller ID is terminal-owned: its badge, detail lines and right-hand label
+  // come from the page's local overlay, never from the server plugin status.
+  const callerIdCard = integration.id === 'caller_id' ? integration.callerIdCard ?? CALLER_ID_CHECKING_VIEW : null;
+  const callerIdVisual = callerIdCard ? CALLER_ID_VISUALS[callerIdCard.state] : null;
+  const StatusIcon = isLocked ? AlertCircle : callerIdVisual ? callerIdVisual.icon : getStatusIcon(integration.status);
+  const statusColor = isLocked ? '#f59e0b' : callerIdVisual ? callerIdVisual.color : getStatusColor(integration.status);
   const isAdminDashboardSetup = usesAdminDashboardSetup(integration.id, integration.readOnlyAdminSetup);
   const isToggleDisabled =
     isLocked ||
@@ -686,11 +1215,36 @@ const IntegrationCard = memo<IntegrationCardProps>(({
     integration.status === 'pending' ||
     Boolean(toggleDisabledMessage);
   const isEnabled = integration.status === 'connected';
-  const adminActionLabel = integration.id === 'caller_id'
-    ? integration.status === 'disconnected'
+  // "Set up" only when this terminal is known to have no line; "Manage" once a
+  // line exists; a neutral "Open" while the state is still unknown.
+  const callerIdAdminState = callerIdCard
+    ? callerIdCard.state === 'unknown' ? callerIdCard.lastKnown : callerIdCard.state
+    : null;
+  const adminActionLabel = callerIdCard
+    ? callerIdAdminState === 'not_assigned'
       ? t('integrations.callerId.setupInAdmin', 'Set up Caller ID in Admin Dashboard')
+      : callerIdAdminState === null || callerIdAdminState === 'checking'
+      ? t('integrations.callerId.openInAdmin', 'Open Caller ID in Admin Dashboard')
       : t('integrations.callerId.manageInAdmin', 'Manage Caller ID in Admin Dashboard')
     : t('integrations.efood.openAdmin', 'Open Admin Dashboard');
+  // Admin-managed cards have no switch, so a generic On/Off label would
+  // contradict the badge ("Ανενεργό" next to a working Caller ID). They show
+  // the resolved state instead.
+  const sideStatusLabel = isLocked
+    ? t('integrations.partnerRequired', 'Partner Required')
+    : callerIdCard
+    ? callerIdShortLabel(t, callerIdCard.state)
+    : isAdminDashboardSetup
+    ? integration.status === 'connected'
+      ? t('integrations.status.connected', 'Connected')
+      : integration.status === 'pending'
+      ? t('integrations.status.pending', 'Pending')
+      : t('integrations.status.disconnected', 'Not Connected')
+    : integration.status === 'pending'
+    ? t('common.pending', 'Pending')
+    : isEnabled
+    ? t('common.on', 'On')
+    : t('common.off', 'Off');
 
   return (
     <motion.div
@@ -722,20 +1276,21 @@ const IntegrationCard = memo<IntegrationCardProps>(({
                 color: statusColor,
               }}
             >
-              <StatusIcon size={12} />
-              <span>
+              <StatusIcon size={12} className={callerIdCard?.state === 'checking' ? 'animate-spin' : undefined} />
+              <span data-testid={callerIdCard ? 'caller-id-card-state' : undefined}>
                 {isLocked && t('integrations.status.partnerRequired', 'Partner credentials required')}
-                {!isLocked && integration.status === 'connected' && (
+                {!isLocked && callerIdCard && callerIdStateLabel(t, callerIdCard.state)}
+                {!isLocked && !callerIdCard && integration.status === 'connected' && (
                   integration.id === 'efood'
                     ? integration.onboardingStatus || t('integrations.status.connected', 'Connected')
                     : t('integrations.status.connected', 'Connected')
                 )}
-                {!isLocked && integration.status === 'pending' && (
+                {!isLocked && !callerIdCard && integration.status === 'pending' && (
                   integration.id === 'efood'
                     ? integration.onboardingStatus || t('integrations.status.pending', 'Pending')
                     : t('integrations.status.pending', 'Pending')
                 )}
-                {!isLocked && integration.status === 'disconnected' && t('integrations.status.disconnected', 'Not Connected')}
+                {!isLocked && !callerIdCard && integration.status === 'disconnected' && t('integrations.status.disconnected', 'Not Connected')}
               </span>
             </div>
             {integration.lastSyncedAt && integration.status === 'connected' && (
@@ -744,6 +1299,8 @@ const IntegrationCard = memo<IntegrationCardProps>(({
               </span>
             )}
           </div>
+
+          {callerIdCard && <CallerIdCardDetails view={callerIdCard} isDark={isDark} />}
 
           {integration.id === 'fiscalization_gr' && integration.environment && (
             <p className={`text-xs mt-2 ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
@@ -874,14 +1431,11 @@ const IntegrationCard = memo<IntegrationCardProps>(({
               />
             </button>
           )}
-          <span className={`text-[10px] font-medium ${isEnabled ? 'text-emerald-400' : isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
-            {isLocked
-              ? t('integrations.partnerRequired', 'Partner Required')
-              : integration.status === 'pending'
-              ? t('common.pending', 'Pending')
-              : isEnabled
-              ? t('common.on', 'On')
-              : t('common.off', 'Off')}
+          <span
+            className={`text-[10px] font-medium ${isEnabled ? 'text-emerald-400' : isDark ? 'text-zinc-400' : 'text-gray-500'}`}
+            data-testid={isAdminDashboardSetup ? 'admin-managed-side-status' : undefined}
+          >
+            {sideStatusLabel}
           </span>
         </div>
       </div>
@@ -1294,6 +1848,53 @@ export const IntegrationsPage: React.FC = () => {
     setLoading(true);
   });
 
+  // Caller ID card: terminal-local overlay (see resolveCallerIdCardState).
+  const callerIdIntegration = integrations.find((item) => item.id === 'caller_id');
+  const callerIdHints = callerIdIntegration?.callerIdHints;
+  const callerIdObservations = useCallerIdTerminalObservations({
+    watchListener: Boolean(callerIdIntegration),
+    loadAssignment: Boolean(callerIdIntegration) && callerIdHints?.orgEnabled !== false,
+    scopeKey: integrationScope,
+  });
+  const [callerIdLastKnown, setCallerIdLastKnown] = useState<{ scope: string; state: CallerIdConclusiveState } | null>(null);
+  const callerIdCardInput = useMemo<CallerIdCardInput | null>(() => (
+    callerIdIntegration
+      ? {
+          hints: callerIdHints ?? { orgEnabled: null, configuredLineCount: null, thisTerminalIsSource: null },
+          config: callerIdObservations.config,
+          listener: callerIdObservations.listener,
+        }
+      : null
+  ), [callerIdIntegration, callerIdHints, callerIdObservations.config, callerIdObservations.listener]);
+  const callerIdResolvedState = callerIdCardInput ? resolveCallerIdCardState(callerIdCardInput) : null;
+  useEffect(() => {
+    if (!callerIdResolvedState || !isConclusiveCallerIdState(callerIdResolvedState)) return;
+    setCallerIdLastKnown((previous) => (
+      previous?.scope === integrationScope && previous.state === callerIdResolvedState
+        ? previous
+        : { scope: integrationScope, state: callerIdResolvedState }
+    ));
+  }, [callerIdResolvedState, integrationScope]);
+  const callerIdCardView = useMemo(() => (
+    callerIdCardInput
+      ? buildCallerIdCardView(
+          callerIdCardInput,
+          callerIdLastKnown?.scope === integrationScope ? callerIdLastKnown.state : null,
+        )
+      : null
+  ), [callerIdCardInput, callerIdLastKnown, integrationScope]);
+  // What the page renders and counts: the caller_id entry carries the local
+  // state, so "N/M connected" and the stats reflect this terminal.
+  const displayedIntegrations = useMemo(() => (
+    callerIdCardView
+      ? integrations.map((item) => (
+          item.id === 'caller_id'
+            ? { ...item, status: CALLER_ID_CARD_STATUS[callerIdCardView.state], callerIdCard: callerIdCardView }
+            : item
+        ))
+      : integrations
+  ), [integrations, callerIdCardView]);
+
   const myDataCardStatus = integrations.find((item) => item.id === 'mydata')?.status;
   // Opening the modal shares the same refresh request as lifecycle and polling.
   useEffect(() => {
@@ -1307,8 +1908,12 @@ export const IntegrationsPage: React.FC = () => {
   }, [myDataModalOpen, fetchIntegrations, myDataCardStatus]);
 
   // Handle refresh
+  const refreshCallerIdObservations = callerIdObservations.refresh;
   const handleRefresh = useCallback(async () => {
     setIsRefreshing(true);
+    // The manual refresh is the explicit re-check of this terminal's Caller ID
+    // assignment; its outcome shows on the card, not in the plugins toast.
+    void refreshCallerIdObservations();
     try {
       await refetchModules();
       if (!(await fetchIntegrations())) throw new Error('Integration refresh failed');
@@ -1318,7 +1923,7 @@ export const IntegrationsPage: React.FC = () => {
     } finally {
       setIsRefreshing(false);
     }
-  }, [refetchModules, fetchIntegrations, t]);
+  }, [refetchModules, fetchIntegrations, refreshCallerIdObservations, t]);
 
   const loadTerminals = useCallback(async () => {
     try {
@@ -1810,7 +2415,7 @@ export const IntegrationsPage: React.FC = () => {
       other: [],
     };
 
-    integrations.forEach(integration => {
+    displayedIntegrations.forEach(integration => {
       if (groups[integration.category]) {
         groups[integration.category].push(integration);
       }
@@ -1818,10 +2423,10 @@ export const IntegrationsPage: React.FC = () => {
 
     // Filter out empty categories
     return Object.entries(groups).filter(([_, items]) => items.length > 0) as [IntegrationCategory, IntegrationWithStatus[]][];
-  }, [integrations]);
+  }, [displayedIntegrations]);
 
   // Calculate stats
-  const stats = useMemo(() => calculateStats(integrations), [integrations]);
+  const stats = useMemo(() => calculateStats(displayedIntegrations), [displayedIntegrations]);
   const isInitialPageLoading = !hasLoadedIntegrations && (loading || modulesLoading);
 
   // Loading state

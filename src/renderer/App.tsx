@@ -9,7 +9,6 @@ import { ModuleProvider } from "./contexts/module-context";
 import { BarcodeScannerProvider } from "./contexts/barcode-scanner-context";
 import LoginPage from "./pages/LoginPage";
 import { ErrorBoundary } from "./components/error/ErrorBoundary";
-import { ScreenCaptureControlRequestModal } from "./components/ScreenCaptureControlRequestModal";
 import { SyncNotificationManager } from "./components/SyncNotificationManager";
 import { CaptureNotificationManager } from "./components/CaptureNotificationManager";
 import { CancellationNoticeManager } from "./components/notices/CancellationNoticeManager";
@@ -29,7 +28,6 @@ import {
   setSecureSession,
   clearSecureSession,
 } from "./lib/secure-session-cache";
-import { screenCaptureHandler } from "./services/ScreenCaptureHandler";
 import AnimatedBackground from "./components/AnimatedBackground";
 import ThemeToggle from "./components/ThemeToggle";
 import FullscreenAwareLayout from "./components/FullscreenAwareLayout";
@@ -1025,8 +1023,6 @@ function AppContent() {
   // Caller ID notifications (gated by module availability inside the hook)
   useCallerIdNotifications({
     active: Boolean(user),
-    realtimeReady: Boolean(user) && realtimeReady,
-    realtimeClient: terminalRealtimeSession?.client ?? null,
     onOpenCustomerSearch: openCallerIdCustomerSearch,
   });
 
@@ -1036,42 +1032,7 @@ function AppContent() {
     }
   }, [user]);
 
-  useEffect(() => {
-    if (typeof document === 'undefined') {
-      return;
-    }
 
-    const syncPollingState = () => {
-      const shouldPoll =
-        Boolean(user) &&
-        document.visibilityState === 'visible' &&
-        navigator.onLine;
-      screenCaptureHandler.setIdleSessionPollingEnabled(shouldPoll);
-    };
-
-    syncPollingState();
-
-    const handleVisibilityChange = () => {
-      syncPollingState();
-    };
-    const handleOnline = () => {
-      syncPollingState();
-    };
-    const handleOffline = () => {
-      syncPollingState();
-    };
-
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
-
-    return () => {
-      screenCaptureHandler.setIdleSessionPollingEnabled(false);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
-    };
-  }, [user]);
 
   useEffect(() => {
     if (!user || isBrowser()) {
@@ -1709,8 +1670,6 @@ function AppContent() {
               onOpenConnectionSettings={() => openConnectionSettings()}
               onOpenSnapshots={() => openConnectionSettings('recovery')}
             />
-
-            <ScreenCaptureControlRequestModal />
 
             {/* Sync Notification Manager */}
             <SyncNotificationManager

@@ -19,6 +19,20 @@ import type {
 } from '../shared/types/delivery-validation';
 import { environment } from '../config/environment';
 import { getBridge } from '../lib';
+import { toValidLatLng } from '../renderer/utils/coordinates';
+import {
+  createUncheckedDeliveryZoneResult,
+  isDeliveryZoneUnchecked,
+} from '../renderer/utils/delivery-fee';
+
+/**
+ * localStorage key of the terminal's zone-check cache. Versioned because
+ * builds up to 1.4.118 cached out_of_zone verdicts for the point (0,0) (an
+ * address without coordinates read as Number(null) === 0) for 30 minutes
+ * under one shared key; bumping the key discards them on update.
+ */
+export const DELIVERY_VALIDATION_CACHE_STORAGE_KEY = 'pos_delivery_validation_cache_v2';
+export const LEGACY_DELIVERY_VALIDATION_CACHE_STORAGE_KEYS = ['pos_delivery_validation_cache'] as const;
 
 interface ValidatorConfig {
   branchId: string;
@@ -39,7 +53,7 @@ export class DeliveryZoneValidator {
   private validationService: DeliveryValidationService;
   private config: ValidatorConfig;
   private cache: Map<string, CachedValidation> = new Map();
-  private readonly CACHE_KEY = 'pos_delivery_validation_cache';
+  private readonly CACHE_KEY = DELIVERY_VALIDATION_CACHE_STORAGE_KEY;
   private readonly DEFAULT_CACHE_EXPIRY = 30 * 60 * 1000; // 30 minutes
 
   private getBridge() {
@@ -97,9 +111,21 @@ export class DeliveryZoneValidator {
   ): Promise<DeliveryBoundaryValidationResponse> {
     const startTime = Date.now();
 
+    // A point that is not a real point ((0,0) from a coerced null, NaN, out of
+    // range) is never sent, cached or reported as out of zone: the zone was
+    // simply not checked.
+    let validationTarget: string | { lat: number; lng: number } = address;
+    if (typeof address !== 'string') {
+      const point = toValidLatLng(address);
+      if (!point) {
+        return createUncheckedDeliveryZoneResult();
+      }
+      validationTarget = point;
+    }
+
     try {
       // Check cache first
-      const cacheKey = this.getCacheKey(address);
+      const cacheKey = this.getCacheKey(validationTarget);
       const cached = this.getCachedValidation(cacheKey);
       if (cached) {
         console.log('[DeliveryZoneValidator] Using cached validation result');
@@ -108,7 +134,7 @@ export class DeliveryZoneValidator {
 
       // Build validation request with correct shape
       const request: DeliveryBoundaryValidationRequest = {
-        address: address, // Can be string or {lat, lng} object
+        address: validationTarget, // Can be string or {lat, lng} object
         branchId: this.config.branchId,
         orderAmount
       };
@@ -119,11 +145,10 @@ export class DeliveryZoneValidator {
       // Track analytics
       const responseTimeMs = Date.now() - startTime;
       if (this.config.enableAnalytics) {
-        await this.trackValidationAttempt(result, address, orderAmount, responseTimeMs);
+        await this.trackValidationAttempt(result, validationTarget, orderAmount, responseTimeMs);
       }
 
-      // Cache successful results
-      if (result.success || result.zone) {
+      if (this.isCacheableResult(validationTarget, result)) {
         this.setCachedValidation(cacheKey, result);
       }
 
@@ -134,11 +159,11 @@ export class DeliveryZoneValidator {
       // Track error in analytics
       const responseTimeMs = Date.now() - startTime;
       if (this.config.enableAnalytics) {
-        await this.trackValidationError(address, orderAmount, responseTimeMs, error);
+        await this.trackValidationError(validationTarget, orderAmount, responseTimeMs, error);
       }
 
       // Try to return cached result if available
-      const cacheKey = this.getCacheKey(address);
+      const cacheKey = this.getCacheKey(validationTarget);
       const cached = this.getCachedValidation(cacheKey);
       if (cached) {
         console.warn('[DeliveryZoneValidator] API failed, using cached result');
@@ -261,10 +286,12 @@ export class DeliveryZoneValidator {
     }
 
     try {
-      const validationResult = result.success
-        ? 'success'
-        : result.reason === 'VALIDATION_SERVICE_UNAVAILABLE'
+      const validationResult = result.reason === 'VALIDATION_SERVICE_UNAVAILABLE' || result.success === false
         ? 'error'
+        : isDeliveryZoneUnchecked(result)
+        ? 'not_checked'
+        : result.isValid
+        ? 'success'
         : 'out_of_zone';
 
       const coordinates = typeof address === 'object'
@@ -346,6 +373,22 @@ export class DeliveryZoneValidator {
   }
 
   /**
+   * Text keys keep every successful answer (the server answers text without a
+   * point deterministically). Point keys keep only a positive verdict: an out
+   * of zone, not-checked or failed answer is asked again next time, so a
+   * zone change or a re-picked address is never hidden for 30 minutes.
+   */
+  private isCacheableResult(
+    target: string | { lat: number; lng: number },
+    result: DeliveryBoundaryValidationResponse
+  ): boolean {
+    if (typeof target === 'string') {
+      return Boolean(result.success || result.zone);
+    }
+    return result.isValid === true && !isDeliveryZoneUnchecked(result);
+  }
+
+  /**
    * Set cached validation result
    */
   private setCachedValidation(key: string, result: DeliveryBoundaryValidationResponse): void {
@@ -374,6 +417,10 @@ export class DeliveryZoneValidator {
    */
   private loadCacheFromStorage(): void {
     try {
+      // Older builds' cache may hold (0,0) out_of_zone verdicts: drop it.
+      for (const legacyKey of LEGACY_DELIVERY_VALIDATION_CACHE_STORAGE_KEYS) {
+        localStorage.removeItem(legacyKey);
+      }
       const stored = localStorage.getItem(this.CACHE_KEY);
       if (stored) {
         const parsed = JSON.parse(stored);

@@ -132,6 +132,7 @@ import { formatCompactOrderNumberForDisplay, getVisibleOrderNumber } from "../ut
 import { resolveTauriPrimaryActions } from "../primary-actions";
 import {
   hasLaunchableNewWork,
+  resolveDirectNewWorkCard,
   resolveNewWorkCards,
   type NewWorkCardId,
 } from "../new-work-cards";
@@ -145,7 +146,24 @@ import {
   resolveSyncedBranchOriginFallback,
   resolveStoreMapOrigin,
 } from "../utils/delivery-routing";
-import { resolveDeliveryFee } from "../utils/delivery-fee";
+import {
+  createUncheckedDeliveryZoneResult,
+  resolveDeliveryFee,
+} from "../utils/delivery-fee";
+import { toValidLatLng } from "../utils/coordinates";
+import {
+  MODAL_ZONE_VALIDATION_FIELD,
+  decidePickupToDeliveryZone,
+  planDeliveryAddressRepick,
+  planDeliveryZoneHandoff,
+  resolveHandoffCustomer,
+  withoutRepickTarget,
+} from "../utils/delivery-zone-handoff";
+import {
+  persistGeocodedSavedAddressCoordinates,
+  resolveSavedAddressCoordinates,
+} from "../utils/saved-address-geolocation";
+import { parseSpecialAddressInput } from "../utils/specialAddress";
 import { pickMeaningfulOrderCustomerName } from "../utils/orderDisplay";
 import { resolveAdjustmentAttribution } from "../utils/staffAttribution";
 import {
@@ -177,6 +195,7 @@ import {
   resolvePickupToDeliveryAddress,
 } from "../utils/pickup-to-delivery";
 import {
+  isLegacyFallbackAddress,
   resolveCanonicalCustomerAddress,
   withMaterializedCustomerAddresses,
 } from "../utils/customer-addresses";
@@ -286,58 +305,21 @@ interface PendingStatusPaymentCollection {
   blocker: UnsettledPaymentBlocker;
 }
 
-const toLatLngCoordinates = (
-  coordinates:
-    | { lat: number; lng: number }
-    | { type: "Point"; coordinates: [number, number] }
-    | null
-    | undefined,
-  latitude?: number | null,
-  longitude?: number | null,
-): { lat: number; lng: number } | undefined => {
-  if (
-    coordinates &&
-    "lat" in coordinates &&
-    Number.isFinite(coordinates.lat) &&
-    Number.isFinite(coordinates.lng)
-  ) {
-    return { lat: Number(coordinates.lat), lng: Number(coordinates.lng) };
-  }
-
-  if (
-    coordinates &&
-    "type" in coordinates &&
-    coordinates.type === "Point" &&
-    Array.isArray(coordinates.coordinates) &&
-    coordinates.coordinates.length >= 2 &&
-    Number.isFinite(coordinates.coordinates[1]) &&
-    Number.isFinite(coordinates.coordinates[0])
-  ) {
-    return {
-      lat: Number(coordinates.coordinates[1]),
-      lng: Number(coordinates.coordinates[0]),
-    };
-  }
-
-  if (Number.isFinite(Number(latitude)) && Number.isFinite(Number(longitude))) {
-    return {
-      lat: Number(latitude),
-      lng: Number(longitude),
-    };
-  }
-
-  return undefined;
-};
-
 const buildCustomerInfoFromOrderFlowCustomer = (
   customer: OrderFlowCustomer,
 ): CustomerInfo => {
   const resolvedAddress = resolveCanonicalCustomerAddress(customer);
-  const coordinates = toLatLngCoordinates(
-    resolvedAddress?.coordinates ?? customer.coordinates,
-    resolvedAddress?.latitude ?? customer.latitude,
-    resolvedAddress?.longitude ?? customer.longitude,
-  );
+  // Strict: an address without coordinates has none (never (0,0)). The
+  // customer-level pair only stands in when there is no saved address row.
+  const coordinates =
+    (resolvedAddress
+      ? toValidLatLng(
+          resolvedAddress.coordinates,
+          resolvedAddress.latitude,
+          resolvedAddress.longitude,
+        )
+      : toValidLatLng(customer.coordinates, customer.latitude, customer.longitude)) ??
+    undefined;
 
   return {
     name: customer.name,
@@ -354,9 +336,8 @@ const buildCustomerInfoFromOrderFlowCustomer = (
       name_on_ringer:
         resolvedAddress?.name_on_ringer || customer.name_on_ringer || "",
       coordinates,
-      latitude: coordinates?.lat ?? resolvedAddress?.latitude ?? customer.latitude ?? null,
-      longitude:
-        coordinates?.lng ?? resolvedAddress?.longitude ?? customer.longitude ?? null,
+      latitude: coordinates?.lat ?? null,
+      longitude: coordinates?.lng ?? null,
     },
     notes: resolvedAddress?.notes || customer.notes || "",
   };
@@ -425,6 +406,16 @@ const readTableBalance = (table: RestaurantTable) => {
   );
   const tips = Math.max(0, Number(balance.tip_total ?? 0) || 0);
   return { total, paid, due, tips };
+};
+
+/** The order type each sale card starts, as its button in the picker does. */
+const NEW_WORK_ORDER_TYPES: Record<
+  Extract<NewWorkCardId, "delivery" | "pickup" | "table">,
+  "delivery" | "pickup" | "dine-in"
+> = {
+  delivery: "delivery",
+  pickup: "pickup",
+  table: "dine-in",
 };
 
 interface OrderPrimaryActionLauncherProps {
@@ -505,6 +496,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     } = useAcquiredModules();
     const repairSettings = useRepairStore((state) => state.settings);
     const repairSettingsScopeBoundRef = useRef(false);
+    // The scoped settings request for this session has finished, answered or
+    // not: a failed load keeps Quick Service hidden but still counts as known,
+    // as on Android, so a lone option can open by itself.
+    const [repairSettingsLoadSettled, setRepairSettingsLoadSettled] = useState(false);
     const repairSessionId = getSecureSessionSync()?.sessionId ?? null;
     const hasRepairsModule = modules.some(
       (module) => module.isActive && module.moduleId === 'repairs',
@@ -513,16 +508,22 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       if (!hasRepairsModule || !repairSessionId) {
         repairStore.getState().clearSession();
         repairSettingsScopeBoundRef.current = false;
+        setRepairSettingsLoadSettled(false);
         return;
       }
       if (repairSettingsScopeBoundRef.current) return;
       repairStore.getState().clearSession();
       repairSettingsScopeBoundRef.current = true;
+      setRepairSettingsLoadSettled(false);
+      let cancelled = false;
       void repairStore.getState().loadSettings().catch(() => {
         // Fail closed: Quick Service remains hidden until a scoped native
         // settings projection is available.
+      }).finally(() => {
+        if (!cancelled) setRepairSettingsLoadSettled(true);
       });
       return () => {
+        cancelled = true;
         repairSettingsScopeBoundRef.current = false;
         repairStore.getState().clearSession();
       };
@@ -1436,7 +1437,39 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       setShowPhoneLookupModal(false);
     }, [pickupToDeliveryContext, resetPickupToDeliveryFlow]);
 
+    // Opened from the menu's "delivery zone not checked" notice: closing it
+    // without saving must keep the order's customer and cart as they were.
+    const menuAddressRepickRef = useRef(false);
+
+    const handleRepickDeliveryAddress = useCallback(() => {
+      const customer = existingCustomer as OrderFlowCustomer | null;
+      const repick = planDeliveryAddressRepick(
+        customer,
+        customer ? resolveCanonicalCustomerAddress(customer) : null,
+      );
+      if (repick.kind === "edit_address") {
+        menuAddressRepickRef.current = true;
+        setExistingCustomer(repick.customer as OrderFlowCustomer);
+        setCustomerModalMode("editAddress");
+        setShowAddCustomerModal(true);
+        return;
+      }
+      // A walk-in delivery without a saved address row: the order's own
+      // address form picks the street again.
+      setShowCustomerInfoModal(true);
+    }, [existingCustomer]);
+
     const closeAddCustomerModal = useCallback(() => {
+      if (menuAddressRepickRef.current) {
+        // Closed without saving: keep the order's customer and cart.
+        menuAddressRepickRef.current = false;
+        setShowAddCustomerModal(false);
+        setExistingCustomer((current) =>
+          withoutRepickTarget(current as OrderFlowCustomer | null) as typeof current,
+        );
+        setCustomerModalMode("new");
+        return;
+      }
       if (pickupToDeliveryContext) {
         const wasEditMode = pickupToDeliveryContext.mode === "edit";
         resetPickupToDeliveryFlow();
@@ -1550,6 +1583,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     });
     const newWorkCard = (id: NewWorkCardId) => newWorkCards.find((card) => card.id === id);
     const canLaunchNewWork = hasLaunchableNewWork(newWorkCards);
+    // Every option is known once the scoped repair settings request finished
+    // (Quick Service may add a card); only then may a lone option open by itself.
+    const newWorkOptionsSettled = !hasRepairsModule || repairSettingsLoadSettled;
     const visibleOrderTypeCardCount = newWorkCards.length;
     const orderTypeModalWidthClass =
       visibleOrderTypeCardCount >= 5
@@ -2037,6 +2073,13 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       setOrderType("pickup");
       setDeliveryZoneInfo(null);
       setRoomChargeContext(null);
+      // One kind of work only: (+) opens it straight away instead of a
+      // one-card picker (founder, 24/09/2026), as the Android POS does.
+      const directCard = resolveDirectNewWorkCard(newWorkCards, newWorkOptionsSettled);
+      if (directCard) {
+        launchNewWorkCard(directCard.id);
+        return;
+      }
       setShowOrderTypeModal(true);
     };
 
@@ -2056,6 +2099,34 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       setShowOrderTypeModal(false);
       setActiveTab("services");
       setServicesOpenCreateSignal((n) => n + 1);
+    };
+
+    // New Order -> Repair / Quick service opens the repairs view on that intake.
+    const handleSelectRepairFlow = (repairIntent: "new_repair" | "quick_service") => {
+      setShowOrderTypeModal(false);
+      window.dispatchEvent(new CustomEvent('pos:navigate-view', {
+        detail: { view: 'repairs', repairIntent },
+      }));
+    };
+
+    // Starts one card's flow exactly as tapping it in the picker does.
+    const launchNewWorkCard = (id: NewWorkCardId) => {
+      switch (id) {
+        case "room":
+          handleSelectRoomFlow();
+          return;
+        case "service":
+          handleSelectServiceFlow();
+          return;
+        case "repair":
+          handleSelectRepairFlow("new_repair");
+          return;
+        case "quick_service":
+          handleSelectRepairFlow("quick_service");
+          return;
+        default:
+          void handleOrderTypeSelect(NEW_WORK_ORDER_TYPES[id]);
+      }
     };
 
     // Room flow option 1 — Room Order: choose an occupied room that has an active folio.
@@ -2573,11 +2644,12 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           return false;
         }
 
-        const addressCoordinates = toLatLngCoordinates(
-          resolvedAddress.coordinates,
-          resolvedAddress.latitude,
-          resolvedAddress.longitude,
-        );
+        let addressCoordinates =
+          toValidLatLng(
+            resolvedAddress.coordinates,
+            resolvedAddress.latitude,
+            resolvedAddress.longitude,
+          ) ?? undefined;
         const addressString = [
           resolvedAddress.streetAddress,
           resolvedAddress.city,
@@ -2597,24 +2669,76 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
         setIsBulkActionLoading(true);
         try {
+          // An address without a point: automatic geolocation, accepted only
+          // when its municipality or postal code matches the saved address.
+          if (
+            !addressCoordinates &&
+            !parseSpecialAddressInput(resolvedAddress.streetAddress).shouldSkipZoneValidation
+          ) {
+            const savedAddress = {
+              id: resolvedAddress.addressId || undefined,
+              street_address: resolvedAddress.streetAddress,
+              city: resolvedAddress.city,
+              postal_code: resolvedAddress.postalCode,
+            };
+            try {
+              const geolocated = await resolveSavedAddressCoordinates(
+                savedAddress,
+                effectiveBranchId || undefined,
+              );
+              if (geolocated) {
+                addressCoordinates = geolocated.coordinates;
+                await persistGeocodedSavedAddressCoordinates({
+                  address: savedAddress,
+                  customerId: resolvePersistedCustomerId(
+                    resolvedAddress.customerId,
+                    customer.id,
+                  ),
+                  resolved: geolocated,
+                  isLegacyFallback: isLegacyFallbackAddress({
+                    id: resolvedAddress.addressId,
+                  }),
+                  updateAddress: (addressId, updates, expectedVersion) =>
+                    bridge.customers.updateAddress(
+                      addressId,
+                      updates,
+                      expectedVersion,
+                    ),
+                }).catch((persistError: unknown) => {
+                  console.warn(
+                    "[OrderDashboard] Failed to persist geolocated address coordinates:",
+                    persistError,
+                  );
+                });
+              }
+            } catch (geolocationError) {
+              console.warn(
+                "[OrderDashboard] Address geolocation failed:",
+                geolocationError,
+              );
+            }
+          }
+
           const validationAmount =
             getPickupToDeliveryValidationAmount(targetOrder);
-          let validationResult = await validateDeliveryAddress(
-            validationTarget,
-            validationAmount,
-          );
-          const canProceed =
-            validationResult?.uiState?.canProceed ??
-            validationResult?.deliveryAvailable ??
-            validationResult?.isValid ??
-            false;
+          // Still no point (and not a "#label" address): the zone was not
+          // checked. A text-only request could only answer
+          // requires_selection, so it is answered locally.
+          let validationResult =
+            !addressCoordinates &&
+            !parseSpecialAddressInput(resolvedAddress.streetAddress)
+              .shouldSkipZoneValidation
+              ? createUncheckedDeliveryZoneResult()
+              : await validateDeliveryAddress(
+                  addressCoordinates || validationTarget,
+                  validationAmount,
+                );
+          // Founder rule (2026-09-29): a zone that was not checked (no usable
+          // point) never blocks and never needs an out-of-zone override.
+          const { zoneNotChecked, canProceed, canAttemptOverride } =
+            decidePickupToDeliveryZone(validationResult);
 
           if (!canProceed) {
-            const canAttemptOverride = Boolean(
-              validationResult?.uiState?.showOverrideOption ||
-              validationResult?.uiState?.requiresManagerApproval,
-            );
-
             if (!canAttemptOverride) {
               toast.error(
                 validationResult?.message ||
@@ -2653,10 +2777,19 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             };
           }
 
+          if (zoneNotChecked) {
+            toast(
+              t("orderDashboard.deliveryZoneNotCheckedNotice", {
+                defaultValue:
+                  "The delivery zone was not checked. Pick the address again.",
+              }),
+              { icon: "📍", duration: 6000 },
+            );
+          }
+
           const deliveryFee = resolveDeliveryFee(validationResult);
           const validatedCoordinates =
-            toLatLngCoordinates(validationResult?.coordinates, null, null) ||
-            addressCoordinates;
+            toValidLatLng(validationResult?.coordinates) ?? addressCoordinates;
           const deliveryZoneId =
             validationResult?.selectedZone?.id ||
             validationResult?.zone?.id ||
@@ -2680,10 +2813,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             deliveryFloor: resolvedAddress.floor || undefined,
             deliveryNotes: resolvedAddress.notes || undefined,
             nameOnRinger: resolvedAddress.nameOnRinger || undefined,
-            deliveryLatitude:
-              validatedCoordinates?.lat ?? resolvedAddress.latitude ?? undefined,
-            deliveryLongitude:
-              validatedCoordinates?.lng ?? resolvedAddress.longitude ?? undefined,
+            deliveryLatitude: validatedCoordinates?.lat ?? undefined,
+            deliveryLongitude: validatedCoordinates?.lng ?? undefined,
             deliveryAddressFingerprint:
               resolvedAddress.addressFingerprint || undefined,
             deliveryZoneId,
@@ -2762,7 +2893,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         }
       },
       [
+        bridge.customers,
         bridge.orders,
+        effectiveBranchId,
         loadOrders,
         orders,
         pickupToDeliveryContext,
@@ -2854,24 +2987,15 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           return;
         }
 
-        // Validate delivery zone for the address
+        // Check the zone only with the address's real point. An address
+        // without one is left to the menu, which geolocates it (accepted only
+        // when its area matches) or shows "zone not checked" — never the
+        // (0,0) "out of zone" of 1.4.118.
         try {
-          const addressString = [
-            resolvedAddress?.street_address || normalizedCustomer.address || "",
-            resolvedAddress?.city || normalizedCustomer.city || "",
-            resolvedAddress?.postal_code || normalizedCustomer.postal_code || "",
-          ]
-            .filter(Boolean)
-            .join(", ");
-          const addressCoordinates = toLatLngCoordinates(
-            resolvedAddress?.coordinates,
-            resolvedAddress?.latitude,
-            resolvedAddress?.longitude,
-          );
-
-          if (addressCoordinates || addressString) {
+          const zonePlan = planDeliveryZoneHandoff({ address: resolvedAddress });
+          if (zonePlan.kind === "check_point") {
             const validationResult = await validateDeliveryAddress(
-              addressCoordinates || addressString,
+              zonePlan.point,
               0,
             );
             if (validationResult) {
@@ -3019,10 +3143,19 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
     const handleNewCustomerAdded = async (customer: any) => {
       const orderFlowCustomer = customer as OrderFlowCustomer;
+      // The order goes to the address the modal just saved or edited
+      // (selected_address_id / editAddressId), not the customer's default.
+      const handoff = resolveHandoffCustomer(orderFlowCustomer, {
+        customerId: existingCustomer?.id ?? null,
+        selectedAddressId:
+          (existingCustomer as OrderFlowCustomer | null)?.selected_address_id ??
+          null,
+      });
 
       if (pickupToDeliveryContext) {
+        const conversionCustomer = handoff.customer as OrderFlowCustomer;
         const resolvedAddress =
-          resolvePickupToDeliveryAddress(orderFlowCustomer);
+          resolvePickupToDeliveryAddress(conversionCustomer);
         if (!resolvedAddress) {
           toast.error(
             t("orderDashboard.customerNoAddress") ||
@@ -3033,7 +3166,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           return;
         }
 
-        await convertPickupOrderToDelivery(orderFlowCustomer);
+        await convertPickupOrderToDelivery(conversionCustomer);
         return;
       }
 
@@ -3053,12 +3186,11 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       );
       debugLog("[handleNewCustomerAdded] Current orderType:", orderType);
 
-      const normalizedCustomer = withMaterializedCustomerAddresses(
-        customer as OrderFlowCustomer,
-      ) as OrderFlowCustomer;
+      const normalizedCustomer = handoff.customer as OrderFlowCustomer;
       const resolvedAddress = resolveCanonicalCustomerAddress(
         normalizedCustomer,
       );
+      menuAddressRepickRef.current = false;
       debugLog(
         "[handleNewCustomerAdded] resolvedAddress:",
         JSON.stringify(resolvedAddress, null, 2),
@@ -3087,24 +3219,22 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           return;
         }
 
-        // Validate delivery zone for the address
+        // Reuse the zone check the modal just ran for this address; otherwise
+        // check only this address's real point. Never re-check another
+        // address (the default) and never a missing point as (0,0).
         try {
-          const addressString = [
-            resolvedAddress?.street_address || normalizedCustomer.address || "",
-            resolvedAddress?.city || normalizedCustomer.city || "",
-            resolvedAddress?.postal_code || normalizedCustomer.postal_code || "",
-          ]
-            .filter(Boolean)
-            .join(", ");
-          const addressCoordinates = toLatLngCoordinates(
-            resolvedAddress?.coordinates ?? normalizedCustomer.coordinates,
-            resolvedAddress?.latitude ?? normalizedCustomer.latitude,
-            resolvedAddress?.longitude ?? normalizedCustomer.longitude,
-          );
-
-          if (addressCoordinates || addressString) {
+          const zonePlan = planDeliveryZoneHandoff({
+            address: resolvedAddress,
+            modalValidation: (customer as Record<string, unknown> | null)?.[
+              MODAL_ZONE_VALIDATION_FIELD
+            ],
+            addressFromModal: handoff.addressFromModal,
+          });
+          if (zonePlan.kind === "reuse") {
+            setDeliveryZoneInfo(zonePlan.zoneInfo);
+          } else if (zonePlan.kind === "check_point") {
             const validationResult = await validateDeliveryAddress(
-              addressCoordinates || addressString,
+              zonePlan.point,
               0,
             );
             if (validationResult) {
@@ -3311,15 +3441,18 @@ export const OrderDashboard = memo<OrderDashboardProps>(
               customerInfo.address.notes || customerInfo.notes || "",
             nameOnRinger: customerInfo.address.name_on_ringer || "",
             name_on_ringer: customerInfo.address.name_on_ringer || "",
-            coordinates: customerInfo.address.coordinates,
-            latitude:
-              customerInfo.address.latitude ??
-              customerInfo.address.coordinates?.lat ??
-              null,
-            longitude:
-              customerInfo.address.longitude ??
-              customerInfo.address.coordinates?.lng ??
-              null,
+            ...(() => {
+              const point = toValidLatLng(
+                customerInfo.address.coordinates,
+                customerInfo.address.latitude,
+                customerInfo.address.longitude,
+              );
+              return {
+                coordinates: point ?? undefined,
+                latitude: point?.lat ?? null,
+                longitude: point?.lng ?? null,
+              };
+            })(),
           };
         }
       }
@@ -6312,8 +6445,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           deliveryFloor: customerInfo.delivery_floor?.trim() || null,
           nameOnRinger: customerInfo.name_on_ringer?.trim() || null,
           deliveryNotes: customerInfo.notes?.trim() || null,
-          deliveryLatitude: customerInfo.latitude ?? customerInfo.coordinates?.lat ?? null,
-          deliveryLongitude: customerInfo.longitude ?? customerInfo.coordinates?.lng ?? null,
+          deliveryLatitude:
+            toValidLatLng(customerInfo.coordinates, customerInfo.latitude, customerInfo.longitude)?.lat ?? null,
+          deliveryLongitude:
+            toValidLatLng(customerInfo.coordinates, customerInfo.latitude, customerInfo.longitude)?.lng ?? null,
           deliveryAddressFingerprint: customerInfo.addressFingerprint ?? null,
         };
         for (const orderId of targetOrderIds) {
@@ -6481,11 +6616,12 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           firstOrder?.special_instructions ||
           firstOrder?.notes ||
           "",
-        coordinates: toLatLngCoordinates(
-          firstOrder?.coordinates,
-          firstOrder?.deliveryLatitude ?? firstOrder?.delivery_latitude ?? firstOrder?.latitude,
-          firstOrder?.deliveryLongitude ?? firstOrder?.delivery_longitude ?? firstOrder?.longitude,
-        ),
+        coordinates:
+          toValidLatLng(
+            firstOrder?.coordinates,
+            firstOrder?.deliveryLatitude ?? firstOrder?.delivery_latitude ?? firstOrder?.latitude,
+            firstOrder?.deliveryLongitude ?? firstOrder?.delivery_longitude ?? firstOrder?.longitude,
+          ) ?? undefined,
         latitude:
           typeof (firstOrder?.deliveryLatitude ?? firstOrder?.delivery_latitude) === "number"
             ? firstOrder?.deliveryLatitude ?? firstOrder?.delivery_latitude
@@ -7448,12 +7584,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                     type="button"
                     data-order-type-card="repair"
                     disabled={!newWorkCard("repair")?.enabled}
-                    onClick={() => {
-                      setShowOrderTypeModal(false);
-                      window.dispatchEvent(new CustomEvent('pos:navigate-view', {
-                        detail: { view: 'repairs', repairIntent: 'new_repair' },
-                      }));
-                    }}
+                    onClick={() => handleSelectRepairFlow("new_repair")}
                     aria-label={composeOrderTypeAriaLabel(
                       t("primaryActions.newRepair"),
                       t("orderFlow.repairDescription", { defaultValue: "Take in a device for repair" }),
@@ -7483,12 +7614,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                     type="button"
                     data-order-type-card="quick_service"
                     disabled={!newWorkCard("quick_service")?.enabled}
-                    onClick={() => {
-                      setShowOrderTypeModal(false);
-                      window.dispatchEvent(new CustomEvent('pos:navigate-view', {
-                        detail: { view: 'repairs', repairIntent: 'quick_service' },
-                      }));
-                    }}
+                    onClick={() => handleSelectRepairFlow("quick_service")}
                     aria-label={composeOrderTypeAriaLabel(
                       t("primaryActions.quickService"),
                       t("orderFlow.quickServiceDescription", { defaultValue: "Serve on the spot, no intake" }),
@@ -7911,6 +8037,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           selectedAddress={getSelectedAddress()}
           orderType={selectedOrderType || "pickup"}
           deliveryZoneInfo={deliveryZoneInfo}
+          onRepickDeliveryAddress={handleRepickDeliveryAddress}
           onOrderComplete={handleOrderComplete}
           roomChargeContext={roomChargeContext}
         />

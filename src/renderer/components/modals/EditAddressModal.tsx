@@ -2,6 +2,10 @@ import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { getBridge } from '../../../lib';
+import {
+  customerAddressWriteErrorText,
+  expectCustomerAddressWrite,
+} from '../../utils/customer-address-write-refusal';
 
 interface CustomerAddress {
   id: string;
@@ -60,7 +64,7 @@ const EditAddressModal: React.FC<EditAddressModalProps> = ({
     setIsLoading(true);
 
     try {
-      const result: any = await bridge.customers.updateAddress(
+      const raw = await bridge.customers.updateAddress(
         address.id,
         {
           customer_id: customerId,
@@ -75,16 +79,15 @@ const EditAddressModal: React.FC<EditAddressModalProps> = ({
         0,
       );
 
-      if (result?.success && result.data) {
-        onAddressUpdated(result.data);
-        onClose();
-      } else {
-        console.error('Failed to update address:', result.error);
-        alert(t('modals.editAddress.updateFailed', { error: result.error || t('modals.editAddress.unknownError') }));
-      }
+      // A refusal (INVALID_COORDINATES, NOT_FOUND, a version conflict, this
+      // register's own refusals) is named; its `error` is a machine code and
+      // is never shown. A queued write (office unreachable) is saved here.
+      const result = expectCustomerAddressWrite<CustomerAddress>(t, raw, 'update', 'modals.editAddress.updateError');
+      onAddressUpdated(result.data ?? address);
+      onClose();
     } catch (error) {
       console.error('Error updating address:', error);
-      alert(t('modals.editAddress.updateError'));
+      alert(customerAddressWriteErrorText(t, error, 'modals.editAddress.updateError'));
     } finally {
       setIsLoading(false);
     }

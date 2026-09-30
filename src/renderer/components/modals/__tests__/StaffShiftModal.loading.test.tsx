@@ -2,6 +2,10 @@ import React from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+// Release runners are far slower than a workstation; see the PIN-pad tests.
+const SLOW_RUNNER_QUERY = { timeout: 8_000 };
+const SLOW_RUNNER_TEST_TIMEOUT_MS = 30_000;
+
 const { bridge, translation } = vi.hoisted(() => ({
   translation: { t: (key: string, fallback?: string | { defaultValue?: string }) =>
     typeof fallback === 'string' ? fallback : fallback?.defaultValue ?? key },
@@ -144,21 +148,24 @@ describe('StaffShiftModal staff loading', () => {
     expect(screen.queryByText('schedule unavailable')).toBeNull();
   });
 
+  // The PIN pad renders after the staff list and a transition; on a loaded
+  // Windows release runner (vitest ~490 s) the default 1 s query budget ran
+  // out and failed the desktop release on 29/09/2026. Allow for a slow runner.
   it('keeps PIN verification disabled when a background staff refresh finishes', async () => {
     const refresh = deferred();
     const verification = deferred();
     bridge.staffSchedule.list.mockReturnValue(refresh.promise);
     bridge.staffAuth.verifyCheckInPin.mockReturnValue(verification.promise);
     render(<StaffShiftModal {...props} />);
-    fireEvent.click(await screen.findByText('Cached Alice'));
-    const digit = await screen.findByRole('button', { name: '1', exact: true });
+    fireEvent.click(await screen.findByText('Cached Alice', undefined, SLOW_RUNNER_QUERY));
+    const digit = await screen.findByRole('button', { name: '1', exact: true }, SLOW_RUNNER_QUERY);
     for (let i = 0; i < 4; i += 1) fireEvent.click(digit);
     fireEvent.click(screen.getByRole('button', { name: 'modals.staffShift.continue' }));
-    await waitFor(() => expect(bridge.staffAuth.verifyCheckInPin).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(bridge.staffAuth.verifyCheckInPin).toHaveBeenCalledTimes(1), SLOW_RUNNER_QUERY);
     await act(async () => refresh.resolve(schedule(cached)));
     expect(screen.getByRole('button', { name: 'modals.staffShift.authenticating' })).toBeDisabled();
     await act(async () => verification.resolve({ success: false, reasonCode: 'invalid_pin' }));
-  });
+  }, SLOW_RUNNER_TEST_TIMEOUT_MS);
 
   it('does not carry a cancelled cold load into a subsequent direct checkout open', async () => {
     const cache = deferred();
@@ -186,14 +193,17 @@ describe('StaffShiftModal staff loading', () => {
     bridge.shifts.getActiveCashierByTerminal.mockResolvedValue({ id: 'cashier-shift' });
     bridge.shifts.open.mockRejectedValue('The cashier shift was closed. Open a cashier shift first.');
     render(<StaffShiftModal {...props} />);
-    fireEvent.click(await screen.findByText('Ana Waiter'));
-    const digit = await screen.findByRole('button', { name: '1', exact: true });
+    fireEvent.click(await screen.findByText('Ana Waiter', undefined, SLOW_RUNNER_QUERY));
+    const digit = await screen.findByRole('button', { name: '1', exact: true }, SLOW_RUNNER_QUERY);
     for (let i = 0; i < 4; i += 1) fireEvent.click(digit);
     fireEvent.click(screen.getByRole('button', { name: 'modals.staffShift.continue' }));
-    fireEvent.click(await screen.findByRole('button', { name: /waiter/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /waiter/i }, SLOW_RUNNER_QUERY));
     expect(bridge.shifts.open).not.toHaveBeenCalled();
-    fireEvent.click(await screen.findByRole('button', { name: 'modals.staffShift.skipCash' }));
-    await waitFor(() => expect(bridge.shifts.open).toHaveBeenCalledWith(expect.objectContaining({ roleType: 'server' })));
-    await screen.findByText('The cashier shift was closed. Open a cashier shift first.');
-  });
+    fireEvent.click(await screen.findByRole('button', { name: 'modals.staffShift.skipCash' }, SLOW_RUNNER_QUERY));
+    await waitFor(
+      () => expect(bridge.shifts.open).toHaveBeenCalledWith(expect.objectContaining({ roleType: 'server' })),
+      SLOW_RUNNER_QUERY,
+    );
+    await screen.findByText('The cashier shift was closed. Open a cashier shift first.', undefined, SLOW_RUNNER_QUERY);
+  }, SLOW_RUNNER_TEST_TIMEOUT_MS);
 });

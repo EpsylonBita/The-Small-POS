@@ -21,6 +21,20 @@ const candidates = [
 ];
 const compiler = candidates.find((candidate) => fs.existsSync(candidate));
 if (!compiler) {
+  // The release job's pre-bundle verification runs before `tauri build` has
+  // fetched the pinned NSIS toolchain. With a cold bundler-tools cache the
+  // compiler is not there yet, and the cache is only saved by a successful
+  // job, so refusing here deadlocked every release (29/09/2026, v1.4.119).
+  // The release workflow opts into deferral for its pre-bundle steps only and
+  // re-runs this smoke without the opt-in right after the NSIS bundle step,
+  // before anything is published.
+  if (process.env.THE_SMALL_POS_NSIS_SMOKE_ALLOW_DEFER === '1') {
+    process.stdout.write(
+      'Managed credential NSIS compile smoke deferred: the pinned Tauri makensis.exe is not provisioned yet; '
+      + 'the release workflow re-runs this smoke strictly after the NSIS bundle step.\n',
+    );
+    process.exit(0);
+  }
   throw new Error('Pinned Tauri makensis.exe is unavailable; refusing to skip Windows NSIS smoke');
 }
 

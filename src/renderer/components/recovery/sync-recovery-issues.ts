@@ -1291,6 +1291,37 @@ const buildCatalogAvailabilityIssues = (
   };
 };
 
+/// Customer-directory rows: `customers` and `customer_addresses` of module
+/// `customers`, exactly the rows the native closeout drain leaves out of the Z
+/// gate (`sync_queue::is_closeout_exempt_row`).
+///
+/// Incident 2026-09-28 (Tomikro, desktop 1.4.118): symptom — «Cannot close
+/// day: pre-Z-report sync failed: PARITY_SYNC_PARTIAL» while Sync health
+/// showed a red «some updates could not be sent» card offering only retry.
+/// Root cause — the office refused a customer's 11-digit phone
+/// (400 INVALID_PHONE), the till queued the customer anyway, and any failed
+/// parity row blocked the Z. A Z never reads the customer directory (orders
+/// carry the customer's name and phone), so these rows no longer block the
+/// day close; they stay visible here as a non-blocking card that says so and
+/// names the office's reason. Regression: tests/services/
+/// sync-recovery-issues.test.ts «a customer the office refused ...».
+///
+/// Release gate: this card is only true together with the native closeout
+/// exemption (`force_sync_until_closeout_stable` with its CloseoutBlocking
+/// scope; Rust tests `sync::tests::closeout_drain_*`) and the coded
+/// create/update rejections of the native customer commands. They ship in the
+/// same desktop build as this renderer; never release this builder on a
+/// native side that still lets a customers row block the Z, or the card would
+/// tell the cashier the day can be closed when it cannot.
+const isCustomerDirectoryRow = (item: SyncQueueItem): boolean =>
+  (item.tableName === 'customers' || item.tableName === 'customer_addresses') &&
+  (item.moduleType ?? '') === 'customers';
+
+/// Customer-directory cards never block the day close. `recovering` is the
+/// only non-blocking status the recovery contract has; `closeoutBlocking:
+/// false` in the params says why the card is not in the blocking list.
+const CUSTOMER_DIRECTORY_ISSUE_STATUS = 'recovering' as const;
+
 const CUSTOMER_ADDRESS_DEFAULT_CONFLICT_MARKER = 'CUSTOMER_ADDRESS_DEFAULT_CONFLICT';
 const CUSTOMER_ADDRESS_DEFAULT_RETRY_MARKER = 'CUSTOMER_ADDRESS_DEFAULT_RETRY';
 const CUSTOMER_ADDRESS_DEFAULT_LEGACY_INDEX_SIGNATURE =
@@ -1344,7 +1375,8 @@ const buildCustomerAddressDefaultConflictIssues = (
       id: `customer-address-default-conflict-${sample.id}`,
       code: 'customer_address_default_conflict',
       severity: 'error',
-      status: 'blocking',
+      // A customer-directory row: it never blocks the day close.
+      status: CUSTOMER_DIRECTORY_ISSUE_STATUS,
       entityType: 'customer_address',
       entityId: sample.recordId,
       titleKey: 'recovery.issues.customerAddressDefaultConflict.title',
@@ -1362,12 +1394,85 @@ const buildCustomerAddressDefaultConflictIssues = (
         moduleType: sample.moduleType || 'customers',
         matchedSignal: customerAddressDefaultMatchedSignal(sample.errorMessage),
         lastError: sample.errorMessage ?? null,
+        closeoutBlocking: false,
       },
     } satisfies RecoveryIssue,
     RECOVERY_RECIPES.customerAddressDefaultConflictRepair,
   );
 
   return { suppressedRows, issues: [issue] };
+};
+
+/// The native replay stores a non-retriable 4xx on a customer-directory row
+/// as `HTTP_{status}_CLIENT_ERROR`, followed by `:{CODE}` when the office
+/// named a bounded machine code (`HTTP_400_CLIENT_ERROR:INVALID_PHONE`).
+/// Rows from older builds carry the bare form.
+const CUSTOMER_CLIENT_ERROR_PATTERN =
+  /(?:^|[^A-Za-z0-9_])HTTP_(\d{3})_CLIENT_ERROR(?::([A-Z0-9_]{1,64}))?(?![A-Za-z0-9_])/;
+
+const CUSTOMER_PHONE_REJECTION_CODES = new Set(['INVALID_PHONE', 'COUNTRY_CONTEXT_REQUIRED']);
+
+const readCustomerClientError = (
+  message?: string | null,
+): { status: number; code: string | null } | null => {
+  const match = CUSTOMER_CLIENT_ERROR_PATTERN.exec(message ?? '');
+  return match ? { status: Number(match[1]), code: match[2] ?? null } : null;
+};
+
+const isCustomerPhoneRejection = (item: SyncQueueItem): boolean => {
+  const rejection = readCustomerClientError(item.errorMessage);
+  return Boolean(rejection?.code && CUSTOMER_PHONE_REJECTION_CODES.has(rejection.code));
+};
+
+const buildCustomerDirectoryFailureIssues = (
+  parityItems: SyncQueueItem[],
+  alreadyCovered: Set<string>,
+): { issues: RecoveryIssue[]; suppressedRows: Set<string> } => {
+  const rows = parityItems.filter(
+    (item) =>
+      isCustomerDirectoryRow(item) &&
+      (item.status === 'failed' || item.status === 'conflict') &&
+      !alreadyCovered.has(`${item.tableName}:${item.recordId}`),
+  );
+  if (rows.length === 0) {
+    return { issues: [], suppressedRows: new Set() };
+  }
+
+  const phoneRows = rows.filter(isCustomerPhoneRejection);
+  const phoneRejected = phoneRows.length > 0;
+  const sample = phoneRows[0] ?? rows[0];
+  const rejection = readCustomerClientError(sample.errorMessage);
+  const issueKey = phoneRejected ? 'customerPhoneRejected' : 'customerDirectoryNotSynced';
+
+  return {
+    suppressedRows: new Set(rows.map((item) => `${item.tableName}:${item.recordId}`)),
+    issues: [
+      {
+        id: phoneRejected ? 'customer-phone-rejected' : 'customer-directory-not-synced',
+        code: phoneRejected ? 'customer_phone_rejected' : 'customer_directory_not_synced',
+        severity: 'warning',
+        status: CUSTOMER_DIRECTORY_ISSUE_STATUS,
+        entityType: sample.tableName === 'customer_addresses' ? 'customer_address' : 'customer',
+        entityId: sample.recordId,
+        titleKey: `recovery.issues.${issueKey}.title`,
+        summaryKey: `recovery.issues.${issueKey}.summary`,
+        guidanceKey: `recovery.issues.${issueKey}.guidance`,
+        actions: [createRetryParityItemAction(), createRetryParityModuleAction()],
+        params: {
+          count: rows.length,
+          moduleType: 'customers',
+          moduleLabel: describeModule('customers'),
+          sampleItemId: sample.id,
+          sampleTableName: sample.tableName,
+          sampleRecordId: sample.recordId,
+          sampleError: sample.errorMessage ?? null,
+          rejectionStatus: rejection?.status ?? null,
+          rejectionCode: rejection?.code ?? null,
+          closeoutBlocking: false,
+        },
+      },
+    ],
+  };
 };
 
 const SERVER_CONFLICT_DUPLICATE_MARKER = 'SERVER_CONFLICT_DUPLICATE';
@@ -1402,7 +1507,9 @@ const buildDuplicateCustomerConflictIssues = (
       id: `duplicate-customer-conflict-${sample.id}`,
       code: 'duplicate_customer_conflict',
       severity: 'error',
-      status: 'blocking',
+      // A customer-directory row: it never blocks the day close, but only the
+      // adoption below clears it.
+      status: CUSTOMER_DIRECTORY_ISSUE_STATUS,
       entityType: 'customer',
       entityId: sample.recordId,
       titleKey: 'recovery.issues.duplicateCustomerConflict.title',
@@ -1417,6 +1524,7 @@ const buildDuplicateCustomerConflictIssues = (
         sampleRecordId: sample.recordId,
         moduleType: sample.moduleType || 'customers',
         lastError: sample.errorMessage ?? null,
+        closeoutBlocking: false,
       },
     } satisfies RecoveryIssue,
     RECOVERY_RECIPES.duplicateCustomerConflictResolve,
@@ -1903,6 +2011,15 @@ export function buildSyncRecoveryIssues({
   for (const suppressedRow of duplicateCustomerConflictResult.suppressedRows) {
     suppressedLegacyFinancialRows.add(suppressedRow);
   }
+  // After the specific customer recipes: whatever customer-directory row they
+  // did not cover gets the general non-blocking customer card.
+  const customerDirectoryFailureResult = buildCustomerDirectoryFailureIssues(
+    parityItems,
+    suppressedLegacyFinancialRows,
+  );
+  for (const suppressedRow of customerDirectoryFailureResult.suppressedRows) {
+    suppressedLegacyFinancialRows.add(suppressedRow);
+  }
   const hasSpecificParityRecoveryIssue =
     paymentTotalConflictResult.issues.length > 0 ||
     invalidDriverOrderResult.issues.length > 0 ||
@@ -1910,7 +2027,8 @@ export function buildSyncRecoveryIssues({
     orderUpdateReplayResult.issues.length > 0 ||
     catalogAvailabilityResult.issues.length > 0 ||
     customerAddressDefaultConflictResult.issues.length > 0 ||
-    duplicateCustomerConflictResult.issues.length > 0;
+    duplicateCustomerConflictResult.issues.length > 0 ||
+    customerDirectoryFailureResult.issues.length > 0;
   pushIssue(issues, buildMissingCredentialIssue(systemHealth, lastParitySync));
   for (const issue of buildCheckoutPaymentBlockerIssues(systemHealth, localizePaymentBlocker)) {
     pushIssue(issues, issue);
@@ -1948,6 +2066,9 @@ export function buildSyncRecoveryIssues({
     pushIssue(issues, issue);
   }
   for (const issue of duplicateCustomerConflictResult.issues) {
+    pushIssue(issues, issue);
+  }
+  for (const issue of customerDirectoryFailureResult.issues) {
     pushIssue(issues, issue);
   }
   for (const issue of buildParityModuleIssues(parityItems, suppressedLegacyFinancialRows)) {

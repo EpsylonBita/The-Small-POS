@@ -2,6 +2,7 @@ import type { Customer, CustomerAddress } from '../../shared/types/customer';
 import type { Order } from '../../shared/types/orders';
 import { resolveCartLineUnitPrice, reconcileHydratedUnitPrice } from './edit-order-pricing';
 import { resolvePersistedCustomerId } from './persisted-customer-id';
+import { toValidLatLng } from './coordinates';
 
 export interface ResolvedPickupToDeliveryAddress {
   addressId: string | null;
@@ -70,6 +71,18 @@ export const resolvePickupToDeliveryAddress = (
     return null;
   }
 
+  // Strict point (shared parser): a missing coordinate is "no point", never
+  // 0, so an address without coordinates can never become (0,0). The
+  // customer-level point belongs to the legacy flat address and is used only
+  // when there is no saved address row.
+  const point = selectedAddress
+    ? toValidLatLng(
+        (selectedAddress as { coordinates?: unknown }).coordinates,
+        (selectedAddress as { latitude?: unknown }).latitude,
+        (selectedAddress as { longitude?: unknown }).longitude,
+      )
+    : toValidLatLng(customer.coordinates, customer.latitude, customer.longitude);
+
   return {
     addressId: normalizeText(selectedAddress?.id) || null,
     customerId: resolvePersistedCustomerId(
@@ -89,13 +102,9 @@ export const resolvePickupToDeliveryAddress = (
     nameOnRinger:
       normalizeText(selectedAddress?.name_on_ringer) ||
       normalizeText(customer.name_on_ringer || undefined),
-    coordinates: selectedAddress?.coordinates ?? customer.coordinates ?? null,
-    latitude:
-      selectedAddress?.latitude ??
-      (Number.isFinite(Number(customer.latitude)) ? Number(customer.latitude) : null),
-    longitude:
-      selectedAddress?.longitude ??
-      (Number.isFinite(Number(customer.longitude)) ? Number(customer.longitude) : null),
+    coordinates: point,
+    latitude: point?.lat ?? null,
+    longitude: point?.lng ?? null,
     addressFingerprint:
       normalizeText(selectedAddress?.address_fingerprint) ||
       normalizeText(customer.address_fingerprint || undefined) ||

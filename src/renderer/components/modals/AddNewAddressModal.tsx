@@ -21,6 +21,12 @@ import { MODULE_IDS, useAcquiredModules } from '../../hooks/useAcquiredModules';
 import { getBridge } from '../../../lib';
 import { parseSpecialAddressInput } from '../../utils/specialAddress';
 import { FloorPresetPicker } from '../forms/FloorPresetPicker';
+import {
+  customerAddressWriteErrorText,
+  expectCustomerAddressWrite,
+} from '../../utils/customer-address-write-refusal';
+
+const ADDRESS_SAVE_FAILED_KEY = 'modals.addCustomer.addressSaveFailed';
 
 interface Customer {
   id: string;
@@ -480,7 +486,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
           }
         : {};
 
-      const addressResult: any = await bridge.customers.addAddress(customer.id, {
+      const addressResult = await bridge.customers.addAddress(customer.id, {
         street: formData.address.trim(),
         street_address: formData.address.trim(),
         address: formData.address.trim(),
@@ -495,9 +501,11 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
         ...metadata,
       });
 
-      if (addressResult?.success === false) {
-        throw new Error(addressResult.error || t('modals.addNewAddress.saveFailed'));
-      }
+      // A refused address (INVALID_COORDINATES, a customer the office no
+      // longer has, this register's own refusals) is named; its `error` is a
+      // machine code and is never shown. A queued write (office unreachable)
+      // is saved on this register and counts as added.
+      expectCustomerAddressWrite(t, addressResult, 'add', ADDRESS_SAVE_FAILED_KEY);
 
       onAddressAdded(
         customer,
@@ -510,7 +518,8 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
       onClose();
     } catch (error) {
       console.error('Error adding new address:', error);
-      alert(t('modals.addNewAddress.addFailed', { error: error instanceof Error ? error.message : t('modals.addNewAddress.unknownError') }));
+      // Never a native error's raw text: the refusal's own message, else the generic one.
+      alert(customerAddressWriteErrorText(t, error, ADDRESS_SAVE_FAILED_KEY));
     } finally {
       setIsSubmitting(false);
     }

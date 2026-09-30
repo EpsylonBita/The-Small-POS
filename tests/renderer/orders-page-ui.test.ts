@@ -1543,6 +1543,45 @@ test('OrderDashboard +New FAB uses aria-label and opens the unified new-work pic
   assert.match(source, /title=\{t\("orderDashboard\.receiptPreview"\)/);
 });
 
+// Founder, 24/09/2026: «όταν είναι μόνο ένα module δεν χρειάζεται επιλογή». A
+// business with one kind of work gets it straight from (+), started exactly as
+// its card would start it, and only once the repair settings have answered.
+test('OrderDashboard (+) opens a lone option directly, through the same handlers as its card', () => {
+  const source = orderDashboardSource();
+
+  const handlerStart = source.indexOf('const handleNewOrderClick = () => {');
+  const handlerEnd = source.indexOf('\n    };', handlerStart);
+  assert.ok(handlerStart >= 0 && handlerEnd > handlerStart, 'new-order handler must exist');
+  const handler = source.slice(handlerStart, handlerEnd);
+  const direct = handler.indexOf('resolveDirectNewWorkCard(newWorkCards, newWorkOptionsSettled)');
+  assert.ok(direct >= 0, '(+) must ask the resolver for a lone option');
+  assert.match(handler, /if \(directCard\) \{\s*launchNewWorkCard\(directCard\.id\);\s*return;\s*\}/);
+  assert.ok(handler.indexOf('setShowOrderTypeModal(true)') > direct, 'the picker opens only when there is a choice');
+
+  assert.match(source, /const newWorkOptionsSettled = !hasRepairsModule \|\| repairSettingsLoadSettled;/);
+  // A failed settings load is settled too (Quick Service stays hidden), as on
+  // Android; only a superseded request is ignored.
+  assert.match(
+    source,
+    /loadSettings\(\)\.catch\(\(\) => \{[\s\S]*?\}\)\.finally\(\(\) => \{\s*if \(!cancelled\) setRepairSettingsLoadSettled\(true\);\s*\}\);/,
+  );
+
+  const launchStart = source.indexOf('const launchNewWorkCard = (id: NewWorkCardId) => {');
+  assert.ok(launchStart >= 0, 'launchNewWorkCard must exist');
+  const launch = source.slice(launchStart, source.indexOf('\n    };', launchStart));
+  assert.match(launch, /case "room":\s*handleSelectRoomFlow\(\);/);
+  assert.match(launch, /case "service":\s*handleSelectServiceFlow\(\);/);
+  assert.match(launch, /case "repair":\s*handleSelectRepairFlow\("new_repair"\);/);
+  assert.match(launch, /case "quick_service":\s*handleSelectRepairFlow\("quick_service"\);/);
+  assert.match(launch, /default:\s*void handleOrderTypeSelect\(NEW_WORK_ORDER_TYPES\[id\]\);/);
+  assert.match(source, /delivery: "delivery",\s*pickup: "pickup",\s*table: "dine-in",/);
+
+  // The cards themselves use the same handlers.
+  assert.match(source, /onClick=\{\(\) => handleSelectRepairFlow\("new_repair"\)\}/);
+  assert.match(source, /onClick=\{\(\) => handleSelectRepairFlow\("quick_service"\)\}/);
+  assert.equal(source.match(/new CustomEvent\('pos:navigate-view', \{\s*detail: \{ view: 'repairs', repairIntent/g)?.length, 1);
+});
+
 // Round 211 → 214 (live QA): the waiter value used to clip as "Χωρίς αν…" in a half-width boxed tile.
 // Round 214 v3 re-laid the metadata as a compact one-line two-chip strip where the WAITER chip takes
 // the remaining row width (flex-1 min-w-0), so a value like "Χωρίς ανάθεση" reads on one line without

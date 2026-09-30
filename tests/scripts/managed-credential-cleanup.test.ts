@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
@@ -163,6 +165,50 @@ test('named managed credential gate is wired into normal runtime and parity gate
     fs.readFileSync(path.resolve(process.cwd(), '../.github/workflows/pos-tauri-auto-release.yml'), 'utf8'),
     /npm run test:managed-credential-cleanup[\s\S]*name: Build NSIS bundle/,
   );
+});
+
+test('the release enforces the NSIS smoke strictly after the bundle step and before publishing', () => {
+  const workflow = fs.readFileSync(
+    path.resolve(process.cwd(), '../.github/workflows/pos-tauri-auto-release.yml'),
+    'utf8',
+  );
+  const build = workflow.indexOf('name: Build NSIS bundle');
+  const strictSmoke = workflow.indexOf('name: Verify managed credential NSIS smoke with the pinned compiler');
+  const sync = workflow.indexOf('name: Sync pos-tauri source to public repo');
+  const publish = workflow.indexOf('name: Publish new release');
+  assert.ok(build >= 0 && strictSmoke > build, 'strict smoke must follow the NSIS bundle step');
+  assert.ok(sync > strictSmoke && publish > strictSmoke, 'strict smoke must precede source sync and publication');
+
+  const strictStep = workflow.slice(strictSmoke, workflow.indexOf('- name:', strictSmoke + 10));
+  assert.match(strictStep, /node scripts\/check-managed-credential-nsis-smoke\.mjs/);
+  assert.doesNotMatch(strictStep, /THE_SMALL_POS_NSIS_SMOKE_ALLOW_DEFER/);
+});
+
+test('the NSIS smoke defers only on explicit opt-in when the pinned compiler is missing', () => {
+  const script = path.resolve(process.cwd(), 'scripts/check-managed-credential-nsis-smoke.mjs');
+  const emptyLocalAppData = fs.mkdtempSync(path.join(os.tmpdir(), 'nsis-smoke-empty-'));
+  try {
+    const run = (extraEnv: Record<string, string>) => spawnSync(process.execPath, [script], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      env: { ...process.env, THE_SMALL_POS_NSIS_SMOKE_ALLOW_DEFER: '', LOCALAPPDATA: emptyLocalAppData, ...extraEnv },
+    });
+
+    const strict = run({});
+    const deferred = run({ THE_SMALL_POS_NSIS_SMOKE_ALLOW_DEFER: '1' });
+    if (process.platform !== 'win32') {
+      // The smoke is a Windows-only gate; elsewhere both runs skip.
+      assert.equal(strict.status, 0);
+      assert.equal(deferred.status, 0);
+      return;
+    }
+    assert.notEqual(strict.status, 0, 'a missing compiler must fail without the opt-in');
+    assert.match(`${strict.stderr}`, /refusing to skip Windows NSIS smoke/);
+    assert.equal(deferred.status, 0);
+    assert.match(`${deferred.stdout}`, /deferred/);
+  } finally {
+    fs.rmSync(emptyLocalAppData, { recursive: true, force: true });
+  }
 });
 
 test('managed credential deletion remains inside delete-app-data and non-update guards', () => {

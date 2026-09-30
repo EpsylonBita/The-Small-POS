@@ -4,9 +4,6 @@ import App from "./App";
 import "./styles/globals.css";
 import "./styles/glassmorphism.css";
 
-// Ensure screen capture IPC listeners are registered at startup
-import "./services/ScreenCaptureHandler";
-
 // Keep the User Timing buffer bounded. React's development build records a
 // performance.measure per component render and never clears them — measured
 // at 34,000+ entries (hundreds of MB of blink_gc) after an hour of dev use.

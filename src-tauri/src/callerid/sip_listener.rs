@@ -690,40 +690,6 @@ async fn handle_call_event(
         "detected",
     );
 
-    match broadcast_to_admin(app_handle, &base_payload).await {
-        Ok(customer) => {
-            let customer_payload = customer.unwrap_or(Value::Null);
-            let payload = serde_json::json!({
-                "callerNumber": base_payload["callerNumber"].as_str().unwrap_or_default(),
-                "callerName": base_payload["callerName"].as_str(),
-                "customer": customer_payload,
-                "sipCallId": base_payload["sipCallId"].as_str().unwrap_or_default(),
-                "timestamp": base_payload["timestamp"].as_str().unwrap_or_default(),
-            });
-            emit_incoming_call(app_handle, &payload);
-            record_caller_log(
-                app_handle,
-                payload["callerNumber"].as_str().unwrap_or_default(),
-                payload["callerName"].as_str(),
-                payload["customer"].get("id").and_then(Value::as_str),
-                payload["customer"].get("name").and_then(Value::as_str),
-                payload["sipCallId"].as_str().unwrap_or_default(),
-                "broadcasted",
-            );
-        }
-        Err(error) => {
-            warn!(error = %error, "Caller ID broadcast to admin failed");
-            record_caller_log(
-                app_handle,
-                base_payload["callerNumber"].as_str().unwrap_or_default(),
-                base_payload["callerName"].as_str(),
-                None,
-                None,
-                base_payload["sipCallId"].as_str().unwrap_or_default(),
-                "broadcast_failed",
-            );
-        }
-    }
 }
 
 fn prune_recent_calls(recent_calls: &mut HashMap<String, Instant>) {
@@ -815,21 +781,6 @@ fn record_caller_log(
     ) {
         warn!(error = %error, "Failed to persist caller_id_log row");
     }
-}
-
-async fn broadcast_to_admin(
-    _app_handle: &tauri::AppHandle,
-    payload: &Value,
-) -> Result<Option<Value>, String> {
-    let response = crate::admin_fetch(
-        None,
-        "/api/pos/caller-id/event",
-        "POST",
-        Some(payload.clone()),
-    )
-    .await?;
-
-    Ok(response.get("customer").cloned())
 }
 
 async fn test_udp_connection(

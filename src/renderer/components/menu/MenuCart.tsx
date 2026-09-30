@@ -1,11 +1,11 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import { ShoppingCart, Trash2, AlertTriangle, Ban, Ticket, X, Loader2, Plus, ScanLine, Gift, CheckSquare, Square, Percent, RotateCcw, Award } from 'lucide-react';
+import { ShoppingCart, Trash2, AlertTriangle, Ban, Ticket, X, Loader2, Plus, ScanLine, Gift, CheckSquare, Square, Percent, RotateCcw, Award, MapPin } from 'lucide-react';
 import { useI18n } from '../../contexts/i18n-context';
 import { useOnBarcodeScan } from '../../contexts/barcode-scanner-context';
 import { useLoyaltyReader } from '../../hooks/useLoyaltyReader';
 import { formatCurrency } from '../../utils/format';
-import type { DeliveryFeeStatus } from '../../utils/delivery-fee';
+import { canCheckoutWithDeliveryFeeStatus, type DeliveryFeeStatus } from '../../utils/delivery-fee';
 import { formatMoneyInputWithCents, parseMoneyInputValue } from '../../utils/moneyInput';
 import {
   applyDiscountToCartLines,
@@ -105,6 +105,12 @@ interface MenuCartProps {
   minimumOrderAmount?: number; // Minimum order amount for delivery zones
   deliveryFee?: number;
   deliveryFeeStatus?: DeliveryFeeStatus;
+  /**
+   * Shown with the "zone not checked" notice: re-opens the address so the
+   * cashier can pick it from the suggestions. Without it the notice still
+   * tells the cashier what to do.
+   */
+  onRepickDeliveryAddress?: () => void;
   allowManualDeliveryFee?: boolean;
   manualDeliveryFeeValue?: number;
   onManualDeliveryFeeChange?: (value: number) => void;
@@ -152,6 +158,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
   minimumOrderAmount = 0,
   deliveryFee = 0,
   deliveryFeeStatus = 'resolved',
+  onRepickDeliveryAddress,
   allowManualDeliveryFee = false,
   manualDeliveryFeeValue = 0,
   onManualDeliveryFeeChange,
@@ -900,6 +907,8 @@ export const MenuCart: React.FC<MenuCartProps> = ({
       ? formatCurrency(appliedDeliveryFee)
       : editMode
         ? '—'
+        : deliveryFeeStatus === 'not_checked'
+          ? t('menu.cart.deliveryFeeZoneNotChecked')
         : deliveryFeeStatus === 'requires_selection'
           ? t('menu.cart.deliveryFeeNeedsExactAddress')
           : deliveryFeeStatus === 'out_of_zone'
@@ -912,7 +921,11 @@ export const MenuCart: React.FC<MenuCartProps> = ({
     isAppliedDiscountOverMax ||
     isSaving ||
     (isBelowMinimum && !editMode) ||
-    (isDeliveryOrder && !allowManualDeliveryFee && deliveryFeeStatus !== 'resolved' && !editMode);
+    // A zone that was not checked never blocks the order (founder rule,
+    // 2026-09-29): the notice below says so and offers the re-pick.
+    (isDeliveryOrder && !allowManualDeliveryFee && !canCheckoutWithDeliveryFeeStatus(deliveryFeeStatus) && !editMode);
+  const showZoneNotCheckedNotice =
+    isDeliveryOrder && !allowManualDeliveryFee && !editMode && deliveryFeeStatus === 'not_checked';
 
   return (
     <div
@@ -1658,6 +1671,32 @@ export const MenuCart: React.FC<MenuCartProps> = ({
             {formatCurrency(totalWithDeliveryFee)}
           </span>
         </div>
+
+        {/* Delivery zone not checked (address without a usable point) */}
+        {showZoneNotCheckedNotice && (
+          <div
+            role="status"
+            data-testid="menu-cart-zone-not-checked"
+            className="flex items-start gap-2 p-3 rounded-lg mb-3 bg-sky-500/10 dark:bg-sky-500/20 border border-sky-500/25 dark:border-sky-400/30"
+          >
+            <MapPin className="w-5 h-5 flex-shrink-0 text-sky-600 dark:text-sky-300" aria-hidden="true" />
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium antialiased text-sky-800 dark:text-sky-200">
+                {t('menu.cart.deliveryZoneNotCheckedNotice')}
+              </p>
+              {onRepickDeliveryAddress && (
+                <button
+                  type="button"
+                  onClick={onRepickDeliveryAddress}
+                  data-testid="menu-cart-zone-repick"
+                  className="mt-2 min-h-[40px] rounded-lg border border-sky-600/40 dark:border-sky-300/40 px-3 py-1.5 text-sm font-semibold antialiased text-sky-800 dark:text-sky-100 active:bg-sky-500/15 dark:active:bg-sky-400/20"
+                >
+                  {t('menu.cart.repickDeliveryAddress')}
+                </button>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Minimum Order Warning for Delivery */}
         {isBelowMinimum && !editMode && (

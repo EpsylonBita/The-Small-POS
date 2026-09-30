@@ -40,6 +40,7 @@ import { AlertTriangle } from 'lucide-react';
 import TableOrderIcon from './icons/TableOrderIcon';
 import PickupOrderIcon from './icons/PickupOrderIcon';
 import { resolveDeliveryFee } from '../utils/delivery-fee';
+import { toValidLatLng } from '../utils/coordinates';
 import {
   getCachedTerminalCredentials,
   refreshTerminalCredentialCache,
@@ -63,6 +64,12 @@ import {
   resolveSelectedCustomerAddress,
   withMaterializedCustomerAddresses,
 } from '../utils/customer-addresses';
+import {
+  MODAL_ZONE_VALIDATION_FIELD,
+  planDeliveryAddressRepick,
+  planDeliveryZoneHandoff,
+  resolveHandoffCustomer,
+} from '../utils/delivery-zone-handoff';
 
 
 interface OrderFlowProps {
@@ -115,43 +122,6 @@ interface Customer {
     is_legacy_fallback?: boolean;
   }>;
 }
-
-const toLatLngCoordinates = (
-  coordinates:
-    | { lat: number; lng: number }
-    | { type: 'Point'; coordinates: [number, number] }
-    | null
-    | undefined,
-  latitude?: number | null,
-  longitude?: number | null,
-): { lat: number; lng: number } | null => {
-  if (
-    coordinates &&
-    'lat' in coordinates &&
-    Number.isFinite(coordinates.lat) &&
-    Number.isFinite(coordinates.lng)
-  ) {
-    return { lat: Number(coordinates.lat), lng: Number(coordinates.lng) };
-  }
-  if (
-    coordinates &&
-    'type' in coordinates &&
-    coordinates.type === 'Point' &&
-    Array.isArray(coordinates.coordinates) &&
-    coordinates.coordinates.length >= 2 &&
-    Number.isFinite(coordinates.coordinates[1]) &&
-    Number.isFinite(coordinates.coordinates[0])
-  ) {
-    return {
-      lat: Number(coordinates.coordinates[1]),
-      lng: Number(coordinates.coordinates[0]),
-    };
-  }
-  if (Number.isFinite(Number(latitude)) && Number.isFinite(Number(longitude))) {
-    return { lat: Number(latitude), lng: Number(longitude) };
-  }
-  return null;
-};
 
 /**
  * Complete Order Flow Component
@@ -478,14 +448,17 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
       floor_number: nextAddress?.floor_number || customer.floor_number,
       notes: nextAddress?.notes || nextAddress?.delivery_notes || customer.notes,
       name_on_ringer: nextAddress?.name_on_ringer || customer.name_on_ringer,
-      coordinates:
-        nextAddress?.coordinates ||
-        customer.coordinates ||
-        (Number.isFinite(customer.latitude) && Number.isFinite(customer.longitude)
-          ? { lat: Number(customer.latitude), lng: Number(customer.longitude) }
-          : undefined),
-      latitude: nextAddress?.latitude ?? customer.latitude ?? null,
-      longitude: nextAddress?.longitude ?? customer.longitude ?? null,
+      // Strict: an address without coordinates keeps none (never (0,0)).
+      ...(() => {
+        const point = nextAddress
+          ? toValidLatLng(nextAddress.coordinates, nextAddress.latitude, nextAddress.longitude)
+          : toValidLatLng(customer.coordinates, customer.latitude, customer.longitude);
+        return {
+          coordinates: point ?? undefined,
+          latitude: point?.lat ?? null,
+          longitude: point?.lng ?? null,
+        };
+      })(),
     });
     setCustomerToEdit(null);
     setCustomerModalMode('new');
@@ -509,7 +482,58 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     setIsAddCustomerModalOpen(true);
   }, []);
 
+  // Opened from the menu's "delivery zone not checked" notice ("pick the
+  // address again"): saving returns to the SAME menu (cart kept) with the
+  // edited address; closing without saving keeps everything as it was.
+  const menuAddressRepickRef = useRef(false);
+
+  const handleRepickDeliveryAddress = useCallback(() => {
+    const orderAddress =
+      selectedAddress && typeof selectedAddress.id === 'string' && selectedAddress.id
+        ? selectedAddress
+        : selectedCustomer
+          ? resolveSelectedCustomerAddress(selectedCustomer)
+          : null;
+    const repick = planDeliveryAddressRepick(selectedCustomer, orderAddress);
+    if (repick.kind === 'edit_address') {
+      menuAddressRepickRef.current = true;
+      setCustomerToEdit(repick.customer as Customer);
+      setCustomerModalMode('editAddress');
+      setIsAddCustomerModalOpen(true);
+      return;
+    }
+    // No saved address row: pick the customer's address again from search.
+    setIsCustomerSearchModalOpen(true);
+  }, [selectedAddress, selectedCustomer]);
+
   const handleCustomerAdded = useCallback((newCustomer: Customer) => {
+    if (menuAddressRepickRef.current) {
+      menuAddressRepickRef.current = false;
+      // The order goes to the address that was just edited, and the modal's
+      // own zone check is reused (never re-checked) when it ran one.
+      const handoff = resolveHandoffCustomer(newCustomer as any, {
+        customerId: typeof selectedCustomer?.id === 'string' ? selectedCustomer.id : null,
+        selectedAddressId: typeof selectedAddress?.id === 'string' ? selectedAddress.id : null,
+      });
+      const zonePlan = planDeliveryZoneHandoff({
+        address: handoff.address,
+        modalValidation: (newCustomer as any)?.[MODAL_ZONE_VALIDATION_FIELD],
+        addressFromModal: handoff.addressFromModal,
+      });
+      setSelectedCustomer(handoff.customer as unknown as Customer);
+      if (handoff.address) {
+        setSelectedAddress(handoff.address);
+      }
+      // Anything but a reusable check: the menu checks the point itself, or
+      // geolocates the address, or shows "zone not checked".
+      setDeliveryZoneInfo(zonePlan.kind === 'reuse' ? zonePlan.zoneInfo : null);
+      setIsAddCustomerModalOpen(false);
+      setCustomerToEdit(null);
+      setCustomerModalMode('new');
+      toast.success(t('orderFlow.addressUpdated', 'Address updated'));
+      return;
+    }
+
     const wasEditing = !!customerToEdit;
     const wasEditingAddress = customerModalMode === 'editAddress';
     const wasAddingAddress = customerModalMode === 'addAddress';
@@ -535,7 +559,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
       setIsMenuModalOpen(true);
       toast.success(t('orderFlow.customerAdded'));
     }
-  }, [t, customerToEdit, customerModalMode]);
+  }, [t, customerToEdit, customerModalMode, selectedAddress, selectedCustomer]);
 
   const handleMenuModalClose = useCallback(() => {
     resetFlow();
@@ -1038,7 +1062,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         selectedAddress?.street_address || selectedAddress?.street || selectedAddress?.address || '';
       const selectedAddressCoordinates = parseSpecialAddressInput(selectedAddressLabel).shouldSkipZoneValidation
         ? null
-        : toLatLngCoordinates(
+        : toValidLatLng(
             selectedAddress?.coordinates,
             selectedAddress?.latitude,
             selectedAddress?.longitude,
@@ -1617,6 +1641,9 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
       <AddCustomerModal
         isOpen={isAddCustomerModalOpen}
         onClose={() => {
+          // A re-pick closed without saving keeps the order's customer,
+          // address and cart: only the editor state is reset.
+          menuAddressRepickRef.current = false;
           setIsAddCustomerModalOpen(false);
           setCustomerToEdit(null);
           setCustomerModalMode('new');
@@ -1706,6 +1733,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
             deliveryZoneInfo={deliveryZoneInfo}
             onOrderComplete={handleOrderComplete}
             isProcessingOrder={isProcessingOrder}
+            onRepickDeliveryAddress={handleRepickDeliveryAddress}
           />
         ) : (
           <MenuModal
@@ -1717,6 +1745,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
             deliveryZoneInfo={deliveryZoneInfo}
             onOrderComplete={handleOrderComplete}
             isProcessingOrder={isProcessingOrder}
+            onRepickDeliveryAddress={handleRepickDeliveryAddress}
           />
         )
       )}

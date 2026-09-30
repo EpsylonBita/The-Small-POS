@@ -20,6 +20,7 @@ import {
 import { getResolvedTerminalCredentials } from '../../services/terminal-credentials';
 import { MODULE_IDS, useAcquiredModules } from '../../hooks/useAcquiredModules';
 import { parseSpecialAddressInput } from '../../utils/specialAddress';
+import { toValidLatLng } from '../../utils/coordinates';
 
 export interface EditCustomerInfoFormData {
   name: string;
@@ -96,14 +97,12 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
     setCustomerInfo(initialCustomerInfo);
     setAddressSuggestions([]);
     setSelectedAddressDetails(null);
-    const initialCoordinates =
-      initialCustomerInfo.coordinates
-      || (
-        typeof initialCustomerInfo.latitude === 'number'
-        && typeof initialCustomerInfo.longitude === 'number'
-          ? { lat: initialCustomerInfo.latitude, lng: initialCustomerInfo.longitude }
-          : null
-      );
+    // Strict: an order without a real delivery point opens without one.
+    const initialCoordinates = toValidLatLng(
+      initialCustomerInfo.coordinates,
+      initialCustomerInfo.latitude,
+      initialCustomerInfo.longitude,
+    );
     setAddressCoordinates(hasDeliveryPro ? initialCoordinates : null);
     setValidationResult(null);
     setValidationStatus('idle');

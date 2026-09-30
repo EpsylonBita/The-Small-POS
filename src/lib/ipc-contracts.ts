@@ -427,58 +427,6 @@ export interface ZReportSubmitResponse extends PaymentIntegrityErrorPayload {
   error?: string;
 }
 
-// -- Screen Capture ----------------------------------------------------------
-
-export interface ScreenCaptureGetSourcesRequest {
-  types: string[];
-}
-
-export interface ScreenCaptureSource {
-  id: string;
-  name: string;
-  display_id?: string;
-}
-
-export interface ScreenCaptureGetSourcesResponse {
-  success: boolean;
-  requestedTypes?: string[];
-  sources?: ScreenCaptureSource[];
-  error?: string;
-}
-
-export interface ScreenCaptureSignalPollingResponse {
-  success: boolean;
-  requestId?: string;
-  intervalMs?: number;
-  stopped?: boolean;
-  error?: string;
-}
-
-export interface ScreenCaptureSignal {
-  id?: string;
-  type?: string;
-  sender?: string;
-  data?: unknown;
-  created_at?: string;
-}
-
-export interface ScreenCaptureRequestState {
-  status?: string;
-  error_message?: string | null;
-  control_status?: string;
-  control_requested_at?: string | null;
-  control_responded_at?: string | null;
-  control_denial_reason?: string | null;
-  [key: string]: unknown;
-}
-
-export interface ScreenCaptureSignalBatchPayload {
-  requestId?: string;
-  request?: ScreenCaptureRequestState | null;
-  signals?: ScreenCaptureSignal[];
-  lastSignalTimestamp?: string | null;
-}
-
 // -- Recovery ----------------------------------------------------------------
 
 export type RecoveryPointKind =

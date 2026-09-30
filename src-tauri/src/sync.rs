@@ -844,6 +844,28 @@ enum ParitySyncExecutionOutcome {
     Failed(&'static str),
 }
 
+/// Which parity rows count as unresolved failures for a pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParityFailureScope {
+    /// Background ticks, manual "sync now" and every renderer path: every row
+    /// counts, exactly as before.
+    AllRows,
+    /// The pre-/post-Z closeout drain only: customer-directory rows
+    /// (`sync_queue::is_closeout_exempt_row`) never block the Z. Every other
+    /// table stays fail-closed. See `closeout_blocking_parity_summary`.
+    CloseoutBlocking,
+}
+
+/// Scope of the pre- and post-Z closeout drain (`force_sync_until_closeout_stable`,
+/// via `drain_z_closeout`). Founder decision 3 after the 2026-09-28 Z block:
+/// customer and customer-address rows never block the Z; they stay visible in
+/// Sync health.
+/// Pinned by `sync::tests::z_closeout_and_background_paths_keep_their_parity_scopes`.
+const Z_CLOSEOUT_PARITY_SCOPE: ParityFailureScope = ParityFailureScope::CloseoutBlocking;
+
+/// Scope of the background tick and manual "sync now": every failed row counts.
+const BACKGROUND_PARITY_SCOPE: ParityFailureScope = ParityFailureScope::AllRows;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum NativeSyncTickOutcome {
     Success(usize),
@@ -4072,6 +4094,7 @@ pub fn start_sync_loop(
                     Some(&cancel),
                     "sync_loop",
                     auth_attempt,
+                    BACKGROUND_PARITY_SCOPE,
                 )
             })
             .await
@@ -4673,6 +4696,15 @@ async fn force_sync_once(
     sync_state: &SyncState,
     app: &AppHandle,
 ) -> Result<usize, String> {
+    force_sync_once_scoped(db, sync_state, app, BACKGROUND_PARITY_SCOPE).await
+}
+
+async fn force_sync_once_scoped(
+    db: &DbState,
+    sync_state: &SyncState,
+    app: &AppHandle,
+    scope: ParityFailureScope,
+) -> Result<usize, String> {
     if !storage::is_configured() {
         return Err("Terminal not configured".into());
     }
@@ -4690,6 +4722,7 @@ async fn force_sync_once(
                 cancellation.as_ref().map(|state| state.inner()),
                 "force_sync",
                 auth_attempt,
+                scope,
             )
         },
     )
@@ -4702,8 +4735,20 @@ async fn force_sync_once(
                 "Force sync complete across legacy and parity queues"
             );
 
-            if let Ok(mut guard) = sync_state.last_sync.lock() {
-                *guard = Some(Utc::now().to_rfc3339());
+            // The last-full-sync timestamp keeps its meaning: a closeout pass
+            // that succeeded only because customer-directory rows are exempt
+            // does not count as a full sync while such rows are stuck.
+            let full_success = scope == ParityFailureScope::AllRows
+                || read_parity_queue_status(db).is_ok_and(|status| {
+                    status.failed == 0
+                        && status.conflicts == 0
+                        && status.quarantined == 0
+                        && status.dead_lettered == 0
+                });
+            if full_success {
+                if let Ok(mut guard) = sync_state.last_sync.lock() {
+                    *guard = Some(Utc::now().to_rfc3339());
+                }
             }
 
             Ok(total_synced)
@@ -4721,6 +4766,23 @@ fn read_parity_queue_status(db: &DbState) -> Result<sync_queue::QueueStatus, Str
         .lock()
         .map_err(|_| "PARITY_STATUS_UNAVAILABLE".to_string())?;
     sync_queue::get_status(&conn).map_err(|_| "PARITY_STATUS_UNAVAILABLE".to_string())
+}
+
+fn read_parity_queue_status_for_scope(
+    db: &DbState,
+    scope: ParityFailureScope,
+) -> Result<sync_queue::QueueStatus, String> {
+    match scope {
+        ParityFailureScope::AllRows => read_parity_queue_status(db),
+        ParityFailureScope::CloseoutBlocking => {
+            let conn = db
+                .conn
+                .lock()
+                .map_err(|_| "PARITY_STATUS_UNAVAILABLE".to_string())?;
+            sync_queue::get_closeout_blocking_status(&conn)
+                .map_err(|_| "PARITY_STATUS_UNAVAILABLE".to_string())
+        }
+    }
 }
 
 fn terminal_binding_error_to_gate(error: &str) -> sync_queue::ParityClaimGateBlock {
@@ -4845,6 +4907,60 @@ fn safe_parity_summary(
     }
 }
 
+/// The pre-/post-Z closeout view of one parity pass: failures, conflicts and
+/// dead letters of closeout-exempt customer-directory rows are subtracted
+/// from the pass counts, and `queue_status` must already come from
+/// `sync_queue::get_closeout_blocking_status`. Everything else keeps
+/// `has_unresolved_failure` exactly as the background tick applies it: auth
+/// outcomes, claim-gate blocks, quarantines, a 429 batch stop and any failure
+/// of an order, payment, adjustment, z-report, shift, drawer, expense, staff
+/// payment, driver earning, fiscal, loyalty or unknown row still block.
+fn closeout_blocking_parity_summary(
+    result: &sync_queue::SyncResult,
+    closeout_queue_status: sync_queue::QueueStatus,
+) -> SafeParitySyncSummary {
+    let exempt = result.closeout_exempt;
+    let failed = result.failed.saturating_sub(exempt.failed).max(0);
+    let conflicts = result.conflicts.saturating_sub(exempt.conflicts).max(0);
+    let dead_lettered = result
+        .dead_lettered
+        .saturating_sub(exempt.dead_lettered)
+        .max(0);
+    // `SyncResult::success` is exactly "no failure, conflict, quarantine,
+    // dead letter, auth outcome or gate block"; recompute it without the
+    // exempt rows. A pass that failed for any other reason stays failed.
+    let only_exempt_failures = result.auth_outcome.is_none()
+        && result.batch_block.is_none()
+        && result.quarantined == 0
+        && failed == 0
+        && conflicts == 0
+        && dead_lettered == 0;
+    SafeParitySyncSummary {
+        batch_success: result.success || only_exempt_failures,
+        processed: usize::try_from(result.processed.max(0)).unwrap_or(0),
+        failed,
+        conflicts,
+        quarantined: result.quarantined,
+        dead_lettered,
+        auth_outcome: result.auth_outcome,
+        batch_block: result.batch_block,
+        queue_status: closeout_queue_status,
+    }
+}
+
+fn scoped_parity_summary(
+    scope: ParityFailureScope,
+    result: &sync_queue::SyncResult,
+    queue_status: sync_queue::QueueStatus,
+) -> SafeParitySyncSummary {
+    match scope {
+        ParityFailureScope::AllRows => safe_parity_summary(result, queue_status),
+        ParityFailureScope::CloseoutBlocking => {
+            closeout_blocking_parity_summary(result, queue_status)
+        }
+    }
+}
+
 /// An exact-item retry is classified from the selected batch only. Unrelated
 /// failed/conflict rows may remain in the renderer queue and must not stop a
 /// deterministic module retry before it reaches the next explicitly listed
@@ -4922,8 +5038,9 @@ async fn force_parity_sync_once(
     cancellation: Option<&tokio_util::sync::CancellationToken>,
     source: &str,
     auth_attempt: RemoteAuthAttemptToken,
+    scope: ParityFailureScope,
 ) -> ParitySyncExecutionOutcome {
-    let status_before = match read_parity_queue_status(db) {
+    let status_before = match read_parity_queue_status_for_scope(db, scope) {
         Ok(status) => status,
         Err(_) => return ParitySyncExecutionOutcome::Failed("PARITY_STATUS_UNAVAILABLE"),
     };
@@ -4972,11 +5089,35 @@ async fn force_parity_sync_once(
         Err(_) => return ParitySyncExecutionOutcome::Failed("PARITY_SYNC_FAILED"),
     };
     emit_monetary_dead_letters(app, &result.monetary_dead_letters);
-    let status_after = match read_parity_queue_status(db) {
+    classify_finished_parity_pass(db, sync_state, app, source, scope, &result)
+}
+
+/// Classify one finished native parity pass for `scope`: read that scope's
+/// queue view, build the bounded summary and apply the shared auth / gate /
+/// unresolved-failure rules.
+fn classify_finished_parity_pass(
+    db: &DbState,
+    sync_state: &SyncState,
+    app: &impl TerminalEventSink,
+    source: &str,
+    scope: ParityFailureScope,
+    result: &sync_queue::SyncResult,
+) -> ParitySyncExecutionOutcome {
+    let status_after = match read_parity_queue_status_for_scope(db, scope) {
         Ok(status) => status,
         Err(_) => return ParitySyncExecutionOutcome::Failed("PARITY_STATUS_UNAVAILABLE"),
     };
-    let summary = safe_parity_summary(&result, status_after);
+    let summary = scoped_parity_summary(scope, result, status_after);
+    if scope == ParityFailureScope::CloseoutBlocking
+        && result.closeout_exempt != sync_queue::CloseoutExemptCounts::default()
+    {
+        warn!(
+            exempt_failed = result.closeout_exempt.failed,
+            exempt_conflicts = result.closeout_exempt.conflicts,
+            exempt_dead_lettered = result.closeout_exempt.dead_lettered,
+            "Closeout pass: customer-directory failures do not block the Z"
+        );
+    }
     if summary.failed > 0
         || summary.conflicts > 0
         || summary.quarantined > 0
@@ -5332,17 +5473,81 @@ pub async fn force_sync(
     Ok(())
 }
 
+/// Most customer-directory rows named individually in the Z-time warning.
+const CLOSEOUT_EXEMPT_LOG_LIMIT: i64 = 20;
+
+/// Z-time audit line for the customer-directory rows the closeout drain left
+/// out. They did not block this Z and stay in Sync health; the log carries
+/// only row ids, tables, statuses and bounded codes (never payloads).
+fn log_closeout_exempt_queue_items(db: &DbState) {
+    let listed = db
+        .conn
+        .lock()
+        .map_err(|error| error.to_string())
+        .and_then(|conn| {
+            sync_queue::list_closeout_exempt_queue_items(&conn, CLOSEOUT_EXEMPT_LOG_LIMIT)
+        });
+    match listed {
+        Ok((0, _)) => {}
+        Ok((total, items)) => {
+            let listed_items = items
+                .iter()
+                .map(|item| {
+                    format!(
+                        "{}:{}:{}:{}:attempts={}:{}",
+                        item.id,
+                        item.table_name,
+                        item.operation,
+                        item.status,
+                        item.attempts,
+                        item.error_code.as_deref().unwrap_or("none")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            warn!(
+                total,
+                items = %listed_items,
+                "Z closeout proceeded without customer-directory sync rows; they remain in Sync health"
+            );
+        }
+        Err(error) => {
+            warn!(error = %error, "Could not list customer-directory rows left out of the Z closeout");
+        }
+    }
+}
+
+/// The Z closeout drain: every pass runs with `Z_CLOSEOUT_PARITY_SCOPE`. The
+/// pass itself is injected so the regressions drive this exact function (and
+/// therefore the production scope) against a real queue.
+async fn drain_z_closeout<PassFn, PassFuture, SnapshotFn>(
+    mut run_pass: PassFn,
+    snapshot_fn: SnapshotFn,
+) -> Result<CloseoutSyncDrainState, String>
+where
+    PassFn: FnMut(ParityFailureScope) -> PassFuture,
+    PassFuture: Future<Output = Result<usize, String>>,
+    SnapshotFn: FnMut() -> Result<UnsyncedSyncQueueSnapshot, String>,
+{
+    drain_sync_until_closeout_stable(
+        CLOSEOUT_SYNC_DRAIN_MAX_PASSES,
+        move || run_pass(Z_CLOSEOUT_PARITY_SCOPE),
+        snapshot_fn,
+    )
+    .await
+}
+
 pub async fn force_sync_until_closeout_stable(
     db: &DbState,
     sync_state: &SyncState,
     app: &AppHandle,
 ) -> Result<CloseoutSyncDrainState, String> {
-    let state = drain_sync_until_closeout_stable(
-        CLOSEOUT_SYNC_DRAIN_MAX_PASSES,
-        || force_sync_once(db, sync_state, app),
+    let state = drain_z_closeout(
+        |scope| force_sync_once_scoped(db, sync_state, app, scope),
         || capture_unsynced_sync_queue_snapshot(db),
     )
     .await?;
+    log_closeout_exempt_queue_items(db);
 
     info!(
         passes_executed = state.passes_executed,
@@ -28830,6 +29035,391 @@ mod tests {
         assert!(state.any_progress);
         assert_eq!(state.remaining_unsynced_count, 0);
         assert!(state.remaining_blockers_summary.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Pre-Z closeout gate vs customer-directory rows.
+    //
+    // Incident 2026-09-28 (Tomikro, desktop 1.4.118). Symptom: "Cannot close
+    // day: pre-Z-report sync failed: PARITY_SYNC_PARTIAL" while closeout
+    // readiness showed 0 blockers. Root cause: the closeout drain turned any
+    // failed parity row into PARITY_SYNC_PARTIAL, and one customers INSERT
+    // rejected with 400 INVALID_PHONE could never replay. Customer-directory
+    // rows are now left out of the closeout decision only; every other table
+    // and the background tick keep the fail-closed rule.
+    // -----------------------------------------------------------------------
+
+    const CLOSEOUT_TEST_TERMINAL_ID: &str = "terminal-closeout-test";
+    const INVALID_PHONE_BODY: &str =
+        r#"{"success":false,"error":"The phone number is invalid","code":"INVALID_PHONE"}"#;
+    /// Nothing listens here; passes that claim no row never connect.
+    const CLOSEOUT_UNREACHABLE_ADMIN: &str = "http://127.0.0.1:9";
+
+    fn spawn_status_json_server(
+        status: u16,
+        body: &'static str,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind status mock server");
+        let addr = listener.local_addr().expect("status mock server address");
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept status mock request");
+            let mut buffer = vec![0u8; 16 * 1024];
+            let _ = stream.read(&mut buffer).expect("read status mock request");
+            let response = format!(
+                "HTTP/1.1 {status} Mock\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write status mock response");
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    fn seed_closeout_terminal_context(db: &DbState) {
+        let conn = db.conn.lock().expect("lock closeout db");
+        db::set_setting(&conn, "terminal", "terminal_id", CLOSEOUT_TEST_TERMINAL_ID)
+            .expect("store terminal id");
+        db::set_setting(
+            &conn,
+            "terminal",
+            "branch_id",
+            "11111111-1111-1111-1111-111111111111",
+        )
+        .expect("store branch id");
+    }
+
+    fn enqueue_offline_customer_insert(db: &DbState, phone: &str) -> String {
+        let conn = db.conn.lock().expect("lock closeout db");
+        sync_queue::enqueue(
+            &conn,
+            &sync_queue::EnqueueInput {
+                table_name: "customers".to_string(),
+                record_id: "cust-5f0e1d2c-0000-4000-8000-00000000c10e".to_string(),
+                operation: "INSERT".to_string(),
+                data: serde_json::json!({
+                    "name": "Synthetic Customer",
+                    "phone": phone,
+                    "phone_country_code": "GR"
+                })
+                .to_string(),
+                organization_id: "org-closeout".to_string(),
+                priority: Some(0),
+                module_type: Some("customers".to_string()),
+                conflict_strategy: Some("manual".to_string()),
+                version: Some(1),
+            },
+        )
+        .expect("enqueue offline customer insert")
+    }
+
+    fn seed_failed_parity_row(
+        db: &DbState,
+        id: &str,
+        table_name: &str,
+        module_type: &str,
+        status: &str,
+    ) {
+        let conn = db.conn.lock().expect("lock closeout db");
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                id, table_name, record_id, operation, data, organization_id,
+                created_at, attempts, status, error_message, module_type, conflict_strategy
+             ) VALUES (?1, ?2, ?3, 'INSERT', '{}', 'org-closeout',
+                datetime('now'), 1, ?4, 'HTTP_422_CLIENT_ERROR', ?5, 'server-wins')",
+            params![id, table_name, format!("record-{id}"), status, module_type],
+        )
+        .expect("seed failed parity row");
+    }
+
+    /// The parity half of `force_sync_once_scoped`'s mapping.
+    fn closeout_pass_result(outcome: ParitySyncExecutionOutcome) -> Result<usize, String> {
+        match outcome {
+            ParitySyncExecutionOutcome::Complete(summary) => Ok(summary.processed),
+            ParitySyncExecutionOutcome::Partial(_, error) => Err(error.to_string()),
+            ParitySyncExecutionOutcome::Paused(_) => Err("REMOTE_AUTH_PAUSED".to_string()),
+            ParitySyncExecutionOutcome::Reset(_) => Err("TERMINAL_AUTH_RESET".to_string()),
+            ParitySyncExecutionOutcome::Failed(error) => Err(error.to_string()),
+        }
+    }
+
+    /// One parity pass as `force_sync_once_scoped` runs it (replay + the
+    /// scoped classification), against the unreachable test admin.
+    async fn closeout_parity_pass(
+        db: &DbState,
+        sync_state: &SyncState,
+        scope: ParityFailureScope,
+    ) -> Result<usize, String> {
+        let sink = NoopTerminalEventSink;
+        let result =
+            sync_queue::process_queue(&db.conn, CLOSEOUT_UNREACHABLE_ADMIN, "api-key").await?;
+        closeout_pass_result(classify_finished_parity_pass(
+            db,
+            sync_state,
+            &sink,
+            "force_sync",
+            scope,
+            &result,
+        ))
+    }
+
+    /// The production Z drain (`drain_z_closeout`, i.e. the scope
+    /// `force_sync_until_closeout_stable` really uses) over a real queue.
+    async fn drain_z_closeout_like_report_submit(
+        db: &DbState,
+        sync_state: &SyncState,
+    ) -> Result<CloseoutSyncDrainState, String> {
+        drain_z_closeout(
+            |scope| closeout_parity_pass(db, sync_state, scope),
+            || capture_unsynced_sync_queue_snapshot(db),
+        )
+        .await
+    }
+
+    /// The same drain with an explicitly chosen scope, to reproduce the
+    /// pre-fix queue-wide rule side by side.
+    async fn drain_closeout_with_scope(
+        db: &DbState,
+        sync_state: &SyncState,
+        scope: ParityFailureScope,
+    ) -> Result<CloseoutSyncDrainState, String> {
+        drain_sync_until_closeout_stable(
+            CLOSEOUT_SYNC_DRAIN_MAX_PASSES,
+            || closeout_parity_pass(db, sync_state, scope),
+            || capture_unsynced_sync_queue_snapshot(db),
+        )
+        .await
+    }
+
+    /// Body of a top-level `fn` in this file, from its signature to the
+    /// closing brace in column 0.
+    fn top_level_fn_body<'a>(source: &'a str, signature: &str) -> &'a str {
+        let start = source
+            .find(signature)
+            .unwrap_or_else(|| panic!("missing `{signature}` in sync.rs"));
+        let rest = &source[start..];
+        let end = rest
+            .match_indices("\n}")
+            .map(|(index, _)| index)
+            .find(|index| matches!(rest.as_bytes().get(index + 2), Some(b'\n' | b'\r') | None))
+            .unwrap_or_else(|| panic!("unterminated `{signature}` in sync.rs"));
+        &rest[..end + 2]
+    }
+
+    #[test]
+    fn z_closeout_and_background_paths_keep_their_parity_scopes() {
+        // Review 2026-09-29: the regressions below pin the classification,
+        // this pins the wiring. Reverting force_sync_until_closeout_stable to
+        // the queue-wide scope (the 1.4.118 behaviour that blocked Tomikro's
+        // Z) or leaking the closeout scope into the background tick fails here.
+        assert_eq!(
+            Z_CLOSEOUT_PARITY_SCOPE,
+            ParityFailureScope::CloseoutBlocking
+        );
+        assert_eq!(BACKGROUND_PARITY_SCOPE, ParityFailureScope::AllRows);
+
+        let source = include_str!("sync.rs");
+        let z_drain = top_level_fn_body(source, "pub async fn force_sync_until_closeout_stable(");
+        assert!(z_drain.contains("drain_z_closeout("), "{z_drain}");
+        assert!(
+            !z_drain.contains("ParityFailureScope::") && !z_drain.contains("force_sync_once("),
+            "the Z drain must take its scope from drain_z_closeout only:\n{z_drain}"
+        );
+        let z_helper = top_level_fn_body(source, "async fn drain_z_closeout<");
+        assert!(
+            z_helper.contains("run_pass(Z_CLOSEOUT_PARITY_SCOPE)"),
+            "{z_helper}"
+        );
+
+        // `force_sync_once(` cannot match `force_sync_once_scoped(`.
+        for signature in ["pub fn start_sync_loop(", "async fn force_sync_once("] {
+            let body = top_level_fn_body(source, signature);
+            assert!(body.contains("BACKGROUND_PARITY_SCOPE"), "{signature}");
+            assert!(
+                !body.contains("CloseoutBlocking") && !body.contains("Z_CLOSEOUT_PARITY_SCOPE"),
+                "{signature} must keep the queue-wide rule"
+            );
+        }
+    }
+
+    fn is_parity_partial(outcome: &ParitySyncExecutionOutcome) -> bool {
+        matches!(
+            outcome,
+            ParitySyncExecutionOutcome::Partial(_, "PARITY_SYNC_PARTIAL")
+        )
+    }
+
+    #[tokio::test]
+    async fn closeout_drain_is_not_blocked_by_a_customer_row_the_server_rejected() {
+        let db = test_db();
+        seed_closeout_terminal_context(&db);
+        let queue_id = enqueue_offline_customer_insert(&db, "69481284741");
+        let sync_state = SyncState::new();
+        let sink = NoopTerminalEventSink;
+
+        // The replay that stranded the row at the store: 400 INVALID_PHONE.
+        let (server_url, server) = spawn_status_json_server(400, INVALID_PHONE_BODY);
+        let replay = sync_queue::process_queue(&db.conn, &server_url, "api-key")
+            .await
+            .expect("replay pass");
+        server.join().expect("join status mock server");
+        assert_eq!(replay.failed, 1);
+
+        // Background tick semantics are unchanged: that pass is partial.
+        let background = classify_finished_parity_pass(
+            &db,
+            &sync_state,
+            &sink,
+            "sync_loop",
+            ParityFailureScope::AllRows,
+            &replay,
+        );
+        assert!(
+            is_parity_partial(&background),
+            "background tick must stay partial"
+        );
+        // The closeout view of the same pass does not block the Z.
+        let closeout = classify_finished_parity_pass(
+            &db,
+            &sync_state,
+            &sink,
+            "force_sync",
+            ParityFailureScope::CloseoutBlocking,
+            &replay,
+        );
+        assert!(matches!(closeout, ParitySyncExecutionOutcome::Complete(_)));
+
+        // Pressing «Κλείσιμο ημέρας» afterwards: the failed row is not claimed
+        // again. The production Z drain now completes...
+        let drained = drain_z_closeout_like_report_submit(&db, &sync_state)
+            .await
+            .expect("a failed customers row must not block the Z drain");
+        assert_eq!(drained.remaining_unsynced_count, 0);
+        assert!(drained.remaining_blockers_summary.is_empty());
+        // ...while the pre-fix, queue-wide rule still reproduces the incident.
+        let queue_wide = drain_closeout_with_scope(&db, &sync_state, ParityFailureScope::AllRows)
+            .await
+            .expect_err("the queue-wide rule is what blocked 1.4.118");
+        assert_eq!(queue_wide, "PARITY_SYNC_PARTIAL");
+
+        // The row is untouched and stays visible in Sync health.
+        let conn = db.conn.lock().expect("lock closeout db");
+        let (status, error_message): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, error_message FROM parity_sync_queue WHERE id = ?1",
+                params![queue_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read stranded customer row");
+        assert_eq!(status, "failed");
+        assert_eq!(
+            error_message.as_deref(),
+            Some("HTTP_400_CLIENT_ERROR:INVALID_PHONE")
+        );
+        assert_eq!(
+            sync_queue::get_status(&conn).expect("queue status").failed,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn closeout_drain_still_blocks_on_failed_money_order_and_unknown_rows() {
+        for (table_name, module_type, status) in [
+            ("payments", "payment", "failed"),
+            ("payment_adjustments", "payment_adjustment", "failed"),
+            ("orders", "orders", "failed"),
+            ("orders", "orders", "conflict"),
+            ("z_reports", "z_report", "conflict"),
+            ("staff_shifts", "shifts", "failed"),
+            ("driver_earnings", "driver_earning", "failed"),
+            ("loyalty_transactions", "loyalty", "failed"),
+            ("fiscal_submissions", "fiscal", "failed"),
+            ("mystery_table", "mystery", "failed"),
+            // A customers table row outside the customers module is not the
+            // directory row the exemption was agreed for.
+            ("customers", "orders", "failed"),
+        ] {
+            let db = test_db();
+            seed_closeout_terminal_context(&db);
+            seed_failed_parity_row(&db, "blocking-row", table_name, module_type, status);
+            let sync_state = SyncState::new();
+            let outcome = drain_z_closeout_like_report_submit(&db, &sync_state).await;
+            assert_eq!(
+                outcome.err().as_deref(),
+                Some("PARITY_SYNC_PARTIAL"),
+                "a {status} {table_name}/{module_type} row must keep blocking the Z"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn closeout_view_only_subtracts_customer_directory_failures_of_a_pass() {
+        let db = test_db();
+        seed_closeout_terminal_context(&db);
+        let sync_state = SyncState::new();
+        let sink = NoopTerminalEventSink;
+        let clean = sync_queue::process_queue(&db.conn, CLOSEOUT_UNREACHABLE_ADMIN, "api-key")
+            .await
+            .expect("empty pass");
+        assert!(clean.success);
+
+        let classify = |result: &sync_queue::SyncResult| {
+            classify_finished_parity_pass(
+                &db,
+                &sync_state,
+                &sink,
+                "force_sync",
+                ParityFailureScope::CloseoutBlocking,
+                result,
+            )
+        };
+
+        // A transient customers failure in this pass (e.g. 503): exempt.
+        let mut exempt_only = clean.clone();
+        exempt_only.success = false;
+        exempt_only.failed = 1;
+        exempt_only.closeout_exempt.failed = 1;
+        assert!(matches!(
+            classify(&exempt_only),
+            ParitySyncExecutionOutcome::Complete(_)
+        ));
+
+        // One more failure from any other row in the same pass: blocks.
+        let mut mixed = exempt_only.clone();
+        mixed.failed = 2;
+        assert!(is_parity_partial(&classify(&mixed)));
+
+        // An exempt dead letter only counts together with its failure.
+        let mut dead = exempt_only.clone();
+        dead.dead_lettered = 1;
+        dead.closeout_exempt.dead_lettered = 1;
+        assert!(matches!(
+            classify(&dead),
+            ParitySyncExecutionOutcome::Complete(_)
+        ));
+        dead.dead_lettered = 2;
+        assert!(is_parity_partial(&classify(&dead)));
+
+        // Quarantines and gate blocks are never exempt.
+        let mut quarantined = exempt_only.clone();
+        quarantined.quarantined = 1;
+        assert!(is_parity_partial(&classify(&quarantined)));
+        let mut blocked = exempt_only.clone();
+        blocked.batch_block = Some(sync_queue::ParityClaimGateBlock::RebindPending);
+        assert!(matches!(
+            classify(&blocked),
+            ParitySyncExecutionOutcome::Partial(_, "TERMINAL_REBIND_PENDING")
+        ));
+
+        // A pass with no failures at all stays complete in both scopes.
+        assert!(matches!(
+            classify(&clean),
+            ParitySyncExecutionOutcome::Complete(_)
+        ));
     }
 
     #[test]

@@ -66,9 +66,6 @@ try {
   await import('./renderer/styles/globals.css');
   await import('./renderer/styles/glassmorphism.css');
 
-  // Ensure screen capture IPC listeners are registered at startup
-  await import('./renderer/services/ScreenCaptureHandler');
-
   // POS app entry
   const { default: App } = await import('./renderer/App');
 

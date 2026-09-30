@@ -239,6 +239,12 @@ pub struct AdminFetchError {
     message: String,
     status: Option<u16>,
     code: Option<String>,
+    /// The non-2xx body when it was the admin application's own JSON error
+    /// envelope (`{success:false}`, a string `error` or a string `code`).
+    /// Platform pages in front of the app (Vercel `DEPLOYMENT_NOT_FOUND`,
+    /// firewall challenges, HTML 404s) leave this empty. Callers read typed
+    /// fields from it (`app_error_field`), never its display text.
+    app_error_body: Option<Value>,
     kind: AdminFetchErrorKind,
 }
 
@@ -248,6 +254,7 @@ impl AdminFetchError {
             message: message.into(),
             status: None,
             code: None,
+            app_error_body: None,
             kind: AdminFetchErrorKind::Local,
         }
     }
@@ -257,6 +264,7 @@ impl AdminFetchError {
             message: message.into(),
             status: None,
             code: None,
+            app_error_body: None,
             kind: AdminFetchErrorKind::Transport,
         }
     }
@@ -267,15 +275,33 @@ impl AdminFetchError {
             message: message.into(),
             status: Some(status),
             code: None,
+            app_error_body: None,
             kind: AdminFetchErrorKind::Http,
         }
     }
 
-    fn with_status_and_code(message: impl Into<String>, status: u16, code: Option<String>) -> Self {
+    /// Build the exact typed error a real non-2xx response with this status
+    /// and body produces, so callers can test their classification against
+    /// server-shaped bodies instead of hand-set fields.
+    #[cfg(test)]
+    pub(crate) fn from_http_response_for_test(status: u16, body: &str) -> Self {
+        admin_http_error_from_body(
+            StatusCode::from_u16(status).expect("valid HTTP status for test"),
+            body,
+        )
+    }
+
+    fn with_status_and_code(
+        message: impl Into<String>,
+        status: u16,
+        code: Option<String>,
+        app_error_body: Option<Value>,
+    ) -> Self {
         Self {
             message: message.into(),
             status: Some(status),
             code,
+            app_error_body,
             kind: AdminFetchErrorKind::Http,
         }
     }
@@ -309,9 +335,25 @@ impl AdminFetchError {
         }
     }
 
-    #[cfg(test)]
+    /// The admin application's bounded machine code (`INVALID_PHONE`,
+    /// `DUPLICATE`, ...) from a non-2xx JSON body. Never the display text.
     pub fn code(&self) -> Option<&str> {
         self.code.as_deref()
+    }
+
+    /// Whether an HTTP failure carried the admin application's own JSON error
+    /// envelope, as opposed to a platform page or an unreadable body.
+    pub fn has_app_error_body(&self) -> bool {
+        self.kind == AdminFetchErrorKind::Http && self.app_error_body.is_some()
+    }
+
+    /// One typed field of the application's JSON error envelope, e.g. the
+    /// latest `customer` record a 409 `VERSION_MISMATCH` carries.
+    pub fn app_error_field(&self, key: &str) -> Option<&Value> {
+        if self.kind != AdminFetchErrorKind::Http {
+            return None;
+        }
+        self.app_error_body.as_ref()?.get(key)
     }
 }
 
@@ -376,6 +418,16 @@ fn admin_http_error_from_body(status: StatusCode, body_text: &str) -> AdminFetch
         .and_then(Value::as_str)
         .filter(|code| !code.is_empty() && code.len() <= 120)
         .map(ToOwned::to_owned);
+    let app_error_body = parsed_json
+        .as_ref()
+        .filter(|json| {
+            json.as_object().is_some_and(|body| {
+                body.get("code").is_some_and(Value::is_string)
+                    || body.get("error").is_some_and(Value::is_string)
+                    || body.get("success").and_then(Value::as_bool) == Some(false)
+            })
+        })
+        .cloned();
     let detail = if let Some(json) = parsed_json {
         let message = json
             .get("error")
@@ -402,7 +454,7 @@ fn admin_http_error_from_body(status: StatusCode, body_text: &str) -> AdminFetch
         format!("{} (HTTP {})", status_error(status), status.as_u16())
     };
 
-    AdminFetchError::with_status_and_code(detail, status.as_u16(), code)
+    AdminFetchError::with_status_and_code(detail, status.as_u16(), code, app_error_body)
 }
 
 // ---------------------------------------------------------------------------
@@ -1069,5 +1121,66 @@ mod tests {
         assert_eq!(entitlement.code(), Some("CALLER_ID_ENTITLEMENT_REQUIRED"));
         assert_eq!(unstructured.code(), None);
         assert_eq!(AdminFetchError::statusless("offline").code(), None);
+    }
+
+    #[test]
+    fn app_error_envelope_is_told_apart_from_platform_pages() {
+        let coded = admin_http_error_from_body(
+            StatusCode::BAD_REQUEST,
+            r#"{"success":false,"error":"The phone number is invalid","code":"INVALID_PHONE"}"#,
+        );
+        assert_eq!(coded.code(), Some("INVALID_PHONE"));
+        assert!(coded.has_app_error_body());
+
+        let uncoded_app_error = admin_http_error_from_body(
+            StatusCode::BAD_REQUEST,
+            r#"{"success":false,"error":"Missing phone or name"}"#,
+        );
+        assert_eq!(uncoded_app_error.code(), None);
+        assert!(uncoded_app_error.has_app_error_body());
+
+        // Vercel platform failures are plain text or HTML, and its JSON form
+        // nests the code under `error`; none of them is the app's envelope.
+        for platform_body in [
+            "The deployment could not be found on Vercel.\n\nDEPLOYMENT_NOT_FOUND\n",
+            "<!DOCTYPE html><html><body>404: This page could not be found</body></html>",
+            r#"{"error":{"code":"DEPLOYMENT_DISABLED","message":"Payment required"}}"#,
+            "",
+        ] {
+            let platform = admin_http_error_from_body(StatusCode::NOT_FOUND, platform_body);
+            assert_eq!(platform.code(), None, "{platform_body}");
+            assert!(!platform.has_app_error_body(), "{platform_body}");
+        }
+
+        assert!(!AdminFetchError::transport("offline").has_app_error_body());
+        assert!(!AdminFetchError::statusless("local").has_app_error_body());
+    }
+
+    #[test]
+    fn app_error_fields_are_read_from_the_application_envelope_only() {
+        let conflict = admin_http_error_from_body(
+            StatusCode::CONFLICT,
+            r#"{"success":false,"error":"Customer version mismatch","code":"VERSION_MISMATCH","customer":{"id":"c-1","version":4},"expected_version":4}"#,
+        );
+        assert_eq!(conflict.code(), Some("VERSION_MISMATCH"));
+        assert_eq!(
+            conflict.app_error_field("customer"),
+            Some(&serde_json::json!({ "id": "c-1", "version": 4 }))
+        );
+        assert_eq!(
+            conflict.app_error_field("expected_version"),
+            Some(&serde_json::json!(4))
+        );
+        assert_eq!(conflict.app_error_field("missing"), None);
+
+        let platform = admin_http_error_from_body(
+            StatusCode::CONFLICT,
+            r#"{"error":{"code":"DEPLOYMENT_DISABLED","customer":{"id":"c-1"}}}"#,
+        );
+        assert_eq!(platform.app_error_field("customer"), None);
+        assert_eq!(
+            AdminFetchError::transport("offline").app_error_field("customer"),
+            None
+        );
     }
 }

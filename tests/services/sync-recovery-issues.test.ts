@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import i18next from 'i18next';
 
 import type { DiagnosticsSystemHealth } from '../../src/lib';
 import { buildSyncRecoveryIssues } from '../../src/renderer/components/recovery/sync-recovery-issues';
@@ -60,12 +63,27 @@ test('default address remedy only matches known scoped address write failures', 
   }
 });
 
+// Updated 29/09/2026: a failed customer_addresses row is no longer an
+// "unrelated" failure (every customer-directory row now has its own
+// non-blocking card), so the unrelated rows here are order rows.
+const unrelatedOrderRow = (overrides: Partial<SyncQueueItem> = {}): SyncQueueItem => addressRow({
+  id: 'unknown', tableName: 'orders', moduleType: 'orders', recordId: 'order-1', errorMessage: 'HTTP 500', ...overrides,
+});
+
 test('specific address recipe cannot hide unrelated or unsampled processor failures', () => {
   const row=addressRow();
-  for (const result of [addressResult([row],2), addressResult([row,addressRow({id:'unknown',recordId:'other',errorMessage:'HTTP 500'})]),addressResult([row,addressRow({id:'unknown',errorMessage:'HTTP 500'})])]) {
+  for (const result of [addressResult([row],2), addressResult([row,unrelatedOrderRow()]),addressResult([row,unrelatedOrderRow({recordId:'address-1'})])]) {
     assert.ok(result.issues.some(item=>item.code === 'customer_address_default_conflict'));
     assert.ok(result.issues.some(item=>item.code === 'parity_processor_stalled_zero_progress'));
   }
+});
+
+test('a second failure on the same address gets the non-blocking customer card, not a blocking one', () => {
+  const result = addressResult([addressRow(), addressRow({id:'unknown',errorMessage:'HTTP_500_SERVER_ERROR'})]);
+  assert.ok(result.issues.some(item=>item.code === 'customer_address_default_conflict'));
+  assert.ok(result.issues.some(item=>item.code === 'customer_directory_not_synced'));
+  assert.equal(result.issues.some(item=>item.status === 'blocking'), false);
+  assert.equal(result.counts.blocking, 0);
 });
 
 test('checkout payment blockers route to the order payment screen with a versioned known solution', () => {
@@ -190,7 +208,11 @@ test('a customer the office already holds gets the action that can actually reso
   const result = customerResult([customerRow()]);
   const issue = result.issues.find(item => item.code === 'duplicate_customer_conflict');
   assert.ok(issue, 'the duplicate conflict must have its own issue');
-  assert.equal(issue.status, 'blocking');
+  // Updated 29/09/2026: customer-directory rows no longer block the Z, so the
+  // card is not in the blocking list; its adoption action stays recommended.
+  assert.equal(issue.status, 'recovering');
+  assert.equal(issue.params?.closeoutBlocking, false);
+  assert.equal(result.counts.blocking, 0);
   assert.equal(issue.entityId, 'cust-b2572ac9-63c2-4f7e-a11a-76c463fa0603');
 
   const resolve = issue.actions.find(action => action.id === 'resolveDuplicateCustomerConflict');
@@ -236,12 +258,107 @@ test('only the office duplicate answer earns the adoption action', () => {
 });
 
 test('a second unrelated blocked row keeps the general parity card visible', () => {
-  const result = customerResult([customerRow(), addressRow({id: 'other', errorMessage: 'HTTP 500'})], 2);
+  const result = customerResult([customerRow(), unrelatedOrderRow()], 2);
   assert.ok(result.issues.some(item => item.code === 'duplicate_customer_conflict'));
   assert.ok(
     result.issues.some(item => item.code.startsWith('parity_')),
     'a specific recipe must not hide a row it does not cover',
   );
+});
+
+// ---------------------------------------------------------------------------
+// 28/09/2026: the customer the office refused for its phone.
+//
+// Symptom (Tomikro, desktop 1.4.118): «Cannot close day: pre-Z-report sync
+// failed: PARITY_SYNC_PARTIAL», and Sync health showed a red «some updates
+// could not be sent» card offering only retry. Root cause: the office refused
+// an 11-digit phone (400 INVALID_PHONE), the till queued the customer anyway
+// and any failed parity row blocked the Z. Customer-directory rows no longer
+// block the Z (native closeout exemption); this card must say so, name the
+// reason, and never sit in the blocking list.
+// ---------------------------------------------------------------------------
+
+const refusedCustomerRow = (overrides: Partial<SyncQueueItem> = {}): SyncQueueItem => customerRow({
+  id: '0a8d8b99-0000-4000-8000-000000000001', status: 'failed',
+  errorMessage: 'HTTP_400_CLIENT_ERROR:INVALID_PHONE', ...overrides,
+});
+
+const refusedResult = (rows: SyncQueueItem[], total = rows.length) => buildSyncRecoveryIssues({
+  systemHealth: baseSystemHealth({parityQueueStatus: {total, failed: total, pending: 0, conflicts: 0}}),
+  lastParitySync: {status: 'failed', error: 'PARITY_SYNC_PARTIAL', processed: 0, remaining: total} as any,
+  parityItems: rows,
+});
+
+test('a customer the office refused for its phone is a non-blocking card that says why', () => {
+  const result = refusedResult([refusedCustomerRow()]);
+  const issue = result.issues.find(item => item.code === 'customer_phone_rejected');
+  assert.ok(issue, 'the refused phone must have its own card');
+  assert.equal(issue.status, 'recovering');
+  assert.equal(issue.severity, 'warning');
+  assert.equal(issue.titleKey, 'recovery.issues.customerPhoneRejected.title');
+  assert.equal(issue.params?.rejectionCode, 'INVALID_PHONE');
+  assert.equal(issue.params?.rejectionStatus, 400);
+  assert.equal(issue.params?.closeoutBlocking, false);
+  assert.equal(issue.params?.sampleItemId, '0a8d8b99-0000-4000-8000-000000000001');
+  assert.ok(issue.actions.some(action => action.id === 'retryParityItem'));
+  // What the shop was shown instead: blocking, retry-only cards.
+  assert.equal(result.issues.some(item => item.code === 'parity_module_failed_items'), false);
+  assert.equal(result.issues.some(item => item.code === 'parity_processor_stalled_zero_progress'), false);
+  assert.equal(result.counts.blocking, 0);
+});
+
+test('COUNTRY_CONTEXT_REQUIRED is a phone refusal too', () => {
+  const result = refusedResult([refusedCustomerRow({errorMessage: 'HTTP_400_CLIENT_ERROR:COUNTRY_CONTEXT_REQUIRED'})]);
+  assert.ok(result.issues.some(item => item.code === 'customer_phone_rejected'));
+});
+
+test('a row stored by 1.4.118 without the code, or refused for another reason, gets the general customer card', () => {
+  const cases: Array<[string, number, string | null]> = [
+    ['HTTP_400_CLIENT_ERROR', 400, null],
+    ['HTTP_404_CLIENT_ERROR:NOT_FOUND', 404, 'NOT_FOUND'],
+    ['HTTP_400_CLIENT_ERROR:INVALID_COORDINATES', 400, 'INVALID_COORDINATES'],
+  ];
+  for (const [errorMessage, status, code] of cases) {
+    const result = refusedResult([refusedCustomerRow({errorMessage})]);
+    const issue = result.issues.find(item => item.code === 'customer_directory_not_synced');
+    assert.ok(issue, errorMessage);
+    assert.equal(issue.status, 'recovering', errorMessage);
+    assert.equal(issue.params?.rejectionStatus, status, errorMessage);
+    assert.equal(issue.params?.rejectionCode, code, errorMessage);
+    assert.equal(result.counts.blocking, 0, errorMessage);
+  }
+});
+
+test('a customer address the office refused is a customer card as well', () => {
+  const result = refusedResult([addressRow({errorMessage: 'HTTP_400_CLIENT_ERROR:INVALID_COORDINATES'})]);
+  const issue = result.issues.find(item => item.code === 'customer_directory_not_synced');
+  assert.ok(issue);
+  assert.equal(issue.entityType, 'customer_address');
+  assert.equal(result.counts.blocking, 0);
+});
+
+test('only the customer directory is exempt: other failures stay blocking next to it', () => {
+  const result = refusedResult([refusedCustomerRow(), unrelatedOrderRow()]);
+  assert.ok(result.issues.some(item => item.code === 'customer_phone_rejected'));
+  assert.ok(result.issues.some(item => item.status === 'blocking' && item.code.startsWith('parity_')));
+
+  // A customers row of another module is not the customer directory (the
+  // native exemption checks both), so it keeps the blocking card.
+  const mislabelled = refusedResult([refusedCustomerRow({moduleType: 'orders'})]);
+  assert.equal(mislabelled.issues.some(item => item.code === 'customer_phone_rejected'), false);
+  assert.ok(mislabelled.counts.blocking > 0);
+});
+
+test('a truncated sample never hides the processor card behind the customer card', () => {
+  const result = refusedResult([refusedCustomerRow()], 2);
+  assert.ok(result.issues.some(item => item.code === 'customer_phone_rejected'));
+  assert.ok(result.issues.some(item => item.code === 'parity_processor_stalled_zero_progress'));
+});
+
+test('pending customer rows keep the pending card, not the refusal card', () => {
+  const result = refusedResult([refusedCustomerRow({status: 'pending', errorMessage: null})]);
+  assert.equal(result.issues.some(item => item.code === 'customer_phone_rejected'), false);
+  assert.equal(result.issues.some(item => item.code === 'customer_directory_not_synced'), false);
 });
 
 // The checkout-blocker card renders `{{reasonText}}` / `{{suggestedFix}}` — the
@@ -366,4 +483,37 @@ test('a blocker from an older build, with no variant, keeps the payment screen',
   assert.ok(issue);
   assert.equal(issue.actions.some(action => action.id === 'repairPlatformSettlementMismatch'), false);
   assert.ok(issue.actions.some(action => action.id === 'openOrderPaymentFix'));
+});
+
+// Review round: the Tomikro incident had exactly one stuck row, and the card
+// read «1 customer changes ... were refused». Each POS locale now has a
+// singular summary; i18next picks it from the card's `count`.
+test('the customer cards read naturally for one change and for several, in every POS locale', async () => {
+  const one = refusedResult([refusedCustomerRow()]).issues.find(item => item.code === 'customer_phone_rejected');
+  assert.equal(one?.params?.count, 1);
+  const several = refusedResult([
+    refusedCustomerRow({errorMessage: 'HTTP_400_CLIENT_ERROR'}),
+    refusedCustomerRow({id: 'second', recordId: 'customer-2', errorMessage: 'HTTP_400_CLIENT_ERROR'}),
+    refusedCustomerRow({id: 'third', recordId: 'customer-3', errorMessage: 'HTTP_400_CLIENT_ERROR'}),
+  ]).issues.find(item => item.code === 'customer_directory_not_synced');
+  assert.equal(several?.params?.count, 3);
+
+  for (const locale of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
+    const messages = JSON.parse(readFileSync(path.join(process.cwd(), 'src', 'locales', `${locale}.json`), 'utf8'));
+    const i18n = i18next.createInstance();
+    await i18n.init({
+      lng: locale,
+      resources: {[locale]: {translation: messages}},
+      interpolation: {escapeValue: false},
+    });
+    for (const key of ['customerPhoneRejected', 'customerDirectoryNotSynced']) {
+      const summaries = messages.recovery.issues[key];
+      const singular = i18n.t(`recovery.issues.${key}.summary`, {count: 1});
+      assert.equal(singular, summaries.summary_one, `${locale} ${key} one`);
+      assert.doesNotMatch(singular, /\{\{|\b1\b/, `${locale} ${key} one`);
+      const plural = i18n.t(`recovery.issues.${key}.summary`, {count: 3});
+      assert.equal(plural, summaries.summary_other.replace('{{count}}', '3'), `${locale} ${key} other`);
+      assert.match(plural, /\b3\b/, `${locale} ${key} other`);
+    }
+  }
 });

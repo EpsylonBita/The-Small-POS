@@ -3,6 +3,7 @@
 //! Phase 1 does not compile or start the legacy SIP listener. This state stays
 //! registered so status and stop calls remain safe during upgrades.
 
+use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
@@ -27,6 +28,8 @@ struct Inner {
     caller_id_candidates: u64,
     rejected_candidates: u64,
     last_rejection_stage: Option<CallerIdRejectionStage>,
+    /// Timestamp of the last detected call in this session (no number).
+    last_call_at: Option<DateTime<Utc>>,
     generation: u64,
     stop_epoch: u64,
     supervisor_cancel: Option<CancellationToken>,
@@ -46,6 +49,7 @@ impl Default for Inner {
             caller_id_candidates: 0,
             rejected_candidates: 0,
             last_rejection_stage: None,
+            last_call_at: None,
             generation: 0,
             stop_epoch: 0,
             supervisor_cancel: None,
@@ -92,6 +96,7 @@ impl CallerIdManager {
                 caller_id_candidates: i.caller_id_candidates,
                 rejected_candidates: i.rejected_candidates,
                 last_rejection_stage: i.last_rejection_stage,
+                last_call_at: i.last_call_at,
             })
             .unwrap_or(CallerIdStatus {
                 status: ListenerStatus::Error,
@@ -104,6 +109,7 @@ impl CallerIdManager {
                 caller_id_candidates: 0,
                 rejected_candidates: 0,
                 last_rejection_stage: None,
+                last_call_at: None,
             })
     }
 
@@ -177,11 +183,19 @@ impl CallerIdManager {
     }
 
     pub fn increment_calls(&self, generation: u64) -> bool {
+        self.increment_calls_at(generation, Utc::now())
+    }
+
+    /// Record one detected call at `detected_at`. Like every other counter it
+    /// is accepted only from the current supervisor generation, so a stopped
+    /// or replaced listener can never move the "last call" time.
+    fn increment_calls_at(&self, generation: u64, detected_at: DateTime<Utc>) -> bool {
         if let Ok(mut inner) = self.inner.lock() {
             if inner.generation != generation {
                 return false;
             }
             inner.calls_detected = inner.calls_detected.saturating_add(1);
+            inner.last_call_at = Some(detected_at);
             return true;
         }
         false
@@ -360,8 +374,83 @@ mod tests {
         assert_eq!(status.caller_id_candidates, 0);
         assert_eq!(status.rejected_candidates, 0);
         assert_eq!(status.last_rejection_stage, None);
+        assert_eq!(status.last_call_at, None);
         assert!(status.error.is_none());
         assert!(status.reason.is_none());
+    }
+
+    #[tokio::test]
+    async fn last_call_at_is_a_generation_scoped_timestamp_only() {
+        let mgr = Arc::new(CallerIdManager::new());
+        let generation = mgr
+            .replace_supervisor(
+                CancellationToken::new(),
+                move |_generation, cancel| async move {
+                    cancel.cancelled().await;
+                },
+            )
+            .await
+            .expect("last-call test generation");
+
+        let first = chrono::DateTime::parse_from_rfc3339("2026-09-29T08:15:00Z")
+            .expect("first call time")
+            .with_timezone(&Utc);
+        let second = chrono::DateTime::parse_from_rfc3339("2026-09-29T08:20:30Z")
+            .expect("second call time")
+            .with_timezone(&Utc);
+        assert!(mgr.increment_calls_at(generation, first));
+        assert!(mgr.increment_calls_at(generation, second));
+        // A stale generation can move neither the counter nor the time.
+        let stale = chrono::DateTime::parse_from_rfc3339("2026-09-29T09:00:00Z")
+            .expect("stale call time")
+            .with_timezone(&Utc);
+        assert!(!mgr.increment_calls_at(generation.saturating_add(1), stale));
+
+        let status = mgr.get_status();
+        assert_eq!(status.calls_detected, 2);
+        assert_eq!(status.last_call_at, Some(second));
+
+        let json = serde_json::to_value(&status).expect("serialize status");
+        assert_eq!(json["lastCallAt"], "2026-09-29T08:20:30Z");
+        let object = json.as_object().expect("status object");
+        assert!(!object.contains_key("last_call_at"));
+        for forbidden in ["number", "phone", "payload"] {
+            assert!(
+                object
+                    .keys()
+                    .all(|key| !key.to_lowercase().contains(&forbidden.to_lowercase())),
+                "status must never carry {forbidden}"
+            );
+        }
+
+        // The live entry point stamps "now".
+        let before = Utc::now();
+        assert!(mgr.increment_calls(generation));
+        let live = mgr.get_status().last_call_at.expect("live call time");
+        assert!(live >= before && live <= Utc::now());
+
+        // Stopping keeps the session's last call, like callsDetected.
+        mgr.stop().await;
+        assert_eq!(mgr.get_status().last_call_at, Some(live));
+    }
+
+    #[test]
+    fn status_without_last_call_at_still_deserializes() {
+        let legacy = serde_json::json!({
+            "status": "listening",
+            "error": null,
+            "reason": null,
+            "registered": false,
+            "callsDetected": 3,
+            "udpPacketsReceived": 0,
+            "trustedPacketsReceived": 0,
+            "callerIdCandidates": 0,
+            "rejectedCandidates": 0,
+            "lastRejectionStage": null
+        });
+        let status: CallerIdStatus = serde_json::from_value(legacy).expect("legacy status shape");
+        assert_eq!(status.calls_detected, 3);
+        assert_eq!(status.last_call_at, None);
     }
 
     #[tokio::test]

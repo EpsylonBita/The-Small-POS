@@ -293,6 +293,55 @@ pub struct SyncResult {
     /// safe to persist in diagnostics because it never includes queued payload
     /// JSON, response bodies, API keys, or customer data.
     pub telemetry: SyncTelemetrySnapshot,
+    /// Share of `failed` / `conflicts` / `dead_lettered` above that came from
+    /// closeout-exempt customer-directory rows. Native-only: the pre-Z
+    /// closeout drain subtracts it, every other caller ignores it, and it is
+    /// never serialized to the renderer.
+    #[serde(skip)]
+    pub(crate) closeout_exempt: CloseoutExemptCounts,
+}
+
+/// SQL predicate for the parity rows that never block the day close: the
+/// customer directory (`customers` / `customer_addresses`, module
+/// `customers`). A Z report never reads them (orders carry the customer's
+/// name and phone inline), Android already leaves them out of its Z gate,
+/// and they stay visible and actionable in Sync health. Founder decision
+/// 2026-09-29, after the 2026-09-28 Tomikro incident where one rejected
+/// customer INSERT blocked the Z with PARITY_SYNC_PARTIAL.
+const CLOSEOUT_EXEMPT_ROW_PREDICATE: &str = "(table_name IN ('customers', 'customer_addresses') \
+     AND COALESCE(module_type, '') = 'customers')";
+
+/// Row-level twin of [`CLOSEOUT_EXEMPT_ROW_PREDICATE`]. Every other table —
+/// orders, payments, adjustments, z_reports, shifts, drawers, expenses, staff
+/// payments, driver earnings, fiscal, loyalty and anything unknown — stays
+/// fail-closed for the Z.
+pub(crate) fn is_closeout_exempt_row(table_name: &str, module_type: &str) -> bool {
+    matches!(table_name, "customers" | "customer_addresses") && module_type == "customers"
+}
+
+/// Per-batch failure counts attributed to closeout-exempt rows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct CloseoutExemptCounts {
+    pub(crate) failed: i64,
+    pub(crate) conflicts: i64,
+    pub(crate) dead_lettered: i64,
+}
+
+impl CloseoutExemptCounts {
+    fn record_failure(&mut self, exempt_row: bool, transitioned_to_dead_letter: bool) {
+        if exempt_row {
+            self.failed += 1;
+            if transitioned_to_dead_letter {
+                self.dead_lettered += 1;
+            }
+        }
+    }
+
+    fn record_conflict(&mut self, exempt_row: bool) {
+        if exempt_row {
+            self.conflicts += 1;
+        }
+    }
 }
 
 /// A monetary sync item that crossed the max-retry threshold and was
@@ -5000,6 +5049,126 @@ pub fn get_status(conn: &Connection) -> Result<QueueStatus, String> {
     })
 }
 
+/// Queue status for the pre-Z closeout decision only. Identical counting to
+/// [`get_status`] but without the closeout-exempt customer-directory rows,
+/// which never block the Z. Background sync, Sync health and every other
+/// reader keep using the queue-wide [`get_status`].
+pub(crate) fn get_closeout_blocking_status(conn: &Connection) -> Result<QueueStatus, String> {
+    let predicate = format!("NOT {CLOSEOUT_EXEMPT_ROW_PREDICATE}");
+    let count = |status_filter: &str| -> Result<i64, String> {
+        let sql = format!(
+            "SELECT COUNT(*) FROM parity_sync_queue
+             WHERE {predicate}{status_filter}"
+        );
+        conn.query_row(&sql, [], |row| row.get(0))
+            .map_err(|e| format!("sync_queue closeout status count: {e}"))
+    };
+    let quarantined: i64 = conn
+        .query_row(
+            &format!(
+                "SELECT COUNT(*) FROM parity_sync_queue
+                 WHERE {predicate}
+                   AND status = 'failed'
+                   AND error_message = ?1"
+            ),
+            [REPAIR_RESERVED_OWNER_QUARANTINED],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("sync_queue closeout status quarantined: {e}"))?;
+    let dead_lettered: i64 = conn
+        .query_row(
+            &format!(
+                "SELECT COUNT(*) FROM parity_sync_queue
+                 WHERE {predicate}
+                   AND status = 'failed'
+                   AND attempts >= ?1
+                   AND COALESCE(error_message, '') <> ?2"
+            ),
+            params![MAX_RETRY_ATTEMPTS, REPAIR_RESERVED_OWNER_QUARANTINED],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("sync_queue closeout status dead_lettered: {e}"))?;
+    Ok(QueueStatus {
+        total: count("")?,
+        pending: count(" AND status = 'pending'")?,
+        in_progress: count(" AND status = 'processing'")?,
+        failed: count(" AND status = 'failed'")?,
+        conflicts: count(" AND status = 'conflict'")?,
+        quarantined,
+        dead_lettered,
+        oldest_item_age: oldest_queue_item_age_ms(conn, Some(&predicate))?,
+    })
+}
+
+/// One closeout-exempt row that is still unsynced when the Z runs. Only
+/// identifiers and bounded codes: no payload, no customer data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CloseoutExemptQueueItem {
+    pub(crate) id: String,
+    pub(crate) table_name: String,
+    pub(crate) operation: String,
+    pub(crate) status: String,
+    pub(crate) attempts: i64,
+    pub(crate) error_code: Option<String>,
+}
+
+/// Leading machine-code part of a stored `error_message`
+/// (`HTTP_400_CLIENT_ERROR:INVALID_PHONE`, `SERVER_CONFLICT_DUPLICATE:`),
+/// cut before any free text so a log line never carries server sentences.
+fn bounded_queue_error_code(error_message: &str) -> Option<String> {
+    let code: String = error_message
+        .trim()
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_' || *ch == ':')
+        .take(96)
+        .collect();
+    let code = code.trim_end_matches(':').to_string();
+    (!code.is_empty()).then_some(code)
+}
+
+/// Closeout-exempt rows still in the queue, oldest first, plus their total.
+/// The pre-Z drain logs these: they did not block this Z but remain in Sync
+/// health for the operator.
+pub(crate) fn list_closeout_exempt_queue_items(
+    conn: &Connection,
+    limit: i64,
+) -> Result<(i64, Vec<CloseoutExemptQueueItem>), String> {
+    let total: i64 = conn
+        .query_row(
+            &format!(
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE {CLOSEOUT_EXEMPT_ROW_PREDICATE}"
+            ),
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("sync_queue closeout exempt count: {e}"))?;
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT id, table_name, operation, status, attempts, error_message
+               FROM parity_sync_queue
+              WHERE {CLOSEOUT_EXEMPT_ROW_PREDICATE}
+              ORDER BY created_at ASC, id ASC
+              LIMIT ?1"
+        ))
+        .map_err(|e| format!("sync_queue closeout exempt prepare: {e}"))?;
+    let items = stmt
+        .query_map([limit.max(0)], |row| {
+            let error_message: Option<String> = row.get(5)?;
+            Ok(CloseoutExemptQueueItem {
+                id: row.get(0)?,
+                table_name: row.get(1)?,
+                operation: row.get(2)?,
+                status: row.get(3)?,
+                attempts: row.get(4)?,
+                error_code: error_message.as_deref().and_then(bounded_queue_error_code),
+            })
+        })
+        .map_err(|e| format!("sync_queue closeout exempt query: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("sync_queue closeout exempt row: {e}"))?;
+    Ok((total, items))
+}
+
 pub(crate) fn renderer_get_status(conn: &Connection) -> Result<QueueStatus, String> {
     let generic_owner = renderer_generic_owner_predicate("parity_sync_queue");
     let ownership_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
@@ -5861,6 +6030,16 @@ fn relink_queued_customer_children(
     local_customer_id: &str,
     remote_customer_id: &str,
 ) -> Result<usize, String> {
+    relink_queued_customer_children_ids(conn, local_customer_id, remote_customer_id)
+        .map(|relinked| relinked.len())
+}
+
+/// `relink_queued_customer_children`, returning the queue ids it relinked.
+fn relink_queued_customer_children_ids(
+    conn: &Connection,
+    local_customer_id: &str,
+    remote_customer_id: &str,
+) -> Result<Vec<String>, String> {
     let mut statement = conn
         .prepare(
             "SELECT id, data
@@ -5878,7 +6057,7 @@ fn relink_queued_customer_children(
         .collect();
     drop(statement);
 
-    let mut relinked = 0usize;
+    let mut relinked = Vec::new();
     for (queue_id, data) in rows {
         let Ok(mut payload) = serde_json::from_str::<Value>(&data) else {
             continue;
@@ -5908,10 +6087,357 @@ fn relink_queued_customer_children(
             params![payload.to_string(), queue_id.as_str()],
         )
         .map_err(|error| format!("sync_queue relink_queued_customer_children update: {error}"))?;
-        relinked += 1;
+        relinked.push(queue_id);
     }
 
     Ok(relinked)
+}
+
+/// Cache field that remembers the local `cust-` id a synced customer replaced,
+/// so an edit started on the local id (a form opened before the INSERT
+/// landed) still reaches the office record.
+pub const LOCAL_CUSTOMER_ALIAS_FIELD: &str = "local_customer_id";
+
+/// What happened to an edit of a record that so far exists only as a queued
+/// INSERT on this terminal (a customer or address saved while offline).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueuedInsertMerge {
+    /// The edit was folded into the queued INSERT. `requeued`: the INSERT had
+    /// failed or was parked, and goes back to pending with the corrected
+    /// record (the old failure belonged to the old payload).
+    Merged { queue_id: String, requeued: bool },
+    /// The INSERT is being sent right now. Merging could lose the edit (the
+    /// in-flight request carries the old payload and its success deletes the
+    /// row), so the caller asks the cashier to retry in a moment.
+    InFlight,
+    /// No INSERT for this id is queued: it already synced, or never existed.
+    NotQueued,
+}
+
+/// Status of the newest queued INSERT for a customer-directory record.
+pub fn queued_customer_directory_insert_status(
+    conn: &Connection,
+    table_name: &str,
+    record_id: &str,
+) -> Result<Option<String>, String> {
+    if !matches!(table_name, "customers" | "customer_addresses") {
+        return Ok(None);
+    }
+    conn.query_row(
+        "SELECT status FROM parity_sync_queue
+          WHERE table_name = ?1 AND operation = 'INSERT' AND record_id = ?2
+          ORDER BY created_at DESC, id DESC
+          LIMIT 1",
+        params![table_name, record_id],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(|error| format!("sync_queue queued_customer_directory_insert_status: {error}"))
+}
+
+/// Fold an edit into the queued INSERT of a customer or address that the
+/// office has not acknowledged yet, instead of queueing an UPDATE against an
+/// id the office has never seen (it replays to 404 forever — the 2026-09-28
+/// audit, VERIFY (d)). Covers every unsynced INSERT state: pending rows keep
+/// their schedule; failed and conflict rows go back to pending with a fresh
+/// retry budget because their payload changed; a processing row is never
+/// touched. A `null` change removes the key, except a customer's `name` and
+/// `phone`, which a create cannot do without.
+pub fn merge_into_queued_customer_directory_insert(
+    conn: &Connection,
+    table_name: &str,
+    record_id: &str,
+    changes: &Map<String, Value>,
+) -> Result<QueuedInsertMerge, String> {
+    if !matches!(table_name, "customers" | "customer_addresses") {
+        return Ok(QueuedInsertMerge::NotQueued);
+    }
+    retry_transaction(conn, |conn| {
+        let row = conn
+            .query_row(
+                "SELECT id, status, data FROM parity_sync_queue
+                  WHERE table_name = ?1 AND operation = 'INSERT' AND record_id = ?2
+                  ORDER BY created_at DESC, id DESC
+                  LIMIT 1",
+                params![table_name, record_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| format!("sync_queue merge queued insert read: {error}"))?;
+        let Some((queue_id, status, data)) = row else {
+            return Ok(QueuedInsertMerge::NotQueued);
+        };
+        if status == "processing" {
+            return Ok(QueuedInsertMerge::InFlight);
+        }
+
+        let mut payload = serde_json::from_str::<Value>(&data)
+            .ok()
+            .filter(Value::is_object)
+            .unwrap_or_else(|| Value::Object(Map::new()));
+        if let Some(object) = payload.as_object_mut() {
+            for (key, value) in changes {
+                if matches!(key.as_str(), "id" | "version" | "expected_version") {
+                    continue;
+                }
+                if value.is_null() {
+                    if table_name == "customers" && matches!(key.as_str(), "name" | "phone") {
+                        continue;
+                    }
+                    object.remove(key);
+                } else {
+                    object.insert(key.clone(), value.clone());
+                }
+            }
+        }
+
+        let requeued = status != "pending";
+        let changed_rows = if requeued {
+            conn.execute(
+                "UPDATE parity_sync_queue
+                    SET data = ?1, status = 'pending', attempts = 0,
+                        error_message = NULL, next_retry_at = NULL,
+                        last_attempt = NULL, retry_delay_ms = ?2
+                  WHERE id = ?3 AND status = ?4",
+                params![
+                    payload.to_string(),
+                    DEFAULT_INITIAL_RETRY_DELAY_MS,
+                    queue_id.as_str(),
+                    status.as_str()
+                ],
+            )
+        } else {
+            conn.execute(
+                "UPDATE parity_sync_queue SET data = ?1 WHERE id = ?2 AND status = 'pending'",
+                params![payload.to_string(), queue_id.as_str()],
+            )
+        }
+        .map_err(|error| format!("sync_queue merge queued insert write: {error}"))?;
+        if changed_rows == 0 {
+            return Ok(QueuedInsertMerge::InFlight);
+        }
+
+        // Keys only: the payload carries the customer's contact details.
+        info!(
+            queue_id = %queue_id,
+            table_name,
+            previous_status = %status,
+            requeued,
+            fields = %changes.keys().cloned().collect::<Vec<_>>().join(","),
+            "Merged an edit into a queued customer-directory INSERT"
+        );
+        Ok(QueuedInsertMerge::Merged { queue_id, requeued })
+    })
+}
+
+/// What happened to a queued address INSERT when its address was deleted
+/// before it ever reached the office.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueuedInsertWithdrawal {
+    Withdrawn {
+        queue_id: String,
+    },
+    /// Being sent right now; left alone.
+    InFlight,
+    NotQueued,
+}
+
+/// Drop the queued INSERT of an address the cashier deleted before it was
+/// ever sent. Replaying it would create an address the cashier removed.
+pub fn withdraw_queued_customer_address_insert(
+    conn: &Connection,
+    address_id: &str,
+) -> Result<QueuedInsertWithdrawal, String> {
+    retry_transaction(conn, |conn| {
+        let row = conn
+            .query_row(
+                "SELECT id, status FROM parity_sync_queue
+                  WHERE table_name = 'customer_addresses' AND operation = 'INSERT'
+                    AND record_id = ?1
+                  ORDER BY created_at DESC, id DESC
+                  LIMIT 1",
+                params![address_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(|error| format!("sync_queue withdraw address insert read: {error}"))?;
+        let Some((queue_id, status)) = row else {
+            return Ok(QueuedInsertWithdrawal::NotQueued);
+        };
+        if status == "processing" {
+            return Ok(QueuedInsertWithdrawal::InFlight);
+        }
+        let deleted = conn
+            .execute(
+                "DELETE FROM parity_sync_queue WHERE id = ?1 AND status = ?2",
+                params![queue_id.as_str(), status.as_str()],
+            )
+            .map_err(|error| format!("sync_queue withdraw address insert: {error}"))?;
+        if deleted == 0 {
+            return Ok(QueuedInsertWithdrawal::InFlight);
+        }
+        info!(
+            queue_id = %queue_id,
+            previous_status = %status,
+            "Withdrew the queued INSERT of an address deleted before it synced"
+        );
+        Ok(QueuedInsertWithdrawal::Withdrawn { queue_id })
+    })
+}
+
+/// The office id that replaced a local `cust-` customer, from the cached
+/// record's alias (`LOCAL_CUSTOMER_ALIAS_FIELD`). A row queued after that
+/// customer's INSERT synced (or one the relink missed) replays against the
+/// office record instead of the local id the office has never seen.
+fn synced_office_customer_id(conn: &Connection, customer_id: &str) -> Option<String> {
+    let customer_id = customer_id.trim();
+    if !customer_id.starts_with("cust-") {
+        return None;
+    }
+    read_local_json_array_setting(conn, "customer_cache_v1")
+        .iter()
+        .find_map(|entry| {
+            let alias = string_field(entry, &[LOCAL_CUSTOMER_ALIAS_FIELD])?;
+            if alias.trim() != customer_id {
+                return None;
+            }
+            string_field(entry, &["id", "customerId"])
+                .filter(|office_id| !office_id.trim().is_empty() && office_id != customer_id)
+        })
+}
+
+/// The office's record for a customer INSERT that just succeeded.
+fn synced_customer_record(response: Option<&Value>) -> Option<(String, Value)> {
+    let response = response?;
+    let record = response
+        .get("data")
+        .filter(|value| value.is_object())
+        .or_else(|| response.get("customer").filter(|value| value.is_object()))?;
+    let remote_id = string_field(record, &["id"]).filter(|id| !id.trim().is_empty())?;
+    Some((remote_id, record.clone()))
+}
+
+/// A customer created on this terminal (`cust-…`) just reached the office,
+/// which answered with its own id. Replace the local placeholder everywhere
+/// this terminal still names it: the cached customer (keeping the local id
+/// as an alias), local orders, and queued rows (addresses added meanwhile,
+/// legacy UPDATE rows). Rows that already failed with a 404 *because* the
+/// office did not know the local id yet go back to pending — the only
+/// automatic requeue here, and it is limited to exactly that failure.
+fn remap_synced_local_customer(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    response: Option<&Value>,
+) -> Result<(), String> {
+    if item.operation != "INSERT" {
+        return Ok(());
+    }
+    let Some((remote_id, record)) = synced_customer_record(response) else {
+        return Ok(());
+    };
+    let local_id = item.record_id.trim();
+    if local_id.is_empty() || remote_id == local_id {
+        return Ok(());
+    }
+
+    let mut cache = read_local_json_array_setting(conn, "customer_cache_v1");
+    let take = |cache: &mut Vec<Value>, id: &str| {
+        cache
+            .iter()
+            .position(|entry| {
+                string_field(entry, &["id", "customerId"]).is_some_and(|candidate| candidate == id)
+            })
+            .map(|index| cache.remove(index))
+    };
+    let local_entry = take(&mut cache, local_id);
+    let remote_entry = take(&mut cache, remote_id.as_str());
+    let mut merged = remote_entry
+        .or(local_entry)
+        .filter(Value::is_object)
+        .unwrap_or_else(|| Value::Object(Map::new()));
+    if let (Some(target), Some(source)) = (merged.as_object_mut(), record.as_object()) {
+        for (key, value) in source {
+            let keep_cached_addresses = key == "addresses"
+                && value.as_array().map(Vec::is_empty).unwrap_or(true)
+                && target
+                    .get("addresses")
+                    .and_then(Value::as_array)
+                    .is_some_and(|addresses| !addresses.is_empty());
+            if !keep_cached_addresses {
+                target.insert(key.clone(), value.clone());
+            }
+        }
+        target.insert("id".to_string(), Value::String(remote_id.clone()));
+        target.insert(
+            LOCAL_CUSTOMER_ALIAS_FIELD.to_string(),
+            Value::String(local_id.to_string()),
+        );
+    }
+    cache.push(merged);
+    write_local_json_array_setting(conn, "customer_cache_v1", &cache)?;
+
+    let relinked_orders = conn
+        .execute(
+            "UPDATE orders SET customer_id = ?1 WHERE customer_id = ?2",
+            params![remote_id.as_str(), local_id],
+        )
+        .map_err(|error| format!("sync_queue remap local customer orders: {error}"))?;
+
+    let mut relinked_rows = relink_queued_customer_children_ids(conn, local_id, &remote_id)?;
+    let mut statement = conn
+        .prepare(
+            "SELECT id FROM parity_sync_queue
+              WHERE table_name = 'customers' AND record_id = ?1
+                AND operation <> 'INSERT' AND id <> ?2",
+        )
+        .map_err(|error| format!("sync_queue remap local customer rows prepare: {error}"))?;
+    let customer_rows: Vec<String> = statement
+        .query_map(params![local_id, item.id.as_str()], |row| row.get(0))
+        .map_err(|error| format!("sync_queue remap local customer rows query: {error}"))?
+        .filter_map(Result::ok)
+        .collect();
+    drop(statement);
+    for queue_id in &customer_rows {
+        conn.execute(
+            "UPDATE parity_sync_queue SET record_id = ?1 WHERE id = ?2",
+            params![remote_id.as_str(), queue_id.as_str()],
+        )
+        .map_err(|error| format!("sync_queue remap local customer row: {error}"))?;
+    }
+    relinked_rows.extend(customer_rows);
+    relinked_rows.sort();
+    relinked_rows.dedup();
+
+    let mut requeued = 0usize;
+    for queue_id in &relinked_rows {
+        requeued += conn
+            .execute(
+                "UPDATE parity_sync_queue
+                    SET status = 'pending', attempts = 0, error_message = NULL,
+                        next_retry_at = NULL, last_attempt = NULL, retry_delay_ms = ?1
+                  WHERE id = ?2
+                    AND status = 'failed'
+                    AND error_message LIKE 'HTTP_404_CLIENT_ERROR%'",
+                params![DEFAULT_INITIAL_RETRY_DELAY_MS, queue_id.as_str()],
+            )
+            .map_err(|error| format!("sync_queue remap local customer requeue: {error}"))?;
+    }
+
+    info!(
+        local_customer_id = %local_id,
+        remote_customer_id = %remote_id,
+        relinked_orders,
+        relinked_queue_rows = relinked_rows.len(),
+        requeued_not_found_rows = requeued,
+        "Local customer reached the office; placeholder id replaced"
+    );
+    Ok(())
 }
 
 /// Mark an item as failed with exponential backoff for retry.
@@ -6949,8 +7475,15 @@ fn prepare_customer_request(
         CustomerPhoneContext::Untouched => {}
     }
 
+    let endpoint = match synced_office_customer_id(conn, &item.record_id) {
+        Some(office_id) if item.operation != "INSERT" => {
+            format!("/api/pos/customers/{office_id}")
+        }
+        _ => resolve_customers_endpoint(item),
+    };
+
     Ok(RequestPreparation::Ready(RequestSpec {
-        endpoint: resolve_customers_endpoint(item),
+        endpoint,
         method: resolve_http_method(item),
         body: if resolve_http_method(item) == Method::DELETE {
             None
@@ -7195,6 +7728,7 @@ fn prepare_customer_address_request(
             reason: "Customer address sync payload is missing customer_id".to_string(),
         });
     };
+    let customer_id = synced_office_customer_id(conn, &customer_id).unwrap_or(customer_id);
 
     let should_create = item.operation == "INSERT"
         || (item.operation == "UPDATE" && is_local_placeholder_id(item.record_id.as_str()));
@@ -9307,6 +9841,9 @@ fn apply_success(
         "customer_addresses" => {
             update_customer_address_cache_after_sync(conn, item, response)?;
         }
+        "customers" => {
+            remap_synced_local_customer(conn, item, response)?;
+        }
         "driver_earnings" | "driver_earning" => {
             if item.operation != "DELETE" {
                 let remote_id = response
@@ -10110,6 +10647,7 @@ where
                     auth_outcome: None,
                     batch_block: Some(block),
                     telemetry,
+                    closeout_exempt: CloseoutExemptCounts::default(),
                 });
             }
         };
@@ -10145,6 +10683,7 @@ where
                     auth_outcome: None,
                     batch_block: Some(block),
                     telemetry,
+                    closeout_exempt: CloseoutExemptCounts::default(),
                 });
             }
         };
@@ -10247,6 +10786,7 @@ where
     let mut failed: i64 = 0;
     let mut conflicts: i64 = 0;
     let mut dead_lettered: i64 = 0;
+    let mut closeout_exempt = CloseoutExemptCounts::default();
     let mut auth_outcome: Option<ParityAuthOutcome> = None;
     let mut batch_block: Option<ParityClaimGateBlock> = None;
     let mut errors: Vec<SyncError> = Vec::new();
@@ -10399,6 +10939,12 @@ where
             continue;
         }
 
+        // Failures of customer-directory rows are also tallied separately so
+        // the pre-Z closeout drain can leave them out (they never block the
+        // Z). A 429 is not tallied: it stops the whole batch, so rows after
+        // it were never attempted and the Z must not proceed on that pass.
+        let closeout_exempt_row = is_closeout_exempt_row(&item.table_name, &item.module_type);
+
         let request_spec = {
             let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
             with_live_generic_claim(&db, &item, |db| prepare_request(db, &item))?
@@ -10449,6 +10995,7 @@ where
                 };
                 if applied.is_some() {
                     conflicts += 1;
+                    closeout_exempt.record_conflict(closeout_exempt_row);
                     telemetry.record_error(&item, "conflict", &reason_code, None);
                     errors.push(safe_sync_error(&item, &reason_code, None));
                 }
@@ -10488,6 +11035,8 @@ where
                         dead_lettered += 1;
                     }
                     failed += 1;
+                    closeout_exempt
+                        .record_failure(closeout_exempt_row, outcome.transitioned_to_dead_letter);
                     telemetry.record_error(&item, "failed", &reason, None);
                     errors.push(safe_sync_error(&item, &reason, None));
                 }
@@ -10615,6 +11164,7 @@ where
                     };
                     if applied.is_some() {
                         failed += 1;
+                        closeout_exempt.record_failure(closeout_exempt_row, false);
                         telemetry.record_error(&item, "failed", error_code, Some(status));
                         errors.push(safe_sync_error(&item, error_code, Some(status)));
                     }
@@ -10751,6 +11301,7 @@ where
 
                     if requires_operator_review {
                         conflicts += 1;
+                        closeout_exempt.record_conflict(closeout_exempt_row);
                         let error_message = format!(
                             "Conflict detected (HTTP {status}) requiring review: {}",
                             resolution
@@ -10788,7 +11339,8 @@ where
                 } else if (400..500).contains(&status) {
                     // Client error (not retriable)
                     let detailed_error = format!("HTTP {status}: {response_body}");
-                    let error_code = format!("HTTP_{status}_CLIENT_ERROR");
+                    let error_code =
+                        parity_client_error_code(&item.table_name, status, &response_body);
                     let resolved_at = Utc::now().to_rfc3339();
                     let outcome = {
                         let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
@@ -10842,6 +11394,8 @@ where
                         dead_lettered += 1;
                     }
                     failed += 1;
+                    closeout_exempt
+                        .record_failure(closeout_exempt_row, failure.transitioned_to_dead_letter);
                     telemetry.record_error(&item, "failed", &error_code, Some(status));
                     errors.push(safe_sync_error(&item, &error_code, Some(status)));
                 } else {
@@ -10962,6 +11516,8 @@ where
                         dead_lettered += 1;
                     }
                     failed += 1;
+                    closeout_exempt
+                        .record_failure(closeout_exempt_row, failure.transitioned_to_dead_letter);
                     telemetry.record_error(&item, "failed", &error_code, Some(status));
                     errors.push(safe_sync_error(&item, &error_code, Some(status)));
                 }
@@ -10993,6 +11549,8 @@ where
                     dead_lettered += 1;
                 }
                 failed += 1;
+                closeout_exempt
+                    .record_failure(closeout_exempt_row, failure.transitioned_to_dead_letter);
                 telemetry.record_error(&item, "failed", &error_code, None);
                 errors.push(safe_sync_error(&item, &error_code, None));
             }
@@ -11023,7 +11581,44 @@ where
         auth_outcome,
         batch_block,
         telemetry,
+        closeout_exempt,
     })
+}
+
+/// Longest server machine code kept on a failed customer-directory row.
+const PARITY_CLIENT_ERROR_CODE_MAX_LEN: usize = 64;
+
+/// The admin application's bounded machine `code` from a JSON error body
+/// (`INVALID_PHONE`, `NOT_FOUND`, ...). Display text is never kept.
+fn parity_server_machine_code(response_body: &str) -> Option<String> {
+    let parsed = serde_json::from_str::<Value>(response_body).ok()?;
+    let code = parsed.get("code")?.as_str()?.trim();
+    if code.is_empty()
+        || code.len() > PARITY_CLIENT_ERROR_CODE_MAX_LEN
+        || !code
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return None;
+    }
+    Some(code.to_ascii_uppercase())
+}
+
+/// Stored `error_message` for a non-retriable 4xx replay. Customer-directory
+/// rows keep the server's machine code (`HTTP_400_CLIENT_ERROR:INVALID_PHONE`)
+/// so Sync health can say *why* the row stopped; the 2026-09-28 incident
+/// could only be diagnosed from edge logs because the body was dropped. Every
+/// other table keeps the exact `HTTP_{status}_CLIENT_ERROR` code that payment
+/// recovery and diagnostics already match.
+fn parity_client_error_code(table_name: &str, status: u16, response_body: &str) -> String {
+    let base = format!("HTTP_{status}_CLIENT_ERROR");
+    if !matches!(table_name, "customers" | "customer_addresses") {
+        return base;
+    }
+    match parity_server_machine_code(response_body) {
+        Some(code) => format!("{base}:{code}"),
+        None => base,
+    }
 }
 
 /// Map a queue item's module type to the appropriate admin API endpoint.
@@ -21556,6 +22151,405 @@ mod tests {
         assert_eq!(status, "conflict", "the row must still be there for review");
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn seed_customer_directory_row(
+        conn: &Connection,
+        id: &str,
+        table_name: &str,
+        record_id: &str,
+        operation: &str,
+        status: &str,
+        error_message: Option<&str>,
+        data: Value,
+    ) {
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                id, table_name, record_id, operation, data, organization_id,
+                created_at, attempts, status, error_message, conflict_strategy, module_type
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 'org-live', datetime('now'), ?6, ?7, ?8,
+                'manual', 'customers')",
+            params![
+                id,
+                table_name,
+                record_id,
+                operation,
+                data.to_string(),
+                if status == "pending" { 0 } else { 1 },
+                status,
+                error_message
+            ],
+        )
+        .expect("seed customer-directory row");
+    }
+
+    fn directory_row(conn: &Connection, id: &str) -> (String, String, i64, Option<String>, Value) {
+        conn.query_row(
+            "SELECT record_id, status, attempts, error_message, data
+               FROM parity_sync_queue WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    serde_json::from_str::<Value>(&row.get::<_, String>(4)?).unwrap_or(Value::Null),
+                ))
+            },
+        )
+        .expect("read customer-directory row")
+    }
+
+    const OFFICE_CUSTOMER_ID: &str = "7d2c1b0a-9e8f-4a6b-8c5d-3e2f1a0b9c8d";
+
+    #[test]
+    fn a_synced_local_customer_is_replaced_by_the_office_record_everywhere() {
+        // Review 2026-09-29: the local `cust-` id was never replaced after its
+        // INSERT synced, so an edit PATCHed /api/pos/customers/cust-… (404) and
+        // addresses added in the meantime replayed to 404 forever.
+        let conn = test_connection();
+        let local = "cust-local-9";
+        assert_eq!(LOCAL_CUSTOMER_ALIAS_FIELD, "local_customer_id");
+        crate::db::set_setting(
+            &conn,
+            "local",
+            "customer_cache_v1",
+            &json!([{
+                "id": local,
+                "name": "Synthetic",
+                "phone": "6948128474",
+                "version": 2,
+                "addresses": [{ "id": "addr-local-9", "street_address": "Synthetic Street 9" }]
+            }])
+            .to_string(),
+        )
+        .expect("seed customer cache");
+        conn.execute(
+            "INSERT INTO orders (id, customer_id, status, created_at)
+             VALUES ('ord-9', ?1, 'completed', datetime('now'))",
+            params![local],
+        )
+        .expect("seed order");
+        seed_customer_directory_row(
+            &conn,
+            "addr-failed",
+            "customer_addresses",
+            "addr-local-10",
+            "INSERT",
+            "failed",
+            Some("HTTP_404_CLIENT_ERROR:NOT_FOUND"),
+            json!({ "customer_id": local, "street_address": "Second Street 10" }),
+        );
+        seed_customer_directory_row(
+            &conn,
+            "addr-pending",
+            "customer_addresses",
+            "addr-local-11",
+            "INSERT",
+            "pending",
+            None,
+            json!({ "customer_id": local, "street_address": "Third Street 11" }),
+        );
+        seed_customer_directory_row(
+            &conn,
+            "addr-invalid",
+            "customer_addresses",
+            "addr-local-12",
+            "INSERT",
+            "failed",
+            Some("HTTP_400_CLIENT_ERROR:INVALID_COORDINATES"),
+            json!({ "customer_id": local, "street_address": "Fourth Street 12" }),
+        );
+        seed_customer_directory_row(
+            &conn,
+            "legacy-update",
+            "customers",
+            local,
+            "UPDATE",
+            "failed",
+            Some("HTTP_404_CLIENT_ERROR"),
+            json!({ "name": "Renamed", "expected_version": 1 }),
+        );
+
+        let item = queue_item(
+            "customers",
+            "INSERT",
+            local,
+            json!({ "name": "Synthetic", "phone": "6948128474" }),
+        );
+        apply_success(
+            &conn,
+            &item,
+            Some(&json!({
+                "success": true,
+                "data": {
+                    "id": OFFICE_CUSTOMER_ID,
+                    "name": "Synthetic",
+                    "phone": "6948128474",
+                    "version": 1,
+                    "addresses": []
+                }
+            })),
+        )
+        .expect("apply customer insert success");
+
+        let cache = read_local_json_array_setting(&conn, "customer_cache_v1");
+        assert_eq!(cache.len(), 1, "the local placeholder must not survive");
+        assert_eq!(cache[0]["id"], OFFICE_CUSTOMER_ID);
+        assert_eq!(cache[0][LOCAL_CUSTOMER_ALIAS_FIELD], local);
+        assert_eq!(cache[0]["version"], 1);
+        assert_eq!(
+            cache[0]["addresses"][0]["street_address"], "Synthetic Street 9",
+            "an empty office address list keeps the cached addresses"
+        );
+
+        let order_customer: String = conn
+            .query_row(
+                "SELECT customer_id FROM orders WHERE id = 'ord-9'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("order customer");
+        assert_eq!(order_customer, OFFICE_CUSTOMER_ID);
+
+        // Failed only because the office did not know the local id: back to pending.
+        let (_, status, attempts, error, data) = directory_row(&conn, "addr-failed");
+        assert_eq!((status.as_str(), attempts, error), ("pending", 0, None));
+        assert_eq!(data["customer_id"], OFFICE_CUSTOMER_ID);
+        let (_, status, _, _, data) = directory_row(&conn, "addr-pending");
+        assert_eq!(status, "pending");
+        assert_eq!(data["customer_id"], OFFICE_CUSTOMER_ID);
+        // Any other failure is relinked but keeps its status for review.
+        let (_, status, _, error, data) = directory_row(&conn, "addr-invalid");
+        assert_eq!(status, "failed");
+        assert_eq!(
+            error.as_deref(),
+            Some("HTTP_400_CLIENT_ERROR:INVALID_COORDINATES")
+        );
+        assert_eq!(data["customer_id"], OFFICE_CUSTOMER_ID);
+        // A legacy UPDATE of the local id now targets the office record.
+        let (record_id, status, _, _, _) = directory_row(&conn, "legacy-update");
+        assert_eq!(record_id, OFFICE_CUSTOMER_ID);
+        assert_eq!(status, "pending");
+    }
+
+    #[test]
+    fn a_customer_insert_answer_without_a_new_id_changes_nothing() {
+        let conn = test_connection();
+        let cache = json!([{ "id": OFFICE_CUSTOMER_ID, "name": "Synthetic", "version": 3 }]);
+        crate::db::set_setting(&conn, "local", "customer_cache_v1", &cache.to_string())
+            .expect("seed customer cache");
+        let item = queue_item("customers", "INSERT", OFFICE_CUSTOMER_ID, json!({}));
+        for response in [
+            json!({ "success": true, "data": { "id": OFFICE_CUSTOMER_ID, "version": 4 } }),
+            json!({ "success": true }),
+            json!({ "success": true, "data": { "name": "No id" } }),
+        ] {
+            apply_success(&conn, &item, Some(&response)).expect("apply");
+            assert_eq!(
+                Value::Array(read_local_json_array_setting(&conn, "customer_cache_v1")),
+                cache,
+                "{response}"
+            );
+        }
+    }
+
+    #[test]
+    fn queued_rows_for_a_synced_local_customer_replay_against_the_office_record() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        crate::db::set_setting(
+            &conn,
+            "local",
+            "customer_cache_v1",
+            &json!([{
+                "id": OFFICE_CUSTOMER_ID,
+                "local_customer_id": "cust-late-1",
+                "name": "Synthetic",
+                "addresses": []
+            }])
+            .to_string(),
+        )
+        .expect("seed customer cache");
+
+        // Queued after the relink ran (or missed by it).
+        let address = queue_item(
+            "customer_addresses",
+            "INSERT",
+            "addr-late-1",
+            json!({ "customer_id": "cust-late-1", "street_address": "Late Street 1" }),
+        );
+        let request = match prepare_request(&conn, &address).expect("prepare address") {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+        assert_eq!(
+            request.endpoint,
+            format!("/api/pos/customers/{OFFICE_CUSTOMER_ID}/addresses")
+        );
+        let body = serde_json::from_str::<Value>(request.body.as_deref().expect("body"))
+            .expect("parse body");
+        assert_eq!(body["customer_id"], OFFICE_CUSTOMER_ID);
+
+        let update = queue_item(
+            "customers",
+            "UPDATE",
+            "cust-late-1",
+            json!({ "name": "Renamed", "expected_version": 1 }),
+        );
+        let request = match prepare_request(&conn, &update).expect("prepare update") {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+        assert_eq!(
+            request.endpoint,
+            format!("/api/pos/customers/{OFFICE_CUSTOMER_ID}")
+        );
+
+        // Without an alias the row keeps its own id, as before.
+        let unknown = queue_item(
+            "customers",
+            "UPDATE",
+            "cust-unknown-1",
+            json!({ "name": "Renamed", "expected_version": 1 }),
+        );
+        let request = match prepare_request(&conn, &unknown).expect("prepare unknown") {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+        assert_eq!(request.endpoint, "/api/pos/customers/cust-unknown-1");
+    }
+
+    #[test]
+    fn an_edit_folds_into_a_parked_customer_insert_and_requeues_it() {
+        let conn = test_connection();
+        seed_customer_directory_row(
+            &conn,
+            "ins-1",
+            "customers",
+            "cust-edit-1",
+            "INSERT",
+            "conflict",
+            Some("SERVER_CONFLICT_DUPLICATE"),
+            json!({ "name": "Synthetic", "phone": "6948128474", "email": "old@example.test" }),
+        );
+        let mut changes = Map::new();
+        changes.insert("phone".to_string(), json!("6948128475"));
+        changes.insert("email".to_string(), Value::Null);
+        // A create cannot lose its name or phone; a version is meaningless here.
+        changes.insert("name".to_string(), Value::Null);
+        changes.insert("expected_version".to_string(), json!(3));
+
+        let merged = merge_into_queued_customer_directory_insert(
+            &conn,
+            "customers",
+            "cust-edit-1",
+            &changes,
+        )
+        .expect("merge");
+        assert_eq!(
+            merged,
+            QueuedInsertMerge::Merged {
+                queue_id: "ins-1".to_string(),
+                requeued: true
+            }
+        );
+        let (_, status, attempts, error, data) = directory_row(&conn, "ins-1");
+        assert_eq!((status.as_str(), attempts, error), ("pending", 0, None));
+        assert_eq!(data, json!({ "name": "Synthetic", "phone": "6948128475" }));
+
+        // A pending row keeps its schedule; only its payload changes.
+        let mut rename = Map::new();
+        rename.insert("name".to_string(), json!("Renamed"));
+        assert_eq!(
+            merge_into_queued_customer_directory_insert(&conn, "customers", "cust-edit-1", &rename)
+                .expect("merge pending"),
+            QueuedInsertMerge::Merged {
+                queue_id: "ins-1".to_string(),
+                requeued: false
+            }
+        );
+
+        // An INSERT being sent is never touched.
+        conn.execute(
+            "UPDATE parity_sync_queue SET status = 'processing' WHERE id = 'ins-1'",
+            [],
+        )
+        .expect("claim");
+        let before = directory_row(&conn, "ins-1");
+        assert_eq!(
+            merge_into_queued_customer_directory_insert(
+                &conn,
+                "customers",
+                "cust-edit-1",
+                &changes
+            )
+            .expect("merge in flight"),
+            QueuedInsertMerge::InFlight
+        );
+        assert_eq!(directory_row(&conn, "ins-1"), before);
+
+        assert_eq!(
+            merge_into_queued_customer_directory_insert(&conn, "customers", "cust-none", &changes)
+                .expect("merge absent"),
+            QueuedInsertMerge::NotQueued
+        );
+        assert_eq!(
+            merge_into_queued_customer_directory_insert(&conn, "orders", "cust-edit-1", &changes)
+                .expect("other tables"),
+            QueuedInsertMerge::NotQueued
+        );
+    }
+
+    #[test]
+    fn a_deleted_unsent_address_is_withdrawn_unless_in_flight() {
+        let conn = test_connection();
+        seed_customer_directory_row(
+            &conn,
+            "addr-w-1",
+            "customer_addresses",
+            "addr-unsent-1",
+            "INSERT",
+            "failed",
+            Some("HTTP_404_CLIENT_ERROR:NOT_FOUND"),
+            json!({ "customer_id": "cust-w-1", "street_address": "Unsent Street 1" }),
+        );
+        assert_eq!(
+            withdraw_queued_customer_address_insert(&conn, "addr-unsent-1").expect("withdraw"),
+            QueuedInsertWithdrawal::Withdrawn {
+                queue_id: "addr-w-1".to_string()
+            }
+        );
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE id = 'addr-w-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(remaining, 0);
+
+        seed_customer_directory_row(
+            &conn,
+            "addr-w-2",
+            "customer_addresses",
+            "addr-unsent-2",
+            "INSERT",
+            "processing",
+            None,
+            json!({ "customer_id": "cust-w-1", "street_address": "Unsent Street 2" }),
+        );
+        assert_eq!(
+            withdraw_queued_customer_address_insert(&conn, "addr-unsent-2").expect("in flight"),
+            QueuedInsertWithdrawal::InFlight
+        );
+        assert_eq!(directory_row(&conn, "addr-w-2").1, "processing");
+        assert_eq!(
+            withdraw_queued_customer_address_insert(&conn, "addr-none").expect("absent"),
+            QueuedInsertWithdrawal::NotQueued
+        );
+    }
+
     fn seed_h8_sibling_test_row(conn: &Connection, id: &str, status: &str, attempts: i64) {
         conn.execute(
             "INSERT INTO parity_sync_queue (
@@ -24728,5 +25722,363 @@ mod tests {
             second_state, first_state,
             "audit redaction must be idempotent"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Closeout exemption for customer-directory rows + stored 4xx codes
+    // (incident 2026-09-28: a rejected customer INSERT blocked the Z)
+    // -----------------------------------------------------------------------
+
+    fn seed_parity_row(
+        conn: &Connection,
+        id: &str,
+        table_name: &str,
+        module_type: &str,
+        status: &str,
+        error_message: Option<&str>,
+    ) {
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                id, table_name, record_id, operation, data, organization_id,
+                created_at, attempts, status, error_message, module_type, conflict_strategy
+             ) VALUES (?1, ?2, ?3, 'INSERT', '{}', 'org-1',
+                datetime('now'), 1, ?4, ?5, ?6, 'manual')",
+            params![
+                id,
+                table_name,
+                format!("record-{id}"),
+                status,
+                error_message,
+                module_type
+            ],
+        )
+        .expect("seed parity row");
+    }
+
+    #[test]
+    fn closeout_exempt_rows_are_exactly_the_customer_directory() {
+        assert!(is_closeout_exempt_row("customers", "customers"));
+        assert!(is_closeout_exempt_row("customer_addresses", "customers"));
+        for (table, module) in [
+            ("customers", "orders"),
+            ("orders", "customers"),
+            ("payments", "payment"),
+            ("payment_adjustments", "payment_adjustment"),
+            ("z_reports", "z_report"),
+            ("staff_shifts", "shifts"),
+            ("cash_drawer_sessions", "shifts"),
+            ("shift_expenses", "shifts"),
+            ("staff_payments", "shifts"),
+            ("driver_earnings", "driver_earning"),
+            ("fiscal_submissions", "fiscal"),
+            ("loyalty_transactions", "loyalty"),
+            ("mystery_table", "mystery"),
+            ("Customers", "customers"),
+        ] {
+            assert!(
+                !is_closeout_exempt_row(table, module),
+                "{table}/{module} must stay fail-closed for the Z"
+            );
+        }
+    }
+
+    #[test]
+    fn closeout_blocking_status_leaves_out_only_customer_directory_rows() {
+        let conn = test_connection();
+        seed_parity_row(
+            &conn,
+            "c-failed",
+            "customers",
+            "customers",
+            "failed",
+            Some("HTTP_400_CLIENT_ERROR:INVALID_PHONE"),
+        );
+        seed_parity_row(
+            &conn,
+            "c-conflict",
+            "customers",
+            "customers",
+            "conflict",
+            Some("SERVER_CONFLICT_DUPLICATE: Customer already exists"),
+        );
+        seed_parity_row(
+            &conn,
+            "a-failed",
+            "customer_addresses",
+            "customers",
+            "failed",
+            Some("HTTP_404_CLIENT_ERROR:NOT_FOUND"),
+        );
+        seed_parity_row(
+            &conn,
+            "c-pending",
+            "customers",
+            "customers",
+            "pending",
+            None,
+        );
+
+        let everything = get_status(&conn).expect("queue-wide status");
+        assert_eq!(
+            (everything.total, everything.failed, everything.conflicts),
+            (4, 2, 1)
+        );
+        let closeout = get_closeout_blocking_status(&conn).expect("closeout status");
+        assert_eq!(
+            (
+                closeout.total,
+                closeout.pending,
+                closeout.failed,
+                closeout.conflicts
+            ),
+            (0, 0, 0, 0),
+            "customer-directory rows never block the Z"
+        );
+
+        seed_parity_row(
+            &conn,
+            "p-failed",
+            "payments",
+            "payment",
+            "failed",
+            Some("HTTP_422_CLIENT_ERROR"),
+        );
+        seed_parity_row(
+            &conn,
+            "o-conflict",
+            "orders",
+            "orders",
+            "conflict",
+            Some("Conflict"),
+        );
+        seed_parity_row(
+            &conn,
+            "mislabelled",
+            "customers",
+            "orders",
+            "failed",
+            Some("HTTP_400_CLIENT_ERROR"),
+        );
+        seed_parity_row(
+            &conn,
+            "unknown",
+            "mystery_table",
+            "mystery",
+            "failed",
+            Some("HTTP_400_CLIENT_ERROR"),
+        );
+        seed_parity_row(&conn, "z-pending", "z_reports", "z_report", "pending", None);
+
+        let closeout = get_closeout_blocking_status(&conn).expect("closeout status");
+        assert_eq!(closeout.total, 5);
+        assert_eq!(closeout.pending, 1);
+        assert_eq!(
+            closeout.failed, 3,
+            "payments, mislabelled customers and unknown stay blocking"
+        );
+        assert_eq!(closeout.conflicts, 1, "order conflicts stay blocking");
+        let everything = get_status(&conn).expect("queue-wide status");
+        assert_eq!(everything.total, 9, "Sync health still sees every row");
+        assert_eq!(everything.failed, 5);
+        assert_eq!(everything.conflicts, 2);
+    }
+
+    #[test]
+    fn closeout_exempt_listing_carries_bounded_codes_only() {
+        let conn = test_connection();
+        seed_parity_row(
+            &conn,
+            "c-failed",
+            "customers",
+            "customers",
+            "failed",
+            Some("HTTP_400_CLIENT_ERROR:INVALID_PHONE"),
+        );
+        seed_parity_row(
+            &conn,
+            "c-conflict",
+            "customers",
+            "customers",
+            "conflict",
+            Some("SERVER_CONFLICT_DUPLICATE: A customer with phone 6948128474 already exists"),
+        );
+        seed_parity_row(
+            &conn,
+            "p-failed",
+            "payments",
+            "payment",
+            "failed",
+            Some("HTTP_422_CLIENT_ERROR"),
+        );
+
+        let (total, items) = list_closeout_exempt_queue_items(&conn, 10).expect("list exempt rows");
+        assert_eq!(total, 2);
+        let codes = items
+            .iter()
+            .map(|item| (item.id.as_str(), item.error_code.as_deref()))
+            .collect::<Vec<_>>();
+        assert!(codes.contains(&("c-failed", Some("HTTP_400_CLIENT_ERROR:INVALID_PHONE"))));
+        assert!(codes.contains(&("c-conflict", Some("SERVER_CONFLICT_DUPLICATE"))));
+        assert!(
+            items.iter().all(|item| !item
+                .error_code
+                .as_deref()
+                .is_some_and(|code| code.contains("6948128474"))),
+            "server sentences (which may echo a phone) never reach the log"
+        );
+
+        let (total, limited) = list_closeout_exempt_queue_items(&conn, 1).expect("limited list");
+        assert_eq!((total, limited.len()), (2, 1));
+    }
+
+    #[test]
+    fn client_error_code_keeps_the_server_code_only_for_customer_rows() {
+        let invalid_phone =
+            r#"{"success":false,"error":"The phone number is invalid","code":"INVALID_PHONE"}"#;
+        assert_eq!(
+            parity_client_error_code("customers", 400, invalid_phone),
+            "HTTP_400_CLIENT_ERROR:INVALID_PHONE"
+        );
+        assert_eq!(
+            parity_client_error_code(
+                "customer_addresses",
+                404,
+                r#"{"success":false,"error":"Address not found","code":"not_found"}"#
+            ),
+            "HTTP_404_CLIENT_ERROR:NOT_FOUND"
+        );
+        // No code, an unsafe code, or a non-JSON platform page: the bare code.
+        assert_eq!(
+            parity_client_error_code(
+                "customers",
+                400,
+                r#"{"success":false,"error":"Missing phone or name"}"#
+            ),
+            "HTTP_400_CLIENT_ERROR"
+        );
+        assert_eq!(
+            parity_client_error_code(
+                "customers",
+                400,
+                r#"{"success":false,"code":"INVALID PHONE 6948128474!"}"#
+            ),
+            "HTTP_400_CLIENT_ERROR"
+        );
+        assert_eq!(
+            parity_client_error_code("customers", 404, "DEPLOYMENT_NOT_FOUND"),
+            "HTTP_404_CLIENT_ERROR"
+        );
+        // Every other table keeps the exact code payment recovery pins.
+        assert_eq!(
+            parity_client_error_code(
+                "payments",
+                422,
+                r#"{"success":false,"error":"Invalid","code":"PAYMENT_TOTAL_MISMATCH"}"#
+            ),
+            "HTTP_422_CLIENT_ERROR"
+        );
+        assert_eq!(
+            parity_client_error_code("orders", 400, invalid_phone),
+            "HTTP_400_CLIENT_ERROR"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_customer_replay_stores_the_server_code_and_counts_as_closeout_exempt() {
+        clear_terminal_identity();
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        let queue_id = enqueue_test_item(
+            &conn,
+            "customers",
+            "INSERT",
+            "cust-8a1b2c3d-0000-4000-8000-000000000001",
+            json!({
+                "name": "Synthetic Customer",
+                "phone": "69481284741",
+                "phone_country_code": "GR"
+            }),
+        );
+        let conn = std::sync::Mutex::new(conn);
+        let (base_url, mut requests, server) = spawn_mock_http_server(vec![MockResponse::json(
+            400,
+            r#"{"success":false,"error":"The phone number is invalid","code":"INVALID_PHONE"}"#,
+        )])
+        .await;
+
+        let result = process_queue(&conn, &base_url, "api-key")
+            .await
+            .expect("process queue");
+        server.await.expect("mock server finished");
+        let request = requests.recv().await.expect("captured replay request");
+        assert_eq!(request.request_line, "POST /api/pos/customers HTTP/1.1");
+
+        assert_eq!(result.failed, 1);
+        assert!(
+            !result.success,
+            "the queue-wide result still reports the failure"
+        );
+        assert_eq!(
+            result.closeout_exempt,
+            CloseoutExemptCounts {
+                failed: 1,
+                conflicts: 0,
+                dead_lettered: 0
+            }
+        );
+        let (status, error_message, next_retry_at): (String, Option<String>, Option<String>) = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT status, error_message, next_retry_at FROM parity_sync_queue WHERE id = ?1",
+                params![queue_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read failed customer row");
+        assert_eq!(status, "failed");
+        assert_eq!(
+            error_message.as_deref(),
+            Some("HTTP_400_CLIENT_ERROR:INVALID_PHONE")
+        );
+        assert!(next_retry_at.is_none());
+        let serialized = serde_json::to_value(&result).expect("serialize sync result");
+        assert!(
+            serialized.get("closeoutExempt").is_none(),
+            "the renderer SyncResult contract is unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn rate_limited_customer_row_is_not_closeout_exempt() {
+        // A 429 stops the whole batch; rows after it were never attempted, so
+        // the Z must not treat that pass as clean.
+        clear_terminal_identity();
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        enqueue_test_item(
+            &conn,
+            "customers",
+            "INSERT",
+            "cust-8a1b2c3d-0000-4000-8000-000000000002",
+            json!({
+                "name": "Synthetic Customer",
+                "phone": "6948128474",
+                "phone_country_code": "GR"
+            }),
+        );
+        let conn = std::sync::Mutex::new(conn);
+        let (base_url, _requests, server) = spawn_mock_http_server(vec![MockResponse::json(
+            429,
+            r#"{"success":false,"error":"Too many requests"}"#,
+        )])
+        .await;
+
+        let result = process_queue(&conn, &base_url, "api-key")
+            .await
+            .expect("process queue");
+        server.await.expect("mock server finished");
+
+        assert_eq!(result.failed, 1);
+        assert_eq!(result.closeout_exempt, CloseoutExemptCounts::default());
     }
 }

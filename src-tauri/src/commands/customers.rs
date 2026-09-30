@@ -19,6 +19,10 @@ struct CustomerLookupPayload {
 struct CustomerPhonePayload {
     #[serde(alias = "customerPhone", alias = "mobile", alias = "telephone")]
     phone: String,
+    /// Read only this terminal's customer cache: no privacy-tombstone sync,
+    /// no remote lookup and no order-history fallback (Caller ID popups).
+    #[serde(default)]
+    cache_only: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -731,6 +735,16 @@ fn upsert_customer_cache_entry(
                 );
             }
         }
+        if !obj.contains_key(sync_queue::LOCAL_CUSTOMER_ALIAS_FIELD) {
+            if let Some(local_id) =
+                value_str(existing_entry, &[sync_queue::LOCAL_CUSTOMER_ALIAS_FIELD])
+            {
+                obj.insert(
+                    sync_queue::LOCAL_CUSTOMER_ALIAS_FIELD.to_string(),
+                    serde_json::json!(local_id),
+                );
+            }
+        }
     }
 
     cache.retain(|entry| {
@@ -877,18 +891,174 @@ fn build_local_customer_from_source(source: &serde_json::Value) -> serde_json::V
     customer
 }
 
+/// How a failed customer write to the admin API is handled on this terminal.
+///
+/// Incident 2026-09-28 (Tomikro, desktop 1.4.118): symptom — the Z report
+/// refused with "Cannot close day: pre-Z-report sync failed:
+/// PARITY_SYNC_PARTIAL" after a cashier saved a customer whose 11-digit phone
+/// the server rejected. Root cause — `customer_create` treated *every* remote
+/// failure as "offline": it cached a local `cust-` customer, queued a parity
+/// INSERT and reported success, so a deterministic 400 INVALID_PHONE became a
+/// queue row that failed on every replay. Only failures a later replay can
+/// outlive are deferred now; a coded application rejection is returned to the
+/// form instead (regressions: `dto_tests::customer_create_*`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CustomerRemoteFailure {
+    /// Keep the offline-first path: cache locally, queue a parity row.
+    Deferrable,
+    /// Deterministic application rejection: a replay would fail the same way.
+    Rejected { status: Option<u16>, code: String },
+}
+
+/// Upper bound for a server machine code echoed back to the renderer.
+const CUSTOMER_REJECTION_CODE_MAX_LEN: usize = 64;
+
+/// A server `code` is echoed only when it is a bounded machine identifier.
+fn bounded_customer_rejection_code(code: &str) -> Option<String> {
+    let code = code.trim();
+    if code.is_empty()
+        || code.len() > CUSTOMER_REJECTION_CODE_MAX_LEN
+        || !code
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return None;
+    }
+    Some(code.to_ascii_uppercase())
+}
+
+/// Defer: transport and local failures, 408, 429, every 5xx, 401/403 (soft
+/// terminal-auth states the replay already rides out) and any 4xx whose body
+/// is not the admin application's JSON envelope (Vercel platform pages).
+/// Reject: every other 4xx that carries the application's JSON error body —
+/// INVALID_PHONE, COUNTRY_CONTEXT_REQUIRED, INVALID_COORDINATES, DUPLICATE,
+/// VERSION_MISMATCH, NOT_FOUND, missing-field and schema validation errors.
+fn classify_customer_remote_failure(error: &crate::api::AdminFetchError) -> CustomerRemoteFailure {
+    if error.is_transport_failure() {
+        return CustomerRemoteFailure::Deferrable;
+    }
+    let Some(status) = error.status() else {
+        return CustomerRemoteFailure::Deferrable;
+    };
+    match status {
+        401 | 403 | 408 | 429 => CustomerRemoteFailure::Deferrable,
+        400..=499 if error.has_app_error_body() => {
+            let code = error
+                .code()
+                .and_then(bounded_customer_rejection_code)
+                .unwrap_or_else(|| {
+                    if status == 404 {
+                        "NOT_FOUND".to_string()
+                    } else {
+                        format!("HTTP_{status}")
+                    }
+                });
+            CustomerRemoteFailure::Rejected {
+                status: Some(status),
+                code,
+            }
+        }
+        _ => CustomerRemoteFailure::Deferrable,
+    }
+}
+
+/// Renderer envelope for a rejected customer write. It carries only bounded
+/// codes: the server body may echo the customer record (a 409
+/// VERSION_MISMATCH does), so its display text never reaches the form.
+fn customer_rejection_response(status: Option<u16>, code: &str) -> serde_json::Value {
+    let conflict = status == Some(409) && code == "VERSION_MISMATCH";
+    let mut response = serde_json::json!({
+        "success": false,
+        "code": code,
+        "errorCode": code,
+        "status": status,
+        "error": code,
+    });
+    if conflict {
+        response["conflict"] = serde_json::json!(true);
+    }
+    response
+}
+
+/// `warning` of a customer write saved on this terminal and queued. A stable
+/// code: the remote error text can echo what the cashier typed (a 5xx
+/// constraint message carries the phone), so it never reaches the renderer.
+const CUSTOMER_SAVED_OFFLINE: &str = "CUSTOMER_SAVED_OFFLINE";
+/// `warning` of an address write saved on this terminal and queued.
+const CUSTOMER_ADDRESS_SAVED_OFFLINE: &str = "CUSTOMER_ADDRESS_SAVED_OFFLINE";
+/// Refusal: the customer exists only on this terminal and nothing queued
+/// will create it on the office (no queued INSERT, no synced record).
+const CUSTOMER_NOT_SYNCED: &str = "CUSTOMER_NOT_SYNCED";
+/// Refusal: the customer's (or address's) INSERT is being sent right now.
+/// Retrying a moment later reaches the office record.
+const CUSTOMER_SYNC_IN_PROGRESS: &str = "CUSTOMER_SYNC_IN_PROGRESS";
+/// Refusal: an edit of an office customer without a known record version
+/// (the office answers a PATCH without `expected_version` with a 400).
+const VERSION_REQUIRED: &str = "VERSION_REQUIRED";
+
+/// Ids this terminal mints for customers the office has not acknowledged
+/// (`build_local_customer_from_source`, `normalize_customer_for_cache`, the
+/// orders-history fallback of `customer_lookup_by_phone`).
+fn is_local_customer_id(customer_id: &str) -> bool {
+    customer_id.trim().starts_with("cust-")
+}
+
+/// The cached office record that replaced the local customer `local_id` when
+/// its INSERT synced (`sync_queue::LOCAL_CUSTOMER_ALIAS_FIELD`).
+fn cached_synced_alias<'a>(
+    cache: &'a [serde_json::Value],
+    local_id: &str,
+) -> Option<&'a serde_json::Value> {
+    cache.iter().find(|entry| {
+        value_str(entry, &[sync_queue::LOCAL_CUSTOMER_ALIAS_FIELD])
+            .is_some_and(|alias| alias == local_id)
+            && value_str(entry, &["id", "customerId"]).is_some_and(|id| id != local_id)
+    })
+}
+
+fn cached_customer_version(cache: &[serde_json::Value], customer_id: &str) -> Option<i64> {
+    cache
+        .iter()
+        .find(|entry| value_str(entry, &["id", "customerId"]).is_some_and(|id| id == customer_id))
+        .and_then(|entry| value_i64(entry, &["version"]))
+        .filter(|version| *version > 0)
+}
+
+/// Split a failed office call of a customer-directory write the same way as
+/// customer create/update: `Some` is the structured rejection to show
+/// (nothing cached or queued), `None` keeps the offline-first path.
+fn customer_write_rejection(
+    error: &crate::api::AdminFetchError,
+    write: &'static str,
+) -> Option<serde_json::Value> {
+    match classify_customer_remote_failure(error) {
+        CustomerRemoteFailure::Rejected { status, code } => {
+            tracing::warn!(
+                code = %code,
+                status = ?status,
+                write,
+                "Customer-directory write rejected by the admin API; nothing cached or queued"
+            );
+            Some(customer_rejection_response(status, &code))
+        }
+        CustomerRemoteFailure::Deferrable => {
+            tracing::info!(
+                status = ?error.status(),
+                transport = error.is_transport_failure(),
+                write,
+                "Customer-directory write saved on this terminal; queued for sync"
+            );
+            None
+        }
+    }
+}
+
 async fn sync_customer_create_remote(
     db: &db::DbState,
-    customer: &serde_json::Value,
-) -> Result<serde_json::Value, String> {
-    let body = build_remote_customer_create_body(customer);
-    let name = string_field(&body, &["name"]).ok_or("Missing customer name")?;
-    let phone = string_field(&body, &["phone"]).ok_or("Missing customer phone")?;
-    if name.is_empty() || phone.is_empty() {
-        return Err("Missing customer name or phone".into());
-    }
-
-    let response = crate::admin_fetch(Some(db), "/api/pos/customers", "POST", Some(body)).await?;
+    body: serde_json::Value,
+) -> Result<serde_json::Value, crate::api::AdminFetchError> {
+    let response =
+        crate::admin_fetch_detailed(Some(db), "/api/pos/customers", "POST", Some(body)).await?;
     let remote_customer = response
         .get("data")
         .cloned()
@@ -902,7 +1072,7 @@ async fn sync_customer_update_remote(
     customer_id: &str,
     updates: &serde_json::Value,
     expected_version: i64,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::api::AdminFetchError> {
     let mut body = build_remote_customer_update_body(updates);
     if body.as_object().map(|obj| obj.is_empty()).unwrap_or(true) {
         return Err("Missing customer updates".into());
@@ -918,7 +1088,7 @@ async fn sync_customer_update_remote(
     }
 
     let path = format!("/api/pos/customers/{customer_id}");
-    let response = crate::admin_fetch(Some(db), &path, "PATCH", Some(body)).await?;
+    let response = crate::admin_fetch_detailed(Some(db), &path, "PATCH", Some(body)).await?;
     let remote_customer = response
         .get("customer")
         .cloned()
@@ -1376,7 +1546,7 @@ async fn sync_customer_address_remote(
     db: &db::DbState,
     customer_id: &str,
     address: &serde_json::Value,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::api::AdminFetchError> {
     let body = build_remote_address_body(address);
     let street = string_field(&body, &["street_address"]).ok_or("Missing address street")?;
     if street.is_empty() {
@@ -1384,7 +1554,7 @@ async fn sync_customer_address_remote(
     }
 
     let path = format!("/api/pos/customers/{customer_id}/addresses");
-    let response = crate::admin_fetch(Some(db), &path, "POST", Some(body)).await?;
+    let response = crate::admin_fetch_detailed(Some(db), &path, "POST", Some(body)).await?;
     let remote_address = response
         .get("address")
         .cloned()
@@ -1397,14 +1567,14 @@ async fn sync_customer_address_update_remote(
     customer_id: &str,
     address_id: &str,
     address: &serde_json::Value,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::api::AdminFetchError> {
     let body = build_remote_address_body(address);
     if body.as_object().map(|obj| obj.is_empty()).unwrap_or(true) {
         return Err("Missing address updates".into());
     }
 
     let path = format!("/api/pos/customers/{customer_id}/addresses/{address_id}");
-    let response = crate::admin_fetch(Some(db), &path, "PATCH", Some(body)).await?;
+    let response = crate::admin_fetch_detailed(Some(db), &path, "PATCH", Some(body)).await?;
     let remote_address = response
         .get("address")
         .cloned()
@@ -1416,14 +1586,19 @@ async fn sync_customer_address_delete_remote(
     db: &db::DbState,
     customer_id: &str,
     address_id: &str,
-) -> Result<(), String> {
+) -> Result<(), crate::api::AdminFetchError> {
     let path = format!("/api/pos/customers/{customer_id}/addresses/{address_id}");
-    match crate::admin_fetch(Some(db), &path, "DELETE", None).await {
+    match crate::admin_fetch_detailed(Some(db), &path, "DELETE", None).await {
         Ok(_) => Ok(()),
-        // DELETE is idempotent: a missing remote address already has the requested state.
-        Err(error) if is_not_found_error(&error) => Ok(()),
+        // DELETE is idempotent: an address the office itself says it does not
+        // have is already gone. A platform 404 page is not that answer.
+        Err(error) if address_already_gone(&error) => Ok(()),
         Err(error) => Err(error),
     }
+}
+
+fn address_already_gone(error: &crate::api::AdminFetchError) -> bool {
+    error.status() == Some(404) && error.has_app_error_body()
 }
 
 #[tauri::command]
@@ -1525,12 +1700,61 @@ pub fn resolve_customer_id_from_cache_conn(
     None
 }
 
+/// Country calling codes stripped from Caller ID numbers longer than 10
+/// digits. Same list and order as the renderer's
+/// `normalizeCallerIdSearchPhone` so both sides derive the same lookup key.
+const CALLER_ID_COUNTRY_PREFIXES: [&str; 42] = [
+    "351", "355", "357", "358", "359", "370", "371", "372", "373", "374", "375", "376", "377",
+    "378", "380", "381", "382", "383", "385", "386", "387", "389", "420", "421", "423", "30", "31",
+    "32", "33", "34", "36", "39", "40", "41", "43", "44", "45", "46", "47", "48", "49", "90",
+];
+
+/// National number used to match a Caller ID number against stored
+/// customers: `+30 210 123 4567`, `00302101234567` and `2101234567` all map to
+/// `2101234567`.
+fn caller_id_phone_key(value: &str) -> String {
+    let mut digits: String = value.chars().filter(char::is_ascii_digit).collect();
+    if let Some(rest) = digits.strip_prefix("00") {
+        digits = rest.to_string();
+    }
+    if let Some(prefix) = CALLER_ID_COUNTRY_PREFIXES
+        .iter()
+        .find(|prefix| digits.len() > 10 && digits.starts_with(**prefix))
+    {
+        digits = digits[prefix.len()..].to_string();
+    }
+    match digits.strip_prefix('0') {
+        Some(rest) => rest.to_string(),
+        None => digits,
+    }
+}
+
+/// First cached customer whose phone matches `phone` as a Caller ID number.
+fn find_cached_customer_for_caller_id(
+    cache: Vec<serde_json::Value>,
+    phone: &str,
+) -> Option<serde_json::Value> {
+    let key = caller_id_phone_key(phone);
+    if key.len() < 3 {
+        return None;
+    }
+    cache.into_iter().find(|entry| {
+        value_str(entry, &["phone", "customerPhone", "mobile", "telephone"])
+            .is_some_and(|stored| caller_id_phone_key(&stored) == key)
+    })
+}
+
 #[tauri::command]
 pub async fn customer_lookup_by_phone(
     arg0: Option<serde_json::Value>,
     db: tauri::State<'_, db::DbState>,
 ) -> Result<serde_json::Value, String> {
     let payload = parse_phone_payload(arg0)?;
+    if payload.cache_only {
+        let cache = read_local_json_array(&db, "customer_cache_v1")?;
+        return Ok(find_cached_customer_for_caller_id(cache, &payload.phone)
+            .unwrap_or(serde_json::Value::Null));
+    }
     let phone = payload.phone;
     let phone_norm = normalize_phone(&phone);
     let _ = sync_customer_privacy_tombstones(&db).await;
@@ -1671,6 +1895,92 @@ pub async fn customer_search(
     Ok(serde_json::json!(matches))
 }
 
+/// Result of one customer create, before the Tauri events are emitted.
+struct CustomerCreateOutcome {
+    response: serde_json::Value,
+    /// The customer to announce through `customer_created`; `None` when the
+    /// write was rejected and nothing changed on this terminal.
+    created: Option<serde_json::Value>,
+}
+
+/// A create without a name or phone can never succeed on the server
+/// (`MISSING_PHONE_OR_NAME`), so it is refused before any request or queue row.
+fn customer_create_precondition_failure(body: &serde_json::Value) -> Option<&'static str> {
+    let has = |key: &str| string_field(body, &[key]).is_some_and(|value| !value.is_empty());
+    (!has("name") || !has("phone")).then_some("MISSING_PHONE_OR_NAME")
+}
+
+/// Apply the outcome of the remote create to this terminal's cache and parity
+/// queue. Kept free of the Tauri handle so the offline/reject split is tested
+/// against a real database.
+fn apply_customer_create_outcome(
+    db: &db::DbState,
+    payload: &serde_json::Value,
+    queue_payload: &serde_json::Value,
+    remote: Result<serde_json::Value, crate::api::AdminFetchError>,
+) -> Result<CustomerCreateOutcome, String> {
+    let remote_error = match remote {
+        Ok(remote_customer) => {
+            let mut cache = read_local_json_array(db, "customer_cache_v1")?;
+            let customer = upsert_customer_cache_entry(&mut cache, remote_customer);
+            write_local_json(db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
+            return Ok(CustomerCreateOutcome {
+                response: serde_json::json!({ "success": true, "data": customer }),
+                created: Some(customer),
+            });
+        }
+        Err(remote_error) => remote_error,
+    };
+
+    if let CustomerRemoteFailure::Rejected { status, code } =
+        classify_customer_remote_failure(&remote_error)
+    {
+        // The code alone names the failed contract; never log the phone.
+        tracing::warn!(
+            code = %code,
+            status = ?status,
+            "Customer create rejected by the admin API; nothing cached or queued"
+        );
+        return Ok(CustomerCreateOutcome {
+            response: customer_rejection_response(status, &code),
+            created: None,
+        });
+    }
+
+    let mut cache = read_local_json_array(db, "customer_cache_v1")?;
+    let customer =
+        upsert_customer_cache_entry(&mut cache, build_local_customer_from_source(payload));
+    write_local_json(db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
+
+    let customer_id =
+        value_str(&customer, &["id", "customerId"]).ok_or("Missing local customer id")?;
+    let version = value_i64(&customer, &["version"]).unwrap_or(1);
+    enqueue_customer_sync_item(
+        db,
+        "customers",
+        &customer_id,
+        "INSERT",
+        queue_payload,
+        version,
+    )?;
+
+    tracing::info!(
+        status = ?remote_error.status(),
+        transport = remote_error.is_transport_failure(),
+        "Customer create saved on this terminal; queued for sync"
+    );
+    Ok(CustomerCreateOutcome {
+        response: serde_json::json!({
+            "success": true,
+            "queued": true,
+            "offline": true,
+            "warning": CUSTOMER_SAVED_OFFLINE,
+            "data": customer
+        }),
+        created: Some(customer),
+    })
+}
+
 #[tauri::command]
 pub async fn customer_create(
     arg0: Option<serde_json::Value>,
@@ -1680,90 +1990,254 @@ pub async fn customer_create(
     let payload = arg0.unwrap_or(serde_json::json!({}));
     let queue_payload = build_remote_customer_create_body(&payload);
 
-    match sync_customer_create_remote(&db, &payload).await {
-        Ok(remote_customer) => {
-            let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
-            let customer = upsert_customer_cache_entry(&mut cache, remote_customer);
-            write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
-            let _ = app.emit("customer_created", customer.clone());
-            let _ = app.emit("customer_realtime_update", customer.clone());
-            Ok(serde_json::json!({ "success": true, "data": customer }))
-        }
-        Err(remote_error) => {
-            let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
-            let customer =
-                upsert_customer_cache_entry(&mut cache, build_local_customer_from_source(&payload));
-            write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
+    if let Some(code) = customer_create_precondition_failure(&queue_payload) {
+        return Ok(customer_rejection_response(None, code));
+    }
 
-            let customer_id =
-                value_str(&customer, &["id", "customerId"]).ok_or("Missing local customer id")?;
-            let version = value_i64(&customer, &["version"]).unwrap_or(1);
-            enqueue_customer_sync_item(
-                &db,
-                "customers",
-                &customer_id,
-                "INSERT",
-                &queue_payload,
-                version,
-            )?;
+    let remote = sync_customer_create_remote(&db, queue_payload.clone()).await;
+    let outcome = apply_customer_create_outcome(&db, &payload, &queue_payload, remote)?;
+    if let Some(customer) = outcome.created {
+        let _ = app.emit("customer_created", customer.clone());
+        let _ = app.emit("customer_realtime_update", customer);
+    }
+    Ok(outcome.response)
+}
 
-            let _ = app.emit("customer_created", customer.clone());
-            let _ = app.emit("customer_realtime_update", customer.clone());
-            Ok(serde_json::json!({
-                "success": true,
-                "queued": true,
-                "offline": true,
-                "warning": remote_error,
-                "data": customer
-            }))
+/// Result of one customer update, before the Tauri events are emitted.
+struct CustomerUpdateOutcome {
+    response: serde_json::Value,
+    /// Customer to announce through `customer_updated`.
+    updated: Option<serde_json::Value>,
+    /// Local version conflict to announce through `customer_sync_conflict`.
+    conflict: Option<serde_json::Value>,
+}
+
+impl CustomerUpdateOutcome {
+    fn answer(response: serde_json::Value) -> Self {
+        Self {
+            response,
+            updated: None,
+            conflict: None,
         }
+    }
+
+    fn refused(code: &str) -> Self {
+        Self::answer(customer_rejection_response(None, code))
     }
 }
 
-#[tauri::command]
-pub async fn customer_update(
-    arg0: Option<serde_json::Value>,
-    arg1: Option<serde_json::Value>,
-    arg2: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
-    app: tauri::AppHandle,
-) -> Result<serde_json::Value, String> {
-    let payload = parse_customer_update_payload(arg0, arg1, arg2)?;
-    let customer_id = payload.customer_id;
-    let updates = payload.updates;
-    let expected_version = payload.expected_version;
-    let mut remote_updates = build_remote_customer_update_body(&updates);
-    let mut remote_failure: Option<String> = None;
+/// Where one customer edit goes.
+enum CustomerUpdatePlan {
+    /// Answered on this terminal: folded into the queued INSERT of a customer
+    /// the office has not seen yet, or refused with a code.
+    Finished(CustomerUpdateOutcome),
+    /// PATCH the office record `customer_id` with this version.
+    Office {
+        customer_id: String,
+        expected_version: i64,
+    },
+    /// Nothing in the edit is for the office (the local ban flag): merge it
+    /// into the cached customer only, as before.
+    LocalOnly,
+}
 
-    if remote_updates
+/// The fields of an edit that belong in a queued customer INSERT: the create
+/// body's fields (name, phone, address, ...) plus the update body's explicit
+/// clears (`email: null`).
+fn queued_customer_insert_changes(
+    updates: &serde_json::Value,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut changes = build_remote_customer_create_body(updates)
         .as_object()
-        .map(|obj| !obj.is_empty())
-        .unwrap_or(false)
-    {
-        match sync_customer_update_remote(&db, &customer_id, &updates, expected_version).await {
-            Ok(remote_customer) => {
-                let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
-                let customer = upsert_customer_cache_entry(&mut cache, remote_customer);
-                write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
-                let _ = app.emit("customer_updated", customer.clone());
-                let _ = app.emit("customer_realtime_update", customer.clone());
-                return Ok(serde_json::json!({ "success": true, "data": customer }));
-            }
-            Err(error) => {
-                remote_failure = Some(error);
-                if expected_version > 0 {
-                    if let Some(obj) = remote_updates.as_object_mut() {
-                        obj.insert(
-                            "expected_version".to_string(),
-                            serde_json::json!(expected_version),
-                        );
-                    }
-                }
+        .cloned()
+        .unwrap_or_default();
+    if let Some(update_body) = build_remote_customer_update_body(updates).as_object() {
+        for (key, value) in update_body {
+            if !matches!(key.as_str(), "loyalty_points" | "is_active") {
+                changes.insert(key.clone(), value.clone());
             }
         }
     }
+    changes
+}
 
-    let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
+/// Merge an edit into the cached copy of a customer that so far exists only
+/// on this terminal. Returns the updated customer.
+fn merge_updates_into_cached_customer(
+    db: &db::DbState,
+    customer_id: &str,
+    updates: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let mut cache = read_local_json_array(db, "customer_cache_v1")?;
+    let mut merged: Option<serde_json::Value> = None;
+    for entry in &mut cache {
+        if value_str(entry, &["id", "customerId"]).as_deref() != Some(customer_id) {
+            continue;
+        }
+        if let (Some(dst), Some(src)) = (entry.as_object_mut(), updates.as_object()) {
+            for (key, value) in src {
+                if matches!(key.as_str(), "id" | "customerId" | "version") {
+                    continue;
+                }
+                dst.insert(key.clone(), value.clone());
+            }
+            let next_version = dst.get("version").and_then(|v| v.as_i64()).unwrap_or(1) + 1;
+            dst.insert("version".to_string(), serde_json::json!(next_version));
+            dst.insert(
+                "updatedAt".to_string(),
+                serde_json::json!(Utc::now().to_rfc3339()),
+            );
+        }
+        merged = Some(entry.clone());
+        break;
+    }
+    let customer = match merged {
+        Some(customer) => customer,
+        None => {
+            let mut source = if updates.is_object() {
+                updates.clone()
+            } else {
+                serde_json::json!({})
+            };
+            source["id"] = serde_json::json!(customer_id);
+            upsert_customer_cache_entry(&mut cache, build_local_customer_from_source(&source))
+        }
+    };
+    write_local_json(db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
+    Ok(customer)
+}
+
+/// Decide where a customer edit goes (review 2026-09-29, audit VERIFY (d)):
+/// - a local `cust-` customer whose INSERT is still queued (pending, failed
+///   or parked as a conflict): the edit is folded into that INSERT, because
+///   a PATCH to `/api/pos/customers/cust-…` can only answer 404 — and a
+///   failed INSERT goes back to pending with the corrected record;
+/// - its INSERT is being sent right now: `CUSTOMER_SYNC_IN_PROGRESS`;
+/// - its INSERT already synced: the edit goes to the office record that
+///   replaced it (the cached alias), with that record's version;
+/// - none of these: `CUSTOMER_NOT_SYNCED`;
+/// - an office customer edited without a known version (the renderer sends
+///   -1 for a customer object without one): the cached version, else
+///   `VERSION_REQUIRED` — a PATCH without `expected_version` is always a 400.
+fn plan_customer_update(
+    db: &db::DbState,
+    customer_id: &str,
+    updates: &serde_json::Value,
+    expected_version: i64,
+) -> Result<CustomerUpdatePlan, String> {
+    let remote_updates = build_remote_customer_update_body(updates);
+    if remote_updates
+        .as_object()
+        .map(|obj| obj.is_empty())
+        .unwrap_or(true)
+    {
+        return Ok(CustomerUpdatePlan::LocalOnly);
+    }
+
+    if is_local_customer_id(customer_id) {
+        let changes = queued_customer_insert_changes(updates);
+        let merge = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            sync_queue::merge_into_queued_customer_directory_insert(
+                &conn,
+                "customers",
+                customer_id,
+                &changes,
+            )?
+        };
+        return match merge {
+            sync_queue::QueuedInsertMerge::Merged { .. } => {
+                let customer = merge_updates_into_cached_customer(db, customer_id, updates)?;
+                Ok(CustomerUpdatePlan::Finished(CustomerUpdateOutcome {
+                    response: serde_json::json!({
+                        "success": true,
+                        "queued": true,
+                        "offline": true,
+                        "warning": CUSTOMER_SAVED_OFFLINE,
+                        "data": customer
+                    }),
+                    updated: Some(customer),
+                    conflict: None,
+                }))
+            }
+            sync_queue::QueuedInsertMerge::InFlight => Ok(CustomerUpdatePlan::Finished(
+                CustomerUpdateOutcome::refused(CUSTOMER_SYNC_IN_PROGRESS),
+            )),
+            sync_queue::QueuedInsertMerge::NotQueued => {
+                // Read after the merge attempt: an INSERT that synced a moment
+                // ago has already left its alias in the cache.
+                let cache = read_local_json_array(db, "customer_cache_v1")?;
+                let office = cached_synced_alias(&cache, customer_id).map(|entry| {
+                    (
+                        value_str(entry, &["id", "customerId"]).unwrap_or_default(),
+                        value_i64(entry, &["version"]).filter(|version| *version > 0),
+                    )
+                });
+                Ok(match office {
+                    Some((office_id, Some(version))) => CustomerUpdatePlan::Office {
+                        customer_id: office_id,
+                        expected_version: version,
+                    },
+                    Some((_, None)) => CustomerUpdatePlan::Finished(
+                        CustomerUpdateOutcome::refused(VERSION_REQUIRED),
+                    ),
+                    None => CustomerUpdatePlan::Finished(CustomerUpdateOutcome::refused(
+                        CUSTOMER_NOT_SYNCED,
+                    )),
+                })
+            }
+        };
+    }
+
+    let expected_version = if expected_version > 0 {
+        Some(expected_version)
+    } else {
+        cached_customer_version(
+            &read_local_json_array(db, "customer_cache_v1")?,
+            customer_id,
+        )
+    };
+    Ok(match expected_version {
+        Some(expected_version) => CustomerUpdatePlan::Office {
+            customer_id: customer_id.to_string(),
+            expected_version,
+        },
+        None => CustomerUpdatePlan::Finished(CustomerUpdateOutcome::refused(VERSION_REQUIRED)),
+    })
+}
+
+/// A 409 `VERSION_MISMATCH` carries the office's latest record. Cache it so
+/// reopening the customer (lookups read the cache first) edits the current
+/// version instead of hitting the same conflict again.
+fn refresh_customer_from_version_conflict(
+    db: &db::DbState,
+    customer_id: &str,
+    error: &crate::api::AdminFetchError,
+) -> Result<(), String> {
+    let Some(latest) = error
+        .app_error_field("customer")
+        .filter(|value| value.is_object())
+    else {
+        return Ok(());
+    };
+    if value_str(latest, &["id", "customerId"]).as_deref() != Some(customer_id) {
+        return Ok(());
+    }
+    let mut cache = read_local_json_array(db, "customer_cache_v1")?;
+    upsert_customer_cache_entry(&mut cache, latest.clone());
+    write_local_json(db, "customer_cache_v1", &serde_json::Value::Array(cache))
+}
+
+/// Apply an edit to this terminal's cache (and, when the office call was
+/// deferred, the parity queue) — the pre-existing local path.
+fn merge_customer_update_locally(
+    db: &db::DbState,
+    customer_id: &str,
+    updates: &serde_json::Value,
+    expected_version: i64,
+    queue_for_sync: bool,
+) -> Result<CustomerUpdateOutcome, String> {
+    let mut cache = read_local_json_array(db, "customer_cache_v1")?;
 
     let mut updated_customer: Option<serde_json::Value> = None;
     let mut conflict: Option<serde_json::Value> = None;
@@ -1801,52 +2275,169 @@ pub async fn customer_update(
     }
 
     if let Some(conflict_payload) = conflict {
-        let mut conflicts = read_local_json_array(&db, "customer_conflicts_v1")?;
+        let mut conflicts = read_local_json_array(db, "customer_conflicts_v1")?;
         conflicts.push(conflict_payload.clone());
         write_local_json(
-            &db,
+            db,
             "customer_conflicts_v1",
             &serde_json::Value::Array(conflicts),
         )?;
-        let _ = app.emit("customer_sync_conflict", conflict_payload.clone());
-        return Ok(serde_json::json!({
-            "success": false,
-            "conflict": true,
-            "error": "Version conflict",
-            "data": conflict_payload
-        }));
+        return Ok(CustomerUpdateOutcome {
+            response: serde_json::json!({
+                "success": false,
+                "conflict": true,
+                "error": "Version conflict",
+                "data": conflict_payload
+            }),
+            updated: None,
+            conflict: Some(conflict_payload),
+        });
     }
 
-    if let Some(customer) = updated_customer.clone() {
-        write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
-        let version = value_i64(&customer, &["version"]).unwrap_or(expected_version.max(1));
-        if remote_failure.is_some()
-            && remote_updates
-                .as_object()
-                .map(|obj| !obj.is_empty())
-                .unwrap_or(false)
-        {
-            enqueue_customer_sync_item(
-                &db,
-                "customers",
-                &customer_id,
-                "UPDATE",
-                &remote_updates,
-                version,
-            )?;
+    let Some(customer) = updated_customer else {
+        return Err("Customer not found".into());
+    };
+    write_local_json(db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
+    let mut remote_updates = build_remote_customer_update_body(updates);
+    let queued = queue_for_sync
+        && remote_updates
+            .as_object()
+            .map(|obj| !obj.is_empty())
+            .unwrap_or(false);
+    if queued {
+        if expected_version > 0 {
+            if let Some(obj) = remote_updates.as_object_mut() {
+                obj.insert(
+                    "expected_version".to_string(),
+                    serde_json::json!(expected_version),
+                );
+            }
         }
+        let version = value_i64(&customer, &["version"]).unwrap_or(expected_version.max(1));
+        enqueue_customer_sync_item(
+            db,
+            "customers",
+            customer_id,
+            "UPDATE",
+            &remote_updates,
+            version,
+        )?;
+    }
+    Ok(CustomerUpdateOutcome {
+        response: serde_json::json!({
+            "success": true,
+            "queued": queued,
+            "offline": queued,
+            "warning": queued.then_some(CUSTOMER_SAVED_OFFLINE),
+            "data": customer
+        }),
+        updated: Some(customer),
+        conflict: None,
+    })
+}
+
+/// Apply the office's answer to an edit (`None`: nothing was sent). Same
+/// split as customer_create: a coded application 4xx is shown on the form
+/// and never merged locally or queued (an UPDATE the office refuses fails on
+/// every replay); a transport, 5xx, 408/429, soft-auth or platform failure
+/// keeps the offline-first path.
+fn apply_customer_update_outcome(
+    db: &db::DbState,
+    customer_id: &str,
+    updates: &serde_json::Value,
+    expected_version: i64,
+    remote: Option<Result<serde_json::Value, crate::api::AdminFetchError>>,
+) -> Result<CustomerUpdateOutcome, String> {
+    let queue_for_sync = match remote {
+        Some(Ok(remote_customer)) => {
+            let mut cache = read_local_json_array(db, "customer_cache_v1")?;
+            let customer = upsert_customer_cache_entry(&mut cache, remote_customer);
+            write_local_json(db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
+            return Ok(CustomerUpdateOutcome {
+                response: serde_json::json!({ "success": true, "data": customer }),
+                updated: Some(customer),
+                conflict: None,
+            });
+        }
+        Some(Err(error)) => {
+            if let CustomerRemoteFailure::Rejected { status, code } =
+                classify_customer_remote_failure(&error)
+            {
+                tracing::warn!(
+                    code = %code,
+                    status = ?status,
+                    "Customer update rejected by the admin API; nothing merged or queued"
+                );
+                if code == "VERSION_MISMATCH" {
+                    refresh_customer_from_version_conflict(db, customer_id, &error)?;
+                }
+                return Ok(CustomerUpdateOutcome::answer(customer_rejection_response(
+                    status, &code,
+                )));
+            }
+            tracing::info!(
+                status = ?error.status(),
+                transport = error.is_transport_failure(),
+                "Customer update saved on this terminal; queued for sync"
+            );
+            true
+        }
+        None => false,
+    };
+    merge_customer_update_locally(db, customer_id, updates, expected_version, queue_for_sync)
+}
+
+fn emit_customer_update_outcome(app: &tauri::AppHandle, outcome: &CustomerUpdateOutcome) {
+    if let Some(conflict) = outcome.conflict.as_ref() {
+        let _ = app.emit("customer_sync_conflict", conflict.clone());
+    }
+    if let Some(customer) = outcome.updated.as_ref() {
         let _ = app.emit("customer_updated", customer.clone());
         let _ = app.emit("customer_realtime_update", customer.clone());
-        return Ok(serde_json::json!({
-            "success": true,
-            "queued": remote_failure.is_some(),
-            "offline": remote_failure.is_some(),
-            "warning": remote_failure,
-            "data": customer
-        }));
     }
+}
 
-    Err("Customer not found".into())
+#[tauri::command]
+pub async fn customer_update(
+    arg0: Option<serde_json::Value>,
+    arg1: Option<serde_json::Value>,
+    arg2: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    let payload = parse_customer_update_payload(arg0, arg1, arg2)?;
+    let updates = payload.updates;
+    let outcome = match plan_customer_update(
+        &db,
+        &payload.customer_id,
+        &updates,
+        payload.expected_version,
+    )? {
+        CustomerUpdatePlan::Finished(outcome) => outcome,
+        CustomerUpdatePlan::LocalOnly => apply_customer_update_outcome(
+            &db,
+            &payload.customer_id,
+            &updates,
+            payload.expected_version,
+            None,
+        )?,
+        CustomerUpdatePlan::Office {
+            customer_id,
+            expected_version,
+        } => {
+            let remote =
+                sync_customer_update_remote(&db, &customer_id, &updates, expected_version).await;
+            apply_customer_update_outcome(
+                &db,
+                &customer_id,
+                &updates,
+                expected_version,
+                Some(remote),
+            )?
+        }
+    };
+    emit_customer_update_outcome(&app, &outcome);
+    Ok(outcome.response)
 }
 
 #[tauri::command]
@@ -1867,6 +2458,311 @@ pub async fn customer_update_ban_status(
     .await
 }
 
+/// Keys of a queued customer INSERT that carry the customer's first address
+/// (see `build_remote_customer_create_body`).
+const CUSTOMER_INSERT_ADDRESS_KEYS: [&str; 12] = [
+    "address",
+    "city",
+    "postal_code",
+    "floor_number",
+    "name_on_ringer",
+    "coordinates",
+    "latitude",
+    "longitude",
+    "place_id",
+    "formatted_address",
+    "resolved_street_number",
+    "address_fingerprint",
+];
+
+/// Where an address write for a customer goes.
+#[derive(Debug, PartialEq)]
+enum CustomerAddressWritePlan {
+    /// The office knows the customer, directly or as the office record that
+    /// replaced a synced local customer: call it and classify failures.
+    Office(String),
+    /// A local customer whose INSERT is still queued. The office cannot know
+    /// it yet (a call can only answer 404), so the write stays on this
+    /// terminal: queued behind the INSERT and replayed against the office id
+    /// once it lands, or folded into the INSERT itself.
+    PendingLocal(String),
+    /// Refused on this terminal with a code.
+    Refused(serde_json::Value),
+}
+
+fn plan_customer_address_write(
+    db: &db::DbState,
+    customer_id: &str,
+) -> Result<CustomerAddressWritePlan, String> {
+    if !is_local_customer_id(customer_id) {
+        return Ok(CustomerAddressWritePlan::Office(customer_id.to_string()));
+    }
+    let cache = read_local_json_array(db, "customer_cache_v1")?;
+    if let Some(office_id) = cached_synced_alias(&cache, customer_id)
+        .and_then(|entry| value_str(entry, &["id", "customerId"]))
+    {
+        return Ok(CustomerAddressWritePlan::Office(office_id));
+    }
+    let queued = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        sync_queue::queued_customer_directory_insert_status(&conn, "customers", customer_id)?
+    };
+    Ok(match queued {
+        Some(_) => CustomerAddressWritePlan::PendingLocal(customer_id.to_string()),
+        None => CustomerAddressWritePlan::Refused(customer_rejection_response(
+            None,
+            CUSTOMER_NOT_SYNCED,
+        )),
+    })
+}
+
+/// Keys of an address edit that carry its point.
+const ADDRESS_POINT_KEYS: [&str; 3] = ["coordinates", "latitude", "longitude"];
+/// Keys of an address edit that change its text. The office rebuilds the
+/// formatted address from the text unless the edit brings one.
+const ADDRESS_TEXT_KEYS: [&str; 3] = ["street_address", "city", "postal_code"];
+
+/// What an address edit does to the address's point.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum AddressPointEdit {
+    /// No coordinate key, or a pair the office refuses (INVALID_COORDINATES):
+    /// the point stays as it is.
+    Untouched,
+    /// Explicit nulls, or (0, 0), which the office stores as "no point".
+    Clear,
+    Set {
+        lat: f64,
+        lng: f64,
+    },
+}
+
+fn coordinate_number(value: &serde_json::Value) -> Option<f64> {
+    match value {
+        serde_json::Value::Number(number) => number.as_f64(),
+        serde_json::Value::String(raw) => raw.trim().parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+fn wgs84_point(lat: Option<f64>, lng: Option<f64>) -> Option<(f64, f64)> {
+    let (lat, lng) = (lat?, lng?);
+    (lat.is_finite()
+        && lng.is_finite()
+        && (-90.0..=90.0).contains(&lat)
+        && (-180.0..=180.0).contains(&lng))
+    .then_some((lat, lng))
+}
+
+/// A point in the shapes an address carries in `coordinates`: `{lat, lng}`,
+/// `{latitude, longitude}`, a GeoJSON Point or a `[lng, lat]` position.
+fn address_point_from_value(value: &serde_json::Value) -> Option<(f64, f64)> {
+    if let Some(position) = value.as_array() {
+        return wgs84_point(
+            position.get(1).and_then(coordinate_number),
+            position.first().and_then(coordinate_number),
+        );
+    }
+    if value.get("type").and_then(|kind| kind.as_str()) == Some("Point") {
+        return value
+            .get("coordinates")
+            .filter(|position| position.is_array())
+            .and_then(address_point_from_value);
+    }
+    let field = |keys: [&str; 2]| {
+        keys.iter()
+            .find_map(|key| value.get(*key).and_then(coordinate_number))
+    };
+    wgs84_point(field(["lat", "latitude"]), field(["lng", "longitude"]))
+}
+
+/// The point a cached address has now: a readable `coordinates` first, then
+/// the flat pair (the office reads its rows the same way).
+fn stored_address_point(address: &serde_json::Value) -> Option<(f64, f64)> {
+    address
+        .get("coordinates")
+        .and_then(address_point_from_value)
+        .or_else(|| {
+            wgs84_point(
+                address.get("latitude").and_then(coordinate_number),
+                address.get("longitude").and_then(coordinate_number),
+            )
+        })
+}
+
+/// Read an address edit's coordinates the way the office PATCH
+/// (`/api/pos/customers/[id]/addresses/[addressId]`) reads them: no
+/// coordinate key leaves the point alone; `coordinates: null` without a flat
+/// pair, or `latitude: null` with `longitude: null`, clears it; otherwise a
+/// readable `coordinates` wins, then the flat pair, a missing half of which
+/// is the current point's. (0, 0) is stored as "no point".
+fn address_point_edit(edit: &serde_json::Value, current: Option<(f64, f64)>) -> AddressPointEdit {
+    if ADDRESS_POINT_KEYS
+        .iter()
+        .all(|key| edit.get(*key).is_none())
+    {
+        return AddressPointEdit::Untouched;
+    }
+    let coordinates = edit.get("coordinates");
+    let latitude = edit.get("latitude");
+    let longitude = edit.get("longitude");
+    let explicit_clear = (coordinates.is_some_and(serde_json::Value::is_null)
+        && latitude.is_none()
+        && longitude.is_none())
+        || (latitude.is_some_and(serde_json::Value::is_null)
+            && longitude.is_some_and(serde_json::Value::is_null));
+    if explicit_clear {
+        return AddressPointEdit::Clear;
+    }
+    let flat = |value: Option<&serde_json::Value>, current: Option<f64>| match value {
+        Some(value) => coordinate_number(value),
+        None => current,
+    };
+    let point = coordinates.and_then(address_point_from_value).or_else(|| {
+        wgs84_point(
+            flat(latitude, current.map(|(lat, _)| lat)),
+            flat(longitude, current.map(|(_, lng)| lng)),
+        )
+    });
+    match point {
+        Some((lat, lng)) if lat == 0.0 && lng == 0.0 => AddressPointEdit::Clear,
+        Some((lat, lng)) => AddressPointEdit::Set { lat, lng },
+        None => AddressPointEdit::Untouched,
+    }
+}
+
+/// Spell a deferred address edit for the queued INSERT it is folded into,
+/// where a `null` change removes the key. The INSERT carries the address
+/// whole, so an edit that moves or clears the point rewrites all three
+/// coordinate keys: `coordinates: null` alone would leave the INSERT's
+/// `latitude`/`longitude`, and the office would store the old point. An edit
+/// of the address text drops a formatted address that spelled the old text;
+/// the office rebuilds it from the new text, as its PATCH does.
+fn spell_address_edit_for_queued_insert(
+    edit: &serde_json::Value,
+    changes: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    match address_point_edit(edit, None) {
+        AddressPointEdit::Untouched => {}
+        AddressPointEdit::Clear => {
+            for key in ADDRESS_POINT_KEYS {
+                changes.insert(key.to_string(), serde_json::Value::Null);
+            }
+        }
+        AddressPointEdit::Set { lat, lng } => {
+            changes.insert(
+                "coordinates".to_string(),
+                serde_json::json!({ "lat": lat, "lng": lng }),
+            );
+            changes.insert("latitude".to_string(), serde_json::json!(lat));
+            changes.insert("longitude".to_string(), serde_json::json!(lng));
+        }
+    }
+    if ADDRESS_TEXT_KEYS.iter().any(|key| edit.get(*key).is_some())
+        && edit.get("formatted_address").is_none()
+    {
+        changes.insert("formatted_address".to_string(), serde_json::Value::Null);
+    }
+}
+
+/// Fold an address edit into the queued INSERT of that address (an address
+/// saved on this terminal and not sent yet), whoever its customer is.
+fn merge_address_edit_into_queued_address_insert(
+    db: &db::DbState,
+    address_id: &str,
+    queue_payload: &serde_json::Value,
+) -> Result<sync_queue::QueuedInsertMerge, String> {
+    let mut changes = queue_payload.as_object().cloned().unwrap_or_default();
+    spell_address_edit_for_queued_insert(queue_payload, &mut changes);
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    sync_queue::merge_into_queued_customer_directory_insert(
+        &conn,
+        "customer_addresses",
+        address_id,
+        &changes,
+    )
+}
+
+/// Fold an address edit into the queued INSERT of a local customer: the
+/// address it carries is the customer's first address.
+fn merge_address_edit_into_customer_insert(
+    db: &db::DbState,
+    customer_id: &str,
+    queue_payload: &serde_json::Value,
+) -> Result<sync_queue::QueuedInsertMerge, String> {
+    let mut changes = build_remote_customer_create_body(queue_payload)
+        .as_object()
+        .map(|body| {
+            body.iter()
+                .filter(|(key, _)| {
+                    CUSTOMER_INSERT_ADDRESS_KEYS.contains(&key.as_str()) || key.as_str() == "notes"
+                })
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect::<serde_json::Map<_, _>>()
+        })
+        .unwrap_or_default();
+    spell_address_edit_for_queued_insert(queue_payload, &mut changes);
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    sync_queue::merge_into_queued_customer_directory_insert(
+        &conn,
+        "customers",
+        customer_id,
+        &changes,
+    )
+}
+
+/// Remove an address that never reached the office from what is queued:
+/// its own queued INSERT is withdrawn, or — for a local customer — the
+/// address its customer INSERT carries is cleared. `Some(code)` refuses the
+/// delete because the row is being sent right now.
+fn remove_unsynced_address_from_queue(
+    db: &db::DbState,
+    plan: &CustomerAddressWritePlan,
+    address_id: &str,
+) -> Result<(bool, Option<&'static str>), String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    match sync_queue::withdraw_queued_customer_address_insert(&conn, address_id)? {
+        sync_queue::QueuedInsertWithdrawal::Withdrawn { .. } => return Ok((true, None)),
+        sync_queue::QueuedInsertWithdrawal::InFlight => {
+            return Ok((false, Some(CUSTOMER_SYNC_IN_PROGRESS)))
+        }
+        sync_queue::QueuedInsertWithdrawal::NotQueued => {}
+    }
+    let CustomerAddressWritePlan::PendingLocal(customer_id) = plan else {
+        return Ok((false, None));
+    };
+    drop(conn);
+    let carried_by_customer_insert = read_local_json_array(db, "customer_cache_v1")?
+        .iter()
+        .find(|entry| {
+            value_str(entry, &["id", "customerId"]).as_deref() == Some(customer_id.as_str())
+        })
+        .and_then(|entry| entry.get("addresses").and_then(|v| v.as_array()).cloned())
+        .is_some_and(|addresses| {
+            addresses.iter().any(|address| {
+                value_str(address, &["id", "addressId"]).as_deref() == Some(address_id)
+            })
+        });
+    if !carried_by_customer_insert {
+        return Ok((true, None));
+    }
+    let clears = CUSTOMER_INSERT_ADDRESS_KEYS
+        .iter()
+        .map(|key| (key.to_string(), serde_json::Value::Null))
+        .collect::<serde_json::Map<_, _>>();
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    Ok(
+        match sync_queue::merge_into_queued_customer_directory_insert(
+            &conn,
+            "customers",
+            customer_id,
+            &clears,
+        )? {
+            sync_queue::QueuedInsertMerge::InFlight => (false, Some(CUSTOMER_SYNC_IN_PROGRESS)),
+            _ => (true, None),
+        },
+    )
+}
+
 #[tauri::command]
 pub async fn customer_add_address(
     arg0: Option<serde_json::Value>,
@@ -1875,7 +2771,6 @@ pub async fn customer_add_address(
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let payload = parse_customer_address_payload(arg0, arg1)?;
-    let customer_id = payload.customer_id;
     let mut queue_payload = build_remote_address_body(&payload.address);
     if queue_payload
         .get("street_address")
@@ -1884,6 +2779,12 @@ pub async fn customer_add_address(
     {
         return Err("Missing address street".into());
     }
+    let (customer_id, office_knows_customer) =
+        match plan_customer_address_write(&db, &payload.customer_id)? {
+            CustomerAddressWritePlan::Refused(response) => return Ok(response),
+            CustomerAddressWritePlan::Office(customer_id) => (customer_id, true),
+            CustomerAddressWritePlan::PendingLocal(customer_id) => (customer_id, false),
+        };
     if let Some(obj) = queue_payload.as_object_mut() {
         obj.insert(
             "customer_id".to_string(),
@@ -1891,14 +2792,22 @@ pub async fn customer_add_address(
         );
     }
 
-    let (address, remote_failure) =
-        match sync_customer_address_remote(&db, &customer_id, &payload.address).await {
-            Ok(remote_address) => (normalize_address_for_cache(remote_address), None),
-            Err(error) => (
-                normalize_address_for_cache(queue_payload.clone()),
-                Some(error),
-            ),
-        };
+    let remote = if office_knows_customer {
+        Some(sync_customer_address_remote(&db, &customer_id, &payload.address).await)
+    } else {
+        None
+    };
+    let (address, deferred) = match remote {
+        Some(Ok(remote_address)) => (normalize_address_for_cache(remote_address), false),
+        Some(Err(error)) => {
+            if let Some(rejection) = customer_write_rejection(&error, "customer_add_address") {
+                return Ok(rejection);
+            }
+            (normalize_address_for_cache(queue_payload.clone()), true)
+        }
+        // Queued behind the local customer's own INSERT.
+        None => (normalize_address_for_cache(queue_payload.clone()), true),
+    };
 
     let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
     let mut updated: Option<serde_json::Value> = None;
@@ -1928,7 +2837,7 @@ pub async fn customer_add_address(
     let customer = if let Some(customer) = updated.clone() {
         write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
         Some(customer)
-    } else if remote_failure.is_none() {
+    } else if !deferred {
         if let Some(remote_customer) = sync_customer_fetch_remote_by_id(&db, &customer_id).await? {
             let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
             let customer = upsert_customer_cache_entry(&mut cache, remote_customer);
@@ -1948,7 +2857,7 @@ pub async fn customer_add_address(
         Some(customer)
     };
 
-    if remote_failure.is_some() {
+    if deferred {
         let address_id = value_str(&address, &["id", "addressId"]).ok_or("Missing address id")?;
         let version = value_i64(&address, &["version"]).unwrap_or(1);
         enqueue_customer_sync_item(
@@ -1961,14 +2870,15 @@ pub async fn customer_add_address(
         )?;
     }
 
+    let warning = deferred.then_some(CUSTOMER_ADDRESS_SAVED_OFFLINE);
     if let Some(customer) = customer.clone() {
         let _ = app.emit("customer_updated", customer.clone());
         let _ = app.emit("customer_realtime_update", customer.clone());
         return Ok(serde_json::json!({
             "success": true,
-            "queued": remote_failure.is_some(),
-            "offline": remote_failure.is_some(),
-            "warning": remote_failure,
+            "queued": deferred,
+            "offline": deferred,
+            "warning": warning,
             "data": address,
             "customer": customer
         }));
@@ -1976,11 +2886,276 @@ pub async fn customer_add_address(
 
     Ok(serde_json::json!({
         "success": true,
-        "queued": remote_failure.is_some(),
-        "offline": remote_failure.is_some(),
-        "warning": remote_failure,
+        "queued": deferred,
+        "offline": deferred,
+        "warning": warning,
         "data": address
     }))
+}
+
+/// A deferred address edit merged into the cached address the way the office
+/// PATCH applies it once the edit reaches it (desktop-address counterpart
+/// request, 2026-09-29). Symptom: a coordinates-only write-back, or any
+/// partial edit, that was queued (offline, 5xx, soft auth) or folded into a
+/// queued INSERT left the saved address without its street, city, postal
+/// code, floor and bell name. Root cause: the cached address was replaced by
+/// the partial edit. Now only the fields the edit carries change (a street
+/// also sets its `street` mirror, notes their `delivery_notes` mirror), the
+/// point follows `address_point_edit` (explicit nulls clear it), a text edit
+/// without its own formatted address rebuilds it from street, city and
+/// postal code as the office does, and the address keeps its office
+/// `version`: nothing reached the office yet.
+fn merge_address_edit_into_cached_address(
+    cached: &serde_json::Value,
+    edit: &serde_json::Value,
+) -> serde_json::Value {
+    let (Some(current), Some(changes)) = (cached.as_object(), edit.as_object()) else {
+        return normalize_address_for_cache(edit.clone());
+    };
+    let mut merged = current.clone();
+    for (key, value) in changes {
+        match key.as_str() {
+            "id" | "version" | "expected_version" | "coordinates" | "latitude" | "longitude" => {}
+            "street_address" => {
+                merged.insert("street_address".to_string(), value.clone());
+                merged.insert("street".to_string(), value.clone());
+            }
+            "notes" => {
+                merged.insert("notes".to_string(), value.clone());
+                merged.insert("delivery_notes".to_string(), value.clone());
+            }
+            "place_id" => {
+                merged.insert("place_id".to_string(), value.clone());
+                merged.insert("google_place_id".to_string(), value.clone());
+            }
+            _ => {
+                merged.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    if ADDRESS_TEXT_KEYS
+        .iter()
+        .any(|key| changes.contains_key(*key))
+        && !changes.contains_key("formatted_address")
+    {
+        let text_source = serde_json::Value::Object(merged.clone());
+        let text = [
+            string_field(&text_source, &["street_address", "street"]),
+            string_field(&text_source, &["city"]),
+            string_field(&text_source, &["postal_code", "postalCode"]),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(", ");
+        merged.insert(
+            "formatted_address".to_string(),
+            if text.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::json!(text)
+            },
+        );
+    }
+    match address_point_edit(edit, stored_address_point(cached)) {
+        AddressPointEdit::Untouched => {}
+        AddressPointEdit::Clear => {
+            for key in ADDRESS_POINT_KEYS {
+                merged.insert(key.to_string(), serde_json::Value::Null);
+            }
+        }
+        AddressPointEdit::Set { lat, lng } => {
+            merged.insert(
+                "coordinates".to_string(),
+                serde_json::json!({ "lat": lat, "lng": lng }),
+            );
+            merged.insert("latitude".to_string(), serde_json::json!(lat));
+            merged.insert("longitude".to_string(), serde_json::json!(lng));
+        }
+    }
+    merged.insert(
+        "updatedAt".to_string(),
+        serde_json::json!(Utc::now().to_rfc3339()),
+    );
+    serde_json::Value::Object(merged)
+}
+
+/// How an address edit lands in the cached customer.
+enum CachedAddressWrite {
+    /// The office's record: it replaces the cached address (a placeholder id
+    /// is replaced by the office's own).
+    Replace(serde_json::Value),
+    /// A deferred edit (queued, or folded into a queued INSERT): merged into
+    /// the cached address.
+    Merge(serde_json::Value),
+}
+
+/// Write an address edit into the cached customer `customer_id` and bump the
+/// customer's version. Returns the customer and the address as cached now,
+/// or `None` when the customer is not cached.
+fn write_address_edit_to_cached_customer(
+    cache: &mut [serde_json::Value],
+    customer_id: &str,
+    target_id: &str,
+    write: CachedAddressWrite,
+) -> Option<(serde_json::Value, serde_json::Value)> {
+    let customer = cache
+        .iter_mut()
+        .find(|entry| value_str(entry, &["id", "customerId"]).as_deref() == Some(customer_id))?
+        .as_object_mut()?;
+    let addresses = customer
+        .entry("addresses".to_string())
+        .or_insert_with(|| serde_json::json!([]));
+    if !addresses.is_array() {
+        *addresses = serde_json::json!([]);
+    }
+    let slots = addresses.as_array_mut()?;
+    let index = slots
+        .iter()
+        .position(|address| value_str(address, &["id", "addressId"]).as_deref() == Some(target_id));
+    let address = match (write, index) {
+        (CachedAddressWrite::Replace(address), _) => address,
+        (CachedAddressWrite::Merge(edit), Some(index)) => {
+            merge_address_edit_into_cached_address(&slots[index], &edit)
+        }
+        (CachedAddressWrite::Merge(edit), None) => normalize_address_for_cache(edit),
+    };
+    match index {
+        Some(index) => slots[index] = address.clone(),
+        None => slots.push(address.clone()),
+    }
+    let next_version = customer
+        .get("version")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(1)
+        + 1;
+    customer.insert("version".to_string(), serde_json::json!(next_version));
+    customer.insert(
+        "updatedAt".to_string(),
+        serde_json::json!(Utc::now().to_rfc3339()),
+    );
+    Some((serde_json::Value::Object(customer.clone()), address))
+}
+
+/// The body of an address edit as it is sent, queued or folded.
+fn build_address_update_queue_payload(
+    updates: &serde_json::Value,
+    customer_id: &str,
+    recreates_placeholder: bool,
+    expected_version: i64,
+) -> Result<serde_json::Value, String> {
+    let mut queue_payload = build_remote_address_body(updates);
+    if queue_payload
+        .as_object()
+        .map(|obj| obj.is_empty())
+        .unwrap_or(true)
+    {
+        return Err("Missing address updates".into());
+    }
+    if let Some(obj) = queue_payload.as_object_mut() {
+        obj.insert("customer_id".to_string(), serde_json::json!(customer_id));
+        if recreates_placeholder && !obj.contains_key("is_default") {
+            // A legacy fallback represents the customer's former single/default
+            // address. Migrating it to customer_addresses must keep that role.
+            obj.insert("is_default".to_string(), serde_json::json!(true));
+        }
+        if !recreates_placeholder && expected_version > 0 {
+            obj.insert(
+                "expected_version".to_string(),
+                serde_json::json!(expected_version),
+            );
+        }
+    }
+    Ok(queue_payload)
+}
+
+/// Result of one address edit on this terminal, before the events.
+enum AddressUpdateApplied {
+    /// The office refused the edit with a code: nothing cached or queued.
+    Rejected(serde_json::Value),
+    Written {
+        /// The address as cached now.
+        address: serde_json::Value,
+        /// The cached customer after the write; `None` when it is not cached.
+        customer: Option<serde_json::Value>,
+        /// The office has not seen the edit yet (queued or folded).
+        deferred: bool,
+    },
+}
+
+/// Apply the office's answer to an address edit (`None`: nothing was sent,
+/// the edit was folded into a queued INSERT). The office's record replaces
+/// the cached address; a coded application 4xx is shown and nothing is
+/// cached or queued; a deferrable failure (transport, 5xx, 408/429, soft
+/// auth, platform page) and a folded edit are merged into the cached address,
+/// and only the deferrable failure is queued.
+fn apply_customer_address_update_outcome(
+    db: &db::DbState,
+    customer_id: &str,
+    target_id: &str,
+    queue_payload: &serde_json::Value,
+    recreates_placeholder: bool,
+    expected_version: i64,
+    remote: Option<Result<serde_json::Value, crate::api::AdminFetchError>>,
+) -> Result<AddressUpdateApplied, String> {
+    let deferred_edit = || {
+        let mut edit = queue_payload.clone();
+        if let Some(obj) = edit.as_object_mut() {
+            obj.insert("id".to_string(), serde_json::json!(target_id));
+            obj.remove("expected_version");
+        }
+        edit
+    };
+    let (write, enqueue_update) = match remote {
+        Some(Ok(remote_address)) => (
+            CachedAddressWrite::Replace(normalize_address_for_cache(remote_address)),
+            false,
+        ),
+        Some(Err(error)) => {
+            if let Some(rejection) = customer_write_rejection(&error, "customer_update_address") {
+                return Ok(AddressUpdateApplied::Rejected(rejection));
+            }
+            (CachedAddressWrite::Merge(deferred_edit()), true)
+        }
+        None => (CachedAddressWrite::Merge(deferred_edit()), false),
+    };
+    let deferred = matches!(write, CachedAddressWrite::Merge(_));
+    let uncached_address = match &write {
+        CachedAddressWrite::Replace(address) => address.clone(),
+        CachedAddressWrite::Merge(edit) => normalize_address_for_cache(edit.clone()),
+    };
+
+    // Read after the office call, so a sync that landed meanwhile stays.
+    let mut cache = read_local_json_array(db, "customer_cache_v1")?;
+    let (address, customer) =
+        match write_address_edit_to_cached_customer(&mut cache, customer_id, target_id, write) {
+            Some((customer, address)) => {
+                write_local_json(db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
+                (address, Some(customer))
+            }
+            None => (uncached_address, None),
+        };
+
+    if enqueue_update {
+        let version = value_i64(&address, &["version"]).unwrap_or(expected_version.max(1));
+        enqueue_customer_sync_item(
+            db,
+            "customer_addresses",
+            target_id,
+            if recreates_placeholder {
+                "INSERT"
+            } else {
+                "UPDATE"
+            },
+            queue_payload,
+            version,
+        )?;
+    }
+    Ok(AddressUpdateApplied::Written {
+        address,
+        customer,
+        deferred,
+    })
 }
 
 #[tauri::command]
@@ -1995,10 +3170,10 @@ pub async fn customer_update_address(
     let target_id = payload.target_id;
     let updates = payload.updates;
     let expected_version = payload.expected_version;
-    let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
+    let cache = read_local_json_array(&db, "customer_cache_v1")?;
     let hinted_customer_id =
         value_str(&updates, &["customer_id", "customerId"]).map(|id| id.trim().to_string());
-    let customer_id = hinted_customer_id
+    let requested_customer_id = hinted_customer_id
         .filter(|id| !id.is_empty())
         .or_else(|| {
             cache.iter().find_map(|entry| {
@@ -2022,124 +3197,81 @@ pub async fn customer_update_address(
             })
         })
         .ok_or("Customer/address not found")?;
+    let (customer_id, office_knows_customer) =
+        match plan_customer_address_write(&db, &requested_customer_id)? {
+            CustomerAddressWritePlan::Refused(response) => return Ok(response),
+            CustomerAddressWritePlan::Office(customer_id) => (customer_id, true),
+            CustomerAddressWritePlan::PendingLocal(customer_id) => (customer_id, false),
+        };
     let recreates_placeholder = sync_queue::is_local_placeholder_id(&target_id);
 
-    let mut queue_payload = build_remote_address_body(&updates);
-    if queue_payload
-        .as_object()
-        .map(|obj| obj.is_empty())
-        .unwrap_or(true)
-    {
-        return Err("Missing address updates".into());
-    }
-    if let Some(obj) = queue_payload.as_object_mut() {
-        obj.insert(
-            "customer_id".to_string(),
-            serde_json::json!(customer_id.clone()),
-        );
-        if recreates_placeholder && !obj.contains_key("is_default") {
-            // A legacy fallback represents the customer's former single/default
-            // address. Migrating it to customer_addresses must keep that role.
-            obj.insert("is_default".to_string(), serde_json::json!(true));
-        }
-        if !recreates_placeholder && expected_version > 0 {
-            obj.insert(
-                "expected_version".to_string(),
-                serde_json::json!(expected_version),
-            );
-        }
-    }
+    let queue_payload = build_address_update_queue_payload(
+        &updates,
+        &customer_id,
+        recreates_placeholder,
+        expected_version,
+    )?;
 
-    let remote_result = if recreates_placeholder {
+    // An address saved on this terminal and not sent yet: the edit rides on
+    // its queued INSERT (a PATCH could only answer 404).
+    let folded_into_queue =
+        match merge_address_edit_into_queued_address_insert(&db, &target_id, &queue_payload)? {
+            sync_queue::QueuedInsertMerge::Merged { .. } => true,
+            sync_queue::QueuedInsertMerge::InFlight => {
+                return Ok(customer_rejection_response(None, CUSTOMER_SYNC_IN_PROGRESS))
+            }
+            sync_queue::QueuedInsertMerge::NotQueued if office_knows_customer => false,
+            sync_queue::QueuedInsertMerge::NotQueued => {
+                match merge_address_edit_into_customer_insert(&db, &customer_id, &queue_payload)? {
+                    sync_queue::QueuedInsertMerge::Merged { .. } => true,
+                    // The INSERT left the queue between the plan and now:
+                    // it is syncing or just synced; a retry reaches the office.
+                    _ => return Ok(customer_rejection_response(None, CUSTOMER_SYNC_IN_PROGRESS)),
+                }
+            }
+        };
+
+    let remote_result = if folded_into_queue {
+        None
+    } else if recreates_placeholder {
         // `legacy:<customer-id>` and `local-*` are renderer/local cache
         // placeholders, never canonical customer_addresses UUIDs. Sending
         // either to PATCH guarantees a 404. Materialize the edited address
         // through POST and replace the placeholder with the returned UUID.
-        sync_customer_address_remote(&db, &customer_id, &queue_payload).await
+        Some(sync_customer_address_remote(&db, &customer_id, &queue_payload).await)
     } else {
-        sync_customer_address_update_remote(&db, &customer_id, &target_id, &updates).await
+        Some(sync_customer_address_update_remote(&db, &customer_id, &target_id, &updates).await)
     };
-    let (address, remote_failure) = match remote_result {
-        Ok(remote_address) => (normalize_address_for_cache(remote_address), None),
-        Err(error) => {
-            let mut local_payload = queue_payload.clone();
-            if let Some(obj) = local_payload.as_object_mut() {
-                obj.insert("id".to_string(), serde_json::json!(target_id.clone()));
+    let (address, cached_customer, deferred) = match apply_customer_address_update_outcome(
+        &db,
+        &customer_id,
+        &target_id,
+        &queue_payload,
+        recreates_placeholder,
+        expected_version,
+        remote_result,
+    )? {
+        AddressUpdateApplied::Rejected(response) => return Ok(response),
+        AddressUpdateApplied::Written {
+            address,
+            customer,
+            deferred,
+        } => (address, customer, deferred),
+    };
+
+    let customer = match cached_customer {
+        Some(customer) => Some(customer),
+        None if !deferred => match sync_customer_fetch_remote_by_id(&db, &customer_id).await? {
+            Some(remote_customer) => {
+                let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
+                let customer = upsert_customer_cache_entry(&mut cache, remote_customer);
+                write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
+                Some(customer)
             }
-            (normalize_address_for_cache(local_payload), Some(error))
-        }
+            None => None,
+        },
+        None => None,
     };
-
-    let mut updated_customer: Option<serde_json::Value> = None;
-    let mut cache_touched = false;
-    for entry in &mut cache {
-        let cached_customer_id = value_str(entry, &["id", "customerId"]).unwrap_or_default();
-        if cached_customer_id != customer_id {
-            continue;
-        }
-
-        if let Some(obj) = entry.as_object_mut() {
-            let addresses = obj
-                .entry("addresses".to_string())
-                .or_insert_with(|| serde_json::json!([]));
-            if let Some(arr) = addresses.as_array_mut() {
-                let mut replaced = false;
-                for addr in arr.iter_mut() {
-                    let aid = value_str(addr, &["id", "addressId"]).unwrap_or_default();
-                    if aid == target_id {
-                        *addr = address.clone();
-                        replaced = true;
-                        break;
-                    }
-                }
-                if !replaced {
-                    arr.push(address.clone());
-                }
-            }
-
-            let next_version = obj.get("version").and_then(|v| v.as_i64()).unwrap_or(1) + 1;
-            obj.insert("version".to_string(), serde_json::json!(next_version));
-            obj.insert(
-                "updatedAt".to_string(),
-                serde_json::json!(Utc::now().to_rfc3339()),
-            );
-            updated_customer = Some(serde_json::Value::Object(obj.clone()));
-            cache_touched = true;
-        }
-        break;
-    }
-
-    let customer = if cache_touched {
-        write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
-        updated_customer.clone()
-    } else if remote_failure.is_none() {
-        if let Some(remote_customer) = sync_customer_fetch_remote_by_id(&db, &customer_id).await? {
-            let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
-            let customer = upsert_customer_cache_entry(&mut cache, remote_customer);
-            write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
-            Some(customer)
-        } else {
-            updated_customer.clone()
-        }
-    } else {
-        updated_customer.clone()
-    };
-
-    if remote_failure.is_some() {
-        let version = value_i64(&address, &["version"]).unwrap_or(expected_version.max(1));
-        enqueue_customer_sync_item(
-            &db,
-            "customer_addresses",
-            &target_id,
-            if recreates_placeholder {
-                "INSERT"
-            } else {
-                "UPDATE"
-            },
-            &queue_payload,
-            version,
-        )?;
-    }
 
     if let Some(customer) = customer.clone() {
         let _ = app.emit("customer_updated", customer.clone());
@@ -2148,9 +3280,9 @@ pub async fn customer_update_address(
 
     Ok(serde_json::json!({
         "success": true,
-        "queued": remote_failure.is_some(),
-        "offline": remote_failure.is_some(),
-        "warning": remote_failure,
+        "queued": deferred,
+        "offline": deferred,
+        "warning": deferred.then_some(CUSTOMER_ADDRESS_SAVED_OFFLINE),
         "data": address,
         "customer": customer
     }))
@@ -2164,11 +3296,36 @@ pub async fn customer_delete_address(
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let payload = parse_customer_delete_address_payload(arg0, arg1)?;
-    let customer_id = payload.customer_id;
     let address_id = payload.address_id;
-    let remote_failure = sync_customer_address_delete_remote(&db, &customer_id, &address_id)
-        .await
-        .err();
+    let plan = plan_customer_address_write(&db, &payload.customer_id)?;
+    if let CustomerAddressWritePlan::Refused(response) = plan {
+        return Ok(response);
+    }
+    let (never_reached_office, refusal) =
+        remove_unsynced_address_from_queue(&db, &plan, &address_id)?;
+    if let Some(code) = refusal {
+        return Ok(customer_rejection_response(None, code));
+    }
+    let (customer_id, deferred) = match plan {
+        CustomerAddressWritePlan::Office(customer_id) if !never_reached_office => {
+            let deferred =
+                match sync_customer_address_delete_remote(&db, &customer_id, &address_id).await {
+                    Ok(()) => false,
+                    Err(error) => {
+                        if let Some(rejection) =
+                            customer_write_rejection(&error, "customer_delete_address")
+                        {
+                            return Ok(rejection);
+                        }
+                        true
+                    }
+                };
+            (customer_id, deferred)
+        }
+        CustomerAddressWritePlan::Office(customer_id)
+        | CustomerAddressWritePlan::PendingLocal(customer_id) => (customer_id, false),
+        CustomerAddressWritePlan::Refused(response) => return Ok(response),
+    };
 
     let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
     let mut updated_customer: Option<serde_json::Value> = None;
@@ -2218,7 +3375,7 @@ pub async fn customer_delete_address(
         write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
     }
 
-    if remote_failure.is_some() {
+    if deferred {
         enqueue_customer_sync_item(
             &db,
             "customer_addresses",
@@ -2239,9 +3396,9 @@ pub async fn customer_delete_address(
 
     Ok(serde_json::json!({
         "success": true,
-        "queued": remote_failure.is_some(),
-        "offline": remote_failure.is_some(),
-        "warning": remote_failure,
+        "queued": deferred,
+        "offline": deferred,
+        "warning": deferred.then_some(CUSTOMER_ADDRESS_SAVED_OFFLINE),
         "data": {
             "id": address_id,
             "deleted": true
@@ -2357,6 +3514,54 @@ pub(crate) async fn resolve_duplicate_customer_conflict(
 #[cfg(test)]
 mod dto_tests {
     use super::*;
+
+    #[test]
+    fn caller_id_phone_key_matches_the_renderer_lookup_normalization() {
+        assert_eq!(caller_id_phone_key("+30 210 123 4567"), "2101234567");
+        assert_eq!(caller_id_phone_key("00302101234567"), "2101234567");
+        assert_eq!(caller_id_phone_key("210-123-4567"), "2101234567");
+        assert_eq!(caller_id_phone_key("+41779990214"), "779990214");
+        assert_eq!(caller_id_phone_key("0779990214"), "779990214");
+        // Ten-digit national numbers keep a leading country-code look-alike.
+        assert_eq!(caller_id_phone_key("3012345678"), "3012345678");
+    }
+
+    #[test]
+    fn caller_id_cache_lookup_finds_a_known_customer_without_any_request() {
+        let cache = vec![
+            serde_json::json!({ "id": "c-other", "name": "Other", "phone": "2109999999" }),
+            serde_json::json!({
+                "id": "c-known",
+                "name": "Μαρία",
+                "phone": "+30 210 123 4567",
+                "addresses": [{ "id": "a-1", "street_address": "Ερμού 1" }]
+            }),
+        ];
+
+        let found = find_cached_customer_for_caller_id(cache.clone(), "2101234567")
+            .expect("known caller resolves from the local cache");
+        assert_eq!(found["id"], "c-known");
+        assert_eq!(found["addresses"][0]["street_address"], "Ερμού 1");
+        assert_eq!(
+            find_cached_customer_for_caller_id(cache.clone(), "00302101234567").unwrap()["id"],
+            "c-known"
+        );
+        assert!(find_cached_customer_for_caller_id(cache.clone(), "6900000000").is_none());
+        assert!(find_cached_customer_for_caller_id(cache, "12").is_none());
+    }
+
+    #[test]
+    fn parse_phone_payload_accepts_the_cache_only_flag() {
+        let cache_only = parse_phone_payload(Some(serde_json::json!({
+            "phone": "2101234567",
+            "cacheOnly": true
+        })))
+        .expect("cache-only payload should parse");
+        assert!(cache_only.cache_only);
+        let plain = parse_phone_payload(Some(serde_json::json!("2101234567")))
+            .expect("plain payload should parse");
+        assert!(!plain.cache_only);
+    }
 
     #[test]
     fn parse_phone_payload_supports_string_and_alias() {
@@ -2726,5 +3931,1579 @@ mod dto_tests {
         setup_local_settings_table(&conn);
         let resolved = resolve_customer_id_from_cache_conn(&conn, "6971729133");
         assert!(resolved.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Customer write failure classification (incident 2026-09-28)
+    // -----------------------------------------------------------------------
+
+    use crate::api::AdminFetchError;
+
+    fn http_error(status: u16, body: &str) -> AdminFetchError {
+        AdminFetchError::from_http_response_for_test(status, body)
+    }
+
+    fn rejected(status: u16, code: &str) -> CustomerRemoteFailure {
+        CustomerRemoteFailure::Rejected {
+            status: Some(status),
+            code: code.to_string(),
+        }
+    }
+
+    #[test]
+    fn classifier_defers_connectivity_local_and_transient_failures() {
+        let deferrable = [
+            AdminFetchError::transport("Cannot reach admin dashboard"),
+            AdminFetchError::transport("Failed to read admin response body"),
+            AdminFetchError::statusless("TERMINAL_REBIND_PENDING"),
+            AdminFetchError::statusless("Invalid JSON from admin dashboard: eof"),
+            AdminFetchError::statusless("Customer API response missing data"),
+            http_error(408, r#"{"success":false,"error":"Request timeout"}"#),
+            http_error(
+                429,
+                r#"{"success":false,"error":"Too many requests","code":"RATE_LIMITED"}"#,
+            ),
+            http_error(500, r#"{"success":false,"error":"Server error"}"#),
+            http_error(502, "Bad gateway"),
+            http_error(
+                503,
+                r#"{"success":false,"error":"Unavailable","code":"CREATE_ERROR"}"#,
+            ),
+        ];
+        for error in deferrable {
+            assert_eq!(
+                classify_customer_remote_failure(&error),
+                CustomerRemoteFailure::Deferrable,
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn classifier_defers_soft_terminal_auth_and_platform_pages() {
+        let deferrable = [
+            http_error(401, r#"{"error":"Terminal API key is invalid"}"#),
+            http_error(
+                401,
+                r#"{"success":false,"error":"Terminal auth","code":"terminal_not_found"}"#,
+            ),
+            http_error(403, r#"{"error":"MODULE_REQUIRED"}"#),
+            http_error(
+                403,
+                r#"{"success":false,"error":"Terminal not authorized","code":"TERMINAL_INACTIVE"}"#,
+            ),
+            // Vercel platform failures in front of the app carry no app code.
+            http_error(
+                404,
+                "The deployment could not be found on Vercel.\n\nDEPLOYMENT_NOT_FOUND\n",
+            ),
+            http_error(402, "Payment required\n\nDEPLOYMENT_DISABLED\n"),
+            http_error(410, "<!DOCTYPE html><html><body>Gone</body></html>"),
+            http_error(
+                404,
+                r#"{"error":{"code":"DEPLOYMENT_NOT_FOUND","message":"not found"}}"#,
+            ),
+            http_error(400, ""),
+        ];
+        for error in deferrable {
+            assert_eq!(
+                classify_customer_remote_failure(&error),
+                CustomerRemoteFailure::Deferrable,
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn classifier_rejects_coded_application_4xx() {
+        let cases = [
+            (
+                http_error(
+                    400,
+                    r#"{"success":false,"error":"The phone number is invalid","code":"INVALID_PHONE"}"#,
+                ),
+                rejected(400, "INVALID_PHONE"),
+            ),
+            (
+                http_error(
+                    400,
+                    r#"{"success":false,"error":"Country required","code":"COUNTRY_CONTEXT_REQUIRED"}"#,
+                ),
+                rejected(400, "COUNTRY_CONTEXT_REQUIRED"),
+            ),
+            (
+                http_error(
+                    400,
+                    r#"{"success":false,"code":"INVALID_COORDINATES","error":"Invalid coordinates","reason":"out_of_range"}"#,
+                ),
+                rejected(400, "INVALID_COORDINATES"),
+            ),
+            (
+                http_error(
+                    409,
+                    r#"{"success":false,"error":"Customer already exists","code":"DUPLICATE"}"#,
+                ),
+                rejected(409, "DUPLICATE"),
+            ),
+            (
+                http_error(
+                    409,
+                    r#"{"success":false,"error":"Customer version mismatch","code":"VERSION_MISMATCH","customer":{"id":"c-1","name":"Synthetic Name","phone":"6948128474"}}"#,
+                ),
+                rejected(409, "VERSION_MISMATCH"),
+            ),
+            (
+                http_error(
+                    404,
+                    r#"{"success":false,"error":"Customer not found or access denied"}"#,
+                ),
+                rejected(404, "NOT_FOUND"),
+            ),
+            (
+                http_error(400, r#"{"success":false,"error":"Missing phone or name"}"#),
+                rejected(400, "HTTP_400"),
+            ),
+            (
+                http_error(
+                    400,
+                    r#"{"success":false,"error":"Validation error","details":{"fieldErrors":{"email":["Invalid email"]}}}"#,
+                ),
+                rejected(400, "HTTP_400"),
+            ),
+            (
+                http_error(422, r#"{"success":false,"error":"Unprocessable"}"#),
+                rejected(422, "HTTP_422"),
+            ),
+            // Lower-case codes are normalised; unbounded codes fall back.
+            (
+                http_error(409, r#"{"success":false,"error":"dup","code":"duplicate"}"#),
+                rejected(409, "DUPLICATE"),
+            ),
+            (
+                http_error(
+                    400,
+                    r#"{"success":false,"error":"bad","code":"<script>alert(1)</script>"}"#,
+                ),
+                rejected(400, "HTTP_400"),
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(
+                classify_customer_remote_failure(&error),
+                expected,
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejection_envelope_carries_codes_only_and_flags_version_conflicts() {
+        let conflict = customer_rejection_response(Some(409), "VERSION_MISMATCH");
+        assert_eq!(conflict["success"], false);
+        assert_eq!(conflict["conflict"], true);
+        assert_eq!(conflict["code"], "VERSION_MISMATCH");
+        assert_eq!(conflict["errorCode"], "VERSION_MISMATCH");
+        assert_eq!(conflict["status"], 409);
+        assert_eq!(conflict["error"], "VERSION_MISMATCH");
+
+        let invalid_phone = customer_rejection_response(Some(400), "INVALID_PHONE");
+        assert_eq!(invalid_phone["code"], "INVALID_PHONE");
+        assert!(invalid_phone.get("conflict").is_none());
+        assert!(invalid_phone.get("data").is_none());
+        assert!(invalid_phone.get("queued").is_none());
+
+        let local = customer_rejection_response(None, "MISSING_PHONE_OR_NAME");
+        assert_eq!(local["status"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn create_without_name_or_phone_is_refused_before_any_request() {
+        let body = build_remote_customer_create_body(&serde_json::json!({
+            "name": "  ",
+            "phone": "6948128474"
+        }));
+        assert_eq!(
+            customer_create_precondition_failure(&body),
+            Some("MISSING_PHONE_OR_NAME")
+        );
+        let body = build_remote_customer_create_body(&serde_json::json!({ "name": "Synthetic" }));
+        assert_eq!(
+            customer_create_precondition_failure(&body),
+            Some("MISSING_PHONE_OR_NAME")
+        );
+        let body = build_remote_customer_create_body(&serde_json::json!({
+            "name": "Synthetic",
+            "phone": "6948128474"
+        }));
+        assert_eq!(customer_create_precondition_failure(&body), None);
+    }
+
+    fn customer_test_db() -> db::DbState {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        db::run_migrations_for_test(&conn);
+        db::DbState {
+            conn: std::sync::Mutex::new(conn),
+            db_path: std::path::PathBuf::from(":memory:"),
+        }
+    }
+
+    fn seed_customer_cache(db: &db::DbState) -> serde_json::Value {
+        let cache = serde_json::json!([{
+            "id": "4f0c8d9e-2f7a-4d0b-9a55-0e7f2b3c1a10",
+            "name": "Existing Synthetic",
+            "phone": "6948128474",
+            "version": 3,
+            "addresses": []
+        }]);
+        write_local_json(db, "customer_cache_v1", &cache).expect("seed customer cache");
+        read_local_json_array(db, "customer_cache_v1")
+            .map(serde_json::Value::Array)
+            .expect("read seeded cache")
+    }
+
+    fn parity_rows(db: &db::DbState) -> Vec<(String, String, String, String)> {
+        let conn = db.conn.lock().expect("lock test db");
+        let mut stmt = conn
+            .prepare(
+                "SELECT table_name, operation, module_type, status
+                   FROM parity_sync_queue ORDER BY created_at",
+            )
+            .expect("prepare parity rows");
+        stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .expect("query parity rows")
+        .map(|row| row.expect("parity row"))
+        .collect()
+    }
+
+    fn create_payload(phone: &str) -> serde_json::Value {
+        serde_json::json!({
+            "name": "Synthetic Customer",
+            "phone": phone,
+            "phone_country_code": "GR",
+            "address": "Synthetic Street 1",
+            "city": "Thessaloniki"
+        })
+    }
+
+    #[test]
+    fn customer_create_rejected_invalid_phone_leaves_cache_and_queue_untouched() {
+        // Regression for the 2026-09-28 Z block: a 400 INVALID_PHONE used to
+        // create a local `cust-` customer plus a parity INSERT that failed on
+        // every replay and blocked the day close.
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = customer_test_db();
+        let seeded_cache = seed_customer_cache(&db);
+        let payload = create_payload("69481284741");
+        let queue_payload = build_remote_customer_create_body(&payload);
+
+        let outcome = apply_customer_create_outcome(
+            &db,
+            &payload,
+            &queue_payload,
+            Err(http_error(
+                400,
+                r#"{"success":false,"error":"The phone number is invalid","code":"INVALID_PHONE"}"#,
+            )),
+        )
+        .expect("rejection is a structured response, not an IPC error");
+
+        assert!(outcome.created.is_none(), "no customer_created event");
+        assert_eq!(outcome.response["success"], false);
+        assert_eq!(outcome.response["code"], "INVALID_PHONE");
+        assert_eq!(outcome.response["errorCode"], "INVALID_PHONE");
+        assert_eq!(outcome.response["status"], 400);
+        assert!(outcome.response.get("queued").is_none());
+        assert!(
+            !outcome.response.to_string().contains("69481284741"),
+            "the rejected phone never travels back in the envelope"
+        );
+        assert!(parity_rows(&db).is_empty(), "no parity row may be queued");
+        assert_eq!(
+            serde_json::Value::Array(
+                read_local_json_array(&db, "customer_cache_v1").expect("read cache")
+            ),
+            seeded_cache,
+            "customer_cache_v1 must be untouched"
+        );
+    }
+
+    #[test]
+    fn customer_create_rejected_duplicate_is_not_queued_either() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = customer_test_db();
+        let seeded_cache = seed_customer_cache(&db);
+        let payload = create_payload("6948128474");
+        let queue_payload = build_remote_customer_create_body(&payload);
+
+        let outcome = apply_customer_create_outcome(
+            &db,
+            &payload,
+            &queue_payload,
+            Err(http_error(
+                409,
+                r#"{"success":false,"error":"Customer already exists","code":"DUPLICATE"}"#,
+            )),
+        )
+        .expect("structured rejection");
+
+        assert_eq!(outcome.response["code"], "DUPLICATE");
+        assert_eq!(outcome.response["status"], 409);
+        assert!(parity_rows(&db).is_empty());
+        assert_eq!(
+            serde_json::Value::Array(read_local_json_array(&db, "customer_cache_v1").unwrap()),
+            seeded_cache
+        );
+    }
+
+    #[test]
+    fn customer_create_transport_failure_still_saves_offline_and_queues_one_insert() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = customer_test_db();
+        seed_customer_cache(&db);
+        let payload = create_payload("6948128474");
+        let queue_payload = build_remote_customer_create_body(&payload);
+
+        let outcome = apply_customer_create_outcome(
+            &db,
+            &payload,
+            &queue_payload,
+            Err(AdminFetchError::transport(
+                "Cannot reach admin dashboard at https://admin.example.test",
+            )),
+        )
+        .expect("offline save");
+
+        assert_eq!(outcome.response["success"], true);
+        assert_eq!(outcome.response["queued"], true);
+        assert_eq!(outcome.response["offline"], true);
+        assert_eq!(outcome.response["warning"], CUSTOMER_SAVED_OFFLINE);
+        assert!(
+            !outcome.response.to_string().contains("admin.example.test"),
+            "the remote error text never reaches the renderer"
+        );
+        let created = outcome.created.expect("offline customer is announced");
+        let local_id = created["id"].as_str().expect("local id").to_string();
+        assert!(local_id.starts_with("cust-"), "{local_id}");
+
+        assert_eq!(
+            parity_rows(&db),
+            vec![(
+                "customers".to_string(),
+                "INSERT".to_string(),
+                "customers".to_string(),
+                "pending".to_string()
+            )]
+        );
+        let cache = read_local_json_array(&db, "customer_cache_v1").expect("read cache");
+        assert_eq!(cache.len(), 2);
+        assert!(cache
+            .iter()
+            .any(|entry| entry["id"].as_str() == Some(local_id.as_str())));
+    }
+
+    #[test]
+    fn customer_create_server_error_and_platform_page_stay_offline_first() {
+        for error in [
+            http_error(
+                500,
+                r#"{"success":false,"error":"duplicate key value violates unique constraint: Key (organization_id, phone)=(org, 6948128474)"}"#,
+            ),
+            http_error(503, r#"{"success":false,"error":"Server error"}"#),
+            http_error(
+                404,
+                "The deployment could not be found on Vercel.\n\nDEPLOYMENT_NOT_FOUND\n",
+            ),
+            http_error(403, r#"{"error":"MODULE_REQUIRED"}"#),
+        ] {
+            let _keyring = crate::tests::fake_keyring::install_empty();
+            let db = customer_test_db();
+            let payload = create_payload("6948128474");
+            let queue_payload = build_remote_customer_create_body(&payload);
+            let outcome =
+                apply_customer_create_outcome(&db, &payload, &queue_payload, Err(error.clone()))
+                    .expect("offline save");
+            assert_eq!(outcome.response["queued"], true, "{error}");
+            assert_eq!(
+                outcome.response["warning"], CUSTOMER_SAVED_OFFLINE,
+                "{error}"
+            );
+            assert!(
+                !outcome.response["warning"]
+                    .to_string()
+                    .contains("6948128474"),
+                "{error}"
+            );
+            assert_eq!(parity_rows(&db).len(), 1, "{error}");
+        }
+    }
+
+    #[test]
+    fn customer_create_success_envelope_is_unchanged() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = customer_test_db();
+        let payload = create_payload("6948128474");
+        let queue_payload = build_remote_customer_create_body(&payload);
+        let outcome = apply_customer_create_outcome(
+            &db,
+            &payload,
+            &queue_payload,
+            Ok(serde_json::json!({
+                "id": "0b8e7f7c-3e2d-4b4a-8f36-3a1d5c9e2b71",
+                "name": "Synthetic Customer",
+                "phone": "6948128474",
+                "version": 1
+            })),
+        )
+        .expect("online create");
+
+        assert_eq!(outcome.response["success"], true);
+        assert_eq!(
+            outcome.response["data"]["id"],
+            "0b8e7f7c-3e2d-4b4a-8f36-3a1d5c9e2b71"
+        );
+        assert!(outcome.response.get("queued").is_none());
+        assert!(outcome.response.get("code").is_none());
+        assert!(outcome.created.is_some());
+        assert!(parity_rows(&db).is_empty());
+    }
+
+    const OFFICE_ID: &str = "4f0c8d9e-2f7a-4d0b-9a55-0e7f2b3c1a10";
+
+    /// A customer saved while offline: a local `cust-` id and a queued INSERT.
+    fn create_local_customer(db: &db::DbState, phone: &str) -> String {
+        let payload = create_payload(phone);
+        let queue_payload = build_remote_customer_create_body(&payload);
+        let outcome = apply_customer_create_outcome(
+            db,
+            &payload,
+            &queue_payload,
+            Err(AdminFetchError::transport("offline")),
+        )
+        .expect("offline create");
+        outcome.response["data"]["id"]
+            .as_str()
+            .expect("local id")
+            .to_string()
+    }
+
+    fn customer_row(
+        db: &db::DbState,
+        table_name: &str,
+        operation: &str,
+    ) -> Vec<(String, i64, Option<String>, serde_json::Value)> {
+        let conn = db.conn.lock().expect("lock test db");
+        let mut stmt = conn
+            .prepare(
+                "SELECT status, attempts, error_message, data FROM parity_sync_queue
+                  WHERE table_name = ?1 AND operation = ?2 ORDER BY created_at",
+            )
+            .expect("prepare rows");
+        stmt.query_map(rusqlite::params![table_name, operation], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(3)?)
+                    .unwrap_or(serde_json::Value::Null),
+            ))
+        })
+        .expect("query rows")
+        .map(|row| row.expect("row"))
+        .collect()
+    }
+
+    fn set_queue_state(db: &db::DbState, table_name: &str, status: &str, error: Option<&str>) {
+        let conn = db.conn.lock().expect("lock test db");
+        conn.execute(
+            "UPDATE parity_sync_queue SET status = ?1, attempts = 3, error_message = ?2
+              WHERE table_name = ?3",
+            rusqlite::params![status, error, table_name],
+        )
+        .expect("set queue state");
+    }
+
+    fn finished(plan: CustomerUpdatePlan) -> CustomerUpdateOutcome {
+        match plan {
+            CustomerUpdatePlan::Finished(outcome) => outcome,
+            CustomerUpdatePlan::Office { customer_id, .. } => {
+                panic!("expected a local answer, got an office PATCH to {customer_id}")
+            }
+            CustomerUpdatePlan::LocalOnly => panic!("expected a local answer, got LocalOnly"),
+        }
+    }
+
+    fn cached(db: &db::DbState, customer_id: &str) -> Option<serde_json::Value> {
+        read_local_json_array(db, "customer_cache_v1")
+            .expect("read cache")
+            .into_iter()
+            .find(|entry| entry["id"].as_str() == Some(customer_id))
+    }
+
+    #[test]
+    fn editing_an_offline_created_customer_folds_into_its_queued_insert() {
+        // Review 2026-09-29 / audit VERIFY (d): the edit used to PATCH
+        // /api/pos/customers/cust-… (404, now shown as NOT_FOUND) or queue an
+        // UPDATE that replayed to 404 forever.
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = customer_test_db();
+        let local_id = create_local_customer(&db, "6948128474");
+
+        let outcome = finished(
+            plan_customer_update(
+                &db,
+                &local_id,
+                &serde_json::json!({ "name": "Renamed Synthetic", "phone": "6948128475" }),
+                1,
+            )
+            .expect("plan"),
+        );
+
+        assert_eq!(outcome.response["success"], true);
+        assert_eq!(outcome.response["queued"], true);
+        assert_eq!(outcome.response["warning"], CUSTOMER_SAVED_OFFLINE);
+        let updated = outcome.updated.expect("customer_updated is announced");
+        assert_eq!(updated["id"], local_id.as_str());
+        assert_eq!(updated["name"], "Renamed Synthetic");
+        assert_eq!(
+            cached(&db, &local_id).expect("cached")["phone"],
+            "6948128475"
+        );
+
+        assert!(
+            customer_row(&db, "customers", "UPDATE").is_empty(),
+            "no UPDATE row"
+        );
+        let inserts = customer_row(&db, "customers", "INSERT");
+        assert_eq!(inserts.len(), 1);
+        assert_eq!(inserts[0].0, "pending");
+        assert_eq!(inserts[0].3["name"], "Renamed Synthetic");
+        assert_eq!(inserts[0].3["phone"], "6948128475");
+        assert_eq!(
+            inserts[0].3["address"], "Synthetic Street 1",
+            "untouched fields stay"
+        );
+    }
+
+    #[test]
+    fn fixing_the_phone_of_a_rejected_offline_create_requeues_it() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = customer_test_db();
+        let local_id = create_local_customer(&db, "69481284741");
+        // What 1.4.118 left behind: the INSERT failed with INVALID_PHONE.
+        set_queue_state(
+            &db,
+            "customers",
+            "failed",
+            Some("HTTP_400_CLIENT_ERROR:INVALID_PHONE"),
+        );
+
+        let outcome = finished(
+            plan_customer_update(
+                &db,
+                &local_id,
+                &serde_json::json!({ "phone": "6948128474" }),
+                -1,
+            )
+            .expect("plan"),
+        );
+        assert_eq!(outcome.response["success"], true);
+
+        let inserts = customer_row(&db, "customers", "INSERT");
+        assert_eq!(inserts.len(), 1);
+        let (status, attempts, error, data) = &inserts[0];
+        assert_eq!(
+            (status.as_str(), *attempts, error.as_deref()),
+            ("pending", 0, None)
+        );
+        assert_eq!(data["phone"], "6948128474");
+        assert!(customer_row(&db, "customers", "UPDATE").is_empty());
+    }
+
+    #[test]
+    fn a_parked_duplicate_insert_takes_the_edit_and_goes_back_to_pending() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = customer_test_db();
+        let local_id = create_local_customer(&db, "6948128474");
+        set_queue_state(
+            &db,
+            "customers",
+            "conflict",
+            Some("SERVER_CONFLICT_DUPLICATE"),
+        );
+
+        finished(
+            plan_customer_update(
+                &db,
+                &local_id,
+                &serde_json::json!({ "phone": "6948128476" }),
+                1,
+            )
+            .expect("plan"),
+        );
+        let inserts = customer_row(&db, "customers", "INSERT");
+        assert_eq!(inserts[0].0, "pending");
+        assert_eq!(inserts[0].3["phone"], "6948128476");
+    }
+
+    #[test]
+    fn an_insert_being_sent_is_not_edited_under_it() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = customer_test_db();
+        let local_id = create_local_customer(&db, "6948128474");
+        set_queue_state(&db, "customers", "processing", None);
+        let cache_before = read_local_json_array(&db, "customer_cache_v1").expect("cache");
+        let insert_before = customer_row(&db, "customers", "INSERT");
+
+        let outcome = finished(
+            plan_customer_update(&db, &local_id, &serde_json::json!({ "name": "Renamed" }), 1)
+                .expect("plan"),
+        );
+        assert_eq!(outcome.response["success"], false);
+        assert_eq!(outcome.response["code"], CUSTOMER_SYNC_IN_PROGRESS);
+        assert!(outcome.updated.is_none());
+        assert_eq!(customer_row(&db, "customers", "INSERT"), insert_before);
+        assert_eq!(
+            read_local_json_array(&db, "customer_cache_v1").expect("cache"),
+            cache_before
+        );
+    }
+
+    #[test]
+    fn a_synced_local_customer_is_edited_through_its_office_record() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = customer_test_db();
+        // What `sync_queue::remap_synced_local_customer` leaves behind.
+        write_local_json(
+            &db,
+            "customer_cache_v1",
+            &serde_json::json!([{
+                "id": OFFICE_ID,
+                "local_customer_id": "cust-synced-1",
+                "name": "Synthetic",
+                "version": 2
+            }]),
+        )
+        .expect("seed cache");
+
+        match plan_customer_update(
+            &db,
+            "cust-synced-1",
+            &serde_json::json!({ "name": "Renamed" }),
+            1,
+        )
+        .expect("plan")
+        {
+            CustomerUpdatePlan::Office {
+                customer_id,
+                expected_version,
+            } => {
+                assert_eq!(customer_id, OFFICE_ID);
+                assert_eq!(expected_version, 2, "the office record's own version");
+            }
+            _ => panic!("expected an office PATCH"),
+        }
+
+        // Nothing queued and nothing synced: the office cannot know it.
+        let outcome = finished(
+            plan_customer_update(
+                &db,
+                "cust-unknown-1",
+                &serde_json::json!({ "name": "Renamed" }),
+                1,
+            )
+            .expect("plan"),
+        );
+        assert_eq!(outcome.response["code"], CUSTOMER_NOT_SYNCED);
+        assert!(parity_rows(&db).is_empty());
+    }
+
+    #[test]
+    fn an_office_customer_edit_without_a_version_uses_the_cached_one() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = customer_test_db();
+        seed_customer_cache(&db);
+
+        match plan_customer_update(
+            &db,
+            OFFICE_ID,
+            &serde_json::json!({ "name": "Renamed" }),
+            -1,
+        )
+        .expect("plan")
+        {
+            CustomerUpdatePlan::Office {
+                customer_id,
+                expected_version,
+            } => {
+                assert_eq!(customer_id, OFFICE_ID);
+                assert_eq!(expected_version, 3);
+            }
+            _ => panic!("expected an office PATCH"),
+        }
+        // An explicit version is kept as sent.
+        match plan_customer_update(&db, OFFICE_ID, &serde_json::json!({ "name": "Renamed" }), 2)
+            .expect("plan")
+        {
+            CustomerUpdatePlan::Office {
+                expected_version, ..
+            } => assert_eq!(expected_version, 2),
+            _ => panic!("expected an office PATCH"),
+        }
+        // Unknown version and nothing cached: refused, never a 400 at the office.
+        let outcome = finished(
+            plan_customer_update(
+                &db,
+                "0b8e7f7c-3e2d-4b4a-8f36-3a1d5c9e2b71",
+                &serde_json::json!({ "name": "Renamed" }),
+                -1,
+            )
+            .expect("plan"),
+        );
+        assert_eq!(outcome.response["code"], VERSION_REQUIRED);
+        // The local ban flag never reaches the office.
+        assert!(matches!(
+            plan_customer_update(&db, OFFICE_ID, &serde_json::json!({ "isBanned": true }), -1)
+                .expect("plan"),
+            CustomerUpdatePlan::LocalOnly
+        ));
+    }
+
+    #[test]
+    fn a_version_conflict_refreshes_the_cached_customer_and_queues_nothing() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = customer_test_db();
+        seed_customer_cache(&db);
+
+        let outcome = apply_customer_update_outcome(
+            &db,
+            OFFICE_ID,
+            &serde_json::json!({ "name": "Renamed" }),
+            3,
+            Some(Err(http_error(
+                409,
+                &serde_json::json!({
+                    "success": false,
+                    "error": "Customer version mismatch",
+                    "code": "VERSION_MISMATCH",
+                    "customer": {
+                        "id": OFFICE_ID,
+                        "name": "Changed Elsewhere",
+                        "phone": "6948128474",
+                        "version": 5
+                    },
+                    "expected_version": 5,
+                    "received_version": 3
+                })
+                .to_string(),
+            ))),
+        )
+        .expect("structured rejection");
+
+        assert_eq!(outcome.response["success"], false);
+        assert_eq!(outcome.response["conflict"], true);
+        assert_eq!(outcome.response["code"], "VERSION_MISMATCH");
+        assert!(
+            !outcome.response.to_string().contains("Changed Elsewhere"),
+            "the record is cached, not echoed"
+        );
+        let refreshed = cached(&db, OFFICE_ID).expect("cached");
+        assert_eq!(refreshed["version"], 5);
+        assert_eq!(refreshed["name"], "Changed Elsewhere");
+        assert!(parity_rows(&db).is_empty());
+
+        // Reopened from the cache, the next edit plans against version 5.
+        match plan_customer_update(&db, OFFICE_ID, &serde_json::json!({ "name": "Again" }), -1)
+            .expect("plan")
+        {
+            CustomerUpdatePlan::Office {
+                expected_version, ..
+            } => assert_eq!(expected_version, 5),
+            _ => panic!("expected an office PATCH"),
+        }
+    }
+
+    #[test]
+    fn a_coded_update_rejection_is_shown_and_a_network_failure_is_queued() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = customer_test_db();
+        let seeded = seed_customer_cache(&db);
+
+        let rejected = apply_customer_update_outcome(
+            &db,
+            OFFICE_ID,
+            &serde_json::json!({ "phone": "69481284741" }),
+            3,
+            Some(Err(http_error(
+                400,
+                r#"{"success":false,"error":"The phone number is invalid","code":"INVALID_PHONE"}"#,
+            ))),
+        )
+        .expect("structured rejection");
+        assert_eq!(rejected.response["code"], "INVALID_PHONE");
+        assert!(rejected.updated.is_none());
+        assert!(parity_rows(&db).is_empty());
+        assert_eq!(
+            serde_json::Value::Array(read_local_json_array(&db, "customer_cache_v1").unwrap()),
+            seeded
+        );
+
+        let deferred = apply_customer_update_outcome(
+            &db,
+            OFFICE_ID,
+            &serde_json::json!({ "name": "Renamed" }),
+            3,
+            Some(Err(AdminFetchError::transport("offline"))),
+        )
+        .expect("offline update");
+        assert_eq!(deferred.response["success"], true);
+        assert_eq!(deferred.response["queued"], true);
+        assert_eq!(deferred.response["warning"], CUSTOMER_SAVED_OFFLINE);
+        let updates = customer_row(&db, "customers", "UPDATE");
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].3["expected_version"], 3);
+        assert_eq!(updates[0].3["name"], "Renamed");
+    }
+
+    #[test]
+    fn address_writes_resolve_where_their_customer_lives() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = customer_test_db();
+
+        assert_eq!(
+            plan_customer_address_write(&db, OFFICE_ID).expect("office"),
+            CustomerAddressWritePlan::Office(OFFICE_ID.to_string())
+        );
+
+        let local_id = create_local_customer(&db, "6948128474");
+        assert_eq!(
+            plan_customer_address_write(&db, &local_id).expect("pending local"),
+            CustomerAddressWritePlan::PendingLocal(local_id.clone())
+        );
+
+        match plan_customer_address_write(&db, "cust-unknown-2").expect("unknown") {
+            CustomerAddressWritePlan::Refused(response) => {
+                assert_eq!(response["code"], CUSTOMER_NOT_SYNCED)
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+
+        let mut cache = read_local_json_array(&db, "customer_cache_v1").expect("cache");
+        cache.push(serde_json::json!({
+            "id": "0b8e7f7c-3e2d-4b4a-8f36-3a1d5c9e2b71",
+            "local_customer_id": "cust-synced-2",
+            "version": 1
+        }));
+        write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))
+            .expect("seed alias");
+        assert_eq!(
+            plan_customer_address_write(&db, "cust-synced-2").expect("alias"),
+            CustomerAddressWritePlan::Office("0b8e7f7c-3e2d-4b4a-8f36-3a1d5c9e2b71".to_string())
+        );
+    }
+
+    #[test]
+    fn an_address_edit_of_an_unsent_address_rides_on_its_queued_insert() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = customer_test_db();
+        let queue_payload = serde_json::json!({
+            "customer_id": OFFICE_ID,
+            "street_address": "Unsent Street 5",
+            "city": "Thessaloniki"
+        });
+        enqueue_customer_sync_item(
+            &db,
+            "customer_addresses",
+            "addr-unsent-5",
+            "INSERT",
+            &queue_payload,
+            1,
+        )
+        .expect("queue address insert");
+
+        let edit = serde_json::json!({
+            "customer_id": OFFICE_ID,
+            "street_address": "Unsent Street 7",
+            "expected_version": 2
+        });
+        assert!(matches!(
+            merge_address_edit_into_queued_address_insert(&db, "addr-unsent-5", &edit)
+                .expect("merge"),
+            sync_queue::QueuedInsertMerge::Merged { .. }
+        ));
+        let inserts = customer_row(&db, "customer_addresses", "INSERT");
+        assert_eq!(inserts.len(), 1);
+        assert_eq!(inserts[0].3["street_address"], "Unsent Street 7");
+        assert_eq!(inserts[0].3["city"], "Thessaloniki");
+        assert!(inserts[0].3.get("expected_version").is_none());
+        assert!(customer_row(&db, "customer_addresses", "UPDATE").is_empty());
+    }
+
+    #[test]
+    fn an_address_edit_of_an_offline_customer_rides_on_the_customer_insert() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = customer_test_db();
+        let local_id = create_local_customer(&db, "6948128474");
+
+        let edit = serde_json::json!({
+            "customer_id": local_id,
+            "street_address": "Other Street 3",
+            "city": "Athens",
+            "floor_number": "2",
+            "latitude": 37.98,
+            "longitude": 23.72
+        });
+        assert!(matches!(
+            merge_address_edit_into_customer_insert(&db, &local_id, &edit).expect("merge"),
+            sync_queue::QueuedInsertMerge::Merged { .. }
+        ));
+        let inserts = customer_row(&db, "customers", "INSERT");
+        let data = &inserts[0].3;
+        assert_eq!(data["address"], "Other Street 3");
+        assert_eq!(data["city"], "Athens");
+        assert_eq!(data["floor_number"], "2");
+        assert_eq!(data["latitude"], 37.98);
+        assert_eq!(
+            data["name"], "Synthetic Customer",
+            "the customer fields stay"
+        );
+        assert!(data.get("customer_id").is_none());
+        assert!(customer_row(&db, "customer_addresses", "UPDATE").is_empty());
+    }
+
+    #[test]
+    fn deleting_an_address_that_never_reached_the_office_changes_only_the_queue() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = customer_test_db();
+
+        // An office customer's address saved offline and never sent.
+        enqueue_customer_sync_item(
+            &db,
+            "customer_addresses",
+            "addr-unsent-8",
+            "INSERT",
+            &serde_json::json!({ "customer_id": OFFICE_ID, "street_address": "Unsent Street 8" }),
+            1,
+        )
+        .expect("queue address insert");
+        let office_plan = CustomerAddressWritePlan::Office(OFFICE_ID.to_string());
+        assert_eq!(
+            remove_unsynced_address_from_queue(&db, &office_plan, "addr-unsent-8")
+                .expect("withdraw"),
+            (true, None)
+        );
+        assert!(customer_row(&db, "customer_addresses", "INSERT").is_empty());
+        // An address the office has: nothing in the queue to change.
+        assert_eq!(
+            remove_unsynced_address_from_queue(&db, &office_plan, "addr-office-1")
+                .expect("office address"),
+            (false, None)
+        );
+
+        // The first address of an offline-created customer rides on its INSERT.
+        let local_id = create_local_customer(&db, "6948128474");
+        let address_id = cached(&db, &local_id).expect("cached")["addresses"][0]["id"]
+            .as_str()
+            .expect("address id")
+            .to_string();
+        let local_plan = CustomerAddressWritePlan::PendingLocal(local_id.clone());
+        assert_eq!(
+            remove_unsynced_address_from_queue(&db, &local_plan, &address_id).expect("clear"),
+            (true, None)
+        );
+        let data = &customer_row(&db, "customers", "INSERT")[0].3;
+        assert!(data.get("address").is_none(), "{data}");
+        assert!(data.get("city").is_none(), "{data}");
+        assert_eq!(data["name"], "Synthetic Customer");
+
+        // Being sent right now: refused instead of racing the replay.
+        set_queue_state(&db, "customers", "processing", None);
+        assert_eq!(
+            remove_unsynced_address_from_queue(&db, &local_plan, &address_id).expect("in flight"),
+            (false, Some(CUSTOMER_SYNC_IN_PROGRESS))
+        );
+    }
+
+    #[test]
+    fn address_write_failures_split_like_customer_writes() {
+        let coded = customer_write_rejection(
+            &http_error(
+                400,
+                r#"{"success":false,"error":"Invalid coordinates","code":"INVALID_COORDINATES"}"#,
+            ),
+            "test",
+        )
+        .expect("coded 4xx is shown");
+        assert_eq!(coded["code"], "INVALID_COORDINATES");
+        assert_eq!(coded["status"], 400);
+
+        let not_found = customer_write_rejection(
+            &http_error(
+                404,
+                r#"{"success":false,"error":"Customer not found or access denied"}"#,
+            ),
+            "test",
+        )
+        .expect("an app 404 is shown");
+        assert_eq!(not_found["code"], "NOT_FOUND");
+
+        for deferred in [
+            AdminFetchError::transport("offline"),
+            http_error(503, r#"{"success":false,"error":"Server error"}"#),
+            http_error(
+                404,
+                "The deployment could not be found on Vercel.\n\nDEPLOYMENT_NOT_FOUND\n",
+            ),
+            http_error(429, r#"{"success":false,"error":"Too many requests"}"#),
+        ] {
+            assert!(
+                customer_write_rejection(&deferred, "test").is_none(),
+                "{deferred}"
+            );
+        }
+
+        // DELETE: only the office's own 404 means "already gone".
+        assert!(address_already_gone(&http_error(
+            404,
+            r#"{"success":false,"error":"Address not found"}"#
+        )));
+        assert!(!address_already_gone(&http_error(
+            404,
+            "The deployment could not be found on Vercel.\n\nDEPLOYMENT_NOT_FOUND\n"
+        )));
+        assert!(!address_already_gone(&AdminFetchError::transport(
+            "offline"
+        )));
+    }
+
+    #[test]
+    fn a_cache_refresh_keeps_the_local_alias_of_a_synced_customer() {
+        let mut cache = vec![serde_json::json!({
+            "id": OFFICE_ID,
+            "local_customer_id": "cust-synced-3",
+            "version": 1
+        })];
+        let refreshed = upsert_customer_cache_entry(
+            &mut cache,
+            serde_json::json!({ "id": OFFICE_ID, "name": "Synthetic", "version": 2 }),
+        );
+        assert_eq!(refreshed["local_customer_id"], "cust-synced-3");
+        assert_eq!(cache.len(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Deferred address edits merge into the cached address (desktop-address
+    // counterpart request, 2026-09-29)
+    // -----------------------------------------------------------------------
+
+    const OFFICE_ADDRESS_ID: &str = "9d1c2b3a-4e5f-4a6b-8c7d-0e1f2a3b4c5d";
+    const LOCATED: (f64, f64) = (40.6401, 22.9444);
+
+    /// A saved address as the office sends it (`normalizePosAddressResponse`).
+    fn office_address(
+        address_id: &str,
+        customer_id: &str,
+        point: Option<(f64, f64)>,
+    ) -> serde_json::Value {
+        let (coordinates, latitude, longitude) = match point {
+            Some((lat, lng)) => (
+                serde_json::json!({ "lat": lat, "lng": lng }),
+                serde_json::json!(lat),
+                serde_json::json!(lng),
+            ),
+            None => (
+                serde_json::Value::Null,
+                serde_json::Value::Null,
+                serde_json::Value::Null,
+            ),
+        };
+        serde_json::json!({
+            "id": address_id,
+            "customer_id": customer_id,
+            "street_address": "Synthetic Street 12",
+            "street": "Synthetic Street 12",
+            "city": "Thessaloniki",
+            "postal_code": "54622",
+            "floor_number": "3",
+            "name_on_ringer": "Synthetic Bell",
+            "notes": "Side door",
+            "delivery_notes": "Side door",
+            "formatted_address": "Synthetic Street 12, Thessaloniki, 54622",
+            "place_id": "synthetic-place-1",
+            "google_place_id": "synthetic-place-1",
+            "coordinates": coordinates,
+            "latitude": latitude,
+            "longitude": longitude,
+            "is_default": true,
+            "version": 4
+        })
+    }
+
+    fn seed_office_customer_with_address(db: &db::DbState, address: serde_json::Value) {
+        write_local_json(
+            db,
+            "customer_cache_v1",
+            &serde_json::json!([{
+                "id": OFFICE_ID,
+                "name": "Existing Synthetic",
+                "phone": "6948128474",
+                "version": 3,
+                "addresses": [address]
+            }]),
+        )
+        .expect("seed customer with address");
+    }
+
+    /// `customer_update_address` after the office call (or after the fold).
+    fn apply_address_edit(
+        db: &db::DbState,
+        customer_id: &str,
+        address_id: &str,
+        queue_payload: &serde_json::Value,
+        remote: Option<Result<serde_json::Value, AdminFetchError>>,
+    ) -> (serde_json::Value, Option<serde_json::Value>, bool) {
+        match apply_customer_address_update_outcome(
+            db,
+            customer_id,
+            address_id,
+            queue_payload,
+            false,
+            4,
+            remote,
+        )
+        .expect("apply address edit")
+        {
+            AddressUpdateApplied::Written {
+                address,
+                customer,
+                deferred,
+            } => (address, customer, deferred),
+            AddressUpdateApplied::Rejected(response) => {
+                panic!("unexpected rejection {response}")
+            }
+        }
+    }
+
+    fn office_address_edit(updates: serde_json::Value) -> serde_json::Value {
+        build_address_update_queue_payload(&updates, OFFICE_ID, false, 4).expect("edit body")
+    }
+
+    fn assert_area_kept(address: &serde_json::Value) {
+        for (key, value) in [
+            ("street_address", "Synthetic Street 12"),
+            ("street", "Synthetic Street 12"),
+            ("city", "Thessaloniki"),
+            ("postal_code", "54622"),
+            ("floor_number", "3"),
+            ("name_on_ringer", "Synthetic Bell"),
+            ("notes", "Side door"),
+            ("delivery_notes", "Side door"),
+        ] {
+            assert_eq!(address[key], value, "{key}: {address}");
+        }
+    }
+
+    fn assert_point(address: &serde_json::Value, point: Option<(f64, f64)>) {
+        match point {
+            Some((lat, lng)) => {
+                assert_eq!(
+                    address["coordinates"],
+                    serde_json::json!({ "lat": lat, "lng": lng }),
+                    "{address}"
+                );
+                assert_eq!(address["latitude"], lat, "{address}");
+                assert_eq!(address["longitude"], lng, "{address}");
+            }
+            None => {
+                for key in ADDRESS_POINT_KEYS {
+                    assert!(address[key].is_null(), "{key}: {address}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_deferred_coordinates_only_address_edit_keeps_the_street_and_area() {
+        // Regression: the cached address was replaced by the edit, so a
+        // queued write-back of a located point left the saved address with
+        // its coordinates only (no street, city, postal code, floor or bell).
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        for failure in [
+            AdminFetchError::transport("offline"),
+            http_error(503, r#"{"success":false,"error":"Server error"}"#),
+            http_error(401, r#"{"error":"Terminal API key is invalid"}"#),
+        ] {
+            let db = customer_test_db();
+            seed_office_customer_with_address(
+                &db,
+                office_address(OFFICE_ADDRESS_ID, OFFICE_ID, None),
+            );
+            let edit = office_address_edit(serde_json::json!({
+                "customer_id": OFFICE_ID,
+                "coordinates": { "lat": LOCATED.0, "lng": LOCATED.1 },
+                "latitude": LOCATED.0,
+                "longitude": LOCATED.1
+            }));
+
+            let (address, customer, deferred) =
+                apply_address_edit(&db, OFFICE_ID, OFFICE_ADDRESS_ID, &edit, Some(Err(failure)));
+
+            assert!(deferred);
+            assert_area_kept(&address);
+            assert_point(&address, Some(LOCATED));
+            assert_eq!(
+                address["formatted_address"],
+                "Synthetic Street 12, Thessaloniki, 54622"
+            );
+            assert_eq!(address["place_id"], "synthetic-place-1");
+            assert_eq!(address["is_default"], true);
+            assert_eq!(address["version"], 4, "the office version, not reset to 1");
+            let customer = customer.expect("cached customer");
+            assert_eq!(customer["version"], 4);
+            assert_eq!(customer["addresses"].as_array().map(Vec::len), Some(1));
+            assert_eq!(
+                cached(&db, OFFICE_ID).expect("cached")["addresses"][0],
+                address
+            );
+
+            // The queued PATCH carries the point only; the office keeps the rest.
+            let updates = customer_row(&db, "customer_addresses", "UPDATE");
+            assert_eq!(updates.len(), 1);
+            let body = &updates[0].3;
+            assert_eq!(body["latitude"], LOCATED.0);
+            assert_eq!(body["expected_version"], 4);
+            assert!(body.get("street_address").is_none(), "{body}");
+            assert!(body.get("city").is_none(), "{body}");
+        }
+    }
+
+    #[test]
+    fn a_deferred_street_edit_changes_only_the_street_fields() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = customer_test_db();
+        seed_office_customer_with_address(
+            &db,
+            office_address(OFFICE_ADDRESS_ID, OFFICE_ID, Some(LOCATED)),
+        );
+        let edit = office_address_edit(serde_json::json!({
+            "customer_id": OFFICE_ID,
+            "street_address": "Synthetic Street 14"
+        }));
+
+        let (address, _, deferred) = apply_address_edit(
+            &db,
+            OFFICE_ID,
+            OFFICE_ADDRESS_ID,
+            &edit,
+            Some(Err(http_error(
+                503,
+                r#"{"success":false,"error":"Server error"}"#,
+            ))),
+        );
+
+        assert!(deferred);
+        assert_eq!(address["street_address"], "Synthetic Street 14");
+        assert_eq!(address["street"], "Synthetic Street 14");
+        // As the office PATCH does: a text edit rebuilds the formatted address.
+        assert_eq!(
+            address["formatted_address"],
+            "Synthetic Street 14, Thessaloniki, 54622"
+        );
+        for (key, value) in [
+            ("city", "Thessaloniki"),
+            ("postal_code", "54622"),
+            ("floor_number", "3"),
+            ("name_on_ringer", "Synthetic Bell"),
+            ("notes", "Side door"),
+            ("delivery_notes", "Side door"),
+            ("place_id", "synthetic-place-1"),
+        ] {
+            assert_eq!(address[key], value, "{key}: {address}");
+        }
+        assert_point(&address, Some(LOCATED));
+        assert_eq!(address["version"], 4);
+        assert_eq!(
+            customer_row(&db, "customer_addresses", "UPDATE")[0].3["street_address"],
+            "Synthetic Street 14"
+        );
+    }
+
+    #[test]
+    fn explicit_null_coordinates_clear_the_cached_point() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = customer_test_db();
+        seed_office_customer_with_address(
+            &db,
+            office_address(OFFICE_ADDRESS_ID, OFFICE_ID, Some(LOCATED)),
+        );
+        // AddCustomerModal's shape for an address saved without a point.
+        let edit = office_address_edit(serde_json::json!({
+            "customer_id": OFFICE_ID,
+            "coordinates": null,
+            "latitude": null,
+            "longitude": null
+        }));
+
+        let (address, _, deferred) = apply_address_edit(
+            &db,
+            OFFICE_ID,
+            OFFICE_ADDRESS_ID,
+            &edit,
+            Some(Err(AdminFetchError::transport("offline"))),
+        );
+
+        assert!(deferred);
+        assert_point(&address, None);
+        assert_area_kept(&address);
+        assert_point(
+            &cached(&db, OFFICE_ID).expect("cached")["addresses"][0],
+            None,
+        );
+        // `coordinates: null` without a flat pair is the office PATCH's "clear".
+        let body = &customer_row(&db, "customer_addresses", "UPDATE")[0].3;
+        assert_eq!(body.get("coordinates"), Some(&serde_json::Value::Null));
+        assert!(body.get("latitude").is_none(), "{body}");
+    }
+
+    #[test]
+    fn the_office_record_still_replaces_the_cached_address() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = customer_test_db();
+        seed_office_customer_with_address(&db, office_address(OFFICE_ADDRESS_ID, OFFICE_ID, None));
+        let edit = office_address_edit(serde_json::json!({
+            "customer_id": OFFICE_ID,
+            "floor_number": "5"
+        }));
+        let mut office_record = office_address(OFFICE_ADDRESS_ID, OFFICE_ID, Some(LOCATED));
+        office_record["floor_number"] = serde_json::json!("5");
+        office_record["version"] = serde_json::json!(5);
+
+        let (address, _, deferred) = apply_address_edit(
+            &db,
+            OFFICE_ID,
+            OFFICE_ADDRESS_ID,
+            &edit,
+            Some(Ok(office_record)),
+        );
+
+        assert!(!deferred);
+        assert_eq!(address["floor_number"], "5");
+        assert_eq!(address["version"], 5);
+        assert_point(&address, Some(LOCATED));
+        assert!(parity_rows(&db).is_empty());
+    }
+
+    #[test]
+    fn address_point_edits_read_like_the_office_patch() {
+        let current = Some(LOCATED);
+        let cases = [
+            (
+                serde_json::json!({ "city": "Thessaloniki" }),
+                AddressPointEdit::Untouched,
+            ),
+            (
+                serde_json::json!({ "coordinates": null }),
+                AddressPointEdit::Clear,
+            ),
+            (
+                serde_json::json!({ "latitude": null, "longitude": null }),
+                AddressPointEdit::Clear,
+            ),
+            (
+                serde_json::json!({ "coordinates": null, "latitude": 40.6, "longitude": 22.9 }),
+                AddressPointEdit::Set {
+                    lat: 40.6,
+                    lng: 22.9,
+                },
+            ),
+            // (0, 0) is what 1.4.118 sent for an address it never located.
+            (
+                serde_json::json!({ "coordinates": { "lat": 0, "lng": 0 } }),
+                AddressPointEdit::Clear,
+            ),
+            (
+                serde_json::json!({
+                    "coordinates": { "type": "Point", "coordinates": [22.9, 40.6] }
+                }),
+                AddressPointEdit::Set {
+                    lat: 40.6,
+                    lng: 22.9,
+                },
+            ),
+            // A missing half of the flat pair is the current point's.
+            (
+                serde_json::json!({ "latitude": "40.7" }),
+                AddressPointEdit::Set {
+                    lat: 40.7,
+                    lng: LOCATED.1,
+                },
+            ),
+        ];
+        for (edit, expected) in cases {
+            assert_eq!(address_point_edit(&edit, current), expected, "{edit}");
+        }
+        // A pair the office refuses (INVALID_COORDINATES) moves nothing.
+        for edit in [
+            serde_json::json!({ "coordinates": { "lat": 91, "lng": 22.9 } }),
+            serde_json::json!({ "latitude": 40.7 }),
+        ] {
+            assert_eq!(
+                address_point_edit(&edit, None),
+                AddressPointEdit::Untouched,
+                "{edit}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_edit_folded_into_a_queued_address_insert_merges_everywhere() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = customer_test_db();
+        let address_id = "addr-unsent-9";
+        // What customer_add_address leaves behind for an office customer
+        // while the office is unreachable.
+        let saved = office_address(address_id, OFFICE_ID, Some(LOCATED));
+        seed_office_customer_with_address(&db, saved.clone());
+        let mut insert_body = build_remote_address_body(&saved);
+        insert_body["customer_id"] = serde_json::json!(OFFICE_ID);
+        enqueue_customer_sync_item(
+            &db,
+            "customer_addresses",
+            address_id,
+            "INSERT",
+            &insert_body,
+            1,
+        )
+        .expect("queue address insert");
+
+        // Clear the point: no coordinate key may survive in the INSERT.
+        let edit = office_address_edit(serde_json::json!({
+            "customer_id": OFFICE_ID,
+            "coordinates": null,
+            "latitude": null,
+            "longitude": null
+        }));
+        assert!(matches!(
+            merge_address_edit_into_queued_address_insert(&db, address_id, &edit).expect("fold"),
+            sync_queue::QueuedInsertMerge::Merged { .. }
+        ));
+        let insert = customer_row(&db, "customer_addresses", "INSERT")[0]
+            .3
+            .clone();
+        for key in ADDRESS_POINT_KEYS {
+            assert!(insert.get(key).is_none(), "{key}: {insert}");
+        }
+        assert_eq!(insert["street_address"], "Synthetic Street 12");
+        assert_eq!(insert["floor_number"], "3");
+        assert_eq!(insert["name_on_ringer"], "Synthetic Bell");
+        let (address, _, deferred) = apply_address_edit(&db, OFFICE_ID, address_id, &edit, None);
+        assert!(deferred);
+        assert_area_kept(&address);
+        assert_point(&address, None);
+
+        // Change the street: the INSERT and the cache keep the rest.
+        let edit = office_address_edit(serde_json::json!({
+            "customer_id": OFFICE_ID,
+            "street_address": "Synthetic Street 14"
+        }));
+        assert!(matches!(
+            merge_address_edit_into_queued_address_insert(&db, address_id, &edit).expect("fold"),
+            sync_queue::QueuedInsertMerge::Merged { .. }
+        ));
+        let insert = customer_row(&db, "customer_addresses", "INSERT")[0]
+            .3
+            .clone();
+        assert_eq!(insert["street_address"], "Synthetic Street 14");
+        assert_eq!(insert["city"], "Thessaloniki");
+        assert_eq!(insert["postal_code"], "54622");
+        assert!(
+            insert.get("formatted_address").is_none(),
+            "the office rebuilds it from the new text: {insert}"
+        );
+        let (address, _, _) = apply_address_edit(&db, OFFICE_ID, address_id, &edit, None);
+        assert_eq!(address["street_address"], "Synthetic Street 14");
+        assert_eq!(address["street"], "Synthetic Street 14");
+        assert_eq!(address["city"], "Thessaloniki");
+        assert_eq!(address["floor_number"], "3");
+        assert_eq!(address["name_on_ringer"], "Synthetic Bell");
+        assert_eq!(
+            address["formatted_address"],
+            "Synthetic Street 14, Thessaloniki, 54622"
+        );
+        assert!(customer_row(&db, "customer_addresses", "UPDATE").is_empty());
+        assert_eq!(customer_row(&db, "customer_addresses", "INSERT").len(), 1);
+    }
+
+    #[test]
+    fn an_edit_folded_into_an_offline_customer_insert_merges_everywhere() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = customer_test_db();
+        let local_id = create_local_customer(&db, "6948128474");
+        let address_id = cached(&db, &local_id).expect("cached")["addresses"][0]["id"]
+            .as_str()
+            .expect("address id")
+            .to_string();
+        let local_edit = |updates: serde_json::Value| {
+            build_address_update_queue_payload(&updates, &local_id, false, 1).expect("edit body")
+        };
+
+        // Locate it: a coordinates-only edit.
+        let edit = local_edit(serde_json::json!({
+            "customer_id": local_id,
+            "coordinates": { "lat": LOCATED.0, "lng": LOCATED.1 },
+            "latitude": LOCATED.0,
+            "longitude": LOCATED.1
+        }));
+        assert_eq!(
+            merge_address_edit_into_queued_address_insert(&db, &address_id, &edit)
+                .expect("no insert of its own"),
+            sync_queue::QueuedInsertMerge::NotQueued
+        );
+        assert!(matches!(
+            merge_address_edit_into_customer_insert(&db, &local_id, &edit).expect("fold"),
+            sync_queue::QueuedInsertMerge::Merged { .. }
+        ));
+        let insert = customer_row(&db, "customers", "INSERT")[0].3.clone();
+        assert_eq!(insert["address"], "Synthetic Street 1");
+        assert_eq!(insert["city"], "Thessaloniki");
+        assert_eq!(
+            insert["coordinates"],
+            serde_json::json!({ "lat": LOCATED.0, "lng": LOCATED.1 })
+        );
+        assert_eq!(insert["latitude"], LOCATED.0);
+        let (address, customer, deferred) =
+            apply_address_edit(&db, &local_id, &address_id, &edit, None);
+        assert!(deferred);
+        assert!(customer.is_some());
+        assert_eq!(address["id"], address_id.as_str());
+        assert_eq!(address["street_address"], "Synthetic Street 1");
+        assert_eq!(address["street"], "Synthetic Street 1");
+        assert_eq!(address["city"], "Thessaloniki");
+        assert_point(&address, Some(LOCATED));
+
+        // Clear it again: the INSERT loses every coordinate key.
+        let edit = local_edit(serde_json::json!({
+            "customer_id": local_id,
+            "coordinates": null,
+            "latitude": null,
+            "longitude": null
+        }));
+        assert!(matches!(
+            merge_address_edit_into_customer_insert(&db, &local_id, &edit).expect("fold"),
+            sync_queue::QueuedInsertMerge::Merged { .. }
+        ));
+        let insert = customer_row(&db, "customers", "INSERT")[0].3.clone();
+        for key in ADDRESS_POINT_KEYS {
+            assert!(insert.get(key).is_none(), "{key}: {insert}");
+        }
+        assert_eq!(insert["address"], "Synthetic Street 1");
+        assert_eq!(insert["name"], "Synthetic Customer");
+        let (address, _, _) = apply_address_edit(&db, &local_id, &address_id, &edit, None);
+        assert_eq!(address["street_address"], "Synthetic Street 1");
+        assert_eq!(address["city"], "Thessaloniki");
+        assert_point(&address, None);
+        assert!(customer_row(&db, "customer_addresses", "UPDATE").is_empty());
+        assert!(customer_row(&db, "customer_addresses", "INSERT").is_empty());
     }
 }

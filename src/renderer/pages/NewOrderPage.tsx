@@ -36,6 +36,12 @@ import {
   reconcileOutstandingPaymentAttempt,
 } from '../utils/splitCheckoutRecovery';
 import { resolveDeliveryFee } from '../utils/delivery-fee';
+import { toValidLatLng } from '../utils/coordinates';
+import {
+  planDeliveryAddressRepick,
+  resolveHandoffCustomer,
+  withoutRepickTarget,
+} from '../utils/delivery-zone-handoff';
 import { mergeCustomerInfoModalSave } from '../utils/customerInfoModalMerge';
 import {
   resolveCanonicalCustomerAddress,
@@ -104,57 +110,16 @@ interface CustomerInfo {
   };
 }
 
-const toLatLngCoordinates = (
-  coordinates:
-    | { lat: number; lng: number }
-    | { type: 'Point'; coordinates: [number, number] }
-    | null
-    | undefined,
-  latitude?: number | null,
-  longitude?: number | null,
-): { lat: number; lng: number } | undefined => {
-  if (
-    coordinates &&
-    'lat' in coordinates &&
-    Number.isFinite(coordinates.lat) &&
-    Number.isFinite(coordinates.lng)
-  ) {
-    return { lat: Number(coordinates.lat), lng: Number(coordinates.lng) };
-  }
-
-  if (
-    coordinates &&
-    'type' in coordinates &&
-    coordinates.type === 'Point' &&
-    Array.isArray(coordinates.coordinates) &&
-    coordinates.coordinates.length >= 2 &&
-    Number.isFinite(coordinates.coordinates[1]) &&
-    Number.isFinite(coordinates.coordinates[0])
-  ) {
-    return {
-      lat: Number(coordinates.coordinates[1]),
-      lng: Number(coordinates.coordinates[0]),
-    };
-  }
-
-  if (Number.isFinite(Number(latitude)) && Number.isFinite(Number(longitude))) {
-    return {
-      lat: Number(latitude),
-      lng: Number(longitude),
-    };
-  }
-
-  return undefined;
-};
-
 const buildCustomerInfoFromCustomer = (customer: Customer): CustomerInfo => {
   const normalizedCustomer = withMaterializedCustomerAddresses(customer) as Customer;
   const resolvedAddress = resolveCanonicalCustomerAddress(normalizedCustomer);
-  const coordinates = toLatLngCoordinates(
-    resolvedAddress?.coordinates ?? normalizedCustomer.coordinates,
-    resolvedAddress?.latitude ?? normalizedCustomer.latitude,
-    resolvedAddress?.longitude ?? normalizedCustomer.longitude,
-  );
+  // Strict: an address without coordinates has none (never (0,0)). The
+  // customer-level pair only stands in when there is no saved address row.
+  const coordinates =
+    (resolvedAddress
+      ? toValidLatLng(resolvedAddress.coordinates, resolvedAddress.latitude, resolvedAddress.longitude)
+      : toValidLatLng(normalizedCustomer.coordinates, normalizedCustomer.latitude, normalizedCustomer.longitude)) ??
+    undefined;
 
   return {
     name: normalizedCustomer.name,
@@ -177,13 +142,8 @@ const buildCustomerInfoFromCustomer = (customer: Customer): CustomerInfo => {
       name_on_ringer:
         resolvedAddress?.name_on_ringer || normalizedCustomer.name_on_ringer || '',
       coordinates,
-      latitude:
-        coordinates?.lat ?? resolvedAddress?.latitude ?? normalizedCustomer.latitude ?? null,
-      longitude:
-        coordinates?.lng ??
-        resolvedAddress?.longitude ??
-        normalizedCustomer.longitude ??
-        null,
+      latitude: coordinates?.lat ?? null,
+      longitude: coordinates?.lng ?? null,
       address_fingerprint:
         resolvedAddress?.address_fingerprint ||
         normalizedCustomer.address_fingerprint ||
@@ -390,9 +350,34 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
     setShowAddCustomerModal(true);
   };
 
+  // Opened from the menu's "delivery zone not checked" notice: closing it
+  // without saving keeps the order's customer and cart as they were.
+  const menuAddressRepickRef = useRef(false);
+
+  const handleRepickDeliveryAddress = () => {
+    const repick = planDeliveryAddressRepick(
+      existingCustomer as (Customer & { id?: unknown }) | null,
+      existingCustomer ? resolveCanonicalCustomerAddress(existingCustomer) : null,
+    );
+    if (repick.kind === 'edit_address') {
+      menuAddressRepickRef.current = true;
+      setExistingCustomer(repick.customer as Customer);
+      setAddCustomerMode('editAddress');
+      setShowAddCustomerModal(true);
+      return;
+    }
+    setShowCustomerInfoModal(true);
+  };
+
   const handleNewCustomerAdded = (customer: any) => {
-    // Store the customer info and proceed to menu
-    const normalizedCustomer = withMaterializedCustomerAddresses(customer as Customer) as Customer;
+    menuAddressRepickRef.current = false;
+    // Store the customer info and proceed to menu. The order goes to the
+    // address the modal just saved or edited (selected_address_id /
+    // editAddressId), not the customer's default address.
+    const normalizedCustomer = resolveHandoffCustomer(customer as Customer, {
+      customerId: (existingCustomer as Customer | null)?.id ?? null,
+      selectedAddressId: (existingCustomer as any)?.selected_address_id ?? null,
+    }).customer as unknown as Customer;
     setExistingCustomer(normalizedCustomer);
 
     const customerInfoData = buildCustomerInfoFromCustomer(normalizedCustomer);
@@ -513,11 +498,11 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
         currentAddress?.street_address || currentAddress?.street || currentAddress?.address || '';
       const currentAddressCoordinates = parseSpecialAddressInput(currentAddressLabel).shouldSkipZoneValidation
         ? undefined
-        : toLatLngCoordinates(
+        : toValidLatLng(
             currentAddress?.coordinates,
             currentAddress?.latitude,
             currentAddress?.longitude,
-          );
+          ) ?? undefined;
 
       if (currentOrderType === 'delivery' && currentAddress) {
         const streetAddress = currentAddress.street_address || currentAddress.street || '';
@@ -1184,15 +1169,18 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
           customerInfo.address.notes || customerInfo.notes || specialInstructions || '',
         nameOnRinger: customerInfo.address.name_on_ringer || '',
         name_on_ringer: customerInfo.address.name_on_ringer || '',
-        coordinates: customerInfo.address.coordinates,
-        latitude:
-          customerInfo.address.latitude ??
-          customerInfo.address.coordinates?.lat ??
-          null,
-        longitude:
-          customerInfo.address.longitude ??
-          customerInfo.address.coordinates?.lng ??
-          null,
+        ...(() => {
+          const point = toValidLatLng(
+            customerInfo.address.coordinates,
+            customerInfo.address.latitude,
+            customerInfo.address.longitude,
+          );
+          return {
+            coordinates: point ?? undefined,
+            latitude: point?.lat ?? null,
+            longitude: point?.lng ?? null,
+          };
+        })(),
       };
     }
 
@@ -1373,6 +1361,15 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
           isOpen={showAddCustomerModal}
           onClose={() => {
             setShowAddCustomerModal(false);
+            if (menuAddressRepickRef.current) {
+              // Closed without saving: keep the order's customer and cart.
+              menuAddressRepickRef.current = false;
+              setExistingCustomer((current) =>
+                withoutRepickTarget(current as (Customer & { editAddressId?: string }) | null) as Customer | null,
+              );
+              setAddCustomerMode('new');
+              return;
+            }
             setExistingCustomer(null);
           }}
           onCustomerAdded={handleNewCustomerAdded}
@@ -1445,6 +1442,7 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
           selectedAddress={getSelectedAddress()}
           orderType={orderType}
           isProcessingOrder={isProcessingOrder}
+          onRepickDeliveryAddress={handleRepickDeliveryAddress}
           onOrderComplete={handleOrderComplete}
         />
       )}

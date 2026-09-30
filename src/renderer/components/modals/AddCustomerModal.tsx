@@ -1,9 +1,25 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { MapPin, User, Phone, Mail, FileText, Building, Users, AlertTriangle, CheckCircle, Clock, Hash, Minus, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { isSupportedCountry, type CountryCode } from 'libphonenumber-js/min';
+import type { CountryCode } from 'libphonenumber-js/min';
+import {
+  CUSTOMER_PHONE_MAX_CHARACTERS,
+  describeExpectedPhoneLengths,
+  isCustomerPhoneRejectionShownWhileTyping,
+  resolveCustomerPhoneEdit,
+  toSupportedPhoneCountry,
+  validateCustomerPhoneInput,
+  type CustomerPhoneInputRejected,
+  type CustomerPhoneInputResult,
+} from '../../../../../shared/services/phone-input-validation';
+import {
+  extractSavedAddressCoordinates,
+  toValidLatLng,
+  type LatLng,
+} from '../../../../../shared/utils/saved-address-coordinates';
 import { Customer } from '../../../shared/types/customer';
 import { customerService } from '../../services/CustomerService';
+import { normalizeCustomerWriteResult } from '../../services/customer-write-result';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { useTheme } from '../../contexts/theme-context';
 import { getBridge, offEvent, onEvent } from '../../../lib';
@@ -81,6 +97,9 @@ interface AddressAutocompleteProps {
   placeholder?: string;
   className?: string;
   searchEnabled?: boolean;
+  /** Incremented by "pick the address again": focus the field and search `repickQuery`. */
+  repickSignal?: number;
+  repickQuery?: string;
 }
 
 interface AddressSelectionDetails {
@@ -94,44 +113,193 @@ interface AddressSelectionDetails {
   fromSuggestion?: boolean;
 }
 
-const extractErrorMessage = (error: unknown, fallback: string): string => {
-  if (error instanceof Error && error.message.trim()) {
-    return error.message;
-  }
-  if (typeof error === 'string' && error.trim()) {
-    return error;
-  }
-  if (error && typeof error === 'object') {
-    const candidate = (error as { error?: unknown; message?: unknown });
-    if (typeof candidate.error === 'string' && candidate.error.trim()) {
-      return candidate.error;
-    }
-    if (typeof candidate.message === 'string' && candidate.message.trim()) {
-      return candidate.message;
-    }
-  }
-  return fallback;
-};
-
-const normalizePhoneCountryCode = (value: unknown): string => {
-  if (typeof value !== 'string') return '';
-  const normalized = value.trim().toUpperCase();
-  return /^[A-Z]{2}$/.test(normalized)
-    && isSupportedCountry(normalized as CountryCode)
-    ? normalized
-    : '';
-};
+const normalizePhoneCountryCode = (value: unknown): string => toSupportedPhoneCountry(value) ?? '';
 
 const isInternationalPhone = (value: string): boolean => {
   const normalized = value.trim();
   return normalized.startsWith('+') || normalized.startsWith('00');
 };
 
-// Founder (05/09/2026): the store is in Greece, so a national number IS a
-// Greek number — the operator never sees an ISO country field. International
-// numbers carry their own +prefix and are sent exactly as typed. A customer
-// that already holds another valid ISO country keeps it on edit.
-const HOME_PHONE_COUNTRY: CountryCode = 'GR';
+// Founder (05/09/2026): the operator never sees an ISO country field. A
+// national number belongs to the STORE's country — the branch's
+// `phone_country_code`, which the settings sync caches on this terminal as
+// `restaurant.phone_country_code` (src-tauri/src/terminal_helpers.rs).
+// International numbers carry their own +prefix and are sent exactly as typed.
+// GR is only the fallback for a terminal that has not cached its branch
+// country yet: it is what this form always used before and what the server's
+// POS routes assume for a national number without a country
+// (admin-dashboard/src/lib/pos-phone-country.ts), so such a terminal behaves
+// exactly as it did before the store country was read.
+const STORE_PHONE_COUNTRY_FALLBACK: CountryCode = 'GR';
+
+type TranslateFn = ReturnType<typeof useTranslation>['t'];
+
+/**
+ * The phone field's verdict, from the shared rule both POS apps use
+ * (shared/services/phone-input-validation.ts).
+ *
+ * Incident 2026-09-28 (Tomikro): an 11-digit mobile passed this form (it only
+ * checked "not empty"), the office refused it and the queued customer blocked
+ * the Z. Now the field turns red with «must have 10 digits (you entered 11)».
+ *
+ * Editing: validate and submit with ONE country — the customer's stored
+ * country while the phone is unchanged, else the store's. An unchanged stored
+ * phone never blocks the save (a few legacy phones fail today's rule) and is
+ * left out of the update, so the office does not re-read it.
+ */
+interface PhoneAssessment {
+  /** Country the number was read in; submitted as `phone_country_code` for national input. */
+  country: CountryCode;
+  result: CustomerPhoneInputResult;
+  /** Edit mode: the phone equals the stored one. */
+  unchanged: boolean;
+  blocksSave: boolean;
+}
+
+const assessCustomerPhone = (input: {
+  editing: boolean;
+  phone: string;
+  storeCountry: CountryCode;
+  initialPhone?: string | null;
+  initialCountry?: string | null;
+}): PhoneAssessment => {
+  if (input.editing) {
+    const decision = resolveCustomerPhoneEdit({
+      phone: input.phone,
+      initialPhone: input.initialPhone,
+      initialCountry: input.initialCountry,
+      storeCountry: input.storeCountry,
+    });
+    return {
+      country: decision.country ?? input.storeCountry,
+      result: decision.result,
+      unchanged: decision.unchanged,
+      blocksSave: decision.blocksSave,
+    };
+  }
+  const result = validateCustomerPhoneInput(input.phone, input.storeCountry);
+  return { country: input.storeCountry, result, unchanged: false, blocksSave: !result.ok };
+};
+
+/** «Phone number must have 10 digits (you entered 11)» and the other rejections. */
+const describePhoneRejection = (t: TranslateFn, result: CustomerPhoneInputRejected): string => {
+  switch (result.reason) {
+    case 'EMPTY':
+      return t('modals.addCustomer.phoneRequired');
+    case 'INVALID_CHARACTERS':
+      return t('modals.addCustomer.phoneInvalidCharacters');
+    case 'TOO_WIDE':
+      return t('modals.addCustomer.phoneTooWide', { max: CUSTOMER_PHONE_MAX_CHARACTERS });
+    case 'TOO_SHORT':
+    case 'TOO_LONG': {
+      // Interpolation names avoid `count`, so i18next never looks up plurals.
+      const expected = describeExpectedPhoneLengths(result.expectedLengths);
+      if (expected?.kind === 'exact') {
+        return t('modals.addCustomer.phoneLengthExact', {
+          expected: expected.count,
+          entered: result.enteredDigits,
+        });
+      }
+      if (expected?.kind === 'either') {
+        return t('modals.addCustomer.phoneLengthEither', {
+          first: expected.a,
+          second: expected.b,
+          entered: result.enteredDigits,
+        });
+      }
+      if (expected?.kind === 'range') {
+        return t('modals.addCustomer.phoneLengthRange', {
+          min: expected.min,
+          max: expected.max,
+          entered: result.enteredDigits,
+        });
+      }
+      return t('modals.addCustomer.phoneInvalid');
+    }
+    default:
+      // INVALID (a plausible length that is no number of that country) and
+      // COUNTRY_REQUIRED (unreachable here: the store country always resolves).
+      return t('modals.addCustomer.phoneInvalid');
+  }
+};
+
+/** An error whose message is already the operator's text, shown where it belongs. */
+class CustomerFormError extends Error {
+  constructor(
+    readonly field: 'submit' | 'phone' | 'address',
+    message: string,
+  ) {
+    super(message);
+    this.name = 'CustomerFormError';
+  }
+}
+
+/**
+ * A customer or address write that was refused (`success:false`, see
+ * CustomerService.CustomerWriteResult): the form shows it and stays open —
+ * nothing was saved or queued on this register.
+ *
+ * Office refusals carry the HTTP status; this register's own refusals
+ * (VERSION_REQUIRED, CUSTOMER_SYNC_IN_PROGRESS, CUSTOMER_NOT_SYNCED from the
+ * native customer commands) carry none, so they are never worded as the
+ * office's answer.
+ */
+const customerRejectionError = (
+  t: TranslateFn,
+  rejection: { code?: string | null; conflict?: boolean; status?: number | null },
+  phoneRejection: CustomerPhoneInputRejected | null,
+  fallbackKey: string,
+  target: 'customer' | 'address' = 'customer',
+): CustomerFormError => {
+  const code = typeof rejection.code === 'string' ? rejection.code : null;
+  if (rejection.conflict || code === 'VERSION_MISMATCH') {
+    return new CustomerFormError(
+      'submit',
+      t('modals.addCustomer.conflictError', 'Customer was updated by another terminal. Please refresh.'),
+    );
+  }
+  switch (code) {
+    case 'INVALID_PHONE':
+    case 'COUNTRY_CONTEXT_REQUIRED':
+      if (target === 'customer') {
+        return new CustomerFormError(
+          'phone',
+          phoneRejection ? describePhoneRejection(t, phoneRejection) : t('modals.addCustomer.phoneRejected'),
+        );
+      }
+      break;
+    case 'DUPLICATE':
+      if (target === 'customer') {
+        return new CustomerFormError('submit', t('modals.addCustomer.customerExists'));
+      }
+      break;
+    case 'INVALID_COORDINATES':
+      return new CustomerFormError('address', t('modals.addCustomer.addressLocationRejected'));
+    case 'NOT_FOUND':
+      return new CustomerFormError(
+        'submit',
+        t(target === 'address' ? 'modals.addCustomer.addressNotFound' : 'modals.addCustomer.customerNotFound'),
+      );
+    case 'VERSION_REQUIRED':
+      return new CustomerFormError('submit', t('modals.addCustomer.versionRequired'));
+    case 'CUSTOMER_SYNC_IN_PROGRESS':
+      return new CustomerFormError('submit', t('modals.addCustomer.customerSyncInProgress'));
+    case 'CUSTOMER_NOT_SYNCED':
+      return new CustomerFormError('submit', t('modals.addCustomer.customerNotSynced'));
+    default:
+      break;
+  }
+  if (!code) {
+    return new CustomerFormError('submit', t(fallbackKey));
+  }
+  const status = typeof rejection.status === 'number' ? rejection.status : null;
+  return new CustomerFormError(
+    'submit',
+    status === null
+      ? t('modals.addCustomer.saveRefusedLocally', { code })
+      : t('modals.addCustomer.saveRejected', { code }),
+  );
+};
 
 const ADD_ADDRESS_SAVE_TIMEOUT_MS = 35_000;
 
@@ -142,33 +310,59 @@ class AddAddressSaveTimeoutError extends Error {
   }
 }
 
-const getStoredCoordinates = (source: any): { lat: number; lng: number } | null => {
-  const directCoordinates = source?.coordinates;
-  if (
-    directCoordinates
-    && typeof directCoordinates.lat === 'number'
-    && typeof directCoordinates.lng === 'number'
-  ) {
-    return { lat: directCoordinates.lat, lng: directCoordinates.lng };
-  }
+/**
+ * The saved point of an address (or of a legacy customer row), or null when
+ * it has none. Strict: an address without coordinates is never (0,0) — that
+ * point used to be zone-checked and answered "out of zone" for about two
+ * thirds of one store's saved addresses.
+ */
+const getStoredCoordinates = (source: any): LatLng | null =>
+  source && typeof source === 'object' ? extractSavedAddressCoordinates(source) : null;
 
-  if (
-    directCoordinates
-    && Array.isArray(directCoordinates.coordinates)
-    && directCoordinates.coordinates.length >= 2
-  ) {
-    const [lng, lat] = directCoordinates.coordinates;
-    if (typeof lat === 'number' && typeof lng === 'number') {
-      return { lat, lng };
+/** The first real point among the candidates (never (0,0), never half a pair). */
+const firstValidPoint = (...candidates: unknown[]): LatLng | null => {
+  for (const candidate of candidates) {
+    const point = toValidLatLng(candidate);
+    if (point) {
+      return point;
     }
   }
-
-  if (typeof source?.latitude === 'number' && typeof source?.longitude === 'number') {
-    return { lat: source.latitude, lng: source.longitude };
-  }
-
   return null;
 };
+
+/**
+ * The saved address that full "Edit customer" edits: the selected one, else
+ * the default, else the first (the order the rest of the POS resolves a
+ * customer's address in). Null when the customer has no saved address.
+ */
+const resolveEditTargetAddress = (customer?: CustomerData | null): any | null => {
+  const addresses = Array.isArray(customer?.addresses)
+    ? customer!.addresses!.filter(
+        (address: any) => address && typeof address === 'object' && typeof address.id === 'string' && address.id.trim(),
+      )
+    : [];
+  if (addresses.length === 0) {
+    return null;
+  }
+  const selectedId = typeof customer?.selected_address_id === 'string' ? customer.selected_address_id : null;
+  return (
+    (selectedId && addresses.find((address: any) => address.id === selectedId))
+    || addresses.find((address: any) => address.is_default)
+    || addresses[0]
+  );
+};
+
+const addressVersionOf = (address: any): number =>
+  Number.isFinite(Number(address?.version)) ? Number(address.version) : -1;
+
+interface AddressFieldsSnapshot {
+  address: string;
+  city: string;
+  postalCode: string;
+  floorNumber: string;
+  nameOnRinger: string;
+  notes: string;
+}
 
 const getStoredAddressSelectionDetails = (source: any): AddressSelectionDetails | null => {
   if (!source) {
@@ -199,6 +393,8 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
   placeholder,
   className = "",
   searchEnabled = true,
+  repickSignal = 0,
+  repickQuery,
 }) => {
   const { t } = useTranslation();
   const placeholderText = placeholder ?? t('modals.addNewAddress.addressPlaceholder');
@@ -206,6 +402,7 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
   const [suggestions, setSuggestions] = useState<AddressSuggestion[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [showSuggestions, setShowSuggestions] = useState(false);
+  const inputRef = useRef<HTMLInputElement | null>(null);
   const timeoutRef = useRef<NodeJS.Timeout | null>(null);
   const searchRequestRef = useRef(0);
   const sessionTokenRef = useRef<string | null>(null);
@@ -298,12 +495,44 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
     }, 200);
   };
 
+  // "Pick the address again": search the saved text (with its city, so a
+  // same-named street elsewhere is less likely) and show the suggestions.
+  useEffect(() => {
+    if (!repickSignal) {
+      return;
+    }
+    inputRef.current?.focus();
+    if (!searchEnabled) {
+      return;
+    }
+    const query = (repickQuery ?? value).trim();
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current);
+    }
+    setShowSuggestions(true);
+    if (query.length < 3) {
+      return;
+    }
+    const requestId = ++searchRequestRef.current;
+    if (!sessionTokenRef.current) {
+      sessionTokenRef.current = createAddressSessionToken();
+    }
+    setIsLoading(true);
+    void searchAddresses(query, requestId);
+    // Only a new request re-runs the search; typing uses handleInputChange.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [repickSignal]);
+
   const handleSuggestionClick = async (suggestion: AddressSuggestion) => {
     try {
       const resolved = await resolveAddressSuggestion(suggestion, value, {
         branchId: terminalBranchId || undefined,
         sessionToken: sessionTokenRef.current || undefined,
       });
+      // An offline or cached candidate can resolve to (0,0) or to no point at
+      // all: that is "no coordinates", never a place to check the zone at.
+      const resolvedPoint = toValidLatLng(resolved.coordinates);
+      const candidatePoint = resolvedPoint ?? toValidLatLng(suggestion.location);
       void upsertVerifiedLocalCandidate({
         place_id: resolved.placeId || suggestion.place_id,
         branch_id: terminalBranchId || undefined,
@@ -311,17 +540,17 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
         formatted_address: resolved.formattedAddress || suggestion.formatted_address || resolved.streetAddress,
         city: resolved.city || undefined,
         postal_code: resolved.postalCode || undefined,
-        location: resolved.coordinates || suggestion.location || undefined,
+        location: candidatePoint || undefined,
         resolved_street_number: resolved.resolvedStreetNumber || undefined,
         address_fingerprint: resolved.addressFingerprint,
         source: resolved.validationSource,
-        verified: true,
+        verified: Boolean(candidatePoint),
       });
 
       onChange(resolved.streetAddress, {
         city: resolved.city || undefined,
         postalCode: resolved.postalCode || undefined,
-        coordinates: resolved.coordinates,
+        coordinates: resolvedPoint || undefined,
         placeId: resolved.placeId || suggestion.place_id,
         resolvedStreetNumber: resolved.resolvedStreetNumber,
         addressFingerprint: resolved.addressFingerprint,
@@ -372,6 +601,7 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
       <div className="relative">
         <MapPin className="liquid-glass-modal-field-icon absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5" />
         <input
+          ref={inputRef}
           type="text"
           value={value}
           onChange={handleInputChange}
@@ -492,6 +722,68 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
     }
   }, [isOpen]);
 
+  // Store country for national phone numbers (see STORE_PHONE_COUNTRY_FALLBACK).
+  const [storePhoneCountry, setStorePhoneCountry] = useState<CountryCode>(STORE_PHONE_COUNTRY_FALLBACK);
+  const readStorePhoneCountry = async (): Promise<CountryCode> => {
+    const terminalConfig = bridge?.terminalConfig as
+      | { getSetting?: (category: string, key?: string) => Promise<unknown> }
+      | undefined;
+    if (typeof terminalConfig?.getSetting !== 'function') {
+      return STORE_PHONE_COUNTRY_FALLBACK;
+    }
+    try {
+      return (
+        toSupportedPhoneCountry(await terminalConfig.getSetting('restaurant', 'phone_country_code'))
+        ?? STORE_PHONE_COUNTRY_FALLBACK
+      );
+    } catch {
+      return STORE_PHONE_COUNTRY_FALLBACK;
+    }
+  };
+
+  useEffect(() => {
+    if (!isOpen) {
+      return undefined;
+    }
+    let active = true;
+    const loadStoreCountry = () => {
+      void readStorePhoneCountry().then((country) => {
+        if (active) {
+          setStorePhoneCountry(country);
+        }
+      });
+    };
+    loadStoreCountry();
+    onEvent('terminal-settings-updated', loadStoreCountry);
+    onEvent('terminal-config-updated', loadStoreCountry);
+    return () => {
+      active = false;
+      offEvent('terminal-settings-updated', loadStoreCountry);
+      offEvent('terminal-config-updated', loadStoreCountry);
+    };
+    // readStorePhoneCountry only reads the bridge.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, bridge.terminalConfig]);
+
+  // Phone field: red once blurred or submitted, or at once for a verdict more
+  // typing cannot fix (shared isCustomerPhoneRejectionShownWhileTyping).
+  const [phoneBlurred, setPhoneBlurred] = useState(false);
+  const [submitAttempted, setSubmitAttempted] = useState(false);
+
+  // Full "Edit customer": the saved address its address fields edit, and the
+  // values they opened with (an unchanged address is not written again).
+  const editTargetAddressRef = useRef<any | null>(null);
+  const [initialAddressFields, setInitialAddressFields] = useState<AddressFieldsSnapshot | null>(null);
+  // A saved address opened for editing WITHOUT a real point: its delivery zone
+  // was never checked. While the cashier leaves it as it is, saving is not
+  // blocked and nothing is zone-checked; «pick the address again» checks it.
+  const [uncheckedStoredAddress, setUncheckedStoredAddress] =
+    useState<Pick<AddressFieldsSnapshot, 'address' | 'city' | 'postalCode'> | null>(null);
+  const [repickSignal, setRepickSignal] = useState(0);
+  // The customer's version after a successful update in this session, so a
+  // retry after a failed address save does not trip over its own change.
+  const savedCustomerVersionRef = useRef<number | null>(null);
+
   // Prefill form from initialCustomer (for editing) or initialPhone (for new customer)
   // Only runs ONCE when modal opens to prevent resetting while user types
   useEffect(() => {
@@ -499,121 +791,119 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       formInitializedRef.current = true;
 
       // Reset delivery validation state when modal opens
-        setDeliveryValidationResult(null);
-        setDeliveryValidationStatus('idle');
-        setShowDeliveryValidation(false);
-        setAddressCoordinates(null);
-        setSelectedAddressDetails(null);
-        setValidationSnapshot(null);
-        setOverrideApplied(false);
-        setOverrideReason('');
+      setDeliveryValidationResult(null);
+      setDeliveryValidationStatus('idle');
+      setShowDeliveryValidation(false);
+      setAddressCoordinates(null);
+      setSelectedAddressDetails(null);
+      setValidationSnapshot(null);
+      setOverrideApplied(false);
+      setOverrideReason('');
       setIsValidatingDelivery(false);
       setErrors({});
+      setPhoneBlurred(false);
+      setSubmitAttempted(false);
+      setInitialAddressFields(null);
+      setUncheckedStoredAddress(null);
+      setRepickSignal(0);
+      editTargetAddressRef.current = null;
+      savedCustomerVersionRef.current = null;
+
+      const emptyForm = {
+        phone: '',
+        phoneCountryCode: '',
+        name: '',
+        email: '',
+        nameOnRinger: '',
+        address: '',
+        city: '',
+        postalCode: '',
+        floorNumber: '',
+        notes: '',
+      };
+
+      // Open a saved address: its stored point (strict, never (0,0)), or the
+      // "zone not checked" state when it has none.
+      const openSavedAddress = (source: any, fields: AddressFieldsSnapshot, editingSavedAddress: boolean) => {
+        const storedCoordinates = getStoredCoordinates(source);
+        const storedDetails = getStoredAddressSelectionDetails(source);
+        setAddressCoordinates(storedCoordinates);
+        setSelectedAddressDetails(storedDetails);
+        setValidationSnapshot(storedDetails?.addressFingerprint || null);
+        setUncheckedStoredAddress(
+          editingSavedAddress && !storedCoordinates && fields.address.trim()
+            ? { address: fields.address, city: fields.city, postalCode: fields.postalCode }
+            : null,
+        );
+      };
 
       if (initialCustomer) {
+        const customerFields = {
+          phone: initialCustomer.phone || '',
+          phoneCountryCode: normalizePhoneCountryCode(initialCustomer.phone_country_code),
+          name: initialCustomer.name || '',
+          email: initialCustomer.email || '',
+        };
+
         if (isEditAddressMode && initialCustomer.editAddressId) {
           // Edit Address mode - find the address to edit and prefill its data
           const addressToEdit = initialCustomer.addresses?.find(
             (addr: any) => addr.id === initialCustomer.editAddressId
           );
           if (addressToEdit) {
-            const storedCoordinates = getStoredCoordinates(addressToEdit);
-            const storedDetails = getStoredAddressSelectionDetails(addressToEdit);
-            setFormData({
-              phone: initialCustomer.phone || '',
-              phoneCountryCode: normalizePhoneCountryCode(initialCustomer.phone_country_code),
-              name: initialCustomer.name || '',
-              email: initialCustomer.email || '',
+            const fields: AddressFieldsSnapshot = {
               nameOnRinger: addressToEdit.name_on_ringer || '',
               address: addressToEdit.street_address || addressToEdit.street || '',
               city: addressToEdit.city || '',
               postalCode: addressToEdit.postal_code || '',
               floorNumber: addressToEdit.floor_number || '',
               notes: addressToEdit.delivery_notes ?? addressToEdit.notes ?? '',
-            });
-            setAddressCoordinates(storedCoordinates);
-            setSelectedAddressDetails(storedDetails);
-            setValidationSnapshot(storedDetails?.addressFingerprint || null);
+            };
+            setFormData({ ...customerFields, ...fields });
+            openSavedAddress(addressToEdit, fields, true);
           } else {
             // Address not found, fall back to empty address fields
-            setFormData({
-              phone: initialCustomer.phone || '',
-              phoneCountryCode: normalizePhoneCountryCode(initialCustomer.phone_country_code),
-              name: initialCustomer.name || '',
-              email: initialCustomer.email || '',
-              nameOnRinger: '',
-              address: '',
-              city: '',
-              postalCode: '',
-              floorNumber: '',
-              notes: '',
-            });
+            setFormData({ ...emptyForm, ...customerFields });
           }
         } else if (isAddAddressMode) {
           // Add Address mode - only prefill customer info, leave address fields EMPTY for new address
-          setFormData({
-            phone: initialCustomer.phone || '',
-            phoneCountryCode: normalizePhoneCountryCode(initialCustomer.phone_country_code),
-            name: initialCustomer.name || '',
-            email: initialCustomer.email || '',
-            nameOnRinger: '', // Empty for new address
-            address: '', // Empty for new address
-            city: '', // Empty for new address
-            postalCode: '', // Empty for new address
-            floorNumber: '', // Empty for new address
-            notes: '', // Empty for new address
-          });
+          setFormData({ ...emptyForm, ...customerFields });
         } else {
-          // Edit mode - prefill all fields
-          const storedCoordinates = getStoredCoordinates(initialCustomer);
-          const storedDetails = getStoredAddressSelectionDetails(initialCustomer);
-          setFormData({
-            phone: initialCustomer.phone || '',
-            phoneCountryCode: normalizePhoneCountryCode(initialCustomer.phone_country_code),
-            name: initialCustomer.name || '',
-            email: initialCustomer.email || '',
-            nameOnRinger: initialCustomer.name_on_ringer || '',
-            address: initialCustomer.address || '',
-            city: initialCustomer.city || '',
-            postalCode: initialCustomer.postal_code || '',
-            floorNumber: initialCustomer.floor_number || '',
-            notes: initialCustomer.notes || '',
-          });
-          setAddressCoordinates(storedCoordinates);
-          setSelectedAddressDetails(storedDetails);
-          setValidationSnapshot(storedDetails?.addressFingerprint || null);
+          // Full edit: the address fields edit the selected (else default)
+          // saved address, exactly like the address editor. A customer with
+          // no saved address keeps the legacy customer-level fields.
+          const targetAddress = mode === 'edit' ? resolveEditTargetAddress(initialCustomer) : null;
+          editTargetAddressRef.current = targetAddress;
+          const fields: AddressFieldsSnapshot = targetAddress
+            ? {
+                nameOnRinger: targetAddress.name_on_ringer || '',
+                address: targetAddress.street_address || targetAddress.street || '',
+                city: targetAddress.city || '',
+                postalCode: targetAddress.postal_code || '',
+                floorNumber: targetAddress.floor_number || '',
+                notes: targetAddress.delivery_notes || targetAddress.notes || initialCustomer.notes || '',
+              }
+            : {
+                nameOnRinger: initialCustomer.name_on_ringer || '',
+                address: initialCustomer.address || '',
+                city: initialCustomer.city || '',
+                postalCode: initialCustomer.postal_code || '',
+                floorNumber: initialCustomer.floor_number || '',
+                notes: initialCustomer.notes || '',
+              };
+          setFormData({ ...customerFields, ...fields });
+          setInitialAddressFields(fields);
+          openSavedAddress(targetAddress ?? initialCustomer, fields, mode === 'edit');
         }
       } else if (initialPhone) {
         // New customer with just phone prefilled
-        setFormData({
-          phone: initialPhone,
-          phoneCountryCode: '',
-          name: '',
-          email: '',
-          nameOnRinger: '',
-          address: '',
-          city: '',
-          postalCode: '',
-          floorNumber: '',
-          notes: '',
-        });
+        setFormData({ ...emptyForm, phone: initialPhone });
       } else {
         // Completely new - reset everything
-        setFormData({
-          phone: '',
-          phoneCountryCode: '',
-          name: '',
-          email: '',
-          nameOnRinger: '',
-          address: '',
-          city: '',
-          postalCode: '',
-          floorNumber: '',
-          notes: '',
-        });
+        setFormData(emptyForm);
       }
     }
-  }, [isOpen, initialPhone, initialCustomer, isAddAddressMode, isEditAddressMode, hasDeliveryPro]);
+  }, [isOpen, initialPhone, initialCustomer, isAddAddressMode, isEditAddressMode, hasDeliveryPro, mode]);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const submissionLockRef = useRef(false);
@@ -623,7 +913,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
   const [deliveryValidationResult, setDeliveryValidationResult] = useState<DeliveryValidationResult | null>(null);
   const [deliveryValidationStatus, setDeliveryValidationStatus] = useState<ValidationStatus | 'idle'>('idle');
   const [showDeliveryValidation, setShowDeliveryValidation] = useState(false);
-  const [addressCoordinates, setAddressCoordinates] = useState<{ lat: number; lng: number } | null>(null);
+  const [addressCoordinates, setAddressCoordinates] = useState<LatLng | null>(null);
   const [isValidatingDelivery, setIsValidatingDelivery] = useState(false);
   const [selectedAddressDetails, setSelectedAddressDetails] = useState<AddressSelectionDetails | null>(null);
   const [validationSnapshot, setValidationSnapshot] = useState<string | null>(null);
@@ -637,6 +927,48 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
   const normalizedStreetAddress = parsedAddressInput.shouldSkipZoneValidation
     ? parsedAddressInput.normalizedAddress
     : formData.address.trim();
+
+  // A saved address without a point, still exactly as it was opened: its
+  // stored coordinates are left alone and its zone is not checked.
+  const keepsUncheckedStoredAddress = Boolean(
+    uncheckedStoredAddress
+    && formData.address === uncheckedStoredAddress.address
+    && formData.city === uncheckedStoredAddress.city
+    && formData.postalCode === uncheckedStoredAddress.postalCode
+    && !firstValidPoint(selectedAddressDetails?.coordinates, addressCoordinates),
+  );
+  // Founder (29/09/2026): never «out of zone» for an address nobody checked.
+  // Say the zone was not checked and offer to pick the address again; saving
+  // is not blocked.
+  const showZoneNotChecked = hasDeliveryPro && keepsUncheckedStoredAddress && !isSpecialAddressMode;
+  const repickQuery = [formData.address.trim(), formData.city.trim()].filter(Boolean).join(', ');
+
+  const phoneAssessment = React.useMemo(
+    () => isAddressOnlyMode
+      ? null
+      : assessCustomerPhone({
+          editing: mode === 'edit' && Boolean(initialCustomer?.id),
+          phone: formData.phone,
+          storeCountry: storePhoneCountry,
+          initialPhone: initialCustomer?.phone,
+          initialCountry: initialCustomer?.phone_country_code,
+        }),
+    [isAddressOnlyMode, mode, initialCustomer?.id, initialCustomer?.phone, initialCustomer?.phone_country_code, formData.phone, storePhoneCountry],
+  );
+  const phoneRejection: CustomerPhoneInputRejected | null =
+    phoneAssessment && !phoneAssessment.result.ok && phoneAssessment.result.reason !== 'EMPTY'
+      ? phoneAssessment.result
+      : null;
+  const livePhoneError = phoneRejection && phoneAssessment?.blocksSave
+    && (phoneBlurred || submitAttempted || isCustomerPhoneRejectionShownWhileTyping(phoneRejection))
+    ? describePhoneRejection(t, phoneRejection)
+    : '';
+  const phoneErrorText = errors.phone || livePhoneError;
+  // Editing a customer whose stored phone fails today's rule: say so, but the
+  // number is kept as it is and the save goes ahead.
+  const phoneKeptWarning = !phoneErrorText && phoneRejection && phoneAssessment && !phoneAssessment.blocksSave
+    ? describePhoneRejection(t, phoneRejection)
+    : '';
 
   const handleInputChange = (field: string, value: string) => {
     if ((field === 'city' || field === 'postalCode') && value !== formData[field]) {
@@ -706,7 +1038,8 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
 
     setIsValidatingDelivery(true);
     try {
-      const coords = details?.coordinates || addressCoordinates || undefined;
+      // Only a real point is ever zone-checked; none means a text check.
+      const coords = firstValidPoint(details?.coordinates, addressCoordinates) || undefined;
       const fallbackFingerprint = buildAddressFingerprint(trimmedAddress, coords);
 
       const validation = await validateAddressForDelivery(trimmedAddress, {
@@ -724,8 +1057,9 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       setDeliveryValidationStatus(validation.validation_status);
       setShowDeliveryValidation(validation.validation_status !== 'module_disabled');
       setValidationSnapshot(validation.address_fingerprint || fallbackFingerprint);
-      if (validation.coordinates) {
-        setAddressCoordinates(validation.coordinates);
+      const validatedPoint = toValidLatLng(validation.coordinates);
+      if (validatedPoint) {
+        setAddressCoordinates(validatedPoint);
       } else if (coords) {
         setAddressCoordinates(coords);
       }
@@ -769,7 +1103,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       return null;
     }
 
-    const coords = selectedAddressDetails?.coordinates || addressCoordinates || undefined;
+    const coords = firstValidPoint(selectedAddressDetails?.coordinates, addressCoordinates) || undefined;
     const currentFingerprint = buildAddressFingerprint(address, coords);
 
     if (deliveryValidationResult && validationSnapshot === currentFingerprint) {
@@ -844,7 +1178,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         postalCode: details?.postalCode || prev.postalCode,
       }));
       setSelectedAddressDetails(details || null);
-      setAddressCoordinates(details?.coordinates || null);
+      setAddressCoordinates(toValidLatLng(details?.coordinates));
       setOverrideApplied(false);
       setOverrideReason('');
       setShowDeliveryValidation(true);
@@ -860,11 +1194,17 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
     clearAddressValidation(address);
   };
 
-  const validateForm = () => {
+  const validateForm = (assessment: PhoneAssessment | null) => {
     const newErrors: Record<string, string> = {};
 
-    if (!formData.phone.trim()) {
-      newErrors.phone = t('modals.addCustomer.phoneRequired');
+    // The phone is read-only while an address is added or edited: a stored
+    // phone never blocks an address save.
+    if (!isAddressOnlyMode) {
+      if (!formData.phone.trim()) {
+        newErrors.phone = t('modals.addCustomer.phoneRequired');
+      } else if (assessment?.blocksSave && !assessment.result.ok) {
+        newErrors.phone = describePhoneRejection(t, assessment.result);
+      }
     }
 
     if (!formData.name.trim()) {
@@ -902,12 +1242,28 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
     submissionLockRef.current = true;
     const submissionGeneration = ++submissionGenerationRef.current;
     setIsSubmitting(true);
+    setSubmitAttempted(true);
 
     try {
-      console.log('[AddCustomerModal.handleSubmit] BUILD v2026.01.05.2 - Called with mode:', mode, 'initialCustomer:', initialCustomer?.id, initialCustomer?.name);
-      console.log('[AddCustomerModal.handleSubmit] formData:', JSON.stringify(formData, null, 2));
+      console.log('[AddCustomerModal.handleSubmit] mode:', mode, 'customer:', initialCustomer?.id ?? null);
 
-      if (!validateForm()) {
+      // Validate with the store country this terminal holds right now, and
+      // submit exactly the country the number was validated with.
+      const storeCountry = await readStorePhoneCountry();
+      if (storeCountry !== storePhoneCountry) {
+        setStorePhoneCountry(storeCountry);
+      }
+      const submitPhoneAssessment = isAddressOnlyMode
+        ? null
+        : assessCustomerPhone({
+            editing: mode === 'edit' && Boolean(initialCustomer?.id),
+            phone: formData.phone,
+            storeCountry,
+            initialPhone: initialCustomer?.phone,
+            initialCountry: initialCustomer?.phone_country_code,
+          });
+
+      if (!validateForm(submitPhoneAssessment)) {
         console.log('[AddCustomerModal.handleSubmit] Validation failed');
         return;
       }
@@ -915,10 +1271,15 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       const submittedPhone = formData.phone;
       const submittedPhoneCountryCode = isInternationalPhone(submittedPhone)
         ? null
-        : normalizePhoneCountryCode(formData.phoneCountryCode) || HOME_PHONE_COUNTRY;
+        : submitPhoneAssessment?.country ?? storeCountry;
+      const submittedPhoneRejection =
+        submitPhoneAssessment && !submitPhoneAssessment.result.ok ? submitPhoneAssessment.result : null;
 
       let validationForSubmit: DeliveryValidationResult | null = null;
-      if (hasDeliveryPro) {
+      // A saved address without a point that the cashier left as it is is not
+      // zone-checked (and never by its text alone, which can land on a
+      // same-named street elsewhere): the save goes ahead, the notice stays.
+      if (hasDeliveryPro && !keepsUncheckedStoredAddress) {
         validationForSubmit = await ensureAddressValidationForSubmit();
         const validationDecisionError = evaluateValidationDecision(validationForSubmit);
         if (validationDecisionError) {
@@ -938,20 +1299,33 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       const refreshed = await getResolvedTerminalCredentials().catch(() => ({
         branchId: terminalBranchId || undefined,
       } as any));
-      const activeValidation = hasDeliveryPro
+      const activeValidation = hasDeliveryPro && !keepsUncheckedStoredAddress
         ? (validationForSubmit || deliveryValidationResult)
         : null;
       // Persist the exact selected suggestion point first (Google/OSM details), then fallback.
+      // Only a real point: never (0,0), never half a pair.
       const persistedCoords = !parsedAddressInput.shouldSkipZoneValidation
-        ? (selectedAddressDetails?.coordinates || addressCoordinates || activeValidation?.coordinates || null)
+        ? firstValidPoint(selectedAddressDetails?.coordinates, addressCoordinates, activeValidation?.coordinates)
         : null;
+      // A saved address without a point, left as it is, keeps whatever point
+      // the office holds: its coordinates are left out of the write rather
+      // than sent as null.
+      const coordinateFields = keepsUncheckedStoredAddress
+        ? {}
+        : {
+            coordinates: persistedCoords,
+            latitude: persistedCoords?.lat ?? null,
+            longitude: persistedCoords?.lng ?? null,
+          };
       const validatedAt = hasDeliveryPro && activeValidation ? new Date().toISOString() : null;
       const normalizedOverrideReason = overrideApplied ? overrideReason.trim() : '';
       const validationMetadata = hasDeliveryPro
         ? {
             override_applied: overrideApplied,
             override_reason: normalizedOverrideReason || null,
-            validation_status: activeValidation?.validation_status || null,
+            validation_status: showZoneNotChecked
+              ? 'requires_selection'
+              : activeValidation?.validation_status || null,
             zone_id: activeValidation?.selectedZone?.id || null,
             validated_at: validatedAt,
             validation_source: activeValidation?.validation_source || null,
@@ -970,69 +1344,66 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       if (mode === 'addAddress' && initialCustomer?.id) {
         console.log('[AddCustomerModal] Adding new address for customer:', initialCustomer.id)
 
-        try {
-          // Use IPC service to avoid CORS
-          const addressData = {
-            street_address: normalizedStreetAddress, // Map to DB column name
-            city: formData.city ? formData.city.trim() : '',
-            postal_code: formData.postalCode ? formData.postalCode.trim() : null,
-            floor_number: formData.floorNumber ? formData.floorNumber.trim() : null,
-            notes: formData.notes ? formData.notes.trim() : null,
-            name_on_ringer: formData.nameOnRinger.trim() || null,
-            address_type: 'delivery',
-            is_default: false,
-            coordinates: persistedCoords,
-            latitude: persistedCoords?.lat ?? null,
-            longitude: persistedCoords?.lng ?? null,
-            ...(validationMetadata ?? {}),
+        // Use IPC service to avoid CORS
+        const addressData = {
+          street_address: normalizedStreetAddress, // Map to DB column name
+          city: formData.city ? formData.city.trim() : '',
+          postal_code: formData.postalCode ? formData.postalCode.trim() : null,
+          floor_number: formData.floorNumber ? formData.floorNumber.trim() : null,
+          notes: formData.notes ? formData.notes.trim() : null,
+          name_on_ringer: formData.nameOnRinger.trim() || null,
+          address_type: 'delivery',
+          is_default: false,
+          coordinates: persistedCoords,
+          latitude: persistedCoords?.lat ?? null,
+          longitude: persistedCoords?.lng ?? null,
+          ...(validationMetadata ?? {}),
+        };
+
+        // Result from IPC is { success: boolean, data?: any, error?: string }
+        let timeoutId: ReturnType<typeof setTimeout> | undefined;
+        const result = await Promise.race([
+          customerService.addCustomerAddress(initialCustomer.id, addressData),
+          new Promise<never>((_resolve, reject) => {
+            timeoutId = setTimeout(
+              () => reject(new AddAddressSaveTimeoutError()),
+              ADD_ADDRESS_SAVE_TIMEOUT_MS,
+            );
+          }),
+        ]).finally(() => {
+          if (timeoutId) clearTimeout(timeoutId);
+        }) as any;
+
+        if (result && result.success) {
+          const newAddress = result.data;
+          console.log('[AddCustomerModal] addAddress success - address:', newAddress?.id ?? null);
+          // Return the customer with the new address info
+          const updatedCustomer = {
+            ...initialCustomer,
+            // Update legacy fields for immediate UI feedback if needed,
+            // though proper selection should use selected_address_id
+            address: normalizedStreetAddress,
+            postal_code: formData.postalCode ? formData.postalCode.trim() : initialCustomer.postal_code,
+            floor_number: formData.floorNumber ? formData.floorNumber.trim() : initialCustomer.floor_number,
+            notes: formData.notes ? formData.notes.trim() : initialCustomer.notes,
+            name_on_ringer: formData.nameOnRinger ? formData.nameOnRinger.trim() : initialCustomer.name_on_ringer,
+            // Include the new address ID
+            selected_address_id: newAddress?.id,
+            // Ensure addresses array includes the new one if we have it locally
+            addresses: initialCustomer.addresses ? [...initialCustomer.addresses, newAddress] : [newAddress]
           };
 
-          // Result from IPC is { success: boolean, data?: any, error?: string }
-          let timeoutId: ReturnType<typeof setTimeout> | undefined;
-          const result = await Promise.race([
-            customerService.addCustomerAddress(initialCustomer.id, addressData),
-            new Promise<never>((_resolve, reject) => {
-              timeoutId = setTimeout(
-                () => reject(new AddAddressSaveTimeoutError()),
-                ADD_ADDRESS_SAVE_TIMEOUT_MS,
-              );
-            }),
-          ]).finally(() => {
-            if (timeoutId) clearTimeout(timeoutId);
-          }) as any;
-
-          if (result && result.success) {
-            const newAddress = result.data;
-            console.log('[AddCustomerModal] addAddress success - newAddress from API:', JSON.stringify(newAddress, null, 2));
-            // Return the customer with the new address info
-            const updatedCustomer = {
-              ...initialCustomer,
-              // Update legacy fields for immediate UI feedback if needed,
-              // though proper selection should use selected_address_id
-              address: normalizedStreetAddress,
-              postal_code: formData.postalCode ? formData.postalCode.trim() : initialCustomer.postal_code,
-              floor_number: formData.floorNumber ? formData.floorNumber.trim() : initialCustomer.floor_number,
-              notes: formData.notes ? formData.notes.trim() : initialCustomer.notes,
-              name_on_ringer: formData.nameOnRinger ? formData.nameOnRinger.trim() : initialCustomer.name_on_ringer,
-              // Include the new address ID
-              selected_address_id: newAddress?.id,
-              // Ensure addresses array includes the new one if we have it locally
-              addresses: initialCustomer.addresses ? [...initialCustomer.addresses, newAddress] : [newAddress]
-            };
-            console.log('[AddCustomerModal] Calling onCustomerAdded with updatedCustomer:', JSON.stringify({
-              id: updatedCustomer.id,
-              name: updatedCustomer.name,
-              address: updatedCustomer.address,
-              addresses: updatedCustomer.addresses,
-              selected_address_id: updatedCustomer.selected_address_id
-            }, null, 2));
-
-            onCustomerAdded(updatedCustomer);
-          } else {
-            throw new Error(result?.error || 'Failed to add address');
-          }
-        } catch (err: any) {
-          throw err;
+          onCustomerAdded(updatedCustomer);
+        } else {
+          // A refused address (INVALID_COORDINATES, NOT_FOUND, this register's
+          // own refusals) is named; anything else gets the generic message.
+          throw customerRejectionError(
+            t,
+            normalizeCustomerWriteResult(result),
+            null,
+            'modals.addCustomer.addressSaveFailed',
+            'address',
+          );
         }
         return;
       }
@@ -1041,59 +1412,59 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       if (mode === 'editAddress' && initialCustomer?.id && initialCustomer?.editAddressId) {
         console.log('[AddCustomerModal] Updating address:', initialCustomer.editAddressId, 'for customer:', initialCustomer.id);
 
-        try {
-          const addressData = {
-            street_address: normalizedStreetAddress,
-            city: formData.city ? formData.city.trim() : null,
-            postal_code: formData.postalCode ? formData.postalCode.trim() : null,
-            floor_number: formData.floorNumber ? formData.floorNumber.trim() : null,
-            notes: formData.notes ? formData.notes.trim() : null,
-            name_on_ringer: formData.nameOnRinger ? formData.nameOnRinger.trim() : null,
-            coordinates: persistedCoords,
-            latitude: persistedCoords?.lat ?? null,
-            longitude: persistedCoords?.lng ?? null,
-            customer_id: initialCustomer.id,
-            ...(validationMetadata ?? {}),
+        const addressData = {
+          street_address: normalizedStreetAddress,
+          city: formData.city ? formData.city.trim() : null,
+          postal_code: formData.postalCode ? formData.postalCode.trim() : null,
+          floor_number: formData.floorNumber ? formData.floorNumber.trim() : null,
+          notes: formData.notes ? formData.notes.trim() : null,
+          name_on_ringer: formData.nameOnRinger ? formData.nameOnRinger.trim() : null,
+          ...coordinateFields,
+          customer_id: initialCustomer.id,
+          ...(validationMetadata ?? {}),
+        };
+
+        // Find the address to get its current version
+        const addressToEdit = initialCustomer.addresses?.find(
+          (addr: any) => addr.id === initialCustomer.editAddressId
+        );
+
+        // Use customerService to update the address
+        const result = await customerService.updateCustomerAddress(
+          initialCustomer.editAddressId,
+          addressData,
+          addressVersionOf(addressToEdit),
+        ) as any;
+
+        if (result && result.success) {
+          const updatedAddress = result.data;
+          // Update the addresses array with the edited address
+          const updatedAddresses = initialCustomer.addresses?.map((addr: any) =>
+            addr.id === initialCustomer.editAddressId
+              ? { ...addr, ...updatedAddress, notes: formData.notes.trim(), delivery_notes: formData.notes.trim() }
+              : addr
+          ) || [];
+
+          // Return the customer with updated addresses
+          const updatedCustomer = {
+            ...initialCustomer,
+            addresses: updatedAddresses,
+            // Keep editAddressId so OrderFlow knows which address was edited
+            editAddressId: initialCustomer.editAddressId,
+            // The address just edited is the one the order goes to (a legacy
+            // placeholder comes back from the office with its new id).
+            selected_address_id: updatedAddress?.id || initialCustomer.editAddressId,
           };
 
-          // Find the address to get its current version
-          const addressToEdit = initialCustomer.addresses?.find(
-            (addr: any) => addr.id === initialCustomer.editAddressId
+          onCustomerAdded(updatedCustomer);
+        } else {
+          throw customerRejectionError(
+            t,
+            normalizeCustomerWriteResult(result),
+            null,
+            'modals.addCustomer.addressSaveFailed',
+            'address',
           );
-          const currentVersion = Number.isFinite(Number(addressToEdit?.version))
-            ? Number(addressToEdit.version)
-            : -1;
-
-          // Use customerService to update the address
-          const result = await customerService.updateCustomerAddress(
-            initialCustomer.editAddressId,
-            addressData,
-            currentVersion
-          ) as any;
-
-          if (result && result.success) {
-            const updatedAddress = result.data;
-            // Update the addresses array with the edited address
-            const updatedAddresses = initialCustomer.addresses?.map((addr: any) =>
-              addr.id === initialCustomer.editAddressId
-                ? { ...addr, ...updatedAddress, notes: formData.notes.trim(), delivery_notes: formData.notes.trim() }
-                : addr
-            ) || [];
-
-            // Return the customer with updated addresses
-            const updatedCustomer = {
-              ...initialCustomer,
-              addresses: updatedAddresses,
-              // Keep editAddressId so OrderFlow knows which address was edited
-              editAddressId: initialCustomer.editAddressId,
-            };
-
-            onCustomerAdded(updatedCustomer);
-          } else {
-            throw new Error(result?.error || 'Failed to update address');
-          }
-        } catch (err: any) {
-          throw new Error(extractErrorMessage(err, 'Failed to update address'));
         }
         return;
       }
@@ -1101,100 +1472,168 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       // Handle EDIT mode - update existing customer via IPC
       if (mode === 'edit' && initialCustomer?.id) {
         console.log('[AddCustomerModal] Updating existing customer via IPC:', initialCustomer.id);
-        console.log('[AddCustomerModal] initialCustomer.version:', (initialCustomer as any).version);
 
-        try {
-          const updates = {
-            phone: submittedPhone,
-            phone_country_code: submittedPhoneCountryCode,
-            name: formData.name.trim(),
-            email: formData.email ? formData.email.trim() : undefined,
-            address: normalizedStreetAddress,
-            city: formData.city ? formData.city.trim() : undefined,
-            postal_code: formData.postalCode ? formData.postalCode.trim() : undefined,
-            floor_number: formData.floorNumber ? formData.floorNumber.trim() : undefined,
-            notes: formData.notes ? formData.notes.trim() : undefined,
-            name_on_ringer: formData.nameOnRinger ? formData.nameOnRinger.trim() : undefined,
-            // Pass coordinates if available
-            coordinates: persistedCoords,
-            latitude: persistedCoords?.lat ?? null,
-            longitude: persistedCoords?.lng ?? null,
-            delivery_validation: validationMetadata,
-          };
+        const initialFields = initialAddressFields;
+        const addressFieldKeys = ['address', 'city', 'postalCode', 'floorNumber', 'nameOnRinger', 'notes'] as const;
+        const notesChanged = !initialFields || formData.notes.trim() !== initialFields.notes.trim();
+        const addressFieldsChanged = !initialFields
+          || addressFieldKeys.some((key) => formData[key].trim() !== initialFields[key].trim());
+        const targetAddress = editTargetAddressRef.current;
+        const storedPoint = getStoredCoordinates(targetAddress ?? initialCustomer);
+        const pointChanged = !keepsUncheckedStoredAddress
+          && (persistedCoords?.lat !== storedPoint?.lat || persistedCoords?.lng !== storedPoint?.lng);
+        // Founder (29/09/2026): full "Edit customer" saves its address changes
+        // to the selected (else default) address, exactly like the address
+        // editor. An untouched address is not written again.
+        const writesAddress = Boolean(normalizedStreetAddress) && (addressFieldsChanged || pointChanged);
 
-          // Use optimistic versioning if available, otherwise fetch fresh version
-          let currentVersion = initialCustomer.version;
+        const updates = {
+          // An unchanged phone is left out: the office keeps it as stored and
+          // does not re-read it with today's rule or another country.
+          ...(submitPhoneAssessment?.unchanged
+            ? {}
+            : { phone: submittedPhone, phone_country_code: submittedPhoneCountryCode }),
+          name: formData.name.trim(),
+          email: formData.email ? formData.email.trim() : undefined,
+          address: normalizedStreetAddress,
+          city: formData.city ? formData.city.trim() : undefined,
+          postal_code: formData.postalCode ? formData.postalCode.trim() : undefined,
+          floor_number: formData.floorNumber ? formData.floorNumber.trim() : undefined,
+          // With a saved address the notes field is that address's delivery
+          // notes: a change is written to the address only (below), so a
+          // separate customer-level note is never replaced. A customer with
+          // no saved address keeps the legacy customer-level notes, written
+          // only when the cashier changed them.
+          notes: !targetAddress && notesChanged && formData.notes.trim() ? formData.notes.trim() : undefined,
+          name_on_ringer: formData.nameOnRinger ? formData.nameOnRinger.trim() : undefined,
+          ...coordinateFields,
+          delivery_validation: validationMetadata,
+        };
 
-          // If no version, fetch fresh customer data to get current version
-          if (currentVersion === undefined || currentVersion === null) {
-            console.log('[AddCustomerModal] No version found, fetching fresh customer data...');
-            try {
-              // First invalidate cache to ensure we get fresh data
-              await bridge.customers.invalidateCache(initialCustomer.phone);
+        // Use optimistic versioning if available, otherwise fetch fresh version
+        let currentVersion: number | null | undefined = savedCustomerVersionRef.current ?? initialCustomer.version;
 
-              const freshCustomer = await bridge.customers.lookupByPhone(initialCustomer.phone);
-              console.log('[AddCustomerModal] Fresh customer data:', JSON.stringify(freshCustomer, null, 2));
-              if (freshCustomer?.version !== undefined && freshCustomer?.version !== null) {
-                currentVersion = freshCustomer.version;
-                console.log('[AddCustomerModal] Got fresh version:', currentVersion);
-              } else if (freshCustomer?.id) {
-                // Customer exists but has no version - this is a legacy customer
-                // We need to fetch the actual version from the database or use force update
-                console.log('[AddCustomerModal] Customer exists but no version in response, using force update (-1)');
-                currentVersion = -1; // Signal to skip version check for legacy customers
-              }
-            } catch (e) {
-              console.warn('[AddCustomerModal] Failed to fetch fresh version:', e);
+        // If no version, fetch fresh customer data to get current version
+        if (currentVersion === undefined || currentVersion === null) {
+          console.log('[AddCustomerModal] No version found, fetching fresh customer data...');
+          try {
+            // First invalidate cache to ensure we get fresh data
+            await bridge.customers.invalidateCache(initialCustomer.phone);
+
+            const freshCustomer = await bridge.customers.lookupByPhone(initialCustomer.phone);
+            if (freshCustomer?.version !== undefined && freshCustomer?.version !== null) {
+              currentVersion = freshCustomer.version;
+            } else if (freshCustomer?.id) {
+              // Customer exists but has no version - this is a legacy customer
+              // We need to fetch the actual version from the database or use force update
+              console.log('[AddCustomerModal] Customer exists but no version in response, using force update (-1)');
+              currentVersion = -1; // Signal to skip version check for legacy customers
             }
+          } catch (e) {
+            console.warn('[AddCustomerModal] Failed to fetch fresh version:', e);
           }
-
-          // If still no version after fetching, throw error - version is required for updates
-          if (currentVersion === undefined || currentVersion === null) {
-            console.error('[AddCustomerModal] Cannot update customer without version');
-            throw new Error(t('modals.addCustomer.versionRequired', 'Unable to update customer - please refresh and try again'));
-          }
-
-          console.log('[AddCustomerModal] Using version for update:', currentVersion);
-
-          // Result is { success, data, conflict, error }
-          const result = await customerService.updateCustomer(initialCustomer.id, updates, currentVersion) as any;
-
-          if (result && result.success) {
-            // Success - merge the updated customer with address data from form
-            // The API returns customer without addresses, so we need to include them
-            const updatedCustomer = {
-              ...result.data,
-              // Include address data from form for immediate use
-              address: normalizedStreetAddress,
-              city: formData.city ? formData.city.trim() : undefined,
-              postal_code: formData.postalCode ? formData.postalCode.trim() : undefined,
-              floor_number: formData.floorNumber ? formData.floorNumber.trim() : undefined,
-              notes: formData.notes ? formData.notes.trim() : undefined,
-              name_on_ringer: formData.nameOnRinger ? formData.nameOnRinger.trim() : undefined,
-              // Preserve existing addresses from initialCustomer if available
-              addresses: initialCustomer.addresses || [],
-            };
-            onCustomerAdded(updatedCustomer);
-            setFormData({
-              phone: '',
-              phoneCountryCode: '',
-              name: '',
-              email: '',
-              nameOnRinger: '',
-              address: '',
-              city: '',
-              postalCode: '',
-              floorNumber: '',
-              notes: '',
-            });
-          } else if (result?.conflict) {
-            throw new Error(t('modals.addCustomer.conflictError', 'Customer was updated by another terminal. Please refresh.'));
-          } else {
-            throw new Error(result?.error || 'Failed to update customer');
-          }
-        } catch (err: any) {
-          throw new Error(extractErrorMessage(err, 'Failed to update customer'));
         }
+
+        // If still no version after fetching, throw error - version is required for updates
+        if (currentVersion === undefined || currentVersion === null) {
+          console.error('[AddCustomerModal] Cannot update customer without version');
+          throw new CustomerFormError(
+            'submit',
+            t('modals.addCustomer.versionRequired', 'Unable to update customer - please refresh and try again'),
+          );
+        }
+
+        const result = await customerService.updateCustomer(initialCustomer.id, updates as any, currentVersion);
+        if (!result.success) {
+          throw customerRejectionError(t, result, submittedPhoneRejection, 'modals.addCustomer.updateFailed');
+        }
+        const savedVersion = Number((result.data as any)?.version);
+        if (Number.isFinite(savedVersion)) {
+          savedCustomerVersionRef.current = savedVersion;
+        }
+
+        let addressWrite: any = null;
+        if (writesAddress) {
+          const addressData = {
+            street_address: normalizedStreetAddress,
+            city: formData.city ? formData.city.trim() : null,
+            postal_code: formData.postalCode ? formData.postalCode.trim() : null,
+            floor_number: formData.floorNumber ? formData.floorNumber.trim() : null,
+            name_on_ringer: formData.nameOnRinger ? formData.nameOnRinger.trim() : null,
+            ...(notesChanged ? { notes: formData.notes.trim() || null } : {}),
+            ...coordinateFields,
+            customer_id: initialCustomer.id,
+            ...(validationMetadata ?? {}),
+          };
+          try {
+            addressWrite = targetAddress?.id
+              ? await customerService.updateCustomerAddress(
+                  targetAddress.id,
+                  addressData,
+                  addressVersionOf(targetAddress),
+                )
+              : await customerService.addCustomerAddress(initialCustomer.id, {
+                  ...addressData,
+                  address_type: 'delivery',
+                  is_default: true,
+                });
+          } catch (addressError) {
+            console.error('[AddCustomerModal] Saving the edited address failed:', addressError);
+            addressWrite = null;
+          }
+          if (!addressWrite?.success) {
+            throw customerRejectionError(
+              t,
+              normalizeCustomerWriteResult(addressWrite),
+              null,
+              'modals.addCustomer.addressSaveFailed',
+              'address',
+            );
+          }
+        }
+
+        // Hand on the addresses as they are now, not as the form opened.
+        const baseAddresses: any[] = Array.isArray(initialCustomer.addresses) ? initialCustomer.addresses : [];
+        const savedAddress = addressWrite?.data && typeof addressWrite.data === 'object' ? addressWrite.data : null;
+        const freshAddresses: any[] =
+          Array.isArray(addressWrite?.customer?.addresses) && addressWrite.customer.addresses.length > 0
+            ? addressWrite.customer.addresses
+            : savedAddress
+              ? targetAddress
+                ? baseAddresses.map((addr: any) => (addr?.id === targetAddress.id ? { ...addr, ...savedAddress } : addr))
+                : [...baseAddresses, savedAddress]
+              : baseAddresses;
+
+        const updatedCustomer = {
+          ...(result.data as any),
+          // Include address data from form for immediate use
+          address: normalizedStreetAddress,
+          city: formData.city ? formData.city.trim() : undefined,
+          postal_code: formData.postalCode ? formData.postalCode.trim() : undefined,
+          floor_number: formData.floorNumber ? formData.floorNumber.trim() : undefined,
+          // The customer's own notes stay as saved; the edited delivery notes
+          // travel with the address.
+          notes: targetAddress
+            ? ((result.data as any)?.notes ?? initialCustomer.notes ?? undefined)
+            : formData.notes ? formData.notes.trim() : undefined,
+          name_on_ringer: formData.nameOnRinger ? formData.nameOnRinger.trim() : undefined,
+          addresses: freshAddresses,
+          selected_address_id:
+            savedAddress?.id || targetAddress?.id || initialCustomer.selected_address_id || null,
+        };
+        onCustomerAdded(updatedCustomer);
+        setFormData({
+          phone: '',
+          phoneCountryCode: '',
+          name: '',
+          email: '',
+          nameOnRinger: '',
+          address: '',
+          city: '',
+          postalCode: '',
+          floorNumber: '',
+          notes: '',
+        });
         return;
       }
 
@@ -1228,8 +1667,13 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         } : null,
       };
 
-      const createdRaw = await customerService.createCustomer(newCustomerData as any) as any;
-      const createdCustomer = (createdRaw?.data ?? createdRaw?.customer ?? createdRaw) as any;
+      // A refused create (success:false) saved and queued nothing: show why and
+      // keep the form open. Only a real connection failure is saved offline.
+      const createResult = await customerService.createCustomer(newCustomerData as any);
+      if (!createResult.success) {
+        throw customerRejectionError(t, createResult, submittedPhoneRejection, 'modals.addCustomer.failed');
+      }
+      const createdCustomer = createResult.data as any;
 
       if (createdCustomer?.id) {
         // Enrich with form data to ensure city/floor are immediately available
@@ -1294,20 +1738,28 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
           notes: '',
         });
       } else {
-        throw new Error(createdRaw?.error || 'Failed to create customer');
+        throw new CustomerFormError('submit', t('modals.addCustomer.failed'));
       }
     } catch (error) {
       console.error('[AddCustomerModal.handleSubmit] Error:', error);
       console.error('[AddCustomerModal.handleSubmit] Mode was:', mode, 'initialCustomer:', initialCustomer?.id);
-      setErrors({
-        submit: isAddAddressMode
-          ? error instanceof AddAddressSaveTimeoutError
+      // Raw native or office text never reaches the form: a known rejection
+      // lands on its field, anything else gets the mode's own message.
+      if (error instanceof CustomerFormError) {
+        setErrors({ [error.field]: error.message });
+      } else if (isAddAddressMode) {
+        setErrors({
+          submit: error instanceof AddAddressSaveTimeoutError
             ? t('modals.addCustomer.addressSaveTimedOut')
-            : t('modals.addCustomer.addressSaveFailed')
-          : error instanceof Error
-            ? error.message
-            : t('modals.addCustomer.failed'),
-      });
+            : t('modals.addCustomer.addressSaveFailed'),
+        });
+      } else if (isEditAddressMode) {
+        setErrors({ submit: t('modals.addCustomer.addressSaveFailed') });
+      } else if (mode === 'edit') {
+        setErrors({ submit: t('modals.addCustomer.updateFailed') });
+      } else {
+        setErrors({ submit: t('modals.addCustomer.failed') });
+      }
     } finally {
       if (submissionGenerationRef.current === submissionGeneration) {
         console.log('[AddCustomerModal.handleSubmit] Finally block - isSubmitting set to false');
@@ -1368,7 +1820,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
               onClick={handleSafeMinimize}
               disabled={isSubmitting}
               className="liquid-glass-modal-close"
-              aria-label={t('app.window.minimize', 'Minimize')}
+              aria-label={t('modals.addCustomer.minimize', 'Minimize')}
             >
               <Minus className="h-5 w-5" />
             </button>
@@ -1394,23 +1846,51 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       <form onSubmit={handleSubmit} className="space-y-4">
         {/* Phone Number - disabled in addAddress mode */}
         <div>
-          <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
+          <label
+            htmlFor="add-customer-phone"
+            className="block text-sm font-medium liquid-glass-modal-text mb-2"
+          >
             {t('modals.addCustomer.phoneLabel').replace(' *', '')} <span className="text-red-500">*</span>
           </label>
           <div className="relative">
             <Phone className="liquid-glass-modal-field-icon absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5" />
             <input
+              id="add-customer-phone"
               type="tel"
               value={formData.phone}
               onChange={(e) => handleInputChange('phone', e.target.value)}
+              onBlur={() => setPhoneBlurred(true)}
               placeholder={t('modals.addCustomer.phonePlaceholder')}
-              className={`${inputBase(resolvedTheme)} pl-10 pr-4 ${isAddressOnlyMode ? 'opacity-60 cursor-not-allowed' : ''}`}
+              aria-invalid={phoneErrorText ? true : undefined}
+              aria-describedby={
+                phoneErrorText
+                  ? 'add-customer-phone-error'
+                  : phoneKeptWarning
+                    ? 'add-customer-phone-warning'
+                    : undefined
+              }
+              className={`${inputBase(resolvedTheme)} pl-10 pr-4 ${isAddressOnlyMode ? 'opacity-60 cursor-not-allowed' : ''} ${phoneErrorText ? '!border-red-500 focus:!ring-red-500/50' : ''}`}
               disabled={isAddressOnlyMode}
               readOnly={isAddressOnlyMode}
             />
           </div>
-          {errors.phone && (
-            <p className="mt-1 text-sm text-red-600 dark:text-red-400">{errors.phone}</p>
+          {phoneErrorText && (
+            <p
+              id="add-customer-phone-error"
+              role="alert"
+              className="mt-1 text-sm text-red-600 dark:text-red-400"
+            >
+              {phoneErrorText}
+            </p>
+          )}
+          {phoneKeptWarning && (
+            <p
+              id="add-customer-phone-warning"
+              className="mt-1 text-sm text-amber-700 dark:text-amber-300"
+            >
+              <span className="block">{phoneKeptWarning}</span>
+              <span className="block">{t('modals.addCustomer.phoneKeptAsSaved')}</span>
+            </p>
           )}
         </div>
 
@@ -1430,10 +1910,31 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
               }
               className="pr-3"
               searchEnabled={hasDeliveryPro}
+              repickSignal={repickSignal}
+              repickQuery={repickQuery}
             />
           </div>
           {errors.address && (
             <p className="mt-1 text-sm text-red-600 dark:text-red-400">{errors.address}</p>
+          )}
+          {showZoneNotChecked && (
+            <div
+              role="status"
+              data-testid="add-customer-zone-not-checked"
+              className="mt-2 space-y-2 rounded-2xl border border-amber-500/30 bg-amber-500/10 p-3"
+            >
+              <div className="flex items-start gap-2 text-sm text-amber-800 dark:text-amber-100">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-300" />
+                <span>{t('modals.addCustomer.zoneNotChecked')}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setRepickSignal((signal) => signal + 1)}
+                className="liquid-glass-modal-button rounded-2xl px-3 py-2 text-sm"
+              >
+                {t('modals.addCustomer.repickAddress')}
+              </button>
+            </div>
           )}
           {!hasDeliveryPro && (
             <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
@@ -1466,7 +1967,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         )}
 
         {/* Delivery Validation */}
-        {hasDeliveryPro && showDeliveryValidation && (
+        {hasDeliveryPro && showDeliveryValidation && !showZoneNotChecked && (
           <div className="liquid-glass-modal-card">
             <div className="space-y-3">
               <div className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300">
@@ -1684,7 +2185,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
           />
           {(formData.floorNumber?.length ?? 0) >= 100 && (
             <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
-              {t('common.validation.maxLength', { count: 100 })}
+              {t('modals.addCustomer.floorTooLong', { max: 100 })}
             </p>
           )}
           {errors.floorNumber && (

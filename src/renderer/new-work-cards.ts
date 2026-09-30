@@ -98,3 +98,21 @@ export function resolveNewWorkCards(input: ResolveNewWorkCardsInput): NewWorkCar
 export function hasLaunchableNewWork(cards: NewWorkCard[]): boolean {
   return cards.some((card) => card.enabled);
 }
+
+/**
+ * The card (+) opens straight away because it is the only kind of work this
+ * business can start (founder, 24/09/2026: «όταν είναι μόνο ένα module δεν
+ * χρειάζεται επιλογή»); undefined when the picker must show. Wait until every
+ * option is known (the scoped repair settings answered), or a second option
+ * could be skipped. Only an enabled card opens: the (+) is not clickable while
+ * nothing can start. Mirrors the Android `resolveDirectNewWorkCard`
+ * (POSSystemMobile/src/navigation/newWorkCards.ts).
+ */
+export function resolveDirectNewWorkCard(
+  cards: NewWorkCard[],
+  optionsSettled: boolean,
+): NewWorkCard | undefined {
+  if (!optionsSettled || cards.length !== 1) return undefined;
+  const [only] = cards;
+  return only.enabled ? only : undefined;
+}

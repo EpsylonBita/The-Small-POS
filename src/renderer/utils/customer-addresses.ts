@@ -1,4 +1,4 @@
-import { extractSavedAddressCoordinates } from './saved-address-geolocation';
+import { readSavedAddressPoint } from './coordinates';
 
 export const LEGACY_FALLBACK_ADDRESS_PREFIX = 'legacy:';
 
@@ -100,15 +100,8 @@ function normalizeOptionalText(value: unknown): string {
 
 function materializeAddress(address: CustomerAddressLike): MaterializedCustomerAddress {
   const streetAddress = normalizeStreetAddress(address.street_address) || normalizeStreetAddress(address.street);
-  const normalizedCoordinates =
-    extractSavedAddressCoordinates({
-      street_address: streetAddress || undefined,
-      city: normalizeOptionalText(address.city) || undefined,
-      postal_code: normalizeOptionalText(address.postal_code) || undefined,
-      coordinates: address.coordinates ?? undefined,
-      latitude: address.latitude ?? undefined,
-      longitude: address.longitude ?? undefined,
-    }) ?? undefined;
+  // Strict: a row without coordinates stays without coordinates (never (0,0)).
+  const point = readSavedAddressPoint(address);
 
   return {
     ...address,
@@ -122,13 +115,9 @@ function materializeAddress(address: CustomerAddressLike): MaterializedCustomerA
     delivery_notes:
       normalizeOptionalText(address.delivery_notes) || normalizeOptionalText(address.notes),
     name_on_ringer: normalizeOptionalText(address.name_on_ringer),
-    coordinates: address.coordinates ?? normalizedCoordinates,
-    latitude:
-      normalizedCoordinates?.lat ??
-      (Number.isFinite(Number(address.latitude)) ? Number(address.latitude) : null),
-    longitude:
-      normalizedCoordinates?.lng ??
-      (Number.isFinite(Number(address.longitude)) ? Number(address.longitude) : null),
+    coordinates: point ?? undefined,
+    latitude: point?.lat ?? null,
+    longitude: point?.lng ?? null,
     address_type: normalizeOptionalText(address.address_type) || 'home',
     is_default: Boolean(address.is_default),
     created_at: normalizeOptionalText(address.created_at),
@@ -159,14 +148,11 @@ export function buildLegacyFallbackCustomerAddress(
     return null;
   }
 
-  const coordinates = extractSavedAddressCoordinates({
-    street_address: normalizedStreet,
-    city: typeof customer.city === 'string' ? customer.city : undefined,
-    postal_code: typeof customer.postal_code === 'string' ? customer.postal_code : undefined,
-    coordinates: customer.coordinates ?? undefined,
-    latitude: customer.latitude ?? undefined,
-    longitude: customer.longitude ?? undefined,
-  }) ?? undefined;
+  const coordinates = readSavedAddressPoint({
+    coordinates: customer.coordinates,
+    latitude: customer.latitude,
+    longitude: customer.longitude,
+  });
 
   return {
     id: `${LEGACY_FALLBACK_ADDRESS_PREFIX}${customer.id}`,
@@ -180,8 +166,8 @@ export function buildLegacyFallbackCustomerAddress(
     delivery_notes: customer.notes ?? undefined,
     name_on_ringer: typeof customer.name_on_ringer === 'string' ? customer.name_on_ringer : undefined,
     coordinates: coordinates ?? undefined,
-    latitude: coordinates?.lat ?? customer.latitude ?? null,
-    longitude: coordinates?.lng ?? customer.longitude ?? null,
+    latitude: coordinates?.lat ?? null,
+    longitude: coordinates?.lng ?? null,
     address_type: 'home',
     is_default: true,
     created_at: '',
@@ -244,15 +230,7 @@ export function toCanonicalCustomerAddress(
     return null;
   }
 
-  const normalizedCoordinates =
-    extractSavedAddressCoordinates(address) ?? undefined;
-
-  const resolvedLatitude =
-    normalizedCoordinates?.lat ??
-    (Number.isFinite(Number(address.latitude)) ? Number(address.latitude) : null);
-  const resolvedLongitude =
-    normalizedCoordinates?.lng ??
-    (Number.isFinite(Number(address.longitude)) ? Number(address.longitude) : null);
+  const point = readSavedAddressPoint(address);
   const resolvedNotes =
     normalizeOptionalText(address.delivery_notes) || normalizeOptionalText(address.notes);
   const resolvedFloor = normalizeOptionalText(address.floor_number);
@@ -272,9 +250,9 @@ export function toCanonicalCustomerAddress(
     delivery_notes: resolvedNotes,
     name_on_ringer: resolvedNameOnRinger,
     nameOnRinger: resolvedNameOnRinger,
-    coordinates: address.coordinates ?? normalizedCoordinates,
-    latitude: resolvedLatitude,
-    longitude: resolvedLongitude,
+    coordinates: point ?? undefined,
+    latitude: point?.lat ?? null,
+    longitude: point?.lng ?? null,
   };
 }
 

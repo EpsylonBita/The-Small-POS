@@ -94,13 +94,6 @@ const EVENT_MAP: Record<string, string> = {
   'menu_check_for_updates': 'menu:check-for-updates',
   'menu_version_checked': 'menu:version-checked',
 
-  // --- Screen capture ---
-  'screen_capture_start': 'screen-capture:start',
-  'screen_capture_stop': 'screen-capture:stop',
-  'screen_capture_signal_batch': 'screen-capture:signal-batch',
-  'screen_capture_signal_poll_error': 'screen-capture:signal-poll-error',
-  'screen_capture_signal_poll_stopped': 'screen-capture:signal-poll-stopped',
-
   // --- Module sync events ---
   'modules_sync_complete': 'modules:sync-complete',
   'modules_sync_error': 'modules:sync-error',
