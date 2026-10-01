@@ -1,8 +1,12 @@
-import { readSavedAddressPoint } from './coordinates';
+import { extractSavedAddressCoordinates } from './saved-address-geolocation';
 
 export const LEGACY_FALLBACK_ADDRESS_PREFIX = 'legacy:';
 
 export type MaterializedCustomerAddress = {
+  coordinate_source?: string | null;
+  geocoded_at?: string | null;
+  google_place_id?: string | null;
+  place_id?: string | null;
   id: string;
   customer_id?: string;
   street_address: string;
@@ -29,6 +33,10 @@ export type MaterializedCustomerAddress = {
 };
 
 type CustomerAddressLike = {
+  coordinate_source?: string | null;
+  geocoded_at?: string | null;
+  google_place_id?: string | null;
+  place_id?: string | null;
   id: string;
   customer_id?: string | null;
   street_address?: string | null;
@@ -101,7 +109,7 @@ function normalizeOptionalText(value: unknown): string {
 function materializeAddress(address: CustomerAddressLike): MaterializedCustomerAddress {
   const streetAddress = normalizeStreetAddress(address.street_address) || normalizeStreetAddress(address.street);
   // Strict: a row without coordinates stays without coordinates (never (0,0)).
-  const point = readSavedAddressPoint(address);
+  const point = extractSavedAddressCoordinates(address);
 
   return {
     ...address,
@@ -148,7 +156,10 @@ export function buildLegacyFallbackCustomerAddress(
     return null;
   }
 
-  const coordinates = readSavedAddressPoint({
+  const coordinates = extractSavedAddressCoordinates({
+    street_address: normalizedStreet,
+    city: typeof customer.city === 'string' ? customer.city : undefined,
+    postal_code: typeof customer.postal_code === 'string' ? customer.postal_code : undefined,
     coordinates: customer.coordinates,
     latitude: customer.latitude,
     longitude: customer.longitude,
@@ -230,7 +241,7 @@ export function toCanonicalCustomerAddress(
     return null;
   }
 
-  const point = readSavedAddressPoint(address);
+  const point = extractSavedAddressCoordinates(address);
   const resolvedNotes =
     normalizeOptionalText(address.delivery_notes) || normalizeOptionalText(address.notes);
   const resolvedFloor = normalizeOptionalText(address.floor_number);

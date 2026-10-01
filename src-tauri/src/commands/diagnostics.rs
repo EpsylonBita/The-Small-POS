@@ -8,6 +8,9 @@ use tracing::{info, warn};
 
 use crate::{db, diagnostics, incident_reporting, sync};
 
+/// Export options from the renderer. `redactSensitive` is accepted for the
+/// IPC contract and ignored: every bundle is redacted (review 30/09/2026 —
+/// a caller could ask for, or default to, an unredacted export).
 fn parse_diagnostics_export_payload(arg0: Option<Value>) -> diagnostics::DiagnosticsExportOptions {
     let mut options = diagnostics::DiagnosticsExportOptions::default();
 
@@ -24,19 +27,26 @@ fn parse_diagnostics_export_payload(arg0: Option<Value>) -> diagnostics::Diagnos
             {
                 options.include_logs = include_logs;
             }
-            if let Some(redact_sensitive) = obj
-                .get("redactSensitive")
-                .or_else(|| obj.get("redact_sensitive"))
-                .or_else(|| obj.get("redacted"))
-                .and_then(|v| v.as_bool())
-            {
-                options.redact_sensitive = redact_sensitive;
-            }
         }
         _ => {}
     }
 
+    options.redact_sensitive = true;
     options
+}
+
+/// The Health view snapshot the renderer may send with an export
+/// (`{ healthView: {...} }`, the shared `buildHealthView` object), written
+/// to `health_view.json` (bundle v2). Only an object is a snapshot, as on
+/// Android.
+fn parse_diagnostics_export_health_view(arg0: &Option<Value>) -> Option<Value> {
+    let Some(Value::Object(obj)) = arg0 else {
+        return None;
+    };
+    obj.get("healthView")
+        .or_else(|| obj.get("health_view"))
+        .filter(|view| view.is_object())
+        .cloned()
 }
 
 fn parse_diagnostics_open_export_dir_payload(arg0: Option<Value>) -> Result<String, String> {
@@ -489,7 +499,16 @@ pub async fn diagnostic_fix_missing_driver_ids(
 ) -> Result<Value, String> {
     let driver_id = parse_diagnostic_fix_driver_payload(arg0)?;
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    fix_missing_driver_ids_in_connection(&conn, &driver_id)
+}
 
+/// Attach delivered delivery orders that carry no driver to `driver_id` and
+/// give each a courier earning, whose money comes only from the order's
+/// completed payment rows.
+pub(crate) fn fix_missing_driver_ids_in_connection(
+    conn: &rusqlite::Connection,
+    driver_id: &str,
+) -> Result<Value, String> {
     let driver_shift_id: Option<String> = conn
         .query_row(
             "SELECT id FROM staff_shifts
@@ -509,15 +528,12 @@ pub async fn diagnostic_fix_missing_driver_ids(
         }));
     };
 
-    // W6: `orders.payment_method` was dropped in v55. Derive per-row
-    // from `order_payments` via `payments::derive_payment_method`. Fetch
-    // the order ids first (so we don't hold `orders_stmt` open while
-    // calling another query), then derive per id.
+    // Fetch the order ids first (so we don't hold `orders_stmt` open while
+    // reading each order's payment rows below).
     let mut orders_stmt = conn
         .prepare(
             // W4b: cents-with-real-fallback shim (removed in 4e).
             "SELECT id,
-                    COALESCE(total_amount_cents, CAST(ROUND(total_amount * 100) AS INTEGER), 0),
                     COALESCE(tip_amount_cents, CAST(ROUND(tip_amount * 100) AS INTEGER), 0),
                     COALESCE(branch_id, '')
              FROM orders
@@ -526,31 +542,17 @@ pub async fn diagnostic_fix_missing_driver_ids(
                AND (driver_id IS NULL OR TRIM(driver_id) = '')",
         )
         .map_err(|e| e.to_string())?;
-    let orders_rows = orders_stmt
+    let orders: Vec<(String, f64, String)> = orders_stmt
         .query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 crate::money::Cents::new(row.get::<_, i64>(1)?).to_f64_dp2(),
-                crate::money::Cents::new(row.get::<_, i64>(2)?).to_f64_dp2(),
-                row.get::<_, String>(3)?,
+                row.get::<_, String>(2)?,
             ))
         })
-        .map_err(|e| e.to_string())?;
-    let mut orders: Vec<(String, String, f64, f64, String)> = Vec::new();
-    for row in orders_rows.filter_map(|r| r.ok()) {
-        let (order_id, total_amount, tip_amount, branch_id) = row;
-        let payment_method = crate::payments::derive_payment_method(&conn, &order_id)
-            .ok()
-            .flatten()
-            .unwrap_or_default();
-        orders.push((
-            order_id,
-            payment_method,
-            total_amount,
-            tip_amount,
-            branch_id,
-        ));
-    }
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
     drop(orders_stmt);
 
     if orders.is_empty() {
@@ -565,7 +567,7 @@ pub async fn diagnostic_fix_missing_driver_ids(
     let mut fixed = 0i64;
     let mut earnings_created = 0i64;
 
-    for (order_id, payment_method, total_amount, tip_amount, branch_id) in orders {
+    for (order_id, tip_amount, branch_id) in orders {
         let now = Utc::now().to_rfc3339();
         let updated = conn
             .execute(
@@ -577,18 +579,15 @@ pub async fn diagnostic_fix_missing_driver_ids(
             fixed += 1;
         }
 
-        let pm_lower = payment_method.to_ascii_lowercase();
-        let mut earning_payment_method = "mixed".to_string();
-        let mut cash_collected = 0.0f64;
-        let mut card_amount = 0.0f64;
-
-        if pm_lower.contains("card") {
-            earning_payment_method = "card".to_string();
-            card_amount = total_amount;
-        } else if pm_lower.contains("cash") {
-            earning_payment_method = "cash".to_string();
-            cash_collected = total_amount;
-        }
+        // Founder's rule (30/09/2026): a courier's money comes only from the
+        // order's completed payment rows. The amounts used to be the order's
+        // whole total under the derived tender, so a 5.00 cash part-payment
+        // charged the courier the full order.
+        let (earning_payment_method, cash_collected, card_amount, _) =
+            match crate::order_ownership::get_order_payment_totals(conn, &order_id) {
+                Ok(totals) => totals,
+                Err(_) => ("cash".to_string(), 0.0, 0.0, 0.0),
+            };
 
         let inserted = conn
             .execute(
@@ -610,7 +609,7 @@ pub async fn diagnostic_fix_missing_driver_ids(
                     earning_payment_method,
                     cash_collected,
                     card_amount,
-                    cash_collected - card_amount,
+                    cash_collected,
                     Option::<String>::None,
                     now,
                     now,
@@ -652,6 +651,7 @@ pub async fn diagnostics_export(
 ) -> Result<Value, String> {
     use tauri::Manager;
     let options = parse_diagnostics_export_payload(arg0.clone());
+    let health_view = parse_diagnostics_export_health_view(&arg0);
     let data_dir = app
         .path()
         .app_data_dir()
@@ -659,7 +659,7 @@ pub async fn diagnostics_export(
     let zip_path = if arg0.is_none() {
         diagnostics::export_diagnostics(&db, &data_dir)?
     } else {
-        diagnostics::export_diagnostics_with_options(&db, &data_dir, options)?
+        diagnostics::export_diagnostics_bundle(&db, &data_dir, options, health_view)?
     };
     Ok(serde_json::json!({
         "success": true,
@@ -929,9 +929,77 @@ mod destructive_recovery_ordering_tests {
 #[cfg(test)]
 mod dto_tests {
     use super::{
-        parse_diagnostic_fix_driver_payload, parse_diagnostics_export_payload,
-        parse_diagnostics_open_export_dir_payload,
+        parse_diagnostic_fix_driver_payload, parse_diagnostics_export_health_view,
+        parse_diagnostics_export_payload, parse_diagnostics_open_export_dir_payload,
     };
+
+    #[test]
+    fn parse_diagnostics_export_health_view_reads_the_optional_snapshot() {
+        let view =
+            serde_json::json!({ "state": "needs_attention", "issues": ["fiscal_queue_not_empty"] });
+        assert_eq!(
+            parse_diagnostics_export_health_view(&Some(serde_json::json!({
+                "redactSensitive": true,
+                "healthView": view.clone(),
+            }))),
+            Some(view)
+        );
+        assert_eq!(
+            parse_diagnostics_export_health_view(&Some(
+                serde_json::json!({ "redactSensitive": true })
+            )),
+            None
+        );
+        assert_eq!(
+            parse_diagnostics_export_health_view(&Some(serde_json::json!({ "healthView": null }))),
+            None
+        );
+        assert_eq!(
+            parse_diagnostics_export_health_view(&Some(serde_json::json!(true))),
+            None
+        );
+        assert_eq!(parse_diagnostics_export_health_view(&None), None);
+        // Only an object is a snapshot (Android keeps only records too).
+        for not_a_snapshot in [
+            serde_json::json!("needs_attention"),
+            serde_json::json!(["fiscal_queue_not_empty"]),
+            serde_json::json!(42),
+        ] {
+            assert_eq!(
+                parse_diagnostics_export_health_view(&Some(serde_json::json!({
+                    "healthView": not_a_snapshot,
+                }))),
+                None
+            );
+        }
+    }
+
+    /// The payload the renderer's Health view export sends (ipc-adapter
+    /// buildDiagnosticsExportArgs): both options and the snapshot come out of
+    /// the same `arg0`, so health_view.json gets what the operator saw.
+    #[test]
+    fn the_health_view_export_payload_carries_options_and_the_snapshot() {
+        let view = serde_json::json!({
+            "format": "thesmall-pos-health-view-v1",
+            "platform": "windows",
+            "source": "health_modal",
+            "availability": "ready",
+            "state": "attention",
+            "issues": [{ "code": "fiscal_queue_not_empty", "severity": "critical", "status": "blocking" }],
+            "closeout": { "status": "not_collected" },
+            "counts": { "parityPending": 2 },
+        });
+        let arg0 = Some(serde_json::json!({
+            "includeLogs": true,
+            "redactSensitive": true,
+            "healthView": view.clone(),
+        }));
+
+        let options = parse_diagnostics_export_payload(arg0.clone());
+        assert!(options.include_logs);
+        assert!(options.redact_sensitive);
+        assert_eq!(parse_diagnostics_export_health_view(&arg0), Some(view));
+    }
 
     #[test]
     fn parse_diagnostics_export_payload_supports_defaults_and_bool_legacy_form() {
@@ -939,9 +1007,9 @@ mod dto_tests {
         let from_bool = parse_diagnostics_export_payload(Some(serde_json::json!(false)));
 
         assert!(defaults.include_logs);
-        assert!(!defaults.redact_sensitive);
+        assert!(defaults.redact_sensitive);
         assert!(!from_bool.include_logs);
-        assert!(!from_bool.redact_sensitive);
+        assert!(from_bool.redact_sensitive);
     }
 
     #[test]
@@ -953,6 +1021,24 @@ mod dto_tests {
 
         assert!(!parsed.include_logs);
         assert!(parsed.redact_sensitive);
+    }
+
+    /// Review 30/09/2026: the export command could be asked for (and
+    /// defaulted to) an unredacted bundle.
+    #[test]
+    fn the_export_command_never_turns_redaction_off() {
+        for arg0 in [
+            None,
+            Some(serde_json::json!(true)),
+            Some(serde_json::json!({ "redactSensitive": false })),
+            Some(serde_json::json!({ "redact_sensitive": false, "includeLogs": true })),
+            Some(serde_json::json!({ "redacted": false })),
+        ] {
+            assert!(
+                parse_diagnostics_export_payload(arg0.clone()).redact_sensitive,
+                "{arg0:?}"
+            );
+        }
     }
 
     #[test]

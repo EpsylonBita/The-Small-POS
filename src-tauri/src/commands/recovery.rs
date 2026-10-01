@@ -1596,11 +1596,22 @@ async fn recovery_execute_action_core(
                 )
                 .unwrap_or_else(|| "card".to_string());
 
+            // Item F: the audit entry names who recorded it (`charged: false`).
+            let session = auth::get_session_json(auth_state);
+            let recorded_by = ["databaseStaffId", "staffId"].iter().find_map(|key| {
+                session
+                    .get(*key)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToString::to_string)
+            });
             let result = payments::resolve_unsettled_payment_blocker_payment(
                 db,
                 &json!({
                     "orderId": order_id,
                     "method": preferred_method,
+                    "recordedBy": recorded_by,
                 }),
             )
             .map_err(auth::GuardedCommandError::from)?;

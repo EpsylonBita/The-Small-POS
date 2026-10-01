@@ -52,8 +52,10 @@ test('InventoryPage renders header and stat icons without wrapper boxes', () => 
   assert.doesNotMatch(source, /\btitle=/);
   assert.doesNotMatch(source, /hover:/);
   assert.doesNotMatch(source, /group-hover:/);
-  // Behaviour/shape preserved: same handler, 44px square, spinner, neutral disabled.
-  assert.match(source, /onClick=\{fetchInventory\}/);
+  // Behaviour/shape preserved: 44px square, spinner, neutral disabled. Manual refresh forces a fresh
+  // load past the cache (fetchInventory(true)); the mount load stays unforced.
+  assert.match(source, /onClick=\{\(\) => void fetchInventory\(true\)\}/);
+  assert.match(source, /const fetchInventory = useCallback\(async \(force = false\) =>/);
   assert.match(source, /h-12 w-12/);
   assert.match(source, /<RefreshCw className=\{`w-5 h-5 \$\{loading \? 'animate-spin' : ''\}`\} \/>/);
   assert.match(source, /loading \? 'opacity-60 cursor-not-allowed' : 'active:scale-95'/);
@@ -238,8 +240,11 @@ test('InventoryPage has no native title/hover/cyan; controls keep handlers + loc
     /(?:border-t-|border-|text-|bg-|ring-|from-|to-|via-)(?:blue|cyan|purple|violet|pink|sky|indigo)-/,
   );
 
-  // Refresh keeps its handler + localized aria-label.
-  assert.match(source, /onClick=\{fetchInventory\}/);
+  // Refresh keeps its forced-refresh handler + localized aria-label.
+  assert.match(
+    source,
+    /onClick=\{\(\) => void fetchInventory\(true\)\}\s*aria-label=\{t\('common\.refresh', 'Refresh'\)\}/,
+  );
   assert.match(source, /aria-label=\{t\('common\.refresh', 'Refresh'\)\}/);
 
   // History row keeps its open handler + accessible name (no title).

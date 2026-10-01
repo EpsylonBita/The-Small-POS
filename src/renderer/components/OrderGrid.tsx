@@ -9,7 +9,9 @@ import LoadingSpinner from './ui/LoadingSpinner';
 import type { StoreMapOrigin } from '../utils/delivery-routing';
 import { shouldShowInCompletedOrderLane, shouldShowInStandardOrderLane } from '../utils/tableOrderFlow';
 import { useAcquiredModules } from '../hooks/useAcquiredModules';
+import { useLocalPreparationSnapshot } from '../hooks/useLocalPreparation';
 import { useTheme } from '../contexts/theme-context';
+import { selectActiveKitchenStage } from './order/KitchenStageBadge';
 
 const isCancelledOrderStatus = (status: unknown): boolean => {
   const normalized = String(status || '').toLowerCase();
@@ -45,6 +47,9 @@ const OrderGrid = memo<OrderGridProps>(({
     () => ({ tablesModuleAvailable: hasTablesModule }),
     [hasTablesModule],
   );
+  // Local kitchen handoff stage from this terminal's KDS: shown on the cards only.
+  // Filters, lanes and status controls below keep using the canonical order.status.
+  const localPreparation = useLocalPreparationSnapshot();
   const baseOrders = ordersProp ?? storeOrders ?? [];
   const shouldApplyFilters = !ordersProp;
 
@@ -112,9 +117,10 @@ const OrderGrid = memo<OrderGridProps>(({
         onSelect={onToggleOrderSelection}
         onDoubleClick={onOrderDoubleClick}
         storeMapOrigin={storeMapOrigin}
+        kitchenStage={selectActiveKitchenStage(localPreparation, order)}
       />
-    )), 
-    [filteredOrders, selectedOrders, onToggleOrderSelection, onOrderDoubleClick, storeMapOrigin]
+    )),
+    [filteredOrders, selectedOrders, onToggleOrderSelection, onOrderDoubleClick, storeMapOrigin, localPreparation]
   );
 
   if (isLoading) {

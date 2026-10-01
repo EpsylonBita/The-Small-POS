@@ -9,7 +9,12 @@ import type {
   OrderEditSettlementRefund,
 } from '../../../lib/ipc-adapter';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
-import { RefundAttributionFields } from './RefundAttributionFields';
+import {
+  RefundAttributionFields,
+  refundRouteForTender,
+  type CashRefundHandler,
+  type RefundTender,
+} from './RefundAttributionFields';
 
 interface EditOrderRefundSettlementModalProps {
   isOpen: boolean;
@@ -21,8 +26,11 @@ interface EditOrderRefundSettlementModalProps {
 interface RefundDraft {
   amount: string;
   reason: string;
-  refundMethod: 'cash' | 'card';
-  cashHandler: 'cashier_drawer' | 'driver_shift';
+  /**
+   * The tender the refund names (shared rule R5): the payment's own by
+   * default (cash, card or other); `null` never records.
+   */
+  refundMethod: RefundTender | null;
 }
 
 // Module audit closure (2026-09-16): one rounding rule for the renderer. The local copy
@@ -41,7 +49,18 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
 
   const totalRequired = useMemo(() => round2(Math.max(0, (preview?.paidTotal || 0) - (preview?.nextTotal || 0))), [preview]);
   const totalReduced = (preview?.nextTotal || 0) < (preview?.originalTotal || 0) - 0.01;
-  const allowDriverCashHandler = preview?.deliverySettlement?.driverCashOwned === true;
+  // Shared rule R2: who hands a cash refund back is the till's rule (the
+  // courier while their earning on the order is unsettled, else the drawer),
+  // shown here and never chosen: the till records the rule's answer.
+  const cashHandlerByRule: CashRefundHandler | null =
+    preview?.cashHandlerByRule === 'driver_shift' || preview?.cashHandlerByRule === 'cashier_drawer'
+      ? preview.cashHandlerByRule
+      : null;
+  // Shared rule R1: the platform's settlement row is never refunded here.
+  const refundablePayments = useMemo(
+    () => (preview?.completedPayments ?? []).filter((payment) => payment.platformSettlement !== true),
+    [preview],
+  );
 
   useEffect(() => {
     if (!isOpen || !preview) {
@@ -49,21 +68,21 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
     }
 
     const nextDrafts: Record<string, RefundDraft> = {};
-    for (const payment of preview.completedPayments) {
-      const defaultMethod = String(payment.method || '').toLowerCase() === 'card' ? 'card' : 'cash';
+    for (const payment of refundablePayments) {
+      // R5 (round 3): the payment's own tender (cash, card or other); an
+      // `other` tender is never guessed as cash.
       nextDrafts[payment.id] = {
         amount:
-          preview.completedPayments.length === 1
+          refundablePayments.length === 1
             ? round2(Math.min(totalRequired, payment.remainingRefundable || 0)).toFixed(2)
             : '',
         reason: '',
-        refundMethod: defaultMethod,
-        cashHandler: allowDriverCashHandler ? 'driver_shift' : 'cashier_drawer',
+        refundMethod: refundRouteForTender(payment.method),
       };
     }
 
     setDrafts(nextDrafts);
-  }, [allowDriverCashHandler, isOpen, preview, totalRequired]);
+  }, [isOpen, preview, refundablePayments, totalRequired]);
 
   const allocatedTotal = useMemo(() => round2(
     Object.values(drafts).reduce((sum, draft) => sum + (Number.parseFloat(draft.amount) || 0), 0),
@@ -80,8 +99,9 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
         current[paymentId] || {
           amount: '',
           reason: '',
-          refundMethod: 'cash',
-          cashHandler: allowDriverCashHandler ? 'driver_shift' : 'cashier_drawer',
+          refundMethod: refundRouteForTender(
+            preview?.completedPayments.find((candidate) => candidate.id === paymentId)?.method,
+          ),
         },
       ),
     }));
@@ -103,7 +123,7 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
     }
 
     const refunds: OrderEditSettlementRefund[] = [];
-    for (const payment of preview.completedPayments) {
+    for (const payment of refundablePayments) {
       const draft = drafts[payment.id];
       const amount = Number.parseFloat(draft?.amount || '');
       if (!Number.isFinite(amount) || amount <= 0) {
@@ -125,13 +145,21 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
         );
         return;
       }
+      // Shared rule R5: a refund always names its tender.
+      if (!draft.refundMethod) {
+        toast.error(
+          t('modals.refund.tenderRequired', {
+            defaultValue: 'Choose how the refund was paid back',
+          }),
+        );
+        return;
+      }
 
       refunds.push({
         paymentId: payment.id,
         amount,
         reason: draft.reason.trim(),
         refundMethod: draft.refundMethod,
-        cashHandler: draft.refundMethod === 'cash' ? draft.cashHandler : undefined,
       });
     }
 
@@ -240,12 +268,25 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
           </div>
 
           <div className="space-y-3">
-            {preview.completedPayments.map((payment) => {
+            {preview.completedPayments
+              .filter((payment) => payment.platformSettlement === true)
+              .map((payment) => (
+                <div
+                  key={payment.id}
+                  data-testid={`edit-refund-platform-settlement-${payment.id}`}
+                  className="liquid-glass-modal-inset rounded-2xl px-3 py-2 text-xs liquid-glass-modal-text-muted"
+                >
+                  {t('modals.refund.platformSettlementLocked', {
+                    defaultValue:
+                      "The delivery platform's settlement: it is never voided or refunded at the till. The server decides what becomes of it.",
+                  })}
+                </div>
+              ))}
+            {refundablePayments.map((payment) => {
               const draft = drafts[payment.id] || {
                 amount: '',
                 reason: '',
-                refundMethod: 'cash' as const,
-                cashHandler: allowDriverCashHandler ? 'driver_shift' as const : 'cashier_drawer' as const,
+                refundMethod: refundRouteForTender(payment.method),
               };
               const currentAmount = Number.parseFloat(draft.amount || '');
               const hasAmount = Number.isFinite(currentAmount) && currentAmount > 0;
@@ -311,9 +352,8 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
                     <RefundAttributionFields
                       refundMethod={draft.refundMethod}
                       onRefundMethodChange={(value) => setDraft(payment.id, (current) => ({ ...current, refundMethod: value }))}
-                      cashHandler={draft.cashHandler}
-                      onCashHandlerChange={(value) => setDraft(payment.id, (current) => ({ ...current, cashHandler: value }))}
-                      allowDriverCashHandler={allowDriverCashHandler}
+                      allowOtherTender={refundRouteForTender(payment.method) === 'other'}
+                      cashHandler={cashHandlerByRule}
                       disabled={isSubmitting}
                     />
                   ) : (

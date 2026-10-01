@@ -2,7 +2,9 @@ use chrono::Utc;
 use rusqlite::OptionalExtension;
 use serde::Deserialize;
 use serde_json::Value;
-use std::time::Duration;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tauri::Emitter;
 
 use crate::money::Cents;
@@ -1105,8 +1107,47 @@ fn resolve_immediate_order_status_sync_context(
     })
 }
 
+/// Renderer event carrying the server's `platform_ack` for this till's own
+/// accept: what the order's platform (efood, …) was told, including a
+/// preparation time it took shorter than the one chosen. The renderer tells
+/// the cashier (founder decision, 01/10/2026). Only the PATCH right after an
+/// accept carries it; a sync-queue replay, the server's retry cron and webhook
+/// auto-accepts only log.
+const ORDER_PLATFORM_ACK_EVENT: &str = "order_platform_ack";
+
+/// The till's own accept, whose server answer goes back to the renderer.
+struct AcceptAnswerListener {
+    app: tauri::AppHandle,
+    /// The order id the renderer accepted with, echoed so it can match.
+    order_id: String,
+}
+
+/// The renderer event for a PATCH answer that relayed the change to a
+/// platform; None when the answer carries no `platform_ack` object (released
+/// servers, orders from no platform). The app shows only what the server
+/// says; it holds no rule about any platform's limits.
+fn platform_ack_event_payload(order_id: &str, answer: &Value) -> Option<Value> {
+    let platform_ack = answer
+        .get("platform_ack")
+        .filter(|value| value.is_object())?;
+    Some(serde_json::json!({
+        "orderId": order_id,
+        "platformAck": platform_ack,
+    }))
+}
+
 fn spawn_immediate_order_status_patch(db: &db::DbState, body: Value) {
-    spawn_immediate_order_status_patches(db, vec![body]);
+    spawn_immediate_order_status_patches(db, vec![body], None);
+}
+
+/// The PATCH right after an accept: as `spawn_immediate_order_status_patch`,
+/// and the server's answer about the order's platform goes to the renderer.
+fn spawn_immediate_order_accept_patch(
+    db: &db::DbState,
+    body: Value,
+    listener: AcceptAnswerListener,
+) {
+    spawn_immediate_order_status_patches(db, vec![body], Some(listener));
 }
 
 /// Send several status PATCHes from ONE spawned task, strictly in order. Two
@@ -1115,7 +1156,11 @@ fn spawn_immediate_order_status_patch(db: &db::DbState, body: Value) {
 /// status and syncing the order back into the active grid. A failed PATCH
 /// aborts the remainder of the sequence: the sync queue holds the same
 /// statuses in order and replays them as the fallback.
-fn spawn_immediate_order_status_patches(db: &db::DbState, bodies: Vec<Value>) {
+fn spawn_immediate_order_status_patches(
+    db: &db::DbState,
+    bodies: Vec<Value>,
+    accept_listener: Option<AcceptAnswerListener>,
+) {
     let Some(context) = resolve_immediate_order_status_sync_context(db) else {
         tracing::debug!(
             "Skipping immediate kiosk status sync because terminal credentials are unavailable"
@@ -1170,6 +1215,24 @@ fn spawn_immediate_order_status_patches(db: &db::DbState, bodies: Vec<Value>) {
                         status = %status,
                         "Immediate kiosk status sync succeeded"
                     );
+                    if let Some(listener) = accept_listener.as_ref() {
+                        match response.json::<Value>().await {
+                            Ok(answer) => {
+                                if let Some(payload) =
+                                    platform_ack_event_payload(&listener.order_id, &answer)
+                                {
+                                    let _ = listener.app.emit(ORDER_PLATFORM_ACK_EVENT, payload);
+                                }
+                            }
+                            Err(error) => {
+                                tracing::debug!(
+                                    order_id = %order_id,
+                                    error = %error,
+                                    "Accept answer could not be read; no platform notice"
+                                );
+                            }
+                        }
+                    }
                 }
                 Ok(response) => {
                     let http_status = response.status().as_u16();
@@ -1824,22 +1887,53 @@ fn load_net_paid_for_order(conn: &rusqlite::Connection, order_id: &str) -> Resul
     payments::load_net_paid_for_order(conn, order_id)
 }
 
+/// The settlement when the local ledger holds everything the order proved
+/// (the pre-29/09 arithmetic the regression suites pin).
+#[cfg(test)]
 fn determine_edit_settlement_required_action(paid_total: f64, next_total: f64) -> &'static str {
-    // Unpaid/pending orders carry no settlement: a product edit just adjusts the
-    // still-open balance, so it must never force an immediate collect/refund prompt
-    // (the live "no-op edit opens Extra Payment for the full unpaid total" defect).
-    // Only orders that already have money applied (paid / partially paid) settle a
-    // delta against what was paid.
-    if paid_total <= 0.01 {
+    determine_edit_settlement_required_action_for_ledger(paid_total, paid_total, next_total)
+}
+
+/// The settlement an edit needs.
+///
+/// Unpaid/pending orders carry no settlement: a product edit just adjusts the
+/// still-open balance, so it must never force an immediate collect/refund
+/// prompt (the live "no-op edit opens Extra Payment for the full unpaid total"
+/// defect). Only orders that already have money applied (paid / partially
+/// paid) settle a delta against what was paid.
+///
+/// `effective_paid` is everything the order proved (the local ledger plus
+/// money its status proved that the local rows do not hold, see
+/// [`ProvenPaymentCoverage`]); a collection is measured against it, so a grown
+/// paid order is asked only for the difference. `ledger_paid` is the money
+/// the LOCAL rows hold; a refund is measured against it, because a refund
+/// must name a local payment (review of the 29/09/2026 fixes: a shrunk paid
+/// order whose rows were missing — offline, or the restore timed out —
+/// demanded a refund of money no local row held, and could not be saved).
+/// When only the missing proven money makes the order look overpaid, nothing
+/// is due here: it stays `paid` and the server ledger settles it later.
+fn determine_edit_settlement_required_action_for_ledger(
+    effective_paid: f64,
+    ledger_paid: f64,
+    next_total: f64,
+) -> &'static str {
+    if effective_paid <= 0.01 {
         return "none";
     }
-    if paid_total + 0.01 < next_total {
+    if effective_paid + 0.01 < next_total {
         "collect"
-    } else if paid_total > next_total + 0.01 {
+    } else if ledger_paid > next_total + 0.01 {
         "refund"
     } else {
         "none"
     }
+}
+
+/// The refund an edit settlement requires: what the local rows hold beyond
+/// the new total (never the proven-but-missing money, see
+/// [`determine_edit_settlement_required_action_for_ledger`]).
+fn edit_settlement_required_refund(ledger_paid: f64, next_total: f64) -> f64 {
+    Cents::round_half_even((ledger_paid - next_total).max(0.0)).to_f64_dp2()
 }
 
 fn resolve_stale_unsynced_overpay_payments_for_order(
@@ -1891,11 +1985,117 @@ fn should_resolve_stale_overpay_payments_before_edit_action(
     !matches!(action, EditSettlementActionPayload::Refund { .. })
 }
 
-fn refresh_order_payment_snapshot(
+/// Money an order's persisted payment status already proved that the LOCAL
+/// payment ledger does not hold.
+///
+/// Field incident 29/09/2026 (Le Petit Paris, Android POS 1.0.12; this
+/// desktop path had the same shape): two card-paid orders had no local
+/// `order_payments` row. An item edit recomputed `payment_status` from the
+/// local ledger alone, found "no coverage", turned the inherited `paid` into
+/// `pending` and pushed it; the Z then listed collected money as unpaid.
+///
+/// A missing local row is not proof that money is gone: the status was proved
+/// when the order became paid. Captured BEFORE a write changes the order, the
+/// gap between what the status proves (the whole previous total for `paid`,
+/// at least one cent for `partially_paid`) and what the local ledger holds is
+/// carried through the write, so an edit keeps `paid`, a grown order honestly
+/// becomes `partially_paid`, and money collected by the same write still
+/// counts. When the local ledger already backs the status the gap is zero and
+/// the ledger alone decides, so an explicit refund or void still changes it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ProvenPaymentCoverage {
+    /// The order's payment status before this write, normalized.
+    prior_status: String,
+    /// Cents the prior status proves that the local ledger does not hold.
+    missing_cents: i64,
+}
+
+impl ProvenPaymentCoverage {
+    fn missing_amount(&self) -> f64 {
+        Cents::new(self.missing_cents).to_f64_dp2()
+    }
+}
+
+fn normalized_order_payment_status(raw: &str) -> String {
+    let normalized = raw.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "" => "pending".to_string(),
+        "completed" => "paid".to_string(),
+        _ => normalized,
+    }
+}
+
+/// Read what the order's current payment status proves against its local
+/// ledger. Must run before the write mutates the order's total or payments.
+fn capture_proven_payment_coverage(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+) -> Result<ProvenPaymentCoverage, String> {
+    let (raw_status, total_cents): (String, i64) = conn
+        .query_row(
+            // W4b: cents-with-real-fallback shim (removed in 4e).
+            "SELECT COALESCE(payment_status, 'pending'),
+                    COALESCE(total_amount_cents, CAST(ROUND(total_amount * 100) AS INTEGER), 0)
+             FROM orders WHERE id = ?1",
+            rusqlite::params![order_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|e| format!("load order payment proof: {e}"))?;
+    let prior_status = normalized_order_payment_status(&raw_status);
+    let proven_cents = match prior_status.as_str() {
+        "paid" => total_cents.max(0),
+        "partially_paid" => total_cents.clamp(0, 1),
+        _ => 0,
+    };
+    let ledger_cents = Cents::round_half_even(load_net_paid_for_order(conn, order_id)?).as_i64();
+    Ok(ProvenPaymentCoverage {
+        prior_status,
+        missing_cents: (proven_cents - ledger_cents).max(0),
+    })
+}
+
+/// The payment state an edit leaves on the order.
+#[derive(Debug, Clone, PartialEq)]
+struct OrderPaymentSnapshot {
+    status: String,
+    /// Derived from completed payment rows; `None` when the local ledger has
+    /// none, so no tender is ever invented.
+    derived_method: Option<String>,
+    /// Net money in the local ledger (completed payments minus refunds).
+    ledger_paid: f64,
+    /// `ledger_paid` plus the coverage the prior status proved.
+    effective_paid: f64,
+}
+
+impl OrderPaymentSnapshot {
+    /// Method label for IPC responses, which have always carried a string.
+    fn method_label(&self) -> String {
+        self.derived_method
+            .clone()
+            .unwrap_or_else(|| "pending".to_string())
+    }
+}
+
+fn payment_status_for_amounts(paid: f64, order_total: f64) -> &'static str {
+    if paid >= order_total - 0.01 {
+        if paid > 0.009 {
+            "paid"
+        } else {
+            "pending"
+        }
+    } else if paid > 0.009 {
+        "partially_paid"
+    } else {
+        "pending"
+    }
+}
+
+fn refresh_order_payment_snapshot_with_coverage(
     conn: &rusqlite::Connection,
     order_id: &str,
     now: &str,
-) -> Result<(String, String, f64), String> {
+    coverage: &ProvenPaymentCoverage,
+) -> Result<OrderPaymentSnapshot, String> {
     let order_total: f64 = conn
         .query_row(
             // W4b: cents-with-real-fallback shim (removed in 4e).
@@ -1906,28 +2106,33 @@ fn refresh_order_payment_snapshot(
         )
         .map_err(|e| format!("load order total for snapshot: {e}"))?;
 
-    let total_paid = load_net_paid_for_order(conn, order_id)?;
-
-    let next_payment_status = if total_paid >= order_total - 0.01 {
-        if total_paid > 0.009 {
-            "paid".to_string()
-        } else {
-            "pending".to_string()
-        }
-    } else if total_paid > 0.009 {
-        "partially_paid".to_string()
+    let ledger_paid = load_net_paid_for_order(conn, order_id)?;
+    let effective_paid = ledger_paid + coverage.missing_amount();
+    // A comp (an order whose total is zero) that was settled stays settled.
+    // With no money to count the arithmetic reads `pending`, so every edit of
+    // a comped order used to turn it `pending` and push that (review of the
+    // 29/09/2026 fixes).
+    let next_payment_status = if order_total <= 0.0 && coverage.prior_status == "paid" {
+        "paid".to_string()
     } else {
-        "pending".to_string()
+        payment_status_for_amounts(effective_paid, order_total).to_string()
     };
+    if coverage.missing_cents > 0 {
+        tracing::warn!(
+            order_id = %order_id,
+            prior_status = %coverage.prior_status,
+            payment_status = %next_payment_status,
+            missing_cents = coverage.missing_cents,
+            "Local payment rows are missing; kept the payment status the order already proved"
+        );
+    }
 
     // W6: `orders.payment_method` was dropped in migration v55. The
     // method is now derived from `order_payments` rows via
     // `payments::derive_payment_method` on every read. This refresh
-    // only persists `payment_status`; the method returned from this
-    // function is a derived value computed for callers that still
-    // need to emit it in a sync payload or IPC response.
-    let next_payment_method = crate::payments::derive_payment_method(conn, order_id)?
-        .unwrap_or_else(|| "pending".to_string());
+    // only persists `payment_status`; the derived method is returned for
+    // callers that emit it in a sync payload or IPC response.
+    let derived_method = crate::payments::derive_payment_method(conn, order_id)?;
 
     conn.execute(
         "UPDATE orders
@@ -1938,7 +2143,296 @@ fn refresh_order_payment_snapshot(
     )
     .map_err(|e| format!("refresh order payment snapshot: {e}"))?;
 
-    Ok((next_payment_status, next_payment_method, total_paid))
+    Ok(OrderPaymentSnapshot {
+        status: next_payment_status,
+        derived_method,
+        ledger_paid,
+        effective_paid,
+    })
+}
+
+/// Ledger-only refresh (no prior-status proof), as the pre-29/09 edit paths
+/// computed it. Kept for the regression suites that pin the ledger arithmetic.
+#[cfg(test)]
+fn refresh_order_payment_snapshot(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+    now: &str,
+) -> Result<(String, String, f64), String> {
+    let snapshot = refresh_order_payment_snapshot_with_coverage(
+        conn,
+        order_id,
+        now,
+        &ProvenPaymentCoverage::default(),
+    )?;
+    Ok((
+        snapshot.status.clone(),
+        snapshot.method_label(),
+        snapshot.ledger_paid,
+    ))
+}
+
+/// Whether a write should carry the order's payment status to the server.
+///
+/// A status the order merely keeps and that records no money (`pending`) is
+/// never pushed: the server may know better (a payment recorded server-first
+/// or on another terminal), and overwriting it with the local default is how
+/// two paid orders became `pending` on 29/09/2026. A status that records
+/// money, and a status this write changed (a collection, or an explicit
+/// refund or void against a complete local ledger), are pushed. The server
+/// applies its own ledger rule on top (`readOrderPaymentAuthority`).
+fn payment_status_to_push<'a>(
+    coverage: &ProvenPaymentCoverage,
+    snapshot: &'a OrderPaymentSnapshot,
+) -> Option<&'a str> {
+    let status = snapshot.status.as_str();
+    let records_money = matches!(status, "paid" | "partially_paid" | "refunded");
+    if records_money || status != coverage.prior_status {
+        Some(status)
+    } else {
+        None
+    }
+}
+
+/// Bound on the server-ledger check a cashier-facing edit may wait for.
+const LEDGER_RESTORE_BEFORE_EDIT_TIMEOUT: Duration = Duration::from_secs(4);
+
+/// How long one restore attempt answers for the same order: the preview and
+/// the save of one edit share it instead of waiting on the server twice.
+const LEDGER_RESTORE_SHARE_WINDOW: Duration = Duration::from_secs(120);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LedgerRestoreOutcome {
+    NotNeeded,
+    Restored(usize),
+    NothingToRestore,
+    Failed(String),
+    TimedOut,
+}
+
+/// Which step of an edit asks for the restore.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LedgerRestoreStep {
+    /// The settlement preview: its attempt is kept for the save that follows.
+    Preview,
+    /// The write (save, financial update): reuses a recent preview attempt
+    /// and ends the edit's share.
+    Write,
+}
+
+fn recent_ledger_restores(
+) -> &'static std::sync::Mutex<HashMap<String, (Instant, LedgerRestoreOutcome)>> {
+    static RECENT: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<String, (Instant, LedgerRestoreOutcome)>>,
+    > = std::sync::OnceLock::new();
+    RECENT.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// The outcome of an attempt for this order inside the share window, if any.
+/// A write consumes it: the next edit asks the server again.
+fn shared_ledger_restore_outcome(
+    order_id: &str,
+    step: LedgerRestoreStep,
+) -> Option<LedgerRestoreOutcome> {
+    let mut recent = recent_ledger_restores().lock().ok()?;
+    recent.retain(|_, (at, _)| at.elapsed() < LEDGER_RESTORE_SHARE_WINDOW);
+    match step {
+        LedgerRestoreStep::Preview => recent.get(order_id).map(|(_, outcome)| outcome.clone()),
+        LedgerRestoreStep::Write => recent.remove(order_id).map(|(_, outcome)| outcome),
+    }
+}
+
+fn remember_ledger_restore_outcome(order_id: &str, outcome: &LedgerRestoreOutcome) {
+    if let Ok(mut recent) = recent_ledger_restores().lock() {
+        recent.insert(order_id.to_string(), (Instant::now(), outcome.clone()));
+    }
+}
+
+#[cfg(test)]
+fn forget_ledger_restores_for_tests() {
+    if let Ok(mut recent) = recent_ledger_restores().lock() {
+        recent.clear();
+    }
+}
+
+/// Whether the order claims money its local ledger does not hold while the
+/// server holds the order (and so its payment rows).
+#[cfg(test)]
+fn order_needs_ledger_restore_before_payment_decision(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+) -> Result<bool, String> {
+    Ok(ledger_restore_target_before_payment_decision(conn, order_id)?.is_some())
+}
+
+/// The server order id to restore the ledger from, when the order claims
+/// money its local ledger does not hold and the server holds the order (and
+/// so its payment rows): its `supabase_id`, or its own id when that is a
+/// server UUID the order was synced under.
+fn ledger_restore_target_before_payment_decision(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+) -> Result<Option<String>, String> {
+    let row: Option<(String, i64, Option<String>, String, String)> = conn
+        .query_row(
+            "SELECT COALESCE(payment_status, 'pending'),
+                    COALESCE(total_amount_cents, CAST(ROUND(total_amount * 100) AS INTEGER), 0),
+                    NULLIF(TRIM(COALESCE(supabase_id, '')), ''),
+                    LOWER(TRIM(COALESCE(sync_status, ''))),
+                    LOWER(TRIM(COALESCE(order_context, '')))
+             FROM orders WHERE id = ?1",
+            rusqlite::params![order_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| format!("load order for ledger restore check: {e}"))?;
+    let Some((raw_status, total_cents, supabase_id, sync_status, order_context)) = row else {
+        return Ok(None);
+    };
+    if order_context == "repair_settlement" || total_cents <= 0 {
+        return Ok(None);
+    }
+    let required_cents = match normalized_order_payment_status(&raw_status).as_str() {
+        "paid" => total_cents,
+        "partially_paid" => 1,
+        _ => return Ok(None),
+    };
+    let remote_order_id = match supabase_id {
+        Some(remote_order_id) => remote_order_id,
+        // Only this terminal knows the order (or it has no server id to ask
+        // under): the server has no ledger rows for it to restore from.
+        None if sync_status == "synced" => {
+            match sync::normalize_optional_uuid_str(Some(order_id)) {
+                Some(remote_order_id) => remote_order_id,
+                None => return Ok(None),
+            }
+        }
+        None => return Ok(None),
+    };
+    let ledger_cents = Cents::round_half_even(load_net_paid_for_order(conn, order_id)?).as_i64();
+    Ok((ledger_cents < required_cents).then_some(remote_order_id))
+}
+
+/// Before an edit decides an order's payment status, make sure the local
+/// ledger is not simply MISSING rows the server ledger holds: pull them first
+/// (bounded, this runs on a cashier path). Best-effort: offline, on a timeout
+/// or on any failure the edit proceeds and keeps the status the order already
+/// proved (see [`ProvenPaymentCoverage`]).
+///
+/// Review of the 29/09/2026 fixes:
+/// - only `fetch` (the network read) runs under the timeout; the DB work —
+///   the need check before, the mirror after — runs outside it, and the
+///   production fetch keeps its blocking credential reads off this task (see
+///   `sync::fetch_order_payment_ledger_with_stored_credentials`), so the
+///   bound is hard;
+/// - one attempt serves the preview and the save of the same edit
+///   ([`LEDGER_RESTORE_SHARE_WINDOW`]): the cashier never waits twice;
+/// - the rows are applied by `sync::apply_order_payment_ledger_before_payment_decision`:
+///   completed server money only, nothing reconstructed from the label, and
+///   the payment label never lowered.
+async fn restore_payment_ledger_before_payment_decision_with<F, Fut>(
+    db: &db::DbState,
+    order_id_raw: &str,
+    step: LedgerRestoreStep,
+    timeout: Duration,
+    fetch: F,
+) -> LedgerRestoreOutcome
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<serde_json::Value>, String>>,
+{
+    let (order_id, remote_order_id) = {
+        let conn = match db.conn.lock() {
+            Ok(conn) => conn,
+            Err(error) => return LedgerRestoreOutcome::Failed(error.to_string()),
+        };
+        let Ok(order_id) = resolve_renderer_order_id(&conn, order_id_raw) else {
+            return LedgerRestoreOutcome::NotNeeded;
+        };
+        match ledger_restore_target_before_payment_decision(&conn, &order_id) {
+            Ok(Some(remote_order_id)) => (order_id, remote_order_id),
+            Ok(None) => return LedgerRestoreOutcome::NotNeeded,
+            Err(error) => return LedgerRestoreOutcome::Failed(error),
+        }
+    };
+
+    if let Some(shared) = shared_ledger_restore_outcome(&order_id, step) {
+        tracing::debug!(
+            order_id = %order_id,
+            outcome = ?shared,
+            "Reusing this edit's server ledger check"
+        );
+        return shared;
+    }
+
+    let fetched = tokio::time::timeout(timeout, fetch(remote_order_id.clone())).await;
+    let outcome = match fetched {
+        Err(_) => LedgerRestoreOutcome::TimedOut,
+        Ok(Err(error)) => LedgerRestoreOutcome::Failed(error),
+        Ok(Ok(remote_payments)) => match db.conn.lock() {
+            Err(error) => LedgerRestoreOutcome::Failed(error.to_string()),
+            Ok(conn) => match sync::apply_order_payment_ledger_before_payment_decision(
+                &conn,
+                &order_id,
+                &remote_order_id,
+                &remote_payments,
+                &Utc::now().to_rfc3339(),
+            ) {
+                Ok(0) => LedgerRestoreOutcome::NothingToRestore,
+                Ok(restored) => LedgerRestoreOutcome::Restored(restored),
+                Err(error) => LedgerRestoreOutcome::Failed(error),
+            },
+        },
+    };
+    if step == LedgerRestoreStep::Preview {
+        remember_ledger_restore_outcome(&order_id, &outcome);
+    }
+    match &outcome {
+        LedgerRestoreOutcome::Restored(restored) => tracing::info!(
+            order_id = %order_id,
+            restored = *restored,
+            "Restored missing payment rows from the server ledger before an edit"
+        ),
+        LedgerRestoreOutcome::Failed(error) => tracing::warn!(
+            order_id = %order_id,
+            error = %error,
+            "Server ledger check before an edit failed; keeping the proven payment status"
+        ),
+        LedgerRestoreOutcome::TimedOut => tracing::warn!(
+            order_id = %order_id,
+            "Server ledger check before an edit timed out; keeping the proven payment status"
+        ),
+        LedgerRestoreOutcome::NotNeeded | LedgerRestoreOutcome::NothingToRestore => {}
+    }
+    outcome
+}
+
+async fn restore_payment_ledger_before_payment_decision(
+    db: &db::DbState,
+    order_id_raw: &str,
+    step: LedgerRestoreStep,
+) -> LedgerRestoreOutcome {
+    restore_payment_ledger_before_payment_decision_with(
+        db,
+        order_id_raw,
+        step,
+        LEDGER_RESTORE_BEFORE_EDIT_TIMEOUT,
+        |remote_order_id| {
+            sync::fetch_order_payment_ledger_with_stored_credentials(
+                remote_order_id,
+                LEDGER_RESTORE_BEFORE_EDIT_TIMEOUT,
+            )
+        },
+    )
+    .await
 }
 
 /// Convert one of the optional `order_updates` JSON fields into a
@@ -2163,8 +2657,8 @@ fn enqueue_order_edit_sync(
     order_notes: Option<&str>,
     total_amount: f64,
     subtotal_amount: f64,
-    payment_status: &str,
-    payment_method: &str,
+    payment_status: Option<&str>,
+    payment_method: Option<&str>,
     extra_fields: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<(), String> {
     let mut payload_map = serde_json::Map::new();
@@ -2195,14 +2689,21 @@ fn enqueue_order_edit_sync(
         "subtotal_cents".to_string(),
         serde_json::json!(Cents::round_half_even(subtotal_amount).as_i64()),
     );
-    payload_map.insert(
-        "paymentStatus".to_string(),
-        serde_json::Value::String(payment_status.to_string()),
-    );
-    payload_map.insert(
-        "paymentMethod".to_string(),
-        serde_json::Value::String(payment_method.to_string()),
-    );
+    // Only what the ledger (or this write) proves rides along: see
+    // `payment_status_to_push`. A method is sent only when completed payment
+    // rows name one; the literal "pending" is never a tender.
+    if let Some(payment_status) = payment_status {
+        payload_map.insert(
+            "paymentStatus".to_string(),
+            serde_json::Value::String(payment_status.to_string()),
+        );
+    }
+    if let Some(payment_method) = payment_method {
+        payload_map.insert(
+            "paymentMethod".to_string(),
+            serde_json::Value::String(payment_method.to_string()),
+        );
+    }
     for (key, value) in extra_fields {
         // extra_fields wins over the defaults (e.g. caller may provide an
         // explicit orderType that overrides the empty default).
@@ -2214,7 +2715,7 @@ fn enqueue_order_edit_sync(
     Ok(())
 }
 
-fn list_completed_payments_for_edit(
+pub(crate) fn list_completed_payments_for_edit(
     conn: &rusqlite::Connection,
     order_id: &str,
 ) -> Result<Vec<serde_json::Value>, String> {
@@ -2243,23 +2744,54 @@ fn list_completed_payments_for_edit(
 
     let rows = stmt
         .query_map(rusqlite::params![order_id], |row| {
-            // W4b: cents columns → f64 for the existing JSON shape.
-            let amount = Cents::new(row.get::<_, i64>(2)?).to_f64_dp2();
-            let refunded = Cents::new(row.get::<_, i64>(6)?).to_f64_dp2();
-            Ok(serde_json::json!({
-                "id": row.get::<_, String>(0)?,
-                "method": row.get::<_, String>(1)?,
-                "amount": amount,
-                "createdAt": row.get::<_, String>(3)?,
-                "transactionRef": row.get::<_, Option<String>>(4)?,
-                "staffShiftId": row.get::<_, Option<String>>(5)?,
-                "refundedAmount": refunded,
-                "remainingRefundable": (amount - refunded).max(0.0),
-            }))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, i64>(6)?,
+            ))
         })
         .map_err(|e| format!("query edit settlement payments: {e}"))?;
 
-    Ok(rows.filter_map(Result::ok).collect())
+    let mut payments = Vec::new();
+    for (id, method, amount_cents, created_at, transaction_ref, staff_shift_id, adjusted_cents) in
+        rows.filter_map(Result::ok)
+    {
+        // A gift row's proven return floor counts once, as in the settlement
+        // snapshot; other rows keep their refund adjustments.
+        let refunded_cents = crate::payments::effective_reversed_cents(
+            conn,
+            &id,
+            order_id,
+            &method,
+            amount_cents,
+            adjusted_cents,
+        )?;
+        // W4b: cents columns → f64 for the existing JSON shape.
+        let amount = Cents::new(amount_cents).to_f64_dp2();
+        let refunded = Cents::new(refunded_cents).to_f64_dp2();
+        let mut payment = serde_json::json!({
+            "id": id,
+            "method": method,
+            "amount": amount,
+            "createdAt": created_at,
+            "transactionRef": transaction_ref,
+            "staffShiftId": staff_shift_id,
+            "refundedAmount": refunded,
+            "remainingRefundable": (amount - refunded).max(0.0),
+        });
+        // Shared rule R1 (round 3 review): the platform's settlement row is
+        // never refunded at the till, so the edit's refund is never
+        // allocated to it. Named only on such a row.
+        if crate::payments::payment_is_platform_settlement(conn, &id)? {
+            payment["platformSettlement"] = serde_json::Value::Bool(true);
+        }
+        payments.push(payment);
+    }
+    Ok(payments)
 }
 
 fn load_active_driver_settlement(
@@ -2483,6 +3015,148 @@ pub async fn order_get_by_customer_phone(
     }))
 }
 
+/// What the local status write decided.
+pub(crate) enum LocalStatusChange {
+    /// A payment blocker refused completion or delivery: the answer to return.
+    Blocked(serde_json::Value),
+    /// Written and queued locally: the ids for the events and the server patch.
+    Applied {
+        order_id: String,
+        remote_order_id: Option<String>,
+    },
+}
+
+/// The local half of `order_update_status`: the transition, the guards
+/// (payment blockers before completion, money taken before a cancel) and the
+/// write with its sync payload.
+pub(crate) fn apply_order_status_locally(
+    db: &db::DbState,
+    order_id_raw: &str,
+    status: &str,
+    estimated_time: Option<i64>,
+    cancellation_reason: Option<&str>,
+    now: &str,
+) -> Result<LocalStatusChange, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let (actual_order_id, remote_order_id) = resolve_order_id_with_remote(&conn, order_id_raw)?;
+    let previous_status = ensure_order_status_transition_allowed(&conn, &actual_order_id, status)?;
+    // Fix review 30/09/2026 (founder rule, Android parity): money taken on
+    // the order is voided or refunded from the order first, or the rest is
+    // collected. Cancelling it would take back what the drawer counted for
+    // it while its payment stays recorded. Refused before anything is
+    // written.
+    if status == "cancelled" && previous_status != "cancelled" {
+        ensure_no_money_taken_before_cancel(&conn, &actual_order_id)?;
+    }
+    if status_requires_payment_integrity_guard(status) {
+        // THE-437: prepaid and platform-rider-COD orders settle by bank —
+        // record their settlement automatically instead of asking the
+        // operator to collect money the platform is holding. Failure falls
+        // through to the normal blocker so the operator still gets a path.
+        if let Err(error) = payments::auto_settle_platform_order(&conn, &actual_order_id) {
+            tracing::warn!(
+                order_id = %actual_order_id,
+                error = %error,
+                "Platform auto-settlement failed; falling back to payment blockers"
+            );
+        }
+        let blockers = payment_integrity::load_order_payment_blockers(&conn, &actual_order_id)?;
+        if !blockers.is_empty() {
+            let action_label = if status == "delivered" {
+                "Cannot mark order as delivered"
+            } else {
+                "Cannot mark order as completed"
+            };
+            return Ok(LocalStatusChange::Blocked(
+                payment_integrity::build_unsettled_payment_blocker_response(
+                    action_label,
+                    &blockers,
+                ),
+            ));
+        }
+    }
+    let was_cancelled = previous_status == "cancelled";
+    let next_is_cancelled = status == "cancelled";
+    let is_cancellation_reactivation = was_cancelled && status == "pending";
+
+    if !was_cancelled && next_is_cancelled {
+        order_ownership::reverse_order_drawer_attribution(&conn, &actual_order_id, now)?;
+    }
+
+    if let Some(reason) = cancellation_reason {
+        conn.execute(
+            "UPDATE orders
+             SET status = ?1,
+                 cancellation_reason = ?2,
+                 sync_status = 'pending',
+                 updated_at = ?3
+             WHERE id = ?4",
+            rusqlite::params![status, reason, now, actual_order_id],
+        )
+        .map_err(|e| format!("update order status: {e}"))?;
+    } else if is_cancellation_reactivation {
+        conn.execute(
+            "UPDATE orders
+             SET status = ?1,
+                 cancellation_reason = NULL,
+                 sync_status = 'pending',
+                 updated_at = ?2
+             WHERE id = ?3",
+            rusqlite::params![status, now, actual_order_id],
+        )
+        .map_err(|e| format!("update order status: {e}"))?;
+    } else {
+        conn.execute(
+            "UPDATE orders
+             SET status = ?1, sync_status = 'pending', updated_at = ?2
+             WHERE id = ?3",
+            rusqlite::params![status, now, actual_order_id],
+        )
+        .map_err(|e| format!("update order status: {e}"))?;
+    }
+    if let Some(eta) = estimated_time {
+        let _ = conn.execute(
+            "UPDATE orders SET estimated_time = ?1, updated_at = ?2 WHERE id = ?3",
+            rusqlite::params![eta, now, actual_order_id],
+        );
+    }
+    let mut sync_payload = serde_json::json!({
+        "orderId": actual_order_id,
+        "status": status,
+        "estimatedTime": estimated_time
+    });
+    if let Some(reason) = cancellation_reason {
+        // Send under both keys so whichever convention the server reads is
+        // satisfied (admin-dashboard inspects both shapes).
+        if let Some(obj) = sync_payload.as_object_mut() {
+            obj.insert(
+                "cancellation_reason".to_string(),
+                serde_json::Value::String(reason.to_string()),
+            );
+            obj.insert(
+                "cancellationReason".to_string(),
+                serde_json::Value::String(reason.to_string()),
+            );
+            obj.insert(
+                "cancelled_at".to_string(),
+                serde_json::Value::String(now.to_string()),
+            );
+        }
+    } else if is_cancellation_reactivation {
+        if let Some(obj) = sync_payload.as_object_mut() {
+            obj.insert("cancellation_reason".to_string(), serde_json::Value::Null);
+            obj.insert("cancellationReason".to_string(), serde_json::Value::Null);
+            obj.insert("cancelled_at".to_string(), serde_json::Value::Null);
+            obj.insert("cancelledAt".to_string(), serde_json::Value::Null);
+        }
+    }
+    enqueue_order_sync_payload(&conn, &actual_order_id, &sync_payload)?;
+    Ok(LocalStatusChange::Applied {
+        order_id: actual_order_id,
+        remote_order_id,
+    })
+}
+
 #[tauri::command]
 pub async fn order_update_status(
     arg0: Option<serde_json::Value>,
@@ -2509,114 +3183,19 @@ pub async fn order_update_status(
     };
     let now = Utc::now().to_rfc3339();
 
-    let (actual_order_id, remote_order_id) = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let (actual_order_id, remote_order_id) =
-            resolve_order_id_with_remote(&conn, &order_id_raw)?;
-        let previous_status =
-            ensure_order_status_transition_allowed(&conn, &actual_order_id, &status)?;
-        if status_requires_payment_integrity_guard(&status) {
-            // THE-437: prepaid and platform-rider-COD orders settle by bank —
-            // record their settlement automatically instead of asking the
-            // operator to collect money the platform is holding. Failure falls
-            // through to the normal blocker so the operator still gets a path.
-            if let Err(error) = payments::auto_settle_platform_order(&conn, &actual_order_id) {
-                tracing::warn!(
-                    order_id = %actual_order_id,
-                    error = %error,
-                    "Platform auto-settlement failed; falling back to payment blockers"
-                );
-            }
-            let blockers = payment_integrity::load_order_payment_blockers(&conn, &actual_order_id)?;
-            if !blockers.is_empty() {
-                let action_label = if status == "delivered" {
-                    "Cannot mark order as delivered"
-                } else {
-                    "Cannot mark order as completed"
-                };
-                return Ok(payment_integrity::build_unsettled_payment_blocker_response(
-                    action_label,
-                    &blockers,
-                ));
-            }
-        }
-        let was_cancelled = previous_status == "cancelled";
-        let next_is_cancelled = status == "cancelled";
-        let is_cancellation_reactivation = was_cancelled && status == "pending";
-
-        if !was_cancelled && next_is_cancelled {
-            order_ownership::reverse_order_drawer_attribution(&conn, &actual_order_id, &now)?;
-        }
-
-        if let Some(reason) = cancellation_reason.as_deref() {
-            conn.execute(
-                "UPDATE orders
-                 SET status = ?1,
-                     cancellation_reason = ?2,
-                     sync_status = 'pending',
-                     updated_at = ?3
-                 WHERE id = ?4",
-                rusqlite::params![status, reason, now, actual_order_id],
-            )
-            .map_err(|e| format!("update order status: {e}"))?;
-        } else if is_cancellation_reactivation {
-            conn.execute(
-                "UPDATE orders
-                 SET status = ?1,
-                     cancellation_reason = NULL,
-                     sync_status = 'pending',
-                     updated_at = ?2
-                 WHERE id = ?3",
-                rusqlite::params![status, now, actual_order_id],
-            )
-            .map_err(|e| format!("update order status: {e}"))?;
-        } else {
-            conn.execute(
-                "UPDATE orders
-                 SET status = ?1, sync_status = 'pending', updated_at = ?2
-                 WHERE id = ?3",
-                rusqlite::params![status, now, actual_order_id],
-            )
-            .map_err(|e| format!("update order status: {e}"))?;
-        }
-        if let Some(eta) = estimated_time {
-            let _ = conn.execute(
-                "UPDATE orders SET estimated_time = ?1, updated_at = ?2 WHERE id = ?3",
-                rusqlite::params![eta, now, actual_order_id],
-            );
-        }
-        let mut sync_payload = serde_json::json!({
-            "orderId": actual_order_id,
-            "status": status,
-            "estimatedTime": estimated_time
-        });
-        if let Some(reason) = cancellation_reason.as_deref() {
-            // Send under both keys so whichever convention the server reads is
-            // satisfied (admin-dashboard inspects both shapes).
-            if let Some(obj) = sync_payload.as_object_mut() {
-                obj.insert(
-                    "cancellation_reason".to_string(),
-                    serde_json::Value::String(reason.to_string()),
-                );
-                obj.insert(
-                    "cancellationReason".to_string(),
-                    serde_json::Value::String(reason.to_string()),
-                );
-                obj.insert(
-                    "cancelled_at".to_string(),
-                    serde_json::Value::String(now.clone()),
-                );
-            }
-        } else if is_cancellation_reactivation {
-            if let Some(obj) = sync_payload.as_object_mut() {
-                obj.insert("cancellation_reason".to_string(), serde_json::Value::Null);
-                obj.insert("cancellationReason".to_string(), serde_json::Value::Null);
-                obj.insert("cancelled_at".to_string(), serde_json::Value::Null);
-                obj.insert("cancelledAt".to_string(), serde_json::Value::Null);
-            }
-        }
-        enqueue_order_sync_payload(&conn, &actual_order_id, &sync_payload)?;
-        (actual_order_id, remote_order_id)
+    let (actual_order_id, remote_order_id) = match apply_order_status_locally(
+        &db,
+        &order_id_raw,
+        &status,
+        estimated_time,
+        cancellation_reason.as_deref(),
+        &now,
+    )? {
+        LocalStatusChange::Blocked(answer) => return Ok(answer),
+        LocalStatusChange::Applied {
+            order_id,
+            remote_order_id,
+        } => (order_id, remote_order_id),
     };
 
     let mut event_payload = serde_json::json!({
@@ -2983,9 +3562,24 @@ pub async fn orders_preview_edit_settlement(
     db: tauri::State<'_, db::DbState>,
 ) -> Result<serde_json::Value, String> {
     let payload = parse_order_edit_settlement_preview_payload(arg0)?;
+    // The collect/refund prompt must be computed against the whole ledger,
+    // not a local mirror that lost rows (29/09/2026).
+    restore_payment_ledger_before_payment_decision(
+        &db,
+        &payload.order_id,
+        LedgerRestoreStep::Preview,
+    )
+    .await;
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let actual_order_id = resolve_renderer_order_id(&conn, &payload.order_id)?;
-    let (next_total, _) = resolve_edit_settlement_totals(&conn, &actual_order_id, &payload)?;
+    preview_edit_settlement_in_connection(&conn, &payload)
+}
+
+fn preview_edit_settlement_in_connection(
+    conn: &rusqlite::Connection,
+    payload: &OrderEditSettlementPayload,
+) -> Result<serde_json::Value, String> {
+    let actual_order_id = resolve_renderer_order_id(conn, &payload.order_id)?;
+    let (next_total, _) = resolve_edit_settlement_totals(conn, &actual_order_id, payload)?;
 
     let (current_total, payment_status, order_type, is_ghost, branch_id, terminal_id, driver_id): (
         f64,
@@ -3024,19 +3618,42 @@ pub async fn orders_preview_edit_settlement(
 
     // W6: derive payment method from completed rows instead of reading
     // the dropped `orders.payment_method` column.
-    let payment_method = crate::payments::derive_payment_method(&conn, &actual_order_id)?
+    let payment_method = crate::payments::derive_payment_method(conn, &actual_order_id)?
         .unwrap_or_else(|| "pending".to_string());
 
-    let completed_payments = list_completed_payments_for_edit(&conn, &actual_order_id)?;
-    let paid_total = completed_payments
+    let completed_payments = list_completed_payments_for_edit(conn, &actual_order_id)?;
+    let ledger_paid_total = completed_payments
         .iter()
         .map(net_paid_amount_from_edit_payment)
         .sum::<f64>();
+    // Money the order's status already proved but the local mirror does not
+    // hold still counts (see `ProvenPaymentCoverage`), so a grown paid order
+    // is asked for the difference, never for its whole total again. A refund
+    // is only ever asked of the money the local rows hold.
+    let coverage = capture_proven_payment_coverage(conn, &actual_order_id)?;
+    let paid_total = ledger_paid_total + coverage.missing_amount();
     let delta = next_total - current_total;
-    let required_action = determine_edit_settlement_required_action(paid_total, next_total);
-    let driver_settlement = load_active_driver_settlement(&conn, &actual_order_id)?;
+    let required_action = determine_edit_settlement_required_action_for_ledger(
+        paid_total,
+        ledger_paid_total,
+        next_total,
+    );
+    let refund_amount = if required_action == "refund" {
+        edit_settlement_required_refund(ledger_paid_total, next_total)
+    } else {
+        0.0
+    };
+    let driver_settlement = load_active_driver_settlement(conn, &actual_order_id)?;
     let driver_cash_owned =
         order_type.eq_ignore_ascii_case("delivery") && driver_settlement.is_some();
+    // Who hands a cash refund back, by the rule only (shared rule R2): shown
+    // on the refund screen, never chosen there.
+    let cash_handler_by_rule =
+        if crate::refunds::courier_still_holds_order_cash(conn, &actual_order_id)? {
+            "driver_shift"
+        } else {
+            "cashier_drawer"
+        };
 
     Ok(serde_json::json!({
         "success": true,
@@ -3049,6 +3666,8 @@ pub async fn orders_preview_edit_settlement(
         "originalTotal": current_total,
         "nextTotal": next_total,
         "paidTotal": paid_total,
+        "ledgerPaidTotal": ledger_paid_total,
+        "refundAmount": refund_amount,
         "delta": delta,
         "paymentStatus": payment_status,
         "paymentMethod": payment_method,
@@ -3058,6 +3677,7 @@ pub async fn orders_preview_edit_settlement(
             "driverCashOwned": driver_cash_owned,
             "driverEarning": driver_settlement,
         },
+        "cashHandlerByRule": cash_handler_by_rule,
     }))
 }
 
@@ -3068,14 +3688,80 @@ pub async fn orders_apply_edit_settlement(
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let (payload, action) = parse_order_edit_settlement_apply_payload(arg0)?;
+    // A paid order whose local mirror lost rows is restored from the server
+    // ledger first, so the edit decides on the whole ledger (29/09/2026).
+    restore_payment_ledger_before_payment_decision(
+        &db,
+        &payload.order_id,
+        LedgerRestoreStep::Write,
+    )
+    .await;
     let now = Utc::now().to_rfc3339();
 
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let actual_order_id = resolve_renderer_order_id(&conn, &payload.order_id)?;
+    let prepared = prepare_edit_settlement(&conn, &actual_order_id, &payload)?;
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| format!("begin transaction: {e}"))?;
+    let response = match apply_edit_settlement_changes(
+        &conn,
+        &actual_order_id,
+        &payload,
+        &prepared,
+        action,
+        &now,
+    ) {
+        Ok(value) => {
+            conn.execute_batch("COMMIT")
+                .map_err(|e| format!("commit: {e}"))?;
+            value
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(error);
+        }
+    };
+    drop(conn);
+
+    if let Ok(order_json) = sync::get_order_by_id(&db, &actual_order_id) {
+        let order_type = order_json
+            .get("orderType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("pickup")
+            .to_string();
+        let is_ghost = order_json
+            .get("is_ghost")
+            .or_else(|| order_json.get("isGhost"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let _ = app.emit("order_realtime_update", order_json);
+        // Auto-reprint the edited order: the receipt document renders at
+        // dispatch time, so it reflects the just-committed items AND the
+        // full payment breakdown — including an edit-settlement delta
+        // recorded in this same transaction with a different method than
+        // the original (e.g. cash order, card-settled edit delta).
+        print::enqueue_after_edit_auto_print(&db, &actual_order_id, &order_type, is_ghost, &app);
+    }
+
+    Ok(response)
+}
+
+/// The edit's inputs, read before its transaction starts.
+struct PreparedEditSettlement {
+    merged_items: Vec<serde_json::Value>,
+    next_total: f64,
+    next_subtotal: f64,
+}
+
+fn prepare_edit_settlement(
+    conn: &rusqlite::Connection,
+    actual_order_id: &str,
+    payload: &OrderEditSettlementPayload,
+) -> Result<PreparedEditSettlement, String> {
     let merged_items =
-        merge_existing_order_item_customizations(&conn, &actual_order_id, &payload.items)?;
+        merge_existing_order_item_customizations(conn, actual_order_id, &payload.items)?;
     let (derived_total, derived_subtotal) =
-        derive_next_order_totals(&conn, &actual_order_id, &merged_items)?;
+        derive_next_order_totals(conn, actual_order_id, &merged_items)?;
     let (next_total, next_subtotal) = match payload.financials.as_ref() {
         Some(financials) => (
             financials.total_amount.unwrap_or(derived_total).max(0.0),
@@ -3083,10 +3769,57 @@ pub async fn orders_apply_edit_settlement(
         ),
         None => (derived_total, derived_subtotal),
     };
+    Ok(PreparedEditSettlement {
+        merged_items,
+        next_total,
+        next_subtotal,
+    })
+}
+
+/// [`orders_apply_edit_settlement`] as the regression suites drive it: the
+/// same steps inside the same transaction shape as the command.
+#[cfg(test)]
+fn apply_edit_settlement_in_connection(
+    conn: &rusqlite::Connection,
+    payload: &OrderEditSettlementPayload,
+    action: EditSettlementActionPayload,
+    now: &str,
+) -> Result<(serde_json::Value, String), String> {
+    let actual_order_id = resolve_renderer_order_id(conn, &payload.order_id)?;
+    let prepared = prepare_edit_settlement(conn, &actual_order_id, payload)?;
     conn.execute_batch("BEGIN IMMEDIATE")
         .map_err(|e| format!("begin transaction: {e}"))?;
+    match apply_edit_settlement_changes(conn, &actual_order_id, payload, &prepared, action, now) {
+        Ok(value) => {
+            conn.execute_batch("COMMIT")
+                .map_err(|e| format!("commit: {e}"))?;
+            Ok((value, actual_order_id))
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
+}
 
-    let result = (|| -> Result<serde_json::Value, String> {
+/// The writes of an edit settlement; the caller owns the transaction.
+fn apply_edit_settlement_changes(
+    conn: &rusqlite::Connection,
+    actual_order_id: &str,
+    payload: &OrderEditSettlementPayload,
+    prepared: &PreparedEditSettlement,
+    action: EditSettlementActionPayload,
+    now: &str,
+) -> Result<serde_json::Value, String> {
+    let actual_order_id = actual_order_id.to_string();
+    let merged_items = &prepared.merged_items;
+    let next_total = prepared.next_total;
+    let next_subtotal = prepared.next_subtotal;
+    {
+        // What the order's payment status proves, read before this edit
+        // changes its total or payments (29/09/2026).
+        let coverage = capture_proven_payment_coverage(conn, &actual_order_id)?;
+
         // Apply order-type / customer / delivery field changes FIRST so the
         // subsequent items/total update and sync-enqueue see the new shape
         // of the row. Without this step the caller's type change (e.g.
@@ -3094,34 +3827,38 @@ pub async fn orders_apply_edit_settlement(
         // keeps the old order_type even though the items/total were edited.
         let applied_order_updates = match payload.order_updates.as_ref() {
             Some(updates) => {
-                apply_edit_settlement_order_updates(&conn, &actual_order_id, updates, &now)?
+                apply_edit_settlement_order_updates(conn, &actual_order_id, updates, now)?
             }
             None => serde_json::Map::new(),
         };
 
         update_order_items_in_connection(
-            &conn,
+            conn,
             &actual_order_id,
             &merged_items,
             payload.order_notes.as_deref(),
             next_total,
             next_subtotal,
-            &now,
+            now,
         )?;
         apply_edit_settlement_financial_adjustments(
-            &conn,
+            conn,
             &actual_order_id,
             payload.financials.as_ref(),
-            &now,
+            now,
         )?;
 
         let stale_payment_ids = if should_resolve_stale_overpay_payments_before_edit_action(&action)
         {
-            resolve_stale_unsynced_overpay_payments_for_order(&conn, &actual_order_id, &now)?
+            resolve_stale_unsynced_overpay_payments_for_order(conn, &actual_order_id, now)?
         } else {
             Vec::new()
         };
-        let paid_total_before = load_net_paid_for_order(&conn, &actual_order_id)?;
+        // A collection is checked against everything the order proved, not
+        // only the rows this terminal still holds; a refund against the money
+        // those rows hold (it must name one of them).
+        let ledger_paid_before = load_net_paid_for_order(conn, &actual_order_id)?;
+        let paid_total_before = ledger_paid_before + coverage.missing_amount();
 
         match action {
             EditSettlementActionPayload::None | EditSettlementActionPayload::MarkPartial => {}
@@ -3162,7 +3899,7 @@ pub async fn orders_apply_edit_settlement(
                         options.sync_order_owner_with_payment = false;
                     }
                     options.mark_order_sync_pending_on_owner_change = false;
-                    payments::record_payment_in_connection(&conn, &input, &options)?;
+                    payments::record_payment_in_connection(conn, &input, &options)?;
                 }
             }
             EditSettlementActionPayload::Refund {
@@ -3172,7 +3909,8 @@ pub async fn orders_apply_edit_settlement(
                     return Err("Refund action requires at least one payment allocation".into());
                 }
                 let refund_total: f64 = refund_rows.iter().map(|refund| refund.amount).sum();
-                let required_refund = (paid_total_before - next_total).max(0.0);
+                let required_refund =
+                    edit_settlement_required_refund(ledger_paid_before, next_total);
                 if (refund_total - required_refund).abs() > 0.01 {
                     return Err(format!(
                         "Refund allocation {refund_total:.2} must match the overpaid amount {required_refund:.2}"
@@ -3190,15 +3928,18 @@ pub async fn orders_apply_edit_settlement(
                         "staffShiftId": refund.staff_shift_id,
                         "adjustmentContext": "edit_settlement",
                     });
-                    refunds::refund_payment_in_connection(&conn, &refund_payload)?;
+                    refunds::refund_payment_in_connection(conn, &refund_payload)?;
                 }
             }
         }
 
-        let (payment_status, payment_method, paid_total_after) =
-            refresh_order_payment_snapshot(&conn, &actual_order_id, &now)?;
-        let required_action =
-            determine_edit_settlement_required_action(paid_total_after, next_total);
+        let snapshot =
+            refresh_order_payment_snapshot_with_coverage(conn, &actual_order_id, now, &coverage)?;
+        let required_action = determine_edit_settlement_required_action_for_ledger(
+            snapshot.effective_paid,
+            snapshot.ledger_paid,
+            next_total,
+        );
         let mut sync_extra_fields = applied_order_updates;
         for (key, value) in
             edit_settlement_financial_sync_fields(payload.financials.as_ref(), next_subtotal)
@@ -3206,14 +3947,14 @@ pub async fn orders_apply_edit_settlement(
             sync_extra_fields.insert(key, value);
         }
         enqueue_order_edit_sync(
-            &conn,
+            conn,
             &actual_order_id,
             &merged_items,
             payload.order_notes.as_deref(),
             next_total,
             next_subtotal,
-            &payment_status,
-            &payment_method,
+            payment_status_to_push(&coverage, &snapshot),
+            snapshot.derived_method.as_deref(),
             &sync_extra_fields,
         )?;
 
@@ -3221,49 +3962,13 @@ pub async fn orders_apply_edit_settlement(
             "success": true,
             "orderId": actual_order_id.clone(),
             "nextTotal": next_total,
-            "paidTotal": paid_total_after,
-            "paymentStatus": payment_status,
-            "paymentMethod": payment_method,
+            "paidTotal": snapshot.effective_paid,
+            "paymentStatus": snapshot.status,
+            "paymentMethod": snapshot.method_label(),
             "requiredAction": required_action,
             "stalePaymentIdsVoided": stale_payment_ids,
         }))
-    })();
-
-    let response = match result {
-        Ok(value) => {
-            conn.execute_batch("COMMIT")
-                .map_err(|e| format!("commit: {e}"))?;
-            Ok(value)
-        }
-        Err(error) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            Err(error)
-        }
-    }?;
-
-    drop(conn);
-
-    if let Ok(order_json) = sync::get_order_by_id(&db, &actual_order_id) {
-        let order_type = order_json
-            .get("orderType")
-            .and_then(|v| v.as_str())
-            .unwrap_or("pickup")
-            .to_string();
-        let is_ghost = order_json
-            .get("is_ghost")
-            .or_else(|| order_json.get("isGhost"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let _ = app.emit("order_realtime_update", order_json);
-        // Auto-reprint the edited order: the receipt document renders at
-        // dispatch time, so it reflects the just-committed items AND the
-        // full payment breakdown — including an edit-settlement delta
-        // recorded in this same transaction with a different method than
-        // the original (e.g. cash order, card-settled edit delta).
-        print::enqueue_after_edit_auto_print(&db, &actual_order_id, &order_type, is_ghost, &app);
     }
-
-    Ok(response)
 }
 
 #[tauri::command]
@@ -3273,8 +3978,35 @@ pub async fn order_update_financials(
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let payload = parse_order_update_financials_payload(arg0)?;
+    // A paid order whose local mirror lost rows is restored from the server
+    // ledger first, so the new totals are compared with the whole ledger.
+    restore_payment_ledger_before_payment_decision(
+        &db,
+        &payload.order_id,
+        LedgerRestoreStep::Write,
+    )
+    .await;
     let now = Utc::now().to_rfc3339();
 
+    let (response, actual_order_id) = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        update_order_financials_in_connection(&conn, &payload, &now)?
+    };
+
+    if let Ok(order_json) = sync::get_order_by_id(&db, &actual_order_id) {
+        let _ = app.emit("order_realtime_update", order_json);
+    }
+
+    Ok(response)
+}
+
+/// The transactional body of [`order_update_financials`]. Returns the IPC
+/// response and the resolved local order id.
+fn update_order_financials_in_connection(
+    conn: &rusqlite::Connection,
+    payload: &OrderUpdateFinancialsPayload,
+    now: &str,
+) -> Result<(serde_json::Value, String), String> {
     let discount_amount = payload.discount_amount.unwrap_or(0.0).max(0.0);
     let discount_percentage = payload.discount_percentage.unwrap_or(0.0).max(0.0);
     let tax_amount = payload.tax_amount.unwrap_or(0.0).max(0.0);
@@ -3288,8 +4020,7 @@ pub async fn order_update_financials(
         })
         .max(0.0);
 
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let actual_order_id = resolve_renderer_order_id(&conn, &payload.order_id)?;
+    let actual_order_id = resolve_renderer_order_id(conn, &payload.order_id)?;
     conn.execute_batch("BEGIN IMMEDIATE")
         .map_err(|e| format!("begin transaction: {e}"))?;
 
@@ -3301,6 +4032,9 @@ pub async fn order_update_financials(
     let edit_delivery_fee_cents = Cents::round_half_even(delivery_fee).as_i64();
     let edit_tip_amount_cents = Cents::round_half_even(tip_amount).as_i64();
     let result = (|| -> Result<serde_json::Value, String> {
+        // What the order's payment status proves, read before the new totals
+        // are written (29/09/2026).
+        let coverage = capture_proven_payment_coverage(conn, &actual_order_id)?;
         conn.execute(
             "UPDATE orders
              SET total_amount = ?1, total_amount_cents = ?2,
@@ -3334,13 +4068,13 @@ pub async fn order_update_financials(
         .map_err(|e| format!("update order financials: {e}"))?;
 
         let stale_payment_ids =
-            resolve_stale_unsynced_overpay_payments_for_order(&conn, &actual_order_id, &now)?;
-        let (payment_status, payment_method, paid_total) =
-            refresh_order_payment_snapshot(&conn, &actual_order_id, &now)?;
+            resolve_stale_unsynced_overpay_payments_for_order(conn, &actual_order_id, now)?;
+        let snapshot =
+            refresh_order_payment_snapshot_with_coverage(conn, &actual_order_id, now, &coverage)?;
 
         // W4d-iv additive emission: every monetary field carries its
         // snake_case_cents sibling alongside the legacy camelCase float.
-        let sync_payload = serde_json::json!({
+        let mut sync_payload = serde_json::json!({
             "orderId": actual_order_id,
             "totalAmount": payload.total_amount,
             "total_amount_cents": Cents::round_half_even(payload.total_amount).as_i64(),
@@ -3355,41 +4089,183 @@ pub async fn order_update_financials(
             "delivery_fee_cents": Cents::round_half_even(delivery_fee).as_i64(),
             "tipAmount": tip_amount,
             "tip_amount_cents": Cents::round_half_even(tip_amount).as_i64(),
-            "paymentStatus": payment_status,
-            "paymentMethod": payment_method,
         });
-        enqueue_order_sync_payload(&conn, &actual_order_id, &sync_payload)
+        // Only what the ledger (or this write) proves rides along; see
+        // `payment_status_to_push`.
+        if let Some(fields) = sync_payload.as_object_mut() {
+            if let Some(status) = payment_status_to_push(&coverage, &snapshot) {
+                fields.insert("paymentStatus".to_string(), serde_json::json!(status));
+            }
+            if let Some(method) = snapshot.derived_method.as_deref() {
+                fields.insert("paymentMethod".to_string(), serde_json::json!(method));
+            }
+        }
+        enqueue_order_sync_payload(conn, &actual_order_id, &sync_payload)
             .map_err(|e| format!("enqueue order financial sync: {e}"))?;
 
         Ok(serde_json::json!({
             "success": true,
             "orderId": actual_order_id.clone(),
-            "paymentStatus": payment_status,
-            "paymentMethod": payment_method,
-            "paidTotal": paid_total,
+            "paymentStatus": snapshot.status,
+            "paymentMethod": snapshot.method_label(),
+            "paidTotal": snapshot.effective_paid,
             "stalePaymentIdsVoided": stale_payment_ids,
         }))
     })();
 
-    let response = match result {
+    match result {
         Ok(value) => {
             conn.execute_batch("COMMIT")
                 .map_err(|e| format!("commit: {e}"))?;
-            Ok(value)
+            Ok((value, actual_order_id))
         }
         Err(error) => {
             let _ = conn.execute_batch("ROLLBACK");
             Err(error)
         }
-    }?;
-
-    drop(conn);
-
-    if let Ok(order_json) = sync::get_order_by_id(&db, &actual_order_id) {
-        let _ = app.emit("order_realtime_update", order_json);
     }
+}
 
-    Ok(response)
+/// Refusal to delete an order that has payment records (item D6, founder rule
+/// 30/09 and 01/10/2026: a payment record is never missing). Deleting the
+/// order took its payment rows with it (`ON DELETE CASCADE`), or left them
+/// pointing at nothing: money the drawer counted, a card the customer was
+/// charged, a void or a set-aside decision, gone from this till.
+pub(crate) const ORDER_HAS_PAYMENT_RECORDS: &str = "ORDER_HAS_PAYMENT_RECORDS";
+
+/// Refuse to delete an order that has ANY payment row, whatever its status
+/// (completed, voided, refunded, set aside). Every per-order delete path runs
+/// it: the renderer's `order_delete` (the admin's realtime delete broadcast)
+/// and the server tombstones of the pull and of "Clean up deleted orders".
+pub(crate) fn ensure_order_has_no_payment_records(
+    conn: &rusqlite::Connection,
+    local_order_id: &str,
+) -> Result<(), String> {
+    let rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM order_payments WHERE order_id = ?1",
+            rusqlite::params![local_order_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("read the order's payment records before a delete: {e}"))?;
+    if rows > 0 {
+        return Err(format!(
+            "{ORDER_HAS_PAYMENT_RECORDS}: this order has {rows} payment record(s); it is not deleted, so they are never orphaned."
+        ));
+    }
+    Ok(())
+}
+
+/// What a deletion the server announced did to the local order (shared rule
+/// R7, round 3, 01/10/2026).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ServerDeletionOutcome {
+    /// It had no payment rows and lay in the open period: deleted here too.
+    Deleted,
+    /// It has payment rows or lies inside a closed Z: kept, hidden as deleted
+    /// (`orders.server_deleted_at`, v93). Its payment rows keep counting.
+    KeptHidden,
+}
+
+/// Does a deletion the server announced keep this order on the till (shared
+/// rule R7; founder rule 30/09 and 01/10/2026: a till never deletes an order
+/// that has payment rows or lies inside a closed Z)? Payment rows of ANY
+/// status count ([`ensure_order_has_no_payment_records`]); "inside a closed
+/// Z" is created before the last Z this till ran
+/// (`business_day::last_z_anchor_utc`): the Z already reported it, and the
+/// rollover keeps such rows for the retention view.
+pub(crate) fn server_deletion_keeps_order(
+    conn: &rusqlite::Connection,
+    local_order_id: &str,
+) -> Result<bool, String> {
+    if ensure_order_has_no_payment_records(conn, local_order_id).is_err() {
+        return Ok(true);
+    }
+    let Some(last_z) = crate::business_day::last_z_anchor_utc(conn) else {
+        return Ok(false);
+    };
+    conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM orders
+              WHERE id = ?1
+                AND datetime(created_at) < datetime(?2)
+         )",
+        rusqlite::params![local_order_id, last_z],
+        |row| row.get(0),
+    )
+    .map_err(|e| format!("read whether a closed Z holds the order: {e}"))
+}
+
+/// Keep a server-deleted order, hidden as deleted (shared rule R7): the
+/// order lists skip it (`sync::get_all_orders_since_utc`), its payment rows
+/// keep counting in the drawer, the shift and the Z. `updated_at` is left
+/// alone, so the order never moves between Z windows. The first deletion's
+/// time is kept.
+pub(crate) fn hide_server_deleted_order(
+    conn: &rusqlite::Connection,
+    local_order_id: &str,
+    now: &str,
+) -> Result<(), String> {
+    conn.execute(
+        "UPDATE orders
+         SET server_deleted_at = COALESCE(server_deleted_at, ?1)
+         WHERE id = ?2",
+        rusqlite::params![now, local_order_id],
+    )
+    .map_err(|e| format!("hide the server-deleted order {local_order_id}: {e}"))?;
+    Ok(())
+}
+
+/// Apply a deletion the server announced to one local order (shared rule R7):
+/// an order with payment rows or inside a closed Z is kept and hidden as
+/// deleted (`orders.server_deleted_at`; the order lists skip it, its payment
+/// rows keep counting); any other order is deleted with its queue rows. Every
+/// server deletion path runs it: the pull's tombstones, "Clean up deleted
+/// orders" and the admin's realtime delete broadcast (`order_delete`). A
+/// repair settlement is never reached here (its callers skip it).
+pub(crate) fn apply_server_order_deletion(
+    conn: &rusqlite::Connection,
+    local_order_id: &str,
+    now: &str,
+) -> Result<ServerDeletionOutcome, String> {
+    if server_deletion_keeps_order(conn, local_order_id)? {
+        hide_server_deleted_order(conn, local_order_id, now)?;
+        return Ok(ServerDeletionOutcome::KeptHidden);
+    }
+    // Queue rows have no FK cascade to orders.
+    conn.execute(
+        "DELETE FROM sync_queue WHERE entity_type = 'order' AND entity_id = ?1",
+        rusqlite::params![local_order_id],
+    )
+    .map_err(|e| format!("delete order queue rows for {local_order_id}: {e}"))?;
+    conn.execute(
+        "DELETE FROM sync_queue
+         WHERE entity_type = 'payment'
+           AND entity_id IN (SELECT id FROM order_payments WHERE order_id = ?1)",
+        rusqlite::params![local_order_id],
+    )
+    .map_err(|e| format!("delete payment queue rows for {local_order_id}: {e}"))?;
+    conn.execute(
+        "DELETE FROM sync_queue
+         WHERE entity_type = 'payment_adjustment'
+           AND entity_id IN (SELECT id FROM payment_adjustments WHERE order_id = ?1)",
+        rusqlite::params![local_order_id],
+    )
+    .map_err(|e| format!("delete payment-adjustment queue rows for {local_order_id}: {e}"))?;
+    let deleted = conn
+        .execute(
+            "DELETE FROM orders
+             WHERE id = ?1
+               AND lower(trim(COALESCE(order_context, ''))) <> 'repair_settlement'",
+            rusqlite::params![local_order_id],
+        )
+        .map_err(|e| format!("delete ordinary local order {local_order_id}: {e}"))?;
+    if deleted != 1 {
+        return Err(format!(
+            "local deleted-order target {local_order_id} changed classification during the delete"
+        ));
+    }
+    Ok(ServerDeletionOutcome::Deleted)
 }
 
 #[tauri::command]
@@ -3402,10 +4278,20 @@ pub async fn order_delete(
     let payload = parse_order_delete_payload(arg0, arg1)?;
     let order_id_raw = payload.order_id;
 
+    let mut kept_hidden = false;
     let actual_order_id = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         let actual_order_id = resolve_renderer_deletable_order_id(&conn, &order_id_raw)?;
+        // R7 (round 3, 01/10/2026): the admin's delete broadcast is a server
+        // deletion. An order with payment rows or inside a closed Z is kept,
+        // hidden as deleted; any other order is deleted here too.
         if let Some(actual_id) = actual_order_id.as_ref() {
+            if server_deletion_keeps_order(&conn, actual_id)? {
+                hide_server_deleted_order(&conn, actual_id, &Utc::now().to_rfc3339())?;
+                kept_hidden = true;
+            }
+        }
+        if let Some(actual_id) = actual_order_id.as_ref().filter(|_| !kept_hidden) {
             conn.execute(
                 "DELETE FROM orders WHERE id = ?1",
                 rusqlite::params![actual_id],
@@ -3440,7 +4326,8 @@ pub async fn order_delete(
 
     Ok(serde_json::json!({
         "success": true,
-        "orderId": actual_order_id
+        "orderId": actual_order_id,
+        "keptHidden": kept_hidden
     }))
 }
 
@@ -3504,6 +4391,7 @@ pub async fn order_save_from_remote(
             let now = Utc::now().to_rfc3339();
             ensure_renderer_order_is_not_repair_settlement(&conn, local_id)?;
             attach_remote_order_identity_to_local(&conn, local_id, &remote_id, &order_data, &now)?;
+            sync::stamp_remote_folio_charge(&conn, local_id, &order_data)?;
         }
         existing_local_id
     };
@@ -3556,8 +4444,10 @@ pub async fn order_save_from_remote(
     let name_on_ringer = value_str(&order_data, &["name_on_ringer", "nameOnRinger"]);
     let special_instructions = value_str(&order_data, &["special_instructions", "notes"]);
     let estimated_time = value_i64(&order_data, &["estimated_time", "estimatedTime"]);
-    let payment_status = value_str(&order_data, &["payment_status", "paymentStatus"])
-        .unwrap_or_else(|| "pending".into());
+    // The server's label in this terminal's vocabulary (`completed` is `paid`).
+    let payment_status = sync::normalize_payment_status_for_sync(
+        value_str(&order_data, &["payment_status", "paymentStatus"]).as_deref(),
+    );
     let payment_method = value_str(&order_data, &["payment_method", "paymentMethod"]);
     let payment_tx_id = value_str(
         &order_data,
@@ -3750,6 +4640,8 @@ pub async fn order_save_from_remote(
             ],
         )
         .map_err(|e| format!("save remote order: {e}"))?;
+        // R6: a folio-charged order says so from the moment it arrives.
+        sync::stamp_remote_folio_charge(&conn, &local_id, &order_data)?;
     }
 
     if let Ok(order_json) = sync::get_order_by_id(&db, &local_id) {
@@ -3974,6 +4866,30 @@ pub async fn order_fetch_items_from_supabase(
     Ok(serde_json::json!([]))
 }
 
+// This classifies only the original CREATE handoff. Payment intent is not a
+// persisted orders column (v55 removed payment_method), and this must not be
+// used as payment proof or as permission to replay an unknown fiscal operation.
+fn enqueue_order_creation_fiscal(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+    normalized: &Value,
+) -> Result<(), String> {
+    let matches_aliases = |keys: &[&str], expected: &str| {
+        let present: Vec<&Value> = keys.iter().filter_map(|key| normalized.get(*key)).collect();
+        !present.is_empty() && present.iter().all(|value| value.as_str() == Some(expected))
+    };
+    if matches_aliases(&["paymentMethod", "payment_method"], "gift_card")
+        && matches_aliases(&["paymentStatus", "payment_status"], "pending")
+        && normalized.get("initialPayment").is_none()
+        && normalized.get("initial_payment").is_none()
+    {
+        // The dedicated gift checkout owns fiscalization after real settlement.
+        // Keep this new pending order and its ordinary order-sync row intact.
+        return Ok(());
+    }
+    crate::fiscal::dispatcher::enqueue_for_order(conn, order_id)
+}
+
 #[tauri::command]
 pub async fn order_create(
     arg0: Option<serde_json::Value>,
@@ -4012,7 +4928,7 @@ pub async fn order_create(
         // the cashier always gets a successful response.
         if let Ok(conn_guard) = db.conn.lock() {
             if let Err(fiscal_err) =
-                crate::fiscal::dispatcher::enqueue_for_order(&conn_guard, &order_id)
+                enqueue_order_creation_fiscal(&conn_guard, &order_id, &normalized)
             {
                 tracing::warn!(
                     "[order_create] fiscal enqueue best-effort failed for order {order_id}: {fiscal_err}"
@@ -4039,6 +4955,94 @@ pub async fn order_create_with_initial_payment(
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let payload = arg0.ok_or("Missing order payload")?;
+    create_order_with_initial_payment(
+        &db,
+        &mgr,
+        &app,
+        payload,
+        &crate::unsaved_payments::MOVED_MONEY_SAVE_DELAYS_MS,
+    )
+    .await
+}
+
+static ACTIVE_CHECKOUTS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn active_checkouts() -> &'static Mutex<HashSet<String>> {
+    ACTIVE_CHECKOUTS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// A new-order checkout in progress on this till, by its client request id
+/// (fix review 30/09/2026). Released when the checkout answers.
+pub(crate) struct CheckoutInProgress(String);
+
+impl Drop for CheckoutInProgress {
+    fn drop(&mut self) {
+        if let Ok(mut active) = active_checkouts().lock() {
+            active.remove(&self.0);
+        }
+    }
+}
+
+/// Claim a checkout for this press; `None` while the same checkout (the same
+/// client request id, on this till's database) is still in progress, e.g.
+/// waiting on the card terminal.
+pub(crate) fn claim_checkout(
+    db: &db::DbState,
+    client_request_id: &str,
+) -> Result<Option<CheckoutInProgress>, String> {
+    let key = format!("{}|{client_request_id}", db.db_path.display());
+    let mut active = active_checkouts()
+        .lock()
+        .map_err(|error| format!("lock active checkouts: {error}"))?;
+    if !active.insert(key.clone()) {
+        return Ok(None);
+    }
+    Ok(Some(CheckoutInProgress(key)))
+}
+
+/// The answer to a press of Pay while the same checkout is still in progress.
+pub(crate) const CHECKOUT_IN_PROGRESS: &str = "CHECKOUT_IN_PROGRESS";
+
+fn checkout_in_progress_response(client_request_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "success": false,
+        "errorCode": CHECKOUT_IN_PROGRESS,
+        "checkoutInProgress": true,
+        "orderPersisted": false,
+        "clientRequestId": client_request_id,
+        "error": "This checkout is still in progress on the card terminal. Wait for it to finish; paying again then checks the same payment and never charges twice.",
+    })
+}
+
+/// The new-order checkout: the fiscal checkout (which charges a card on the
+/// fiscal device), then the order and its initial payment in one write.
+///
+/// Item E (fix review 30/09/2026): a card the fiscal device approved is money
+/// that moved. If the order write then failed (no cashier shift open, a
+/// locked database, ...) the error went back as a plain failure, the order
+/// did not exist, nothing durable said the customer had paid, and the next
+/// try started a new checkout and a second charge. The order is now held in a
+/// durable record (`unsaved_payments`, kind `new_order_checkout`) BEFORE the
+/// write, the same write is retried with the same keys, and a write that still
+/// fails answers `PAYMENT_NOT_SAVED`: the Z holds on `payments_not_saved`,
+/// "Save payment again" writes the order and its payment with the same keys
+/// (no new charge), and the manager can record the money given back.
+///
+/// Fix review 30/09/2026 (double charge on a slow terminal): the screen used
+/// to give up after 15 s while the terminal still waited for the card, and
+/// the next press of Pay started a second checkout. Now every press of the
+/// same cart carries the same client request id, and (1) a press while the
+/// same checkout is still in progress never reaches the terminal
+/// (`CHECKOUT_IN_PROGRESS`); (2) a press after its charge was held as not
+/// saved replays the held order and payment (the payload the card was
+/// charged for), never the terminal and never this press's payload.
+pub(crate) async fn create_order_with_initial_payment(
+    db: &db::DbState,
+    mgr: &crate::ecr::DeviceManager,
+    invalidator: &dyn crate::print::PrintQueueInvalidator,
+    payload: serde_json::Value,
+    save_delays_ms: &[u64],
+) -> Result<serde_json::Value, String> {
     let mut normalized = payload.get("orderData").cloned().unwrap_or(payload);
     {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -4068,6 +5072,12 @@ pub async fn order_create_with_initial_payment(
         );
     }
 
+    // One press at a time per checkout: a second press while the first still
+    // waits on the card terminal never reaches the terminal.
+    let Some(_checkout) = claim_checkout(db, &client_request_id)? else {
+        return Ok(checkout_in_progress_response(&client_request_id));
+    };
+
     let existing_order_id = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         let existing = conn
@@ -4090,10 +5100,31 @@ pub async fn order_create_with_initial_payment(
         }
     };
 
+    // A card the fiscal device approved for this checkout: money that moved.
+    let mut card_money_moved = false;
     if existing_order_id.is_none() {
+        // This checkout's charge is held as not saved (item E): replay the
+        // held order and payment, the payload the card was charged for.
+        let held = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            crate::unsaved_payments::list(&conn, Some(&client_request_id))?
+                .into_iter()
+                .find(crate::unsaved_payments::UnsavedChargedPayment::is_new_order_checkout)
+        };
+        if let Some(entry) = held {
+            return Ok(crate::unsaved_payments::save_charged_payment(
+                db,
+                entry,
+                save_delays_ms,
+                None,
+                |db, entry| crate::unsaved_payments::write_recorded_entry(db, entry, invalidator),
+            )
+            .await);
+        }
+
         let checkout = match crate::commands::ecr::fiscal_checkout_for_order_payload(
-            &db,
-            &mgr,
+            db,
+            mgr,
             &client_request_id,
             &normalized,
             &initial_payment,
@@ -4154,6 +5185,7 @@ pub async fn order_create_with_initial_payment(
                     );
                 }
                 if method == "card" {
+                    card_money_moved = true;
                     payment.insert("terminalApproved".to_string(), serde_json::json!(true));
                     payment.insert("paymentOrigin".to_string(), serde_json::json!("terminal"));
                     if let Some(device_id) =
@@ -4180,7 +5212,56 @@ pub async fn order_create_with_initial_payment(
         }
     }
 
-    let mut resp = sync::create_order(&db, &normalized, &app)?;
+    // Item A's criterion holds at checkout too: a card the checkout carries as
+    // approved by a payment terminal is money that moved as well.
+    if !card_money_moved && existing_order_id.is_none() {
+        let checkout_payment = normalized
+            .get("initialPayment")
+            .or_else(|| normalized.get("initial_payment"))
+            .unwrap_or(&initial_payment);
+        let method = checkout_payment
+            .get("method")
+            .or_else(|| checkout_payment.get("paymentMethod"))
+            .or_else(|| checkout_payment.get("payment_method"))
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        card_money_moved = method == "card"
+            && crate::commands::payments::payment_payload_has_terminal_approval(checkout_payment);
+    }
+
+    let checkout_record = if card_money_moved {
+        crate::unsaved_payments::UnsavedChargedPayment::for_new_order_checkout(
+            &client_request_id,
+            &normalized,
+            &Utc::now().to_rfc3339(),
+        )
+    } else {
+        None
+    };
+    let (mut resp, fiscal_enqueued) = match checkout_record {
+        Some((entry, keyed_order)) => {
+            let answer = crate::unsaved_payments::save_charged_payment(
+                db,
+                entry,
+                save_delays_ms,
+                None,
+                |db, _entry| {
+                    crate::unsaved_payments::write_new_order_checkout(db, &keyed_order, invalidator)
+                },
+            )
+            .await;
+            if answer.get("success").and_then(|value| value.as_bool()) != Some(true) {
+                // Charged, not saved yet (or saved but set aside for review):
+                // a typed answer, never a plain failure the renderer retries
+                // with a new checkout.
+                return Ok(answer);
+            }
+            (answer, true)
+        }
+        None => (sync::create_order(db, &normalized, invalidator)?, false),
+    };
     let order_id = resp
         .get("orderId")
         .and_then(|v| v.as_str())
@@ -4200,12 +5281,15 @@ pub async fn order_create_with_initial_payment(
                 .or_insert_with(|| serde_json::json!({ "orderId": order_id.clone() }));
         }
 
-        if let Ok(conn) = db.conn.lock() {
-            if let Err(fiscal_err) = crate::fiscal::dispatcher::enqueue_for_order(&conn, &order_id)
-            {
-                tracing::warn!(
-                    "[order_create_with_initial_payment] fiscal enqueue best-effort failed for order {order_id}: {fiscal_err}"
-                );
+        if !fiscal_enqueued {
+            if let Ok(conn) = db.conn.lock() {
+                if let Err(fiscal_err) =
+                    crate::fiscal::dispatcher::enqueue_for_order(&conn, &order_id)
+                {
+                    tracing::warn!(
+                        "[order_create_with_initial_payment] fiscal enqueue best-effort failed for order {order_id}: {fiscal_err}"
+                    );
+                }
             }
         }
     }
@@ -4335,9 +5419,15 @@ pub async fn order_approve(
     let _ = app.emit("order_status_updated", payload.clone());
     let _ = app.emit("order_realtime_update", payload.clone());
     if let Some(remote_order_id) = remote_order_id.as_deref() {
-        spawn_immediate_order_status_patch(
+        // The answer says what the order's platform took (a shorter
+        // preparation time is told to the cashier by the renderer).
+        spawn_immediate_order_accept_patch(
             &db,
             build_order_status_patch_body(remote_order_id, "confirmed", estimated_time, None, None),
+            AcceptAnswerListener {
+                app: app.clone(),
+                order_id: order_id_raw.clone(),
+            },
         );
     }
     // THE-434: the accept is the moment the store commits to the order — the
@@ -4377,21 +5467,22 @@ pub async fn order_approve(
     )
 }
 
-#[tauri::command]
-pub async fn order_decline(
-    arg0: Option<String>,
-    arg1: Option<String>,
-    db: tauri::State<'_, db::DbState>,
-    app: tauri::AppHandle,
-) -> Result<serde_json::Value, String> {
-    let order_id_raw = arg0.ok_or("Missing orderId")?;
-    let reason = arg1.unwrap_or_else(|| "Declined".to_string());
-    let now = Utc::now().to_rfc3339();
+/// The local half of `order_decline`: refuses an order money was taken on
+/// (fix review 30/09/2026, like every cancel), then cancels it with its
+/// reason and queues the change. Answers the local id, the server id and the
+/// event payload.
+pub(crate) fn decline_order_locally(
+    db: &db::DbState,
+    order_id_raw: &str,
+    reason: &str,
+    now: &str,
+) -> Result<(String, Option<String>, serde_json::Value), String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let (order_id, remote_order_id) = resolve_order_id_with_remote(&conn, &order_id_raw)?;
+    let (order_id, remote_order_id) = resolve_order_id_with_remote(&conn, order_id_raw)?;
     let previous_status = ensure_order_status_transition_allowed(&conn, &order_id, "cancelled")?;
     if previous_status != "cancelled" {
-        order_ownership::reverse_order_drawer_attribution(&conn, &order_id, &now)?;
+        ensure_no_money_taken_before_cancel(&conn, &order_id)?;
+        order_ownership::reverse_order_drawer_attribution(&conn, &order_id, now)?;
     }
     conn.execute(
         "UPDATE orders
@@ -4407,13 +5498,27 @@ pub async fn order_decline(
     let payload = serde_json::json!({
         "orderId": order_id,
         "status": "cancelled",
-        "reason": reason.clone(),
-        "cancellationReason": reason.clone(),
-        "cancellation_reason": reason.clone(),
+        "reason": reason,
+        "cancellationReason": reason,
+        "cancellation_reason": reason,
         "cancelled_at": now
     });
     let _ = enqueue_order_sync_payload(&conn, &order_id, &payload);
-    drop(conn);
+    Ok((order_id, remote_order_id, payload))
+}
+
+#[tauri::command]
+pub async fn order_decline(
+    arg0: Option<String>,
+    arg1: Option<String>,
+    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    let order_id_raw = arg0.ok_or("Missing orderId")?;
+    let reason = arg1.unwrap_or_else(|| "Declined".to_string());
+    let now = Utc::now().to_rfc3339();
+    let (_order_id, remote_order_id, payload) =
+        decline_order_locally(&db, &order_id_raw, &reason, &now)?;
 
     let _ = app.emit("order_status_updated", payload.clone());
     let _ = app.emit("order_realtime_update", payload);
@@ -4430,6 +5535,282 @@ pub async fn order_decline(
         );
     }
     Ok(serde_json::json!({ "success": true, "orderId": order_id_raw }))
+}
+
+/// Refusal of a cancel on an order money was taken on (item D1; every cancel
+/// since the fix review of 30/09/2026).
+pub(crate) const ORDER_HAS_PAYMENTS: &str = "ORDER_HAS_PAYMENTS";
+
+/// Money taken on an order (completed payments net of refunds; a voided row
+/// does not count) is voided or refunded from the order first, or the rest
+/// is collected, before the order is cancelled: a cancel takes back what the
+/// drawer counted for the order while its payment stays recorded (founder
+/// rule 30/09/2026; Android refuses the plain cancel of an order with
+/// settled money too). An unreadable ledger refuses as well.
+pub(crate) fn ensure_no_money_taken_before_cancel(
+    conn: &rusqlite::Connection,
+    local_order_id: &str,
+) -> Result<(), String> {
+    match cancel_refusal_code(conn, local_order_id)? {
+        Some(ORDER_HAS_PAYMENTS) => Err(format!(
+            "{ORDER_HAS_PAYMENTS}: money was taken on this order. Void or refund it from the order first, or collect the rest."
+        )),
+        Some(code) => Err(format!(
+            "{code}: this order is marked paid, but its payment is not recorded on this till. Restore it from the server (Sync Now), or record the payment from the Z report, then cancel."
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Refusal of a cancel on an order whose label claims money while this till
+/// holds no payment record of it (founder rule 30/09/2026 and 01/10/2026: an
+/// order is never paid without its payment record; a missing record is
+/// restored from the server or recorded by a manager, never charged again).
+/// Cancelling it hid it from every integrity check: the Z skips cancelled
+/// orders, so the claim and the missing record both vanished.
+pub(crate) const ORDER_PAYMENT_NOT_RECORDED: &str = "ORDER_PAYMENT_NOT_RECORDED";
+
+/// Why this till refuses to cancel the order, before any reason or PIN is
+/// asked (`None`: it may be cancelled). The one rule every till cancel and
+/// decline applies; the renderer asks it through the settlement snapshot
+/// (`cancelRefusal`) so the cashier is told first.
+///
+/// - [`ORDER_HAS_PAYMENTS`]: completed money net of refunds is on it; it is
+///   voided or refunded from the order first, or the rest is collected.
+/// - [`ORDER_PAYMENT_NOT_RECORDED`]: none is, yet the label claims money
+///   (`paid`, `completed`, `partially_paid`, `partial`, any case), the total
+///   is above zero, it is no room-folio charge, and the store collects its
+///   money. The existing ledger restore (sync) or "Record the payment" (the Z
+///   report) comes first; once a record exists the first rule applies, and a
+///   void or refund settles the label in the same write.
+///
+/// A platform order whose money the delivery platform holds or settles is
+/// exempt from both: the server labels it paid at ingest, before its
+/// settlement row is mirrored here, and declining it must keep working
+/// (verifier, 01/10/2026). A platform settlement row is never money the STORE
+/// took (shared rule R1, round 3, 01/10/2026,
+/// [`payments::platform_settlement_row_sql`]: its `payment_origin` or its
+/// external id `platform_settlement:*`), on any order: declining or
+/// cancelling a platform-held order stays possible after its settlement is
+/// mirrored, and the server decides what becomes of the settlement. It still
+/// is the order's payment record, so an order it covers is never refused as
+/// "not recorded" either. Money the store's own till took on such an order
+/// still refuses. Server-originated cancellations (a pull) never come through
+/// here. An unreadable ledger refuses: never "nothing taken" by default.
+///
+/// A hotel folio charge is exempt from the "not recorded" refusal (shared
+/// rule R6): the folio charge is its record ([`payments::order_is_folio_charged`],
+/// `orders.folio_charged` stamped from the server's `room_charge`).
+pub(crate) fn cancel_refusal_code(
+    conn: &rusqlite::Connection,
+    local_order_id: &str,
+) -> Result<Option<&'static str>, String> {
+    let store_collectable = payments::order_money_is_store_collectable(conn, local_order_id);
+    if payments::load_store_taken_net_paid_cents(conn, local_order_id)? > 0 {
+        return Ok(Some(ORDER_HAS_PAYMENTS));
+    }
+    // R1: the platform's settlement row is no money the store took, but it
+    // is the order's payment record.
+    let recorded_cents =
+        Cents::round_half_even(payments::load_net_paid_for_order(conn, local_order_id)?).as_i64();
+    if recorded_cents > 0 {
+        return Ok(None);
+    }
+    let order: Option<(String, i64)> = conn
+        .query_row(
+            "SELECT LOWER(TRIM(COALESCE(payment_status, ''))),
+                    COALESCE(total_amount_cents, CAST(ROUND(total_amount * 100) AS INTEGER), 0)
+             FROM orders WHERE id = ?1",
+            rusqlite::params![local_order_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| format!("read the order's payment label before a cancel: {e}"))?;
+    let Some((label, total_cents)) = order else {
+        return Ok(None);
+    };
+    let claims_money = matches!(
+        label.as_str(),
+        "paid" | "completed" | "partially_paid" | "partial"
+    );
+    if !claims_money || total_cents <= 0 {
+        return Ok(None);
+    }
+    if !store_collectable || payments::order_is_folio_charged(conn, local_order_id)? {
+        return Ok(None);
+    }
+    Ok(Some(ORDER_PAYMENT_NOT_RECORDED))
+}
+
+/// Item D1 (fix review 30/09/2026): cancelling an order that still owes money
+/// is explicit. A released table no longer cancels its order (the server
+/// frees the table, ends the session and leaves an owing order open), so the
+/// operator cancels it from the release question or the table check: a
+/// reason, then the desktop's approval for money actions (an active cashier
+/// or manager shift on this terminal and a fresh PIN, `CashDrawerControl`;
+/// the desktop has no per-staff void permission). Answers the order id and
+/// the reason once approved.
+///
+/// An order money was taken on is refused before any PIN is asked
+/// ([`ORDER_HAS_PAYMENTS`], the same rule as Android's release question):
+/// its payment is voided or refunded from the order first, or the rest is
+/// collected. Cancelling it would take back what the drawer counted for it
+/// while the payment stays recorded.
+pub(crate) fn authorize_owing_order_cancel(
+    db: &db::DbState,
+    auth_state: &crate::auth::AuthState,
+    arg0: Option<serde_json::Value>,
+) -> Result<(String, String, crate::auth::MoneyApprover), crate::auth::GuardedCommandError> {
+    let payload = arg0.ok_or("Missing cancel payload")?;
+    let order_id = value_str(&payload, &["orderId", "order_id"])
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or("Missing orderId")?;
+    let reason = value_str(
+        &payload,
+        &["reason", "cancellationReason", "cancellation_reason"],
+    )
+    .map(|value| value.trim().to_string())
+    .filter(|value| !value.is_empty())
+    .ok_or("A reason is required to cancel an order")?;
+    {
+        // Unreadable payments refuse too: never "no money taken" by default.
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let (local_order_id, _) = resolve_order_id_with_remote(&conn, &order_id)?;
+        ensure_no_money_taken_before_cancel(&conn, &local_order_id)?;
+    }
+    // With nobody on shift at this terminal, a manager approves with their own
+    // PIN (fix review 30/09/2026).
+    let approver = crate::auth::authorize_money_action(
+        crate::auth::MoneyApproval::VoidOrders,
+        db,
+        auth_state,
+    )?;
+    Ok((order_id, reason, approver))
+}
+
+/// What the order still owes, read before it is cancelled (a cancellation
+/// reverses what the order counted, so the amount is taken first).
+pub(crate) fn owing_order_outstanding_cents(
+    db: &db::DbState,
+    order_id_raw: &str,
+) -> Result<i64, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let (order_id, _) = resolve_order_id_with_remote(&conn, order_id_raw)?;
+    payments::load_order_payment_balance_snapshot(&conn, &order_id)
+        .map(|balance| Cents::round_half_even(balance.outstanding_amount).as_i64())
+}
+
+/// The audit entry of an approved cancellation: who, when, why, and what the
+/// order still owed when it was cancelled (`None` when that could not be
+/// read: recorded as unknown, never as zero).
+pub(crate) fn record_owing_order_cancel_audit(
+    db: &db::DbState,
+    auth_state: &crate::auth::AuthState,
+    order_id_raw: &str,
+    reason: &str,
+    outstanding_cents: Option<i64>,
+    approver: &crate::auth::MoneyApprover,
+) -> Result<(), String> {
+    let session = crate::auth::get_session_json(auth_state);
+    // The manager whose own PIN approved it, else the session's staff.
+    let cancelled_by = approver.manager_staff_id.clone().or_else(|| {
+        ["databaseStaffId", "staffId"].iter().find_map(|key| {
+            session
+                .get(*key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+        })
+    });
+    let now = Utc::now().to_rfc3339();
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let (order_id, _) = resolve_order_id_with_remote(&conn, order_id_raw)?;
+    let order_number: Option<String> = conn
+        .query_row(
+            "SELECT COALESCE(NULLIF(TRIM(display_order_number), ''), order_number)
+             FROM orders WHERE id = ?1",
+            rusqlite::params![order_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("load the cancelled order: {e}"))?
+        .flatten();
+    let payload = serde_json::json!({
+        "reason": reason,
+        "outstandingCents": outstanding_cents,
+        "cancelledBy": cancelled_by,
+        "cancelledAt": now,
+        "approval": "cash_drawer_control",
+        "approvalVia": approver.via,
+    });
+    conn.execute(
+        "INSERT INTO recovery_action_log (
+             id, action_id, issue_code, entity_type, entity_id, order_id, order_number,
+             success, message, actor_staff_id, payload_json, created_at
+         ) VALUES (?1, 'order_cancel_owing', 'order_owes_money', 'order', ?2, ?2, ?3,
+                   1, ?4, ?5, ?6, ?7)",
+        rusqlite::params![
+            uuid::Uuid::new_v4().to_string(),
+            order_id,
+            order_number,
+            format!("Order cancelled with approval: {reason}"),
+            cancelled_by,
+            payload.to_string(),
+            now,
+        ],
+    )
+    .map_err(|e| format!("write the cancellation audit entry: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn order_cancel_with_approval(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+    auth_state: tauri::State<'_, crate::auth::AuthState>,
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, crate::auth::GuardedCommandError> {
+    let (order_id, reason, approver) = authorize_owing_order_cancel(&db, &auth_state, arg0)?;
+    let outstanding_cents = owing_order_outstanding_cents(&db, &order_id)
+        .inspect_err(|error| {
+            tracing::warn!(
+                order_id = %order_id,
+                error = %error,
+                "Reading what the order owes before cancelling it failed"
+            );
+        })
+        .ok();
+    let answer = order_update_status(
+        Some(serde_json::json!({
+            "orderId": order_id,
+            "status": "cancelled",
+            "cancellationReason": reason,
+        })),
+        None,
+        db.clone(),
+        app,
+    )
+    .await
+    .map_err(crate::auth::GuardedCommandError::from)?;
+    if answer.get("success").and_then(serde_json::Value::as_bool) == Some(true) {
+        if let Err(error) = record_owing_order_cancel_audit(
+            &db,
+            &auth_state,
+            &order_id,
+            &reason,
+            outstanding_cents,
+            &approver,
+        ) {
+            tracing::warn!(
+                order_id = %order_id,
+                error = %error,
+                "The order was cancelled; its audit entry could not be written"
+            );
+        }
+    }
+    Ok(answer)
 }
 
 #[tauri::command]
@@ -4597,17 +5978,21 @@ fn clear_delivery_tip_recipients_for_reset(
 ) -> Result<usize, String> {
     let payment_ids = {
         let mut statement = conn
-            .prepare(
+            .prepare(&format!(
+                // A payment set aside for review keeps its tip exactly as
+                // recorded: it is not money, and it is never re-sent.
                 "SELECT id
                  FROM order_payments
                  WHERE order_id = ?1
                    AND tip_recipient_role = 'driver'
+                   AND NOT {}
                    AND COALESCE(
                          tip_amount_cents,
                          CAST(ROUND(tip_amount * 100) AS INTEGER),
                          0
                        ) > 0",
-            )
+                crate::payment_review::set_aside_payment_sql("order_payments")
+            ))
             .map_err(|e| format!("prepare delivery tip reset lookup: {e}"))?;
         let rows = statement
             .query_map(rusqlite::params![order_id], |row| row.get::<_, String>(0))
@@ -4621,7 +6006,8 @@ fn clear_delivery_tip_recipients_for_reset(
     }
 
     conn.execute(
-        "UPDATE order_payments
+        &format!(
+            "UPDATE order_payments
          SET tip_recipient_staff_id = NULL,
              tip_recipient_staff_shift_id = NULL,
              sync_status = 'pending',
@@ -4637,11 +6023,14 @@ fn clear_delivery_tip_recipients_for_reset(
              updated_at = ?1
          WHERE order_id = ?2
            AND tip_recipient_role = 'driver'
+           AND NOT {}
            AND COALESCE(
                  tip_amount_cents,
                  CAST(ROUND(tip_amount * 100) AS INTEGER),
                  0
                ) > 0",
+            crate::payment_review::set_aside_payment_sql("order_payments")
+        ),
         rusqlite::params![now, order_id],
     )
     .map_err(|e| format!("clear delivery tip recipient for reset: {e}"))?;
@@ -4809,16 +6198,54 @@ pub async fn order_reset_to_active(
     }))
 }
 
-#[tauri::command]
-pub async fn order_notify_platform_ready(
-    arg0: Option<String>,
-    db: tauri::State<'_, db::DbState>,
-    app: tauri::AppHandle,
-) -> Result<serde_json::Value, String> {
-    let order_id_raw = arg0.ok_or("Missing orderId")?;
+/// What Ready on a platform order found before writing anything (item D8,
+/// efood late Ready, 01/10/2026).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PlatformReadyLocal {
+    /// The order is already past Ready (out for delivery, delivered,
+    /// completed): nothing to do, no write, no queue row, no PATCH.
+    AlreadyClosed { status: String },
+    /// The order was cancelled or refunded (by the platform, or here): no
+    /// write, no settlement, no queue row, no PATCH; the cashier is told.
+    Cancelled { status: String },
+    /// Written and queued: the server id for the immediate PATCH and the
+    /// status the order now has here (`ready`, or `delivered` for a
+    /// platform-fleet order whose settlement covers it).
+    Applied {
+        remote_order_id: Option<String>,
+        local_status: &'static str,
+    },
+}
+
+/// The local half of `order_notify_platform_ready`.
+///
+/// A stale card used to reach `ensure_order_status_transition_allowed` and
+/// fail with «Invalid status transition: delivered -> ready» (a false
+/// "Failed to notify the platform" toast), and a Ready on an order the
+/// platform had cancelled could run the platform auto-settlement and record
+/// money on a cancelled order. The precheck answers both before anything is
+/// written.
+pub(crate) fn notify_platform_ready_locally(
+    db: &db::DbState,
+    order_id_raw: &str,
+    now: &str,
+) -> Result<PlatformReadyLocal, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let (order_id, remote_order_id) = resolve_order_id_with_remote(&conn, &order_id_raw)?;
-    let now = Utc::now().to_rfc3339();
+    let (order_id, remote_order_id) = resolve_order_id_with_remote(&conn, order_id_raw)?;
+    let current_status = load_canonical_order_status(&conn, &order_id)?;
+    match current_status.as_str() {
+        "out_for_delivery" | "delivered" | "completed" => {
+            return Ok(PlatformReadyLocal::AlreadyClosed {
+                status: current_status,
+            });
+        }
+        "cancelled" | "refunded" => {
+            return Ok(PlatformReadyLocal::Cancelled {
+                status: current_status,
+            });
+        }
+        _ => {}
+    }
     ensure_order_status_transition_allowed(&conn, &order_id, "ready")?;
     conn.execute(
         "UPDATE orders SET status = 'ready', sync_status = 'pending', updated_at = ?1 WHERE id = ?2",
@@ -4882,12 +6309,44 @@ pub async fn order_notify_platform_ready(
             &serde_json::json!({ "orderId": order_id, "status": "delivered" }),
         );
     }
-    drop(conn);
-    let local_status = if platform_fleet_done {
-        "delivered"
-    } else {
-        "ready"
-    };
+    Ok(PlatformReadyLocal::Applied {
+        remote_order_id,
+        local_status: if platform_fleet_done {
+            "delivered"
+        } else {
+            "ready"
+        },
+    })
+}
+
+#[tauri::command]
+pub async fn order_notify_platform_ready(
+    arg0: Option<String>,
+    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    let order_id_raw = arg0.ok_or("Missing orderId")?;
+    let now = Utc::now().to_rfc3339();
+    let (remote_order_id, local_status) =
+        match notify_platform_ready_locally(&db, &order_id_raw, &now)? {
+            // Nothing written, queued or sent; the renderer refreshes quietly.
+            PlatformReadyLocal::AlreadyClosed { status } => {
+                return Ok(
+                    serde_json::json!({ "success": true, "alreadyClosed": true, "status": status }),
+                );
+            }
+            // Nothing written, queued or sent; the renderer shows the
+            // cancellation notice, never a success toast.
+            PlatformReadyLocal::Cancelled { status } => {
+                return Ok(
+                    serde_json::json!({ "success": false, "cancelled": true, "status": status }),
+                );
+            }
+            PlatformReadyLocal::Applied {
+                remote_order_id,
+                local_status,
+            } => (remote_order_id, local_status),
+        };
     let payload = serde_json::json!({ "orderId": order_id_raw, "status": local_status });
     let _ = app.emit("order_status_updated", payload.clone());
     let _ = app.emit("order_realtime_update", payload);
@@ -5106,17 +6565,21 @@ fn resolve_delivery_tip_recipients_for_assignment(
 ) -> Result<usize, String> {
     let payment_ids = {
         let mut statement = conn
-            .prepare(
+            .prepare(&format!(
+                // A payment set aside for review keeps its tip exactly as
+                // recorded: it is not money, and it is never re-sent.
                 "SELECT id
                  FROM order_payments
                  WHERE order_id = ?1
                    AND tip_recipient_role = 'driver'
+                   AND NOT {}
                    AND COALESCE(
                          tip_amount_cents,
                          CAST(ROUND(tip_amount * 100) AS INTEGER),
                          0
                        ) > 0",
-            )
+                crate::payment_review::set_aside_payment_sql("order_payments")
+            ))
             .map_err(|e| format!("prepare pending delivery tip lookup: {e}"))?;
         let rows = statement
             .query_map(rusqlite::params![order_id], |row| row.get::<_, String>(0))
@@ -5130,7 +6593,8 @@ fn resolve_delivery_tip_recipients_for_assignment(
     }
 
     conn.execute(
-        "UPDATE order_payments
+        &format!(
+            "UPDATE order_payments
          SET tip_recipient_staff_id = ?1,
              tip_recipient_staff_shift_id = ?2,
              sync_status = 'pending',
@@ -5146,11 +6610,14 @@ fn resolve_delivery_tip_recipients_for_assignment(
              updated_at = ?3
          WHERE order_id = ?4
            AND tip_recipient_role = 'driver'
+           AND NOT {}
            AND COALESCE(
                  tip_amount_cents,
                  CAST(ROUND(tip_amount * 100) AS INTEGER),
                  0
                ) > 0",
+            crate::payment_review::set_aside_payment_sql("order_payments")
+        ),
         rusqlite::params![driver_id, driver_shift_id, now, order_id],
     )
     .map_err(|e| format!("assign delivery tip to driver payment: {e}"))?;
@@ -5518,8 +6985,10 @@ mod dto_tests {
     fn renderer_mutation_and_fiscal_commands_keep_guard_before_side_effects() {
         let source = include_str!("orders.rs");
         let cases = [
+            // Fix review 30/09/2026: the command writes through its local
+            // half (pinned below to delegate to it).
             (
-                "order_update_status",
+                "apply_order_status_locally",
                 "resolve_order_id_with_remote",
                 "reverse_order_drawer_attribution",
             ),
@@ -5558,13 +7027,20 @@ mod dto_tests {
                 "resolve_renderer_deletable_order_id",
                 "DELETE FROM orders",
             ),
+            // Item D6 and shared rule R7 (round 3): no order with payment
+            // records, or inside a closed Z, is ever deleted.
+            (
+                "order_delete",
+                "server_deletion_keeps_order",
+                "DELETE FROM orders",
+            ),
             (
                 "order_approve",
                 "resolve_order_id_with_remote",
                 "UPDATE orders",
             ),
             (
-                "order_decline",
+                "decline_order_locally",
                 "resolve_order_id_with_remote",
                 "reverse_order_drawer_attribution",
             ),
@@ -5579,7 +7055,7 @@ mod dto_tests {
                 "remove_driver_earning_for_order",
             ),
             (
-                "order_notify_platform_ready",
+                "notify_platform_ready_locally",
                 "resolve_order_id_with_remote",
                 "UPDATE orders",
             ),
@@ -5608,6 +7084,7 @@ mod dto_tests {
         for (command, guard, side_effect) in cases {
             let start = source
                 .find(&format!("pub async fn {command}"))
+                .or_else(|| source.find(&format!("pub(crate) fn {command}(")))
                 .unwrap_or_else(|| panic!("missing command source for {command}"));
             let remainder = &source[start..];
             let end = remainder
@@ -5625,6 +7102,60 @@ mod dto_tests {
                 "repair guard must precede {side_effect} in {command}"
             );
         }
+
+        for (command, local_half) in [
+            ("order_update_status", "apply_order_status_locally("),
+            ("order_decline", "decline_order_locally("),
+            (
+                "order_notify_platform_ready",
+                "notify_platform_ready_locally(",
+            ),
+        ] {
+            let start = source
+                .find(&format!("pub async fn {command}("))
+                .unwrap_or_else(|| panic!("missing command source for {command}"));
+            let remainder = &source[start..];
+            let end = remainder
+                .find("\n#[tauri::command]")
+                .unwrap_or(remainder.len());
+            assert!(
+                remainder[..end].contains(local_half),
+                "{command} must write through {local_half}"
+            );
+        }
+    }
+
+    /// Item D6 (founder rule 30/09 and 01/10/2026): an order with ANY payment
+    /// row (completed, voided, refunded, set aside) is never deleted; the
+    /// cascade took its records with it.
+    #[test]
+    fn an_order_with_any_payment_record_is_never_deleted() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open delete test database");
+        db::run_migrations_for_test(&conn);
+        for id in ["order-with-voided-payment", "order-without-payment"] {
+            conn.execute(
+                "INSERT INTO orders (id, items, total_amount, total_amount_cents, status,
+                     payment_status, sync_status, created_at, updated_at)
+                 VALUES (?1, '[]', 6.0, 600, 'pending', 'pending', 'synced',
+                         datetime('now'), datetime('now'))",
+                rusqlite::params![id],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status,
+                 sync_status, created_at, updated_at)
+             VALUES ('pay-voided', 'order-with-voided-payment', 'cash', 6.0, 600, 'voided',
+                     'synced', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+
+        let refused = ensure_order_has_no_payment_records(&conn, "order-with-voided-payment")
+            .expect_err("a voided payment is a record");
+        assert!(refused.starts_with(ORDER_HAS_PAYMENT_RECORDS), "{refused}");
+        ensure_order_has_no_payment_records(&conn, "order-without-payment")
+            .expect("nothing to orphan");
     }
 
     #[test]
@@ -5909,6 +7440,66 @@ mod dto_tests {
         );
         assert_eq!(body.get("estimated_time").and_then(Value::as_i64), Some(20));
         assert_eq!(body.get("estimatedTime").and_then(Value::as_i64), Some(20));
+    }
+
+    // Founder decision, 01/10/2026: a preparation time the platform does not
+    // take is shortened and the cashier is told. The server says so in the
+    // accept's PATCH answer (`platform_ack`); the renderer gets it as-is.
+    #[test]
+    fn accept_answer_with_platform_ack_becomes_the_renderer_event() {
+        let answer = serde_json::json!({
+            "success": true,
+            "data": { "id": "remote-order-1", "status": "confirmed" },
+            "platform_ack": {
+                "platform": "efood",
+                "action": "approved",
+                "success": true,
+                "preparation_time": {
+                    "requested_minutes": 30,
+                    "sent_minutes": 27,
+                    "max_minutes": 27,
+                    "shortened": true
+                }
+            }
+        });
+
+        let payload = platform_ack_event_payload("order-1", &answer)
+            .expect("an answer with platform_ack is passed on");
+
+        assert_eq!(
+            payload.get("orderId").and_then(Value::as_str),
+            Some("order-1")
+        );
+        assert_eq!(
+            payload
+                .pointer("/platformAck/platform")
+                .and_then(Value::as_str),
+            Some("efood")
+        );
+        assert_eq!(
+            payload
+                .pointer("/platformAck/preparation_time/sent_minutes")
+                .and_then(Value::as_i64),
+            Some(27)
+        );
+        assert_eq!(
+            payload
+                .pointer("/platformAck/preparation_time/requested_minutes")
+                .and_then(Value::as_i64),
+            Some(30)
+        );
+    }
+
+    #[test]
+    fn accept_answer_without_platform_ack_raises_no_event() {
+        let released_server = serde_json::json!({
+            "success": true,
+            "data": { "id": "remote-order-1", "status": "confirmed" }
+        });
+        assert!(platform_ack_event_payload("order-1", &released_server).is_none());
+
+        let not_an_object = serde_json::json!({ "success": true, "platform_ack": "efood" });
+        assert!(platform_ack_event_payload("order-1", &not_an_object).is_none());
     }
 
     #[test]
@@ -6384,6 +7975,91 @@ mod transition_tests {
             params![order_id, status],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn gift_create_fiscal_handoff_preserves_pending_order_without_a_fiscal_row() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                 id, organization_id, branch_id, items, total_amount, total_amount_cents,
+                 status, payment_status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'gift-create-original', 'org-gift-create', 'branch-gift-create', '[]', 10.0, 1000,
+                 'pending', 'pending', 'pending', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id,
+                 created_at, module_type, status
+             ) VALUES (
+                 'gift-original-order-sync', 'orders', 'gift-create-original', 'INSERT',
+                 '{\"paymentMethod\":\"gift_card\",\"paymentStatus\":\"pending\"}',
+                 'org-gift-create', datetime('now'), 'orders', 'pending'
+             )",
+            [],
+        )
+        .unwrap();
+
+        for original in [
+            serde_json::json!({"paymentMethod":"gift_card", "paymentStatus":"pending"}),
+            serde_json::json!({"payment_method":"gift_card", "payment_status":"pending"}),
+            serde_json::json!({"paymentMethod":"gift_card", "payment_method":"gift_card",
+                "paymentStatus":"pending", "payment_status":"pending"}),
+        ] {
+            enqueue_order_creation_fiscal(&conn, "gift-create-original", &original).unwrap();
+            enqueue_order_creation_fiscal(&conn, "gift-create-original", &original).unwrap();
+        }
+        let retained: (String, String, i64) = conn.query_row(
+            "SELECT payment_status, sync_status, total_amount_cents FROM orders WHERE id = 'gift-create-original'",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(retained, ("pending".into(), "pending".into(), 1000));
+        let rows: (i64, i64, i64, i64) = conn.query_row(
+            "SELECT
+                 (SELECT COUNT(*) FROM parity_sync_queue WHERE module_type = 'fiscal'),
+                 (SELECT COUNT(*) FROM parity_sync_queue WHERE id = 'gift-original-order-sync' AND status = 'pending'),
+                 (SELECT COUNT(*) FROM order_payments),
+                 (SELECT COUNT(*) FROM fiscal_sequence_counters)",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        ).unwrap();
+        assert_eq!(rows, (0, 1, 0, 0));
+    }
+
+    #[test]
+    fn gift_create_fiscal_handoff_keeps_ordinary_and_noncanonical_enqueue_behavior() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        for (index, payload) in [
+            serde_json::json!({"paymentMethod":"cash", "paymentStatus":"pending"}),
+            serde_json::json!({"paymentMethod":"card", "paymentStatus":"pending"}),
+            serde_json::json!({"paymentMethod":"gift_card", "paymentStatus":"completed"}),
+            serde_json::json!({"paymentMethod":"gift_card"}),
+            serde_json::json!({"paymentMethod":"gift_card", "payment_method":"cash", "paymentStatus":"pending"}),
+            serde_json::json!({"paymentMethod":"gift_card", "paymentStatus":"pending", "payment_status":"completed"}),
+            serde_json::json!({"paymentMethod":"gift_card", "paymentStatus":"pending", "initialPayment":null}),
+            serde_json::json!({"paymentMethod":"gift_card", "paymentStatus":"pending", "initial_payment":{}}),
+        ].into_iter().enumerate() {
+            let order_id = format!("ordinary-create-control-{index}");
+            conn.execute(
+                "INSERT INTO orders (
+                     id, organization_id, branch_id, items, total_amount, total_amount_cents,
+                     status, payment_status, sync_status, created_at, updated_at
+                 ) VALUES (?1, 'org-gift-control', 'branch-gift-control', '[]', 10.0, 1000,
+                     'pending', 'pending', 'pending', datetime('now'), datetime('now'))",
+                [&order_id],
+            ).unwrap();
+            enqueue_order_creation_fiscal(&conn, &order_id, &payload).unwrap();
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE module_type = 'fiscal' AND record_id = ?1",
+                [&order_id], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(count, 1, "ordinary fiscal handoff remains for control {index}");
+        }
     }
 
     #[test]
@@ -7650,5 +9326,917 @@ mod transition_tests {
         assert_eq!(order_type, "pickup");
         assert!((total_amount - 15.0).abs() < 0.001);
         assert_eq!(queue_count, 0);
+    }
+}
+
+/// Field incident 29/09/2026 (Le Petit Paris, Android POS 1.0.12; the same
+/// path existed on the desktop): two card-paid orders had no local payment
+/// row, an item edit recomputed the payment status from the local ledger
+/// alone, downgraded `paid` to `pending` and pushed it. These pin the desktop
+/// counterpart of the fix: never downgrade a paid order because the local
+/// ledger lacks rows, restore the rows from the server first, never push a
+/// local `pending` nobody set, and still honour an explicit void.
+#[cfg(test)]
+mod paid_edit_ledger_tests {
+    use super::*;
+    use crate::db;
+    use rusqlite::{params, Connection};
+
+    fn test_db() -> db::DbState {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             PRAGMA busy_timeout = 5000;
+             PRAGMA synchronous = NORMAL;",
+        )
+        .expect("pragma setup");
+        db::run_migrations_for_test(&conn);
+        db::DbState {
+            conn: std::sync::Mutex::new(conn),
+            db_path: std::path::PathBuf::from(":memory:"),
+        }
+    }
+
+    /// A server-known order the checkout marked paid, whose local payment
+    /// mirror was never written (the 29/09 state).
+    fn seed_order(
+        conn: &Connection,
+        order_id: &str,
+        total: f64,
+        payment_status: &str,
+        supabase_id: Option<&str>,
+    ) {
+        let total_cents = Cents::round_half_even(total).as_i64();
+        let items = serde_json::json!([{
+            "name": "Crepe",
+            "quantity": 1,
+            "unit_price": total,
+            "total_price": total,
+        }])
+        .to_string();
+        let sync_status = if supabase_id.is_some() {
+            "synced"
+        } else {
+            "pending"
+        };
+        conn.execute(
+            "INSERT INTO orders (
+                 id, supabase_id, items, subtotal, subtotal_cents, total_amount, total_amount_cents,
+                 status, payment_status, sync_status, created_at, updated_at
+             ) VALUES (
+                 ?1, ?2, ?3, ?4, ?5, ?4, ?5, 'completed', ?6, ?7,
+                 '2026-09-29T11:05:13Z', '2026-09-29T11:05:13Z'
+             )",
+            params![
+                order_id,
+                supabase_id,
+                items,
+                total,
+                total_cents,
+                payment_status,
+                sync_status,
+            ],
+        )
+        .expect("seed order");
+    }
+
+    fn insert_completed_payment(
+        conn: &Connection,
+        payment_id: &str,
+        order_id: &str,
+        method: &str,
+        amount: f64,
+    ) {
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, amount_cents, status, sync_status, sync_state,
+                 created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 'completed', 'synced', 'applied', datetime('now'), datetime('now'))",
+            params![
+                payment_id,
+                order_id,
+                method,
+                amount,
+                Cents::round_half_even(amount).as_i64()
+            ],
+        )
+        .expect("insert completed payment");
+    }
+
+    fn edit_payload(order_id: &str, total: f64, notes: Option<&str>) -> OrderEditSettlementPayload {
+        OrderEditSettlementPayload {
+            order_id: order_id.to_string(),
+            items: vec![serde_json::json!({
+                "name": "Crepe",
+                "quantity": 1,
+                "unit_price": total,
+                "total_price": total,
+            })],
+            order_notes: notes.map(ToString::to_string),
+            order_updates: None,
+            financials: None,
+        }
+    }
+
+    fn stored_payment_status(conn: &Connection, order_id: &str) -> String {
+        conn.query_row(
+            "SELECT payment_status FROM orders WHERE id = ?1",
+            params![order_id],
+            |row| row.get(0),
+        )
+        .expect("read payment status")
+    }
+
+    /// The newest queued order push for this order.
+    fn queued_order_push(conn: &Connection, order_id: &str) -> serde_json::Value {
+        let data: String = conn
+            .query_row(
+                "SELECT data FROM parity_sync_queue
+                 WHERE table_name = 'orders' AND record_id = ?1
+                 ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                params![order_id],
+                |row| row.get(0),
+            )
+            .expect("queued order push");
+        serde_json::from_str(&data).expect("parse queued order push")
+    }
+
+    #[test]
+    fn an_edit_keeps_a_card_paid_order_paid_when_its_local_payment_rows_are_missing() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        seed_order(
+            &conn,
+            "order-lpp-7",
+            7.0,
+            "paid",
+            Some("remote-order-lpp-7"),
+        );
+
+        let (response, _) = apply_edit_settlement_in_connection(
+            &conn,
+            &edit_payload("order-lpp-7", 7.0, Some("no sugar")),
+            EditSettlementActionPayload::None,
+            "2026-09-29T12:31:57Z",
+        )
+        .expect("apply edit");
+
+        assert_eq!(response["paymentStatus"], "paid", "{response}");
+        assert_eq!(stored_payment_status(&conn, "order-lpp-7"), "paid");
+        let push = queued_order_push(&conn, "order-lpp-7");
+        assert_eq!(push["paymentStatus"], "paid", "{push}");
+        assert!(
+            push.get("paymentMethod").is_none(),
+            "no tender may be invented for rows the terminal does not hold: {push}"
+        );
+    }
+
+    #[test]
+    fn a_financials_update_keeps_the_proven_paid_status_without_local_rows() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        seed_order(
+            &conn,
+            "order-lpp-13",
+            13.0,
+            "paid",
+            Some("remote-order-lpp-13"),
+        );
+        let payload: OrderUpdateFinancialsPayload = serde_json::from_value(serde_json::json!({
+            "orderId": "order-lpp-13",
+            "totalAmount": 13.0,
+            "subtotal": 13.0,
+        }))
+        .unwrap();
+
+        let (response, _) =
+            update_order_financials_in_connection(&conn, &payload, "2026-09-29T16:42:00Z")
+                .expect("update financials");
+
+        assert_eq!(response["paymentStatus"], "paid", "{response}");
+        assert_eq!(stored_payment_status(&conn, "order-lpp-13"), "paid");
+        let push = queued_order_push(&conn, "order-lpp-13");
+        assert_eq!(push["paymentStatus"], "paid", "{push}");
+        assert!(push.get("paymentMethod").is_none(), "{push}");
+    }
+
+    #[test]
+    fn a_grown_paid_order_without_local_rows_asks_only_for_the_difference() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        seed_order(
+            &conn,
+            "order-grown",
+            7.0,
+            "paid",
+            Some("remote-order-grown"),
+        );
+
+        let preview =
+            preview_edit_settlement_in_connection(&conn, &edit_payload("order-grown", 9.0, None))
+                .expect("preview");
+        assert_eq!(preview["requiredAction"], "collect", "{preview}");
+        assert_eq!(preview["paidTotal"], 7.0, "{preview}");
+        assert_eq!(preview["ledgerPaidTotal"], 0.0, "{preview}");
+
+        // Without a collection the order is honestly partially paid, never
+        // pending: the proven 7.00 still counts.
+        let (response, _) = apply_edit_settlement_in_connection(
+            &conn,
+            &edit_payload("order-grown", 9.0, None),
+            EditSettlementActionPayload::MarkPartial,
+            "2026-09-29T12:40:00Z",
+        )
+        .expect("apply grown edit");
+        assert_eq!(response["paymentStatus"], "partially_paid", "{response}");
+        assert_eq!(response["requiredAction"], "collect", "{response}");
+        assert_eq!(
+            queued_order_push(&conn, "order-grown")["paymentStatus"],
+            "partially_paid"
+        );
+    }
+
+    #[test]
+    fn collecting_the_difference_completes_a_grown_order_whose_rows_are_missing() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        seed_order(
+            &conn,
+            "order-grown-paid",
+            7.0,
+            "paid",
+            Some("remote-order-grown-paid"),
+        );
+        let action: EditSettlementActionPayload = serde_json::from_value(serde_json::json!({
+            "type": "collect",
+            "payments": [{ "method": "card", "amount": 2.0 }],
+        }))
+        .unwrap();
+
+        let (response, _) = apply_edit_settlement_in_connection(
+            &conn,
+            &edit_payload("order-grown-paid", 9.0, None),
+            action,
+            "2026-09-29T12:45:00Z",
+        )
+        .expect("collect the difference");
+
+        assert_eq!(response["paymentStatus"], "paid", "{response}");
+        assert_eq!(stored_payment_status(&conn, "order-grown-paid"), "paid");
+
+        // Collecting the whole new total again (the pre-fix outstanding) is
+        // refused: the proven 7.00 is already money in hand.
+        seed_order(
+            &conn,
+            "order-grown-over",
+            7.0,
+            "paid",
+            Some("remote-order-grown-over"),
+        );
+        let over: EditSettlementActionPayload = serde_json::from_value(serde_json::json!({
+            "type": "collect",
+            "payments": [{ "method": "cash", "amount": 9.0 }],
+        }))
+        .unwrap();
+        let error = apply_edit_settlement_in_connection(
+            &conn,
+            &edit_payload("order-grown-over", 9.0, None),
+            over,
+            "2026-09-29T12:46:00Z",
+        )
+        .expect_err("collecting the proven money twice must be refused");
+        assert!(error.contains("exceeds outstanding balance"), "{error}");
+        assert_eq!(stored_payment_status(&conn, "order-grown-over"), "paid");
+    }
+
+    #[test]
+    fn a_pending_status_the_edit_did_not_change_is_never_pushed() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        seed_order(
+            &conn,
+            "order-unpaid",
+            8.5,
+            "pending",
+            Some("remote-order-unpaid"),
+        );
+
+        let (response, _) = apply_edit_settlement_in_connection(
+            &conn,
+            &edit_payload("order-unpaid", 9.5, None),
+            EditSettlementActionPayload::None,
+            "2026-09-29T13:00:00Z",
+        )
+        .expect("apply edit to unpaid order");
+
+        assert_eq!(response["paymentStatus"], "pending");
+        let push = queued_order_push(&conn, "order-unpaid");
+        assert!(
+            push.get("paymentStatus").is_none() && push.get("paymentMethod").is_none(),
+            "a local default must not overwrite what the server knows: {push}"
+        );
+    }
+
+    #[test]
+    fn an_explicit_void_against_a_complete_ledger_still_changes_and_pushes_the_status() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        seed_order(
+            &conn,
+            "order-void",
+            10.0,
+            "partially_paid",
+            Some("remote-order-void"),
+        );
+        // The 7.40 row was never accepted by the server (it exceeded the
+        // total); the financial update voids it as a stale overpayment.
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, amount_cents, status, sync_status, sync_state,
+                 created_at, updated_at
+             ) VALUES ('payment-void', 'order-void', 'cash', 7.4, 740, 'completed', 'failed', 'failed',
+                 datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        let payload: OrderUpdateFinancialsPayload = serde_json::from_value(serde_json::json!({
+            "orderId": "order-void",
+            "totalAmount": 6.9,
+            "subtotal": 6.9,
+        }))
+        .unwrap();
+
+        let (response, _) =
+            update_order_financials_in_connection(&conn, &payload, "2026-09-29T13:10:00Z")
+                .expect("update financials");
+
+        assert_eq!(
+            response["stalePaymentIdsVoided"],
+            serde_json::json!(["payment-void"])
+        );
+        assert_eq!(response["paymentStatus"], "pending", "{response}");
+        assert_eq!(
+            queued_order_push(&conn, "order-void")["paymentStatus"],
+            "pending",
+            "an explicit void is a real change and is pushed"
+        );
+    }
+
+    #[test]
+    fn a_complete_local_ledger_alone_decides_the_status() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        seed_order(
+            &conn,
+            "order-mirrored",
+            12.0,
+            "paid",
+            Some("remote-order-mirrored"),
+        );
+        insert_completed_payment(&conn, "payment-mirrored", "order-mirrored", "card", 12.0);
+
+        let coverage = capture_proven_payment_coverage(&conn, "order-mirrored").unwrap();
+        assert_eq!(coverage.missing_cents, 0);
+        let (response, _) = apply_edit_settlement_in_connection(
+            &conn,
+            &edit_payload("order-mirrored", 12.0, Some("extra napkins")),
+            EditSettlementActionPayload::None,
+            "2026-09-29T13:20:00Z",
+        )
+        .expect("apply edit");
+        assert_eq!(response["paymentStatus"], "paid");
+        assert_eq!(
+            queued_order_push(&conn, "order-mirrored")["paymentMethod"],
+            "card"
+        );
+    }
+
+    #[test]
+    fn only_server_known_orders_that_claim_money_they_do_not_hold_need_a_restore() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        seed_order(
+            &conn,
+            "needs-restore",
+            7.0,
+            "paid",
+            Some("remote-needs-restore"),
+        );
+        seed_order(
+            &conn,
+            "partial-needs-restore",
+            7.0,
+            "partially_paid",
+            Some("remote-partial"),
+        );
+        seed_order(&conn, "local-only", 7.0, "paid", None);
+        seed_order(&conn, "unpaid", 7.0, "pending", Some("remote-unpaid"));
+        seed_order(&conn, "mirrored", 7.0, "paid", Some("remote-mirrored"));
+        insert_completed_payment(&conn, "payment-mirrored-7", "mirrored", "cash", 7.0);
+        seed_order(&conn, "repair", 7.0, "paid", Some("remote-repair"));
+        conn.execute(
+            "UPDATE orders SET order_context = 'repair_settlement' WHERE id = 'repair'",
+            [],
+        )
+        .unwrap();
+
+        for (order_id, expected) in [
+            ("needs-restore", true),
+            ("partial-needs-restore", true),
+            ("local-only", false),
+            ("unpaid", false),
+            ("mirrored", false),
+            ("repair", false),
+            ("missing-order", false),
+        ] {
+            assert_eq!(
+                order_needs_ledger_restore_before_payment_decision(&conn, order_id).unwrap(),
+                expected,
+                "{order_id}"
+            );
+        }
+    }
+
+    /// A row of `GET /api/pos/payments?order_id=` as the server answers it.
+    fn server_payment(
+        id: &str,
+        remote_order_id: &str,
+        method: &str,
+        amount: f64,
+        status: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "order_id": remote_order_id,
+            "payment_method": method,
+            "amount": amount,
+            "status": status,
+            "currency": "EUR",
+            "created_at": "2026-09-29T11:05:20Z",
+            "updated_at": "2026-09-29T11:30:00Z",
+        })
+    }
+
+    fn completed_local_payments(conn: &Connection, order_id: &str) -> Vec<(String, i64)> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT method, COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER))
+                 FROM order_payments WHERE order_id = ?1 AND status = 'completed'
+                 ORDER BY created_at, id",
+            )
+            .unwrap();
+        stmt.query_map(params![order_id], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_server_ledger_is_restored_before_the_edit_decides() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            seed_order(
+                &conn,
+                "order-restore",
+                13.0,
+                "paid",
+                Some("remote-order-restore"),
+            );
+        }
+
+        let outcome = restore_payment_ledger_before_payment_decision_with(
+            &db,
+            "order-restore",
+            LedgerRestoreStep::Write,
+            Duration::from_secs(1),
+            |remote_order_id| async move {
+                assert_eq!(remote_order_id, "remote-order-restore");
+                Ok(vec![server_payment(
+                    "payment-restored",
+                    &remote_order_id,
+                    "card",
+                    13.0,
+                    "completed",
+                )])
+            },
+        )
+        .await;
+        assert_eq!(outcome, LedgerRestoreOutcome::Restored(1));
+
+        let conn = db.conn.lock().unwrap();
+        let (response, _) = apply_edit_settlement_in_connection(
+            &conn,
+            &edit_payload("order-restore", 13.0, Some("to go")),
+            EditSettlementActionPayload::None,
+            "2026-09-29T14:31:00Z",
+        )
+        .expect("apply edit after restore");
+        assert_eq!(response["paymentStatus"], "paid");
+        let push = queued_order_push(&conn, "order-restore");
+        assert_eq!(push["paymentStatus"], "paid");
+        assert_eq!(
+            push["paymentMethod"], "card",
+            "the tender comes from the restored row, as recorded"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_or_slow_server_leaves_the_proven_status_in_place() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            seed_order(
+                &conn,
+                "order-offline",
+                7.0,
+                "paid",
+                Some("remote-order-offline"),
+            );
+            seed_order(&conn, "order-slow", 7.0, "paid", Some("remote-order-slow"));
+            seed_order(
+                &conn,
+                "order-unpaid-check",
+                7.0,
+                "pending",
+                Some("remote-unpaid-check"),
+            );
+        }
+
+        let failed = restore_payment_ledger_before_payment_decision_with(
+            &db,
+            "order-offline",
+            LedgerRestoreStep::Write,
+            Duration::from_secs(1),
+            |_| async { Err::<Vec<serde_json::Value>, String>("network unreachable".to_string()) },
+        )
+        .await;
+        assert_eq!(
+            failed,
+            LedgerRestoreOutcome::Failed("network unreachable".to_string())
+        );
+
+        let timed_out = restore_payment_ledger_before_payment_decision_with(
+            &db,
+            "order-slow",
+            LedgerRestoreStep::Write,
+            Duration::from_millis(20),
+            |_| async {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                Ok::<Vec<serde_json::Value>, String>(Vec::new())
+            },
+        )
+        .await;
+        assert_eq!(timed_out, LedgerRestoreOutcome::TimedOut);
+
+        let mut restore_called = false;
+        let not_needed = restore_payment_ledger_before_payment_decision_with(
+            &db,
+            "order-unpaid-check",
+            LedgerRestoreStep::Write,
+            Duration::from_secs(1),
+            |_| {
+                restore_called = true;
+                async { Ok::<Vec<serde_json::Value>, String>(Vec::new()) }
+            },
+        )
+        .await;
+        assert_eq!(not_needed, LedgerRestoreOutcome::NotNeeded);
+        assert!(
+            !restore_called,
+            "an order that claims no money is never fetched"
+        );
+
+        let conn = db.conn.lock().unwrap();
+        let (response, _) = apply_edit_settlement_in_connection(
+            &conn,
+            &edit_payload("order-offline", 7.0, Some("offline edit")),
+            EditSettlementActionPayload::None,
+            "2026-09-29T15:00:00Z",
+        )
+        .expect("offline edit");
+        assert_eq!(response["paymentStatus"], "paid");
+        assert_eq!(
+            queued_order_push(&conn, "order-offline")["paymentStatus"],
+            "paid"
+        );
+    }
+
+    /// Review of the 29/09/2026 fixes (probe ported): shrinking a paid order
+    /// whose local payment rows are missing (offline, or the restore timed
+    /// out) demanded a refund of money no local row held — the refund picker
+    /// had no payment to refund against and the edit could not be saved.
+    #[test]
+    fn a_shrunk_paid_order_whose_rows_are_missing_saves_without_a_refund() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        seed_order(&conn, "o-shrink", 10.0, "paid", Some("remote-o-shrink"));
+
+        let preview =
+            preview_edit_settlement_in_connection(&conn, &edit_payload("o-shrink", 8.0, None))
+                .expect("preview");
+        assert_eq!(preview["requiredAction"], "none", "{preview}");
+        assert_eq!(preview["refundAmount"], 0.0, "{preview}");
+        assert_eq!(preview["paidTotal"], 10.0, "the proven money still counts");
+        assert_eq!(preview["ledgerPaidTotal"], 0.0);
+        assert_eq!(
+            preview["completedPayments"].as_array().map(Vec::len),
+            Some(0)
+        );
+
+        // A refund cannot be asked of rows that do not exist.
+        let refund: EditSettlementActionPayload = serde_json::from_value(serde_json::json!({
+            "type": "refund",
+            "refunds": [{ "paymentId": "no-such-payment", "amount": 2.0, "reason": "probe", "refundMethod": "cash" }],
+        }))
+        .unwrap();
+        let error = apply_edit_settlement_in_connection(
+            &conn,
+            &edit_payload("o-shrink", 8.0, None),
+            refund,
+            "2026-09-29T12:00:00Z",
+        )
+        .expect_err("nothing to refund locally");
+        assert!(
+            error.contains("must match the overpaid amount 0.00"),
+            "{error}"
+        );
+
+        // The save goes through and the order stays paid; the server ledger
+        // settles the missing money later.
+        let (response, _) = apply_edit_settlement_in_connection(
+            &conn,
+            &edit_payload("o-shrink", 8.0, None),
+            EditSettlementActionPayload::None,
+            "2026-09-29T12:01:00Z",
+        )
+        .expect("the shrunk order saves");
+        assert_eq!(response["paymentStatus"], "paid", "{response}");
+        assert_eq!(response["requiredAction"], "none", "{response}");
+        assert_eq!(stored_payment_status(&conn, "o-shrink"), "paid");
+        assert_eq!(
+            queued_order_push(&conn, "o-shrink")["paymentStatus"],
+            "paid"
+        );
+    }
+
+    /// When the local rows do hold more than the new total, the refund is the
+    /// money THEY hold beyond it — never the proven-but-missing money.
+    #[test]
+    fn a_refund_is_only_asked_of_the_money_the_local_rows_hold() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        // Paid 15.00; this terminal holds a 10.00 card row, 5.00 is missing.
+        seed_order(&conn, "o-mixed", 15.0, "paid", Some("remote-o-mixed"));
+        insert_completed_payment(&conn, "pay-mixed-card", "o-mixed", "card", 10.0);
+
+        let preview =
+            preview_edit_settlement_in_connection(&conn, &edit_payload("o-mixed", 8.0, None))
+                .expect("preview");
+        assert_eq!(preview["requiredAction"], "refund", "{preview}");
+        assert_eq!(preview["refundAmount"], 2.0, "{preview}");
+        assert_eq!(preview["paidTotal"], 15.0);
+        assert_eq!(preview["ledgerPaidTotal"], 10.0);
+
+        // The pre-fix amount (everything proven minus the new total) is refused.
+        let refund = |amount: f64| -> EditSettlementActionPayload {
+            serde_json::from_value(serde_json::json!({
+                "type": "refund",
+                "refunds": [{ "paymentId": "pay-mixed-card", "amount": amount, "reason": "edit", "refundMethod": "card" }],
+            }))
+            .unwrap()
+        };
+        let error = apply_edit_settlement_in_connection(
+            &conn,
+            &edit_payload("o-mixed", 8.0, None),
+            refund(7.0),
+            "2026-09-29T12:10:00Z",
+        )
+        .expect_err("the missing money is not refunded here");
+        assert!(error.contains("overpaid amount 2.00"), "{error}");
+
+        let (response, _) = apply_edit_settlement_in_connection(
+            &conn,
+            &edit_payload("o-mixed", 8.0, None),
+            refund(2.0),
+            "2026-09-29T12:11:00Z",
+        )
+        .expect("refund what the local rows hold");
+        assert_eq!(response["paymentStatus"], "paid", "{response}");
+        assert_eq!(response["requiredAction"], "none", "{response}");
+    }
+
+    /// Review of the 29/09/2026 fixes (probe ported): the restore reused the
+    /// payment mirror, which ignored the server row's `status` and inserted a
+    /// payment another terminal had VOIDED as completed money.
+    #[tokio::test]
+    async fn a_voided_server_payment_is_never_restored_as_collected_money() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            seed_order(&conn, "o-voided", 10.0, "paid", Some("remote-o-voided"));
+        }
+
+        let outcome = restore_payment_ledger_before_payment_decision_with(
+            &db,
+            "o-voided",
+            LedgerRestoreStep::Preview,
+            Duration::from_secs(2),
+            |remote_order_id| async move {
+                Ok(vec![
+                    server_payment(
+                        "remote-pay-voided",
+                        &remote_order_id,
+                        "card",
+                        10.0,
+                        "voided",
+                    ),
+                    server_payment(
+                        "remote-pay-refunded",
+                        &remote_order_id,
+                        "cash",
+                        10.0,
+                        "refunded",
+                    ),
+                ])
+            },
+        )
+        .await;
+        assert_eq!(outcome, LedgerRestoreOutcome::NothingToRestore);
+
+        let conn = db.conn.lock().unwrap();
+        assert!(
+            completed_local_payments(&conn, "o-voided").is_empty(),
+            "voided or refunded server money is not money in hand"
+        );
+        let preview =
+            preview_edit_settlement_in_connection(&conn, &edit_payload("o-voided", 12.0, None))
+                .expect("preview");
+        assert_eq!(preview["ledgerPaidTotal"], 0.0, "{preview}");
+        assert_eq!(stored_payment_status(&conn, "o-voided"), "paid");
+        drop(conn);
+        forget_ledger_restores_for_tests();
+    }
+
+    /// The real restore path keeps the label the order proved even when the
+    /// server holds only part of the money, and the edit then decides on the
+    /// restored rows plus the proven remainder.
+    #[tokio::test]
+    async fn a_partial_server_ledger_never_lowers_the_proven_label_before_an_edit() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            seed_order(&conn, "o-partial", 13.0, "paid", Some("remote-o-partial"));
+        }
+
+        let outcome = restore_payment_ledger_before_payment_decision_with(
+            &db,
+            "o-partial",
+            LedgerRestoreStep::Write,
+            Duration::from_secs(2),
+            |remote_order_id| async move {
+                Ok(vec![server_payment(
+                    "remote-pay-partial",
+                    &remote_order_id,
+                    "cash",
+                    5.0,
+                    "completed",
+                )])
+            },
+        )
+        .await;
+        assert_eq!(outcome, LedgerRestoreOutcome::Restored(1));
+
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            stored_payment_status(&conn, "o-partial"),
+            "paid",
+            "the mirror's recompute read partially_paid; the proven label stays"
+        );
+        assert_eq!(
+            completed_local_payments(&conn, "o-partial"),
+            vec![("cash".to_string(), 500)]
+        );
+        let (response, _) = apply_edit_settlement_in_connection(
+            &conn,
+            &edit_payload("o-partial", 13.0, Some("no onions")),
+            EditSettlementActionPayload::None,
+            "2026-09-29T14:40:00Z",
+        )
+        .expect("apply edit");
+        assert_eq!(response["paymentStatus"], "paid", "{response}");
+        assert_eq!(response["requiredAction"], "none", "{response}");
+        assert_eq!(
+            queued_order_push(&conn, "o-partial")["paymentStatus"],
+            "paid"
+        );
+    }
+
+    /// Review of the 29/09/2026 fixes: the 4 s bound was soft (the DB lock
+    /// and credential reads ran inside the timed future) and the preview and
+    /// the save each waited on the server. Only the fetch is timed now, the
+    /// DB is free while it runs, and the save reuses the preview's attempt.
+    #[tokio::test]
+    async fn one_server_check_serves_the_preview_and_the_save_of_an_edit() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            seed_order(&conn, "o-shared", 7.0, "paid", Some("remote-o-shared"));
+        }
+
+        let db_ref = &db;
+        let preview = restore_payment_ledger_before_payment_decision_with(
+            db_ref,
+            "o-shared",
+            LedgerRestoreStep::Preview,
+            Duration::from_millis(50),
+            |_| async move {
+                assert!(
+                    db_ref.conn.try_lock().is_ok(),
+                    "no DB lock is held while the server is asked"
+                );
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                Ok::<Vec<serde_json::Value>, String>(Vec::new())
+            },
+        )
+        .await;
+        assert_eq!(preview, LedgerRestoreOutcome::TimedOut);
+
+        let started = Instant::now();
+        let mut asked_again = false;
+        let save = restore_payment_ledger_before_payment_decision_with(
+            db_ref,
+            "o-shared",
+            LedgerRestoreStep::Write,
+            Duration::from_secs(4),
+            |_| {
+                asked_again = true;
+                async { Ok::<Vec<serde_json::Value>, String>(Vec::new()) }
+            },
+        )
+        .await;
+        assert!(!asked_again, "the save must not ask the server again");
+        assert_eq!(save, LedgerRestoreOutcome::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        // The save ended the edit: the next edit asks the server again.
+        let mut asked = false;
+        let next_edit = restore_payment_ledger_before_payment_decision_with(
+            db_ref,
+            "o-shared",
+            LedgerRestoreStep::Preview,
+            Duration::from_secs(1),
+            |_| {
+                asked = true;
+                async { Ok::<Vec<serde_json::Value>, String>(Vec::new()) }
+            },
+        )
+        .await;
+        assert!(asked);
+        assert_eq!(next_edit, LedgerRestoreOutcome::NothingToRestore);
+        forget_ledger_restores_for_tests();
+    }
+
+    /// Review of the 29/09/2026 fixes: a comp (zero total) the order had
+    /// settled read `pending` after any edit — no money to count — and that
+    /// was pushed.
+    #[test]
+    fn a_comped_order_stays_paid_through_an_edit() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        seed_order(&conn, "o-comp", 0.0, "paid", Some("remote-o-comp"));
+
+        let (response, _) = apply_edit_settlement_in_connection(
+            &conn,
+            &edit_payload("o-comp", 0.0, Some("on the house")),
+            EditSettlementActionPayload::None,
+            "2026-09-29T16:00:00Z",
+        )
+        .expect("edit the comp");
+        assert_eq!(response["paymentStatus"], "paid", "{response}");
+        assert_eq!(stored_payment_status(&conn, "o-comp"), "paid");
+        assert_eq!(queued_order_push(&conn, "o-comp")["paymentStatus"], "paid");
+
+        let payload: OrderUpdateFinancialsPayload = serde_json::from_value(serde_json::json!({
+            "orderId": "o-comp",
+            "totalAmount": 0.0,
+            "subtotal": 0.0,
+        }))
+        .unwrap();
+        let (response, _) =
+            update_order_financials_in_connection(&conn, &payload, "2026-09-29T16:05:00Z")
+                .expect("update financials");
+        assert_eq!(response["paymentStatus"], "paid", "{response}");
+
+        // A zero-total order nobody settled is not turned into a paid one.
+        seed_order(&conn, "o-zero-pending", 0.0, "pending", Some("remote-zero"));
+        let (response, _) = apply_edit_settlement_in_connection(
+            &conn,
+            &edit_payload("o-zero-pending", 0.0, None),
+            EditSettlementActionPayload::None,
+            "2026-09-29T16:10:00Z",
+        )
+        .expect("edit the zero order");
+        assert_eq!(response["paymentStatus"], "pending", "{response}");
     }
 }

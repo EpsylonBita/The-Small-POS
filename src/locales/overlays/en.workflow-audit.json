@@ -10,10 +10,10 @@
   "sync": {
     "healthModal": {
       "problems": {
-        "syncFailed": "Synchronization has failed. Open Recovery to see which records need attention."
+        "syncFailed": "Some records couldn't sync. They are kept safely on this device."
       },
       "recommendations": {
-        "openRecovery": "Open Recovery and review the failed record before retrying."
+        "openRecovery": "Review the failed records before retrying."
       }
     }
   }

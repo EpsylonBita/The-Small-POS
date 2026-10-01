@@ -24,6 +24,9 @@ use crate::storage;
 enum RefundMethod {
     Cash,
     Card,
+    /// Any other tender (shared rule R5, round 3 review 01/10/2026): the
+    /// refund of an `other` payment names it, never a guessed cash.
+    Other,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,6 +46,18 @@ impl RefundMethod {
         match self {
             RefundMethod::Cash => "cash",
             RefundMethod::Card => "card",
+            RefundMethod::Other => "other",
+        }
+    }
+
+    /// The tender the server's adjustment endpoint is told: cash or card
+    /// only, as Android sends (`SyncService` filters the same way). An
+    /// `other` refund is stored here and sent without one; the server reads
+    /// the payment's own tender.
+    fn wire_value(self) -> Option<&'static str> {
+        match self {
+            RefundMethod::Cash | RefundMethod::Card => Some(self.as_str()),
+            RefundMethod::Other => None,
         }
     }
 }
@@ -74,8 +89,88 @@ fn normalize_refund_method(value: Option<&str>) -> Option<RefundMethod> {
     {
         Some("cash") => Some(RefundMethod::Cash),
         Some("card") => Some(RefundMethod::Card),
+        Some("other") => Some(RefundMethod::Other),
         _ => None,
     }
+}
+
+/// The tender a refund names when the caller names none (shared rule R5,
+/// round 3 review 01/10/2026; Android `resolveRefundCashHandlingAsync`,
+/// `paymentTenderBucket`): the payment's own, cash, card, or `other` for any
+/// other tender. A refund always names its tender and is never guessed as
+/// cash. Symptom before: an `other` payment's refund stored no tender here
+/// while Android stored `other`, so the two apps wrote different records for
+/// the same refund. (A gift card row never gets here: refused before.)
+fn default_refund_method_for_tender(payment_method: &str) -> RefundMethod {
+    match payment_method.trim().to_ascii_lowercase().as_str() {
+        "cash" => RefundMethod::Cash,
+        "card" | "credit_card" | "debit_card" => RefundMethod::Card,
+        _ => RefundMethod::Other,
+    }
+}
+
+/// Does a courier still hold this order's cash (an unsettled, untransferred
+/// driver earning)? The rule a new cash refund's `cash_handler` follows when
+/// the caller names none (shared rule R2): `driver_shift` then, else
+/// `cashier_drawer`. The same earning the `driver_shift` write lowers.
+pub(crate) fn courier_still_holds_order_cash(
+    conn: &Connection,
+    order_id: &str,
+) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM driver_earnings
+              WHERE order_id = ?1
+                AND COALESCE(settled, 0) = 0
+                AND COALESCE(is_transferred, 0) = 0
+         )",
+        params![order_id],
+        |row| row.get(0),
+    )
+    .map_err(|e| format!("read whether a courier holds the cash of {order_id}: {e}"))
+}
+
+/// Who hands a new cash refund back (shared rule R2, round 3, 01/10/2026;
+/// Android `resolveRefundCashHandlingAsync`): the courier (`driver_shift`)
+/// while their earning on the order is still unsettled (they still hold the
+/// cash), else the drawer (`cashier_drawer`). Every new cash refund records
+/// it, so each reader counts it once. The rule decides, never the caller
+/// (round 3 review: the refund screen's picker let a cashier book a refund
+/// on the drawer while the courier still held the cash; Android has none).
+fn cash_handler_by_rule(conn: &Connection, order_id: &str) -> Result<CashHandler, String> {
+    Ok(if courier_still_holds_order_cash(conn, order_id)? {
+        CashHandler::DriverShift
+    } else {
+        CashHandler::CashierDrawer
+    })
+}
+
+/// SQL predicate over a refund adjustment aliased `pa` of a payment aliased
+/// `op` (`op` may be NULL through a LEFT JOIN): the refund paid out cash.
+/// Its own `refund_method`, else the payment's own tender (shared rule R5: a
+/// refund that names no tender is never read as cash for an `other` or gift
+/// tender); with neither (a pre-v37 refund whose payment row is gone), the
+/// legacy cash reading.
+pub(crate) fn refund_counts_as_cash_sql(pa: &str, op: &str) -> String {
+    format!(
+        "(LOWER(COALESCE(NULLIF(TRIM({pa}.refund_method), ''), NULLIF(TRIM({op}.method), ''), 'cash')) = 'cash')"
+    )
+}
+
+/// SQL predicate over a cash refund aliased `pa` on the order aliased `o`:
+/// the DRAWER paid it (shared rule R2): `cash_handler = 'cashier_drawer'`
+/// on any order type, or a legacy refund that names no handler on an order
+/// no courier earning carries. A `driver_shift` refund, or a handler-less one
+/// on a courier's order, is the courier's
+/// ([`crate::order_ownership::courier_order_tender_cents`]): once, never
+/// both.
+pub(crate) fn refund_paid_by_drawer_sql(pa: &str, o: &str) -> String {
+    format!(
+        "(LOWER(TRIM(COALESCE({pa}.cash_handler, ''))) = 'cashier_drawer' \
+          OR (TRIM(COALESCE({pa}.cash_handler, '')) = '' \
+              AND NOT EXISTS (SELECT 1 FROM driver_earnings de_refund \
+                               WHERE de_refund.order_id = {o}.id)))"
+    )
 }
 
 fn normalize_cash_handler(value: Option<&str>) -> Option<CashHandler> {
@@ -338,8 +433,35 @@ pub(crate) fn refund_payment_in_connection(
         )
         .map_err(|_| format!("Payment not found: {payment_id}"))?;
 
+    // Shared rule R1 (round 3 review, 01/10/2026; Android
+    // `assertOrderPaymentCanBeReversed`): the delivery platform's settlement
+    // row is the platform's money, mirrored from the server. The till never
+    // refunds it; the server decides what becomes of it. Refused before any
+    // refund row, drawer or courier entry, or queued adjustment.
+    if crate::payments::payment_is_platform_settlement(conn, &payment_id)? {
+        return Err(crate::payments::PLATFORM_SETTLEMENT_NOT_REVERSIBLE.into());
+    }
+    // Gift card value moves only through the server's atomic redemption and no
+    // atomic reversal exists yet: refuse before any refund row or cash entry.
+    if payment_method
+        .trim()
+        .eq_ignore_ascii_case(crate::payments::GIFT_CARD_METHOD)
+    {
+        return Err(crate::payments::GIFT_CARD_REVERSAL_UNSUPPORTED.into());
+    }
     if pay_status == "voided" {
         return Err("Cannot refund a voided payment".into());
+    }
+    // A 1.4.119 placeholder records no money (item D3, round 2 review): it
+    // counts nowhere as money in, so nothing is paid out against it.
+    if crate::payments::payment_is_placeholder(conn, &payment_id)? {
+        return Err(crate::payments::PLACEHOLDER_PAYMENT_NOT_MONEY_ERROR.into());
+    }
+    // A payment set aside for review is money nowhere: a refund of it would
+    // count money leaving that never counted as arriving. It is given back
+    // only through its own resolution (fix review 30/09/2026).
+    if pay_status == crate::payment_review::DUPLICATE_REVIEW_PAYMENT_STATUS {
+        return Err("Cannot refund a payment set aside for review".into());
     }
     if let Some(idempotency_key) = client_idempotency_key.as_deref() {
         let existing = conn
@@ -375,15 +497,40 @@ pub(crate) fn refund_payment_in_connection(
         }
     }
 
-    let refund_method = requested_refund_method.unwrap_or_else(|| {
-        match payment_method.to_ascii_lowercase().as_str() {
-            "card" => RefundMethod::Card,
-            _ => RefundMethod::Cash,
-        }
-    });
+    // R5: a refund always names its tender: the caller's, else the
+    // payment's own (cash, card or other).
+    let refund_method = requested_refund_method
+        .unwrap_or_else(|| default_refund_method_for_tender(&payment_method));
+    // R2: every new cash refund records who handed the money back, by the
+    // rule only: the courier while they still hold the order's cash, else
+    // the drawer. A caller's answer never overrides it.
     let cash_handler = match refund_method {
-        RefundMethod::Cash => Some(requested_cash_handler.unwrap_or(CashHandler::CashierDrawer)),
-        RefundMethod::Card => None,
+        RefundMethod::Cash => {
+            let by_rule = cash_handler_by_rule(conn, &order_id)?;
+            if let Some(requested) = requested_cash_handler.filter(|handler| *handler != by_rule) {
+                info!(
+                    payment_id = %payment_id,
+                    requested = requested.as_str(),
+                    by_rule = by_rule.as_str(),
+                    "A cash refund's handler follows the rule, not the caller"
+                );
+            }
+            Some(by_rule)
+        }
+        RefundMethod::Card | RefundMethod::Other => None,
+    };
+    // The local record names `other` once this till's schema accepts it
+    // (v94); a till whose widening could not apply stores no tender, which
+    // every reader reads as the payment's own (`refund_counts_as_cash_sql`).
+    let stored_refund_method = match refund_method {
+        RefundMethod::Other if !crate::db::payment_adjustments_accept_other_refund(conn) => {
+            warn!(
+                payment_id = %payment_id,
+                "payment_adjustments.refund_method does not accept 'other' yet; the refund names no tender"
+            );
+            None
+        }
+        method => Some(method.as_str()),
     };
 
     let prior_refunds: f64 = conn
@@ -464,7 +611,7 @@ pub(crate) fn refund_payment_in_connection(
             resolved_staff_id,
             resolved_staff_shift_id,
             initial_sync_state,
-            refund_method.as_str(),
+            stored_refund_method,
             cash_handler.map(CashHandler::as_str),
             adjustment_context.as_str(),
             client_idempotency_key,
@@ -542,7 +689,12 @@ pub(crate) fn refund_payment_in_connection(
                 );
             }
         }
-        None => {
+        // A non-cash refund (card or other) of a CARD row lowers the card
+        // money the courier's earning carries, as the recount does
+        // (`order_ownership::courier_order_tender_cents`). A card refund of a
+        // cash row leaves the courier's cash and card alone (no cash left
+        // anyone's hands; the recount agrees), so it writes nothing here.
+        None if payment_method.trim().eq_ignore_ascii_case("card") => {
             // W4c dual-write: mirror `card_amount` clamp onto `card_amount_cents`.
             let _ = conn.execute(
                 "UPDATE driver_earnings
@@ -568,6 +720,8 @@ pub(crate) fn refund_payment_in_connection(
                 params![amount, amount_cents, now, order_id],
             );
         }
+        // Any other refund (R5): no drawer, courier or card money here.
+        None => {}
     }
 
     let terminal_id = storage::get_credential("terminal_id").unwrap_or_default();
@@ -584,7 +738,7 @@ pub(crate) fn refund_payment_in_connection(
         resolved_staff_shift_id.as_deref(),
         &terminal_id,
         &branch_id,
-        Some(refund_method.as_str()),
+        refund_method.wire_value(),
         cash_handler.map(CashHandler::as_str),
         Some(adjustment_context.as_str()),
         client_idempotency_key.as_deref(),
@@ -719,6 +873,17 @@ pub fn void_payment_with_adjustment(
         )
         .map_err(|_| format!("Payment not found: {payment_id}"))?;
 
+    // Shared rule R1 (round 3 review): the platform's settlement row is never
+    // voided at the till (see `refund_payment_in_connection`).
+    if crate::payments::payment_is_platform_settlement(&conn, payment_id)? {
+        return Err(crate::payments::PLATFORM_SETTLEMENT_NOT_REVERSIBLE.into());
+    }
+    if pay_method
+        .trim()
+        .eq_ignore_ascii_case(crate::payments::GIFT_CARD_METHOD)
+    {
+        return Err(crate::payments::GIFT_CARD_REVERSAL_UNSUPPORTED.into());
+    }
     match pay_status.as_str() {
         "completed" => {}
         "voided" => return Err(format!("Payment {payment_id} is already voided")),
@@ -732,6 +897,11 @@ pub fn void_payment_with_adjustment(
                 "Payment {payment_id} has status '{other}' and cannot be voided"
             ))
         }
+    }
+    // A 1.4.119 placeholder records no money (item D3, round 2 review): a
+    // void would take money out of an order that never counted it in.
+    if crate::payments::payment_is_placeholder(&conn, payment_id)? {
+        return Err(crate::payments::PLACEHOLDER_PAYMENT_NOT_MONEY_ERROR.into());
     }
 
     // Reconciliation guard: a completed payment must have no prior refund
@@ -856,6 +1026,9 @@ pub fn void_payment_with_adjustment(
         .map_err(|e| format!("void payment: {e}"))?;
 
         payments::recompute_order_payment_state(&conn, &order_id, &now, payment_id)?;
+        // A voided payment is money the courier no longer holds (founder,
+        // 30/09/2026): a delivery's earning drops it now.
+        crate::order_ownership::release_driver_earning_money_for_payment(&conn, payment_id, &now)?;
 
         // Insert adjustment audit record (W4c dual-write).
         let void_amount_cents = Cents::round_half_even(amount).as_i64();
@@ -1049,10 +1222,11 @@ pub fn list_order_adjustments(db: &DbState, order_id: &str) -> Result<Value, Str
 pub fn get_payment_balance(db: &DbState, payment_id: &str) -> Result<Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
-    let (original_amount, status): (f64, String) = conn
+    let (original_amount, status, order_id, payment_method): (f64, String, String, String) = conn
         .query_row(
             // W4b: cents-with-real-fallback shim (removed in 4e).
-            "SELECT COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER), 0), status
+            "SELECT COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER), 0), status,
+                    order_id, COALESCE(method, '')
              FROM order_payments WHERE id = ?1",
             params![payment_id],
             |row| {
@@ -1060,10 +1234,18 @@ pub fn get_payment_balance(db: &DbState, payment_id: &str) -> Result<Value, Stri
                     // W4b: cents column → f64 for existing local var.
                     Cents::new(row.get::<_, i64>(0)?).to_f64_dp2(),
                     row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
                 ))
             },
         )
         .map_err(|_| format!("Payment not found: {payment_id}"))?;
+    // What the refund screen starts from (R2, R5): the tender the refund
+    // names when the cashier picks none, and who hands cash back by the rule
+    // (shown, never chosen).
+    let default_refund_method = default_refund_method_for_tender(&payment_method).as_str();
+    let cash_handler_by_rule = cash_handler_by_rule(&conn, &order_id)?.as_str();
+    let platform_settlement = crate::payments::payment_is_platform_settlement(&conn, payment_id)?;
 
     let total_refunds: f64 = conn
         .query_row(
@@ -1108,6 +1290,9 @@ pub fn get_payment_balance(db: &DbState, payment_id: &str) -> Result<Value, Stri
         "totalRefunds": total_refunds,
         "balance": balance,
         "status": status,
+        "defaultRefundMethod": default_refund_method,
+        "cashHandlerByRule": cash_handler_by_rule,
+        "platformSettlement": platform_settlement,
     }))
 }
 
@@ -1179,6 +1364,51 @@ mod tests {
         .expect("insert payment");
 
         pay_id
+    }
+
+    /// A payment set aside for review is never refunded or voided through the
+    /// ordinary money actions: it is money nowhere, so a refund would take
+    /// uncounted money out of the drawer's expected cash (30/09/2026).
+    #[test]
+    fn a_set_aside_payment_is_never_refunded_or_voided() {
+        let db = test_db();
+        let pay_id = seed_order_and_payment(&db, "ord-sa", 13.0);
+        {
+            let conn = db.conn.lock().unwrap();
+            crate::payment_review::set_aside_already_paid_payment(
+                &conn,
+                &pay_id,
+                Some("srv-card"),
+                "2026-09-30T10:06:00Z",
+            )
+            .unwrap();
+        }
+
+        let refused = refund_payment(
+            &db,
+            &serde_json::json!({ "paymentId": pay_id, "amount": 13.0, "reason": "Duplicate" }),
+        )
+        .expect_err("a set-aside payment is not refundable");
+        assert!(refused.contains("set aside"), "{refused}");
+        assert!(void_payment_with_adjustment(&db, &pay_id, "Duplicate", None, None).is_err());
+
+        let conn = db.conn.lock().unwrap();
+        let adjustments: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM payment_adjustments WHERE payment_id = ?1",
+                params![pay_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(adjustments, 0, "nothing recorded, nothing queued");
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM order_payments WHERE id = ?1",
+                params![pay_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "duplicate_review");
     }
 
     #[test]

@@ -8,6 +8,13 @@ export interface OrderCompletionInput {
    * exceptions thrown before the create resolved.
    */
   orderPersisted: boolean;
+  /**
+   * Item E (30/09/2026): the card was charged and the order could not be
+   * saved yet. The till holds the order for "Save payment again", so the
+   * checkout ends like a persisted one (a retry from the cart would be a new
+   * checkout and a second charge), but it is not a success.
+   */
+  chargedNotSaved?: boolean;
 }
 
 export interface OrderCompletionOutcome {
@@ -36,6 +43,9 @@ export interface OrderCompletionOutcome {
 export function resolveOrderCompletionOutcome(
   input: OrderCompletionInput,
 ): OrderCompletionOutcome {
+  if (input.chargedNotSaved && !input.succeeded && !input.orderPersisted) {
+    return { completionResult: false, resetOrderUiState: true };
+  }
   const finalize = input.succeeded || input.orderPersisted;
   return { completionResult: finalize, resetOrderUiState: finalize };
 }

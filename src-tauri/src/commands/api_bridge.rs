@@ -194,6 +194,19 @@ fn is_delta_cursor_admin_get(path: &str) -> bool {
 
 fn is_cacheable_admin_get(method: &str, path: &str) -> bool {
     let route = canonical_admin_route(path);
+    let snapshot_page = matches!(
+        route,
+        "/api/pos/inventory"
+            | "/api/pos/products"
+            | "/api/pos/product-categories"
+            | "/api/pos/loyalty/customers"
+            | "/api/pos/sync/inventory_items"
+            | "/api/pos/sync/retail_products"
+    ) && path.split_once('?').is_some_and(|(_, query)| {
+        query
+            .split('&')
+            .any(|part| matches!(part.split('=').next(), Some("offset" | "limit")))
+    });
     method.eq_ignore_ascii_case("GET")
         && route.starts_with("/api/pos/")
         && !route.contains("/api/pos/auth")
@@ -202,9 +215,18 @@ fn is_cacheable_admin_get(method: &str, path: &str) -> bool {
         // mislead the operator after another device changes the shop status.
         && route != "/api/pos/platforms"
         && !route.starts_with("/api/pos/platforms/")
+        // Gift card balances and redemptions are live money state; a cached
+        // response must never stand in for them offline.
+        && route != "/api/pos/gift-cards"
+        && !route.starts_with("/api/pos/gift-cards/")
         && !is_caller_id_admin_route(path)
         && !is_repair_admin_route(path)
         && !is_delta_cursor_admin_get(path)
+        // Version fences and their pages must represent current server state.
+        // Module snapshot owners retain the prior complete local snapshot on
+        // outage; substituting individual cached pages can mix revisions.
+        && route != "/api/pos/sync-version"
+        && !snapshot_page
 }
 
 fn admin_api_cache_key(path: &str) -> String {
@@ -339,6 +361,29 @@ pub(crate) fn read_cached_admin_get_response(
         .and_then(|value| value.as_str())
         .map(|value| value.to_string());
     Some((data, cached_at))
+}
+
+fn read_admin_get_fallback_after_error(
+    db: &db::DbState,
+    path: &str,
+    cacheable_get: bool,
+    error: &api::AdminFetchError,
+) -> Option<(serde_json::Value, Option<String>)> {
+    if !cacheable_get {
+        return None;
+    }
+    // An observed denial is authoritative. It must reach module owners rather
+    // than becoming a successful offline response from an earlier purchase.
+    if matches!(error.status(), Some(401 | 403)) {
+        if let Ok(conn) = db.conn.lock() {
+            let _ = conn.execute(
+                "DELETE FROM local_settings WHERE setting_category = 'local' AND setting_key = ?1",
+                [admin_api_cache_key(path)],
+            );
+        }
+        return None;
+    }
+    read_cached_admin_get_response(db, path)
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -480,25 +525,26 @@ pub async fn api_fetch_from_admin(
             }))
         }
         Err(e) => {
-            if cacheable_get {
-                if let Some((cached_data, cached_at)) =
-                    read_cached_admin_get_response(&db, &final_path)
-                {
-                    return Ok(serde_json::json!({
-                        "success": true,
-                        "data": cached_data,
-                        "status": 200,
-                        "meta": {
-                            "source": "cache",
-                            "cachedAt": cached_at,
-                            "offlineFallback": true,
-                            "path": final_path,
-                        }
-                    }));
-                }
+            if let Some((cached_data, cached_at)) =
+                read_admin_get_fallback_after_error(&db, &final_path, cacheable_get, &e)
+            {
+                return Ok(serde_json::json!({
+                    "success": true,
+                    "data": cached_data,
+                    "status": 200,
+                    "meta": {
+                        "source": "cache",
+                        "cachedAt": cached_at,
+                        "offlineFallback": true,
+                        "path": final_path,
+                    }
+                }));
             }
 
-            Ok(admin_fetch_error_payload(&e, cacheable_get))
+            Ok(admin_fetch_error_payload(
+                &e,
+                cacheable_get && !matches!(e.status(), Some(401 | 403)),
+            ))
         }
     }
 }
@@ -1129,6 +1175,36 @@ mod dto_tests {
     }
 
     #[test]
+    fn observed_admin_denial_purges_cache_but_outages_keep_offline_data() {
+        let db = test_db_state();
+        let path = "/api/pos/kds?branch_id=branch-1";
+        let other_path = "/api/pos/suppliers";
+        let response = serde_json::json!({ "tickets": [] });
+        cache_admin_get_response(&db, other_path, &response).unwrap();
+        for status in [401, 403] {
+            cache_admin_get_response(&db, path, &response).unwrap();
+            let denial = api::AdminFetchError::with_status("access denied", status);
+            assert!(read_admin_get_fallback_after_error(&db, path, true, &denial).is_none());
+            assert!(read_cached_admin_get_response(&db, path).is_none());
+            assert!(read_cached_admin_get_response(&db, other_path).is_some());
+            assert_eq!(admin_fetch_error_payload(&denial, false)["status"], status);
+        }
+        cache_admin_get_response(&db, path, &response).unwrap();
+        for outage in [
+            api::AdminFetchError::statusless("network 403 timeout"),
+            api::AdminFetchError::with_status("upstream message (HTTP 401)", 503),
+        ] {
+            assert_eq!(
+                read_admin_get_fallback_after_error(&db, path, true, &outage)
+                    .unwrap()
+                    .0,
+                response
+            );
+            assert!(read_admin_get_fallback_after_error(&db, path, false, &outage).is_none());
+        }
+    }
+
+    #[test]
     fn cacheable_admin_get_only_applies_to_pos_get_routes() {
         assert!(is_cacheable_admin_get("GET", "/api/pos/suppliers"));
         assert!(is_cacheable_admin_get(
@@ -1137,6 +1213,23 @@ mod dto_tests {
         ));
         assert!(!is_cacheable_admin_get("POST", "/api/pos/suppliers"));
         assert!(!is_cacheable_admin_get("GET", "/api/admin/users"));
+    }
+
+    #[test]
+    fn gift_card_routes_are_never_offline_cacheable() {
+        for path in [
+            "/api/pos/gift-cards",
+            "/api/pos/gift-cards/",
+            "/api/pos/gift-cards?status=active",
+            "/api/pos/gift-cards/status",
+            "/api/pos/gift-cards/lookup?card_number=GC1",
+        ] {
+            assert!(
+                !is_cacheable_admin_get("GET", path),
+                "{path} must stay live"
+            );
+        }
+        assert!(is_cacheable_admin_get("GET", "/api/pos/gift-cardsets"));
     }
 
     #[test]
@@ -1151,6 +1244,36 @@ mod dto_tests {
             assert!(!is_cacheable_admin_get("GET", path));
         }
         assert!(is_cacheable_admin_get("GET", "/api/pos/integrations"));
+    }
+
+    #[test]
+    fn snapshot_version_fences_and_pages_cannot_use_generic_offline_fallback() {
+        assert!(!is_cacheable_admin_get(
+            "GET",
+            "/api/pos/sync-version?module=inventory"
+        ));
+        for route in [
+            "inventory",
+            "products",
+            "product-categories",
+            "loyalty/customers",
+            "sync/inventory_items",
+            "sync/retail_products",
+        ] {
+            assert!(!is_cacheable_admin_get(
+                "GET",
+                &format!("/api/pos/{route}?limit=200&offset=0")
+            ));
+            assert!(!is_cacheable_admin_get(
+                "GET",
+                &format!("/api/pos/{route}?offset=200")
+            ));
+        }
+        assert!(is_cacheable_admin_get(
+            "GET",
+            "/api/pos/inventory?low_stock=true"
+        ));
+        assert!(is_cacheable_admin_get("GET", "/api/pos/products"));
     }
 
     #[test]

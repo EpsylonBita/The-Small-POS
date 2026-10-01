@@ -671,6 +671,23 @@ pub struct StaffPayoutLine {
     pub amount: f64,
 }
 
+/// One gift-bound original's confirmed canonical close (`gift_closing_v1`
+/// proof / frozen `gift_close_report_v1` row). Integer cents, formatted only
+/// at render time and always with this original's own currency code.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GiftCloseDrawerLine {
+    #[serde(default)]
+    pub staff_name: Option<String>,
+    pub currency: String,
+    pub ordinary_expected_cents: i64,
+    pub gift_liability_cash_cents: i64,
+    pub expected_cents: i64,
+    pub counted_cents: i64,
+    pub variance_cents: i64,
+    #[serde(default)]
+    pub canonical_closed_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ShiftCheckoutDoc {
     pub shift_id: String,
@@ -730,6 +747,8 @@ pub struct ShiftCheckoutDoc {
     pub cancelled_or_refunded_total: f64,
     #[serde(default)]
     pub cancelled_or_refunded_count: i64,
+    #[serde(default)]
+    pub gift_close: Option<GiftCloseDrawerLine>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -872,6 +891,12 @@ pub struct ZReportDoc {
     pub platform_lines: Vec<ZReportPlatformEntry>,
     #[serde(default)]
     pub staff_reports: Vec<ZReportStaffEntry>,
+    #[serde(default)]
+    pub gift_liability_cash_cents: i64,
+    #[serde(default)]
+    pub gift_ordinary_adjustment_cents: i64,
+    #[serde(default)]
+    pub gift_close_lines: Vec<GiftCloseDrawerLine>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1004,6 +1029,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Received" => "\u{0395}\u{03B9}\u{03C3}\u{03C0}\u{03C1}\u{03AC}\u{03C7}\u{03B8}\u{03B7}\u{03BA}\u{03B5}",
             "Change" => "\u{03A1}\u{03AD}\u{03C3}\u{03C4}\u{03B1}",
             "Other" => "\u{0386}\u{03BB}\u{03BB}\u{03BF}",
+            "Gift Card" => "Δωροκάρτα",
             "ADJUSTMENTS" => "\u{03A0}\u{03A1}\u{039F}\u{03A3}\u{0391}\u{03A1}\u{039C}\u{039F}\u{0393}\u{0395}\u{03A3}",
             "Void" => "\u{0391}\u{03BA}\u{03CD}\u{03C1}\u{03C9}\u{03C3}\u{03B7}",
             "Refund" => "\u{0395}\u{03C0}\u{03B9}\u{03C3}\u{03C4}\u{03C1}\u{03BF}\u{03C6}\u{03AE}",
@@ -1128,6 +1154,14 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Due" => "Προθεσμία",
             "Branch" => "Κατάστημα",
             "Contact" => "Επικοινωνία",
+            "Ordinary expected" => "Αναμενόμενο συνήθων κινήσεων",
+            "Gift card liability cash" => "Μετρητά υποχρέωσης δωροκαρτών",
+            "Currency" => "Νόμισμα",
+            "Close confirmed" => "Επιβεβαίωση κλεισίματος",
+            "Ordinary adjustment" => "Προσαρμογή συνήθων κινήσεων",
+            "Gift card drawer closes (confirmed)" => {
+                "Κλεισίματα ταμείου δωροκαρτών (επιβεβαιωμένα)"
+            }
             _ => key,
         },
         "de" => match key {
@@ -1161,6 +1195,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Received" => "Erhalten",
             "Change" => "Wechselgeld",
             "Other" => "Andere",
+            "Gift Card" => "Geschenkkarte",
             "ADJUSTMENTS" => "KORREKTUREN",
             "Void" => "Storno",
             "Refund" => "Erstattung",
@@ -1283,6 +1318,14 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Due" => "Fällig am",
             "Branch" => "Filiale",
             "Contact" => "Kontakt",
+            "Ordinary expected" => "Regulär erwartet",
+            "Gift card liability cash" => "Bargeld Gutscheinverbindlichkeit",
+            "Currency" => "Währung",
+            "Close confirmed" => "Abschluss bestätigt",
+            "Ordinary adjustment" => "Reguläre Anpassung",
+            "Gift card drawer closes (confirmed)" => {
+                "Kassenabschlüsse mit Gutscheinen (bestätigt)"
+            }
             _ => key,
         },
         "fr" => match key {
@@ -1316,6 +1359,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Received" => "Recu",
             "Change" => "Monnaie",
             "Other" => "Autre",
+            "Gift Card" => "Carte cadeau",
             "ADJUSTMENTS" => "AJUSTEMENTS",
             "Void" => "Annulation",
             "Refund" => "Remboursement",
@@ -1439,6 +1483,14 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Branch" => "Établissement",
             // Same word in French and English.
             "Contact" => "Contact",
+            "Ordinary expected" => "Attendu ordinaire",
+            "Gift card liability cash" => "Espèces passif cartes cadeaux",
+            "Currency" => "Devise",
+            "Close confirmed" => "Clôture confirmée",
+            "Ordinary adjustment" => "Ajustement ordinaire",
+            "Gift card drawer closes (confirmed)" => {
+                "Clôtures de caisse cartes cadeaux (confirmées)"
+            }
             _ => key,
         },
         "it" => match key {
@@ -1472,6 +1524,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Received" => "Ricevuto",
             "Change" => "Resto",
             "Other" => "Altro",
+            "Gift Card" => "Carta regalo",
             "ADJUSTMENTS" => "RETTIFICHE",
             "Void" => "Annullamento",
             "Refund" => "Rimborso",
@@ -1594,6 +1647,12 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Due" => "Scadenza",
             "Branch" => "Punto vendita",
             "Contact" => "Contatto",
+            "Ordinary expected" => "Atteso ordinario",
+            "Gift card liability cash" => "Contanti passività carte regalo",
+            "Currency" => "Valuta",
+            "Close confirmed" => "Chiusura confermata",
+            "Ordinary adjustment" => "Rettifica ordinaria",
+            "Gift card drawer closes (confirmed)" => "Chiusure cassa carte regalo (confermate)",
             _ => key,
         },
         // Albanian. Written with real `ë`/`ç`: raster receipts draw them as-is,
@@ -1629,6 +1688,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Received" => "Marrë",
             "Change" => "Kusuri",
             "Other" => "Tjetër",
+            "Gift Card" => "Kartë dhuratë",
             "ADJUSTMENTS" => "RREGULLIME",
             "Void" => "Anulim",
             "Refund" => "Rimbursim",
@@ -1753,6 +1813,14 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Due" => "Afati",
             "Branch" => "Dega",
             "Contact" => "Kontakti",
+            "Ordinary expected" => "Pritet i zakonshëm",
+            "Gift card liability cash" => "Kesh i detyrimit të kartave dhuratë",
+            "Currency" => "Monedha",
+            "Close confirmed" => "Mbyllja u konfirmua",
+            "Ordinary adjustment" => "Rregullim i zakonshëm",
+            "Gift card drawer closes (confirmed)" => {
+                "Mbyllje arke me karta dhuratë (të konfirmuara)"
+            }
             _ => key,
         },
         _ => key,
@@ -2153,6 +2221,182 @@ fn format_drawer_equation_amount(
         DrawerEquationSign::Subtract => "-",
     };
     format!("{prefix}{}", format_absolute(row.amount.abs()))
+}
+
+/// Integer cents formatted with a gift-card close's own currency code
+/// ("143.45 EUR"). Gift close amounts never pass through `f64` and never borrow
+/// the terminal's configured currency symbol.
+fn gift_close_amount(cents: i64, currency: &str, comma: bool) -> String {
+    let sign = if cents < 0 { "-" } else { "" };
+    let magnitude = cents.unsigned_abs();
+    let separator = if comma { ',' } else { '.' };
+    let amount = format!("{sign}{}{separator}{:02}", magnitude / 100, magnitude % 100);
+    match non_empty_receipt_value(currency) {
+        Some(code) => format!("{amount} {code}"),
+        None => amount,
+    }
+}
+
+/// A gift-close drawer movement: like `gift_close_amount`, with an explicit `+`
+/// when the movement adds cash to the drawer.
+fn gift_close_movement(cents: i64, currency: &str, comma: bool) -> String {
+    let amount = gift_close_amount(cents, currency, comma);
+    if cents < 0 {
+        amount
+    } else {
+        format!("+{amount}")
+    }
+}
+
+/// One printed row of a confirmed gift-card drawer close.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GiftCloseRow {
+    label_key: &'static str,
+    value: String,
+    emphasize: bool,
+    rule_before: bool,
+}
+
+impl GiftCloseRow {
+    fn plain(label_key: &'static str, value: String) -> Self {
+        Self {
+            label_key,
+            value,
+            emphasize: false,
+            rule_before: false,
+        }
+    }
+}
+
+/// Drawer reconciliation rows of one confirmed gift-card close, in print order.
+/// On a gift-bound checkout they replace the generic expected/counted/variance
+/// lines. The gift liability cash is a separately labelled drawer movement
+/// (liability funding): it is never folded into sales, tenders or tax.
+fn gift_close_rows(line: &GiftCloseDrawerLine, comma: bool) -> Vec<GiftCloseRow> {
+    let currency = line.currency.as_str();
+    let mut rows = vec![
+        GiftCloseRow::plain(
+            "Ordinary expected",
+            gift_close_amount(line.ordinary_expected_cents, currency, comma),
+        ),
+        GiftCloseRow::plain(
+            "Gift card liability cash",
+            gift_close_movement(line.gift_liability_cash_cents, currency, comma),
+        ),
+        GiftCloseRow {
+            emphasize: true,
+            rule_before: true,
+            ..GiftCloseRow::plain(
+                "Expected",
+                gift_close_amount(line.expected_cents, currency, comma),
+            )
+        },
+        GiftCloseRow::plain(
+            "Counted Cash",
+            gift_close_amount(line.counted_cents, currency, comma),
+        ),
+        GiftCloseRow::plain(
+            "Variance",
+            gift_close_amount(line.variance_cents, currency, comma),
+        ),
+    ];
+    if let Some(code) = non_empty_receipt_value(currency) {
+        rows.push(GiftCloseRow::plain("Currency", code.to_string()));
+    }
+    if let Some(closed_at) = non_empty_receipt_value(&line.canonical_closed_at) {
+        rows.push(GiftCloseRow::plain(
+            "Close confirmed",
+            format_datetime_human(closed_at),
+        ));
+    }
+    rows
+}
+
+/// A Z report that carries confirmed gift-card drawer closes. Ordinary reports
+/// (no lines, zero cents) keep their unchanged layout.
+fn z_report_has_gift_close(doc: &ZReportDoc) -> bool {
+    !doc.gift_close_lines.is_empty()
+        || doc.gift_liability_cash_cents != 0
+        || doc.gift_ordinary_adjustment_cents != 0
+}
+
+/// Currency code shared by every gift close of a Z report. Empty when the closes
+/// disagree or none is listed, so an aggregate never borrows the terminal's
+/// currency symbol.
+fn z_report_gift_currency(doc: &ZReportDoc) -> &str {
+    let mut codes = doc.gift_close_lines.iter().map(|line| line.currency.trim());
+    match codes.next() {
+        Some(first) if codes.all(|code| code == first) => first,
+        _ => "",
+    }
+}
+
+/// Aggregate gift-close rows of the Z cash-drawer equation, printed after the
+/// ordinary movements so that every row sums to the canonical expected cash.
+/// Empty for an ordinary Z report.
+fn z_report_gift_drawer_rows(doc: &ZReportDoc, comma: bool) -> Vec<GiftCloseRow> {
+    if !z_report_has_gift_close(doc) {
+        return Vec::new();
+    }
+    let currency = z_report_gift_currency(doc);
+    let mut rows = vec![GiftCloseRow::plain(
+        "Gift card liability cash",
+        gift_close_movement(doc.gift_liability_cash_cents, currency, comma),
+    )];
+    if doc.gift_ordinary_adjustment_cents != 0 {
+        rows.push(GiftCloseRow::plain(
+            "Ordinary adjustment",
+            gift_close_movement(doc.gift_ordinary_adjustment_cents, currency, comma),
+        ));
+    }
+    rows
+}
+
+fn gift_close_staff_name(line: &GiftCloseDrawerLine) -> Option<&str> {
+    line.staff_name.as_deref().and_then(non_empty_receipt_value)
+}
+
+fn gift_close_rows_html(rows: Vec<GiftCloseRow>, lang: &str) -> String {
+    let mut html = String::new();
+    for row in rows {
+        if row.rule_before {
+            html.push_str("<hr/>");
+        }
+        let tag = if row.emphasize { "strong" } else { "span" };
+        html.push_str(&format!(
+            "<div class=\"line\"><{tag}>{}</{tag}><{tag}>{}</{tag}></div>",
+            esc(receipt_label(lang, row.label_key)),
+            esc(&row.value),
+        ));
+    }
+    html
+}
+
+/// "Gift card drawer closes (confirmed)" section of a Z report: one block per
+/// confirmed original. Empty for an ordinary Z report.
+fn z_report_gift_close_section_html(doc: &ZReportDoc, lang: &str) -> String {
+    if doc.gift_close_lines.is_empty() {
+        return String::new();
+    }
+    let mut html = format!(
+        "<div class=\"section\"><div class=\"center\"><strong>{}</strong></div>",
+        esc(receipt_label(lang, "Gift card drawer closes (confirmed)")),
+    );
+    for (index, line) in doc.gift_close_lines.iter().enumerate() {
+        if index > 0 {
+            html.push_str("<hr/>");
+        }
+        if let Some(staff_name) = gift_close_staff_name(line) {
+            html.push_str(&format!(
+                "<div class=\"line\"><span>{}</span><span>{}</span></div>",
+                esc(receipt_label(lang, "Staff")),
+                esc(staff_name),
+            ));
+        }
+        html.push_str(&gift_close_rows_html(gift_close_rows(line, false), lang));
+    }
+    html.push_str("</div>");
+    html
 }
 
 fn money(value: f64) -> String {
@@ -4603,23 +4847,30 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                             money(doc.staff_payouts_total),
                         ));
                     }
-                    body.push_str(&format!(
-                        "<div class=\"line\"><span>{}</span><span>{}</span></div>\
-                         <div class=\"line\"><span>{}</span><span>{}</span></div>\
-                         <div class=\"line\"><span>{}</span><span>{}</span></div>",
-                        esc(receipt_label(lang, "Expected")),
-                        expected,
-                        esc(receipt_label(lang, "Counted Cash")),
-                        counted_cash,
-                        esc(receipt_label(lang, "Variance")),
-                        variance,
-                    ));
-                    if let Some(expected_amount) = doc.expected_amount {
-                        body.push_str(&format!(
-                            "<div class=\"line\"><strong>{}</strong><strong>{}</strong></div>",
-                            esc(receipt_label(lang, "Expected In Drawer")),
-                            money(expected_amount),
+                    if let Some(gift_close) = doc.gift_close.as_ref() {
+                        body.push_str(&gift_close_rows_html(
+                            gift_close_rows(gift_close, false),
+                            lang,
                         ));
+                    } else {
+                        body.push_str(&format!(
+                            "<div class=\"line\"><span>{}</span><span>{}</span></div>\
+                             <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                             <div class=\"line\"><span>{}</span><span>{}</span></div>",
+                            esc(receipt_label(lang, "Expected")),
+                            expected,
+                            esc(receipt_label(lang, "Counted Cash")),
+                            counted_cash,
+                            esc(receipt_label(lang, "Variance")),
+                            variance,
+                        ));
+                        if let Some(expected_amount) = doc.expected_amount {
+                            body.push_str(&format!(
+                                "<div class=\"line\"><strong>{}</strong><strong>{}</strong></div>",
+                                esc(receipt_label(lang, "Expected In Drawer")),
+                                money(expected_amount),
+                            ));
+                        }
                     }
                     if !doc.staff_payout_lines.is_empty() {
                         body.push_str(&format!(
@@ -4695,23 +4946,30 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                             money(doc.transferred_staff_returns),
                         ));
                     }
-                    body.push_str(&format!(
-                        "<div class=\"line\"><span>{}</span><span>{}</span></div>\
-                         <div class=\"line\"><span>{}</span><span>{}</span></div>\
-                         <div class=\"line\"><span>{}</span><span>{}</span></div>",
-                        esc(receipt_label(lang, "Expected")),
-                        expected,
-                        esc(receipt_label(lang, "Closing")),
-                        closing,
-                        esc(receipt_label(lang, "Variance")),
-                        variance,
-                    ));
-                    if let Some(expected_amount) = doc.expected_amount {
-                        body.push_str(&format!(
-                            "<div class=\"line\"><strong>{}</strong><strong>{}</strong></div>",
-                            esc(receipt_label(lang, "Expected In Drawer")),
-                            money(expected_amount),
+                    if let Some(gift_close) = doc.gift_close.as_ref() {
+                        body.push_str(&gift_close_rows_html(
+                            gift_close_rows(gift_close, false),
+                            lang,
                         ));
+                    } else {
+                        body.push_str(&format!(
+                            "<div class=\"line\"><span>{}</span><span>{}</span></div>\
+                             <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                             <div class=\"line\"><span>{}</span><span>{}</span></div>",
+                            esc(receipt_label(lang, "Expected")),
+                            expected,
+                            esc(receipt_label(lang, "Closing")),
+                            closing,
+                            esc(receipt_label(lang, "Variance")),
+                            variance,
+                        ));
+                        if let Some(expected_amount) = doc.expected_amount {
+                            body.push_str(&format!(
+                                "<div class=\"line\"><strong>{}</strong><strong>{}</strong></div>",
+                                esc(receipt_label(lang, "Expected In Drawer")),
+                                money(expected_amount),
+                            ));
+                        }
                     }
                 }
                 if !should_render_shift_checkout_driver_summary(doc) {
@@ -5011,6 +5269,10 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                     esc(&value),
                 ));
             }
+            body.push_str(&gift_close_rows_html(
+                z_report_gift_drawer_rows(doc, false),
+                lang,
+            ));
             body.push_str(&format!(
                 "<hr/>\
                  <div class=\"line\"><span>{}</span><span>{}</span></div>\
@@ -5024,6 +5286,7 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                 esc(receipt_label(lang, "Variance")),
                 money(doc.cash_variance),
             ));
+            body.push_str(&z_report_gift_close_section_html(doc, lang));
 
             body.push_str(&format!(
                 "<div class=\"section\"><div class=\"center\"><strong>{}</strong></div>\
@@ -5196,6 +5459,63 @@ fn emit_pair_bold(builder: &mut EscPosBuilder, label: &str, value: &str, width: 
 fn emit_wrapped(builder: &mut EscPosBuilder, text: &str, width: usize) {
     for line in wrap(text, width) {
         builder.text(&line).lf();
+    }
+}
+
+fn emit_gift_close_rows(
+    builder: &mut EscPosBuilder,
+    rows: Vec<GiftCloseRow>,
+    lang: &str,
+    width: usize,
+) {
+    for row in rows {
+        if row.rule_before {
+            emit_rule(builder, width, '-');
+        }
+        if row.emphasize {
+            emit_pair_bold(
+                builder,
+                receipt_label(lang, row.label_key),
+                &row.value,
+                width,
+            );
+        } else {
+            emit_pair(
+                builder,
+                receipt_label(lang, row.label_key),
+                &row.value,
+                width,
+            );
+        }
+    }
+}
+
+/// "Gift card drawer closes (confirmed)" section of a Z report: one block per
+/// confirmed original. Emits nothing for an ordinary Z report.
+fn emit_z_report_gift_close_section(
+    builder: &mut EscPosBuilder,
+    doc: &ZReportDoc,
+    lang: &str,
+    width: usize,
+    comma: bool,
+) {
+    if doc.gift_close_lines.is_empty() {
+        return;
+    }
+    emit_rule(builder, width, '-');
+    builder
+        .bold(true)
+        .text(receipt_label(lang, "Gift card drawer closes (confirmed)"))
+        .lf()
+        .bold(false);
+    for (index, line) in doc.gift_close_lines.iter().enumerate() {
+        if index > 0 {
+            emit_rule(builder, width, '-');
+        }
+        if let Some(staff_name) = gift_close_staff_name(line) {
+            emit_pair(builder, receipt_label(lang, "Staff"), staff_name, width);
+        }
+        emit_gift_close_rows(builder, gift_close_rows(line, comma), lang, width);
     }
 }
 
@@ -8162,6 +8482,62 @@ fn emit_raster_common_footer(
     }
 }
 
+fn draw_gift_close_rows(
+    canvas: &mut TtfReceiptComposer,
+    preset: RasterExactPreset,
+    rows: Vec<GiftCloseRow>,
+    lang: &str,
+) {
+    for row in rows {
+        if row.rule_before {
+            canvas.draw_rule();
+        }
+        let style = if row.emphasize {
+            preset.total_style
+        } else {
+            preset.item_style
+        };
+        canvas.draw_pair(
+            &format!("{}:", receipt_label(lang, row.label_key)),
+            &row.value,
+            style,
+        );
+    }
+}
+
+/// "Gift card drawer closes (confirmed)" section of a Z report: one block per
+/// confirmed original. Draws nothing for an ordinary Z report.
+fn draw_z_report_gift_close_section(
+    canvas: &mut TtfReceiptComposer,
+    preset: RasterExactPreset,
+    doc: &ZReportDoc,
+    lang: &str,
+    comma: bool,
+) {
+    if doc.gift_close_lines.is_empty() {
+        return;
+    }
+    canvas.draw_rule();
+    canvas.draw_wrapped(
+        receipt_label(lang, "Gift card drawer closes (confirmed)"),
+        BitmapAlign::Left,
+        preset.section_style,
+    );
+    for (index, line) in doc.gift_close_lines.iter().enumerate() {
+        if index > 0 {
+            canvas.draw_rule();
+        }
+        if let Some(staff_name) = gift_close_staff_name(line) {
+            canvas.draw_pair(
+                &format!("{}:", receipt_label(lang, "Staff")),
+                staff_name,
+                preset.item_style,
+            );
+        }
+        draw_gift_close_rows(canvas, preset, gift_close_rows(line, comma), lang);
+    }
+}
+
 fn render_classic_non_customer_raster_exact_ttf(
     document: &ReceiptDocument,
     cfg: &LayoutConfig,
@@ -8556,34 +8932,43 @@ fn render_classic_non_customer_raster_exact_ttf(
                             preset.item_style,
                         );
                     }
-                    if let Some(expected) = doc.expected_amount {
-                        canvas.draw_pair(
-                            &format!("{}:", receipt_label(lang, "Expected")),
-                            &money_with_currency_locale(expected, &cur, comma),
-                            preset.item_style,
+                    if let Some(gift_close) = doc.gift_close.as_ref() {
+                        draw_gift_close_rows(
+                            &mut canvas,
+                            preset,
+                            gift_close_rows(gift_close, comma),
+                            lang,
                         );
-                    }
-                    if let Some(closing) = doc.closing_amount {
-                        canvas.draw_pair(
-                            &format!("{}:", receipt_label(lang, "Counted Cash")),
-                            &money_with_currency_locale(closing, &cur, comma),
-                            preset.item_style,
-                        );
-                    }
-                    if let Some(variance) = doc.variance_amount {
-                        canvas.draw_pair(
-                            &format!("{}:", receipt_label(lang, "Variance")),
-                            &money_with_currency_locale(variance, &cur, comma),
-                            preset.item_style,
-                        );
-                    }
-                    if let Some(expected) = doc.expected_amount {
-                        canvas.draw_rule();
-                        canvas.draw_pair(
-                            &format!("{}:", receipt_label(lang, "Expected In Drawer")),
-                            &money_with_currency_locale(expected, &cur, comma),
-                            preset.total_style,
-                        );
+                    } else {
+                        if let Some(expected) = doc.expected_amount {
+                            canvas.draw_pair(
+                                &format!("{}:", receipt_label(lang, "Expected")),
+                                &money_with_currency_locale(expected, &cur, comma),
+                                preset.item_style,
+                            );
+                        }
+                        if let Some(closing) = doc.closing_amount {
+                            canvas.draw_pair(
+                                &format!("{}:", receipt_label(lang, "Counted Cash")),
+                                &money_with_currency_locale(closing, &cur, comma),
+                                preset.item_style,
+                            );
+                        }
+                        if let Some(variance) = doc.variance_amount {
+                            canvas.draw_pair(
+                                &format!("{}:", receipt_label(lang, "Variance")),
+                                &money_with_currency_locale(variance, &cur, comma),
+                                preset.item_style,
+                            );
+                        }
+                        if let Some(expected) = doc.expected_amount {
+                            canvas.draw_rule();
+                            canvas.draw_pair(
+                                &format!("{}:", receipt_label(lang, "Expected In Drawer")),
+                                &money_with_currency_locale(expected, &cur, comma),
+                                preset.total_style,
+                            );
+                        }
                     }
                     if !doc.staff_payout_lines.is_empty() {
                         canvas.draw_rule();
@@ -8678,34 +9063,43 @@ fn render_classic_non_customer_raster_exact_ttf(
                             preset.item_style,
                         );
                     }
-                    if let Some(expected) = doc.expected_amount {
-                        canvas.draw_pair(
-                            &format!("{}:", receipt_label(lang, "Expected")),
-                            &money_with_currency_locale(expected, &cur, comma),
-                            preset.item_style,
+                    if let Some(gift_close) = doc.gift_close.as_ref() {
+                        draw_gift_close_rows(
+                            &mut canvas,
+                            preset,
+                            gift_close_rows(gift_close, comma),
+                            lang,
                         );
-                    }
-                    if let Some(closing) = doc.closing_amount {
-                        canvas.draw_pair(
-                            &format!("{}:", receipt_label(lang, "Closing")),
-                            &money_with_currency_locale(closing, &cur, comma),
-                            preset.item_style,
-                        );
-                    }
-                    if let Some(variance) = doc.variance_amount {
-                        canvas.draw_pair(
-                            &format!("{}:", receipt_label(lang, "Variance")),
-                            &money_with_currency_locale(variance, &cur, comma),
-                            preset.item_style,
-                        );
-                    }
-                    if let Some(expected) = doc.expected_amount {
-                        canvas.draw_rule();
-                        canvas.draw_pair(
-                            &format!("{}:", receipt_label(lang, "Expected In Drawer")),
-                            &money_with_currency_locale(expected, &cur, comma),
-                            preset.total_style,
-                        );
+                    } else {
+                        if let Some(expected) = doc.expected_amount {
+                            canvas.draw_pair(
+                                &format!("{}:", receipt_label(lang, "Expected")),
+                                &money_with_currency_locale(expected, &cur, comma),
+                                preset.item_style,
+                            );
+                        }
+                        if let Some(closing) = doc.closing_amount {
+                            canvas.draw_pair(
+                                &format!("{}:", receipt_label(lang, "Closing")),
+                                &money_with_currency_locale(closing, &cur, comma),
+                                preset.item_style,
+                            );
+                        }
+                        if let Some(variance) = doc.variance_amount {
+                            canvas.draw_pair(
+                                &format!("{}:", receipt_label(lang, "Variance")),
+                                &money_with_currency_locale(variance, &cur, comma),
+                                preset.item_style,
+                            );
+                        }
+                        if let Some(expected) = doc.expected_amount {
+                            canvas.draw_rule();
+                            canvas.draw_pair(
+                                &format!("{}:", receipt_label(lang, "Expected In Drawer")),
+                                &money_with_currency_locale(expected, &cur, comma),
+                                preset.total_style,
+                            );
+                        }
                     }
                 }
                 if !should_render_shift_checkout_driver_summary(doc) {
@@ -8989,6 +9383,12 @@ fn render_classic_non_customer_raster_exact_ttf(
                     preset.item_style,
                 );
             }
+            draw_gift_close_rows(
+                &mut canvas,
+                preset,
+                z_report_gift_drawer_rows(doc, comma),
+                lang,
+            );
             canvas.draw_rule();
             canvas.draw_pair(
                 &format!("{}:", receipt_label(lang, "Expected In Drawer")),
@@ -9005,6 +9405,7 @@ fn render_classic_non_customer_raster_exact_ttf(
                 &money_with_currency_locale(doc.cash_variance, &cur, comma),
                 preset.total_style,
             );
+            draw_z_report_gift_close_section(&mut canvas, preset, doc, lang, comma);
 
             // --- Daily totals ---
             canvas.draw_rule();
@@ -11136,38 +11537,47 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                             width,
                         );
                     }
-                    emit_pair(
-                        &mut builder,
-                        receipt_label(lang, "Expected"),
-                        &doc.expected_amount
-                            .map(|v| money_locale(v, comma))
-                            .unwrap_or_else(|| "N/A".to_string()),
-                        width,
-                    );
-                    emit_pair(
-                        &mut builder,
-                        receipt_label(lang, "Counted Cash"),
-                        &doc.closing_amount
-                            .map(|v| money_locale(v, comma))
-                            .unwrap_or_else(|| "N/A".to_string()),
-                        width,
-                    );
-                    emit_pair(
-                        &mut builder,
-                        receipt_label(lang, "Variance"),
-                        &doc.variance_amount
-                            .map(|v| money_locale(v, comma))
-                            .unwrap_or_else(|| "N/A".to_string()),
-                        width,
-                    );
-                    if let Some(expected) = doc.expected_amount {
-                        emit_rule(&mut builder, width, '-');
-                        emit_pair_bold(
+                    if let Some(gift_close) = doc.gift_close.as_ref() {
+                        emit_gift_close_rows(
                             &mut builder,
-                            receipt_label(lang, "Expected In Drawer"),
-                            &money_locale(expected, comma),
+                            gift_close_rows(gift_close, comma),
+                            lang,
                             width,
                         );
+                    } else {
+                        emit_pair(
+                            &mut builder,
+                            receipt_label(lang, "Expected"),
+                            &doc.expected_amount
+                                .map(|v| money_locale(v, comma))
+                                .unwrap_or_else(|| "N/A".to_string()),
+                            width,
+                        );
+                        emit_pair(
+                            &mut builder,
+                            receipt_label(lang, "Counted Cash"),
+                            &doc.closing_amount
+                                .map(|v| money_locale(v, comma))
+                                .unwrap_or_else(|| "N/A".to_string()),
+                            width,
+                        );
+                        emit_pair(
+                            &mut builder,
+                            receipt_label(lang, "Variance"),
+                            &doc.variance_amount
+                                .map(|v| money_locale(v, comma))
+                                .unwrap_or_else(|| "N/A".to_string()),
+                            width,
+                        );
+                        if let Some(expected) = doc.expected_amount {
+                            emit_rule(&mut builder, width, '-');
+                            emit_pair_bold(
+                                &mut builder,
+                                receipt_label(lang, "Expected In Drawer"),
+                                &money_locale(expected, comma),
+                                width,
+                            );
+                        }
                     }
                     if !doc.staff_payout_lines.is_empty() {
                         emit_rule(&mut builder, width, '-');
@@ -11254,38 +11664,47 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                             width,
                         );
                     }
-                    emit_pair(
-                        &mut builder,
-                        receipt_label(lang, "Expected"),
-                        &doc.expected_amount
-                            .map(|v| money_locale(v, comma))
-                            .unwrap_or_else(|| "N/A".to_string()),
-                        width,
-                    );
-                    emit_pair(
-                        &mut builder,
-                        receipt_label(lang, "Closing"),
-                        &doc.closing_amount
-                            .map(|v| money_locale(v, comma))
-                            .unwrap_or_else(|| "N/A".to_string()),
-                        width,
-                    );
-                    emit_pair(
-                        &mut builder,
-                        receipt_label(lang, "Variance"),
-                        &doc.variance_amount
-                            .map(|v| money_locale(v, comma))
-                            .unwrap_or_else(|| "N/A".to_string()),
-                        width,
-                    );
-                    if let Some(expected) = doc.expected_amount {
-                        emit_rule(&mut builder, width, '-');
-                        emit_pair_bold(
+                    if let Some(gift_close) = doc.gift_close.as_ref() {
+                        emit_gift_close_rows(
                             &mut builder,
-                            receipt_label(lang, "Expected In Drawer"),
-                            &money_locale(expected, comma),
+                            gift_close_rows(gift_close, comma),
+                            lang,
                             width,
                         );
+                    } else {
+                        emit_pair(
+                            &mut builder,
+                            receipt_label(lang, "Expected"),
+                            &doc.expected_amount
+                                .map(|v| money_locale(v, comma))
+                                .unwrap_or_else(|| "N/A".to_string()),
+                            width,
+                        );
+                        emit_pair(
+                            &mut builder,
+                            receipt_label(lang, "Closing"),
+                            &doc.closing_amount
+                                .map(|v| money_locale(v, comma))
+                                .unwrap_or_else(|| "N/A".to_string()),
+                            width,
+                        );
+                        emit_pair(
+                            &mut builder,
+                            receipt_label(lang, "Variance"),
+                            &doc.variance_amount
+                                .map(|v| money_locale(v, comma))
+                                .unwrap_or_else(|| "N/A".to_string()),
+                            width,
+                        );
+                        if let Some(expected) = doc.expected_amount {
+                            emit_rule(&mut builder, width, '-');
+                            emit_pair_bold(
+                                &mut builder,
+                                receipt_label(lang, "Expected In Drawer"),
+                                &money_locale(expected, comma),
+                                width,
+                            );
+                        }
                     }
                 }
                 if !should_render_shift_checkout_driver_summary(doc) {
@@ -11606,6 +12025,12 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     width,
                 );
             }
+            emit_gift_close_rows(
+                &mut builder,
+                z_report_gift_drawer_rows(doc, comma),
+                lang,
+                width,
+            );
             emit_rule(&mut builder, width, '-');
             emit_pair(
                 &mut builder,
@@ -11625,6 +12050,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                 &money_locale(doc.cash_variance, comma),
                 width,
             );
+            emit_z_report_gift_close_section(&mut builder, doc, lang, width, comma);
 
             // --- Daily totals ---
             emit_rule(&mut builder, width, '=');
@@ -15774,5 +16200,485 @@ mod tests {
             &kiosk_delivery_without_contact,
             "el"
         ));
+    }
+
+    const GIFT_CLOSE_PRINT_KEYS: [&str; 6] = [
+        "Ordinary expected",
+        "Gift card liability cash",
+        "Currency",
+        "Close confirmed",
+        "Ordinary adjustment",
+        "Gift card drawer closes (confirmed)",
+    ];
+
+    const GIFT_CLOSED_AT: &str = "2026-09-30T18:05:00Z";
+
+    fn sample_gift_close_line() -> GiftCloseDrawerLine {
+        GiftCloseDrawerLine {
+            staff_name: Some("Maria Gift".to_string()),
+            currency: "EUR".to_string(),
+            ordinary_expected_cents: 12_345,
+            gift_liability_cash_cents: 2_000,
+            expected_cents: 14_345,
+            counted_cents: 14_000,
+            variance_cents: -345,
+            canonical_closed_at: GIFT_CLOSED_AT.to_string(),
+        }
+    }
+
+    /// Ordinary cashier movements summing to 123.45 (50.00 + 88.80 - 4.10 - 11.25).
+    /// Expected/counted/variance already hold the canonical figures, as print.rs
+    /// sets them for a gift-bound original.
+    fn sample_gift_checkout(
+        role_type: &str,
+        gift_close: Option<GiftCloseDrawerLine>,
+    ) -> ReceiptDocument {
+        ReceiptDocument::ShiftCheckout(ShiftCheckoutDoc {
+            shift_id: "SHIFT-GIFT".to_string(),
+            role_type: role_type.to_string(),
+            staff_name: "Maria Gift".to_string(),
+            terminal_name: "Front".to_string(),
+            check_in: "2026-09-30T08:00:00Z".to_string(),
+            check_out: GIFT_CLOSED_AT.to_string(),
+            orders_count: 9,
+            sales_amount: 211.10,
+            cash_sales: 88.80,
+            card_sales: 122.30,
+            opening_amount: 50.0,
+            cash_refunds: 4.10,
+            total_expenses: 11.25,
+            expected_amount: Some(143.45),
+            closing_amount: Some(140.0),
+            variance_amount: Some(-3.45),
+            gift_close,
+            ..ShiftCheckoutDoc::default()
+        })
+    }
+
+    /// Drawer equation: 100.00 + 500.00 + 0.00 - 15.00 = 585.00 ordinary, plus
+    /// 20.00 gift liability cash and a 0.50 ordinary adjustment = 605.50.
+    fn sample_gift_z_report(with_gift: bool) -> ZReportDoc {
+        let mut doc = ZReportDoc {
+            report_id: "ZR-GIFT".to_string(),
+            report_date: "2026-09-30".to_string(),
+            generated_at: "2026-09-30T23:59:00Z".to_string(),
+            shift_count: Some(2),
+            terminal_name: "Front".to_string(),
+            total_orders: 40,
+            gross_sales: 980.0,
+            net_sales: 880.0,
+            cash_sales: 500.0,
+            card_sales: 380.0,
+            discounts_total: 6.0,
+            opening_cash: 100.0,
+            expenses_total: 15.0,
+            expected_cash: 605.50,
+            closing_cash: 602.05,
+            cash_variance: -3.45,
+            ..ZReportDoc::default()
+        };
+        if with_gift {
+            doc.gift_liability_cash_cents = 2_000;
+            doc.gift_ordinary_adjustment_cents = 50;
+            doc.gift_close_lines = vec![sample_gift_close_line()];
+        }
+        doc
+    }
+
+    /// Terminal configured with another currency symbol: gift rows must still
+    /// print the close's own code.
+    fn gift_close_text_cfg() -> LayoutConfig {
+        LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            language: "en".to_string(),
+            classic_customer_render_mode: ClassicCustomerRenderMode::Text,
+            currency_symbol: "$".to_string(),
+            footer_text: None,
+            ..LayoutConfig::default()
+        }
+    }
+
+    fn escpos_text(doc: &ReceiptDocument, cfg: &LayoutConfig) -> String {
+        String::from_utf8_lossy(&render_escpos(doc, cfg).bytes).to_string()
+    }
+
+    fn slice_between<'a>(text: &'a str, start: &str, end: &str) -> &'a str {
+        let from = text
+            .find(start)
+            .unwrap_or_else(|| panic!("missing {start:?} in:\n{text}"));
+        let to = text[from..]
+            .find(end)
+            .map(|offset| from + offset)
+            .unwrap_or_else(|| panic!("missing {end:?} after {start:?} in:\n{text}"));
+        &text[from..to]
+    }
+
+    #[test]
+    fn gift_close_labels_are_translated_for_every_receipt_language() {
+        for key in GIFT_CLOSE_PRINT_KEYS {
+            assert_eq!(receipt_label("en", key), key);
+        }
+        for lang in ["el", "de", "fr", "it", "sq"] {
+            for key in GIFT_CLOSE_PRINT_KEYS {
+                let translated = receipt_label(lang, key);
+                assert!(!translated.trim().is_empty(), "{lang}: {key} is empty");
+                assert_ne!(translated, key, "{lang}: {key} is untranslated");
+            }
+        }
+        assert_eq!(
+            receipt_label("el", "Gift card liability cash"),
+            "Μετρητά υποχρέωσης δωροκαρτών"
+        );
+    }
+
+    #[test]
+    fn gift_close_amounts_format_integer_cents_with_the_close_currency_code() {
+        assert_eq!(gift_close_amount(14_345, "EUR", false), "143.45 EUR");
+        assert_eq!(gift_close_amount(-345, "EUR", false), "-3.45 EUR");
+        assert_eq!(gift_close_amount(-5, " EUR ", true), "-0,05 EUR");
+        assert_eq!(gift_close_amount(0, "EUR", false), "0.00 EUR");
+        assert_eq!(gift_close_amount(2_000, "", false), "20.00");
+        assert_eq!(gift_close_movement(2_000, "EUR", false), "+20.00 EUR");
+        assert_eq!(gift_close_movement(-50, "EUR", true), "-0,50 EUR");
+        assert_eq!(
+            gift_close_amount(i64::MIN, "EUR", false),
+            "-92233720368547758.08 EUR"
+        );
+
+        let euro = sample_gift_close_line();
+        let lek = GiftCloseDrawerLine {
+            currency: "ALL".to_string(),
+            ..euro.clone()
+        };
+        let mut doc = ZReportDoc {
+            gift_close_lines: vec![euro.clone(), euro.clone()],
+            ..ZReportDoc::default()
+        };
+        assert_eq!(z_report_gift_currency(&doc), "EUR");
+        doc.gift_close_lines.push(lek);
+        assert_eq!(z_report_gift_currency(&doc), "");
+        doc.gift_close_lines.clear();
+        assert_eq!(z_report_gift_currency(&doc), "");
+    }
+
+    #[test]
+    fn gift_close_checkout_text_prints_the_canonical_drawer_in_the_close_currency() {
+        let cfg = gift_close_text_cfg();
+        let closed_at = format_datetime_human(GIFT_CLOSED_AT);
+        let ordinary = escpos_text(&sample_gift_checkout("cashier", None), &cfg);
+        let text = escpos_text(
+            &sample_gift_checkout("cashier", Some(sample_gift_close_line())),
+            &cfg,
+        );
+
+        let drawer = slice_between(&text, "Ordinary expected", "Tips Received");
+        for expected in [
+            "Ordinary expected",
+            "123.45 EUR",
+            "Gift card liability cash",
+            "+20.00 EUR",
+            "Expected",
+            "143.45 EUR",
+            "Counted Cash",
+            "140.00 EUR",
+            "Variance",
+            "-3.45 EUR",
+            "Currency",
+            "Close confirmed",
+            closed_at.as_str(),
+        ] {
+            assert!(
+                drawer.contains(expected),
+                "missing {expected:?} in:\n{drawer}"
+            );
+        }
+        assert!(!drawer.contains('$'), "terminal symbol leaked:\n{drawer}");
+        // The gift rows replace the generic drawer lines; nothing is duplicated.
+        assert!(!text.contains("Expected In Drawer"));
+        assert!(!text.contains("N/A"));
+        assert_eq!(text.matches("143.45").count(), 1);
+        assert_eq!(text.matches("140.00").count(), 1);
+        assert_eq!(text.matches("-3.45").count(), 1);
+
+        // Ordinary movement rows (sales, cash/card sales, opening, refunds,
+        // expenses) print byte-identically; the gift cash is never sales.
+        let ordinary_head = &ordinary[..ordinary.find("Expected").expect("ordinary drawer")];
+        let gift_head = &text[..text.find("Ordinary expected").expect("gift drawer")];
+        assert_eq!(gift_head, ordinary_head);
+        assert!(gift_head.contains("211.10"));
+        assert!(gift_head.contains("88.80"));
+        assert!(!text.contains("231.10"));
+        assert!(!text.contains("108.80"));
+        let ordinary_tail = &ordinary[ordinary.find("Tips Received").expect("ordinary tips")..];
+        let gift_tail = &text[text.find("Tips Received").expect("gift tips")..];
+        assert_eq!(gift_tail, ordinary_tail);
+
+        // The generic (non-cashier) drawer layout gets the same replacement.
+        let generic = escpos_text(
+            &sample_gift_checkout("server", Some(sample_gift_close_line())),
+            &cfg,
+        );
+        assert!(generic.contains("Gift card liability cash"));
+        assert!(generic.contains("143.45 EUR"));
+        assert!(!generic.contains("Closing"));
+        assert!(!generic.contains("Expected In Drawer"));
+    }
+
+    #[test]
+    fn gift_close_checkout_html_prints_the_canonical_drawer_in_the_close_currency() {
+        let cfg = gift_close_text_cfg();
+        let close_row = format!(
+            "<span>Close confirmed</span><span>{}</span>",
+            format_datetime_human(GIFT_CLOSED_AT)
+        );
+        let ordinary = render_html(&sample_gift_checkout("cashier", None), &cfg);
+        let html = render_html(
+            &sample_gift_checkout("cashier", Some(sample_gift_close_line())),
+            &cfg,
+        );
+
+        for expected in [
+            "<span>Ordinary expected</span><span>123.45 EUR</span>",
+            "<span>Gift card liability cash</span><span>+20.00 EUR</span>",
+            "<strong>Expected</strong><strong>143.45 EUR</strong>",
+            "<span>Counted Cash</span><span>140.00 EUR</span>",
+            "<span>Variance</span><span>-3.45 EUR</span>",
+            "<span>Currency</span><span>EUR</span>",
+            close_row.as_str(),
+        ] {
+            assert!(html.contains(expected), "missing {expected:?} in:\n{html}");
+        }
+        assert!(!html.contains("Expected In Drawer"));
+        assert!(!html.contains("N/A"));
+        assert_eq!(html.matches("143.45").count(), 1);
+
+        let ordinary_head = &ordinary[..ordinary
+            .find("<div class=\"line\"><span>Expected</span>")
+            .expect("ordinary drawer")];
+        let gift_head = &html[..html
+            .find("<div class=\"line\"><span>Ordinary expected</span>")
+            .expect("gift drawer")];
+        assert_eq!(gift_head, ordinary_head);
+        assert!(gift_head.contains("<span>Sales</span><span>211.10</span>"));
+        assert!(gift_head.contains("<span>Cash Sales</span><span>88.80</span>"));
+        assert!(!html.contains("231.10"));
+        assert!(!html.contains("108.80"));
+        let tips = "<div class=\"line\"><span>Tips Received</span>";
+        assert_eq!(
+            &html[html.find(tips).expect("gift tips")..],
+            &ordinary[ordinary.find(tips).expect("ordinary tips")..]
+        );
+    }
+
+    #[test]
+    fn gift_close_checkout_raster_renders_and_differs_from_the_ordinary_checkout() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            classic_customer_render_mode: ClassicCustomerRenderMode::RasterExact,
+            currency_symbol: "$".to_string(),
+            ..LayoutConfig::default()
+        };
+        let ordinary = render_classic_non_customer_raster_exact_ttf(
+            &sample_gift_checkout("cashier", None),
+            &cfg,
+        )
+        .expect("render ordinary checkout");
+        let gift = render_classic_non_customer_raster_exact_ttf(
+            &sample_gift_checkout("cashier", Some(sample_gift_close_line())),
+            &cfg,
+        )
+        .expect("render gift checkout");
+
+        assert!(
+            gift.height() > ordinary.height(),
+            "gift drawer rows must reach the raster receipt"
+        );
+    }
+
+    #[test]
+    fn gift_close_z_report_text_adds_gift_rows_without_touching_sales() {
+        let cfg = gift_close_text_cfg();
+        let closed_at = format_datetime_human(GIFT_CLOSED_AT);
+        let ordinary = escpos_text(&ReceiptDocument::ZReport(sample_gift_z_report(false)), &cfg);
+        let text = escpos_text(&ReceiptDocument::ZReport(sample_gift_z_report(true)), &cfg);
+
+        // Everything before the drawer (gross, net, discounts, payments) and the
+        // daily totals (orders, cash, card, net) print byte-identically.
+        let ordinary_head = &ordinary[..ordinary.find("CASH DRAWER").expect("drawer")];
+        assert_eq!(
+            &text[..text.find("CASH DRAWER").expect("drawer")],
+            ordinary_head
+        );
+        assert!(ordinary_head.contains("980.00"));
+        assert_eq!(
+            &text[text.rfind("TOTAL").expect("totals")..],
+            &ordinary[ordinary.rfind("TOTAL").expect("totals")..]
+        );
+        assert!(!text.contains("1000.00"));
+        assert!(!text.contains("520.00"));
+
+        let drawer = slice_between(&text, "CASH DRAWER", "Expected In Drawer");
+        let all_cash_out = drawer.find("All Cash Out").expect("ordinary equation");
+        let gift_row = drawer.find("Gift card liability cash").expect("gift row");
+        let adjustment_row = drawer.find("Ordinary adjustment").expect("adjustment row");
+        assert!(all_cash_out < gift_row && gift_row < adjustment_row);
+        assert!(drawer.contains("+20.00 EUR"));
+        assert!(drawer.contains("+0.50 EUR"));
+        assert!(!drawer.contains('$'));
+        assert!(text.contains("605.50"));
+
+        let variance = text.find("Variance").expect("drawer variance");
+        let section_start = text
+            .find("Gift card drawer closes (confirmed)")
+            .expect("gift close section");
+        assert!(variance < section_start);
+        let section = &text[section_start..text.rfind("TOTAL").expect("totals")];
+        for expected in [
+            "Staff",
+            "Maria Gift",
+            "Ordinary expected",
+            "123.45 EUR",
+            "Gift card liability cash",
+            "+20.00 EUR",
+            "143.45 EUR",
+            "Counted Cash",
+            "140.00 EUR",
+            "-3.45 EUR",
+            "Currency",
+            "Close confirmed",
+            closed_at.as_str(),
+        ] {
+            assert!(
+                section.contains(expected),
+                "missing {expected:?} in:\n{section}"
+            );
+        }
+
+        // No ordinary adjustment row when the frozen adjustment is zero.
+        let without_adjustment = ZReportDoc {
+            gift_ordinary_adjustment_cents: 0,
+            ..sample_gift_z_report(true)
+        };
+        let text = escpos_text(&ReceiptDocument::ZReport(without_adjustment), &cfg);
+        assert!(text.contains("Gift card liability cash"));
+        assert!(!text.contains("Ordinary adjustment"));
+    }
+
+    #[test]
+    fn gift_close_z_report_html_adds_gift_rows_without_touching_sales() {
+        let cfg = gift_close_text_cfg();
+        let close_row = format!(
+            "<span>Close confirmed</span><span>{}</span>",
+            format_datetime_human(GIFT_CLOSED_AT)
+        );
+        let ordinary = render_html(&ReceiptDocument::ZReport(sample_gift_z_report(false)), &cfg);
+        let html = render_html(&ReceiptDocument::ZReport(sample_gift_z_report(true)), &cfg);
+
+        assert_eq!(
+            &html[..html.find("CASH DRAWER").expect("drawer")],
+            &ordinary[..ordinary.find("CASH DRAWER").expect("drawer")]
+        );
+        let totals = "<strong>TOTAL</strong>";
+        assert_eq!(
+            &html[html.rfind(totals).expect("totals")..],
+            &ordinary[ordinary.rfind(totals).expect("totals")..]
+        );
+        assert!(!html.contains("1000.00"));
+        assert!(!html.contains("520.00"));
+
+        let drawer = slice_between(&html, "CASH DRAWER", "Expected In Drawer");
+        assert!(drawer.contains("<span>Gift card liability cash</span><span>+20.00 EUR</span>"));
+        assert!(drawer.contains("<span>Ordinary adjustment</span><span>+0.50 EUR</span>"));
+
+        let section = slice_between(&html, "Gift card drawer closes (confirmed)", totals);
+        for expected in [
+            "<span>Staff</span><span>Maria Gift</span>",
+            "<span>Ordinary expected</span><span>123.45 EUR</span>",
+            "<span>Gift card liability cash</span><span>+20.00 EUR</span>",
+            "<strong>Expected</strong><strong>143.45 EUR</strong>",
+            "<span>Counted Cash</span><span>140.00 EUR</span>",
+            "<span>Variance</span><span>-3.45 EUR</span>",
+            "<span>Currency</span><span>EUR</span>",
+            close_row.as_str(),
+        ] {
+            assert!(
+                section.contains(expected),
+                "missing {expected:?} in:\n{section}"
+            );
+        }
+        assert!(
+            html.find("Expected In Drawer").expect("drawer total")
+                < html
+                    .find("Gift card drawer closes (confirmed)")
+                    .expect("section")
+        );
+    }
+
+    #[test]
+    fn gift_close_z_report_raster_renders_and_differs_from_the_ordinary_report() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            classic_customer_render_mode: ClassicCustomerRenderMode::RasterExact,
+            currency_symbol: "$".to_string(),
+            ..LayoutConfig::default()
+        };
+        let ordinary = render_classic_non_customer_raster_exact_ttf(
+            &ReceiptDocument::ZReport(sample_gift_z_report(false)),
+            &cfg,
+        )
+        .expect("render ordinary Z report");
+        let gift = render_classic_non_customer_raster_exact_ttf(
+            &ReceiptDocument::ZReport(sample_gift_z_report(true)),
+            &cfg,
+        )
+        .expect("render gift Z report");
+
+        assert!(
+            gift.height() > ordinary.height(),
+            "gift drawer rows must reach the raster Z report"
+        );
+    }
+
+    #[test]
+    fn ordinary_checkout_and_z_report_keep_their_layout_without_gift_close() {
+        // Legacy snapshots without the new fields still deserialize, as ordinary.
+        let mut checkout_value =
+            serde_json::to_value(ShiftCheckoutDoc::default()).expect("serialize checkout fixture");
+        checkout_value
+            .as_object_mut()
+            .expect("checkout object")
+            .remove("gift_close");
+        let checkout: ShiftCheckoutDoc =
+            serde_json::from_value(checkout_value).expect("legacy checkout");
+        assert!(checkout.gift_close.is_none());
+
+        let mut z_value = serde_json::to_value(ZReportDoc::default()).expect("serialize Z fixture");
+        let z_object = z_value.as_object_mut().expect("Z object");
+        for field in [
+            "gift_liability_cash_cents",
+            "gift_ordinary_adjustment_cents",
+            "gift_close_lines",
+        ] {
+            assert!(z_object.remove(field).is_some(), "{field} not serialized");
+        }
+        let z: ZReportDoc = serde_json::from_value(z_value).expect("legacy Z report");
+        assert!(!z_report_has_gift_close(&z));
+        assert!(z_report_gift_drawer_rows(&z, false).is_empty());
+
+        let cfg = gift_close_text_cfg();
+        let ordinary_checkout = sample_gift_checkout("cashier", None);
+        let ordinary_z = ReceiptDocument::ZReport(sample_gift_z_report(false));
+        for rendered in [
+            escpos_text(&ordinary_checkout, &cfg),
+            render_html(&ordinary_checkout, &cfg),
+            escpos_text(&ordinary_z, &cfg),
+            render_html(&ordinary_z, &cfg),
+        ] {
+            assert!(rendered.contains("Expected In Drawer"));
+            for key in GIFT_CLOSE_PRINT_KEYS {
+                assert!(!rendered.contains(key), "ordinary receipt shows {key:?}");
+            }
+            assert!(!rendered.contains("EUR"));
+        }
     }
 }

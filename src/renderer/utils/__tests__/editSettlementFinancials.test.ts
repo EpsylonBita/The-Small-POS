@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { deriveEditSettlementFinancials } from '../editSettlementFinancials';
+import {
+  deriveEditSettlementFinancials,
+  resolveEditSettlementRefundAmount,
+} from '../editSettlementFinancials';
 
 describe('edited gross-price VAT', () => {
   it('recalculates 4 → 8 → 4 euros without retaining the previous rounded tax', () => {
@@ -22,5 +25,26 @@ describe('edited gross-price VAT', () => {
     expect(deriveEditSettlementFinancials(
       { tax_rate: null, taxRate: 24 }, [{ quantity: 1, unit_price: 4 }], 'pickup', 0,
     ).taxAmount).toBe(0.77);
+  });
+});
+
+// Review of the 29/09/2026 fixes: a paid order whose local payment rows are
+// missing (offline, restore timed out) was asked to refund money no local
+// row held — `paidTotal` counts that proven money — and could not be saved.
+describe('edit settlement refund amount', () => {
+  it('refunds what the native preview says the local rows hold beyond the new total', () => {
+    // Paid 15.00, 10.00 held locally, edited down to 8.00.
+    expect(
+      resolveEditSettlementRefundAmount({ refundAmount: 2, ledgerPaidTotal: 10, paidTotal: 15, nextTotal: 8 }),
+    ).toBe(2);
+    expect(resolveEditSettlementRefundAmount({ refundAmount: 0, paidTotal: 10, nextTotal: 8 })).toBe(0);
+  });
+
+  it('never refunds proven money no local row holds when the native amount is absent', () => {
+    expect(resolveEditSettlementRefundAmount({ ledgerPaidTotal: 0, paidTotal: 10, nextTotal: 8 })).toBe(0);
+    expect(resolveEditSettlementRefundAmount({ ledgerPaidTotal: 10.1, paidTotal: 15, nextTotal: 8 })).toBe(2.1);
+    // Only a preview that carries neither falls back to the paid total.
+    expect(resolveEditSettlementRefundAmount({ paidTotal: 10, nextTotal: 8.5 })).toBe(1.5);
+    expect(resolveEditSettlementRefundAmount({ refundAmount: null, paidTotal: 'x', nextTotal: 8 })).toBe(0);
   });
 });

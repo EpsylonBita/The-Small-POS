@@ -15,6 +15,7 @@ import type { TipSelection } from './TipModal';
 import { LoyaltyRedeemModal } from './LoyaltyRedeemModal';
 // SplitPaymentModal is rendered in OrderDashboard (survives MenuModal close)
 import { useDiscountSettings } from '../../hooks/useDiscountSettings';
+import { notifyMoneySettingsUnavailable } from '../../utils/checkoutMoneySettings';
 import { useFeaturedItems } from '../../hooks/useFeaturedItems';
 import { useDeliveryValidation } from '../../hooks/useDeliveryValidation';
 import { useAcquiredModules, MODULE_IDS } from '../../hooks/useAcquiredModules';
@@ -464,7 +465,13 @@ export const MenuModal: React.FC<MenuModalProps> = ({
 
 
   const { t } = useTranslation();
-  const { maxDiscountPercentage } = useDiscountSettings();
+  const {
+    maxDiscountPercentage: storeMaxDiscountPercentage,
+    unavailable: discountCapUnavailable,
+    refreshSettings: retryDiscountSettings,
+  } = useDiscountSettings();
+  // No discount on an assumed cap while the store's cap cannot be read.
+  const maxDiscountPercentage = discountCapUnavailable ? 0 : storeMaxDiscountPercentage;
   const {
     validateAddress: validateDeliveryAddress,
     isValidating: isValidatingDeliveryFee,
@@ -500,7 +507,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   // Split payment state managed by OrderDashboard (SplitPaymentModal renders there)
   const [manualDiscountMode, setManualDiscountMode] = useState<'percentage' | 'fixed'>('percentage');
   const [manualDiscountValue, setManualDiscountValue] = useState<number>(0);
-  const [manualDeliveryFee, setManualDeliveryFee] = useState<number>(0);
+    const [manualDeliveryFee, setManualDeliveryFee] = useState<number>(0);
+    const manualDeliveryFeeEditedRef = useRef(false);
   const [ghostModeFeatureEnabled, setGhostModeFeatureEnabled] = useState(false);
   const [ghostModeArmed, setGhostModeArmed] = useState(false);
   const [ghostModeArmedAt, setGhostModeArmedAt] = useState<string | null>(null);
@@ -684,9 +692,6 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     isOpen,
     cartItems,
     orderType,
-    customerName: orderType === 'pickup'
-      ? (pickupCustomerName.trim() || null)
-      : (selectedCustomer?.name || null),
   });
 
   // Coupon state
@@ -971,6 +976,17 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   }, [bridge.orders]);
 
   // Reset refs and cart when modal closes
+  useEffect(() => {
+      if (!isOpen || editMode || orderType !== 'delivery' || hasDeliveryPro) {return}
+      manualDeliveryFeeEditedRef.current = false;
+    let cancelled = false;
+    void bridge.settings.get('delivery', 'delivery_fee').then((value: unknown) => {
+      const raw = value && typeof value === 'object' ? (value as { value?: unknown }).value : value;
+      if (!cancelled && !manualDeliveryFeeEditedRef.current) {setManualDeliveryFee(Math.max(0, Number(raw) || 0))}
+    }).catch(() => {});
+    return () => {cancelled = true};
+  }, [isOpen, editMode, orderType, hasDeliveryPro]);
+
   useEffect(() => {
     if (!isOpen) {
       hasLoadedItemsRef.current = false;
@@ -2306,6 +2322,14 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       return;
     }
 
+    // Item H (fix review 30/09/2026): the store's discount cap could not be
+    // read. Checkout is paused with "Try again" rather than capping a
+    // discount on an assumed value.
+    if (!editMode && discountCapUnavailable) {
+      notifyMoneySettingsUnavailable(t, retryDiscountSettings);
+      return;
+    }
+
     // In edit mode, save changes directly without payment
     if (editMode && editOrderId && onEditComplete) {
       setIsSavingEdit(true);
@@ -2792,7 +2816,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
               onRepickDeliveryAddress={editMode ? undefined : onRepickDeliveryAddress}
               allowManualDeliveryFee={orderType === 'delivery' && hasDeliveryModule && !hasDeliveryPro}
               manualDeliveryFeeValue={manualDeliveryFee}
-              onManualDeliveryFeeChange={editMode ? undefined : setManualDeliveryFee}
+              onManualDeliveryFeeChange={editMode ? undefined : value => {manualDeliveryFeeEditedRef.current = true; setManualDeliveryFee(value)}}
               appliedCoupon={appliedCoupon}
               onApplyCoupon={editMode ? undefined : handleApplyCoupon}
               onRemoveCoupon={handleRemoveCoupon}

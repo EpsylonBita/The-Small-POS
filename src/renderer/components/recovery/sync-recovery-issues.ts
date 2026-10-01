@@ -700,6 +700,10 @@ const buildCheckoutPaymentBlockerIssues = (
     const platformHoldsButTillWasCharged =
       blocker.reasonCode === 'platform_settlement_mismatch' &&
       blocker.reasonVariant === 'platform_holds';
+    // Shared rule R4 (round 3): money the platform holds is restored from the
+    // server, never collected at the till; the payment screen is never offered.
+    const platformHeldRestoreOnly =
+      blocker.platformHeld === true && !settlementMissing && !platformHoldsButTillWasCharged;
     const issue = {
       id: `checkout-payment-blocker-${blocker.orderId}`,
       code: blocker.reasonCode,
@@ -720,10 +724,12 @@ const buildCheckoutPaymentBlockerIssues = (
               createRepairPlatformHeldDrawerRowAction(blocker),
               createContactDevAction(),
             ]
-          : [
-              createOpenOrderPaymentFixAction(blocker, preferredMethod),
-              createContactDevAction(),
-            ],
+          : platformHeldRestoreOnly
+            ? [createRetrySyncAction(), createContactDevAction()]
+            : [
+                createOpenOrderPaymentFixAction(blocker, preferredMethod),
+                createContactDevAction(),
+              ],
       params: {
         orderNumber: blocker.orderNumber,
         reasonCode: blocker.reasonCode,
@@ -740,6 +746,9 @@ const buildCheckoutPaymentBlockerIssues = (
       orderId: blocker.orderId,
       orderNumber: blocker.orderNumber,
     } satisfies RecoveryIssue;
+    if (platformHeldRestoreOnly) {
+      return issue;
+    }
     return withKnownSolution(
       issue,
       settlementMissing

@@ -268,26 +268,28 @@ fn order_not_found_returns_err_but_does_not_panic_req_12() {
 }
 
 // ============================================================
-// T40 — active_cache short-circuit (Req 4.10)
+// T40 — the fiscal-active verdict never skips a receipt
 // ============================================================
 
+/// Review of the 29/09/2026 fixes (decided for both POS apps): the verdict
+/// used to short-circuit the enqueue, so one `active:false` answer dropped
+/// every receipt of a store WITH a fiscal plugin until the next refresh. A
+/// receipt is always queued; the server answers `skipped` for a branch
+/// without a plugin and the row drains. A fresh inactive verdict only keeps
+/// the row from holding the Z.
 #[test]
-fn active_cache_inactive_skips_enqueue_without_writing_row() {
+fn active_cache_inactive_still_queues_the_receipt() {
     let conn = fresh_db();
     seed_order(&conn, "order-cache-1", "branch-X");
 
-    // Pretend the health-poll told us this branch has no active plugin.
+    // The status check told us this branch has no active plugin.
     active_cache::update("branch-X", false);
 
-    let outcome = enqueue_for_order(&conn, "order-cache-1");
-    assert!(
-        outcome.is_ok(),
-        "Ok on cached-inactive (silent skip per Req 4.10)"
-    );
+    enqueue_for_order(&conn, "order-cache-1").expect("the receipt is queued");
     assert_eq!(
         count_fiscal_rows(&conn),
-        0,
-        "no row written when cache says inactive"
+        1,
+        "an inactive verdict must never drop a receipt"
     );
 }
 

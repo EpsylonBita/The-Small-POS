@@ -27,11 +27,11 @@ export const UpdateNotification: React.FC<UpdateNotificationProps> = ({
     onDownload,
     onInstallLater
 }) => {
-    const { t } = useI18n(); // Assuming i18n context availability, otherwise fallback to english texts
+    const { t, language } = useI18n(); // Assuming i18n context availability, otherwise fallback to english texts
 
     if (!updateInfo) return null;
     const releaseNotesHtml =
-        getReleaseNotesHtml(updateInfo.releaseNotes) || '<p>Bug fixes and improvements.</p>';
+        getReleaseNotesHtml(updateInfo.releaseNotes, language) || '<p>Bug fixes and improvements.</p>';
 
     return (
         <LiquidGlassModal

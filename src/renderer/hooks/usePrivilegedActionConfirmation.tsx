@@ -1,6 +1,7 @@
 import React, { useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { getBridge } from '../../lib'
-import type { PrivilegedActionScope } from '../../lib/ipc-contracts'
+import type { MoneyApproval, PrivilegedActionScope } from '../../lib/ipc-contracts'
 import PINLoginModal from '../components/auth/PINLoginModal'
 import { extractPrivilegedActionError } from '../utils/privileged-actions'
 
@@ -14,10 +15,16 @@ interface PrivilegedActionRequest<T> {
 interface PendingPrivilegedAction<T> extends PrivilegedActionRequest<T> {
   resolve: (value: T) => void
   reject: (error: unknown) => void
+  /**
+   * The till asked for a manager's own PIN (nobody is on shift at this
+   * terminal, fix review 30/09/2026): what the manager approves.
+   */
+  approval?: MoneyApproval | null
 }
 
 export function usePrivilegedActionConfirmation() {
   const bridge = getBridge()
+  const { t } = useTranslation()
   const [pendingAction, setPendingAction] = useState<PendingPrivilegedAction<unknown> | null>(null)
 
   const runWithPrivilegedConfirmation = async <T,>({
@@ -52,6 +59,7 @@ export function usePrivilegedActionConfirmation() {
           reject,
           title,
           subtitle,
+          approval: privilegedError.approval ?? null,
         })
       })
     }
@@ -75,6 +83,7 @@ export function usePrivilegedActionConfirmation() {
       await bridge.auth.confirmPrivilegedAction({
         pin,
         scope: pendingAction.scope,
+        ...(pendingAction.approval ? { approval: pendingAction.approval } : {}),
       })
     } catch (error) {
       const privilegedError = extractPrivilegedActionError(error, pendingAction.scope)
@@ -101,13 +110,24 @@ export function usePrivilegedActionConfirmation() {
     return true
   }
 
+  // Nobody is on shift at this terminal: a manager approves with their own
+  // PIN (the shared terminal PIN does not), so the prompt says so.
+  const subtitle = pendingAction?.approval
+    ? String(
+        t('auth.managerApproval.subtitle', {
+          defaultValue:
+            'Nobody is checked in on this till. A manager with the right to approve it enters their own PIN. Nothing is charged.',
+        })
+      )
+    : pendingAction?.subtitle
+
   const confirmationModal = (
     <PINLoginModal
       isOpen={Boolean(pendingAction)}
       onClose={handleClose}
       onSubmit={handleSubmit}
       title={pendingAction?.title}
-      subtitle={pendingAction?.subtitle}
+      subtitle={subtitle}
     />
   )
 

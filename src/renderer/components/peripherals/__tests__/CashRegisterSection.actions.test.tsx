@@ -101,6 +101,42 @@ describe('cash register device actions', () => {
     expect(notices.success).not.toHaveBeenCalled();
   });
 
+  const capDevice = { ...device, protocol: 'cap_driver', settings: { capturePath: 'C:\\Capture', outputPath: 'C:\\Capture\\Output',
+    serviceName: 'CapDriverSVC', transactionTimeoutMs: 120000, cashPaymentCode: 1, cardPaymentCode: 2, eftPosIndex: 1,
+    fileEncoding: 'utf-8', probeDeviceTcp: false },
+    taxRates: [{ code: 'A', rate: '24', label: 'Standard', department: 1 }, { code: 'B', rate: '13', label: 'Reduced', department: 2 },
+      { code: 'C', rate: '6', label: 'Super Reduced', department: 3 }, { code: 'D', rate: '0', label: 'Zero', department: 4 }] };
+
+  it('keeps a saved CAP voucher code through an unrelated edit and refuses a colliding one', async () => {
+    bridge.ecr.getDevices.mockResolvedValue({ success: true, devices: [{ ...capDevice, settings: { ...capDevice.settings, voucherPaymentCode: 5 } }] });
+    bridge.ecr.updateDevice.mockResolvedValue({ success: true });
+    await open();
+    fireEvent.click(screen.getByRole('button', { name: 'Edit', exact: true }));
+    const voucher = screen.getByLabelText('Voucher code (optional)') as HTMLInputElement;
+    expect(voucher.value).toBe('5');
+    fireEvent.change(voucher, { target: { value: '2' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+    await waitFor(() => expect(notices.error).toHaveBeenCalledWith('The voucher code must be 2–20 and differ from the cash and card codes'));
+    expect(bridge.ecr.updateDevice).not.toHaveBeenCalled();
+    fireEvent.change(voucher, { target: { value: '5' } });
+    fireEvent.change(screen.getByDisplayValue('Register A'), { target: { value: 'Edited Register' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+    await waitFor(() => expect(bridge.ecr.updateDevice).toHaveBeenCalledTimes(1));
+    expect(JSON.stringify(bridge.ecr.updateDevice.mock.calls[0])).toContain('"voucherPaymentCode":5');
+  });
+
+  it('writes no CAP voucher code when none was configured', async () => {
+    bridge.ecr.getDevices.mockResolvedValue({ success: true, devices: [capDevice] });
+    bridge.ecr.updateDevice.mockResolvedValue({ success: true });
+    await open();
+    fireEvent.click(screen.getByRole('button', { name: 'Edit', exact: true }));
+    expect((screen.getByLabelText('Voucher code (optional)') as HTMLInputElement).value).toBe('');
+    fireEvent.change(screen.getByDisplayValue('Register A'), { target: { value: 'Edited Register' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+    await waitFor(() => expect(bridge.ecr.updateDevice).toHaveBeenCalledTimes(1));
+    expect(JSON.stringify(bridge.ecr.updateDevice.mock.calls[0])).not.toMatch(/voucher/i);
+  });
+
   it('retains a device when removal resolves success:false', async () => {
     bridge.ecr.removeDevice.mockResolvedValue({ success: false });
     await open();

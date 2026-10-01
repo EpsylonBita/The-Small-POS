@@ -1140,12 +1140,8 @@ pub async fn branch_data_get_bundle_status(
             "kiosk_orders",
             "default",
         ),
-        cached_admin_get_dataset_status(
-            &db,
-            "/api/pos/customer-display?limit=200",
-            "customer_display_feed",
-            "default",
-        ),
+        // The customer display reads only local orders and kitchen stages (no fetch, DB read or provider).
+        customer_display_feed_status(),
         cached_admin_get_dataset_status(
             &db,
             "/api/pos/analytics?time_range=today",
@@ -1247,7 +1243,7 @@ pub async fn branch_data_get_bundle_status(
         .collect();
     let advisory_missing: Vec<String> = advisory_datasets
         .iter()
-        .filter(|dataset| !dataset.available)
+        .filter(|dataset| advisory_dataset_missing(dataset))
         .map(|dataset| dataset.cache_key.clone())
         .collect();
 
@@ -1279,9 +1275,56 @@ pub async fn branch_data_get_bundle_status(
     }))
 }
 
+const LOCAL_ONLY_UNSUPPORTED: &str = "local_only_unsupported";
+
+/// Retired native cloud feed: the customer display reads only local orders and
+/// kitchen stages, so this status is explicit and never backed by a cache.
+fn customer_display_feed_status() -> DatasetStatus {
+    DatasetStatus {
+        cache_key: "customer_display_feed".to_string(),
+        scope_key: "default".to_string(),
+        synced_at: None,
+        available: false,
+        source: LOCAL_ONLY_UNSUPPORTED,
+        item_count: None,
+    }
+}
+
+/// A local-only dataset has no cloud copy, so it is never missing cloud data.
+fn advisory_dataset_missing(dataset: &DatasetStatus) -> bool {
+    !dataset.available && dataset.source != LOCAL_ONLY_UNSUPPORTED
+}
+
 #[cfg(test)]
 mod stale_write_tests {
     use super::*;
+
+    #[test]
+    fn retired_customer_display_feed_is_local_only_and_never_missing_cloud_data() {
+        let status = customer_display_feed_status();
+        assert_eq!(status.cache_key, "customer_display_feed");
+        assert_eq!(status.scope_key, "default");
+        assert_eq!(status.synced_at, None);
+        assert!(!status.available);
+        assert_eq!(status.source, "local_only_unsupported");
+        assert_eq!(status.item_count, None);
+        assert!(!advisory_dataset_missing(&status));
+        // A cloud-backed advisory cache without data is still reported missing.
+        let uncached_cloud = DatasetStatus {
+            cache_key: "kiosk_status".to_string(),
+            scope_key: "default".to_string(),
+            synced_at: None,
+            available: false,
+            source: "local_settings",
+            item_count: None,
+        };
+        assert!(advisory_dataset_missing(&uncached_cloud));
+        let cached_cloud = DatasetStatus {
+            available: true,
+            ..uncached_cloud
+        };
+        assert!(!advisory_dataset_missing(&cached_cloud));
+    }
 
     fn cached_tables() -> Value {
         json!({

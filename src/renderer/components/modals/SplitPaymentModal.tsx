@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { roundMoney } from '@shared/utils/money';
 import { useTranslation } from 'react-i18next';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -6,16 +6,41 @@ import { Banknote, BadgePercent, Check, ChevronDown, CreditCard, Loader2, Plus, 
 import toast from 'react-hot-toast';
 
 import { getBridge } from '../../../lib';
+import type { PaymentSettlementSnapshot } from '../../../lib/ipc-adapter';
 import { usePaymentPrintPrompt } from '../../hooks/usePaymentPrintPrompt';
 import { createInFlightGuard, settleDraftPortions, settleTerminalPortion, toTerminalCardPortion, type InFlightGuard, type SplitOrderFinancials, type TerminalSettlementResult } from '../../utils/splitPaymentSettlement';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { PlatformHeldPaymentNotice, usePlatformHeldNoticeForOrderId } from '../ui/PlatformHeldPaymentNotice';
 import { formatCurrency } from '../../utils/format';
+import { isPaymentSetAsideError, PAYMENT_SET_ASIDE_TOAST_MS, throwIfPaymentSetAside } from '../../utils/paymentSetAside';
+import { isPaymentNotSavedError, PAYMENT_NOT_SAVED_TOAST_MS, pendingNotSavedMessage, throwIfPaymentNotSaved, useUnsavedChargedPayments } from '../../utils/unsavedPayments';
+import { UnsavedChargedPaymentBanner } from '../ui/UnsavedChargedPaymentBanner';
+import {
+  claimOrdinaryCollectionOwner,
+  classifyOrdinaryTerminalReply,
+  classifyOrdinaryWrite,
+  noteOrdinaryTerminalTransaction,
+  noteOrdinaryBatchWrite,
+  noteOrdinaryWriteFacts,
+  ordinaryCollectionView,
+  probeOrdinaryOwner,
+  readOrdinaryWriteReply,
+  releaseOrdinaryOwnerBeforeSend,
+  retainedOrdinaryOwner,
+  runOrdinaryCollection,
+  type OrdinaryCollectionFacts,
+  type OrdinaryCollectionOwner,
+  type OrdinaryCollectionScope,
+  type OrdinaryCollectionVerdict,
+  type OrdinaryTerminalVerdict,
+} from '../../hooks/useOrderStore';
 
 export interface CartItem { name: string; quantity: number; totalPrice: number; price?: number; itemIndex?: number; isSynthetic?: boolean; [key: string]: any }
 type TabMode = 'by-amount' | 'by-items';
 type ReceiptMode = 'combined' | 'individual';
-type PortionStatus = 'draft' | 'processing' | 'paid';
+// `unsaved`: a terminal portion charged on this till whose payment could not
+// be saved yet (30/09/2026): never a chargeable draft again.
+type PortionStatus = 'draft' | 'processing' | 'paid' | 'unsaved';
 type PaymentOrigin = 'manual' | 'terminal';
 
 export interface SplitPortion {
@@ -43,6 +68,8 @@ interface SplitPaymentModalProps {
   onSplitComplete: (result: SplitPaymentResult) => void | Promise<void>; existingPayments?: any[];
   initialMode?: TabMode; isGhostOrder?: boolean; collectionMode?: SplitPaymentCollectionMode;
   allowDiscounts?: boolean; isReconciliationPending?: boolean;
+  /** Existing-order ordinary collection scope of this terminal; when set (null fails closed) every charge and confirm runs under the order's ordinary claim. */
+  collectionScope?: OrdinaryCollectionScope | null;
 }
 
 type OrderFinancialState = SplitOrderFinancials;
@@ -65,6 +92,8 @@ const terminalChargeGuard: InFlightGuard = createInFlightGuard();
 // confirm cannot run concurrently with an in-flight terminal charge (the
 // review found Card-tap + Confirm during pre-flight double-collects).
 const CONFIRM_SETTLEMENT_GUARD_ID = '__confirm-settlement__';
+type DraftSettlement = Awaited<ReturnType<typeof settleDraftPortions>>;
+type DirectSale = NonNullable<PaymentSettlementSnapshot['unresolvedDirectSale']>;
 let nextGeneratedPortionId = 1;
 // Module audit closure (2026-09-16): one rounding rule for the renderer. The local copy
 // rounded on the binary product, so it sent 1.005 to 1.00.
@@ -108,9 +137,14 @@ const extractOrderFinancialState = (order: any, fallbackTotal: number): OrderFin
   return { totalAmount, subtotal, discountAmount, discountPercentage, taxAmount, deliveryFee, tipAmount };
 };
 
-export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, onClose, orderId, orderTotal, items, onSplitComplete, existingPayments = EMPTY_EXISTING_PAYMENTS, initialMode = 'by-amount', isGhostOrder = false, collectionMode, allowDiscounts = true, isReconciliationPending = false }) => {
+export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, onClose, orderId, orderTotal, items, onSplitComplete, existingPayments = EMPTY_EXISTING_PAYMENTS, initialMode = 'by-amount', isGhostOrder = false, collectionMode, allowDiscounts = true, isReconciliationPending = false, collectionScope }) => {
   const { t } = useTranslation();
   const bridge = getBridge();
+  const viewEpoch = useRef(0);
+  useEffect(() => {
+    const epoch = ++viewEpoch.current;
+    return () => { if (viewEpoch.current === epoch) viewEpoch.current++; };
+  }, [isOpen, orderId, collectionScope?.organizationId, collectionScope?.terminalId]);
   // Mirrors the module-scoped guard into render state so the UI can lock the
   // modal (close, inputs, Confirm) for the WHOLE guarded window — including
   // the pre-flight IPC that runs before portion.status flips to 'processing'.
@@ -204,6 +238,16 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
   // money still owed.
   const platformHeldNotice = usePlatformHeldNoticeForOrderId(orderId, isOpen);
   const platformHeld = platformHeldNotice !== null;
+  // A card of this order charged on this till and not saved yet (30/09/2026):
+  // shown with Save payment again, and no portion is charged or confirmed
+  // while it stands.
+  // Saved again, the charged card's row is in the ledger: the retained
+  // ordinary claim of the order settles from it and the split shows the order
+  // as it now stands (`onUnsavedSavedRef` is set once the state readers exist).
+  const onUnsavedSavedRef = useRef<() => Promise<void>>(async () => undefined);
+  const onUnsavedSaved = useCallback(() => onUnsavedSavedRef.current(), []);
+  const unsaved = useUnsavedChargedPayments(orderId, isOpen, t, formatCurrency, onUnsavedSaved);
+  const unsavedLocked = unsaved.payments.length > 0;
   const isCloseLocked = isReconciliationPending || Boolean(processingPortionId) || isProcessing || isTerminalChargeInFlight;
   const activeDiscountTotal = useMemo(() => round2(portions.filter((portion) => portion.status !== 'paid').reduce((sum, portion) => sum + portion.discountAmount, 0)), [portions]);
   const assignedDraftAmount = useMemo(() => round2(portions.filter((portion) => portion.status !== 'paid').reduce((sum, portion) => sum + portion.amount, 0)), [portions]);
@@ -211,7 +255,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
   const remaining = useMemo(() => round2(adjustedDue - assignedDraftAmount), [adjustedDue, assignedDraftAmount]);
   const hasPositiveAssignment = useMemo(() => portions.some((portion) => portion.status !== 'paid' && portion.amount > 0.009), [portions]);
   const anyItemsAssigned = useMemo(() => activeTab !== 'by-items' || availableItems.some((item) => itemAssignments[Number(item.itemIndex ?? 0)] !== undefined), [activeTab, availableItems, itemAssignments]);
-  const canConfirm = useMemo(() => hasPositiveAssignment && anyItemsAssigned && remaining >= -0.01 && !isInitializing && !isProcessing && !processingPortionId && !isTerminalChargeInFlight && !isReconciliationPending && !platformHeld, [anyItemsAssigned, hasPositiveAssignment, isInitializing, isProcessing, isReconciliationPending, isTerminalChargeInFlight, platformHeld, processingPortionId, remaining]);
+  const canConfirm = useMemo(() => hasPositiveAssignment && anyItemsAssigned && remaining >= -0.01 && !unsavedLocked && !isInitializing && !isProcessing && !processingPortionId && !isTerminalChargeInFlight && !isReconciliationPending && !platformHeld, [anyItemsAssigned, hasPositiveAssignment, isInitializing, isProcessing, isReconciliationPending, isTerminalChargeInFlight, platformHeld, processingPortionId, remaining, unsavedLocked]);
 
   const getPortion = useCallback((portionId: string) => portions.find((portion) => portion.id === portionId) ?? null, [portions]);
   const updatePortion = useCallback((portionId: string, updater: (portion: SplitPortion) => SplitPortion) => setPortions((current) => current.map((portion) => portion.id === portionId ? updater(portion) : portion)), []);
@@ -279,6 +323,23 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
     return () => { cancelled = true; };
   }, [applySplitStateSnapshot, buildFallbackSplitState, fetchLatestSplitState, initialMode, isOpen]);
 
+  useEffect(() => {
+    onUnsavedSavedRef.current = async () => {
+      const retained = collectionScope === undefined ? null : retainedOrdinaryOwner(collectionScope, orderId);
+      if (retained) {
+        await probeOrdinaryOwner(retained, async () => {
+          const state = await fetchLatestSplitState();
+          return { completedPayments: state.payments, value: state };
+        }).catch(() => undefined);
+      }
+      try {
+        applySplitStateSnapshot(await fetchLatestSplitState(), { resetDraft: true, mode: activeTab });
+      } catch (error) {
+        console.warn('[SplitPaymentModal] Split refresh after Save payment again failed:', error);
+      }
+    };
+  }, [activeTab, applySplitStateSnapshot, collectionScope, fetchLatestSplitState, orderId]);
+
   const ensureLatestOutstanding = useCallback(async (attemptedAmount: number, mode: TabMode) => {
     const snapshot = await fetchLatestSplitState();
     if (hasLiveSplitStateDrift(snapshot) || attemptedAmount > snapshot.outstanding + 0.01) {
@@ -339,12 +400,18 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
     if (fiscalEnabled === false || fiscalEnabled === 'false' || fiscalEnabled === '0') return;
     try { const fiscalResult: any = await bridge.ecr.fiscalPrint(orderId); if (fiscalResult?.skipped) return; } catch (error) { console.warn('[SplitPaymentModal] Fiscal print failed:', error); toast.error(t('orderDashboard.fiscalPrintFailed', { defaultValue: 'Cash register print failed' })); }
   }, [askForPaymentPrint, bridge, isGhostOrder, orderFinancials.totalAmount, orderId, t]);
-  const recordPortionPayment = useCallback(async (portion: SplitPortion, paymentOrigin: PaymentOrigin, transactionRef?: string, terminalDeviceId?: string) => {
+  const recordPortionPayment = useCallback(async (portion: SplitPortion, paymentOrigin: PaymentOrigin, transactionRef?: string, terminalDeviceId?: string, onReply?: (raw: unknown, threw: boolean) => void) => {
     const result: any = await bridge.payments.recordPayment({ orderId, method: portion.method, amount: portion.amount, discountAmount: portion.discountAmount, cashReceived: portion.method === 'cash' ? portion.amount : undefined, changeGiven: portion.method === 'cash' ? 0 : undefined, transactionRef, paymentOrigin, terminalApproved: paymentOrigin === 'terminal', terminalDeviceId, collectedBy: portion.collectedBy ?? defaultCollectedBy, items: activeTab === 'by-items' ? portion.items.map((item) => ({ itemIndex: Number(item.itemIndex ?? 0), itemName: item.name, itemQuantity: item.quantity, itemAmount: item.totalPrice })) : undefined });
+    onReply?.(result, false);
+    // A charged card whose payment could not be saved: kept, never a draft.
+    throwIfPaymentNotSaved(result, t, formatCurrency);
+    // An approved card that found the order already paid is recorded set
+    // aside for a manager to give back: never a collected portion.
+    throwIfPaymentSetAside(result, t, formatCurrency);
     const paymentId = extractPaymentId(result); if (result?.success === false || !paymentId) throw new Error(result?.error || 'Missing paymentId after recording split payment');
     appendCompletedPayment(portion, paymentId, paymentOrigin, transactionRef, terminalDeviceId);
     return paymentId;
-  }, [activeTab, appendCompletedPayment, bridge, defaultCollectedBy, orderId]);
+  }, [activeTab, appendCompletedPayment, bridge, defaultCollectedBy, orderId, t]);
 
   const completeAndClose = useCallback(async (recordedPortions: SplitPortion[], paymentIds: string[], updatedOrderTotal: number, recordedAmount: number) => {
     const remainingAmount = round2(Math.max(0, updatedOrderTotal - (alreadyPaidAmount + recordedAmount)));
@@ -356,8 +423,84 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
   }, [activeTab, alreadyPaidAmount, onClose, onSplitComplete, printFinalOrderDocuments, receiptMode, t]);
 
   const resolveReadyTerminal = useCallback(async () => { const raw: any = await bridge.ecr.getDefaultTerminal(); const device = raw?.device ?? raw?.data?.device ?? null; const deviceId = typeof device?.id === 'string' ? device.id : ''; if (!deviceId) return null; const status: any = await bridge.ecr.getDeviceStatus(deviceId); return status?.connected === true && status?.ready === true && status?.busy !== true ? { deviceId, name: device?.name || deviceId } : null; }, [bridge]);
+  const ordinaryRefusalText = useCallback((code: string) => (code === 'GIFT_CARD_TERMINAL_SCOPE_REQUIRED'
+    ? t('giftCardCheckout.refusal.scope', 'This terminal has no confirmed organization or terminal identity. Pair the POS again.')
+    : t('giftCardCheckout.refusal.admission', 'Earlier gift card attempts must be checked first.')), [t]);
+  // Existing-order guard for one terminal charge and its write. Only an exact
+  // decline proves nothing moved; an approved charge that is not booked stays
+  // unknown and keeps the order's ordinary claim.
+  const settleOrdinaryTerminalPortion = useCallback(async (owner: OrdinaryCollectionOwner, cardPortion: SplitPortion, terminal: { deviceId: string; name: string }, isCurrent: () => boolean, directSale?: DirectSale): Promise<TerminalSettlementResult> => {
+    const seen: { charge: OrdinaryTerminalVerdict | null; write: OrdinaryCollectionFacts | null } = { charge: null, write: null };
+    const noteWrite = (raw: unknown, threw: boolean) => { if (seen.write) return; seen.write = readOrdinaryWriteReply(raw, threw); noteOrdinaryWriteFacts(owner, seen.write); };
+    const run = await runOrdinaryCollection<{ settlement?: TerminalSettlementResult; failure?: unknown }>(owner, { method: 'card', amount: cardPortion.amount, transactionRef: directSale?.id ?? null, idempotencyKey: null, settlementGeneration: null, terminalTransactionId: directSale?.id ?? null }, async () => {
+      try {
+        const settlement = await settleTerminalPortion(orderFinancials, cardPortion, {
+          processPayment: async () => {
+            if (!isCurrent()) throw new Error('The split payment view changed before card collection');
+            if (directSale?.recoverable && directSale.id) {
+              // This is the saved original approval, not another hardware send.
+              seen.charge = { verdict: 'approved', transactionId: directSale.id, message: null };
+              noteOrdinaryTerminalTransaction(owner, directSale.id);
+              return { transactionId: directSale.id };
+            }
+            let rawPayment: unknown; let threw = false;
+            try { rawPayment = await bridge.ecr.processPayment(cardPortion.amount, { deviceId: terminal.deviceId, orderId, reference: `${orderId}:${cardPortion.id}` }); } catch { threw = true; }
+            const charge = classifyOrdinaryTerminalReply(rawPayment, threw);
+            seen.charge = charge;
+            if (charge.verdict !== 'approved') throw new Error(charge.message || 'Card payment was not approved');
+            noteOrdinaryTerminalTransaction(owner, charge.transactionId);
+            return { transactionId: charge.transactionId };
+          },
+          recordPayment: async (transactionId: string) => {
+            if (!isCurrent()) throw new Error('The split payment view changed before card recording');
+            try { return await recordPortionPayment(cardPortion, 'terminal', transactionId, terminal.deviceId, noteWrite); } catch (error) { noteWrite(undefined, true); throw error; }
+          },
+          persistFinancials,
+        });
+        return { verdict: 'completed' as OrdinaryCollectionVerdict, value: { settlement } };
+      } catch (failure) {
+        const charge = seen.charge;
+        const verdict: OrdinaryCollectionVerdict = !charge
+          ? 'not_sent'
+          : charge.verdict === 'approved'
+            ? (seen.write && classifyOrdinaryWrite(seen.write) === 'completed' ? 'completed' : 'unknown')
+            : charge.verdict;
+        return { verdict, value: { failure } };
+      }
+    });
+    if (run.status === 'refused') throw new Error(ordinaryRefusalText(run.code));
+    if (run.status === 'completed' && run.value?.settlement) return run.value.settlement;
+    const failure = run.value?.failure;
+    throw failure instanceof Error ? failure : new Error(t('splitPayment.cardFailed', { defaultValue: 'Card payment failed' }));
+  }, [bridge, orderFinancials, orderId, ordinaryRefusalText, persistFinancials, recordPortionPayment, t]);
+  // Existing-order guard for Confirm Split: every portion write under one
+  // ordinary claim, each kept with its own reference. Any unknown write keeps
+  // it; a booked write completes it; an earlier booked write never proves a
+  // later unknown one.
+  const settleOrdinaryDrafts = useCallback(async (owner: OrdinaryCollectionOwner, draftPortions: SplitPortion[], settle: (onReply: (raw: unknown, threw: boolean, transactionRef: string | null) => void) => Promise<DraftSettlement>): Promise<DraftSettlement> => {
+    const writes: OrdinaryCollectionFacts[] = [];
+    const first = draftPortions[0];
+    const run = await runOrdinaryCollection<{ settlement?: DraftSettlement; failure?: unknown }>(owner, { method: first.method, amount: round2(draftPortions.reduce((sum, portion) => sum + portion.amount, 0)), transactionRef: first.transactionRef ?? null, idempotencyKey: null, settlementGeneration: null, terminalTransactionId: null }, async () => {
+      let outcome: { settlement?: DraftSettlement; failure?: unknown };
+      try {
+        outcome = { settlement: await settle((raw, threw, transactionRef) => { const facts = readOrdinaryWriteReply(raw, threw); noteOrdinaryBatchWrite(owner, facts, transactionRef); writes.push(facts); }) };
+      } catch (failure) {
+        outcome = { failure };
+      }
+      const verdicts = writes.map(classifyOrdinaryWrite);
+      const verdict: OrdinaryCollectionVerdict = verdicts.includes('unknown') ? 'unknown' : verdicts.includes('completed') ? 'completed' : 'not_sent';
+      return { verdict, value: outcome };
+    });
+    if (run.status === 'refused') throw new Error(ordinaryRefusalText(run.code));
+    if (run.status === 'completed' && run.value?.settlement && run.value.failure === undefined) return run.value.settlement;
+    const failure = run.value?.failure;
+    throw failure instanceof Error ? failure : new Error(t('splitPayment.failed', 'Split payment failed. Please try again.'));
+  }, [ordinaryRefusalText, t]);
   const handleTerminalCardPayment = useCallback(async (portionId: string) => {
     if (isReconciliationPending || platformHeld) return;
+    if (unsavedLocked) { toast.error(pendingNotSavedMessage(unsaved.payments, t, formatCurrency), { duration: PAYMENT_NOT_SAVED_TOAST_MS }); return; }
+    const startedEpoch = viewEpoch.current;
+    const isCurrent = () => isOpen && viewEpoch.current === startedEpoch;
     const portion = getPortion(portionId); if (!portion || portion.status !== 'draft') return; if (portion.amount <= 0.009) return;
     // Gap review P0-01: the guard must be armed synchronously BEFORE the first
     // await. The pre-flight IPC below yields long enough for a double-tap to
@@ -365,12 +508,79 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
     // queues a concurrent charge instead of rejecting it — the card was charged
     // twice. The state-based checks below stay as defense in depth only.
     if (!terminalChargeGuard.acquire(portionId)) { toast.error(t('splitPayment.cardBusy', { defaultValue: 'Another card payment is already in progress' })); return; }
+    // Existing-order guard: claim the order before the first await.
+    let ordinaryOwner: OrdinaryCollectionOwner | null = null;
+    if (collectionScope !== undefined) {
+      const claim = claimOrdinaryCollectionOwner(collectionScope, orderId);
+      if (!claim.claimed) {
+        if (claim.retained) {
+          try {
+            const sale = (await bridge.payments.getSettlementSnapshot(orderId)).unresolvedDirectSale;
+            const original = ordinaryCollectionView(claim.retained)?.original;
+            let recoveredLabel: string | null = null;
+            if (isCurrent() && sale?.recoverable && sale.id && sale.deviceId && sale.currency?.toUpperCase() === 'EUR'
+              && sale.amountCents === Math.round(portion.amount * 100) && original?.method === 'card'
+              && Math.round(original.amount * 100) === sale.amountCents
+              && (!original.terminalTransactionId || original.terminalTransactionId === sale.id)) {
+              const cardPortion = toTerminalCardPortion(portion, sale.deviceId);
+              noteOrdinaryTerminalTransaction(claim.retained, sale.id);
+              await recordPortionPayment(cardPortion, 'terminal', sale.id, sale.deviceId);
+              recoveredLabel = cardPortion.label;
+            }
+            // The retained original is continued from the ledger, never
+            // resent: its row may have landed above or through Save payment
+            // again (30/09/2026).
+            const probe = await probeOrdinaryOwner(claim.retained, async () => {
+              const state = await fetchLatestSplitState();
+              return { completedPayments: state.payments, value: state };
+            });
+            if (isCurrent() && probe.status === 'completed' && probe.value) {
+              applySplitStateSnapshot(probe.value, { resetDraft: true, mode: activeTab });
+              toast.success(recoveredLabel
+                ? t('splitPayment.portionPaid', { defaultValue: '{{person}} paid successfully', person: recoveredLabel })
+                : t('orderDashboard.cardPaymentRecorded', { defaultValue: 'Card payment recorded.' }));
+              terminalChargeGuard.release(portionId);
+              return;
+            }
+          } catch (error) {
+            if (isPaymentNotSavedError(error)) {
+              terminalChargeGuard.release(portionId);
+              toast.error(error.message, { duration: PAYMENT_NOT_SAVED_TOAST_MS });
+              await unsaved.refresh();
+              return;
+            }
+            if (isPaymentSetAsideError(error)) {
+              terminalChargeGuard.release(portionId);
+              toast.error(error.message, { duration: PAYMENT_SET_ASIDE_TOAST_MS });
+              try { applySplitStateSnapshot(await fetchLatestSplitState(), { resetDraft: true, mode: activeTab }); } catch (refreshError) { console.warn('[SplitPaymentModal] Split refresh after a set-aside card failed:', refreshError); }
+              return;
+            }
+            console.warn('[SplitPaymentModal] Original SALE recovery remains pending:', error);
+          }
+        }
+        terminalChargeGuard.release(portionId); toast.error(ordinaryRefusalText(claim.code)); return;
+      }
+      ordinaryOwner = claim.owner;
+    }
     setIsTerminalChargeInFlight(true);
     try {
       if (processingPortionId && processingPortionId !== portionId) { toast.error(t('splitPayment.cardBusy', { defaultValue: 'Another card payment is already in progress' })); return; }
+      // Read fresh before any terminal is asked to charge.
+      const pending = await unsaved.refresh();
+      if (pending.length > 0) { toast.error(pendingNotSavedMessage(pending, t, formatCurrency), { duration: PAYMENT_NOT_SAVED_TOAST_MS }); return; }
       try { await ensureLatestOutstanding(portion.amount, activeTab); } catch (error) { toast.error(error instanceof Error ? error.message : t('splitPayment.failed', 'Split payment failed. Please try again.')); return; }
+      if (!isCurrent()) return;
+      const sale = (await bridge.payments.getSettlementSnapshot(orderId)).unresolvedDirectSale;
+      if (!isCurrent()) return;
+      if (sale && (!sale.recoverable || !sale.id || !sale.deviceId || sale.currency?.toUpperCase() !== 'EUR'
+        || sale.amountCents !== Math.round(portion.amount * 100))) {
+        toast.error(ordinaryRefusalText('DIRECT_SALE_RECONCILIATION_REQUIRED'));
+        return;
+      }
       setPortionMethod(portionId, 'card');
-      let terminal: { deviceId: string; name: string } | null = null; try { terminal = await resolveReadyTerminal(); } catch (error) { console.warn('[SplitPaymentModal] Failed to resolve terminal:', error); }
+      let terminal: { deviceId: string; name: string } | null = sale?.recoverable && sale.deviceId
+        ? { deviceId: sale.deviceId, name: sale.deviceId } : null;
+      if (!terminal) { try { terminal = await resolveReadyTerminal(); } catch (error) { console.warn('[SplitPaymentModal] Failed to resolve terminal:', error); } }
       if (!terminal) { toast(t('splitPayment.manualCardFallback', { defaultValue: 'No ready payment terminal. This portion will be recorded as a manual card payment on confirm.' })); return; }
       // Gap review P0-02: `portion` was captured before the setPortionMethod
       // write above landed in state, so recording from it persisted an approved
@@ -381,22 +591,48 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
       updatePortion(portionId, (current) => toTerminalCardPortion(current, terminal!.deviceId));
       let settlement: TerminalSettlementResult;
       try {
-        settlement = await settleTerminalPortion(orderFinancials, cardPortion, {
+        settlement = ordinaryOwner ? await settleOrdinaryTerminalPortion(ordinaryOwner, cardPortion, terminal, isCurrent, sale ?? undefined) : await settleTerminalPortion(orderFinancials, cardPortion, {
           processPayment: async () => {
+            if (!isCurrent()) throw new Error('The split payment view changed before card collection');
+            if (sale?.recoverable && sale.id) return { transactionId: sale.id };
             const rawPayment: any = await bridge.ecr.processPayment(cardPortion.amount, { deviceId: terminal!.deviceId, orderId, reference: `${orderId}:${cardPortion.id}` });
             const tx = extractTransactionDetails(rawPayment);
             if (!tx.success || tx.status !== 'approved' || !tx.transactionId) throw new Error(tx.errorMessage || 'Card payment was not approved');
             return { transactionId: tx.transactionId };
           },
-          recordPayment: (transactionId) => recordPortionPayment(cardPortion, 'terminal', transactionId, terminal!.deviceId),
+          recordPayment: (transactionId) => {
+            if (!isCurrent()) throw new Error('The split payment view changed before card recording');
+            return recordPortionPayment(cardPortion, 'terminal', transactionId, terminal!.deviceId);
+          },
           persistFinancials,
         });
       } catch (error) {
+        if (isPaymentNotSavedError(error)) {
+          // The card was charged and its payment is not saved yet: the portion
+          // is never a chargeable draft again; its record offers Save payment
+          // again and every other portion waits.
+          toast.error(error.message, { duration: PAYMENT_NOT_SAVED_TOAST_MS });
+          updatePortion(portionId, (current) => ({ ...current, status: 'unsaved' }));
+          await unsaved.refresh();
+          return;
+        }
+        if (isPaymentSetAsideError(error)) {
+          // The card was charged and recorded set aside: tell the cashier not
+          // to charge again, and show the order as it now stands.
+          toast.error(error.message, { duration: PAYMENT_SET_ASIDE_TOAST_MS });
+          try {
+            applySplitStateSnapshot(await fetchLatestSplitState(), { resetDraft: true, mode: activeTab });
+          } catch (refreshError) {
+            console.warn('[SplitPaymentModal] Split refresh after a set-aside card failed:', refreshError);
+          }
+          return;
+        }
         console.error('[SplitPaymentModal] Terminal card payment failed:', error);
         updatePortion(portionId, (current) => ({ ...current, status: 'draft', paymentOrigin: 'manual' }));
         toast.error(error instanceof Error ? error.message : t('splitPayment.cardFailed', { defaultValue: 'Card payment failed' }));
         return;
       }
+      if (!isCurrent()) return;
       if (settlement.discountPersistFailed) toast.error(t('splitPayment.discountPersistFailed', { defaultValue: 'Payment recorded, but the discount could not be saved to the order. Review the order total before closing it.' }));
       try {
         if (receiptMode === 'individual') await safePrintSplitReceipt(settlement.paymentId);
@@ -408,13 +644,17 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
         toast.error(error instanceof Error ? error.message : t('splitPayment.failed', 'Split payment failed. Please try again.'));
       }
     } finally {
+      // Ends the claim only while nothing was sent under it.
+      if (ordinaryOwner) releaseOrdinaryOwnerBeforeSend(ordinaryOwner);
       terminalChargeGuard.release(portionId);
       setIsTerminalChargeInFlight(false);
     }
-  }, [activeTab, alreadyPaidAmount, bridge, completeAndClose, ensureLatestOutstanding, getPortion, isReconciliationPending, orderFinancials, orderId, persistFinancials, platformHeld, processingPortionId, receiptMode, recordPortionPayment, resolveReadyTerminal, safePrintSplitReceipt, setPortionMethod, t, updatePortion]);
+  }, [activeTab, alreadyPaidAmount, applySplitStateSnapshot, bridge, collectionScope, completeAndClose, ensureLatestOutstanding, fetchLatestSplitState, getPortion, isOpen, isReconciliationPending, orderFinancials, orderId, ordinaryRefusalText, persistFinancials, platformHeld, processingPortionId, receiptMode, recordPortionPayment, resolveReadyTerminal, safePrintSplitReceipt, setPortionMethod, settleOrdinaryTerminalPortion, t, unsaved, unsavedLocked, updatePortion]);
 
   const handleConfirm = useCallback(async () => {
     if (!canConfirm) return;
+    const startedEpoch = viewEpoch.current;
+    const isCurrent = () => isOpen && viewEpoch.current === startedEpoch;
     const draftPortions = portions.filter((portion) => portion.status === 'draft' && portion.amount > 0.009); if (!draftPortions.length) return;
     // Review round 2 P0: Confirm must hold the SAME synchronous guard as the
     // terminal charge. During a Card tap's pre-flight IPC the portion is still
@@ -422,26 +662,56 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
     // would record the portion as a manual payment while the terminal flow
     // proceeds to charge the card for it a second time.
     if (!terminalChargeGuard.acquire(CONFIRM_SETTLEMENT_GUARD_ID)) { toast.error(t('splitPayment.cardBusy', { defaultValue: 'Another card payment is already in progress' })); return; }
+    // Existing-order guard: claim the order before the first await.
+    let ordinaryOwner: OrdinaryCollectionOwner | null = null;
+    if (collectionScope !== undefined) {
+      const claim = claimOrdinaryCollectionOwner(collectionScope, orderId);
+      if (!claim.claimed) { terminalChargeGuard.release(CONFIRM_SETTLEMENT_GUARD_ID); toast.error(ordinaryRefusalText(claim.code)); return; }
+      ordinaryOwner = claim.owner;
+    }
     setIsProcessing(true);
     try {
+      const pending = await unsaved.refresh();
+      if (pending.length > 0) { toast.error(pendingNotSavedMessage(pending, t, formatCurrency), { duration: PAYMENT_NOT_SAVED_TOAST_MS }); return; }
+      if ((await bridge.payments.getSettlementSnapshot(orderId)).unresolvedDirectSale) {
+        throw new Error(ordinaryRefusalText('DIRECT_SALE_RECONCILIATION_REQUIRED'));
+      }
+      if (!isCurrent()) return;
       await ensureLatestOutstanding(round2(draftPortions.reduce((sum, portion) => sum + portion.amount, 0)), activeTab);
+      if (!isCurrent()) return;
       const portionOrigins = new Map<string, PaymentOrigin>(draftPortions.map((portion) => [portion.id, portion.method === 'card' ? (portion.paymentOrigin || 'manual') : 'manual']));
-      const settlement = await settleDraftPortions(orderFinancials, draftPortions, {
-        recordPayment: (portion) => recordPortionPayment(portion, portionOrigins.get(portion.id) ?? 'manual', portion.transactionRef, portion.terminalDeviceId),
+      const settleDrafts = (onReply?: (raw: unknown, threw: boolean, transactionRef: string | null) => void) => settleDraftPortions(orderFinancials, draftPortions, {
+        recordPayment: async (portion) => {
+          if (!isCurrent()) throw new Error('The split payment view changed before recording');
+          let replied = false;
+          const noteReply = onReply && ((raw: unknown, threw: boolean) => { replied = true; onReply(raw, threw, portion.transactionRef ?? null); });
+          try { return await recordPortionPayment(portion, portionOrigins.get(portion.id) ?? 'manual', portion.transactionRef, portion.terminalDeviceId, noteReply); }
+          catch (error) { if (onReply && !replied) onReply(undefined, true, portion.transactionRef ?? null); throw error; }
+        },
         persistFinancials,
         onPortionSettled: receiptMode === 'individual' ? async (_portion, paymentId) => { await safePrintSplitReceipt(paymentId); } : undefined,
       });
+      const settlement = ordinaryOwner ? await settleOrdinaryDrafts(ordinaryOwner, draftPortions, settleDrafts) : await settleDrafts();
+      if (!isCurrent()) return;
       if (settlement.discountPersistFailures.length > 0) toast.error(t('splitPayment.discountPersistFailed', { defaultValue: 'Payment recorded, but the discount could not be saved to the order. Review the order total before closing it.' }));
       const recordedPortions: SplitPortion[] = draftPortions.map((portion, index) => ({ ...portion, status: 'paid', paymentId: settlement.paymentIds[index], paymentOrigin: portionOrigins.get(portion.id) ?? 'manual' }));
       await completeAndClose(recordedPortions, settlement.paymentIds, settlement.financials.totalAmount, recordedPortions.reduce((sum, portion) => sum + portion.amount, 0));
     } catch (error) {
+      if (isPaymentNotSavedError(error)) {
+        toast.error(error.message, { duration: PAYMENT_NOT_SAVED_TOAST_MS });
+        await unsaved.refresh();
+        try { applySplitStateSnapshot(await fetchLatestSplitState(), { resetDraft: true, mode: activeTab }); } catch (refreshError) { console.warn('[SplitPaymentModal] Split refresh after a charged payment not saved failed:', refreshError); }
+        return;
+      }
       console.error('[SplitPaymentModal] Split confirmation failed:', error);
       toast.error(error instanceof Error ? error.message : t('splitPayment.failed', 'Split payment failed. Please try again.'));
     } finally {
+      // Ends the claim only while nothing was sent under it.
+      if (ordinaryOwner) releaseOrdinaryOwnerBeforeSend(ordinaryOwner);
       terminalChargeGuard.release(CONFIRM_SETTLEMENT_GUARD_ID);
       setIsProcessing(false);
     }
-  }, [activeTab, canConfirm, completeAndClose, ensureLatestOutstanding, orderFinancials, persistFinancials, portions, receiptMode, recordPortionPayment, safePrintSplitReceipt, t]);
+  }, [activeTab, applySplitStateSnapshot, bridge, canConfirm, collectionScope, completeAndClose, ensureLatestOutstanding, fetchLatestSplitState, isOpen, orderFinancials, orderId, ordinaryRefusalText, persistFinancials, portions, receiptMode, recordPortionPayment, safePrintSplitReceipt, settleOrdinaryDrafts, t, unsaved]);
 
   const MethodToggle: React.FC<{ portion: SplitPortion }> = ({ portion }) => {
     const locked = portion.status !== 'draft' || isProcessing || isTerminalChargeInFlight || isReconciliationPending || platformHeld;
@@ -537,6 +807,10 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
       ) : portion.status === 'processing' ? (
         <div className="rounded-2xl border border-slate-400/30 bg-slate-500/10 px-3 py-2 text-xs text-slate-700 dark:text-slate-200">
           {t('splitPayment.waitingForApproval', { defaultValue: 'Waiting for card approval on the payment terminal...' })}
+        </div>
+      ) : portion.status === 'unsaved' ? (
+        <div data-testid={`split-portion-unsaved-${portion.id}`} className="rounded-2xl border border-red-400/40 bg-red-500/10 px-3 py-2 text-xs font-semibold text-red-800 dark:text-red-200">
+          {t('splitPayment.portionNotSaved', { defaultValue: 'Card charged, payment not saved yet. Do not charge again.' })}
         </div>
       ) : (
         <>
@@ -893,6 +1167,15 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
           <PlatformHeldPaymentNotice
             notice={platformHeldNotice}
             showBlockedAction
+            className="flex-shrink-0"
+          />
+          <UnsavedChargedPaymentBanner
+            payments={unsaved.payments}
+            onSaveAgain={async () => {
+              await unsaved.saveAgain();
+              try { applySplitStateSnapshot(await fetchLatestSplitState(), { resetDraft: true, mode: activeTab }); } catch (refreshError) { console.warn('[SplitPaymentModal] Split refresh after Save payment again failed:', refreshError); }
+            }}
+            isSaving={unsaved.isSaving}
             className="flex-shrink-0"
           />
           <div className="flex-shrink-0 text-center">

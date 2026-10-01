@@ -48,6 +48,18 @@ interface RetryItemsResult {
   retried: number;
 }
 
+/** A row a Health "Sync now" made due, with the retry time it had. */
+export interface MadeDueRow {
+  id: string;
+  nextRetryAt: string | null;
+}
+
+/** sync_queue_make_due: the rows made due and the audit entry holding their retry times. */
+export interface MakeDueResult {
+  madeDue: MadeDueRow[];
+  auditId: string | null;
+}
+
 // =============================================
 // SYNC QUEUE BRIDGE
 // =============================================
@@ -152,6 +164,20 @@ export class SyncQueueBridge implements SyncQueue {
     });
     await this.refreshPendingCount();
     return result;
+  }
+
+  /**
+   * Health "Sync now": make these pending rows due now. Only their retry
+   * time changes; the previous times are written to the recovery action log
+   * first (the returned auditId). Rows not waiting out a retry are left alone.
+   */
+  async makeDue(itemIds: string[], issueCode: string): Promise<MakeDueResult> {
+    return this.invokeFn<MakeDueResult>('sync_queue_make_due', { itemIds, issueCode });
+  }
+
+  /** The rows with these ids, as they are now; a row not returned is gone. */
+  async itemsById(itemIds: string[]): Promise<SyncQueueItem[]> {
+    return this.invokeFn<SyncQueueItem[]>('sync_queue_items_by_id', { itemIds });
   }
 
   async listConflicts(limit = 100): Promise<ConflictAuditEntry[]> {

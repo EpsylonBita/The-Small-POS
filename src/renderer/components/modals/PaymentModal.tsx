@@ -1,14 +1,23 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { CreditCard, Banknote, Coins, AlertTriangle, Split, BedDouble, HandCoins } from 'lucide-react';
+import { CreditCard, Banknote, Coins, AlertTriangle, Split, BedDouble, HandCoins, Gift } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { roundMoney } from '@shared/utils/money';
 import { useFeatures } from '../../hooks/useFeatures';
 import { useAcquiredModules, MODULE_IDS } from '../../hooks/useAcquiredModules';
+import {
+  claimOrdinaryCollectionOwner,
+  ordinaryCollectionView,
+  releaseOrdinaryOwnerBeforeSend,
+  type OrdinaryCollectionOwner,
+} from '../../hooks/useOrderStore';
 import { formatMoneyInputFromNumber, formatMoneyInputWithCents, parseMoneyInputValue } from '../../utils/moneyInput';
 import { formatCurrency } from '../../utils/format';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import toast from 'react-hot-toast';
 import { ActivityTracker } from '../../services/ActivityTracker';
+import type { GiftCardTenderEvent } from '../../services/GiftCardCheckoutService';
+import type { GiftCardScope } from '../../services/GiftCardsApiService';
+import { GiftCardTender } from '../payment/GiftCardTender';
 import {
   TipModal,
   type TipRecipientRole,
@@ -51,6 +60,24 @@ export interface PaymentCompletionData {
   existingOrderId?: string;
   existingOrderNumber?: string;
   roomChargeFallback?: boolean;
+  /**
+   * Existing-order cash/card only: the ordinary collection claim this confirm
+   * made. Pass it on unchanged; never claim again, copy, log or persist it.
+   */
+  ordinaryOwner?: OrdinaryCollectionOwner;
+}
+
+/** An existing order this modal collects its outstanding balance for. */
+export interface PaymentModalExistingOrder {
+  orderId: string;            // real local order ID
+  orderSynced: boolean;       // host: supabase id present and sync status synced
+  currency: string | null;    // host: fresh giftCardsApiService.getStatus().currency; null refuses gift
+  scope: GiftCardScope;       // resolved organization + public terminal
+  online: boolean;
+  outstandingCents: number;   // integer cents of the current outstanding balance = fixed full gift amount
+  giftEnabled: boolean;       // host decision: only the ordinary outstanding flow offers gift
+  giftReceiptRecovery?: boolean; // host: reopen a gift-paid order's own Tender for its receipt only
+  onGiftEvent?: (event: GiftCardTenderEvent) => void;
 }
 
 export const isRoomChargeFallbackPrompt = (
@@ -79,9 +106,14 @@ interface PaymentModalProps {
   onSplitPayment?: (tipSelection: TipSelection | null) => void;
   roomChargeContext?: RoomChargeContext | null;
   allowTips?: boolean;
+  /**
+   * Collect the outstanding balance of this existing order: cash/card confirms
+   * claim its ordinary collection, and the host may offer a fixed full gift card.
+   */
+  existingOrder?: PaymentModalExistingOrder;
 }
 
-type ModalStep = 'minimum_warning' | 'payment_selection' | 'cash_input';
+type ModalStep = 'minimum_warning' | 'payment_selection' | 'cash_input' | 'gift';
 
 type CashChangeBreakdownItem = {
   value: number;
@@ -197,6 +229,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   onSplitPayment,
   roomChargeContext = null,
   allowTips = true,
+  existingOrder,
 }) => {
   const { t } = useTranslation();
   const { isFeatureEnabled, isMobileWaiter, loading: isFeatureLoading } = useFeatures();
@@ -210,15 +243,35 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   const [showTipModal, setShowTipModal] = useState(false);
   const [tipSelection, setTipSelection] = useState<TipSelection | null>(null);
   const cashInputRef = useRef<HTMLInputElement | null>(null);
+  // This modal's own existing-order cash/card attempt holds the order's claim.
+  const ordinaryAttemptRef = useRef(false);
+  const wasOpenRef = useRef(false);
   const canUseRoomCharge =
     !roomChargeFallback &&
     Boolean(roomChargeContext?.roomId && roomChargeContext?.activeFolioId) &&
     hasModule(MODULE_IDS.ROOMS) &&
     hasModule(MODULE_IDS.ORDERS) &&
     hasModule('guest_billing');
+  // The gift card pays the whole outstanding balance, fixed in integer cents,
+  // and never joins a room-charge flow or a tip it could not collect.
+  const giftOutstandingCents = existingOrder?.outstandingCents;
+  const hasGiftAmount =
+    typeof giftOutstandingCents === 'number' &&
+    Number.isSafeInteger(giftOutstandingCents) &&
+    giftOutstandingCents > 0;
+  const canUseGiftCard =
+    Boolean(existingOrder?.giftEnabled) &&
+    hasModule(MODULE_IDS.GIFT_CARDS) &&
+    hasGiftAmount &&
+    !roomChargeContext &&
+    !roomChargeFallback &&
+    !(tipSelection?.amount && tipSelection.amount > 0);
+  // Receipt reentry for an order a gift card already paid: the modal opens on
+  // that order's own Tender at a zero amount and offers no way to collect money.
+  const giftReceiptRecovery = Boolean(existingOrder?.giftEnabled && existingOrder.giftReceiptRecovery);
   const hasAnyPaymentMethod = canUseCash || canUseCard || canUseRoomCharge;
   const paymentOptionCount =
-    2 + (onSplitPayment ? 1 : 0) + (canUseRoomCharge ? 1 : 0);
+    2 + (onSplitPayment ? 1 : 0) + (canUseRoomCharge ? 1 : 0) + (canUseGiftCard ? 1 : 0);
   const paymentGridClass =
     paymentOptionCount >= 4
       ? 'grid-cols-2'
@@ -247,8 +300,12 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
 
   // Determine initial step based on minimum order check
   const [currentStep, setCurrentStep] = useState<ModalStep>(
-    isBelowMinimum ? 'minimum_warning' : 'payment_selection'
+    giftReceiptRecovery ? 'gift' : isBelowMinimum ? 'minimum_warning' : 'payment_selection'
   );
+  const currentStepRef = useRef(currentStep);
+  currentStepRef.current = currentStep;
+  // Gift step: the Tender pays a fixed amount, never an editable one.
+  const giftFixedAmountCents = hasGiftAmount ? (giftOutstandingCents as number) : 0;
 
   const showDeliveryFee = orderType === 'delivery';
   const subtotalBeforeDiscount = Math.max(0, orderTotal + discountAmount - (showDeliveryFee ? deliveryFee : 0));
@@ -313,8 +370,16 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
 
   // Reset step when modal opens
   useEffect(() => {
+    const reopened = isOpen && !wasOpenRef.current;
+    wasOpenRef.current = isOpen;
     if (isOpen) {
-      setCurrentStep(isBelowMinimum ? 'minimum_warning' : 'payment_selection');
+      // Only the user or the host leaves the gift step: a processing flag
+      // change while open keeps the Tender and its pending receipt action.
+      if (!reopened && currentStepRef.current === 'gift') {
+        setIsProcessingPayment(isProcessing);
+        return;
+      }
+      setCurrentStep(giftReceiptRecovery ? 'gift' : isBelowMinimum ? 'minimum_warning' : 'payment_selection');
       setIsProcessingPayment(isProcessing);
       setCashReceived('');
       setSelectedPaymentMethod(null);
@@ -322,7 +387,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       setShowTipModal(false);
       setTipSelection(null);
     }
-  }, [isOpen, isProcessing, isBelowMinimum]);
+  }, [isOpen, isProcessing, isBelowMinimum, giftReceiptRecovery]);
 
   useEffect(() => {
     if (!isOpen || currentStep !== 'cash_input') return;
@@ -336,6 +401,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
 
   // Handle payment method selection
   const handlePaymentMethodSelect = (method: PaymentMethodSelection) => {
+    if (giftReceiptRecovery) return;
     if (method === 'room_charge' && !canUseRoomCharge) return;
     setSelectedPaymentMethod(method);
 
@@ -348,8 +414,37 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     }
   };
 
+  const ordinaryClaimRefusalText = (code: string): string =>
+    code === 'GIFT_CARD_TERMINAL_SCOPE_REQUIRED'
+      ? t(
+          'giftCardCheckout.refusal.scope',
+          'This terminal has no confirmed organization or terminal identity. Pair the POS again.',
+        )
+      : t('giftCardCheckout.refusal.admission', 'Earlier gift card attempts must be checked first.');
+
+  const handleGiftCardSelect = () => {
+    if (!canUseGiftCard || isProcessingPayment) return;
+    setSelectedPaymentMethod(null);
+    setCurrentStep('gift');
+  };
+
   // Simple payment handler - just method, no amount input needed
   const handleSimplePayment = async (method: PaymentMethodSelection) => {
+    // A receipt reentry never collects money.
+    if (giftReceiptRecovery) return;
+    // Existing-order cash/card: claim the order before any state change or
+    // await, so a gift debit or another collection cannot start meanwhile.
+    let ordinaryOwner: OrdinaryCollectionOwner | undefined;
+    if (existingOrder && (method === 'cash' || method === 'card')) {
+      const claim = claimOrdinaryCollectionOwner(existingOrder.scope, existingOrder.orderId);
+      if (!claim.claimed) {
+        // A repeated tap during this modal's own attempt stays silent.
+        if (!ordinaryAttemptRef.current) toast.error(ordinaryClaimRefusalText(claim.code));
+        return;
+      }
+      ordinaryOwner = claim.owner;
+      ordinaryAttemptRef.current = true;
+    }
     setIsProcessingPayment(true);
     try {
       // Intentional 500ms delay: gives the user visible feedback that the
@@ -383,6 +478,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
               roomChargeFallback: true,
             }
           : {}),
+        ...(ordinaryOwner ? { ordinaryOwner } : {}),
       };
 
       const completionResult = await onPaymentComplete(paymentPayload);
@@ -437,6 +533,14 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     } catch (error) {
       toast.error(t('modals.payment.paymentFailed'));
     } finally {
+      if (ordinaryOwner) {
+        ordinaryAttemptRef.current = false;
+        // Nothing was sent under a claim that is still only held, so end it.
+        // Once a send started, only its own reconciliation settles the owner.
+        if (ordinaryCollectionView(ordinaryOwner)?.phase === 'held') {
+          releaseOrdinaryOwnerBeforeSend(ordinaryOwner);
+        }
+      }
       setIsProcessingPayment(false);
     }
   };
@@ -470,6 +574,11 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   };
 
   const handleBackToPaymentSelection = () => {
+    // A receipt reentry has no payment selection to return to.
+    if (giftReceiptRecovery) {
+      handleClose();
+      return;
+    }
     setCurrentStep('payment_selection');
     setCashReceived('');
     setSelectedPaymentMethod(null);
@@ -478,7 +587,8 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   const handleClose = () => {
     // Prevent closing while a payment is actively processing
     if (isProcessingPayment) return;
-    resetModal();
+    // A receipt reentry keeps only its Tender until the host closes the modal.
+    if (!giftReceiptRecovery) resetModal();
     onClose();
   };
 
@@ -532,6 +642,13 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
           <button onClick={handleCashPaymentComplete} disabled={!hasEnoughCash || isProcessingPayment}
             className={`liquid-glass-modal-button flex-1 font-medium ${cashInputVisualClasses.completeButton} ${!hasEnoughCash || isProcessingPayment ? 'cursor-not-allowed opacity-50' : ''}`}>
             {isProcessingPayment ? t('modals.payment.processing') : t('modals.payment.completeCash', 'Complete')}
+          </button>
+        </div>
+      ) : currentStep === 'gift' ? (
+        <div className="liquid-glass-modal-border flex gap-3 border-t px-6 py-4">
+          <button type="button" onClick={handleBackToPaymentSelection} disabled={isProcessingPayment}
+            className="liquid-glass-modal-button flex-1 font-medium liquid-glass-modal-text">
+            {t('common.actions.back', 'Back')}
           </button>
         </div>
       ) : undefined}
@@ -761,6 +878,32 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                   </button>
                 )}
 
+                {/* Gift Card Option — existing orders only, for the whole outstanding balance */}
+                {canUseGiftCard && (
+                  <button
+                    type="button"
+                    onClick={handleGiftCardSelect}
+                    disabled={isProcessingPayment}
+                    className={`group relative flex flex-col items-center justify-center ${paymentOptionPaddingClass} rounded-2xl border-2 transition-all duration-300 overflow-hidden
+                      ${isProcessingPayment
+                        ? 'border-gray-400/20 bg-gray-500/5 opacity-50 cursor-not-allowed'
+                        : 'border-violet-400/30 bg-gradient-to-br from-violet-500/10 to-violet-600/5 active:scale-[0.98]'
+                      }`}
+                  >
+                    <Gift
+                      className={`w-20 h-20 mb-3 transition-all duration-300
+                        ${isProcessingPayment ? 'text-gray-400' : 'text-violet-400'}`}
+                      strokeWidth={1.5}
+                    />
+
+                    <span className={`${paymentMethodLabelBaseClass}
+                      ${isProcessingPayment ? 'text-gray-400' : 'text-violet-400'}`}
+                    >
+                      {t('giftCardCheckout.title', 'Gift card')}
+                    </span>
+                  </button>
+                )}
+
                 {/* Split Option — shown only when onSplitPayment callback is provided */}
                 {onSplitPayment && (
                   <button
@@ -905,6 +1048,21 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
             )}
 
           </div>
+        )}
+
+        {/* Step: Gift card (existing order). The Tender owns the debit and its
+            receipt action; it stays mounted after a payment until the user or
+            the host closes it, and this modal never completes a gift payment. */}
+        {currentStep === 'gift' && existingOrder && (
+          <GiftCardTender
+            orderId={existingOrder.orderId}
+            orderSynced={existingOrder.orderSynced}
+            currency={existingOrder.currency}
+            scope={existingOrder.scope}
+            online={existingOrder.online}
+            fixedAmountCents={giftFixedAmountCents}
+            onEvent={existingOrder.onGiftEvent}
+          />
         )}
       </div>
     </LiquidGlassModal>

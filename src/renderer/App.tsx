@@ -1,10 +1,15 @@
+import { CustomerDisplayProvider } from './pages/CustomerDisplayPage';
+import { KitchenDisplayProvider } from './pages/KitchenDisplayPage';
+import { LocalPreparationScopeSync } from './hooks/useLocalPreparation';
 import React, { lazy, Suspense, useState, useEffect, useMemo, useCallback, useRef } from "react";
-import { HashRouter, Routes, Route } from "react-router-dom";
+import { HashRouter } from "react-router-dom";
 import { Toaster, toast } from "react-hot-toast";
 import { AlertTriangle } from "lucide-react";
 import { ThemeProvider } from "./contexts/theme-context";
 import { ShiftProvider, useShift } from "./contexts/shift-context";
 import { I18nProvider, useI18n } from "./contexts/i18n-context";
+import { I18nextProvider } from 'react-i18next';
+import displayI18n from '../lib/i18n';
 import { ModuleProvider } from "./contexts/module-context";
 import { BarcodeScannerProvider } from "./contexts/barcode-scanner-context";
 import LoginPage from "./pages/LoginPage";
@@ -12,6 +17,8 @@ import { ErrorBoundary } from "./components/error/ErrorBoundary";
 import { SyncNotificationManager } from "./components/SyncNotificationManager";
 import { CaptureNotificationManager } from "./components/CaptureNotificationManager";
 import { CancellationNoticeManager } from "./components/notices/CancellationNoticeManager";
+import { IncomingOrderAlertManager } from "./components/notices/IncomingOrderAlertManager";
+import { AppRoutes } from "./AppRoutes";
 import { SyncStatusIndicator } from "./components/SyncStatusIndicator";
 import { CallerIdCustomerSearchModalHost } from "./components/callerid/CallerIdCustomerSearchModalHost";
 import { DeferredModal } from "./components/ui/DeferredModal";
@@ -41,6 +48,7 @@ import { useBlockerRegistration } from "./hooks/useBlockerRegistration";
 import { useFreezeWatchdog } from "./hooks/useFreezeWatchdog";
 import { useMenuVersionPolling } from "./hooks/useMenuVersionPolling";
 import { useAppEvents } from "./hooks/useAppEvents";
+import { invalidateFinancialOpening } from "./lib/financial-opening";
 import {
   useCallerIdNotifications,
   type CallerIdCustomerSearchRequest,
@@ -79,8 +87,6 @@ import {
 
 // Route code stays local in the Tauri bundle but is evaluated only when used.
 // Background listeners remain outside these Suspense boundaries.
-const RefactoredMainLayout = lazy(() => import('./components/RefactoredMainLayout'));
-const NewOrderPage = lazy(() => import('./pages/NewOrderPage'));
 const CustomerDisplayPage = lazy(() => import('./pages/CustomerDisplayPage'));
 const KitchenDisplayPage = lazy(() => import('./pages/KitchenDisplayPage'));
 const OnboardingPage = lazy(() => import('./pages/OnboardingPage'));
@@ -107,7 +113,7 @@ const PARITY_QUEUE_REFRESH_INTERVAL_MS = 15_000;
 const PARITY_SYNC_RETRY_INTERVAL_MS = 30_000;
 const TOAST_CONTAINER_STYLE: React.CSSProperties = { zIndex: 2147483647 };
 
-type ConnectionSettingsSection = 'recovery' | null;
+type ConnectionSettingsSection = 'recovery' | 'printing' | null;
 type ExternalDisplayKind = 'customer_display' | 'kitchen_display';
 
 function resolveExternalDisplayKind(hash: string): ExternalDisplayKind | null {
@@ -332,6 +338,7 @@ export function ConfigGuard({ children }: { children: React.ReactNode }) {
         // If not configured, ensure we clear any stale session data
         if (!isConfiguredValue) {
           console.log('Terminal not configured, clearing stale session data');
+          invalidateFinancialOpening();
           void clearSecureSession();
           clearTerminalCredentialCache();
         } else {
@@ -406,6 +413,7 @@ export function ConfigGuard({ children }: { children: React.ReactNode }) {
   // Listen for app:reset event (remote wipe / terminal deleted)
   useEffect(() => {
     const handleReset = (data: any) => {
+      invalidateFinancialOpening();
       const reason = data?.reason || 'unknown';
       console.log('App reset triggered:', reason);
 
@@ -440,6 +448,8 @@ export function ConfigGuard({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     const handleTerminalAuthPaused = (data: any) => {
+      // Paused terminal auth always ends dedicated financial authority.
+      invalidateFinancialOpening();
       // A failed onboarding request reports its own error and retry action.
       // An auth-pause event is not evidence that initial setup succeeded.
       if (configuredState.current !== true) return;
@@ -910,8 +920,14 @@ function AppContent() {
       }
 
       if (detail.screen === 'connectionSettings') {
+        // 'printing': the Health view's printer action (printer settings and
+        // the print queue).
         const requestedSection =
-          detail.params?.section === 'recovery' ? 'recovery' : null;
+          detail.params?.section === 'recovery'
+            ? 'recovery'
+            : detail.params?.section === 'printing'
+              ? 'printing'
+              : null;
         openConnectionSettings(requestedSection);
         return;
       }
@@ -989,6 +1005,7 @@ function AppContent() {
   // Use custom hook for app events
   const { isShuttingDown, shutdownState } = useAppEvents({
     onLogout: () => {
+      invalidateFinancialOpening();
       stopRealtimeAuthRef.current();
       void clearSecureSession();
       setUser(null);
@@ -1344,11 +1361,13 @@ function AppContent() {
 
                 if (!validationResult || !validationResult.valid) {
                   console.warn('Session invalid or expired, clearing local storage');
+                  invalidateFinancialOpening();
                   void clearSecureSession();
                   return;
                 }
               } catch (err) {
                 console.error('Session validation failed:', err);
+                invalidateFinancialOpening();
                 void clearSecureSession();
                 return;
               }
@@ -1383,6 +1402,7 @@ function AppContent() {
 
           } catch (err) {
             console.error('Error restoring session:', err);
+            invalidateFinancialOpening();
             void clearSecureSession();
           }
         }
@@ -1486,6 +1506,8 @@ function AppContent() {
 
   // Logout function
   const handleLogout = async () => {
+    // Fence dedicated financial authority before any await; shift/EOD state stays.
+    invalidateFinancialOpening();
     stopRealtimeAuthRef.current();
     try {
       await bridge.auth.logout();
@@ -1610,43 +1632,17 @@ function AppContent() {
 
 
             <Suspense fallback={<PageLoading />}>
-              <Routes>
-                <Route
-                  path="/"
-                  element={
-                    <RefactoredMainLayout
-                      onLogout={handleLogout}
-                      onOpenConnectionSettings={openConnectionSettings}
-                    />
-                  }
-                />
-                <Route
-                  path="/dashboard"
-                  element={
-                    <RefactoredMainLayout
-                      onLogout={handleLogout}
-                      onOpenConnectionSettings={openConnectionSettings}
-                    />
-                  }
-                />
-                <Route
-                  path="/new-order"
-                  element={
-                    <PageLoadMotion animationKey="new-order" className="h-full min-h-0">
-                      <NewOrderPage />
-                    </PageLoadMotion>
-                  }
-                />
-                <Route
-                  path="*"
-                  element={
-                    <RefactoredMainLayout
-                      onLogout={handleLogout}
-                      onOpenConnectionSettings={openConnectionSettings}
-                    />
-                  }
-                />
-              </Routes>
+              {/* The local KDS / Customer Display providers wrap the routes
+                  but stay outside their error boundary (AppRoutes): a page
+                  that crashes is replaced by the fallback without resetting
+                  the connected screens. */}
+              <LocalPreparationScopeSync />
+              <KitchenDisplayProvider><CustomerDisplayProvider>
+              <AppRoutes
+                onLogout={handleLogout}
+                onOpenConnectionSettings={openConnectionSettings}
+              />
+              </CustomerDisplayProvider></KitchenDisplayProvider>
             </Suspense>
 
             <CallerIdCustomerSearchModalHost
@@ -1699,6 +1695,16 @@ function AppContent() {
                 hides immediately when `user` clears on logout. */}
             <CancellationNoticeManager enabled={Boolean(user)} />
 
+            {/* Incoming platform / customer orders waiting for accept /
+                decline. Mounted here, beside the routes and never inside
+                one, so no navigation unmounts it: it rings and shows on
+                every page, /new-order included (that route renders without
+                RefactoredMainLayout). The routes carry their own error
+                boundary (AppRoutes), so a page that crashes cannot reach the
+                boundary around this whole tree and unmount it either. Off
+                while logged out and on waiter terminals. */}
+            <IncomingOrderAlertManager enabled={Boolean(user)} />
+
             <PortaledToaster
               position="top-center"
               containerStyle={TOAST_CONTAINER_STYLE}
@@ -1723,6 +1729,14 @@ function AppContent() {
 }
 
 function App() {
+  // A connected display consumes only the owner's local snapshot. Do not mount the
+  // POS bootstrap/providers (and their independent sync services) in this window.
+  const connectedDisplay = resolveExternalDisplayKind(window.location.hash);
+  if (connectedDisplay) {
+    return <I18nextProvider i18n={displayI18n}><ErrorBoundary><ThemeProvider>
+      <Suspense fallback={<PageLoading />}>{connectedDisplay === 'kitchen_display' ? <KitchenDisplayPage /> : <CustomerDisplayPage />}</Suspense>
+    </ThemeProvider></ErrorBoundary></I18nextProvider>;
+  }
   return (
     <I18nProvider>
       <ConfigGuard>

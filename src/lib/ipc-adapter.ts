@@ -31,6 +31,12 @@ import type { RepairBridge } from "../renderer/features/repairs/contracts";
 import type { CustomerMessagingBridge } from "../renderer/features/customer-messaging/contracts";
 import type {
   AuthSetupPinRequest,
+  GiftCardFiscalDisposition,
+  GiftCardFiscalReadinessRequest,
+  GiftCardOrderRequest,
+  GiftCardReconcileOrderResponse,
+  GiftCardRedeemForOrderRequest,
+  GiftCardRedeemForOrderResponse,
   PrivilegedActionConfirmRequest,
   PrivilegedActionConfirmResponse,
   ResetStartResponse,
@@ -63,6 +69,43 @@ import type {
   SyncRemoveInvalidOrdersResponse,
   SyncValidatePendingOrdersResponse,
   TerminalConfigGetSettingRequest,
+  ShiftFinancialClosingAuthorizeRequest,
+  ShiftFinancialClosingAuthorizeResponse,
+  ShiftFinancialClosingListPendingRequest,
+  ShiftFinancialClosingListPendingResponse,
+  ShiftFinancialClosingRetryRequest,
+  ShiftFinancialClosingRetryResponse,
+  ShiftFinancialClosingStatusRequest,
+  ShiftFinancialClosingStatusResponse,
+  ShiftFinancialOpeningAuthorizeRequest,
+  ShiftFinancialOpeningBeginRequest,
+  ShiftFinancialOpeningClearAuthorizationResponse,
+  ShiftFinancialOpeningResponse,
+  ShiftFinancialOpeningStatusRequest,
+  ShiftFinancialOpeningStatusResponse,
+  GiftFundingAttemptRequest,
+  GiftFundingAttemptResponse,
+  GiftFundingAuthorizeManagerRequest,
+  GiftFundingAuthorizeManagerResponse,
+  GiftFundingAvailabilityRequest,
+  GiftFundingAvailabilityResponse,
+  GiftFundingCancelRequest,
+  GiftReturnAuthorizeRequest,
+  GiftReturnAuthorizeResponse,
+  GiftReturnBeginRequest,
+  GiftReturnRecoverRequest,
+  GiftReturnResponse,
+  GiftReturnStatusRequest,
+  GiftReturnStatusResponse,
+  GiftFundingCloseBlockerRequest,
+  GiftFundingCloseBlockerResponse,
+  GiftFundingCompleteRequest,
+  GiftFundingGrantRequest,
+  GiftFundingPrepareRequest,
+  GiftFundingRefreshDrawerRequest,
+  GiftFundingRefreshDrawerResponse,
+  GiftFundingStatusRequest,
+  GiftFundingStatusResponse,
   TerminalRuntimeConfig,
   ZReportSubmitResponse,
 } from "./ipc-contracts";
@@ -72,6 +115,20 @@ import type {
 // ============================================================================
 
 // -- Generic -----------------------------------------------------------------
+
+/**
+ * The answer of `orders.notifyPlatformReady` (item D8, 01/10/2026). An order
+ * already past Ready answers `alreadyClosed` and an order cancelled or
+ * refunded answers `cancelled`; in both cases nothing was written, queued or
+ * sent to the platform.
+ */
+export interface PlatformReadyResult {
+  success: boolean;
+  status?: string;
+  alreadyClosed?: boolean;
+  cancelled?: boolean;
+  error?: string;
+}
 
 export interface IpcResult<T = unknown> {
   success: boolean;
@@ -134,18 +191,35 @@ export interface ReceiptSamplePreviewResponse {
 }
 
 export interface ExternalDisplayInfo {
+  /** Current enumeration position; not an identity. */
   index: number;
-  id: number;
+  /** Opaque physical monitor identity (name, position, size, scale). */
+  id: string;
   name: string;
   scaleFactor?: number;
   position?: { x: number; y: number };
   size?: { width: number; height: number };
   workArea?: { x: number; y: number; width: number; height: number };
+  /** The OS primary monitor. */
+  isPrimary?: boolean;
+  /** The monitor showing the cashier POS window. */
+  hostsPos?: boolean;
+  /** Not the cashier's monitor: a valid external screen, including an external OS primary. */
+  external?: boolean;
+  /** External and not reserved by any projection. */
+  available?: boolean;
+  /** Content opening, running or closing on this monitor. */
+  occupiedBy?: string | null;
 }
 
 export interface ExternalDisplayPresentation {
   contentType: "customer_display" | "kitchen_display" | string;
   label?: string;
+  /** Reserved monitor; it stays occupied until the window is destroyed. */
+  displayId?: string;
+  /** Opaque token of the latest successful open of this content. */
+  token?: string;
+  state?: "opening" | "active" | "closing";
 }
 
 export interface ExternalDisplayCapabilities {
@@ -153,21 +227,52 @@ export interface ExternalDisplayCapabilities {
   supported: boolean;
   displays: ExternalDisplayInfo[];
   activePresentations?: ExternalDisplayPresentation[];
+  occupiedDisplayIds?: string[];
+  primaryDisplayId?: string | null;
+  posDisplayId?: string | null;
   error?: string;
 }
 
 export interface ExternalDisplayOpenParams {
   contentType: "customer_display" | "kitchen_display" | string;
+  /** Current owned presentation token; omitted only when starting content without a lease. */
+  expectedToken?: string;
+  /** Opaque id from the capability list; omitted for the first free external screen. */
+  displayId?: string;
+  /** Legacy explicit index, validated against the monitors connected now. */
   displayIndex?: number;
   display_index?: number;
 }
 
 export interface ExternalDisplayOpenResult extends IpcResult {
   supported?: boolean;
-  activeDisplayId?: number;
+  /** Refusal reason, e.g. display_occupied, display_not_found or no_external_display. */
+  code?: string;
+  /** Presentation token for token-aware cleanup of this open. */
+  token?: string;
+  displayId?: string;
+  activeDisplayId?: string;
+  /** The content already ran on this screen; only its token changed. */
+  reused?: boolean;
+  occupiedBy?: string | null;
   contentType?: string;
   label?: string;
   display?: ExternalDisplayInfo;
+}
+
+export interface ExternalDisplayCloseParams {
+  contentType: "customer_display" | "kitchen_display" | string;
+  /** Closes only this presentation; without it the content stops. */
+  token?: string;
+}
+
+export interface ExternalDisplayCloseResult extends IpcResult {
+  contentType?: string;
+  label?: string;
+  closed?: boolean;
+  /** The token no longer named the running presentation; nothing closed. */
+  stale?: boolean;
+  activePresentations?: ExternalDisplayPresentation[];
 }
 
 // -- Auth / Staff Auth -------------------------------------------------------
@@ -509,12 +614,22 @@ function buildDiagnosticsExportArgs(
     return [];
   }
 
-  const payload: Record<string, boolean> = {};
+  const payload: Record<string, unknown> = {};
   if (typeof options.includeLogs === "boolean") {
     payload.includeLogs = options.includeLogs;
   }
   if (typeof options.redactSensitive === "boolean") {
     payload.redactSensitive = options.redactSensitive;
+  }
+  // The Health view snapshot (shared buildHealthView) becomes the bundle's
+  // health_view.json. Only an object is a snapshot, as on Android.
+  const healthView: unknown = options.healthView;
+  if (
+    typeof healthView === "object" &&
+    healthView !== null &&
+    !Array.isArray(healthView)
+  ) {
+    payload.healthView = healthView;
   }
 
   return Object.keys(payload).length ? [payload] : [];
@@ -1000,6 +1115,27 @@ export interface PaymentSettlementSnapshot {
   outstandingAmount: number;
   completedPayments: PaymentSettlementRow[];
   generation: string;
+  /** Native exact-original direct EFT result; false means manual reconciliation. */
+  unresolvedDirectSale?: {
+    recoverable: boolean;
+    requiresReconciliation?: boolean;
+    id?: string;
+    deviceId?: string;
+    amount?: number;
+    amountCents?: number;
+    currency?: string;
+    status?: string;
+    terminalReference?: string | null;
+    authorizationCode?: string | null;
+    cardType?: string | null;
+    cardLastFour?: string | null;
+  } | null;
+  /**
+   * Why the till would refuse to cancel this order (founder rule 30/09 and
+   * 01/10/2026), asked before the cancel reason; null when it may be
+   * cancelled or the ledger could not be read. Absent on older tills.
+   */
+  cancelRefusal?: 'ORDER_HAS_PAYMENTS' | 'ORDER_PAYMENT_NOT_RECORDED' | null;
 }
 
 export interface RecordPaymentFiscalCheckout {
@@ -1023,6 +1159,111 @@ export interface RecordPaymentResult extends IpcResult {
   requiresReconciliation?: boolean;
   fiscalCheckout?: RecordPaymentFiscalCheckout;
   settlement?: Omit<PaymentSettlementSnapshot, "success" | "orderId">;
+  /**
+   * `PAYMENT_SET_ASIDE_FOR_REVIEW`: an approved card found the order already
+   * covered. It was recorded set aside for a manager to give back and is not
+   * counted; it is NOT a collection (fix review 30/09/2026).
+   */
+  errorCode?: string;
+  paymentSetAside?: boolean;
+  /** `order_already_covered` or `exceeds_amount_due`. */
+  reason?: string;
+  /** What was still due when it was set aside (`exceeds_amount_due`). */
+  amountDue?: number;
+  /**
+   * `PAYMENT_NOT_SAVED`: the card was charged but the payment could not be
+   * saved on this till yet (kept as `unsavedPayment`, the Z holds, "Save
+   * payment again" replays it). `PAYMENT_NOT_SAVED_PENDING`: a new tender was
+   * refused because a charged payment of the order is not saved; nothing was
+   * charged. Never a generic failure (fix review 30/09/2026).
+   */
+  paymentNotSaved?: boolean;
+  amountCents?: number;
+  unsavedPayment?: UnsavedChargedPaymentSummary;
+  unsavedPayments?: UnsavedChargedPaymentSummary[];
+}
+
+/** A card payment this till charged and could not save yet. */
+export interface UnsavedChargedPaymentSummary {
+  idempotencyKey: string;
+  orderId: string;
+  method: string;
+  amount: number;
+  amountCents: number;
+  currency: string;
+  transactionRef?: string | null;
+  /**
+   * `single`, `split_portion`, `collect_outstanding` or `new_order_checkout`
+   * (a card charged at new-order checkout whose order is not saved yet; its
+   * `orderId` is then the checkout's client request id).
+   */
+  kind: string;
+  /** When the terminal approved it (RFC 3339). */
+  capturedAt: string;
+  attempts: number;
+  /** False after a refusal no save can change: a manager resolves it on the Z. */
+  canSaveAgain: boolean;
+}
+
+export interface ListUnsavedPaymentsResult {
+  success: boolean;
+  payments: UnsavedChargedPaymentSummary[];
+}
+
+export interface SaveUnsavedPaymentsParams {
+  orderId?: string;
+  idempotencyKey?: string;
+}
+
+export interface SaveUnsavedPaymentsResult {
+  success: boolean;
+  saved: number;
+  setAside: RecordPaymentResult[];
+  unsaved: UnsavedChargedPaymentSummary[];
+  results: RecordPaymentResult[];
+}
+
+export interface ResolveUnsavedPaymentParams {
+  idempotencyKey: string;
+  outcome?: "returned_to_customer";
+  /** The staff member confirming it (the checked-in cashier or manager). */
+  resolvedBy?: string | null;
+}
+
+export interface ResolveUnsavedPaymentResult {
+  success: boolean;
+  idempotencyKey: string;
+  orderId?: string | null;
+  outcome: "returned_to_customer";
+  /** `saved`: its payment row exists after all, nothing to give back. */
+  result: "resolved" | "already_resolved" | "saved" | "not_found";
+  resolvedAt: string;
+  /** Charged payments not saved left on this till, read after the write. */
+  remainingUnsavedPayments: number;
+}
+
+export interface ResolveSetAsidePaymentParams {
+  paymentId: string;
+  outcome?: "returned_to_customer";
+  /** The staff member confirming it (the checked-in cashier or manager). */
+  resolvedBy?: string | null;
+}
+
+export interface ResolveSetAsidePaymentResult {
+  success: boolean;
+  paymentId: string;
+  orderId: string;
+  outcome: "returned_to_customer";
+  alreadyResolved: boolean;
+  resolvedAt: string;
+  /** Unresolved set-aside payments left on this terminal, read after the write. */
+  remainingSetAsidePayments: number;
+}
+
+export interface CancelOrderWithApprovalParams {
+  orderId: string;
+  /** Why the order is cancelled: required, kept on the order and in the audit entry. */
+  reason: string;
 }
 
 export interface ResolvePaymentBlockerParams {
@@ -1030,6 +1271,13 @@ export interface ResolvePaymentBlockerParams {
   method: "cash" | "card";
   staffShiftId?: string;
   staffId?: string;
+  /**
+   * The outstanding amount the operator confirmed, in cents (30/09/2026).
+   * The till keys the record `z-record:<order>:<cents>` and refuses it when
+   * the balance changed since. The command needs the cash-drawer approval
+   * (cashier or manager shift + fresh PIN); nothing is ever charged.
+   */
+  amountCents?: number;
 }
 
 export interface UpdatePaymentMethodResult {
@@ -1049,6 +1297,8 @@ export interface EditSettlementCompletedPayment {
   staffShiftId?: string | null;
   refundedAmount: number;
   remainingRefundable: number;
+  /** The delivery platform's settlement row (shared rule R1): never refunded. */
+  platformSettlement?: boolean;
 }
 
 export interface OrderEditSettlementPreview {
@@ -1061,7 +1311,14 @@ export interface OrderEditSettlementPreview {
   isGhostOrder: boolean;
   originalTotal: number;
   nextTotal: number;
+  /** Everything the order proved: local rows plus money its status proved
+   * that no local row holds (the collect prompt is measured against it). */
   paidTotal: number;
+  /** Money the local payment rows hold. */
+  ledgerPaidTotal?: number;
+  /** The refund due when `requiredAction` is `refund`: what the local rows
+   * hold beyond the new total (never proven-but-missing money). */
+  refundAmount?: number;
   delta: number;
   paymentStatus: string;
   paymentMethod: string;
@@ -1078,13 +1335,20 @@ export interface OrderEditSettlementPreview {
       cashToReturn: number;
     } | null;
   };
+  /** Who hands a cash refund back by the till's rule (shared rule R2). */
+  cashHandlerByRule?: "cashier_drawer" | "driver_shift";
 }
 
 export interface OrderEditSettlementRefund {
   paymentId: string;
   amount: number;
   reason: string;
-  refundMethod?: "cash" | "card";
+  /** The tender the refund names (shared rule R5). */
+  refundMethod?: "cash" | "card" | "other";
+  /**
+   * Ignored by the till: a cash refund's handler is its rule (shared rule
+   * R2). Kept so older callers still type-check.
+   */
   cashHandler?: "cashier_drawer" | "driver_shift";
   staffId?: string;
   staffShiftId?: string;
@@ -1526,8 +1790,14 @@ export interface PlatformBridge {
       driverId: string,
       notes?: string,
     ): Promise<IpcResult>;
+    /**
+     * Cancel an order that still owes money, with a reason (item D1,
+     * 30/09/2026): needs the cash-drawer approval (cashier or manager shift
+     * + fresh PIN) and writes an audit entry. Nothing is charged.
+     */
+    cancelWithApproval(params: CancelOrderWithApprovalParams): Promise<IpcResult>;
     resetToActive(orderId: string): Promise<IpcResult>;
-    notifyPlatformReady(orderId: string): Promise<IpcResult>;
+    notifyPlatformReady(orderId: string): Promise<PlatformReadyResult>;
     updatePreparation(
       orderId: string,
       stage: string,
@@ -1568,6 +1838,26 @@ export interface PlatformBridge {
       voidedBy?: string,
       staffShiftId?: string,
     ): Promise<IpcResult>;
+    /**
+     * "Money given back to the customer" for a payment set aside as a
+     * possible duplicate. Needs the cash-drawer PIN confirmation.
+     */
+    resolveSetAsidePayment(
+      params: ResolveSetAsidePaymentParams,
+    ): Promise<ResolveSetAsidePaymentResult>;
+    /** Card payments charged on this till and not saved yet (one order, or all). */
+    listUnsavedPayments(orderId?: string): Promise<ListUnsavedPaymentsResult>;
+    /** "Save payment again": the same writes and keys, no new charge. */
+    saveUnsavedPayments(
+      params: SaveUnsavedPaymentsParams,
+    ): Promise<SaveUnsavedPaymentsResult>;
+    /**
+     * "Money given back to the customer" for a charged payment not saved.
+     * Needs the cash-drawer PIN confirmation.
+     */
+    resolveUnsavedPayment(
+      params: ResolveUnsavedPaymentParams,
+    ): Promise<ResolveUnsavedPaymentResult>;
     getOrderPayments(orderId: string): Promise<any[]>;
     getSettlementSnapshot(orderId: string): Promise<PaymentSettlementSnapshot>;
     getReceiptPreview(orderId: string): Promise<IpcResult<{ html: string }>>;
@@ -2011,6 +2301,103 @@ export interface PlatformBridge {
     reconnect(deviceType: string): Promise<IpcResult>;
   };
 
+  // -- Shift financial opening -----------------------------------------------
+  // Native owns the opening key, the original shift/drawer ids, the queued
+  // original and the selected cashier's volatile hosted session. The PIN is a
+  // transient request field. Never follow a refusal with the ordinary open.
+  shiftFinancialOpening: {
+    begin(
+      payload: ShiftFinancialOpeningBeginRequest,
+    ): Promise<ShiftFinancialOpeningResponse>;
+    authorize(
+      payload: ShiftFinancialOpeningAuthorizeRequest,
+    ): Promise<ShiftFinancialOpeningResponse>;
+    status(
+      payload?: ShiftFinancialOpeningStatusRequest,
+    ): Promise<ShiftFinancialOpeningStatusResponse>;
+    /** Clears every dedicated hosted cashier authorization, in-flight too. */
+    clearAuthorization(): Promise<ShiftFinancialOpeningClearAuthorizationResponse>;
+  };
+
+  // -- Shift financial closing authorization ---------------------------------
+  // Original-cashier renewal of one retained pending closing by its key; native
+  // selects the cashier from the stored original. Clearing stays on
+  // `shiftFinancialOpening.clearAuthorization()`; there is no closing clear.
+  shiftFinancialClosing: {
+    authorize(
+      payload: ShiftFinancialClosingAuthorizeRequest,
+    ): Promise<ShiftFinancialClosingAuthorizeResponse>;
+    // Nonsecret recovery of the selected original cashier's retained closings.
+    // `retry` only reschedules the stored original; confirm with `status`.
+    listPending(
+      payload: ShiftFinancialClosingListPendingRequest,
+    ): Promise<ShiftFinancialClosingListPendingResponse>;
+    status(payload: ShiftFinancialClosingStatusRequest): Promise<ShiftFinancialClosingStatusResponse>;
+    retry(payload: ShiftFinancialClosingRetryRequest): Promise<ShiftFinancialClosingRetryResponse>;
+  };
+
+  // -- Gift card funding (native core, gift_funding_v1) ----------------------
+  // Native owns the attempt key, the immutable attempt journal and the hosted
+  // cashier/manager sessions; PINs are transient. Funding is stored value,
+  // never an order, payment, fiscal receipt or verified capture. Clearing uses
+  // the existing `shiftFinancialOpening.clearAuthorization()` (the native clear
+  // also drops the manager grant authority); there is intentionally no
+  // separate funding clear channel.
+  giftFunding: {
+    prepare(payload: GiftFundingPrepareRequest): Promise<GiftFundingAttemptResponse>;
+    beginCollection(payload: GiftFundingAttemptRequest): Promise<GiftFundingAttemptResponse>;
+    complete(payload: GiftFundingCompleteRequest): Promise<GiftFundingAttemptResponse>;
+    cancel(payload: GiftFundingCancelRequest): Promise<GiftFundingAttemptResponse>;
+    recover(payload: GiftFundingAttemptRequest): Promise<GiftFundingAttemptResponse>;
+    authorizeManager(
+      payload: GiftFundingAuthorizeManagerRequest,
+    ): Promise<GiftFundingAuthorizeManagerResponse>;
+    grant(payload: GiftFundingGrantRequest): Promise<GiftFundingAttemptResponse>;
+    status(payload?: GiftFundingStatusRequest): Promise<GiftFundingStatusResponse>;
+    refreshDrawer(
+      payload: GiftFundingRefreshDrawerRequest,
+    ): Promise<GiftFundingRefreshDrawerResponse>;
+    closeBlocker(
+      payload?: GiftFundingCloseBlockerRequest,
+    ): Promise<GiftFundingCloseBlockerResponse>;
+    availability(
+      payload: GiftFundingAvailabilityRequest,
+    ): Promise<GiftFundingAvailabilityResponse>;
+  };
+
+  // -- Gift card original-card return (native core, atomic_return_v1) -------
+  // Authorization is a separate transient-PIN hosted check-in held natively;
+  // shiftFinancialOpening.clearAuthorization also drops it. Recovery replays
+  // the captured original with its recorded operator, key and body.
+  giftReturns: {
+    authorize: (payload: GiftReturnAuthorizeRequest) => Promise<GiftReturnAuthorizeResponse>;
+    begin: (payload: GiftReturnBeginRequest) => Promise<GiftReturnResponse>;
+    recover: (payload: GiftReturnRecoverRequest) => Promise<GiftReturnResponse>;
+    status: (payload?: GiftReturnStatusRequest) => Promise<GiftReturnStatusResponse>;
+  };
+
+  // -- Gift card checkout ----------------------------------------------------
+  // Native imports and books the canonical gift payment and owns the
+  // idempotency key and both durable journals. Never follow a gift result
+  // with recordPayment, an EFT charge or a management redeem.
+  giftCardCheckout: {
+    redeemForOrder(
+      payload: GiftCardRedeemForOrderRequest,
+    ): Promise<GiftCardRedeemForOrderResponse>;
+    reconcileOrder(
+      payload: GiftCardOrderRequest,
+    ): Promise<GiftCardReconcileOrderResponse>;
+    fiscalReadiness(
+      payload?: GiftCardFiscalReadinessRequest,
+    ): Promise<GiftCardFiscalDisposition>;
+    fiscalFinalize(
+      payload: GiftCardOrderRequest,
+    ): Promise<GiftCardFiscalDisposition>;
+    fiscalReconcile(
+      payload: GiftCardOrderRequest,
+    ): Promise<GiftCardFiscalDisposition>;
+  };
+
   // -- ECR (Payment Terminal) ------------------------------------------------
   ecr: {
     discoverDevices(
@@ -2069,7 +2456,7 @@ export interface PlatformBridge {
   loyalty: {
     getSettings(): Promise<IpcResult>;
     syncSettings(): Promise<IpcResult>;
-    syncCustomers(): Promise<IpcResult>;
+    syncCustomers(options?: { force?: boolean }): Promise<IpcResult>;
     getCustomers(opts?: { search?: string }): Promise<IpcResult>;
     getCustomerBalance(customerId: string): Promise<IpcResult>;
     lookupByPhone(phone: string): Promise<IpcResult>;
@@ -2158,7 +2545,7 @@ export interface PlatformBridge {
   externalDisplay: {
     getCapabilities(): Promise<ExternalDisplayCapabilities>;
     open(params: ExternalDisplayOpenParams): Promise<ExternalDisplayOpenResult>;
-    close(params: { contentType: string }): Promise<IpcResult>;
+    close(params: ExternalDisplayCloseParams): Promise<ExternalDisplayCloseResult>;
   };
 
   // -- Admin API (generic authenticated fetch) -------------------------------
@@ -2216,7 +2603,9 @@ export interface PlatformBridge {
       staffId?: string;
       staffShiftId?: string;
       orderId?: string;
-      refundMethod?: "cash" | "card";
+      /** The tender the refund names (shared rule R5). */
+      refundMethod?: "cash" | "card" | "other";
+      /** Ignored by the till: the rule decides (shared rule R2). */
       cashHandler?: "cashier_drawer" | "driver_shift";
       adjustmentContext?: "manual" | "edit_settlement";
     }): Promise<IpcResult>;
@@ -2371,6 +2760,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   "order:approve": "orders.approve",
   "order:decline": "orders.decline",
   "order:assign-driver": "orders.assignDriver",
+  "order:cancel-with-approval": "orders.cancelWithApproval",
   "order:reset-to-active": "orders.resetToActive",
   "order:notify-platform-ready": "orders.notifyPlatformReady",
   "order:update-preparation": "orders.updatePreparation",
@@ -2392,6 +2782,10 @@ export const CHANNEL_MAP: Record<string, string> = {
   "kitchen:print-ticket": "payments.printKitchenTicket",
   "payment:record": "payments.recordPayment",
   "payment:void": "payments.voidPayment",
+  "payment:resolve-set-aside": "payments.resolveSetAsidePayment",
+  "payment:list-unsaved": "payments.listUnsavedPayments",
+  "payment:save-unsaved": "payments.saveUnsavedPayments",
+  "payment:resolve-unsaved": "payments.resolveUnsavedPayment",
   "payment:get-order-payments": "payments.getOrderPayments",
   "payment:get-settlement-snapshot": "payments.getSettlementSnapshot",
   "payment:get-receipt-preview": "payments.getReceiptPreview",
@@ -2663,6 +3057,43 @@ export const CHANNEL_MAP: Record<string, string> = {
   "loyalty:earn": "loyalty.earnPoints",
   "loyalty:redeem": "loyalty.redeemPoints",
   "loyalty:transactions": "loyalty.getTransactions",
+
+  // Gift card checkout
+  "gift-card:redeem-for-order": "giftCardCheckout.redeemForOrder",
+  "gift-card:reconcile-order": "giftCardCheckout.reconcileOrder",
+  "gift-card:fiscal-readiness": "giftCardCheckout.fiscalReadiness",
+  "gift-card:fiscal-finalize": "giftCardCheckout.fiscalFinalize",
+  "gift-card:fiscal-reconcile": "giftCardCheckout.fiscalReconcile",
+
+  // Shift financial opening
+  "shift:financial-opening-begin": "shiftFinancialOpening.begin",
+  "shift:financial-opening-authorize": "shiftFinancialOpening.authorize",
+  "shift:financial-opening-status": "shiftFinancialOpening.status",
+  "shift:financial-opening-clear-authorization": "shiftFinancialOpening.clearAuthorization",
+  "shift:financial-closing-authorize": "shiftFinancialClosing.authorize",
+  "shift:financial-closing-list-pending": "shiftFinancialClosing.listPending",
+  "shift:financial-closing-status": "shiftFinancialClosing.status",
+  "shift:financial-closing-retry": "shiftFinancialClosing.retry",
+
+  // Gift card funding (native core, gift_funding_v1). No separate clear
+  // channel: shift:financial-opening-clear-authorization also drops it.
+  "gift-funding:prepare": "giftFunding.prepare",
+  "gift-funding:begin-collection": "giftFunding.beginCollection",
+  "gift-funding:complete": "giftFunding.complete",
+  "gift-funding:cancel": "giftFunding.cancel",
+  "gift-funding:recover": "giftFunding.recover",
+  "gift-funding:authorize-manager": "giftFunding.authorizeManager",
+  "gift-funding:grant": "giftFunding.grant",
+  "gift-funding:status": "giftFunding.status",
+  "gift-funding:refresh-drawer": "giftFunding.refreshDrawer",
+  "gift-funding:close-blocker": "giftFunding.closeBlocker",
+  "gift-funding:availability": "giftFunding.availability",
+
+  // Gift card original-card return (atomic_return_v1)
+  "gift-return:authorize": "giftReturns.authorize",
+  "gift-return:begin": "giftReturns.begin",
+  "gift-return:recover": "giftReturns.recover",
+  "gift-return:status": "giftReturns.status",
 
   // Modules
   "modules:fetch-from-admin": "modules.fetchFromAdmin",
@@ -3096,6 +3527,8 @@ export class TauriBridge implements PlatformBridge {
     decline: (id: string, r: string) => this.inv("order:decline", id, r),
     assignDriver: (id: string, d: string, n?: string) =>
       this.inv("order:assign-driver", id, d, n),
+    cancelWithApproval: (params: CancelOrderWithApprovalParams) =>
+      this.inv("order:cancel-with-approval", params),
     resetToActive: (id: string) => this.inv("order:reset-to-active", id),
     notifyPlatformReady: (id: string) =>
       this.inv("order:notify-platform-ready", id),
@@ -3141,6 +3574,14 @@ export class TauriBridge implements PlatformBridge {
         voidedBy: by,
         staffShiftId,
       }),
+    resolveSetAsidePayment: (params: ResolveSetAsidePaymentParams) =>
+      this.inv("payment:resolve-set-aside", params),
+    listUnsavedPayments: (orderId?: string) =>
+      this.inv("payment:list-unsaved", orderId ? { orderId } : {}),
+    saveUnsavedPayments: (params: SaveUnsavedPaymentsParams) =>
+      this.inv("payment:save-unsaved", params),
+    resolveUnsavedPayment: (params: ResolveUnsavedPaymentParams) =>
+      this.inv("payment:resolve-unsaved", params),
     getOrderPayments: (orderId: string) =>
       this.inv("payment:get-order-payments", orderId),
     getSettlementSnapshot: (orderId: string) =>
@@ -3651,6 +4092,75 @@ export class TauriBridge implements PlatformBridge {
       this.inv("hardware:reconnect", deviceType),
   };
 
+  giftCardCheckout = {
+    redeemForOrder: (payload: GiftCardRedeemForOrderRequest) =>
+      this.inv("gift-card:redeem-for-order", payload),
+    reconcileOrder: (payload: GiftCardOrderRequest) =>
+      this.inv("gift-card:reconcile-order", payload),
+    fiscalReadiness: (payload?: GiftCardFiscalReadinessRequest) =>
+      this.inv("gift-card:fiscal-readiness", payload ?? {}),
+    fiscalFinalize: (payload: GiftCardOrderRequest) =>
+      this.inv("gift-card:fiscal-finalize", payload),
+    fiscalReconcile: (payload: GiftCardOrderRequest) =>
+      this.inv("gift-card:fiscal-reconcile", payload),
+  };
+
+  shiftFinancialOpening = {
+    begin: (payload: ShiftFinancialOpeningBeginRequest) =>
+      this.inv("shift:financial-opening-begin", payload),
+    authorize: (payload: ShiftFinancialOpeningAuthorizeRequest) =>
+      this.inv("shift:financial-opening-authorize", payload),
+    status: (payload?: ShiftFinancialOpeningStatusRequest) =>
+      this.inv("shift:financial-opening-status", payload ?? {}),
+    clearAuthorization: () =>
+      this.inv("shift:financial-opening-clear-authorization", {}),
+  };
+
+  shiftFinancialClosing = {
+    authorize: (payload: ShiftFinancialClosingAuthorizeRequest) =>
+      this.inv("shift:financial-closing-authorize", payload),
+    listPending: (payload: ShiftFinancialClosingListPendingRequest) =>
+      this.inv("shift:financial-closing-list-pending", payload),
+    status: (payload: ShiftFinancialClosingStatusRequest) =>
+      this.inv("shift:financial-closing-status", payload),
+    retry: (payload: ShiftFinancialClosingRetryRequest) =>
+      this.inv("shift:financial-closing-retry", payload),
+  };
+
+  giftFunding = {
+    prepare: (payload: GiftFundingPrepareRequest) =>
+      this.inv("gift-funding:prepare", payload),
+    beginCollection: (payload: GiftFundingAttemptRequest) =>
+      this.inv("gift-funding:begin-collection", payload),
+    complete: (payload: GiftFundingCompleteRequest) =>
+      this.inv("gift-funding:complete", payload),
+    cancel: (payload: GiftFundingCancelRequest) =>
+      this.inv("gift-funding:cancel", payload),
+    recover: (payload: GiftFundingAttemptRequest) =>
+      this.inv("gift-funding:recover", payload),
+    authorizeManager: (payload: GiftFundingAuthorizeManagerRequest) =>
+      this.inv("gift-funding:authorize-manager", payload),
+    grant: (payload: GiftFundingGrantRequest) =>
+      this.inv("gift-funding:grant", payload),
+    status: (payload?: GiftFundingStatusRequest) =>
+      this.inv("gift-funding:status", payload ?? {}),
+    refreshDrawer: (payload: GiftFundingRefreshDrawerRequest) =>
+      this.inv("gift-funding:refresh-drawer", payload),
+    closeBlocker: (payload?: GiftFundingCloseBlockerRequest) =>
+      this.inv("gift-funding:close-blocker", payload ?? {}),
+    availability: (payload: GiftFundingAvailabilityRequest) =>
+      this.inv("gift-funding:availability", payload),
+  };
+
+  giftReturns = {
+    authorize: (payload: GiftReturnAuthorizeRequest) =>
+      this.inv("gift-return:authorize", payload),
+    begin: (payload: GiftReturnBeginRequest) => this.inv("gift-return:begin", payload),
+    recover: (payload: GiftReturnRecoverRequest) => this.inv("gift-return:recover", payload),
+    status: (payload?: GiftReturnStatusRequest) =>
+      this.inv("gift-return:status", payload ?? {}),
+  };
+
   ecr = {
     discoverDevices: (types?: string[], timeout?: number) =>
       this.inv("ecr:discover-devices", types, timeout),
@@ -3705,7 +4215,7 @@ export class TauriBridge implements PlatformBridge {
   loyalty = {
     getSettings: () => this.inv("loyalty:get-settings"),
     syncSettings: () => this.inv("loyalty:sync-settings"),
-    syncCustomers: () => this.inv("loyalty:sync-customers"),
+    syncCustomers: (options?: { force?: boolean }) => this.inv("loyalty:sync-customers", options),
     getCustomers: (opts?: { search?: string }) =>
       this.inv("loyalty:get-customers", opts),
     getCustomerBalance: (customerId: string) =>
@@ -3795,7 +4305,7 @@ export class TauriBridge implements PlatformBridge {
     getCapabilities: () => this.inv("display:list-monitors"),
     open: (params: ExternalDisplayOpenParams) =>
       this.inv("display:open-window", params),
-    close: (params: { contentType: string }) =>
+    close: (params: ExternalDisplayCloseParams) =>
       this.inv("display:close-window", params),
   };
 
@@ -3838,7 +4348,7 @@ export class TauriBridge implements PlatformBridge {
       staffId?: string;
       staffShiftId?: string;
       orderId?: string;
-      refundMethod?: "cash" | "card";
+      refundMethod?: "cash" | "card" | "other";
       cashHandler?: "cashier_drawer" | "driver_shift";
       adjustmentContext?: "manual" | "edit_settlement";
     }) => this.inv("refund:payment", params),

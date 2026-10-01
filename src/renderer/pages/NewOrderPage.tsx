@@ -58,6 +58,16 @@ import {
 } from '../../shared/utils/pos-order-items';
 import { AlertTriangle } from 'lucide-react';
 import { getBridge } from '../../lib';
+import {
+  announceUnsavedCheckoutChanged,
+  notifyPaymentNotSaved,
+} from '../utils/unsavedPayments';
+import {
+  notifyMoneySettingsUnavailable,
+  resolveCheckoutTaxRate,
+} from '../utils/checkoutMoneySettings';
+import { useCheckoutRequestId } from '../hooks/useCheckoutRequestId';
+import { isCheckoutOutcomeUnknown, notifyCheckoutOutcomeUnknown } from '../utils/checkoutOutcome';
 import { pageMotionContainer, pageMotionItem } from '../components/ui/page-motion';
 
 interface Customer {
@@ -160,7 +170,11 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
   const { resolvedTheme } = useTheme();
   const { conflicts, createOrder, silentRefresh } = useOrderStore();
   const { staff, activeShift, isShiftActive } = useShift();
-  const { getSetting } = useTerminalSettings();
+  const {
+    getSetting,
+    loaded: terminalSettingsLoaded,
+    reload: reloadTerminalSettings,
+  } = useTerminalSettings();
   const { askForPaymentPrint, shouldAskPaymentPrint, paymentPrintPromptModal } = usePaymentPrintPrompt();
   const { branchId, organizationId, terminalId } = useResolvedPosIdentity('branch+organization');
   const { isFeatureEnabled, isMobileWaiter, loading: featuresLoading } = useFeatures();
@@ -223,7 +237,8 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
   const [selectedOrderType, setSelectedOrderType] = useState<"pickup" | "delivery" | "dine-in" | null>(null);
   const [addCustomerMode, setAddCustomerMode] = useState<'new' | 'edit' | 'addAddress' | 'editAddress'>('new');
   const [isProcessingOrder, setIsProcessingOrder] = useState(false);
-  const [taxRatePercentage, setTaxRatePercentage] = useState<number>(24);
+  // The store's tax rate, or null while it cannot be read (item H).
+  const [taxRatePercentage, setTaxRatePercentage] = useState<number | null>(null);
 
   // Customer data states
   const [phoneNumber, setPhoneNumber] = useState('');
@@ -272,15 +287,13 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
     setIsInitializing(false);
   }, [searchParams]);
 
+  // Item H (fix review 30/09/2026): a stored rate, today's 24% when none is
+  // stored, and null (checkout paused) when the settings could not be read or
+  // the stored value is not a rate. Never an assumed 24% on a read error.
   useEffect(() => {
-    const rawConfiguredRate = getSetting<number | string>('tax', 'tax_rate_percentage', 24);
-    const configuredRate = Number(rawConfiguredRate);
-    if (Number.isFinite(configuredRate) && configuredRate >= 0 && configuredRate <= 100) {
-      setTaxRatePercentage(configuredRate);
-    } else {
-      setTaxRatePercentage(24);
-    }
-  }, [getSetting]);
+    const resolved = resolveCheckoutTaxRate({ loaded: terminalSettingsLoaded, getSetting });
+    setTaxRatePercentage(resolved.available ? resolved.rate : null);
+  }, [getSetting, terminalSettingsLoaded]);
 
   // Handler for selecting order type
   const handleOrderTypeSelect = (type: "pickup" | "delivery") => {
@@ -468,7 +481,20 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
     }
   }, [askForPaymentPrint, bridge]);
 
+  // Fix review 30/09/2026: one checkout id per cart, reused by every press
+  // of Pay until the checkout ends, so a slow card terminal is never paid
+  // twice.
+  const { take: takeCheckoutRequestId, reset: resetCheckoutRequestId } =
+    useCheckoutRequestId();
+
   const handleOrderComplete = useCallback(async (orderData: any): Promise<boolean> => {
+    // Item H (fix review 30/09/2026): the store's tax rate could not be read.
+    // Checkout is paused with "Try again": no order is priced or its tax split
+    // on an assumed rate.
+    if (taxRatePercentage === null) {
+      notifyMoneySettingsUnavailable(t, reloadTerminalSettings);
+      return false;
+    }
     setIsProcessingOrder(true);
     const isSplitPayment = orderData.paymentData?.method === 'pending';
     const isGhostOrder = orderData.is_ghost === true;
@@ -660,9 +686,7 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
         return true;
       }
 
-      const clientRequestId =
-        globalThis.crypto?.randomUUID?.() ??
-        `order-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const clientRequestId = takeCheckoutRequestId();
       const tableOrderFields = buildTableOrderCreateFields({
         serviceOrderType: currentOrderType,
         pricingOrderType: currentOrderType,
@@ -754,10 +778,30 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
       };
 
       const result = await createOrder(orderToCreate);
+      if (!result.success && result.paymentNotSaved) {
+        // Item E: the card was charged and the order could not be saved
+        // yet. The till holds the order and its payment; the checkout ends
+        // here (a retry from this cart would be a new checkout and a second
+        // charge) and the dashboard banner offers "Save payment again".
+        notifyPaymentNotSaved(result, t);
+        announceUnsavedCheckoutChanged();
+        resetCheckoutRequestId();
+        setShowMenuModal(false);
+        navigate('/');
+        return false;
+      }
+      if (!result.success && isCheckoutOutcomeUnknown(result)) {
+        // The payment has no answer yet (fix review 30/09/2026): the cart
+        // and its checkout id stay, so Pay again checks the same payment.
+        notifyCheckoutOutcomeUnknown(result, t);
+        return false;
+      }
       if (!result.success || !result.orderId) {
         toast.error(t('orderFlow.orderFailed', 'Failed to create order'));
         return false;
       }
+      // The order exists: the next checkout is a new one.
+      resetCheckoutRequestId();
 
       const roomCharge = (result as any).roomCharge;
       if (isRoomChargePayment && roomCharge?.applied === false) {
@@ -846,7 +890,9 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
     createOrder,
     finalizeCreatedOrderPayment,
     isShiftActive,
+    navigate,
     organizationId,
+    reloadTerminalSettings,
     selectedOrderType,
     shouldAskPaymentPrint,
     silentRefresh,
@@ -858,6 +904,8 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
     t,
     taxRatePercentage,
     terminalId,
+    takeCheckoutRequestId,
+    resetCheckoutRequestId,
   ]);
 
   const handleSplitClose = useCallback(async () => {
@@ -968,6 +1016,16 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
         orderId: pendingPayment.orderId,
         fallbackOrderTotal: pendingPayment.orderTotal,
       });
+      if (paymentAttempt.kind === 'not_saved') {
+        // The card was charged but its payment is not saved on this till (or
+        // the tender was refused because one is not): never "Failed to
+        // collect payment" and never a new try with a new key. Its record
+        // holds the Z and Save payment again replays it (30/09/2026).
+        notifyPaymentNotSaved(paymentAttempt.result, t);
+        setOutstandingPaymentData(null);
+        void silentRefresh().catch(() => {});
+        return false;
+      }
       if (paymentAttempt.kind === 'unknown') {
         if (!selection.reconciliationOnly) {
           toast.error(t('orderDashboard.collectPaymentFailed', {

@@ -1221,9 +1221,11 @@ test('table check manager renders as an app-level modal overlay', () => {
     /<div className="liquid-glass-modal-backdrop" aria-hidden="true" \/>/,
     'the app-level overlay should keep the liquid glass backdrop blur',
   );
+  // Item D1 (30/09/2026): the check also renders its cancel-order PIN
+  // approval next to the portal, so the portal is one child of the return.
   assert.match(
     source,
-    /return ReactDOM\.createPortal\(modalContent, document\.body\);/,
+    /return \(\s*<>\s*\{ReactDOM\.createPortal\(modalContent, document\.body\)\}\s*\{cancelApprovalModal\}\s*<\/>\s*\);/,
     'the table check manager must portal into document.body outside the scroll-locked route shell',
   );
 });
@@ -1258,9 +1260,10 @@ test('TableActionModal turns cleaning tables into cleaned-only order flow', () =
     /tableActionModal\.markCleaned/,
     'cleaned action should have its own translatable label',
   );
+  // Item D1 (30/09/2026): the release runs inside the owed-money question.
   assert.match(
     dashboardSource,
-    /const handleTableSetAvailable = useCallback\(async \(\) => \{[\s\S]*updateTableStatus\(selectedTable\.id, "available"\)[\s\S]*setShowTableActionModal\(false\)/,
+    /const handleTableSetAvailable = useCallback\(async \(\) => \{[\s\S]*const table = selectedTable;\s*await guardTableRelease\(table, async \(\) => \{[\s\S]*updateTableStatus\(table\.id, "available"\)[\s\S]*setShowTableActionModal\(false\)/,
     'main table action flow should mark the selected cleaning table available and close the modal',
   );
   assert.match(
@@ -1307,7 +1310,7 @@ test('TableActionModal treats maintenance tables as out of service', () => {
   );
   assert.match(
     dashboardSource,
-    /const handleTableSetAvailable = useCallback\(async \(\) => \{[\s\S]*updateTableStatus\(selectedTable\.id, "available"\)[\s\S]*setShowTableActionModal\(false\)/,
+    /const handleTableSetAvailable = useCallback\(async \(\) => \{[\s\S]*await guardTableRelease\(table, async \(\) => \{[\s\S]*updateTableStatus\(table\.id, "available"\)[\s\S]*setShowTableActionModal\(false\)/,
     'main flow should return maintenance tables to available through updateTableStatus',
   );
   assert.match(
@@ -1348,7 +1351,7 @@ test('TableActionModal exposes management actions for reserved tables', () => {
   );
   assert.match(
     source,
-    /\{!isReservedTable && \(/,
+    /\{!isReservedTable && canCreateReservation && \(/,
     'reserved tables should not show the create-new-reservation action',
   );
   assert.match(
@@ -1356,14 +1359,16 @@ test('TableActionModal exposes management actions for reserved tables', () => {
     /const handleTableEditReservation = useCallback\(async \(\) => \{[\s\S]*getTodayReservationForTable\(selectedTable\.id\)[\s\S]*setEditingReservation\(reservation\)[\s\S]*setShowReservationForm\(true\)/,
     'main flow should load the table reservation before opening the edit form',
   );
+  // Item D1 (30/09/2026): each reservation release runs inside the owed-money
+  // question, on the table captured when the action started.
   assert.match(
     dashboardSource,
-    /const handleTableNoShowReservation = useCallback\(async \(\) => \{[\s\S]*updateStatus\(reservation\.id, "no_show"\)[\s\S]*updateTableStatus\(selectedTable\.id, "available", \{ __release: true \}\)/,
+    /const handleTableNoShowReservation = useCallback\(async \(\) => \{[\s\S]*updateStatus\(reservation\.id, "no_show"\)[\s\S]*const noShowTable = selectedTable;\s*await guardTableRelease\(noShowTable, async \(\) => \{\s*await updateTableStatus\(noShowTable\.id, "available", \{ __release: true \}\)/,
     'main flow should mark no-show reservations and durably release the table',
   );
   assert.match(
     dashboardSource,
-    /const handleTableCancelReservation = useCallback\(async \(\) => \{[\s\S]*cancelReservation\(reservation\.id[\s\S]*updateTableStatus\(selectedTable\.id, "available", \{ __release: true \}\)/,
+    /const handleTableCancelReservation = useCallback\(async \(\) => \{[\s\S]*cancelReservation\(reservation\.id[\s\S]*const cancelledReservationTable = selectedTable;\s*await guardTableRelease\(cancelledReservationTable, async \(\) => \{\s*await updateTableStatus\(cancelledReservationTable\.id, "available", \{ __release: true \}\)/,
     'main flow should cancel reservations and durably release the table',
   );
   assert.match(
@@ -1371,10 +1376,16 @@ test('TableActionModal exposes management actions for reserved tables', () => {
     /initialReservation=\{editingReservation\}/,
     'reservation form should receive the reservation being edited',
   );
+  // The submit itself lives in the shared helper (utils/table-reservation-submit.ts).
   assert.match(
     dashboardSource,
+    /await submitTableReservation\(\{\s*data,\s*editingReservation,/,
+    'reservation form submit should hand the reservation being edited to the shared submit',
+  );
+  assert.match(
+    readFileSync(path.join(process.cwd(), 'src', 'renderer', 'utils', 'table-reservation-submit.ts'), 'utf8'),
     /updateReservationDetails\(editingReservation\.id/,
-    'reservation form submit should save edits when editing an existing reservation',
+    'the shared submit should save edits when editing an existing reservation',
   );
 });
 
@@ -1385,16 +1396,23 @@ test('reservation edit saves details with table identity compatibility and surfa
     'utf8',
   );
 
-  assert.match(
-    dashboardSource,
-    /tableId:\s*data\.tableId,/,
-    'dashboard reservation edits should keep the current table id for POS reservation PATCH compatibility',
+  const submitSource = readFileSync(
+    path.join(process.cwd(), 'src', 'renderer', 'utils', 'table-reservation-submit.ts'),
+    'utf8',
   );
+
   assert.match(
-    flowSource,
+    submitSource,
     /tableId:\s*data\.tableId,/,
-    'order flow reservation edits should keep the current table id for POS reservation PATCH compatibility',
+    'reservation edits should keep the current table id for POS reservation PATCH compatibility',
   );
+  for (const [name, source] of [['dashboard', dashboardSource], ['order flow', flowSource]] as const) {
+    assert.match(
+      source,
+      /await submitTableReservation\(\{\s*data,\s*editingReservation,/,
+      `${name} reservation edits should go through the shared submit`,
+    );
+  }
   assert.match(
     dashboardSource,
     /const reservationUpdateError = extractOrderDashboardErrorMessage\(error\);[\s\S]*reservationUpdateError \|\|[\s\S]*defaultValue: "Failed to update reservation"/,
@@ -1720,14 +1738,16 @@ test('stale reserved-table actions self-heal instead of dead-ending on reservati
   // and closes/clears the modal — replacing the old toast-and-return dead end.
   assert.match(
     dashboardSource,
-    /const releaseStaleReservedTable = useCallback\(async \(\) => \{[\s\S]*?updateTableStatus\(selectedTable\.id, "available", \{[\s\S]*?refetchTables\(\)[\s\S]*?tableActionModal\.reservationReleased[\s\S]*?setShowTableActionModal\(false\)[\s\S]*?setSelectedTable\(null\)[\s\S]*?\}, \[refetchTables, selectedTable, t, updateTableStatus\]\)/,
+    /const releaseStaleReservedTable = useCallback\(async \(\) => \{[\s\S]*?const table = selectedTable;\s*await guardTableRelease\(table, async \(\) => \{\s*const released = await updateTableStatus\(table\.id, "available", \{[\s\S]*?refetchTables\(\)[\s\S]*?tableActionModal\.reservationReleased[\s\S]*?setShowTableActionModal\(false\)[\s\S]*?setSelectedTable\(null\)[\s\S]*?\}, \[guardTableRelease, refetchTables, selectedTable, t, updateTableStatus\]\)/,
     'releaseStaleReservedTable should durably release the table, refetch, toast and close the modal',
   );
 
   // The release must be DURABLE: every reserved -> available release passes the
   // __release flag so useTables stores a surviving override (the live bug was a
   // plain release that the immediate stale refetch resurrected as reserved).
-  const durableReleases = dashboardSource.match(/updateTableStatus\(selectedTable\.id, "available", \{\s*__release: true,?\s*\}\)/g) ?? [];
+  // Item D1 (30/09/2026): each runs on the table captured when the action
+  // started, inside the owed-money question.
+  const durableReleases = dashboardSource.match(/updateTableStatus\((?:table|noShowTable|cancelledReservationTable)\.id, "available", \{\s*__release: true,?\s*\}\)/g) ?? [];
   assert.ok(
     durableReleases.length >= 3,
     `expected the stale-recovery, no-show and cancel paths to pass __release, found ${durableReleases.length}`,
@@ -3086,5 +3106,76 @@ test('the dashboard lanes and their counters share one table-module gate', () =>
   assert.match(
     source,
     /\}, \[orders, filter, activeTab, orderFilter, displayTables, hasTablesModule\]\);/,
+  );
+});
+
+// Fix review 30/09/2026 (founder rule): an order money was taken on is never
+// cancelled. The dashboard's cancel (single or bulk) and the platform decline
+// ask first, before the cancel reason; the till refuses it again, and that
+// refusal is told as such, never as a generic failure.
+test('every dashboard cancel refuses an order money was taken on', () => {
+  const source = orderDashboardSource();
+  assert.match(
+    source,
+    /else if \(action === "cancel"\) \{[\s\S]*?const refusals = await findCancelRefusals\(selectedOrders\);[\s\S]*?announceCancelRefusedPaid\(refusals\.hasPayments\);[\s\S]*?announceCancelRefusedNotRecorded\(refusals\.notRecorded\);[\s\S]*?setPendingCancelOrders\(cancellable\);\s*setShowCancelModal\(true\);/,
+    'the bulk cancel must leave out orders money was taken on, and paid labels with no payment record, before asking the reason',
+  );
+  assert.match(
+    source,
+    /const declineRefusalAnnounced = async \(orderId: string\): Promise<boolean> => \{[\s\S]*?findCancelRefusals\(\[orderId\]\)[\s\S]*?announceCancelRefusedPaid\(refusals\.hasPayments\);\s*return true;[\s\S]*?announceCancelRefusedNotRecorded\(refusals\.notRecorded\);\s*return true;/,
+    'the platform decline must refuse an order money was taken on, or a paid label with no payment record',
+  );
+  // Round 2 review (01/10/2026): refused BEFORE the reason is asked, and a
+  // refused or failed decline is never reported as declined.
+  assert.match(
+    source,
+    /const handleBeforeDeclineOrder = async \(orderId: string\): Promise<boolean> =>\s*!\(await declineRefusalAnnounced\(orderId\)\);/,
+    'the decline refusal must be asked before the reason',
+  );
+  assert.match(source, /onBeforeDecline=\{handleBeforeDeclineOrder\}/);
+  assert.match(
+    source,
+    /const handleDeclineOrder = async \(orderId: string, reason: string\): Promise<boolean> => \{[\s\S]*?if \(await declineRefusalAnnounced\(orderId\)\) \{\s*return false;[\s\S]*?await declineOrder\(orderId, reason\);\s*if \(!ok\) \{[\s\S]*?return false;/,
+    'a refused or failed decline must answer false so the panel reports no success',
+  );
+  assert.match(
+    source,
+    /const handleOrderCancellation = async \(reason: string\) => \{[\s\S]*?if \(!success && errorCode === ORDER_HAS_PAYMENTS\) \{[\s\S]*?announceCancelRefusedPaid\(\[orderId\]\);[\s\S]*?if \(!success && errorCode === ORDER_PAYMENT_NOT_RECORDED\) \{[\s\S]*?announceCancelRefusedNotRecorded\(\[orderId\]\);/,
+    "the till's refusals must be told as such",
+  );
+  assert.match(source, /t\("orderDashboard\.cancelRefusedPaid"/);
+  assert.match(source, /t\("orderDashboard\.cancelRefusedNotRecorded"/);
+});
+
+// Round 3 item DR4 (01/10/2026): a failed approval answered nothing, so the
+// panel said "Approved" and closed while the order stayed pending, and a
+// success was announced twice (the dashboard and the panel). The dashboard
+// now answers whether it approved, announces only the failure, and keeps the
+// panel open after one.
+test('the dashboard approval answers whether it happened and never announces a success itself', () => {
+  const source = orderDashboardSource();
+  const start = source.indexOf('const handleApproveOrder = async (');
+  assert.ok(start >= 0, 'handleApproveOrder must exist');
+  const end = source.indexOf('const declineRefusalAnnounced', start);
+  assert.ok(end > start, 'the decline helpers follow the approval handler');
+  const body = source.slice(start, end);
+  assert.match(body, /\): Promise<boolean> => \{/, 'the approval must answer whether it happened');
+  assert.doesNotMatch(body, /toast\.success\(/, 'the panel announces a success, once');
+  assert.match(
+    body,
+    /if \(!ok\) \{\s*stopAcceptAnswer\(\);\s*toast\.error\(t\("orderDashboard\.approveOrderFailed"\)\);\s*return false;\s*\}/,
+    'a failed approval answers false before the panel is closed',
+  );
+});
+
+// Round 2 review (01/10/2026): the table check's "Cancel the order" asks the
+// till's refusal (money taken on it, or a paid label with no payment record
+// here) before it asks the reason, like the release question and the decline.
+test('the table check refuses a cancel before it asks the reason', () => {
+  const source = tableCheckManagerSource();
+  assert.match(
+    source,
+    /if \(await refuseOwingCancelUpFront\(orderId, t\)\) return;\s*setCancelReason\(''\);\s*setSecondaryModal\('cancel-order'\);/,
+    'the cancel reason must be asked only once the till does not refuse the cancel',
   );
 });

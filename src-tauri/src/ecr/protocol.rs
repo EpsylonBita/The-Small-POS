@@ -264,4 +264,53 @@ pub trait EcrProtocol: Send {
     /// generates the receipt data and the cash register acts as a
     /// pass-through printer. Returns the number of bytes written.
     fn send_raw(&mut self, data: &[u8]) -> Result<usize, String>;
+
+    /// Payment codes this adapter emits for an already-settled gift card
+    /// receipt. `None` means the adapter has no verified gift tender mapping.
+    fn gift_tender_codes(&self) -> Option<GiftTenderCodes> {
+        None
+    }
+
+    /// Restart-proof correlation for the fiscal receipt that will be sent with
+    /// this transaction id, captured before anything is sent. Adapters without
+    /// a side-effect-free way to recover that receipt refuse, so no settled
+    /// gift card receipt is dispatched through them.
+    fn fiscal_dispatch_correlation(
+        &self,
+        _transaction_id: &str,
+    ) -> Result<serde_json::Value, String> {
+        Err(format!(
+            "{}: no restart-proof fiscal receipt correlation",
+            self.name()
+        ))
+    }
+
+    /// Dispatch a settled gift card receipt. `NotPublished` is returned only
+    /// when the adapter proves nothing reached the register; the default
+    /// cannot prove that, so every `process_transaction` error stays an
+    /// uncertain `Err`.
+    fn process_settled_receipt(
+        &mut self,
+        request: &TransactionRequest,
+    ) -> Result<SettledDispatch, String> {
+        self.process_transaction(request)
+            .map(SettledDispatch::Completed)
+    }
+}
+
+/// Result of a settled gift card receipt dispatch.
+#[derive(Debug)]
+pub enum SettledDispatch {
+    /// The exchange ran; the response carries its outcome.
+    Completed(TransactionResponse),
+    /// The adapter refused before publishing anything to the register.
+    NotPublished(String),
+}
+
+/// Register payment codes used for an already-settled gift card receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GiftTenderCodes {
+    pub cash: u8,
+    pub card: u8,
+    pub voucher: Option<u8>,
 }

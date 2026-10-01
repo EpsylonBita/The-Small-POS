@@ -17,6 +17,7 @@ import {
   Wifi,
   WifiOff,
   X,
+  type LucideIcon,
 } from 'lucide-react';
 import { OrderSyncRouteIndicator } from './OrderSyncRouteIndicator';
 import { FinancialSyncPanel } from './FinancialSyncPanel';
@@ -67,8 +68,75 @@ import type {
   QueueStatus,
   SyncQueueItem,
 } from '../../../../shared/pos/sync-queue-types';
-import { getSyncQueueBridge } from '../services/SyncQueueBridge';
+import {
+  HEALTH_PRIMARY_ACTIONS,
+  type HealthAvailability,
+  type HealthPrimaryActionId,
+  type HealthProblemCode,
+} from '../../../../shared/pos/health/health-contract';
+import {
+  SYNC_PROBLEMS,
+  buildSimpleHealthSummary,
+  countDesktopBacklog,
+  countDesktopPrinterFailures,
+  desktopPrintQueueSignal,
+  isPrintingStallActive,
+  judgeSyncAttempt,
+  resolveSupportStatus,
+  type HealthSignalExtras,
+} from '../../../../shared/pos/health/health-summary';
+import {
+  classifyParityQueueItem,
+  parseQueueTimestampMs,
+  summarizeStuckRows,
+} from '../../../../shared/pos/health/queue-classification';
+import {
+  closeoutStatusLabelKey,
+  summarizeCloseout,
+  type CloseoutBlockerInput,
+} from '../../../../shared/pos/health/closeout-blockers';
+import {
+  healthDuration,
+  healthGuidanceKey,
+  healthImpactKey,
+  healthProblemKey,
+  healthRecommendationKey,
+  healthStateKeys,
+  healthStatusLabelKey,
+} from '../../../../shared/pos/health/health-i18n';
+import { buildHealthView } from '../../../../shared/pos/health/diagnostics-bundle';
+import { buildIncomingOrderAlertSupportEvidence } from '../services/incomingOrderAlert';
+import { getSyncQueueBridge, type MadeDueRow } from '../services/SyncQueueBridge';
+import {
+  rowsWaitingOutRetry,
+  syncNowIssueCode,
+  syncNowRemainder,
+  syncNowTargetItems,
+} from './recovery/sync-now-attempt';
 import type { SubscriptionConnectionStatus } from '../services/RealtimeManager';
+
+/**
+ * A system health read whose backlog query failed says so
+ * (`syncBacklogStatus: 'unavailable'`, with an empty backlog). The last known
+ * backlog is kept instead of that empty one, so nothing downstream reads a
+ * failed read as "nothing waiting"; the backlog card says it could not be
+ * read (health-recovery rule, review 30/09/2026).
+ */
+function withLastKnownBacklog(
+  next: DiagnosticsSystemHealth,
+  previous: DiagnosticsSystemHealth | null,
+): DiagnosticsSystemHealth {
+  return next.syncBacklogStatus === 'unavailable' && previous?.syncBacklog
+    ? { ...next, syncBacklog: previous.syncBacklog }
+    : next;
+}
+
+/**
+ * The Health summary is the shared one (shared/pos/health), so this terminal
+ * and the Android POS reach the same state with the same words. Re-exported for
+ * the characterization test that pinned the desktop behaviour before the port.
+ */
+export { buildSimpleHealthSummary };
 
 // ---------------------------------------------------------------------------
 // Types
@@ -137,53 +205,6 @@ interface SyncHealthPresentation {
   iconClassName: string;
 }
 
-type SimpleHealthState = 'healthy' | 'attention' | 'support_needed';
-type HealthAvailability = 'loading' | 'ready' | 'stale' | 'unavailable';
-type HealthGuidanceCode =
-  | 'canContinueOrders'
-  | 'startShift'
-  | 'contactSupportBeforeOrders';
-type HealthProblemCode =
-  | 'failedPayments'
-  | 'invalidOrders'
-  | 'crashDetected'
-  | 'offline'
-  | 'printerUnavailable'
-  | 'printerNotConfigured'
-  | 'syncWaiting'
-  | 'syncFailed'
-  | 'ready'
-  | 'shiftInactive';
-type HealthRecommendedActionCode =
-  | 'keepOpen'
-  | 'doNotClearData'
-  | 'contactSupport'
-  | 'contactSupportBeforeOrders'
-  | 'keepTakingOrders'
-  | 'checkInternet'
-  | 'startShift'
-  | 'checkConnection'
-  | 'configurePrinter'
-  | 'openRecovery'
-  | 'useNormally'
-  | 'startShiftWhenReady';
-type SimpleServiceStatus = {
-  orders: 'working' | 'limited' | 'blocked' | 'start_shift';
-  internet: 'connected' | 'offline' | 'unknown';
-  sync: 'healthy' | 'waiting' | 'failed';
-  printer: 'ready' | 'attention' | 'failed' | 'not_configured';
-  support: 'not_needed' | 'notified' | 'not_sent' | 'failed_to_notify';
-};
-
-interface SimpleHealthSummary {
-  state: SimpleHealthState;
-  canContinueOrders: boolean;
-  guidance: HealthGuidanceCode;
-  recommendedActions: HealthRecommendedActionCode[];
-  problem: HealthProblemCode;
-  serviceStatuses: SimpleServiceStatus;
-}
-
 interface VisibleSyncFailure {
   id: string;
   title: string;
@@ -201,26 +222,6 @@ const createDefaultFinancialStats = (): DiagnosticsFinancialQueueStatus => ({
   staff_payments: { pending: 0, failed: 0 },
   shift_expenses: { pending: 0, failed: 0 },
 });
-
-const countBacklog = (health: DiagnosticsSystemHealth | null): number => {
-  if (!health?.syncBacklog) return 0;
-  return Object.values(health.syncBacklog).reduce((sum, statuses) => {
-    return (
-      sum +
-      Object.entries(statuses)
-        .filter(([status]) => status !== 'synced' && status !== 'applied')
-        .reduce((inner, [, count]) => inner + count, 0)
-    );
-  }, 0);
-};
-
-const countPrinterFailures = (health: DiagnosticsSystemHealth | null): number => {
-  return (
-    health?.printerStatus?.recentJobs?.filter((job) =>
-      String(job.status || '').toLowerCase().includes('fail'),
-    ).length ?? 0
-  );
-};
 
 const parseObjectPayload = (raw?: string | null): Record<string, unknown> => {
   if (!raw) return {};
@@ -303,140 +304,6 @@ const normalizeOperatorSyncStatus = (
     default:
       return 'unknown';
   }
-};
-
-const buildSimpleHealthSummary = ({
-  health,
-  syncStatus,
-  supportStatus,
-  isShiftActive,
-  parityItems,
-}: {
-  health: DiagnosticsSystemHealth | null;
-  syncStatus: SyncStatus;
-  supportStatus: SimpleServiceStatus['support'];
-  isShiftActive: boolean;
-  parityItems: SyncQueueItem[];
-}): SimpleHealthSummary => {
-  const backlog = countBacklog(health);
-  const failedFinancialItems = parityItems.filter((item) =>
-    ['payments', 'payment_adjustments'].includes(item.tableName) &&
-    ['failed', 'conflict'].includes(item.status),
-  ).length ||
-    (health?.financialQueueStatus?.totalFailed ?? 0) ||
-    (health?.financialQueueStatus?.failedPaymentItems ?? 0) ||
-    syncStatus.failedPaymentItems;
-  const invalidOrders = health?.invalidOrders?.count ?? 0;
-  const panicCount = health?.panicCount ?? 0;
-  const printerFailures = countPrinterFailures(health);
-  const printerConfigured = health?.printerStatus?.configured ?? false;
-  const isOnline =
-    typeof health?.isOnline === 'boolean' ? health.isOnline : syncStatus.isOnline;
-  const syncFailed =
-    failedFinancialItems > 0 ||
-    parityItems.some((item) => ['failed', 'conflict'].includes(item.status)) ||
-    invalidOrders > 0 ||
-    (health?.parityQueueStatus?.failed ?? 0) > 0 ||
-    (health?.parityQueueStatus?.conflicts ?? 0) > 0 ||
-    (health?.syncStatusSummary?.syncErrors ?? 0) > 0;
-
-  const supportNeeded = failedFinancialItems > 0 || invalidOrders > 0 || panicCount > 0;
-  // Printer jobs can remain failed from the last shift/session. Before a shift
-  // starts, keep printer-only noise out of the top-level operator alarm.
-  const activePrinterIssue = isShiftActive && printerFailures > 0;
-  const printerNeedsSetup = !printerConfigured;
-  const attentionNeeded =
-    !supportNeeded &&
-    (!isOnline ||
-      backlog > 0 ||
-      syncStatus.pendingItems > 0 ||
-      activePrinterIssue ||
-      printerNeedsSetup ||
-      syncFailed);
-  const guidance: HealthGuidanceCode = isShiftActive
-    ? 'canContinueOrders'
-    : 'startShift';
-  const orderStatus: SimpleServiceStatus['orders'] = isShiftActive ? 'working' : 'start_shift';
-
-  if (supportNeeded) {
-    return {
-      state: 'support_needed',
-      canContinueOrders: isShiftActive,
-      guidance: isShiftActive ? 'canContinueOrders' : 'contactSupportBeforeOrders',
-      recommendedActions: isShiftActive
-        ? ['openRecovery', 'doNotClearData', 'contactSupport']
-        : ['openRecovery', 'doNotClearData', 'contactSupportBeforeOrders'],
-      problem:
-        failedFinancialItems > 0
-          ? 'failedPayments'
-          : invalidOrders > 0
-            ? 'invalidOrders'
-            : 'crashDetected',
-      serviceStatuses: {
-        orders: isShiftActive ? 'limited' : 'blocked',
-        internet: isOnline ? 'connected' : 'offline',
-        sync: 'failed',
-        printer: printerFailures >= 3 ? 'failed' : printerConfigured ? 'ready' : 'not_configured',
-        support: supportStatus,
-      },
-    };
-  }
-
-  if (attentionNeeded) {
-    return {
-      state: 'attention',
-      canContinueOrders: isShiftActive,
-      guidance,
-      recommendedActions: syncFailed
-        ? ['openRecovery', 'keepOpen', 'doNotClearData']
-        : isShiftActive
-        ? printerNeedsSetup
-          ? ['keepTakingOrders', 'keepOpen', 'configurePrinter']
-          : ['keepTakingOrders', 'keepOpen', 'checkInternet']
-        : printerNeedsSetup
-          ? ['startShift', 'keepOpen', 'configurePrinter']
-          : ['startShift', 'keepOpen', 'checkConnection'],
-      problem: syncFailed
-        ? 'syncFailed'
-        : !isOnline
-        ? 'offline'
-        : printerNeedsSetup
-          ? 'printerNotConfigured'
-          : printerFailures > 0
-            ? 'printerUnavailable'
-            : 'syncWaiting',
-      serviceStatuses: {
-        orders: orderStatus,
-        internet: isOnline ? 'connected' : 'offline',
-        sync: syncFailed ? 'failed' : backlog > 0 || syncStatus.pendingItems > 0 ? 'waiting' : 'healthy',
-        printer: activePrinterIssue
-          ? printerFailures >= 3
-            ? 'failed'
-            : 'attention'
-          : printerConfigured
-            ? 'ready'
-            : 'not_configured',
-        support: supportStatus,
-      },
-    };
-  }
-
-  return {
-    state: 'healthy',
-    canContinueOrders: isShiftActive,
-    guidance,
-    recommendedActions: isShiftActive
-      ? ['useNormally']
-      : ['startShiftWhenReady', 'keepOpen'],
-    problem: isShiftActive ? 'ready' : 'shiftInactive',
-    serviceStatuses: {
-      orders: orderStatus,
-      internet: isOnline ? 'connected' : 'unknown',
-      sync: 'healthy',
-      printer: printerConfigured ? 'ready' : 'not_configured',
-      support: supportStatus,
-    },
-  };
 };
 
 const normalizeFinancialStats = (stats: any): DiagnosticsFinancialQueueStatus => {
@@ -685,6 +552,17 @@ const ENTITY_TYPE_KEYS: Record<string, string> = {
   staff_payment: 'sync.entityTypes.staffPayment',
 };
 
+/** Icons of the Health modal's recommended actions that have a button here. */
+const PRIMARY_ACTION_ICONS: Partial<Record<HealthPrimaryActionId, LucideIcon>> = {
+  syncNow: RefreshCw,
+  exportDiagnostics: Download,
+  openRecovery: Database,
+  openConnectionSettings: Wifi,
+  configurePrinter: Printer,
+  checkPrinting: Printer,
+  refresh: RefreshCw,
+};
+
 const resolveSyncErrorMessage = (
   error: string | null,
   t: ReturnType<typeof useTranslation>['t'],
@@ -868,6 +746,26 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
   const [recentRecoveryActions, setRecentRecoveryActions] = useState<
     RecoveryActionLogEntry[]
   >([]);
+  // The Health modal's one recommended action. `syncVerification` holds the
+  // problem a primary "Sync now" tried to clear, and the queue rows it worked
+  // on read by id before and after the cycle, until a fresh health check has
+  // been read; `repeatedFailureProblem` remembers (for this session) a sync
+  // problem that survived it, which turns the recommendation into "Export
+  // diagnostics".
+  const [primaryActionBusy, setPrimaryActionBusy] =
+    useState<HealthPrimaryActionId | null>(null);
+  const [syncVerification, setSyncVerification] = useState<{
+    problem: HealthProblemCode;
+    /** The rows it worked on, before and after the cycle; null when unreadable. */
+    before: SyncQueueItem[] | null;
+    after: SyncQueueItem[] | null;
+    /** The recovery log entry holding the retry times of the rows made due. */
+    auditId: string | null;
+    madeDue: MadeDueRow[];
+    startedAt: string;
+  } | null>(null);
+  const [repeatedFailureProblem, setRepeatedFailureProblem] =
+    useState<HealthProblemCode | null>(null);
   const launcherRef = useRef<HTMLButtonElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const healthDialogTitleId = React.useId();
@@ -995,7 +893,8 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
 
   // --- System health loading (eager — loads on mount) ---
 
-  const loadSystemHealth = useCallback(async () => {
+  /** Resolves true when a fresh health snapshot was read. */
+  const loadSystemHealth = useCallback(async (): Promise<boolean> => {
     setSystemLoading(true);
     try {
       const [healthResult, financialResult, integrityResult, parityResult, actionsResult] =
@@ -1010,7 +909,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
         throw healthResult.reason;
       }
       const data = healthResult.value;
-      setSystemHealth(data);
+      setSystemHealth((previous) => withLastKnownBacklog(data, previous));
       setFinancialStats(
         normalizeFinancialStats(
           data.financialQueueStatus ?? data.syncStatusSummary?.financialStats,
@@ -1045,9 +944,11 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
       setLastHealthCheckedAt(new Date().toISOString());
       systemLoaded.current = true;
       setHealthAvailability('ready');
+      return true;
     } catch (err) {
       console.error('Failed to load system health:', err);
       setHealthAvailability(systemLoaded.current ? 'stale' : 'unavailable');
+      return false;
     } finally {
       setSystemLoading(false);
     }
@@ -1062,7 +963,9 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
       const candidate =
         payload?.data && payload?.success ? payload.data : payload;
       if (candidate && typeof candidate === 'object') {
-        setSystemHealth(candidate as DiagnosticsSystemHealth);
+        setSystemHealth((previous) =>
+          withLastKnownBacklog(candidate as DiagnosticsSystemHealth, previous),
+        );
         setFinancialStats(
           normalizeFinancialStats(
             (candidate as DiagnosticsSystemHealth).financialQueueStatus ??
@@ -1423,7 +1326,12 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
 
   // --- Actions ---
 
-  const handleForceSync = async () => {
+  /**
+   * Runs one manual sync cycle. Resolves true/false when it re-read the health
+   * snapshot afterwards (fresh / refresh failed), null when it did not.
+   */
+  const handleForceSync = async (): Promise<boolean | null> => {
+    let healthRefreshed: boolean | null = null;
     try {
       setSyncStatus((prev) => ({ ...prev, syncInProgress: true }));
       const result = await runParitySyncCycle({ trigger: 'manual' });
@@ -1451,7 +1359,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
 
       await loadSyncStatus();
       if (systemLoaded.current) {
-        await loadSystemHealth();
+        healthRefreshed = await loadSystemHealth();
       }
     } catch (error) {
       console.error('Failed to force sync:', error);
@@ -1459,15 +1367,25 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     } finally {
       setSyncStatus((prev) => ({ ...prev, syncInProgress: false }));
     }
+    return healthRefreshed;
   };
 
   const handleExport = async () => {
     setExporting(true);
     setExportPath(null);
     try {
+      // health_view.json: what the operator saw when they exported. The
+      // bundle must still export if this view cannot be built.
+      let healthView: Record<string, unknown> | undefined;
+      try {
+        healthView = buildExportHealthView();
+      } catch (viewError) {
+        console.warn('Failed to capture the Health view for diagnostics:', viewError);
+      }
       const options: DiagnosticsExportOptions = {
         includeLogs: true,
         redactSensitive: true,
+        ...(healthView ? { healthView } : {}),
       };
       const result = await bridge.diagnostics.export(options);
       if (result?.success && result?.path) {
@@ -1514,6 +1432,83 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
       systemHealth,
       lastParitySync: effectiveLastParitySync ?? null,
     });
+  };
+
+  const handleOpenConnectionSettings = () => {
+    setShowDetailPanel(false);
+    window.dispatchEvent(
+      new CustomEvent('pos:recovery-route', {
+        detail: { screen: 'connectionSettings' },
+      }),
+    );
+  };
+
+  /**
+   * Settings > Printing: the printer settings and the print queue, where
+   * waiting jobs can be retried or cancelled. Opening it is not a fix: the
+   * warning stays until a fresh check finds nothing waiting too long.
+   */
+  const handleOpenPrinterSettings = () => {
+    setShowDetailPanel(false);
+    window.dispatchEvent(
+      new CustomEvent('pos:recovery-route', {
+        detail: { screen: 'connectionSettings', params: { section: 'printing' } },
+      }),
+    );
+  };
+
+  /**
+   * The Health modal's primary "Sync now". Sending is not proof of a fix:
+   * once a fresh health check has been read, the rows it worked on are
+   * judged, and only rows the cycle actually tried can make it a failure
+   * (see the syncVerification effect). Rows waiting out a retry delay are
+   * made due first, their retry time only, recorded in the recovery log
+   * (review 30/09/2026: the cycle skipped them and the attempt still read
+   * as failed).
+   */
+  const handlePrimarySyncNow = async () => {
+    const attemptedProblem = simpleHealthSummary.problem;
+    const startedAt = new Date().toISOString();
+    const nowMs = Date.now();
+    const queue = getSyncQueueBridge();
+    const readById = async (ids: string[]): Promise<SyncQueueItem[] | null> => {
+      if (ids.length === 0) return [];
+      try {
+        const items = await queue.itemsById(ids);
+        return Array.isArray(items) ? items : null;
+      } catch {
+        return null;
+      }
+    };
+    setPrimaryActionBusy('syncNow');
+    try {
+      const before = await readById(
+        syncNowTargetItems(attemptedProblem, recoveryParityItems, nowMs).map((item) => item.id),
+      );
+      let madeDue: MadeDueRow[] = [];
+      let auditId: string | null = null;
+      const waiting = before ? rowsWaitingOutRetry(before, nowMs) : [];
+      if (waiting.length > 0) {
+        try {
+          const result = await queue.makeDue(waiting, syncNowIssueCode(attemptedProblem));
+          madeDue = Array.isArray(result?.madeDue) ? result.madeDue : [];
+          auditId = result?.auditId ?? null;
+        } catch (error) {
+          // Nothing recorded, nothing changed: the cycle runs on what is due.
+          console.warn('[SyncStatusIndicator] Sync now could not make its rows due:', error);
+        }
+      }
+      let refreshed = await handleForceSync();
+      if (refreshed === null) {
+        refreshed = await loadSystemHealth();
+      }
+      const after = before ? await readById(before.map((item) => item.id)) : null;
+      if (refreshed) {
+        setSyncVerification({ problem: attemptedProblem, before, after, auditId, madeDue, startedAt });
+      }
+    } finally {
+      setPrimaryActionBusy(null);
+    }
   };
 
   const handleRecoveryPanelRefresh = useCallback(async () => {
@@ -1566,55 +1561,208 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
 
   // --- System health helpers ---
 
-  const totalBacklog = systemHealth
-    ? Object.values(systemHealth.syncBacklog).reduce((sum, statuses) => {
-        return (
-          sum +
-          Object.entries(statuses)
-            .filter(([s]) => s !== 'synced' && s !== 'applied')
-            .reduce((s, [, c]) => s + c, 0)
-        );
-      }, 0)
-    : 0;
+  const totalBacklog = countDesktopBacklog(systemHealth);
+  // The last backlog read failed: the card says so, never "clear".
+  const backlogUnavailable = systemHealth?.syncBacklogStatus === 'unavailable';
+
+  // P1 Health signals (shared rules in shared/pos/health).
+  // Queue rows pending 30+ minutes after an attempt (or blocking the Z) are
+  // stuck. Re-aged at every fresh check (lastHealthCheckedAt).
+  const stuckSignal = useMemo(() => {
+    const nowMs = Date.now();
+    return summarizeStuckRows(
+      recoveryParityItems.map((item) => {
+        const createdMs = parseQueueTimestampMs(item.createdAt ?? null);
+        return {
+          status: classifyParityQueueItem(item, nowMs),
+          ageMs: createdMs === null ? null : Math.max(0, nowMs - createdMs),
+          tableName: item.tableName,
+          moduleType: item.moduleType ?? null,
+        };
+      }),
+    );
+  }, [recoveryParityItems, lastHealthCheckedAt]);
+
+  // Day close (Z). The renderer only sees the checkout payment blockers; open
+  // shifts, drawers and the fiscal queue are checked in Rust (zreport.rs), so
+  // this is a partial check that can say "blocked" but never "ready".
+  const closeoutSummary = useMemo(() => {
+    const blocking = (systemHealth?.checkoutPaymentBlockers?.details ?? []).filter(
+      (blocker) => blocker.severity !== 'warning',
+    );
+    const blockers: CloseoutBlockerInput[] =
+      blocking.length > 0
+        ? [
+            {
+              key: 'unpaid_finalized_orders',
+              count: blocking.length,
+              orderIds: [
+                ...new Set(
+                  blocking
+                    .map((blocker) => blocker.orderId)
+                    .filter((orderId): orderId is string => Boolean(orderId)),
+                ),
+              ],
+            },
+          ]
+        : [];
+    return summarizeCloseout({
+      applicable: !isMobileWaiter,
+      checked: systemHealth !== null,
+      complete: false,
+      blockers,
+      overdue: endOfDayStatus.status === 'pending_local_submit',
+      submitted: endOfDayStatus.status === 'submitted_pending_admin',
+      reportDate: endOfDayStatus.pendingReportDate ?? null,
+    });
+  }, [
+    endOfDayStatus.pendingReportDate,
+    endOfDayStatus.status,
+    isMobileWaiter,
+    systemHealth,
+  ]);
+
+  const terminalAuthInvalid =
+    !!effectiveCredentialState &&
+    (!effectiveCredentialState.hasAdminUrl || !effectiveCredentialState.hasApiKey);
+
+  // Print jobs still waiting (the whole queue, printerStatus.pendingJobs),
+  // aged at every fresh check: waiting minutes after a print should have
+  // finished means nothing is printing (store incident 30/09/2026, the Health
+  // view said "Printer: Ready" while every job stayed pending). Aged when the
+  // queue was read (lastHealthCheckedAt), not when a render rebuilds it, as
+  // Android does with its snapshot's capturedAt.
+  const printQueueSignal = useMemo(() => {
+    const readAtMs = lastHealthCheckedAt ? Date.parse(lastHealthCheckedAt) : Number.NaN;
+    return desktopPrintQueueSignal(systemHealth, Number.isFinite(readAtMs) ? readAtMs : Date.now());
+  }, [systemHealth, lastHealthCheckedAt]);
+  // The print stall as the operator's alarm (shared rule: during a shift).
+  // The heart shows it too, so staff see receipts are not printing without
+  // opening Health (review 30/09/2026).
+  const printingStallActive = isPrintingStallActive({
+    isShiftActive,
+    printQueue: printQueueSignal,
+  });
+
+  const healthSignalExtras = useMemo<HealthSignalExtras>(
+    () => ({
+      availability: healthAvailability,
+      stuck: stuckSignal,
+      closeout: closeoutSummary,
+      terminalAuthInvalid,
+      printQueue: printQueueSignal,
+    }),
+    [closeoutSummary, healthAvailability, printQueueSignal, stuckSignal, terminalAuthInvalid],
+  );
+
   const simpleHealthSummary = useMemo(() => {
-    const draft = buildSimpleHealthSummary({
+    const input = {
       health: systemHealth,
       syncStatus,
-      supportStatus: 'not_sent',
       isShiftActive,
       parityItems: recoveryParityItems,
+    };
+    const draft = buildSimpleHealthSummary({
+      ...input,
+      supportStatus: 'not_sent',
+      extras: healthSignalExtras,
     });
-    const supportStatus: SimpleServiceStatus['support'] = incidentReport?.success
-      ? 'notified'
-      : incidentReport?.error
-        ? 'failed_to_notify'
-        : draft.state === 'healthy'
-          ? 'not_needed'
-          : 'not_sent';
+    const supportStatus = resolveSupportStatus({
+      incidentSucceeded: incidentReport?.success,
+      incidentFailed: Boolean(incidentReport?.error),
+      state: draft.state,
+    });
 
     return buildSimpleHealthSummary({
-      health: systemHealth,
-      syncStatus,
+      ...input,
       supportStatus,
-      isShiftActive,
-      parityItems: recoveryParityItems,
+      extras: {
+        ...healthSignalExtras,
+        // The problem never depends on this flag, so the draft's is final.
+        repeatedFailure:
+          repeatedFailureProblem !== null && repeatedFailureProblem === draft.problem,
+      },
     });
-  }, [incidentReport, isShiftActive, syncStatus, systemHealth, recoveryParityItems]);
+  }, [
+    healthSignalExtras,
+    incidentReport,
+    isShiftActive,
+    recoveryParityItems,
+    repeatedFailureProblem,
+    syncStatus,
+    systemHealth,
+  ]);
+
+  // After a primary "Sync now" and a fresh check, the shared rule both apps
+  // apply (judgeSyncAttempt), on the rows it worked on as Android does: only
+  // a verified failure — a row the cycle tried that is still stuck, failed
+  // or in conflict — is a repeated failure; rows it did not reach are
+  // pending, and anything else clears the memory. The manual cycle always
+  // runs here (missing credentials show as a different problem), so `ran`
+  // is true.
+  useEffect(() => {
+    if (!syncVerification) return;
+    const problem = simpleHealthSummary.problem;
+    const remaining = syncNowRemainder({
+      before: syncVerification.before,
+      after: syncVerification.after,
+      problemStillThere: problem === syncVerification.problem,
+      nowMs: Date.now(),
+    });
+    const outcome = judgeSyncAttempt({
+      freshCheck: remaining !== null,
+      ran: true,
+      remaining: remaining ?? 'problem',
+    });
+    setRepeatedFailureProblem(outcome === 'failed' && SYNC_PROBLEMS.has(problem) ? problem : null);
+    if (syncVerification.auditId) {
+      // The entry that recorded the retry times gets the outcome.
+      const entry: RecoveryActionLogEntry = {
+        id: syncVerification.auditId,
+        actionId: 'syncNow',
+        issueCode: syncNowIssueCode(syncVerification.problem),
+        success: outcome === 'resolved',
+        outcome,
+        timestamp: syncVerification.startedAt,
+        actor: { staffId: null, staffName: null },
+        targetRefs: {
+          queueRowIds: (syncVerification.before ?? []).map((item) => item.id).slice(0, 20),
+        },
+        madeDue: syncVerification.madeDue,
+      };
+      void Promise.resolve()
+        .then(() => bridge.recovery.recordActionLog(entry))
+        .catch((error) => console.warn('[SyncStatusIndicator] Sync now outcome not logged:', error));
+    }
+    setSyncVerification(null);
+  }, [bridge.recovery, simpleHealthSummary.problem, syncVerification]);
+
+  useEffect(() => {
+    if (repeatedFailureProblem !== null && simpleHealthSummary.problem !== repeatedFailureProblem) {
+      setRepeatedFailureProblem(null);
+    }
+  }, [repeatedFailureProblem, simpleHealthSummary.problem]);
+
   const localizedHealthSummary = useMemo(() => {
-    const stateKey =
-      simpleHealthSummary.state === 'support_needed'
-        ? 'supportNeeded'
-        : simpleHealthSummary.state;
+    const stateKeys = healthStateKeys(simpleHealthSummary.state);
+    const problemParams = simpleHealthSummary.problemDetail.params;
+    const duration = healthDuration(problemParams?.durationMs ?? null);
     return {
-      title: t(`sync.healthModal.states.${stateKey}.title`),
+      title: t(stateKeys.titleKey),
       message:
         simpleHealthSummary.state === 'healthy' && !isShiftActive
           ? t('sync.healthModal.states.healthy.messageNoShift')
-          : t(`sync.healthModal.states.${stateKey}.message`),
-      guidance: t(`sync.healthModal.guidance.${simpleHealthSummary.guidance}`),
-      problem: t(`sync.healthModal.problems.${simpleHealthSummary.problem}`),
+          : t(stateKeys.messageKey),
+      guidance: t(healthGuidanceKey(simpleHealthSummary.guidance)),
+      problem: problemParams
+        ? t(healthProblemKey(simpleHealthSummary.problemDetail), {
+            count: problemParams.count ?? 0,
+            duration: t(duration.key, { count: duration.count }),
+          })
+        : t(healthProblemKey(simpleHealthSummary.problemDetail)),
+      impacts: simpleHealthSummary.impacts.map((impact) => t(healthImpactKey(impact))),
       recommendedActions: simpleHealthSummary.recommendedActions.map((action) =>
-        t(`sync.healthModal.recommendations.${action}`),
+        t(healthRecommendationKey(action)),
       ),
     };
   }, [isShiftActive, simpleHealthSummary, t]);
@@ -1648,6 +1796,47 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     ],
   );
 
+  /** health_view.json for the diagnostics bundle: exactly what this view shows. */
+  const buildExportHealthView = () =>
+    buildHealthView({
+      platform: 'windows',
+      source: 'health_modal',
+      availability: healthAvailability,
+      // No valid observation yet: the summary would describe an empty snapshot.
+      summary: systemHealth !== null ? simpleHealthSummary : null,
+      issues: sharedRecoveryIssues,
+      closeout: closeoutSummary,
+      lastActions: recentRecoveryActions,
+      counts: {
+        localPending: syncStatus.pendingItems,
+        parityPending: parityPendingCount,
+        parityFailed: parityFailedCount,
+        parityConflicts: parityConflictCount,
+        financialPending: financialPendingCount,
+        financialFailed: financialFailedCount,
+        // Left out when the read failed: absent is not zero.
+        ...(backlogUnavailable ? {} : { syncBacklog: totalBacklog }),
+        stuckRows: stuckSignal?.count ?? 0,
+        invalidOrders: systemHealth?.invalidOrders?.count ?? 0,
+        printerFailures: countDesktopPrinterFailures(systemHealth),
+        // Left out when the queue was not read: absent is not zero.
+        ...(printQueueSignal
+          ? {
+              printJobsWaiting: printQueueSignal.waitingCount,
+              ...(printQueueSignal.oldestWaitingAgeMs !== null
+                ? { oldestPrintJobWaitingMs: printQueueSignal.oldestWaitingAgeMs }
+                : {}),
+            }
+          : {}),
+        crashCount: systemHealth?.panicCount ?? 0,
+        recoveryIssues: sharedRecoveryIssues.length,
+      },
+      // Desktop extra: the incoming-order alert's watchdog and render-failure
+      // entries (Tomikro, 30/09/2026), which otherwise live only in this
+      // register's local storage.
+      extra: { incomingOrderAlerts: buildIncomingOrderAlertSupportEvidence() },
+    });
+
   const totalPending =
     syncStatus.pendingItems + financialPendingCount + parityPendingCount;
   const rawNextRetryAt = syncStatus.oldestNextRetryAt ?? queueFailure?.nextRetryAt;
@@ -1657,6 +1846,8 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
   const advancedIssueCount =
     sharedRecoveryIssues.length +
     (systemHealth === null && !systemLoading ? 1 : 0);
+  // Nothing to report except a read that failed: never "All clear".
+  const advancedUnavailableOnly = advancedIssueCount === 0 && backlogUnavailable;
   const shouldOpenAdvancedByDefault =
     sharedRecoveryIssues.length > 0 || (systemHealth === null && !systemLoading);
   const syncErrorDisplay = useMemo(
@@ -1756,12 +1947,24 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
         ? 'text-yellow-600 dark:text-yellow-400'
         : 'text-red-600 dark:text-red-400';
 
-  const heartStatusClass =
-    syncHealthState === 'healthy' && syncStatus.isOnline
-      ? 'text-green-400 drop-shadow-[0_0_8px_rgba(34,197,94,0.6)]'
+  // A stalled print queue during a shift turns a green heart to the
+  // attention colour; a red (sync error) heart stays red.
+  const heartTone: 'healthy' | 'error' | 'attention' =
+    syncHealthState === 'healthy' && syncStatus.isOnline && !printingStallActive
+      ? 'healthy'
       : syncHealthState === 'error'
+        ? 'error'
+        : 'attention';
+  const heartStatusClass =
+    heartTone === 'healthy'
+      ? 'text-green-400 drop-shadow-[0_0_8px_rgba(34,197,94,0.6)]'
+      : heartTone === 'error'
         ? 'text-red-400 drop-shadow-[0_0_8px_rgba(239,68,68,0.6)]'
         : 'text-amber-400 drop-shadow-[0_0_8px_rgba(251,191,36,0.55)]';
+  // The colour is not the only signal: the heart's label says it too.
+  const heartLabel = printingStallActive
+    ? `${getStatusText()} | ${t(healthImpactKey('printingStopped'))}`
+    : getStatusText();
 
   useEffect(() => {
     if (showDetailPanel) {
@@ -2343,12 +2546,16 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
           <span
             className={cn(
               'inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold',
-              advancedIssueCount > 0
+              advancedIssueCount > 0 || advancedUnavailableOnly
                 ? 'border border-amber-200/90 bg-amber-50 text-amber-700 dark:border-amber-400/30 dark:bg-amber-500/10 dark:text-amber-200'
                 : 'border border-emerald-200/90 bg-emerald-50 text-emerald-700 dark:border-emerald-400/30 dark:bg-emerald-500/10 dark:text-emerald-200',
             )}
           >
-            {advancedIssueCount > 0 ? t('sync.system.pending', { count: advancedIssueCount }) : t('sync.dashboard.allClear')}
+            {advancedIssueCount > 0
+              ? t('sync.system.pending', { count: advancedIssueCount })
+              : advancedUnavailableOnly
+                ? t('sync.healthModal.status.unavailable')
+                : t('sync.dashboard.allClear')}
           </span>
           <ChevronDown
             className={cn(
@@ -2444,15 +2651,31 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
               <div className={modalInsetClass}>
                 <div className="flex items-center justify-between">
                   <div className={modalEyebrowClass}>{t('sync.system.syncBacklog')}</div>
-                  <span className={cn(
-                    'text-xs font-semibold',
-                    totalBacklog > 0 ? 'text-amber-600 dark:text-amber-300' : 'text-emerald-600 dark:text-emerald-300',
-                  )}>
-                    {totalBacklog > 0 ? t('sync.system.pending', { count: totalBacklog }) : t('sync.system.clear')}
+                  <span
+                    data-testid="sync-backlog-status"
+                    className={cn(
+                      'text-xs font-semibold',
+                      backlogUnavailable || totalBacklog > 0
+                        ? 'text-amber-600 dark:text-amber-300'
+                        : 'text-emerald-600 dark:text-emerald-300',
+                    )}
+                  >
+                    {backlogUnavailable
+                      ? t('sync.healthModal.status.unavailable')
+                      : totalBacklog > 0
+                        ? t('sync.system.pending', { count: totalBacklog })
+                        : t('sync.system.clear')}
                   </span>
                 </div>
                 <div className="mt-4 space-y-2">
-                  {totalBacklog > 0 ? (
+                  {backlogUnavailable ? (
+                    <p
+                      data-testid="sync-backlog-unavailable"
+                      className="text-sm text-slate-600 dark:text-slate-300"
+                    >
+                      {t('sync.system.backlogUnavailable')}
+                    </p>
+                  ) : totalBacklog > 0 ? (
                     Object.entries(systemHealth.syncBacklog).map(([type, statuses]) => {
                       const pending = Object.entries(statuses)
                         .filter(([s]) => s !== 'synced' && s !== 'applied')
@@ -2713,27 +2936,45 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
       },
     }[summary.state];
     const StatusIcon = visual.icon;
-    const statusKey = (value: string) => {
-      const keys: Record<string, string> = {
-        start_shift: 'startShift',
-        not_configured: 'notConfigured',
-        not_needed: 'notNeeded',
-        not_sent: 'notSent',
-        failed_to_notify: 'failedToNotify',
-      };
-      return keys[value] ?? value;
-    };
     const statusLabel = (value: string) =>
-      t(`sync.healthModal.status.${statusKey(value)}`, {
+      t(healthStatusLabelKey(value), {
         defaultValue: t('sync.healthModal.status.unknown'),
       });
     const serviceItems = [
-      { label: t('sync.healthModal.services.orders'), value: summary.serviceStatuses.orders },
-      { label: t('sync.healthModal.services.internet'), value: summary.serviceStatuses.internet },
-      { label: t('sync.healthModal.services.sync'), value: summary.serviceStatuses.sync },
-      { label: t('sync.healthModal.services.printer'), value: summary.serviceStatuses.printer },
-      { label: t('sync.healthModal.services.support'), value: summary.serviceStatuses.support },
+      { key: 'orders', label: t('sync.healthModal.services.orders'), value: statusLabel(summary.serviceStatuses.orders) },
+      { key: 'internet', label: t('sync.healthModal.services.internet'), value: statusLabel(summary.serviceStatuses.internet) },
+      { key: 'sync', label: t('sync.healthModal.services.sync'), value: statusLabel(summary.serviceStatuses.sync) },
+      { key: 'printer', label: t('sync.healthModal.services.printer'), value: statusLabel(summary.serviceStatuses.printer) },
+      { key: 'support', label: t('sync.healthModal.services.support'), value: statusLabel(summary.serviceStatuses.support) },
+      { key: 'closeout', label: t('sync.healthModal.services.closeout'), value: t(closeoutStatusLabelKey(summary.serviceStatuses.closeout)) },
     ];
+    // The ONE recommended action. The desktop has no entry point from here to
+    // the Z screen, the printer settings, the shift start or a live-updates
+    // reconnect, so those (and waiting for the connection) are guidance only.
+    const primaryActionId = summary.primaryAction;
+    const primaryAction = HEALTH_PRIMARY_ACTIONS[primaryActionId];
+    const primaryActionHandlers: Partial<Record<HealthPrimaryActionId, () => void>> = {
+      syncNow: () => void handlePrimarySyncNow(),
+      exportDiagnostics: () => void handleExport(),
+      openRecovery: handleOpenRecovery,
+      openConnectionSettings: handleOpenConnectionSettings,
+      configurePrinter: handleOpenPrinterSettings,
+      checkPrinting: handleOpenPrinterSettings,
+      refresh: () => void loadSystemHealth(),
+    };
+    const runPrimaryAction = primaryActionHandlers[primaryActionId];
+    const primaryActionIsBusy =
+      primaryActionId === 'syncNow'
+        ? primaryActionBusy === 'syncNow' || syncStatus.syncInProgress
+        : primaryActionId === 'exportDiagnostics'
+          ? exporting
+          : primaryActionId === 'refresh'
+            ? systemLoading
+            : false;
+    const PrimaryActionIcon = PRIMARY_ACTION_ICONS[primaryActionId] ?? RefreshCw;
+    const primaryActionBusyMotion =
+      primaryActionId === 'exportDiagnostics' ? 'animate-bounce' : 'animate-spin';
+    const showPrimaryAction = primaryActionId !== 'none';
     const locale = i18n?.resolvedLanguage || i18n?.language;
     const formatHealthDateTime = (value: string) =>
       formatDateTime(value, {}, locale);
@@ -2804,6 +3045,35 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                   </p>
                 </section>
               )}
+              {healthAvailability === 'unavailable' && showPrimaryAction && (
+                <div
+                  className={cn('mb-5 rounded-2xl border p-4', liquidGlassModalTone('neutral'))}
+                  data-testid="health-primary-action"
+                >
+                  <h4 className="text-xs font-bold uppercase tracking-wide opacity-70">
+                    {t('sync.healthModal.sections.recommendedActions')}
+                  </h4>
+                  <div className="mt-2 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="min-w-0 space-y-1">
+                      {!runPrimaryAction && <p className="text-base font-black">{t(primaryAction.labelKey)}</p>}
+                      <p className="text-sm font-semibold leading-6">{t(primaryAction.detailKey)}</p>
+                      <p className="text-sm leading-6 opacity-80">{t(primaryAction.verificationKey)}</p>
+                    </div>
+                    {runPrimaryAction && (
+                      <button
+                        type="button"
+                        onClick={runPrimaryAction}
+                        disabled={primaryActionIsBusy}
+                        aria-busy={primaryActionIsBusy}
+                        className="inline-flex min-h-[48px] shrink-0 items-center justify-center gap-2 rounded-2xl border border-yellow-300 bg-yellow-400 px-5 text-sm font-black text-black active:bg-yellow-300 disabled:opacity-50"
+                      >
+                        <PrimaryActionIcon className={cn('h-5 w-5', primaryActionIsBusy && primaryActionBusyMotion)} aria-hidden="true" />
+                        {t(primaryAction.labelKey)}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
               {healthAvailability === 'stale' && (
                 <div
                   id={`${healthDialogDescriptionId}-stale`}
@@ -2832,27 +3102,81 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                   <div className="min-w-0 flex-1">
                     <h3 className="mt-1 text-xl font-bold tracking-tight">{localizedHealthSummary.title}</h3>
                     <p id={healthDialogDescriptionId} className="mt-2 max-w-2xl text-sm leading-6">{summary.state === 'healthy' ? localizedHealthSummary.message : localizedHealthSummary.problem}</p>
-                    <div className="mt-3 inline-flex min-h-10 items-center gap-2 rounded-xl border border-current/15 bg-white/60 px-4 text-sm font-black text-current dark:bg-white/10">
-                      {summary.canContinueOrders ? (
-                        <CheckCircle2 className="h-4 w-4 text-emerald-700 dark:text-emerald-300" />
-                      ) : summary.state === 'support_needed' ? (
-                        <AlertTriangle className="h-4 w-4 text-rose-700 dark:text-red-300" />
-                      ) : (
-                        <Clock className="h-4 w-4 text-amber-700 dark:text-yellow-300" />
-                      )}
-                      {localizedHealthSummary.guidance}
-                    </div>
+                    {/* "Start a shift" is already the recommended action below. */}
+                    {summary.primaryAction !== 'startShift' && (
+                      <div className="mt-3 inline-flex min-h-10 items-center gap-2 rounded-xl border border-current/15 bg-white/60 px-4 text-sm font-black text-current dark:bg-white/10">
+                        {summary.canContinueOrders ? (
+                          <CheckCircle2 className="h-4 w-4 text-emerald-700 dark:text-emerald-300" />
+                        ) : summary.state === 'support_needed' ? (
+                          <AlertTriangle className="h-4 w-4 text-rose-700 dark:text-red-300" />
+                        ) : (
+                          <Clock className="h-4 w-4 text-amber-700 dark:text-yellow-300" />
+                        )}
+                        {localizedHealthSummary.guidance}
+                      </div>
+                    )}
+                    {localizedHealthSummary.impacts.length > 0 && (
+                      <ul className="mt-3 list-inside list-disc space-y-1 text-sm font-semibold leading-6">
+                        {localizedHealthSummary.impacts.map((impact) => (
+                          <li key={impact}>{impact}</li>
+                        ))}
+                      </ul>
+                    )}
                     <div className="mt-3 text-sm opacity-80">
                       {t('sync.healthModal.lastChecked', { value: lastChecked })}
                     </div>
                   </div>
                 </div>
 
-                <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-5">
+                {showPrimaryAction && (
+                  <div
+                    className="mt-4 rounded-2xl border border-current/15 bg-white/70 p-4 dark:bg-white/10"
+                    data-testid="health-primary-action"
+                  >
+                    <h4 className="text-xs font-bold uppercase tracking-wide opacity-70">
+                      {t('sync.healthModal.sections.recommendedActions')}
+                    </h4>
+                    <div className="mt-2 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="min-w-0 space-y-1">
+                        {!runPrimaryAction && <p className="text-base font-black">{t(primaryAction.labelKey)}</p>}
+                        <p className="text-sm font-semibold leading-6">{t(primaryAction.detailKey)}</p>
+                        <p className="text-sm leading-6 opacity-80">{t(primaryAction.verificationKey)}</p>
+                      </div>
+                      {runPrimaryAction && (
+                        <button
+                          type="button"
+                          onClick={runPrimaryAction}
+                          disabled={primaryActionIsBusy}
+                          aria-busy={primaryActionIsBusy}
+                          className="inline-flex min-h-[48px] shrink-0 items-center justify-center gap-2 rounded-2xl border border-yellow-300 bg-yellow-400 px-5 text-sm font-black text-black active:bg-yellow-300 disabled:opacity-50"
+                        >
+                          <PrimaryActionIcon className={cn('h-5 w-5', primaryActionIsBusy && primaryActionBusyMotion)} aria-hidden="true" />
+                          {t(primaryAction.labelKey)}
+                        </button>
+                      )}
+                    </div>
+                    {primaryActionId === 'exportDiagnostics' && exportPath && (
+                      <button
+                        type="button"
+                        onClick={handleOpenExportDir}
+                        className="mt-3 inline-flex min-h-[48px] items-center gap-2 rounded-xl border border-slate-300 bg-white px-4 text-sm font-bold text-slate-900 active:bg-slate-100 dark:border-white/15 dark:bg-white/[0.07] dark:text-white dark:active:bg-white/[0.12]"
+                      >
+                        <FolderOpen className="h-4 w-4" />
+                        {t('sync.healthModal.actions.openFolder')}
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3">
                   {serviceItems.map((item) => (
-                    <div key={item.label} className="rounded-2xl border border-current/10 bg-white/55 px-3 py-2 dark:bg-white/[0.08]">
+                    <div
+                      key={item.key}
+                      data-testid={`health-service-${item.key}`}
+                      className="rounded-2xl border border-current/10 bg-white/55 px-3 py-2 dark:bg-white/[0.08]"
+                    >
                       <div className="text-xs font-bold uppercase tracking-wide opacity-70">{item.label}</div>
-                      <div className="mt-1 text-sm font-black">{statusLabel(item.value)}</div>
+                      <div className="mt-1 text-sm font-black">{item.value}</div>
                     </div>
                   ))}
                 </div>
@@ -2904,9 +3228,9 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                   <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                     {[
                       [t('sync.healthModal.advanced.fields.lastSync'), systemHealth?.lastSyncTime || syncStatus.lastSync ? formatHealthDateTime((systemHealth?.lastSyncTime || syncStatus.lastSync) as string) : t('sync.healthModal.advanced.values.never')],
-                      [t('sync.healthModal.advanced.fields.syncBacklog'), formatNumber(totalBacklog, {}, locale)],
+                      [t('sync.healthModal.advanced.fields.syncBacklog'), backlogUnavailable ? t('sync.healthModal.status.unavailable') : formatNumber(totalBacklog, {}, locale)],
                       [t('sync.healthModal.advanced.fields.financialFailed'), formatNumber(financialFailedCount, {}, locale)],
-                      [t('sync.healthModal.advanced.fields.printerFailures'), formatNumber(countPrinterFailures(systemHealth), {}, locale)],
+                      [t('sync.healthModal.advanced.fields.printerFailures'), formatNumber(countDesktopPrinterFailures(systemHealth), {}, locale)],
                       [t('sync.healthModal.advanced.fields.crashCount'), formatNumber(systemHealth?.panicCount ?? 0, {}, locale)],
                     ].map(([label, value]) => (
                       <div key={String(label)} className="rounded-2xl border border-slate-200 bg-white p-3 dark:border-yellow-400/10 dark:bg-white/[0.05]">
@@ -2922,7 +3246,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
               </details>
             </div>
             <div className="flex shrink-0 flex-wrap gap-3 border-t border-slate-200 bg-white px-5 py-3 dark:border-white/15 dark:bg-slate-950">
-              {systemHealth && healthAvailability !== 'unavailable' && needsRecovery && <button type="button" onClick={handleOpenRecovery} className="inline-flex min-h-[48px] flex-1 items-center justify-center gap-2 rounded-2xl bg-amber-400 px-4 py-2 text-sm font-bold text-black active:bg-amber-300"><Database className="h-5 w-5" />{t('sync.dashboard.openRecovery', {defaultValue: 'Open Recovery Center'})}</button>}
+              {systemHealth && healthAvailability !== 'unavailable' && needsRecovery && <button type="button" onClick={handleOpenRecovery} className="inline-flex min-h-[48px] flex-1 items-center justify-center gap-2 rounded-2xl border border-slate-300 bg-white px-4 py-2 text-sm font-bold text-slate-900 active:bg-slate-100 dark:border-white/20 dark:bg-white/[0.07] dark:text-white dark:active:bg-white/[0.12]"><Database className="h-5 w-5" />{t('sync.dashboard.openRecovery', {defaultValue: 'Open Recovery Center'})}</button>}
               <button type="button" onClick={loadSystemHealth} disabled={systemLoading} aria-busy={systemLoading} className="inline-flex min-h-[48px] flex-1 items-center justify-center gap-2 rounded-2xl border border-slate-300 bg-white px-4 py-2 text-sm font-bold text-slate-900 active:bg-slate-100 disabled:opacity-50 dark:border-white/20 dark:bg-white/[0.07] dark:text-white dark:active:bg-white/[0.12]"><RefreshCw className={cn('h-5 w-5', systemLoading && 'animate-spin')} />{t('sync.healthModal.actions.refresh')}</button>
             </div>
           </div>
@@ -2943,7 +3267,8 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
         ref={launcherRef}
         className="group relative flex min-h-[44px] min-w-[44px] items-center justify-center rounded-full p-2 transition-all duration-200 active:bg-slate-100/80 dark:active:bg-white/10"
         onClick={() => setShowDetailPanel(!showDetailPanel)}
-        aria-label={getStatusText()}
+        aria-label={heartLabel}
+        data-heart-tone={heartTone}
         aria-haspopup="dialog"
         aria-expanded={showDetailPanel}
         aria-controls={showDetailPanel ? `${healthDialogTitleId}-dialog` : undefined}

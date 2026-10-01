@@ -10,10 +10,10 @@
   "sync": {
     "healthModal": {
       "problems": {
-        "syncFailed": "Sinkronizimi dështoi. Hap Rikuperimin për të parë cilat të dhëna duan vëmendje."
+        "syncFailed": "Disa të dhëna nuk u sinkronizuan. Ruhen të sigurta në këtë pajisje."
       },
       "recommendations": {
-        "openRecovery": "Hap Rikuperimin dhe shiko të dhënën që dështoi para se të provosh përsëri."
+        "openRecovery": "Kontrollo të dhënat që dështuan para se të provosh sërish."
       }
     }
   }

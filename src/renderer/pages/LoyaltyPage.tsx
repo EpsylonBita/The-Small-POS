@@ -75,7 +75,7 @@ const LoyaltyPage: React.FC = () => {
   const isDark = resolvedTheme === 'dark';
   const formatMoney = (amount: number) => formatCurrency(amount);
 
-  const fetchData = useCallback(async () => {
+  const fetchData = useCallback(async (force = false) => {
     setLoading(true);
     try {
       const [settingsRes, customersRes] = await Promise.all([
@@ -88,7 +88,7 @@ const LoyaltyPage: React.FC = () => {
 
       Promise.all([
         bridge.loyalty.syncSettings().catch(() => null),
-        bridge.loyalty.syncCustomers().catch(() => null),
+        bridge.loyalty.syncCustomers({ force }).catch(() => null),
       ]).then(async () => {
         try {
           const [freshSettings, freshCustomers] = await Promise.all([
@@ -269,7 +269,7 @@ const LoyaltyPage: React.FC = () => {
             </button>
             <button
               type="button"
-              onClick={() => void fetchData()}
+              onClick={() => void fetchData(true)}
               disabled={loading}
               aria-label={t('common.refresh', 'Refresh')}
               className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all ${

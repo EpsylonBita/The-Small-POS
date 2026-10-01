@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { getBridge } from '../../lib';
 
 interface UseDiscountSettingsReturn {
@@ -6,38 +6,45 @@ interface UseDiscountSettingsReturn {
   taxRatePercentage: number;
   isLoading: boolean;
   error: string | null;
+  /**
+   * The store's discount cap or tax rate could not be read (item H, fix
+   * review 30/09/2026). The values above are then not the store's: nothing
+   * may be priced, capped or split on them, and checkout is paused until a
+   * read succeeds (`refreshSettings`).
+   */
+  unavailable: boolean;
   refreshSettings: () => Promise<void>;
 }
 
+const isPercentage = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100;
+
 /**
  * Custom hook for managing discount settings
- * 
- * Fetches and caches the maximum discount percentage setting from the main process.
- * Provides a refresh function to manually reload settings when needed.
- * 
- * @returns {UseDiscountSettingsReturn} Object containing max discount percentage, loading state, error state, and refresh function
- * 
+ *
+ * Fetches the maximum discount percentage and the tax rate from the native
+ * settings. A setting that is not stored reads as the till's default (the
+ * native side answers 100% / 0%). A read that fails, or a stored value that
+ * is not a percentage, is "unavailable": it never falls back to an assumed
+ * 30% / 24% (item H, fix review 30/09/2026; the same decision as Android).
+ *
  * @example
  * ```tsx
- * const { maxDiscountPercentage, isLoading, error } = useDiscountSettings();
- * 
- * if (isLoading) return <div>Loading settings...</div>;
- * if (error) return <div>Error: {error}</div>;
- * 
- * // Use maxDiscountPercentage for validation
- * if (discountValue > maxDiscountPercentage) {
- *   alert(`Discount cannot exceed ${maxDiscountPercentage}%`);
- * }
+ * const { maxDiscountPercentage, unavailable } = useDiscountSettings();
+ * if (unavailable) return <PausedCheckoutNotice />;
  * ```
  */
 export function useDiscountSettings(): UseDiscountSettingsReturn {
-  const bridge = getBridge();
-  const [maxDiscountPercentage, setMaxDiscountPercentage] = useState<number>(30); // Default to 30%
-  const [taxRatePercentage, setTaxRatePercentage] = useState<number>(24); // Default to 24% (Greek VAT)
+  const bridge = useMemo(() => getBridge(), []);
+  const [maxDiscountPercentage, setMaxDiscountPercentage] = useState<number>(30); // Shown only once read
+  const [taxRatePercentage, setTaxRatePercentage] = useState<number>(24); // Shown only once read
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+  const [unavailable, setUnavailable] = useState<boolean>(false);
+  const generationRef = useRef(0);
 
-  const fetchSettings = async () => {
+  const fetchSettings = useCallback(async () => {
+    const generation = ++generationRef.current;
     setIsLoading(true);
     setError(null);
 
@@ -46,49 +53,46 @@ export function useDiscountSettings(): UseDiscountSettingsReturn {
         bridge.settings.getDiscountMax(),
         bridge.settings.getTaxRate()
       ]);
+      if (generation !== generationRef.current) return;
 
-      // Validate discount percentage
-      if (typeof discountPercentage === 'number' && discountPercentage >= 0 && discountPercentage <= 100) {
+      if (isPercentage(discountPercentage) && isPercentage(taxRate)) {
         setMaxDiscountPercentage(discountPercentage);
-      } else {
-        console.warn('Invalid discount percentage received, using default (30%)');
-        setMaxDiscountPercentage(30);
-      }
-
-      // Validate tax rate
-      if (typeof taxRate === 'number' && taxRate >= 0 && taxRate <= 100) {
         setTaxRatePercentage(taxRate);
+        setUnavailable(false);
       } else {
-        console.warn('Invalid tax rate received, using default (24%)');
-        setTaxRatePercentage(24);
+        console.warn('Invalid discount cap or tax rate received: checkout is paused', {
+          discountPercentage,
+          taxRate,
+        });
+        setError('Invalid discount cap or tax rate');
+        setUnavailable(true);
       }
     } catch (err) {
+      if (generation !== generationRef.current) return;
       const errorMessage = err instanceof Error ? err.message : 'Failed to fetch settings';
       console.error('Error fetching settings:', err);
       setError(errorMessage);
-      // Fall back to default values on error
-      setMaxDiscountPercentage(30);
-      setTaxRatePercentage(24);
+      setUnavailable(true);
     } finally {
-      setIsLoading(false);
+      if (generation === generationRef.current) setIsLoading(false);
     }
-  };
+  }, [bridge]);
 
   // Fetch settings on mount
   useEffect(() => {
-    fetchSettings();
-  }, []);
+    void fetchSettings();
+  }, [fetchSettings]);
 
-  const refreshSettings = async () => {
+  const refreshSettings = useCallback(async () => {
     await fetchSettings();
-  };
+  }, [fetchSettings]);
 
   return {
     maxDiscountPercentage,
     taxRatePercentage,
     isLoading,
     error,
+    unavailable,
     refreshSettings
   };
 }
-

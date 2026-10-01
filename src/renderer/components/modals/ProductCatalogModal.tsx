@@ -12,6 +12,7 @@ import { useTheme } from '../../contexts/theme-context';
 import { useModules } from '../../contexts/module-context';
 import { useProductCatalog } from '../../hooks/useProductCatalog';
 import { useDiscountSettings } from '../../hooks/useDiscountSettings';
+import { notifyMoneySettingsUnavailable } from '../../utils/checkoutMoneySettings';
 import { useDeliveryValidation } from '../../hooks/useDeliveryValidation';
 import { useAcquiredModules, MODULE_IDS } from '../../hooks/useAcquiredModules';
 import { useOnBarcodeScan, useBarcodeScannerContext } from '../../contexts/barcode-scanner-context';
@@ -144,7 +145,13 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const { organizationId: moduleOrgId } = useModules();
-  const { maxDiscountPercentage } = useDiscountSettings();
+  const {
+    maxDiscountPercentage: storeMaxDiscountPercentage,
+    unavailable: discountCapUnavailable,
+    refreshSettings: retryDiscountSettings,
+  } = useDiscountSettings();
+  // No discount on an assumed cap while the store's cap cannot be read.
+  const maxDiscountPercentage = discountCapUnavailable ? 0 : storeMaxDiscountPercentage;
   const { hasModule } = useAcquiredModules();
   const hasDeliveryModule = hasModule(MODULE_IDS.DELIVERY);
   const hasDeliveryZonesModule = hasModule(MODULE_IDS.DELIVERY_ZONES);
@@ -165,6 +172,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [discountPercentage, setDiscountPercentage] = useState<number>(0);
   const [manualDeliveryFee, setManualDeliveryFee] = useState<number>(0);
+  const manualDeliveryFeeEditedRef = useRef(false);
   const [manualDeliveryFeeInput, setManualDeliveryFeeInput] = useState('');
   const [localDeliveryZoneInfo, setLocalDeliveryZoneInfo] =
     useState<DeliveryBoundaryValidationResponse | null>(null);
@@ -181,6 +189,16 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
   // Debounce search term to avoid excessive API calls (300ms delay)
   const debouncedSearchTerm = useDebounce(searchTerm, 300);
   const bridge = getBridge();
+  useEffect(() => {
+    if (!isOpen || orderType !== 'delivery' || hasDeliveryPro) {return}
+    manualDeliveryFeeEditedRef.current = false;
+    let cancelled = false;
+    void bridge.settings.get('delivery', 'delivery_fee').then((value: unknown) => {
+      const raw = value && typeof value === 'object' ? (value as { value?: unknown }).value : value;
+      if (!cancelled && !manualDeliveryFeeEditedRef.current) {setManualDeliveryFee(Math.max(0, Number(raw) || 0))}
+    }).catch(() => {});
+    return () => {cancelled = true};
+  }, [isOpen, orderType, hasDeliveryPro]);
   const offerValidationRequestIdRef = useRef(0);
 
   useEffect(() => {
@@ -751,6 +769,14 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
   const handleCheckout = async () => {
     if (cartItems.length === 0) return;
 
+    // Item H (fix review 30/09/2026): the store's discount cap could not be
+    // read. Checkout is paused with "Try again" rather than capping a
+    // discount on an assumed value.
+    if (discountCapUnavailable) {
+      notifyMoneySettingsUnavailable(t, retryDiscountSettings);
+      return;
+    }
+
     if (orderType === 'delivery' && hasDeliveryPro && !canCheckoutWithDeliveryFeeStatus(deliveryFeeStatus)) {
         if (!deliveryValidationTarget || !hasExactDeliveryCoordinates) {
           return;
@@ -1154,6 +1180,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
                       inputMode="decimal"
                       value={manualDeliveryFeeInput}
                       onChange={(event) => {
+                        manualDeliveryFeeEditedRef.current = true;
                         const formatted = formatMoneyInputWithCents(event.target.value)
                         setManualDeliveryFeeInput(formatted)
                         setManualDeliveryFee(parseMoneyInputValue(formatted))

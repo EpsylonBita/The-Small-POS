@@ -2478,6 +2478,9 @@ where
 
     crate::cache_terminal_settings_snapshot(db, &resp)
         .map_err(|_| "SETTINGS_DURABLE_WRITE_FAILED".to_string())?;
+    // A settings sync may have changed the branch or its plugins: ask for the
+    // fiscal-active verdict on the next sync pass (29/09/2026).
+    crate::fiscal::status::mark_due();
     if binding_changed {
         prepare_terminal_connection_rebind(db)?;
         finish_terminal_connection_rebind(db)?;
@@ -2619,6 +2622,19 @@ pub async fn settings_get(
     get_settings(db).await
 }
 
+fn read_local_state_setting(
+    conn: &rusqlite::Connection,
+    key: &str,
+) -> Result<Option<String>, String> {
+    conn.query_row(
+        "SELECT setting_value FROM local_settings WHERE setting_category = 'local' AND setting_key = ?1",
+        [key],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(|error| format!("Failed to read local state: {error}"))
+}
+
 #[tauri::command]
 pub async fn settings_get_local(
     arg0: Option<Value>,
@@ -2635,6 +2651,10 @@ pub async fn settings_get_local(
             }
 
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            if category == "local" {
+                return read_local_state_setting(&conn, setting_key)
+                    .map(|value| value.map(Value::String).unwrap_or(Value::Null));
+            }
             if let Some(v) = db::get_setting(&conn, category, setting_key) {
                 return Ok(serde_json::Value::String(v));
             }
@@ -3199,14 +3219,52 @@ pub async fn settings_update_local(
     Ok(serde_json::json!({ "success": true }))
 }
 
+/// The code of a money setting that could not be read (item H).
+pub(crate) const SETTING_UNAVAILABLE: &str = "SETTING_UNAVAILABLE";
+
+/// A money setting stored as a percentage (item H, fix review 30/09/2026;
+/// the same decision as Android): the stored value, `default_when_missing`
+/// when none is stored, and an error, never an assumed value, when the read
+/// fails or the stored value is not a percentage. The renderer then pauses
+/// checkout with "Try again" instead of pricing, capping or splitting tax on
+/// a guess.
+fn read_money_percentage(
+    conn: &rusqlite::Connection,
+    category: &str,
+    key: &str,
+    default_when_missing: f64,
+) -> Result<f64, String> {
+    let stored = db::read_setting_strict(conn, category, key)
+        .map_err(|error| format!("{SETTING_UNAVAILABLE}: {error}"))?;
+    let Some(raw) = stored else {
+        return Ok(default_when_missing);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(default_when_missing);
+    }
+    match trimmed.parse::<f64>() {
+        Ok(value) if value.is_finite() && (0.0..=100.0).contains(&value) => Ok(value),
+        _ => Err(format!(
+            "{SETTING_UNAVAILABLE}: {category}.{key} is not a percentage"
+        )),
+    }
+}
+
+/// The store's discount cap: 100% when none is stored (today's default).
+pub(crate) fn read_discount_max(conn: &rusqlite::Connection) -> Result<f64, String> {
+    read_money_percentage(conn, "general", "discount_max", 100.0)
+}
+
+/// The store's tax rate: 0% when none is stored (today's default).
+pub(crate) fn read_tax_rate(conn: &rusqlite::Connection) -> Result<f64, String> {
+    read_money_percentage(conn, "general", "tax_rate", 0.0)
+}
+
 #[tauri::command]
 pub async fn settings_get_discount_max(db: tauri::State<'_, db::DbState>) -> Result<Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let val = db::get_setting(&conn, "general", "discount_max");
-    Ok(match val {
-        Some(v) => serde_json::json!(v.parse::<f64>().unwrap_or(100.0)),
-        None => serde_json::json!(100.0),
-    })
+    read_discount_max(&conn).map(|value| serde_json::json!(value))
 }
 
 #[tauri::command]
@@ -3223,11 +3281,7 @@ pub async fn settings_set_discount_max(
 #[tauri::command]
 pub async fn settings_get_tax_rate(db: tauri::State<'_, db::DbState>) -> Result<Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let val = db::get_setting(&conn, "general", "tax_rate");
-    Ok(match val {
-        Some(v) => serde_json::json!(v.parse::<f64>().unwrap_or(0.0)),
-        None => serde_json::json!(0.0),
-    })
+    read_tax_rate(&conn).map(|value| serde_json::json!(value))
 }
 
 #[tauri::command]
@@ -3440,6 +3494,49 @@ pub async fn terminal_config_refresh(
 
 #[cfg(test)]
 mod dto_tests {
+    #[test]
+    fn local_state_lookup_distinguishes_missing_data_from_sql_failure() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        assert!(super::read_local_state_setting(&conn, "kds_phase_scope").is_err());
+        conn.execute_batch(
+            "CREATE TABLE local_settings (setting_category TEXT, setting_key TEXT, setting_value TEXT);",
+        )
+        .unwrap();
+        assert_eq!(
+            super::read_local_state_setting(&conn, "kds_phase_scope").unwrap(),
+            None
+        );
+        conn.execute(
+            "INSERT INTO local_settings VALUES ('local', 'kds_phase_scope', ?1)",
+            ["persisted-collected-marker"],
+        )
+        .unwrap();
+        assert_eq!(
+            super::read_local_state_setting(&conn, "kds_phase_scope").unwrap(),
+            Some("persisted-collected-marker".to_string())
+        );
+        conn.execute(
+            "UPDATE local_settings SET setting_value = '' WHERE setting_key = 'kds_phase_scope'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            super::read_local_state_setting(&conn, "kds_phase_scope").unwrap(),
+            Some(String::new())
+        );
+        conn.execute(
+            "UPDATE local_settings SET setting_value = x'00FF' WHERE setting_key = 'kds_phase_scope'",
+            [],
+        )
+        .unwrap();
+        assert!(super::read_local_state_setting(&conn, "kds_phase_scope").is_err());
+        conn.execute_batch(
+            "ALTER TABLE local_settings RENAME COLUMN setting_value TO broken_value;",
+        )
+        .unwrap();
+        assert!(super::read_local_state_setting(&conn, "kds_phase_scope").is_err());
+    }
+
     use super::{
         api_key_digest, choose_rebind_recovery_generation, clear_terminal_connection_lifecycle,
         credential_status_projection, finish_terminal_connection_rebind,

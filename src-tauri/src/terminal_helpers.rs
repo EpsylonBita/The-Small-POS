@@ -619,6 +619,11 @@ pub(crate) fn cache_terminal_settings_snapshot(
         updated.push("restaurant.longitude".to_string());
     }
 
+    if let Some(delivery_fee) = nested_value_number_string(resp, &["/branch_info/delivery_fee"]) {
+        db::set_setting(&transaction, "delivery", "delivery_fee", &delivery_fee)?;
+        updated.push("delivery.delivery_fee".to_string());
+    }
+
     // Branch tax_id → organization.vat_number (for receipt header).
     // Falls back to organization_branding.vat_number when branch lacks tax_id.
     if let Some(tax_id) = nested_value_str(

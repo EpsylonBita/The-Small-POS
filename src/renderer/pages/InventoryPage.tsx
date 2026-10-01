@@ -25,6 +25,8 @@ import { toast } from 'react-hot-toast';
 import { formatCurrency, formatDate } from '../utils/format';
 import { posApiGet, posApiPatch } from '../utils/api-helpers';
 import { getBridge, isBrowser } from '../../lib';
+import { useResolvedPosIdentity } from '../hooks/useResolvedPosIdentity';
+import { readModuleSnapshot } from '../services/module-snapshots';
 import { offlineAdjustInventory } from '../services/offline-mutations';
 import { getOfflineActionState } from '../services/offline-page-capabilities';
 
@@ -160,6 +162,10 @@ function formatHistoryLoadError(error: unknown, t: (key: string, fallback: strin
 }
 
 const InventoryPage: React.FC = () => {
+  const identity = useResolvedPosIdentity('branch+organization');
+  const identityKey = `${identity.organizationId}/${identity.branchId}/${identity.terminalId}`;
+  const activeIdentity = useRef(identityKey);
+  activeIdentity.current = identityKey;
   const { t, i18n } = useTranslation();
   const { resolvedTheme } = useTheme();
   const [loading, setLoading] = useState(true);
@@ -208,35 +214,12 @@ const InventoryPage: React.FC = () => {
     };
   }, []);
 
-  const fetchInventory = useCallback(async () => {
+  const fetchInventory = useCallback(async (force = false) => {
     setLoading(true);
     setError(null);
     try {
-      const invoke = getIpcInvoke();
-      if (invoke) {
-        const result = await invoke('api:fetch-from-admin', '/api/pos/inventory');
-        if (result?.success && result?.data?.success !== false) {
-          const rows = Array.isArray(result?.data?.inventory)
-            ? result.data.inventory
-            : Array.isArray(result?.data?.data)
-              ? result.data.data
-              : [];
-          const normalized: InventoryItem[] = rows.map(normalizeInventoryItem);
-          setInventory(normalized.filter((item: InventoryItem) => item.is_active));
-          return;
-        }
-        throw new Error(result?.error || result?.data?.error || 'Failed to fetch inventory');
-      }
-
-      const result = await posApiGet<any>('pos/inventory');
-      if (!result.success || result.data?.success === false) {
-        throw new Error(result.error || result.data?.error || 'Failed to fetch inventory');
-      }
-      const rows = Array.isArray(result.data?.inventory)
-        ? result.data.inventory
-        : Array.isArray(result.data?.data)
-          ? result.data.data
-          : [];
+      const { rows } = await readModuleSnapshot('inventory', force);
+      if (activeIdentity.current !== identityKey) return;
       const normalized: InventoryItem[] = rows.map(normalizeInventoryItem);
       setInventory(normalized.filter((item: InventoryItem) => item.is_active));
       setError(null);
@@ -245,15 +228,16 @@ const InventoryPage: React.FC = () => {
       const message = t('inventory.errors.loadFailed', 'Failed to load inventory');
       setError(message);
       toast.error(message);
-      setInventory([]);
+
     } finally {
       setLoading(false);
     }
-  }, [t]);
+  }, [t, identityKey]);
 
   useEffect(() => {
-    fetchInventory();
-  }, [fetchInventory]);
+    setInventory([]);
+    if (identity.isReady) void fetchInventory();
+  }, [fetchInventory, identity.isReady]);
 
   const getStockStatus = (item: InventoryItem): 'critical' | 'low' | 'good' => {
     if (item.stock_quantity <= 0) return 'critical';
@@ -444,7 +428,7 @@ const InventoryPage: React.FC = () => {
         </div>
         <button
           type="button"
-          onClick={fetchInventory}
+          onClick={() => void fetchInventory(true)}
           aria-label={t('common.refresh', 'Refresh')}
           className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all ${isDark ? 'border border-amber-400/30 bg-amber-500/15 text-amber-300 active:bg-amber-500/25' : 'border border-amber-400/40 bg-amber-50 text-amber-600 active:bg-amber-100'} ${loading ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
         >
@@ -463,7 +447,7 @@ const InventoryPage: React.FC = () => {
               </div>
             </div>
             <button
-              onClick={fetchInventory}
+              onClick={() => void fetchInventory(true)}
               className={`shrink-0 rounded-2xl px-3 py-2 text-sm font-medium border transition-transform active:scale-[0.98] ${isDark ? 'border-red-700 active:bg-red-900/40' : 'border-red-300 active:bg-red-100'}`}
             >
               {t('common.retry', 'Retry')}

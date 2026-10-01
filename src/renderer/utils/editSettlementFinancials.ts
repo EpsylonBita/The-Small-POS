@@ -91,3 +91,39 @@ export const deriveEditSettlementFinancials = (
     tipAmount,
   };
 };
+
+export interface EditSettlementRefundPreviewLike {
+  refundAmount?: unknown;
+  ledgerPaidTotal?: unknown;
+  paidTotal?: unknown;
+  nextTotal?: unknown;
+}
+
+const finiteOrNull = (value: unknown): number | null => {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+/**
+ * The refund a paid-order edit asks for: the native preview's `refundAmount`,
+ * i.e. what the LOCAL payment rows hold beyond the new total.
+ *
+ * Review of the 29/09/2026 fixes: the prompt used `paidTotal - nextTotal`,
+ * but `paidTotal` also counts money the order proved without a local payment
+ * row (offline, or the server-ledger restore timed out). A refund of that
+ * money has no payment to name, so the edit could never be saved. The native
+ * side now asks for a refund only of the money the local rows hold.
+ */
+export const resolveEditSettlementRefundAmount = (
+  preview: EditSettlementRefundPreviewLike,
+): number => {
+  const nativeAmount = finiteOrNull(preview.refundAmount);
+  if (nativeAmount !== null) {
+    return roundMoney(Math.max(0, nativeAmount));
+  }
+  const ledgerPaid =
+    finiteOrNull(preview.ledgerPaidTotal) ?? finiteOrNull(preview.paidTotal) ?? 0;
+  const nextTotal = finiteOrNull(preview.nextTotal) ?? 0;
+  return roundMoney(Math.max(0, ledgerPaid - nextTotal));
+};

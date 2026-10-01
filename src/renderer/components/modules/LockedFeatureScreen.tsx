@@ -125,28 +125,7 @@ export const LockedFeatureScreen: React.FC<LockedFeatureScreenProps> = ({
         }),
       }).catch(() => {/* Ignore */})
 
-      // Try to create checkout session
-      const response = await fetch('/api/modules/checkout', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          module_id: moduleId,
-          billing_cycle: 'monthly',
-          source: 'pos_tauri',
-          context: 'feature_gate',
-        }),
-      })
-
-      const data = await response.json()
-
-      if (response.ok && data.checkout_url) {
-        // Open checkout in external browser
-        await openExternalUrl(data.checkout_url)
-      } else {
-        throw new Error(data.error || 'Failed to create checkout')
-      }
-    } catch (err) {
-      // Fallback to admin dashboard
+      // Purchase requires the authenticated browser's fresh quote and explicit confirmation.
       const adminUrl = getAdminBaseUrl()
       const purchaseUrl = generateModulePurchaseUrl(adminUrl, moduleId, {
         source: 'pos_tauri',
@@ -154,6 +133,8 @@ export const LockedFeatureScreen: React.FC<LockedFeatureScreenProps> = ({
       })
 
       await openExternalUrl(purchaseUrl)
+    } catch (err) {
+      console.error('Failed to open module purchase:', err)
     } finally {
       setIsCheckoutLoading(false)
     }

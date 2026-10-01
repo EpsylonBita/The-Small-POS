@@ -57,7 +57,16 @@ export function OrderStatusControls({
 
     setIsNotifyingPlatform(true);
     try {
-      await bridge.orders.notifyPlatformReady(order.id);
+      const result = await bridge.orders.notifyPlatformReady(order.id);
+      // Item D8 (01/10/2026): a cancelled order is never announced as
+      // ready, and an order already past Ready needs no message.
+      if (result?.cancelled) {
+        toast.error(t('cancellationNotice.eyebrow', { defaultValue: 'Order cancelled by platform' }));
+        return;
+      }
+      if (result?.alreadyClosed) {
+        return;
+      }
       const platformName = getPlatformName(orderPlugin);
       toast.success(t('orders.messages.platformNotified', { platform: platformName }));
     } catch (error) {

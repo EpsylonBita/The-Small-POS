@@ -39,6 +39,7 @@ test('update release notes render markdown changelogs safely', () => {
   assert.match(source, /'code'/);
   assert.match(source, /DOMPurify\.sanitize\(html/);
   assert.match(source, /releaseNotesLooksLikeHtml\(trimmed\)\s*\?\s*trimmed\s*:\s*releaseNotesMarkdownToHtml\(trimmed\)/);
+  assert.match(source, /const trimmed = selectReleaseNotesForLanguage\(releaseNotes\.trim\(\), language\)/);
   assert.ok(source.includes('const heading = /^(#{1,4})\\s+(.+)$/.exec(line);'));
   assert.ok(source.includes('const unordered = /^[-*]\\s+(.+)$/.exec(line);'));
   assert.match(source, /ALLOWED_ATTR: \[\]/);
@@ -48,13 +49,17 @@ test('update dialog and notification share the release notes renderer', () => {
   const dialogSource = readFileSync(updateDialogPath, 'utf8');
   const notificationSource = readFileSync(updateNotificationPath, 'utf8');
 
+  // Both surfaces pass the till's i18n language, so a multilingual changelog
+  // section shows only the block written in that language.
   assert.match(dialogSource, /import \{ getReleaseNotesHtml \} from '\.\.\/utils\/release-notes'/);
-  assert.match(dialogSource, /const releaseNotes = getReleaseNotesHtml\(updateInfo\?\.releaseNotes\)/);
+  assert.match(dialogSource, /const \{ t, language \} = useI18n\(\);/);
+  assert.match(dialogSource, /const releaseNotes = getReleaseNotesHtml\(updateInfo\?\.releaseNotes, language\)/);
   assert.match(dialogSource, /__html: releaseNotes/);
   assert.doesNotMatch(dialogSource, /DOMPurify\.sanitize/);
 
   assert.match(notificationSource, /import \{ getReleaseNotesHtml \} from '\.\.\/\.\.\/utils\/release-notes'/);
-  assert.match(notificationSource, /getReleaseNotesHtml\(updateInfo\.releaseNotes\)/);
+  assert.match(notificationSource, /const \{ t, language \} = useI18n\(\);/);
+  assert.match(notificationSource, /getReleaseNotesHtml\(updateInfo\.releaseNotes, language\)/);
   assert.match(notificationSource, /__html: releaseNotesHtml/);
   assert.doesNotMatch(notificationSource, /DOMPurify\.sanitize/);
 });

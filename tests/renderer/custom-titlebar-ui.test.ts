@@ -8,6 +8,7 @@ const framePath = path.join(projectRoot, 'src', 'renderer', 'components', 'AppWi
 const fullscreenLayoutPath = path.join(projectRoot, 'src', 'renderer', 'components', 'FullscreenAwareLayout.tsx');
 const mainLayoutPath = path.join(projectRoot, 'src', 'renderer', 'components', 'RefactoredMainLayout.tsx');
 const appPath = path.join(projectRoot, 'src', 'renderer', 'App.tsx');
+const appRoutesPath = path.join(projectRoot, 'src', 'renderer', 'AppRoutes.tsx');
 const windowStateHookPath = path.join(projectRoot, 'src', 'renderer', 'hooks', 'useWindowState.ts');
 const systemUiPath = path.join(projectRoot, 'src-tauri', 'src', 'commands', 'system_ui.rs');
 const tauriLibPath = path.join(projectRoot, 'src-tauri', 'src', 'lib.rs');
@@ -249,7 +250,9 @@ test('App wires updater state into the frame on login and main POS routes', () =
   assert.match(source, /<LoginPage onLogin=\{handleLogin\} \/>/);
   assert.doesNotMatch(source, /<LoginPage onLogin=\{handleLogin\} onOpenSettings=/);
   assert.match(source, /onCheckForUpdates=\{openUpdateCheck\}/);
-  assert.match(source, /<PageLoadMotion animationKey="new-order" className="h-full min-h-0">/);
+  // The logged-in routes live in AppRoutes.tsx, rendered by App.tsx.
+  assert.match(source, /<AppRoutes\s+onLogout=\{handleLogout\}\s+onOpenConnectionSettings=\{openConnectionSettings\}\s*\/>/);
+  assert.match(readFileSync(appRoutesPath, 'utf8'), /<PageLoadMotion animationKey="new-order" className="h-full min-h-0">/);
   assert.match(source, /if \(!user\) \{\s*setShowConnectionSettings\(false\);/);
   assert.match(source, /className="fixed top-12 left-\[9\.5rem\] z-40"/);
   assert.match(source, /<SyncStatusIndicator onOpenRecovery=\{openSyncRecovery\} \/>/);

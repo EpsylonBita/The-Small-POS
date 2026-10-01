@@ -187,6 +187,17 @@ fn normalize_fiscal_payment_method(raw: &str) -> Result<&'static str, String> {
     }
 }
 
+/// Stored prior tenders may include canonical gift card payments. They stay a
+/// typed `gift_card` tender that the fiscal adapter maps to the register's
+/// voucher payment, never cash or card. A gift card is never the intended
+/// tender collected by a checkout.
+fn normalize_prior_fiscal_payment_method(raw: &str) -> Result<&'static str, String> {
+    if raw.trim().eq_ignore_ascii_case("gift_card") {
+        return Ok("gift_card");
+    }
+    normalize_fiscal_payment_method(raw)
+}
+
 /// Build the final fiscal receipt when one or more earlier split tenders are
 /// already stored. Prior rows contribute their refund-net tender amounts, and
 /// the new intended payment remains explicit so only that outstanding card
@@ -200,13 +211,14 @@ pub fn build_fiscal_data_for_outstanding_checkout(
 ) -> Result<FiscalReceiptData, String> {
     let mut prior_cash_cents = 0_i64;
     let mut prior_card_cents = 0_i64;
+    let mut prior_gift_cents = 0_i64;
     for (index, payment) in completed_payments.iter().enumerate() {
         if payment.get("status").and_then(|value| value.as_str()) != Some("completed") {
             continue;
         }
         let raw_method = str_field(payment, &["method", "paymentMethod", "payment_method"])
             .ok_or_else(|| format!("Fiscal payment {index} is missing a method"))?;
-        let method = normalize_fiscal_payment_method(raw_method)?;
+        let method = normalize_prior_fiscal_payment_method(raw_method)?;
         let amount = f64_field(payment, &["remainingRefundable", "remaining_refundable"])
             .or_else(|| {
                 let gross = f64_field(payment, &["amount", "amountPaid", "amount_paid"])?;
@@ -222,6 +234,7 @@ pub fn build_fiscal_data_for_outstanding_checkout(
         match method {
             "cash" => prior_cash_cents += amount_cents,
             "card" => prior_card_cents += amount_cents,
+            "gift_card" => prior_gift_cents += amount_cents,
             _ => unreachable!("normalized fiscal method"),
         }
     }
@@ -256,7 +269,7 @@ pub fn build_fiscal_data_for_outstanding_checkout(
         _ => unreachable!("normalized fiscal method"),
     }
 
-    let mut tenders = Vec::with_capacity(2);
+    let mut tenders = Vec::with_capacity(3);
     if cash_cents > 0 {
         tenders.push(serde_json::json!({
             "method": "cash",
@@ -267,6 +280,12 @@ pub fn build_fiscal_data_for_outstanding_checkout(
         tenders.push(serde_json::json!({
             "method": "card",
             "amount": card_cents as f64 / 100.0,
+        }));
+    }
+    if prior_gift_cents > 0 {
+        tenders.push(serde_json::json!({
+            "method": "gift_card",
+            "amount": prior_gift_cents as f64 / 100.0,
         }));
     }
 
@@ -287,6 +306,89 @@ pub fn build_fiscal_data_for_outstanding_checkout(
         ));
     }
 
+    build_fiscal_data(order, &tenders, tax_rates, operator_id)
+}
+
+/// Build the one fiscal receipt of an order whose tenders are all already
+/// settled: the canonical gift card payment plus any cash already booked.
+/// Nothing is collected here. Every row contributes its refund-net amount, a
+/// positive-net card tender is refused (CAP would start a second EFT sale for
+/// it), and net cash plus net gift must cover the whole order total exactly.
+pub fn build_fiscal_data_for_settled_gift_checkout(
+    order: &serde_json::Value,
+    completed_payments: &[serde_json::Value],
+    tax_rates: &[TaxRateConfig],
+    operator_id: Option<&str>,
+) -> Result<FiscalReceiptData, String> {
+    let mut cash_cents = 0_i64;
+    let mut gift_cents = 0_i64;
+    for (index, payment) in completed_payments.iter().enumerate() {
+        if payment.get("status").and_then(|value| value.as_str()) != Some("completed") {
+            continue;
+        }
+        let raw_method = str_field(payment, &["method", "paymentMethod", "payment_method"])
+            .ok_or_else(|| format!("Fiscal payment {index} is missing a method"))?;
+        let method = normalize_prior_fiscal_payment_method(raw_method)?;
+        let net = f64_field(payment, &["remainingRefundable", "remaining_refundable"])
+            .or_else(|| {
+                let gross = f64_field(payment, &["amount", "amountPaid", "amount_paid"])?;
+                let refunded =
+                    f64_field(payment, &["refundedAmount", "refunded_amount"]).unwrap_or(0.0);
+                Some(gross - refunded)
+            })
+            .ok_or_else(|| format!("Fiscal payment {index} is missing amount"))?;
+        let scaled = net * 100.0;
+        if !scaled.is_finite() || scaled < -0.000_001 || (scaled - scaled.round()).abs() > 0.000_001
+        {
+            return Err(format!(
+                "Fiscal payment {index} has no whole-cent net amount"
+            ));
+        }
+        let cents = scaled.round() as i64;
+        match method {
+            "cash" => cash_cents += cents,
+            "gift_card" => gift_cents += cents,
+            "card" if cents > 0 => {
+                return Err(
+                    "A settled gift card receipt cannot carry an already approved card tender"
+                        .to_string(),
+                )
+            }
+            "card" => {}
+            other => {
+                return Err(format!(
+                    "A {other} tender cannot be carried by a settled gift card receipt"
+                ))
+            }
+        }
+    }
+    if gift_cents <= 0 {
+        return Err("The order has no settled gift card tender".to_string());
+    }
+    let order_total = f64_field(order, &["total_amount", "totalAmount", "total"])
+        .ok_or("Order total is required for a settled gift card receipt")?;
+    let order_total_cents = positive_cents(order_total, "order total")?;
+    let covered_cents = cash_cents + gift_cents;
+    if covered_cents != order_total_cents {
+        return Err(format!(
+            "Settled tenders {}.{:02} do not match order total {}.{:02}; a fiscal receipt needs full coverage",
+            covered_cents / 100,
+            covered_cents.unsigned_abs() % 100,
+            order_total_cents / 100,
+            order_total_cents.unsigned_abs() % 100,
+        ));
+    }
+    let mut tenders = Vec::with_capacity(2);
+    if cash_cents > 0 {
+        tenders.push(serde_json::json!({
+            "method": "cash",
+            "amount": cash_cents as f64 / 100.0,
+        }));
+    }
+    tenders.push(serde_json::json!({
+        "method": "gift_card",
+        "amount": gift_cents as f64 / 100.0,
+    }));
     build_fiscal_data(order, &tenders, tax_rates, operator_id)
 }
 
@@ -420,6 +522,67 @@ mod tests {
     }
 
     #[test]
+    fn settled_gift_checkout_uses_actual_net_rows_and_full_coverage_only() {
+        let order = json!({
+            "items": [{"name": "Item", "quantity": 1, "price": 20.00, "taxRate": 24.0}],
+            "total_amount": 20.00
+        });
+        let tenders = |data: &FiscalReceiptData| {
+            data.payments
+                .iter()
+                .map(|payment| (payment.method.clone(), payment.amount))
+                .collect::<Vec<_>>()
+        };
+        let build = |rows: &[serde_json::Value]| {
+            build_fiscal_data_for_settled_gift_checkout(&order, rows, &sample_tax_rates(), None)
+        };
+
+        let full = build(&[json!({"method": "gift_card", "amount": 20.00, "status": "completed"})])
+            .unwrap();
+        assert_eq!(tenders(&full), vec![("gift_card".to_string(), 2000)]);
+
+        let mixed = build(&[
+            json!({"method": "gift_card", "amount": 10.00, "status": "completed"}),
+            json!({"method": "cash", "amount": 15.00, "refundedAmount": 5.00, "status": "completed"}),
+            json!({"method": "cash", "amount": 9.00, "status": "voided"}),
+        ])
+        .unwrap();
+        assert_eq!(
+            tenders(&mixed),
+            vec![("cash".to_string(), 1000), ("gift_card".to_string(), 1000)]
+        );
+
+        // A fully refunded card is not a tender; a live card is refused.
+        assert!(build(&[
+            json!({"method": "gift_card", "amount": 20.00, "status": "completed"}),
+            json!({"method": "card", "amount": 5.00, "refundedAmount": 5.00, "status": "completed"}),
+        ])
+        .is_ok());
+        let card = build(&[
+            json!({"method": "gift_card", "amount": 10.00, "status": "completed"}),
+            json!({"method": "card", "amount": 10.00, "status": "completed"}),
+        ])
+        .unwrap_err();
+        assert!(card.contains("card tender"), "{card}");
+
+        // Partial coverage, no gift and fractional cents invent nothing.
+        let partial =
+            build(&[json!({"method": "gift_card", "amount": 10.00, "status": "completed"})])
+                .unwrap_err();
+        assert!(partial.contains("full coverage"), "{partial}");
+        assert!(
+            build(&[json!({"method": "cash", "amount": 20.00, "status": "completed"})])
+                .unwrap_err()
+                .contains("no settled gift")
+        );
+        assert!(
+            build(&[json!({"method": "gift_card", "amount": 19.995, "status": "completed"})])
+                .unwrap_err()
+                .contains("whole-cent")
+        );
+    }
+
+    #[test]
     fn test_build_fiscal_data_basic() {
         let order = json!({
             "items": [
@@ -470,6 +633,69 @@ mod tests {
         assert_eq!(data.payments.len(), 1);
         assert_eq!(data.payments[0].method, "card");
         assert_eq!(data.payments[0].amount, 500);
+    }
+
+    #[test]
+    fn outstanding_checkout_carries_a_prior_gift_card_as_its_own_tender() {
+        let order = json!({
+            "items": [{"name": "Item", "quantity": 1, "price": 50.00}],
+            "total_amount": 50.00
+        });
+        let prior = vec![json!({"method": "gift_card", "amount": 20.00, "status": "completed"})];
+        let data = build_fiscal_data_for_outstanding_checkout(
+            &order,
+            &prior,
+            &json!({"method": "cash", "amount": 30.00}),
+            &sample_tax_rates(),
+            None,
+        )
+        .unwrap();
+        let tenders: Vec<(String, i64)> = data
+            .payments
+            .iter()
+            .map(|payment| (payment.method.clone(), payment.amount as i64))
+            .collect();
+        assert_eq!(
+            tenders,
+            vec![("cash".to_string(), 3000), ("gift_card".to_string(), 2000)]
+        );
+
+        // A gift card is never the tender a checkout collects.
+        assert!(build_fiscal_data_for_outstanding_checkout(
+            &order,
+            &[],
+            &json!({"method": "gift_card", "amount": 50.00}),
+            &sample_tax_rates(),
+            None,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn outstanding_card_remainder_after_a_partial_gift_charges_only_the_remainder() {
+        let order = json!({
+            "items": [{"name": "Item", "quantity": 1, "price": 50.00}],
+            "total_amount": 50.00
+        });
+        let prior = vec![json!({"method": "gift_card", "amount": 20.00, "status": "completed"})];
+        let data = build_fiscal_data_for_outstanding_checkout(
+            &order,
+            &prior,
+            &json!({"method": "card", "amount": 30.00}),
+            &sample_tax_rates(),
+            None,
+        )
+        .unwrap();
+        let mut tenders: Vec<(String, i64)> = data
+            .payments
+            .iter()
+            .map(|payment| (payment.method.clone(), payment.amount as i64))
+            .collect();
+        tenders.sort();
+        assert_eq!(
+            tenders,
+            vec![("card".to_string(), 3000), ("gift_card".to_string(), 2000)]
+        );
     }
 
     #[test]

@@ -8,7 +8,27 @@ import React, {
   useMemo,
   useRef,
 } from "react";
-import { useOrderStore } from "../hooks/useOrderStore";
+import {
+  adoptGiftCardPaymentIds,
+  claimOrdinaryCollectionOwner,
+  classifyOrdinaryWrite,
+  isSetAsideOrdinaryWrite,
+  ledgerHasOriginalOrdinaryPayment,
+  noteOrdinaryWriteFacts,
+  probeOrdinaryOwner,
+  readOrdinaryWriteReply,
+  releaseOrdinaryOwnerBeforeSend,
+  retainedOrdinaryOwner,
+  runOrdinaryCollection,
+  useOrderStore,
+  type OrdinaryCollectionFacts,
+  type OrdinaryCollectionOwner,
+  type OrdinaryCollectionRun,
+  type OrdinaryCollectionVerdict,
+} from "../hooks/useOrderStore";
+import { giftCardsApiService, type GiftCardScope } from "../services/GiftCardsApiService";
+import type { GiftCardTenderEvent } from "../services/GiftCardCheckoutService";
+import type { PaymentModalExistingOrder } from "./modals/PaymentModal";
 import { useShift } from "../contexts/shift-context";
 import type { OrderItem } from "../types/orders";
 import type { Customer, CustomerInfo } from "../types/customer";
@@ -86,10 +106,9 @@ import {
 } from "lucide-react";
 import TableOrderIcon from "./icons/TableOrderIcon";
 import PickupOrderIcon from "./icons/PickupOrderIcon";
-import { toLocalDateString } from "../utils/date";
+import { submitTableReservation } from "../utils/table-reservation-submit";
 import { debugLog } from "../utils/debugLog";
 import {
-  buildChangedReservationUpdate,
   reservationsService,
   type Reservation,
 } from "../services/ReservationsService";
@@ -119,8 +138,8 @@ import { useDeliveryValidation } from "../hooks/useDeliveryValidation";
 import { useResolvedPosIdentity } from "../hooks/useResolvedPosIdentity";
 import { useTerminalSettings } from "../hooks/useTerminalSettings";
 import { useKioskOrderAutoPrint, isKioskOrder } from "../hooks/useKioskOrderAutoPrint";
-import { isAppAudioEnabled, playAppAudioTones, useAppAudioEnabled } from "../services/appAudio";
-import { playSelectedPlatformSound } from "../services/platformNotificationSound";
+import { subscribeIncomingOrderApprovalFocus } from "../services/incomingOrderAlert";
+import { noticeShortenedPreparationTime } from "../services/platformAcceptNotice";
 import {
   resolveCallerIdOrderSelection,
   subscribeToCallerIdOrderIntents,
@@ -172,6 +191,31 @@ import {
 } from "../services/terminal-credentials";
 import { couponRedemptionService } from "../services/CouponRedemptionService";
 import { getBridge, offEvent, onEvent } from "../../lib";
+import {
+  announceUnsavedCheckoutChanged,
+  notifyPaymentNotSaved,
+  useUnsavedCheckoutPayments,
+} from "../utils/unsavedPayments";
+import { UnsavedChargedPaymentBanner } from "./ui/UnsavedChargedPaymentBanner";
+import { usePrivilegedActionConfirmation } from "../hooks/usePrivilegedActionConfirmation";
+import { useTableReleaseGuard } from "../hooks/useTableReleaseGuard";
+import {
+  findCancelRefusals,
+  ORDER_HAS_PAYMENTS,
+  ORDER_PAYMENT_NOT_RECORDED,
+} from "../utils/orderCancelGuard";
+import {
+  announcePlatformReadyOutcome,
+  markPlatformOrdersReady,
+} from "../utils/platformReadyAction";
+import { useCheckoutRequestId } from "../hooks/useCheckoutRequestId";
+import { isCheckoutOutcomeUnknown, notifyCheckoutOutcomeUnknown } from "../utils/checkoutOutcome";
+import {
+  notifyMoneySettingsUnavailable,
+  resolveCheckoutTaxRate,
+} from "../utils/checkoutMoneySettings";
+import { PAYMENT_SET_ASIDE_TOAST_MS } from "../utils/paymentSetAside";
+import { formatSetAsidePaymentMessage } from "../../lib/payment-integrity";
 import { isExternalPlatform } from "../utils/plugin-icons";
 import type {
   EditSettlementOrderUpdates,
@@ -185,10 +229,15 @@ import { resolveOrderCompletionOutcome } from "../utils/orderCompletionOutcome";
 import {
   loadPersistedSplitDismissal,
   reconcileOutstandingPaymentAttempt,
+  type OutstandingPaymentAttemptReconciliation,
+  type PersistedSplitDismissalResolution,
 } from "../utils/splitCheckoutRecovery";
 import { loadPaymentEditRoute } from "../utils/paymentEditRouting";
 import { repairMissingPayment } from "../utils/repairMissingPayment";
-import { deriveEditSettlementFinancials } from "../utils/editSettlementFinancials";
+import {
+  deriveEditSettlementFinancials,
+  resolveEditSettlementRefundAmount,
+} from "../utils/editSettlementFinancials";
 import {
   calculatePickupToDeliveryTotal,
   getPickupToDeliveryValidationAmount,
@@ -221,8 +270,6 @@ import {
 
 const RoomsView = lazy(() => import('../pages/verticals/hotel/RoomsView').then(m => ({ default: m.RoomsView })));
 const AppointmentsView = lazy(() => import('../pages/verticals/salon/AppointmentsView').then(m => ({ default: m.AppointmentsView })));
-
-const INCOMING_ORDER_ALERT_REPEAT_MS = 30_000;
 
 interface OrderDashboardProps {
   className?: string;
@@ -455,8 +502,12 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     const { askForPaymentPrint, shouldAskPaymentPrint, paymentPrintPromptModal } =
       usePaymentPrintPrompt();
     const { resolvedTheme } = useTheme();
-    const { getSetting, refresh: refreshTerminalSettings } =
-      useTerminalSettings();
+    const {
+      getSetting,
+      refresh: refreshTerminalSettings,
+      loaded: terminalSettingsLoaded,
+      reload: reloadTerminalSettings,
+    } = useTerminalSettings();
     const {
       orders,
       pendingExternalOrders,
@@ -475,6 +526,17 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       resolveConflict,
       createOrder,
     } = useOrderStore();
+
+    // Item E (30/09/2026): a card charged at new-order checkout whose order
+    // this till could not save yet. Read from its durable record, so it is
+    // back after a restart; "Save payment again" writes the order and its
+    // payment with the same keys (no new charge).
+    const unsavedCheckout = useUnsavedCheckoutPayments(
+      true,
+      t,
+      formatCurrency,
+      silentRefresh,
+    );
 
     const scopedPendingExternalOrders = React.useMemo(
       () =>
@@ -992,6 +1054,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     const [selectedOrderForApproval, setSelectedOrderForApproval] =
       useState<Order | null>(null);
     const [isViewOnlyMode, setIsViewOnlyMode] = useState(true); // View-only mode for order details (no approve/decline)
+    // Bumped when the app-shell incoming-order alert asks for the approval
+    // panel: remounting it re-appends its portal, so it lands above a dialog
+    // (settings, a wizard) that had covered it.
+    const [approvalPanelInstance, setApprovalPanelInstance] = useState(0);
 
     // State for edit modals
     const [showEditOptionsModal, setShowEditOptionsModal] = useState(false);
@@ -1149,6 +1215,141 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       useState(false);
     const [singlePaymentCollectionData, setSinglePaymentCollectionData] =
       useState<PendingStatusPaymentCollection | null>(null);
+
+    // Ordinary cash/card collection and the gift tender share one scope: the
+    // resolved organization and this terminal's public id. A missing value
+    // fails closed in the shared collection controller.
+    const collectionScope = useMemo<GiftCardScope>(
+      () => ({
+        organizationId: resolvedIdentityOrganizationId ?? null,
+        terminalId: resolvedTerminalId ?? null,
+      }),
+      [resolvedIdentityOrganizationId, resolvedTerminalId],
+    );
+    const ordinaryRefusalText = useCallback(
+      (code: string) =>
+        code === "GIFT_CARD_TERMINAL_SCOPE_REQUIRED"
+          ? t(
+              "giftCardCheckout.refusal.scope",
+              "This terminal has no confirmed organization or terminal identity. Pair the POS again.",
+            )
+          : t(
+              "giftCardCheckout.refusal.admission",
+              "Earlier gift card attempts must be checked first.",
+            ),
+      [t],
+    );
+    // Verdict of one outstanding write from its raw reply facts; a lost or
+    // ambiguous reply completes only on the original's own ledger row.
+    const judgeOrdinaryAttempt = useCallback(
+      (
+        owner: OrdinaryCollectionOwner,
+        attempt: OutstandingPaymentAttemptReconciliation,
+      ): OrdinaryCollectionVerdict => {
+        const facts: OrdinaryCollectionFacts = {
+          replyLost: attempt.attempt.replyLost,
+          success: attempt.attempt.success,
+          paymentApproved: attempt.attempt.paymentApproved,
+          paymentPersisted: attempt.attempt.paymentPersisted,
+          requiresReconciliation: attempt.attempt.requiresReconciliation,
+          paymentId: attempt.attempt.paymentId,
+          code: attempt.attempt.code,
+        };
+        noteOrdinaryWriteFacts(owner, facts);
+        const verdict = classifyOrdinaryWrite(facts);
+        if (
+          verdict === "unknown" &&
+          "settlement" in attempt &&
+          ledgerHasOriginalOrdinaryPayment(owner, attempt.settlement.completedPayments)
+        ) {
+          return "completed";
+        }
+        return verdict;
+      },
+      [],
+    );
+
+    // Browser and native connectivity, as the gift card surfaces read it.
+    const [browserOnline, setBrowserOnline] = useState(
+      () => typeof navigator === "undefined" || navigator.onLine !== false,
+    );
+    const [nativeOnline, setNativeOnline] = useState(true);
+    useEffect(() => {
+      let disposed = false;
+      const goOnline = () => setBrowserOnline(true);
+      const goOffline = () => setBrowserOnline(false);
+      const applyNativeStatus = (status: unknown) => {
+        const flag =
+          status && typeof status === "object"
+            ? (status as { isOnline?: unknown }).isOnline
+            : undefined;
+        if (!disposed && typeof flag === "boolean") setNativeOnline(flag);
+      };
+      window.addEventListener("online", goOnline);
+      window.addEventListener("offline", goOffline);
+      onEvent("network:status", applyNativeStatus);
+      void Promise.resolve()
+        .then(() => getBridge().sync.getNetworkStatus())
+        .then(applyNativeStatus)
+        .catch(() => undefined);
+      return () => {
+        disposed = true;
+        window.removeEventListener("online", goOnline);
+        window.removeEventListener("offline", goOffline);
+        offEvent("network:status", applyNativeStatus);
+      };
+    }, []);
+
+    // Epoch of the outstanding-payment target: bumped when its order or the
+    // collection scope changes and on unmount, so a late continuation never
+    // touches a newer target's UI.
+    const outstandingEpochRef = useRef(0);
+    const outstandingTargetOrderId = outstandingPaymentData?.orderId ?? null;
+    const [outstandingGiftCurrency, setOutstandingGiftCurrency] = useState<{
+      orderId: string;
+      currency: string | null;
+    } | null>(null);
+    const [giftSettledOrderId, setGiftSettledOrderId] = useState<string | null>(null);
+    const giftEventQueueRef = useRef<Promise<void>>(Promise.resolve());
+    // Gift-paid orders whose receipt may still need the Tender's finalize,
+    // reconcile or recheck after the payment modal closed: nonsecret order
+    // context only, in memory. After a restart the native journal governs.
+    const [giftReceiptRecoveries, setGiftReceiptRecoveries] = useState<
+      Array<NonNullable<typeof outstandingPaymentData>>
+    >([]);
+    const [giftReceiptReentryOrderId, setGiftReceiptReentryOrderId] = useState<string | null>(null);
+    const giftFiscalNextRef = useRef<{ orderId: string; nextAction: string } | null>(null);
+    // Order whose ordinary write landed before its ledger could be read.
+    const ordinaryLandedRef = useRef<string | null>(null);
+
+    useEffect(() => {
+      const epoch = outstandingEpochRef.current;
+      setOutstandingGiftCurrency(null);
+      setGiftSettledOrderId(null);
+      // A new target or scope never inherits an older target's processing state.
+      setIsProcessingOutstandingPayment(false);
+      if (outstandingTargetOrderId) {
+        // Read fresh for every opened target; a failed read leaves no currency.
+        void giftCardsApiService
+          .getStatus()
+          .then((status) => (status.ok ? status.data.currency : null))
+          .catch(() => null)
+          .then((currency) => {
+            if (outstandingEpochRef.current !== epoch) return;
+            setOutstandingGiftCurrency({ orderId: outstandingTargetOrderId, currency });
+          });
+      }
+      return () => {
+        outstandingEpochRef.current += 1;
+      };
+    }, [collectionScope, outstandingTargetOrderId]);
+
+    const outstandingOrderSynced = useMemo(() => {
+      if (!outstandingTargetOrderId) return false;
+      const order = orders.find((candidate) => candidate.id === outstandingTargetOrderId);
+      const remoteId = String(order?.supabase_id ?? order?.supabaseId ?? "").trim();
+      return Boolean(remoteId) && (order?.sync_status ?? order?.syncStatus) === "synced";
+    }, [orders, outstandingTargetOrderId]);
     const [pendingEditRefundSettlement, setPendingEditRefundSettlement] =
       useState<PendingEditRefundSettlement | null>(null);
     // Drives the new small "cash or card?" modal shown after a paid-order
@@ -1211,10 +1412,6 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     const bulkActionsBarRef = useRef<HTMLDivElement>(null);
     const orderGridRef = useRef<HTMLDivElement>(null);
     const tableGridScrollRef = useRef<HTMLDivElement>(null);
-    const alertTimeoutRef = useRef<number | null>(null);
-    const alertingOrderIdRef = useRef<string | null>(null);
-    const activeAlertAudioRef = useRef<(() => void) | null>(null);
-    const appAudioEnabled = useAppAudioEnabled();
     const shiftRefreshArmedRef = useRef(false);
     const splitPaymentCompletedRef = useRef<SplitPaymentResult | null>(null);
     const splitCloseRecoveryRef = useRef(false);
@@ -1669,64 +1866,17 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       };
     }, []);
 
-    // Auto-open approval panel for external pending orders (queue)
-    // Returns its stop handle (rather than assigning activeAlertAudioRef
-    // itself) so playSelectedPlatformSound keeps sole ownership of the one
-    // stop function the caller holds through the whole fallback chain.
-    const playFallbackExternalOrderAlert = useCallback(
-      () => playAppAudioTones([{ frequency: 880, start: 0, duration: 0.45 }], 0.18),
-      [],
-    );
-
-    const playExternalOrderAlert = useCallback(() => {
-      activeAlertAudioRef.current?.();
-      activeAlertAudioRef.current = playSelectedPlatformSound({
-        volume: 0.9,
-        onFallbackToTones: playFallbackExternalOrderAlert,
-      });
-    }, [playFallbackExternalOrderAlert]);
-
-    const startAlertLoop = useCallback(
-      (orderId: string) => {
-        if (alertTimeoutRef.current) {
-          clearTimeout(alertTimeoutRef.current);
-          alertTimeoutRef.current = null;
-        }
-
-        alertingOrderIdRef.current = orderId;
-
-        const tick = () => {
-          if (alertingOrderIdRef.current !== orderId || !isAppAudioEnabled()) {
-            return;
-          }
-          playExternalOrderAlert();
-          alertTimeoutRef.current = window.setTimeout(
-            tick,
-            INCOMING_ORDER_ALERT_REPEAT_MS,
-          );
-        };
-
-        tick();
-      },
-      [playExternalOrderAlert],
-    );
-
-    const stopAlertLoop = useCallback(() => {
-      if (alertTimeoutRef.current) {
-        clearTimeout(alertTimeoutRef.current);
-        alertTimeoutRef.current = null;
-      }
-      alertingOrderIdRef.current = null;
-      activeAlertAudioRef.current?.();
-      activeAlertAudioRef.current = null;
-    }, []);
-
+    // Auto-open the approval panel for pending platform / customer orders
+    // (queue head first). The sound is NOT played here: the App-level alert
+    // loop (services/incomingOrderAlertLoop.ts) owns it on every page, this
+    // screen included, and its dialog watches for this panel (its header carries
+    // INCOMING_ORDER_APPROVAL_MARKER_ATTR) to know the order is on screen.
+    // See services/incomingOrderAlert.ts (Tomikro, 30/09/2026).
     useEffect(() => {
       if (
         !scopedPendingExternalOrders ||
         scopedPendingExternalOrders.length === 0
       ) {
-        stopAlertLoop();
         return;
       }
 
@@ -1746,39 +1896,25 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       showApprovalPanel,
       isViewOnlyMode,
       selectedOrderForApproval,
-      stopAlertLoop,
     ]);
 
-    useEffect(() => {
-      const activeOrderId =
-        showApprovalPanel && !isViewOnlyMode
-          ? selectedOrderForApproval?.id
-          : null;
-      if (!activeOrderId || !appAudioEnabled) {
-        stopAlertLoop();
-        return;
-      }
-
-      if (
-        alertingOrderIdRef.current !== activeOrderId ||
-        !alertTimeoutRef.current
-      ) {
-        startAlertLoop(activeOrderId);
-      }
-    }, [
-      appAudioEnabled,
-      showApprovalPanel,
-      isViewOnlyMode,
-      selectedOrderForApproval,
-      startAlertLoop,
-      stopAlertLoop,
-    ]);
-
+    // «Open the order» on the app-shell alert: show this order's approval
+    // panel now, on top, even if a details view or another dialog is open.
+    const scopedPendingExternalOrdersRef = useRef(scopedPendingExternalOrders);
+    scopedPendingExternalOrdersRef.current = scopedPendingExternalOrders;
     useEffect(
-      () => () => {
-        stopAlertLoop();
-      },
-      [stopAlertLoop],
+      () =>
+        subscribeIncomingOrderApprovalFocus((orderId) => {
+          const queue = scopedPendingExternalOrdersRef.current;
+          const target =
+            queue.find((order) => order.id === orderId) ?? queue[0];
+          if (!target) return;
+          setSelectedOrderForApproval(target);
+          setIsViewOnlyMode(false);
+          setShowApprovalPanel(true);
+          setApprovalPanelInstance((instance) => instance + 1);
+        }),
+      [],
     );
 
     useEffect(() => {
@@ -1981,55 +2117,97 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       setShowEditOptionsModal(true);
     };
 
-    // Handle order approval
+    // Handle order approval. False: not approved (it failed); the approval
+    // panel then stays open, says nothing of a success and the cashier may
+    // try again (round 3 item DR4: on a failure the panel still said
+    // "Approved" and closed, and a success was announced twice, here and by
+    // the panel). The panel announces a success itself, once; a failure is
+    // announced here.
     const handleApproveOrder = async (
       orderId: string,
       estimatedTime?: number,
-    ) => {
-      try {
-        // The store no longer toasts (it used to say "Order approved" in
-        // hardcoded English on top of this screen's localized messages) —
-        // success and failure are both announced here, once, translated.
-        const ok = await approveOrder(orderId, estimatedTime);
-        if (ok) {
-          toast.success(t("orderApprovalPanel.approved"));
-          // Kiosk orders print here, not on arrival: the slip used to come out
-          // while this panel was still asking for a prep time, for an order the
-          // operator had not accepted yet. No-ops for every other source, so the
-          // efood/Wolt, phone and counter approval paths are unchanged.
-          if (selectedOrderForApproval && isKioskOrder(selectedOrderForApproval)) {
-            void printApprovedKioskOrder({
-              ...selectedOrderForApproval,
-              estimatedTime,
-            } as Partial<Order>);
-          }
-        } else {
-          toast.error(t("orderDashboard.approveOrderFailed"));
-        }
-        await loadOrders();
-        setShowApprovalPanel(false);
-        setSelectedOrderForApproval(null);
-        setIsViewOnlyMode(true);
-      } catch (error) {
+    ): Promise<boolean> => {
+      // The order's platform may take a shorter preparation time than the
+      // one chosen: the server's answer to this accept says so, and the
+      // cashier is told. Listening starts before the accept goes out.
+      const stopAcceptAnswer = noticeShortenedPreparationTime(orderId, t);
+      // The store does not toast (it used to say "Order approved" in
+      // hardcoded English on top of this screen's localized messages).
+      const ok = await approveOrder(orderId, estimatedTime).catch((error: unknown) => {
+        console.warn("[OrderDashboard] Approving the order failed:", error);
+        return false;
+      });
+      if (!ok) {
+        stopAcceptAnswer();
         toast.error(t("orderDashboard.approveOrderFailed"));
+        return false;
       }
+      // Kiosk orders print here, not on arrival: the slip used to come out
+      // while this panel was still asking for a prep time, for an order the
+      // operator had not accepted yet. No-ops for every other source, so the
+      // efood/Wolt, phone and counter approval paths are unchanged.
+      if (selectedOrderForApproval && isKioskOrder(selectedOrderForApproval)) {
+        void printApprovedKioskOrder({
+          ...selectedOrderForApproval,
+          estimatedTime,
+        } as Partial<Order>);
+      }
+      try {
+        await loadOrders();
+      } catch (error) {
+        console.warn("[OrderDashboard] Reloading orders after an approval failed:", error);
+      }
+      setShowApprovalPanel(false);
+      setSelectedOrderForApproval(null);
+      setIsViewOnlyMode(true);
+      return true;
     };
 
-    // Handle order decline
-    const handleDeclineOrder = async (orderId: string, reason: string) => {
+    // A decline cancels the order: refused when money was taken on it (fix
+    // review 30/09/2026), or when it is labelled paid with no payment record
+    // here (01/10/2026). A platform order the platform holds is never
+    // refused. True: the decline may go on. The cashier is told why not.
+    const declineRefusalAnnounced = async (orderId: string): Promise<boolean> => {
+      const refusals = await findCancelRefusals([orderId]);
+      if (refusals.hasPayments.length > 0) {
+        announceCancelRefusedPaid(refusals.hasPayments);
+        return true;
+      }
+      if (refusals.notRecorded.length > 0) {
+        announceCancelRefusedNotRecorded(refusals.notRecorded);
+        return true;
+      }
+      return false;
+    };
+
+    // Asked when Decline is pressed, before the reason (founder rule 30/09
+    // and 01/10/2026: a refusal comes before any reason or PIN).
+    const handleBeforeDeclineOrder = async (orderId: string): Promise<boolean> =>
+      !(await declineRefusalAnnounced(orderId));
+
+    // Handle order decline. False: not declined (refused, or it failed); the
+    // approval panel then stays open and reports no success. The panel
+    // announces a success itself.
+    const handleDeclineOrder = async (orderId: string, reason: string): Promise<boolean> => {
       try {
+        // Asked again: money may have been taken while the reason was typed.
+        // The till refuses it again at decline.
+        if (await declineRefusalAnnounced(orderId)) {
+          return false;
+        }
         const ok = await declineOrder(orderId, reason);
-        if (ok) {
-          toast.success(t("orderApprovalPanel.declined"));
-        } else {
+        if (!ok) {
           toast.error(t("orderDashboard.declineOrderFailed"));
+          return false;
         }
         await loadOrders();
         setShowApprovalPanel(false);
         setSelectedOrderForApproval(null);
         setIsViewOnlyMode(true);
+        return true;
       } catch (error) {
         toast.error(t("orderDashboard.declineOrderFailed"));
+        return false;
       }
     };
 
@@ -2205,6 +2383,19 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       setShowTableCheckManager(true);
     }, []);
 
+    // Item D1 (fix review 30/09/2026): releasing a table whose order still
+    // owes money asks first (collect, cancel with approval, or keep it as an
+    // open tab) instead of leaving the order to linger as an orphan.
+    const {
+      runWithPrivilegedConfirmation: runTableReleaseApproval,
+      confirmationModal: tableReleaseApprovalModal,
+    } = usePrivilegedActionConfirmation();
+    const { guardRelease: guardTableRelease, modal: tableReleaseModal } =
+      useTableReleaseGuard({
+        runWithPrivilegedConfirmation: runTableReleaseApproval,
+        onCollect: openTableCheckManager,
+      });
+
     // Handle table selection from TableSelector
     const handleTableSelectorSelect = useCallback((table: RestaurantTable) => {
       setEditingReservation(null);
@@ -2271,23 +2462,26 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         // may still report the table reserved — until the server reflects the
         // released status. Without it useTables deletes the override and the stale
         // reserved row reappears.
-        const released = await updateTableStatus(selectedTable.id, "available", {
-          __release: true,
+        const table = selectedTable;
+        await guardTableRelease(table, async () => {
+          const released = await updateTableStatus(table.id, "available", {
+            __release: true,
+          });
+          await refetchTables();
+          if (released) {
+            toast.success(
+              t("tableActionModal.reservationReleased", {
+                defaultValue: "Reservation no longer active; table released",
+              }),
+            );
+          } else {
+            toast.error(
+              t("tableActionModal.reservationLoadFailed", {
+                defaultValue: "Failed to load reservation",
+              }),
+            );
+          }
         });
-        await refetchTables();
-        if (released) {
-          toast.success(
-            t("tableActionModal.reservationReleased", {
-              defaultValue: "Reservation no longer active; table released",
-            }),
-          );
-        } else {
-          toast.error(
-            t("tableActionModal.reservationLoadFailed", {
-              defaultValue: "Failed to load reservation",
-            }),
-          );
-        }
       } catch (error) {
         console.error("Failed to release stale reserved table:", error);
         toast.error(
@@ -2299,14 +2493,15 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         setShowTableActionModal(false);
         setSelectedTable(null);
       }
-    }, [refetchTables, selectedTable, t, updateTableStatus]);
+    }, [guardTableRelease, refetchTables, selectedTable, t, updateTableStatus]);
 
     const handleTableEditReservation = useCallback(async () => {
       const reservationBranchId = effectiveBranchId || branchId;
       if (!selectedTable || !reservationBranchId || !organizationId) {
         toast.error(
-          t("orderDashboard.missingContext") ||
-            "Missing branch or organization context",
+          t("reservationForm.toasts.missingContext", {
+            defaultValue: "Missing branch or organization context",
+          }),
         );
         return;
       }
@@ -2338,8 +2533,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       const reservationBranchId = effectiveBranchId || branchId;
       if (!selectedTable || !reservationBranchId || !organizationId) {
         toast.error(
-          t("orderDashboard.missingContext") ||
-            "Missing branch or organization context",
+          t("reservationForm.toasts.missingContext", {
+            defaultValue: "Missing branch or organization context",
+          }),
         );
         return;
       }
@@ -2355,8 +2551,11 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         }
 
         await reservationsService.updateStatus(reservation.id, "no_show");
-        await updateTableStatus(selectedTable.id, "available", { __release: true });
-        await refetchTables();
+        const noShowTable = selectedTable;
+        await guardTableRelease(noShowTable, async () => {
+          await updateTableStatus(noShowTable.id, "available", { __release: true });
+          await refetchTables();
+        });
         toast.success(
           t("tableActionModal.noShowSuccess", {
             defaultValue: "Reservation marked as no-show",
@@ -2372,14 +2571,15 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           }),
         );
       }
-    }, [branchId, effectiveBranchId, organizationId, refetchTables, releaseStaleReservedTable, selectedTable, t, updateTableStatus]);
+    }, [branchId, effectiveBranchId, guardTableRelease, organizationId, refetchTables, releaseStaleReservedTable, selectedTable, t, updateTableStatus]);
 
     const handleTableCancelReservation = useCallback(async () => {
       const reservationBranchId = effectiveBranchId || branchId;
       if (!selectedTable || !reservationBranchId || !organizationId) {
         toast.error(
-          t("orderDashboard.missingContext") ||
-            "Missing branch or organization context",
+          t("reservationForm.toasts.missingContext", {
+            defaultValue: "Missing branch or organization context",
+          }),
         );
         return;
       }
@@ -2399,8 +2599,11 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             defaultValue: "Cancelled from POS table actions",
           }),
         );
-        await updateTableStatus(selectedTable.id, "available", { __release: true });
-        await refetchTables();
+        const cancelledReservationTable = selectedTable;
+        await guardTableRelease(cancelledReservationTable, async () => {
+          await updateTableStatus(cancelledReservationTable.id, "available", { __release: true });
+          await refetchTables();
+        });
         toast.success(
           t("tableActionModal.cancelSuccess", {
             defaultValue: "Reservation cancelled",
@@ -2416,109 +2619,77 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           }),
         );
       }
-    }, [branchId, effectiveBranchId, organizationId, refetchTables, releaseStaleReservedTable, selectedTable, t, updateTableStatus]);
+    }, [branchId, effectiveBranchId, guardTableRelease, organizationId, refetchTables, releaseStaleReservedTable, selectedTable, t, updateTableStatus]);
 
     const handleTableSetAvailable = useCallback(async () => {
       if (!selectedTable) {
         return;
       }
 
-      const success = await updateTableStatus(selectedTable.id, "available");
-      if (success) {
-        toast.success(
-          t("tableActionModal.setAvailableSuccess", {
-            defaultValue: "Table marked available",
-          }),
-        );
-        setShowTableActionModal(false);
-        setSelectedTable(null);
-        return;
-      }
-
-      toast.error(
-        t("tableActionModal.setAvailableFailed", {
-          defaultValue: "Failed to mark table available",
-        }),
-      );
-    }, [selectedTable, t, updateTableStatus]);
-
-    // Handle reservation form submission
-    const handleReservationSubmit = useCallback(
-      async (data: CreateReservationDto) => {
-        const reservationBranchId = effectiveBranchId || branchId;
-        if (!reservationBranchId || !organizationId) {
-          toast.error(
-            t("orderDashboard.missingContext") ||
-              "Missing branch or organization context",
+      const table = selectedTable;
+      await guardTableRelease(table, async () => {
+        const success = await updateTableStatus(table.id, "available");
+        if (success) {
+          toast.success(
+            t("tableActionModal.setAvailableSuccess", {
+              defaultValue: "Table marked available",
+            }),
           );
+          setShowTableActionModal(false);
+          setSelectedTable(null);
           return;
         }
 
+        toast.error(
+          t("tableActionModal.setAvailableFailed", {
+            defaultValue: "Failed to mark table available",
+          }),
+        );
+      });
+    }, [guardTableRelease, selectedTable, t, updateTableStatus]);
+
+    // Handle reservation form submission, through the helper the Tables page shares.
+    const handleReservationSubmit = useCallback(
+      async (data: CreateReservationDto) => {
         try {
-          // Set context for the service with actual IDs
-          reservationsService.setContext(reservationBranchId, organizationId);
-
-          // Format date and time from the Date object
-          const reservationDate = toLocalDateString(data.reservationTime);
-          const reservationTime = data.reservationTime
-            .toTimeString()
-            .slice(0, 5);
-
-          if (editingReservation) {
-            const updatePayload = buildChangedReservationUpdate(editingReservation, {
-              customerName: data.customerName,
-              customerPhone: data.customerPhone,
-              partySize: data.partySize,
-              reservationDate,
-              reservationTime,
-              tableId: data.tableId,
-              specialRequests: data.specialRequests,
-            });
-
-            if (Object.keys(updatePayload).length > 0) {
-              await reservationsService.updateReservationDetails(editingReservation.id, updatePayload);
-            }
-
-            toast.success(
-              t("orderDashboard.reservationUpdated", {
-                defaultValue: "Reservation updated successfully",
+          const result = await submitTableReservation({
+            data,
+            editingReservation,
+            branchId: effectiveBranchId || branchId,
+            organizationId,
+          });
+          if (result === "missing-context") {
+            toast.error(
+              t("reservationForm.toasts.missingContext", {
+                defaultValue: "Missing branch or organization context",
               }),
             );
-            setShowReservationForm(false);
-            setEditingReservation(null);
-            setSelectedTable(null);
-            await refetchTables();
             return;
           }
 
-          // Create the reservation with table status update
-          await reservationsService.createReservationWithTableUpdate({
-            customerName: data.customerName,
-            customerPhone: data.customerPhone,
-            partySize: data.partySize,
-            reservationDate,
-            reservationTime,
-            tableId: data.tableId,
-            specialRequests: data.specialRequests,
-          });
-
           toast.success(
-            t("orderDashboard.reservationCreated") ||
-              "Reservation created successfully",
+            result === "updated"
+              ? t("reservationForm.toasts.updated", {
+                  defaultValue: "Reservation updated successfully",
+                })
+              : t("reservationForm.toasts.created", {
+                  defaultValue: "Reservation created successfully",
+                }),
           );
           setShowReservationForm(false);
+          setEditingReservation(null);
           setSelectedTable(null);
           await refetchTables();
         } catch (error) {
-          console.error("Failed to create reservation:", error);
+          console.error("Failed to save reservation:", error);
           const reservationUpdateError = extractOrderDashboardErrorMessage(error);
           toast.error(
             editingReservation
               ? reservationUpdateError ||
-                t("orderDashboard.reservationUpdateFailed", {
+                t("reservationForm.toasts.updateFailed", {
                   defaultValue: "Failed to update reservation",
                 })
-              : t("orderDashboard.reservationFailed", {
+              : t("reservationForm.toasts.createFailed", {
                   defaultValue: "Failed to create reservation",
                 }),
           );
@@ -2752,6 +2923,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
             const overrideResponse = await requestDeliveryOverride(
               t("orderDashboard.pickupToDeliveryOverrideReason", {
+                orderNumber: pickupToDeliveryContext.orderNumber,
                 defaultValue: `Pickup order ${pickupToDeliveryContext.orderNumber} converted to delivery`,
               }),
             );
@@ -3522,17 +3694,28 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
     // Handle order completion from menu modal. Resolves false on failure so
     // MenuModal/PaymentModal keep the cart and skip their success toasts.
+    // Fix review 30/09/2026: one checkout id per cart, reused by every press
+    // of Pay until the checkout ends, so a slow card terminal is never paid
+    // twice.
+    const { take: takeCheckoutRequestId, reset: resetCheckoutRequestId } =
+      useCheckoutRequestId();
+
     const handleOrderComplete = async (orderData: any): Promise<boolean> => {
       const isSplitPayment = orderData.paymentData?.method === "pending";
       const isTablePaymentSave = orderData.paymentData?.method === "table";
       let createdOrderId: string | undefined;
       let orderPersisted = false;
-      const finishOrderCompletion = (succeeded: boolean): boolean => {
+      const finishOrderCompletion = (
+        succeeded: boolean,
+        chargedNotSaved = false,
+      ): boolean => {
         const outcome = resolveOrderCompletionOutcome({
           succeeded,
           orderPersisted,
+          chargedNotSaved,
         });
         if (outcome.resetOrderUiState) {
+          resetCheckoutRequestId();
           setShowMenuModal(false);
           setSelectedOrderType(null);
           setExistingCustomer(null);
@@ -3953,27 +4136,82 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
         const existingOrderId = orderData.paymentData?.existingOrderId;
         if (existingOrderId && (paymentMethod === "cash" || paymentMethod === "card")) {
-          const askBeforeFallbackPrint = await shouldAskPaymentPrint();
-          const paymentResult: any = await bridge.payments.recordPayment({
-            orderId: existingOrderId,
-            method: paymentMethod,
-            amount: total,
-            cashReceived:
-              paymentMethod === "cash"
-                ? orderData.paymentData?.cashReceived
-                : undefined,
-            changeGiven:
-              paymentMethod === "cash"
-                ? orderData.paymentData?.change
-                : undefined,
-            transactionRef: orderData.paymentData?.transactionId,
-            tipAmount,
-            tipRecipientRole,
-            tipRecipientStaffId,
-            tipRecipientStaffShiftId,
-          });
-          if (paymentResult?.success === false) {
-            throw new Error(paymentResult.error || "Failed to record payment");
+          // Existing-order guard: continue the modal's claim or take the
+          // order's ordinary claim before the first await of this write.
+          const givenOwner: OrdinaryCollectionOwner | null =
+            orderData.paymentData?.ordinaryOwner ?? null;
+          const fallbackClaim = givenOwner
+            ? null
+            : claimOrdinaryCollectionOwner(collectionScope, existingOrderId);
+          if (fallbackClaim && !fallbackClaim.claimed) {
+            throw new Error(ordinaryRefusalText(fallbackClaim.code));
+          }
+          const fallbackOwner =
+            givenOwner ?? (fallbackClaim?.claimed ? fallbackClaim.owner : null);
+          if (!fallbackOwner) {
+            throw new Error(ordinaryRefusalText("GIFT_CARD_HOLD_NOT_CURRENT"));
+          }
+          let askBeforeFallbackPrint = false;
+          let fallbackRun: OrdinaryCollectionRun<any>;
+          try {
+            askBeforeFallbackPrint = await shouldAskPaymentPrint();
+            fallbackRun = await runOrdinaryCollection<any>(
+              fallbackOwner,
+              {
+                method: paymentMethod,
+                amount: total,
+                transactionRef: orderData.paymentData?.transactionId ?? null,
+                idempotencyKey: null,
+                settlementGeneration: null,
+                terminalTransactionId: null,
+              },
+              async () => {
+                let raw: unknown;
+                let threw = false;
+                try {
+                  raw = await bridge.payments.recordPayment({
+                    orderId: existingOrderId,
+                    method: paymentMethod,
+                    amount: total,
+                    cashReceived:
+                      paymentMethod === "cash"
+                        ? orderData.paymentData?.cashReceived
+                        : undefined,
+                    changeGiven:
+                      paymentMethod === "cash"
+                        ? orderData.paymentData?.change
+                        : undefined,
+                    transactionRef: orderData.paymentData?.transactionId,
+                    tipAmount,
+                    tipRecipientRole,
+                    tipRecipientStaffId,
+                    tipRecipientStaffShiftId,
+                  });
+                } catch {
+                  threw = true;
+                }
+                const facts = readOrdinaryWriteReply(raw, threw);
+                noteOrdinaryWriteFacts(fallbackOwner, facts);
+                return { verdict: classifyOrdinaryWrite(facts), value: raw, code: facts.code };
+              },
+            );
+          } finally {
+            // Ends a claim taken here only while nothing was sent under it.
+            if (!givenOwner) releaseOrdinaryOwnerBeforeSend(fallbackOwner);
+          }
+          if (fallbackRun.status === "refused") {
+            throw new Error(ordinaryRefusalText(fallbackRun.code));
+          }
+          const paymentResult: any = fallbackRun.value;
+          if (fallbackRun.status === "unknown") {
+            throw new Error(
+              t("orderDashboard.collectPaymentFailed", {
+                defaultValue: "Failed to collect payment",
+              }),
+            );
+          }
+          if (fallbackRun.status !== "completed") {
+            throw new Error(paymentResult?.error || "Failed to record payment");
           }
           await silentRefresh().catch((err) => {
             console.debug("[OrderDashboard] Silent refresh after fallback payment failed:", err);
@@ -4062,6 +4300,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
         // Create order object
         const orderToCreate = {
+          clientRequestId: takeCheckoutRequestId(),
           customer_id: persistedCustomerId,
           customerId: persistedCustomerId,
           customer_name: persistedCustomerName ?? undefined,
@@ -4126,6 +4365,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         if (result.success) {
           createdOrderId = result.orderId;
           orderPersisted = true;
+          // The order exists: the next checkout is a new one.
+          resetCheckoutRequestId();
 
           const roomCharge = (result as any).roomCharge;
           if (isRoomChargePayment && roomCharge?.applied === false && result.orderId) {
@@ -4448,6 +4689,19 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           }
 
           return finishOrderCompletion(true);
+        } else if (result.paymentNotSaved) {
+          // Item E: the card was charged and the order could not be saved
+          // yet. The till holds the order and its payment; the checkout ends
+          // here (a retry from this cart would be a new checkout and a second
+          // charge) and the banner offers "Save payment again".
+          notifyPaymentNotSaved(result, t);
+          announceUnsavedCheckoutChanged();
+          return finishOrderCompletion(false, true);
+        } else if (isCheckoutOutcomeUnknown(result)) {
+          // The payment has no answer yet (fix review 30/09/2026): the cart
+          // and its checkout id stay, so Pay again checks the same payment.
+          notifyCheckoutOutcomeUnknown(result, t);
+          return finishOrderCompletion(false);
         } else {
           toast.error(result.error || t("orderDashboard.orderCreateFailed"));
           return finishOrderCompletion(false);
@@ -4550,6 +4804,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         order: Order | undefined,
         nextItems: OrderItem[],
         targetOrderType: EditableOrderType,
+        taxRatePercentage: number,
       ): {
         financials?: Partial<OrderFinancialsUpdateParams>;
         orderUpdates?: Partial<EditSettlementOrderUpdates>;
@@ -4562,7 +4817,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           order,
           nextItems,
           targetOrderType,
-          Number(getSetting<number | string>('tax', 'tax_rate_percentage', 24)),
+          taxRatePercentage,
         );
 
         const orderUpdates: Partial<EditSettlementOrderUpdates> = {
@@ -4770,11 +5025,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         ) {
           resetEditOrderState();
           clearBulkSelection();
-          const refundAmount = Math.max(
-            0,
-            Number(previews[0].paidTotal || 0) -
-              Number(previews[0].nextTotal || 0),
-          );
+          // Only money the LOCAL payment rows hold is refunded (native
+          // `refundAmount`): `paidTotal` also counts money the order proved
+          // without a local row, which no refund can name.
+          const refundAmount = resolveEditSettlementRefundAmount(previews[0]);
           setEditSettlementDeltaPrompt({
             mode: "refund",
             amount: refundAmount,
@@ -4881,25 +5135,79 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         const { mode, amount, preview, request } = editSettlementDeltaPrompt;
 
         if (mode === "collect") {
-          await bridge.orders.applyEditSettlement({
-            orderId: request.orderId,
-            items: request.items,
-            orderNotes: request.orderNotes,
-            financials: request.financials,
-            orderUpdates: request.orderUpdates,
-            action: {
-              type: "collect",
-              payments: [
-                {
-                  orderId: request.orderId,
-                  method,
-                  amount,
-                  paymentOrigin: "manual",
-                  collectedBy: "cashier_drawer",
-                },
-              ],
+          // Existing-order guard: the edit's collected money is written under
+          // the order's ordinary claim, taken before any await. Its reply has
+          // no payment reference, so an unknown result stays held (no probe).
+          const claim = claimOrdinaryCollectionOwner(collectionScope, request.orderId);
+          if (!claim.claimed) {
+            toast.error(ordinaryRefusalText(claim.code));
+            throw new Error(claim.code);
+          }
+          const owner = claim.owner;
+          const run = await runOrdinaryCollection<unknown>(
+            owner,
+            {
+              method,
+              amount,
+              transactionRef: null,
+              idempotencyKey: null,
+              settlementGeneration: null,
+              terminalTransactionId: null,
             },
+            async () => {
+              let raw: unknown;
+              try {
+                raw = await bridge.orders.applyEditSettlement({
+                  orderId: request.orderId,
+                  items: request.items,
+                  orderNotes: request.orderNotes,
+                  financials: request.financials,
+                  orderUpdates: request.orderUpdates,
+                  action: {
+                    type: "collect",
+                    payments: [
+                      {
+                        orderId: request.orderId,
+                        method,
+                        amount,
+                        paymentOrigin: "manual",
+                        collectedBy: "cashier_drawer",
+                      },
+                    ],
+                  },
+                });
+              } catch {
+                noteOrdinaryWriteFacts(owner, readOrdinaryWriteReply(undefined, true));
+                return { verdict: "unknown" as const, value: undefined, code: null };
+              }
+              // The atomic edit settlement may answer without a payment id;
+              // only an explicit failure reply is judged by its raw facts.
+              if (
+                raw &&
+                typeof raw === "object" &&
+                (raw as { success?: unknown }).success === false
+              ) {
+                const facts = readOrdinaryWriteReply(raw);
+                noteOrdinaryWriteFacts(owner, facts);
+                return { verdict: classifyOrdinaryWrite(facts), value: raw, code: facts.code };
+              }
+              return { verdict: "completed" as const, value: raw, code: null };
+            },
+          ).finally(() => {
+            // Ends the claim only while nothing was sent under it.
+            releaseOrdinaryOwnerBeforeSend(owner);
           });
+          if (run.status !== "completed") {
+            if (run.status === "unknown") void loadOrders().catch(() => undefined);
+            toast.error(
+              run.status === "refused"
+                ? ordinaryRefusalText(run.code)
+                : t("orderDashboard.collectPaymentFailed", {
+                    defaultValue: "Failed to collect payment",
+                  }),
+            );
+            throw new Error(run.code || "ORDINARY_COLLECTION_NOT_COMPLETED");
+          }
         } else {
           // Refund path: attribute the refund to the first completed
           // payment that can cover it. Prefer a payment whose method
@@ -4950,8 +5258,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                     defaultValue: "Edit settlement refund",
                   }),
                   refundMethod: method,
-                  cashHandler:
-                    method === "cash" ? "cashier_drawer" : undefined,
+                  // R2: who handed cash back is the till's rule (the courier
+                  // while their earning is unsettled), never sent from here.
                   staffId: attribution.staffId,
                   staffShiftId: attribution.staffShiftId,
                 },
@@ -4968,8 +5276,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         activeShift?.id,
         activeShift?.staff_id,
         bridge.orders,
+        collectionScope,
         editSettlementDeltaPrompt,
         loadOrders,
+        ordinaryRefusalText,
         staff?.databaseStaffId,
         staff?.staffId,
         t,
@@ -5066,6 +5376,194 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       }
     }, [bridge, silentRefresh, splitPaymentData, t]);
 
+    const outstandingPaymentDataRef = useRef(outstandingPaymentData);
+    outstandingPaymentDataRef.current = outstandingPaymentData;
+
+    // The Tender's receipt steps that keep a gift-paid order's receipt open;
+    // any other native answer ends it.
+    const giftReceiptPending = (nextAction: string): boolean =>
+      nextAction === "finalize" || nextAction === "reconcile" || nextAction === "recheck";
+
+    // Original receipt context of orders the Tender reported fully paid by gift
+    // card, kept per order and independent of the current UI target. Memory
+    // only: after a restart the native journal governs.
+    const giftBookedReceiptsRef = useRef(
+      new Map<string, NonNullable<typeof outstandingPaymentData>>(),
+    );
+
+    // Gift adoption for the outstanding order. The Tender already booked the
+    // money natively; the host only rereads the canonical ledger once per new
+    // payment and never records, completes or prints anything for it.
+    const handleOutstandingGiftEvent = useCallback(
+      (event: GiftCardTenderEvent) => {
+        if (event.type === "fiscal") {
+          // The Tender's own receipt progress: a finished receipt ends its retained reentry.
+          giftFiscalNextRef.current = { orderId: event.orderId, nextAction: event.fiscal.nextAction };
+          if (!giftReceiptPending(event.fiscal.nextAction)) {
+            setGiftReceiptRecoveries((current) =>
+              current.filter((entry) => entry.orderId !== event.orderId),
+            );
+          }
+          return;
+        }
+        if (event.type !== "financial") return;
+        const pendingPayment = outstandingPaymentDataRef.current;
+        if (!pendingPayment || event.orderId !== pendingPayment.orderId) return;
+        const { orderId, orderTotal } = pendingPayment;
+        const epoch = outstandingEpochRef.current;
+        const freshPaymentIds = adoptGiftCardPaymentIds(
+          collectionScope,
+          orderId,
+          event.adopted.map((payment) => payment.localPaymentId),
+        );
+        const { coverage } = event;
+        // The Tender's trusted full-gift event proves this order's money is booked:
+        // keep its original receipt context before any await, so a Close while the
+        // ledger reread is pending, failed or stale still reaches that receipt.
+        if (
+          event.adopted.length > 0 &&
+          coverage !== null &&
+          coverage.fullyCovered &&
+          coverage.outstandingCents === 0
+        ) {
+          giftBookedReceiptsRef.current.set(orderId, pendingPayment);
+        }
+        giftEventQueueRef.current = giftEventQueueRef.current
+          .then(async () => {
+            if (freshPaymentIds.length > 0) await silentRefresh().catch(() => {});
+            const settlement = await loadPersistedSplitDismissal(bridge, orderId, orderTotal);
+            if (epoch !== outstandingEpochRef.current) return;
+            if (
+              settlement.kind === "settled" &&
+              coverage !== null &&
+              coverage.fullyCovered &&
+              coverage.outstandingCents === 0
+            ) {
+              // Keep the Tender mounted so its pending receipt action stays reachable.
+              setGiftSettledOrderId(orderId);
+              return;
+            }
+            const settlementGeneration = settlement.settlementGeneration;
+            if (!settlementGeneration) return;
+            setOutstandingPaymentData((current) =>
+              current && current.orderId === orderId
+                ? {
+                    ...current,
+                    orderTotal: settlement.orderTotal,
+                    outstandingAmount: settlement.outstandingAmount,
+                    existingPayments: settlement.completedPayments,
+                    settlementGeneration,
+                  }
+                : current,
+            );
+          })
+          .catch(() => undefined);
+      },
+      [bridge, collectionScope, silentRefresh],
+    );
+
+    const outstandingExistingOrder = useMemo<PaymentModalExistingOrder | undefined>(() => {
+      const orderId = outstandingPaymentData?.orderId;
+      if (!orderId) return undefined;
+      return {
+        orderId,
+        orderSynced: outstandingOrderSynced,
+        currency:
+          outstandingGiftCurrency?.orderId === orderId ? outstandingGiftCurrency.currency : null,
+        scope: collectionScope,
+        online: browserOnline && nativeOnline,
+        outstandingCents: Math.round((outstandingPaymentData?.outstandingAmount ?? 0) * 100),
+        giftEnabled: true,
+        giftReceiptRecovery: giftReceiptReentryOrderId === orderId,
+        onGiftEvent: handleOutstandingGiftEvent,
+      };
+    }, [
+      browserOnline,
+      collectionScope,
+      giftReceiptReentryOrderId,
+      handleOutstandingGiftEvent,
+      nativeOnline,
+      outstandingGiftCurrency,
+      outstandingOrderSynced,
+      outstandingPaymentData?.orderId,
+      outstandingPaymentData?.outstandingAmount,
+    ]);
+
+    // The missing-payment repair takes no gift card; its cash/card write
+    // still runs under the order's ordinary claim.
+    const repairExistingOrder = useMemo<PaymentModalExistingOrder | undefined>(() => {
+      const orderId = missingPaymentRepairTarget?.orderId;
+      if (!orderId) return undefined;
+      return {
+        orderId,
+        orderSynced: false,
+        currency: null,
+        scope: collectionScope,
+        online: browserOnline && nativeOnline,
+        outstandingCents: Math.round((missingPaymentRepairTarget?.amount ?? 0) * 100),
+        giftEnabled: false,
+      };
+    }, [
+      browserOnline,
+      collectionScope,
+      missingPaymentRepairTarget?.amount,
+      missingPaymentRepairTarget?.orderId,
+      nativeOnline,
+    ]);
+
+    // Reopens a gift-paid order's own Tender, which reads native receipt state
+    // and offers only the step native allows; nothing here collects money.
+    const reenterGiftReceipt = useCallback(
+      (orderId: string) => {
+        if (outstandingPaymentDataRef.current) return;
+        const retained = giftReceiptRecoveries.find((entry) => entry.orderId === orderId);
+        if (!retained) return;
+        setGiftReceiptReentryOrderId(orderId);
+        setOutstandingPaymentData({ ...retained, outstandingAmount: 0 });
+      },
+      [giftReceiptRecoveries],
+    );
+
+    const handleOutstandingClose = useCallback(() => {
+      const pendingPayment = outstandingPaymentDataRef.current;
+      if (!pendingPayment) return;
+      setOutstandingPaymentData(null);
+      const reentry = giftReceiptReentryOrderId === pendingPayment.orderId;
+      setGiftReceiptReentryOrderId(null);
+      // Retained from the Tender's event before the ledger reread settled the UI.
+      const booked = giftBookedReceiptsRef.current.get(pendingPayment.orderId);
+      if (giftSettledOrderId === pendingPayment.orderId || reentry || booked) {
+        // Paid by gift card: the Tender owns its receipt, nothing is left to split.
+        // A receipt it has not finished keeps a reentry to that same Tender.
+        const fiscal = giftFiscalNextRef.current;
+        const receiptPending =
+          !fiscal || fiscal.orderId !== pendingPayment.orderId || giftReceiptPending(fiscal.nextAction);
+        const original = booked ?? pendingPayment;
+        setGiftReceiptRecoveries((current) => {
+          const others = current.filter((entry) => entry.orderId !== pendingPayment.orderId);
+          return receiptPending ? [...others, original] : others;
+        });
+        if (!reentry) void loadOrders().catch(() => undefined);
+        return;
+      }
+      setSplitPaymentData({
+        kind: "new-order",
+        orderId: pendingPayment.orderId,
+        orderTotal: pendingPayment.orderTotal,
+        existingPayments: pendingPayment.existingPayments,
+        items: pendingPayment.items,
+        isGhostOrder: pendingPayment.isGhostOrder,
+        initialMode: "by-items",
+        orderNumber: pendingPayment.orderNumber,
+        orderType: pendingPayment.orderType,
+        tipAmount: pendingPayment.tipAmount,
+        tipRecipientRole: pendingPayment.tipRecipientRole,
+        tipRecipientStaffId: pendingPayment.tipRecipientStaffId,
+        tipRecipientStaffShiftId: pendingPayment.tipRecipientStaffShiftId,
+        recoverySession: (pendingPayment.recoverySession ?? 0) + 1,
+      });
+    }, [giftReceiptReentryOrderId, giftSettledOrderId, loadOrders]);
+
     const handleOutstandingPaymentSelect = useCallback(async (
       selection: OutstandingPaymentSelection,
     ): Promise<boolean | "reconciliation-pending"> => {
@@ -5094,45 +5592,152 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         return true;
       }
       const paymentMethod = selection.method;
+      const orderId = pendingPayment.orderId;
+      // Existing-order guard. A reconciliation only continues the retained
+      // original collection and never writes; a collection sends under the
+      // order's ordinary claim, taken here (or by the modal) before any await.
+      const probeOwner = selection.reconciliationOnly
+        ? selection.ordinaryOwner ?? retainedOrdinaryOwner(collectionScope, orderId)
+        : null;
+      let sendOwner: OrdinaryCollectionOwner | null = null;
+      let claimedHere = false;
+      if (!selection.reconciliationOnly) {
+        if (selection.ordinaryOwner) {
+          sendOwner = selection.ordinaryOwner;
+        } else {
+          const claim = claimOrdinaryCollectionOwner(collectionScope, orderId);
+          if (!claim.claimed) {
+            toast.error(ordinaryRefusalText(claim.code));
+            return claim.retained ? "reconciliation-pending" : false;
+          }
+          sendOwner = claim.owner;
+          claimedHere = true;
+        }
+      }
+      const epoch = outstandingEpochRef.current;
 
       setIsProcessingOutstandingPayment(true);
       try {
         const askBeforePrint = await shouldAskPaymentPrint();
-        const paymentAttempt = await reconcileOutstandingPaymentAttempt({
-          recordPayment: () => bridge.payments.recordPayment({
-            orderId: pendingPayment.orderId,
-            method: paymentMethod,
-            amount: pendingPayment.outstandingAmount,
-            cashReceived:
-              paymentMethod === "cash" ? selection.cashReceived : undefined,
-            changeGiven:
-              paymentMethod === "cash" ? selection.change : undefined,
-            transactionRef: selection.transactionId,
-            idempotencyKey: selection.transactionId,
-            collectOutstandingBalance: true,
-            expectedSettlementGeneration: pendingPayment.settlementGeneration,
-            tipAmount: pendingPayment.tipAmount,
-            tipRecipientRole: pendingPayment.tipRecipientRole,
-            tipRecipientStaffId: pendingPayment.tipRecipientStaffId,
-            tipRecipientStaffShiftId: pendingPayment.tipRecipientStaffShiftId,
-          }),
-          snapshotOnly: selection.reconciliationOnly,
-          bridge,
-          orderId: pendingPayment.orderId,
-          fallbackOrderTotal: pendingPayment.orderTotal,
-        });
-        if (paymentAttempt.kind === "unknown") {
-          if (!selection.reconciliationOnly) {
-            toast.error(
-              t("orderDashboard.collectPaymentFailed", {
-                defaultValue: "Failed to collect payment",
-              }),
-            );
+        let latestResolution: PersistedSplitDismissalResolution;
+        let collectedHere: boolean;
+        if (!sendOwner) {
+          // Snapshot-only: the canonical ledger may settle the original; nothing is resent.
+          const probe = probeOwner
+            ? await probeOrdinaryOwner(probeOwner, async () => {
+                const settlement = await loadPersistedSplitDismissal(
+                  bridge,
+                  orderId,
+                  pendingPayment.orderTotal,
+                );
+                return { completedPayments: settlement.completedPayments, value: settlement };
+              })
+            : null;
+          if (probe?.status === "unknown") return "reconciliation-pending";
+          const snapshot =
+            probe?.status === "completed" && probe.value
+              ? probe.value
+              : await loadPersistedSplitDismissal(
+                  bridge,
+                  orderId,
+                  pendingPayment.orderTotal,
+                ).catch(() => null);
+          if (!snapshot) return "reconciliation-pending";
+          latestResolution = snapshot;
+          collectedHere =
+            probe?.status === "completed" || ordinaryLandedRef.current === orderId;
+        } else {
+          const owner = sendOwner;
+          const run = await runOrdinaryCollection(
+            owner,
+            {
+              method: paymentMethod,
+              amount: pendingPayment.outstandingAmount,
+              transactionRef: selection.transactionId ?? null,
+              idempotencyKey: selection.transactionId ?? null,
+              settlementGeneration: pendingPayment.settlementGeneration,
+              terminalTransactionId: null,
+            },
+            async () => {
+              const attempt = await reconcileOutstandingPaymentAttempt({
+                recordPayment: () => bridge.payments.recordPayment({
+                  orderId,
+                  method: paymentMethod,
+                  amount: pendingPayment.outstandingAmount,
+                  cashReceived:
+                    paymentMethod === "cash" ? selection.cashReceived : undefined,
+                  changeGiven:
+                    paymentMethod === "cash" ? selection.change : undefined,
+                  transactionRef: selection.transactionId,
+                  idempotencyKey: selection.transactionId,
+                  collectOutstandingBalance: true,
+                  expectedSettlementGeneration: pendingPayment.settlementGeneration,
+                  tipAmount: pendingPayment.tipAmount,
+                  tipRecipientRole: pendingPayment.tipRecipientRole,
+                  tipRecipientStaffId: pendingPayment.tipRecipientStaffId,
+                  tipRecipientStaffShiftId: pendingPayment.tipRecipientStaffShiftId,
+                }),
+                bridge,
+                orderId,
+                fallbackOrderTotal: pendingPayment.orderTotal,
+              });
+              return {
+                verdict: judgeOrdinaryAttempt(owner, attempt),
+                value: attempt,
+                code: attempt.attempt.code,
+              };
+            },
+          );
+          if (run.status === "refused") {
+            toast.error(ordinaryRefusalText(run.code));
+            return false;
           }
-          return "reconciliation-pending";
+          const attempt = run.value;
+          if (attempt?.kind === "not_saved") {
+            // The card was charged but its payment is not saved on this till
+            // (or the tender was refused because one is not): never "Failed to
+            // collect payment" and never a new try with a new key. Its record
+            // holds the Z and Save payment again replays it (30/09/2026). The
+            // charged one keeps this order's ordinary claim until its own row
+            // lands; a refused tender moved nothing and released it.
+            if (epoch === outstandingEpochRef.current) {
+              notifyPaymentNotSaved(attempt.result, t);
+              setOutstandingPaymentData(null);
+              void silentRefresh().catch(() => {});
+            }
+            return false;
+          }
+          if (attempt && isSetAsideOrdinaryWrite(attempt.attempt)) {
+            // Money that moved found the order already covered: recorded set
+            // aside for a manager to give back, never a collection and never
+            // offered as still due (30/09/2026).
+            if (epoch === outstandingEpochRef.current) {
+              const setAsideMessage = formatSetAsidePaymentMessage(attempt.attempt.setAsideAnswer, t);
+              if (setAsideMessage) toast.error(setAsideMessage, { duration: PAYMENT_SET_ASIDE_TOAST_MS });
+              setOutstandingPaymentData(null);
+              void silentRefresh().catch(() => {});
+            }
+            return false;
+          }
+          if (run.status === "unknown" || !attempt || attempt.kind === "unknown") {
+            if (run.status === "completed") ordinaryLandedRef.current = orderId;
+            if (epoch === outstandingEpochRef.current) {
+              toast.error(
+                t("orderDashboard.collectPaymentFailed", {
+                  defaultValue: "Failed to collect payment",
+                }),
+              );
+            }
+            return "reconciliation-pending";
+          }
+          latestResolution = attempt.settlement;
+          collectedHere = run.status === "completed";
         }
-        const latestResolution = paymentAttempt.settlement;
+        // A late result settles the original claim but never a newer screen,
+        // checked again after the refresh: its target or scope may have changed.
+        if (epoch !== outstandingEpochRef.current) return false;
         await silentRefresh().catch(() => {});
+        if (epoch !== outstandingEpochRef.current) return false;
 
         if (latestResolution.kind === "partial") {
           setOutstandingPaymentData(null);
@@ -5178,36 +5783,50 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         }
 
         setOutstandingPaymentData(null);
-        void finalizeCreatedOrderPayment(
-          pendingPayment.orderId,
-          pendingPayment.isGhostOrder,
-          {
-            askBeforePrint,
-            autoPrintSuppressed: askBeforePrint,
-            amount: pendingPayment.outstandingAmount,
-            orderNumber: pendingPayment.orderNumber || null,
-          },
-        ).catch((error) => {
-          console.warn(
-            "[OrderDashboard] Recovered payment print failed:",
-            error,
-          );
-        });
+        // Only this ordinary collection's own money gets its receipt here; a
+        // gift-settled order's receipt belongs to the gift card Tender.
+        if (collectedHere && giftSettledOrderId !== orderId) {
+          void finalizeCreatedOrderPayment(
+            pendingPayment.orderId,
+            pendingPayment.isGhostOrder,
+            {
+              askBeforePrint,
+              autoPrintSuppressed: askBeforePrint,
+              amount: pendingPayment.outstandingAmount,
+              orderNumber: pendingPayment.orderNumber || null,
+            },
+          ).catch((error) => {
+            console.warn(
+              "[OrderDashboard] Recovered payment print failed:",
+              error,
+            );
+          });
+        }
+        if (ordinaryLandedRef.current === orderId) ordinaryLandedRef.current = null;
         return true;
       } catch {
         console.error("[OrderDashboard] Failed to collect recovered payment");
-        toast.error(
-          t("orderDashboard.collectPaymentFailed", {
-            defaultValue: "Failed to collect payment",
-          }),
-        );
+        if (epoch === outstandingEpochRef.current) {
+          toast.error(
+            t("orderDashboard.collectPaymentFailed", {
+              defaultValue: "Failed to collect payment",
+            }),
+          );
+        }
         return false;
       } finally {
-        setIsProcessingOutstandingPayment(false);
+        // Ends a claim taken here only while nothing was sent under it; the
+        // processing flag belongs to this target and scope only.
+        if (claimedHere && sendOwner) releaseOrdinaryOwnerBeforeSend(sendOwner);
+        if (epoch === outstandingEpochRef.current) setIsProcessingOutstandingPayment(false);
       }
     }, [
       bridge,
+      collectionScope,
       finalizeCreatedOrderPayment,
+      giftSettledOrderId,
+      judgeOrdinaryAttempt,
+      ordinaryRefusalText,
       outstandingPaymentData,
       shouldAskPaymentPrint,
       silentRefresh,
@@ -5292,6 +5911,19 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           toast.error(
             t("orderDashboard.collectPaymentFailed", {
               defaultValue: "Payment collection is required before continuing.",
+            }),
+          );
+          return false;
+        }
+
+        // Shared rule R4 (round 3, 01/10/2026): the delivery platform holds
+        // this order's money. It is restored from the server, never
+        // collected at the till: no payment screen is offered.
+        if (blocker.platformHeld === true) {
+          toast.error(
+            t("orderDashboard.platformHeldNotCollected", {
+              defaultValue:
+                "The delivery platform holds this order's money. Restore it from the server (Sync Now); it is never collected at the till.",
             }),
           );
           return false;
@@ -5513,28 +6145,27 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           // Relay ready/prepared to the platform for every selected platform
           // order. notifyPlatformReady sets status='ready' locally, queues the
           // offline fallback, and fires the immediate PATCH in one call.
-          for (const order of selectedOrderObjects) {
-            try {
-              await bridge.orders.notifyPlatformReady(order.id);
-            } catch {
-              toast.error(
-                t("orderDashboard.platformReadyFailed", {
-                  defaultValue:
-                    "Failed to notify the platform for {{orderNumber}}",
-                  orderNumber: formatCompactOrderNumberForDisplay(
-                    getVisibleOrderNumber(order),
-                  ),
-                }),
-              );
-              return;
-            }
-          }
-          toast.success(
-            t("orderDashboard.platformReadySent", {
-              defaultValue: "Platform notified — rider is on the way",
-              count: selectedOrderObjects.length,
-            }),
+          // Item D8 (01/10/2026): the till answers an order already past
+          // Ready with `alreadyClosed` and a cancelled or refunded one with
+          // `cancelled`; neither wrote, queued or sent anything. A cancelled
+          // order is never announced as ready: the cashier gets the
+          // platform's cancellation notice for it instead.
+          const outcome = await markPlatformOrdersReady(
+            selectedOrderObjects.map((order) => ({
+              id: order.id,
+              displayNumber:
+                formatCompactOrderNumberForDisplay(getVisibleOrderNumber(order)) ||
+                order.id,
+            })),
+            (orderId) => bridge.orders.notifyPlatformReady(orderId),
           );
+          announcePlatformReadyOutcome(outcome, t, toast);
+          if (outcome.failedOrderNumber !== null) {
+            return;
+          }
+          if (outcome.markedReady < selectedOrderObjects.length) {
+            await loadOrders();
+          }
           handleClearSelection();
           return;
         }
@@ -5838,7 +6469,29 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         } else if (action === "cancel") {
           // Handle cancel action - show cancellation modal
           if (selectedOrders.length > 0) {
-            setPendingCancelOrders(selectedOrders);
+            // Fix review 30/09/2026 (founder rule): an order money was taken
+            // on is never cancelled. The cashier is told before the reason is
+            // asked; the payment is voided or refunded from the order first,
+            // or the rest is collected. The till refuses it again at cancel.
+            // Founder rule 01/10/2026: an order labelled paid with no
+            // payment record here is not cancelled either: the record is
+            // restored from the server or recorded first.
+            const refusals = await findCancelRefusals(selectedOrders);
+            if (refusals.hasPayments.length > 0) {
+              announceCancelRefusedPaid(refusals.hasPayments);
+            }
+            if (refusals.notRecorded.length > 0) {
+              announceCancelRefusedNotRecorded(refusals.notRecorded);
+            }
+            const cancellable = selectedOrders.filter(
+              (orderId) =>
+                !refusals.hasPayments.includes(orderId) &&
+                !refusals.notRecorded.includes(orderId),
+            );
+            if (cancellable.length === 0) {
+              return;
+            }
+            setPendingCancelOrders(cancellable);
             setShowCancelModal(true);
           } else {
             toast.error(t("orderDashboard.noOrdersForCancel"));
@@ -5869,6 +6522,46 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       setPendingDeliveryOrders([]);
     };
 
+    const describeOrderNumbers = (orderIds: readonly string[]) =>
+      orderIds
+        .map((orderId) => {
+          const order =
+            orders.find((candidate) => candidate.id === orderId) ||
+            pendingExternalOrders.find((candidate) => candidate.id === orderId);
+          return order
+            ? formatCompactOrderNumberForDisplay(getVisibleOrderNumber(order)) || orderId
+            : orderId;
+        })
+        .join(", ");
+
+    // An order labelled paid whose payment is not recorded on this till is
+    // never cancelled (founder rule 30/09 and 01/10/2026): its record is
+    // restored from the server or recorded first, never charged again.
+    const announceCancelRefusedNotRecorded = (orderIds: readonly string[]) => {
+      toast.error(
+        t("orderDashboard.cancelRefusedNotRecorded", {
+          orderNumber: describeOrderNumbers(orderIds),
+          defaultValue:
+            "Order {{orderNumber}} was not cancelled: it is marked paid, but its payment is not recorded on this till. Restore it from the server with Sync Now, or record the payment from the Z Report, then cancel.",
+        }),
+        { id: "order-cancel-refused-not-recorded", duration: 10000 },
+      );
+    };
+
+    // An order money was taken on is never cancelled (fix review 30/09/2026):
+    // the cashier is told which ones and what to do instead.
+    const announceCancelRefusedPaid = (orderIds: readonly string[]) => {
+      const orderNumbers = describeOrderNumbers(orderIds);
+      toast.error(
+        t("orderDashboard.cancelRefusedPaid", {
+          orderNumber: orderNumbers,
+          defaultValue:
+            "Order {{orderNumber}} was not cancelled: money was taken on it. Void or refund the payment from the order first, or collect the rest.",
+        }),
+        { id: "order-cancel-refused-paid", duration: 8000 },
+      );
+    };
+
     // Handle order cancellation
     const handleOrderCancellation = async (reason: string) => {
       // Forward the typed reason so it's persisted locally AND included
@@ -5884,11 +6577,21 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         // server's `cancellation_reason` column and shows up in both the
         // pos-tauri order detail view and the admin dashboard.
         for (const orderId of pendingCancelOrders) {
-          const { success } = await updateOrderStatusDetailed(
+          const { success, errorCode } = await updateOrderStatusDetailed(
             orderId,
             "cancelled",
             cancellationOptions,
           );
+          if (!success && errorCode === ORDER_HAS_PAYMENTS) {
+            // Money was taken on it since the reason was asked: the till
+            // refused the cancel (fix review 30/09/2026).
+            announceCancelRefusedPaid([orderId]);
+            return;
+          }
+          if (!success && errorCode === ORDER_PAYMENT_NOT_RECORDED) {
+            announceCancelRefusedNotRecorded([orderId]);
+            return;
+          }
           if (!success) {
             const order = orders.find((o) => o.id === orderId);
             toast.error(
@@ -6011,7 +6714,14 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           showPaymentMethodEditError(
             route.reason === "adjusted"
               ? localizePaymentMethodEditError("PAYMENT_METHOD_EDIT_ADJUSTED_ORDER_NOT_EDITABLE")
-              : t("orderDashboard.paymentMethodEditUnavailable"),
+              : route.reason === "platform_held"
+                ? // R4: the platform's money is restored from the server,
+                  // never collected or recorded at the till.
+                  t("orderDashboard.platformHeldNotCollected", {
+                    defaultValue:
+                      "The delivery platform holds this order's money. Restore it from the server (Sync Now); it is never collected at the till.",
+                  })
+                : t("orderDashboard.paymentMethodEditUnavailable"),
           );
           return;
         }
@@ -6096,38 +6806,119 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           return false;
         }
         const paymentMethod = selection.method;
+        const orderId = target.orderId;
+        // Existing-order guard, as for outstanding collection: a
+        // reconciliation only continues the retained original, and a repair
+        // write sends under the order's ordinary claim taken before any await.
+        const probeOwner = selection.reconciliationOnly
+          ? selection.ordinaryOwner ?? retainedOrdinaryOwner(collectionScope, orderId)
+          : null;
+        let sendOwner: OrdinaryCollectionOwner | null = null;
+        let claimedHere = false;
+        if (!selection.reconciliationOnly) {
+          if (selection.ordinaryOwner) {
+            sendOwner = selection.ordinaryOwner;
+          } else {
+            const claim = claimOrdinaryCollectionOwner(collectionScope, orderId);
+            if (!claim.claimed) {
+              toast.error(ordinaryRefusalText(claim.code));
+              return claim.retained ? "reconciliation-pending" : false;
+            }
+            sendOwner = claim.owner;
+            claimedHere = true;
+          }
+        }
 
         missingPaymentRepairRef.current = true;
         setIsRepairingMissingPayment(true);
         try {
-          const paymentAttempt = await reconcileOutstandingPaymentAttempt({
-            recordPayment: () => repairMissingPayment(bridge.payments, {
-              orderId: target.orderId,
-              method: paymentMethod,
-              amount: selection.amount,
-              cashReceived: selection.cashReceived,
-              changeGiven: selection.change,
-              transactionRef: selection.transactionId,
-              idempotencyKey: selection.transactionId,
-              expectedSettlementGeneration: target.settlementGeneration,
-            }),
-            snapshotOnly: selection.reconciliationOnly,
-            bridge,
-            orderId: target.orderId,
-            fallbackOrderTotal: target.amount,
-          });
-          if (paymentAttempt.kind === "unknown") {
-            if (!selection.reconciliationOnly) {
+          let settlement: PersistedSplitDismissalResolution;
+          if (!sendOwner) {
+            const probe = probeOwner
+              ? await probeOrdinaryOwner(probeOwner, async () => {
+                  const snapshot = await loadPersistedSplitDismissal(bridge, orderId, target.amount);
+                  return { completedPayments: snapshot.completedPayments, value: snapshot };
+                })
+              : null;
+            if (probe?.status === "unknown") return "reconciliation-pending";
+            const snapshot =
+              probe?.status === "completed" && probe.value
+                ? probe.value
+                : await loadPersistedSplitDismissal(bridge, orderId, target.amount).catch(
+                    () => null,
+                  );
+            if (!snapshot) return "reconciliation-pending";
+            settlement = snapshot;
+          } else {
+            const owner = sendOwner;
+            const run = await runOrdinaryCollection(
+              owner,
+              {
+                method: paymentMethod,
+                amount: selection.amount,
+                transactionRef: selection.transactionId ?? null,
+                idempotencyKey: selection.transactionId ?? null,
+                settlementGeneration: target.settlementGeneration,
+                terminalTransactionId: null,
+              },
+              async () => {
+                const attempt = await reconcileOutstandingPaymentAttempt({
+                  recordPayment: () => repairMissingPayment(bridge.payments, {
+                    orderId,
+                    method: paymentMethod,
+                    amount: selection.amount,
+                    cashReceived: selection.cashReceived,
+                    changeGiven: selection.change,
+                    transactionRef: selection.transactionId,
+                    idempotencyKey: selection.transactionId,
+                    expectedSettlementGeneration: target.settlementGeneration,
+                  }),
+                  bridge,
+                  orderId,
+                  fallbackOrderTotal: target.amount,
+                });
+                return {
+                  verdict: judgeOrdinaryAttempt(owner, attempt),
+                  value: attempt,
+                  code: attempt.attempt.code,
+                };
+              },
+            );
+            if (run.status === "refused") {
+              toast.error(ordinaryRefusalText(run.code));
+              return false;
+            }
+            const attempt = run.value;
+            if (attempt?.kind === "not_saved") {
+              // The card was charged but its payment is not saved on this till
+              // (or the tender was refused because one is not): never "Failed to
+              // collect payment" and never a new try with a new key. Its record
+              // holds the Z and Save payment again replays it (30/09/2026).
+              notifyPaymentNotSaved(attempt.result, t);
+              setMissingPaymentRepairTarget(null);
+              void loadOrders().catch(() => {});
+              return false;
+            }
+            if (attempt && isSetAsideOrdinaryWrite(attempt.attempt)) {
+              // Money that moved found the order already covered: recorded set
+              // aside for a manager to give back, never a repair (30/09/2026).
+              const setAsideMessage = formatSetAsidePaymentMessage(attempt.attempt.setAsideAnswer, t);
+              if (setAsideMessage) toast.error(setAsideMessage, { duration: PAYMENT_SET_ASIDE_TOAST_MS });
+              setMissingPaymentRepairTarget(null);
+              void loadOrders().catch(() => {});
+              return false;
+            }
+            // An unknown repair keeps its claim and its target; nothing is re-targeted.
+            if (run.status === "unknown" || !attempt || attempt.kind === "unknown") {
               toast.error(
                 t("orderDashboard.collectPaymentFailed", {
                   defaultValue: "Failed to collect payment",
                 }),
               );
+              return "reconciliation-pending";
             }
-            return "reconciliation-pending";
+            settlement = attempt.settlement;
           }
-
-          const settlement = paymentAttempt.settlement;
           if (settlement.kind === "settled") {
             setMissingPaymentRepairTarget(null);
             setPendingEditOrders([]);
@@ -6167,14 +6958,19 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           );
           return false;
         } finally {
+          // Ends a claim taken here only while nothing was sent under it.
+          if (claimedHere && sendOwner) releaseOrdinaryOwnerBeforeSend(sendOwner);
           missingPaymentRepairRef.current = false;
           setIsRepairingMissingPayment(false);
         }
       }, [
         bridge,
         clearBulkSelection,
+        collectionScope,
+        judgeOrdinaryAttempt,
         loadOrders,
         missingPaymentRepairTarget,
+        ordinaryRefusalText,
         t,
       ],
     );
@@ -6537,6 +7333,17 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       notes?: string;
     }) => {
       try {
+        // Item H (fix review 30/09/2026): the edit re-splits the order's tax.
+        // While the store's tax rate cannot be read, the edit is paused with
+        // "Try again" instead of splitting on an assumed 24%.
+        const editTaxRate = resolveCheckoutTaxRate({
+          loaded: terminalSettingsLoaded,
+          getSetting,
+        });
+        if (!editTaxRate.available) {
+          notifyMoneySettingsUnavailable(t, reloadTerminalSettings);
+          return;
+        }
         const targetOrder = orders.find((order) => order.id === orderData.orderId);
         const targetOrderType = resolveEditableOrderType({
           orderType:
@@ -6550,6 +7357,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           targetOrder,
           normalizeEditOrderItems(orderData.items),
           targetOrderType,
+          editTaxRate.rate,
         );
 
         await applySettlementAwareOrderEdit([
@@ -6729,6 +7537,16 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       <div className={`relative flex h-full min-h-0 flex-col gap-4 overflow-hidden ${className}`}>
         {/* Order Conflict Banner */}
         {/* Conflict banner intentionally disabled: remote always wins */}
+
+        {unsavedCheckout.payments.length > 0 ? (
+          <div className="shrink-0" data-testid="unsaved-checkout-banner">
+            <UnsavedChargedPaymentBanner
+              payments={unsavedCheckout.payments}
+              onSaveAgain={unsavedCheckout.saveAgain}
+              isSaving={unsavedCheckout.isSaving}
+            />
+          </div>
+        ) : null}
 
         {/* Order Tabs - Module dependent */}
         <div className="shrink-0">
@@ -7052,6 +7870,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                       // TableActionModal, not the new-reservation shortcut.
                       const isReservedTable =
                         !hasOpenCheck && displayStatus === "reserved";
+                      // Pay and reservation management always apply; booking an
+                      // available table needs the Reservations module.
+                      const showTableSecondaryAction =
+                        hasOpenCheck || isReservedTable || hasReservationsModule;
                       // Cleaning/maintenance/unavailable tables are not ready for guests and must
                       // not offer guest order actions, even with no open check after payment.
                       const needsAttention =
@@ -7271,7 +8093,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                               </button>
                             </div>
                           ) : (
-                            <div className="mt-2 grid grid-cols-2 gap-2">
+                            <div className={`mt-2 grid gap-2 ${showTableSecondaryAction ? "grid-cols-2" : "grid-cols-1"}`}>
                               <button
                                 type="button"
                                 onClick={(event) => {
@@ -7293,6 +8115,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                                   ? t("tablesDashboard.openCheck", "Open check")
                                   : t("tablesDashboard.newOrder", "New order")}
                               </button>
+                              {showTableSecondaryAction && (
                               <button
                                 type="button"
                                 onClick={(event) => {
@@ -7329,6 +8152,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                                         defaultValue: "New Reservation",
                                       })}
                               </button>
+                              )}
                             </div>
                           )}
                         </article>
@@ -7869,6 +8693,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             table={selectedTable}
             onNewOrder={handleTableNewOrder}
             onNewReservation={handleTableNewReservation}
+            canCreateReservation={hasReservationsModule}
             onSetAvailable={handleTableSetAvailable}
             onEditReservation={handleTableEditReservation}
             onNoShowReservation={handleTableNoShowReservation}
@@ -7879,6 +8704,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             }}
           />
         )}
+
+        {tableReleaseModal}
+        {tableReleaseApprovalModal}
 
         {selectedTable && (
           <TableCheckManagerModal
@@ -8059,37 +8887,45 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             collectionMode={splitPaymentData.collectionMode}
             allowDiscounts={splitPaymentData.kind !== "edit-settlement"}
             onSplitComplete={handleSplitComplete}
+            collectionScope={collectionScope}
           />
         )}
 
         {outstandingPaymentData && (
           <OutstandingPaymentMethodModal
             isOpen={true}
-            onClose={() => {
-              const pendingPayment = outstandingPaymentData;
-              setOutstandingPaymentData(null);
-              setSplitPaymentData({
-                kind: "new-order",
-                orderId: pendingPayment.orderId,
-                orderTotal: pendingPayment.orderTotal,
-                existingPayments: pendingPayment.existingPayments,
-                items: pendingPayment.items,
-                isGhostOrder: pendingPayment.isGhostOrder,
-                initialMode: "by-items",
-                orderNumber: pendingPayment.orderNumber,
-                orderType: pendingPayment.orderType,
-                tipAmount: pendingPayment.tipAmount,
-                tipRecipientRole: pendingPayment.tipRecipientRole,
-                tipRecipientStaffId: pendingPayment.tipRecipientStaffId,
-                tipRecipientStaffShiftId: pendingPayment.tipRecipientStaffShiftId,
-                recoverySession: (pendingPayment.recoverySession ?? 0) + 1,
-              });
-            }}
+            onClose={handleOutstandingClose}
             amount={outstandingPaymentData.outstandingAmount}
             orderType={outstandingPaymentData.orderType}
             isProcessing={isProcessingOutstandingPayment}
             onSelect={handleOutstandingPaymentSelect}
+            existingOrder={outstandingExistingOrder}
           />
+        )}
+        {!outstandingPaymentData && giftReceiptRecoveries.length > 0 && (
+          <div className="fixed bottom-4 right-4 z-40 space-y-2" data-testid="gift-receipt-recovery">
+            {giftReceiptRecoveries.map((entry) => (
+              <div
+                key={entry.orderId}
+                role="status"
+                className="liquid-glass-modal-card flex items-center gap-3 rounded-2xl px-4 py-3 text-sm"
+              >
+                <span className="liquid-glass-modal-text">
+                  {entry.orderNumber ? `#${entry.orderNumber} · ` : ""}
+                  {t("giftCardCheckout.refusal.fiscalPending", {
+                    defaultValue: "A receipt for this order is still pending. Check the receipt first.",
+                  })}
+                </span>
+                <button
+                  type="button"
+                  className="liquid-glass-modal-button"
+                  onClick={() => reenterGiftReceipt(entry.orderId)}
+                >
+                  {t("giftCardCheckout.checkAgain", { defaultValue: "Check again" })}
+                </button>
+              </div>
+            ))}
+          </div>
         )}
 
         {singlePaymentCollectionData && (
@@ -8111,6 +8947,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             totalAmount={Number(
               singlePaymentCollectionData.blocker.totalAmount || 0,
             )}
+            collectionScope={collectionScope}
           />
         )}
 
@@ -8217,9 +9054,11 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
         {showApprovalPanel && selectedOrderForApproval && !isViewOnlyMode && (
           <OrderApprovalPanel
+            key={approvalPanelInstance}
             order={selectedOrderForApproval}
             onApprove={handleApproveOrder}
             onDecline={handleDeclineOrder}
+            onBeforeDecline={handleBeforeDeclineOrder}
             onClose={() => {
               setShowApprovalPanel(false);
               setSelectedOrderForApproval(null);
@@ -8303,6 +9142,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             allowSplit={false}
             isProcessing={isRepairingMissingPayment}
             onSelect={handleMissingPaymentRepair}
+            existingOrder={repairExistingOrder}
             onClose={() => {
               if (isRepairingMissingPayment) return;
               setMissingPaymentRepairTarget(null);

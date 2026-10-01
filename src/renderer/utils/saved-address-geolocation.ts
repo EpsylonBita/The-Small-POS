@@ -11,11 +11,15 @@ import { parseSpecialAddressInput } from './specialAddress';
 
 export interface SavedAddressLike {
   id?: unknown;
-  street_address?: string;
-  street?: string;
-  city?: string;
-  postal_code?: string;
-  postalCode?: string;
+  google_place_id?: string | null;
+  place_id?: string | null;
+  coordinate_source?: string | null;
+  geocoded_at?: string | null;
+  street_address?: string | null;
+  street?: string | null;
+  city?: string | null;
+  postal_code?: string | null;
+  postalCode?: string | null;
   latitude?: unknown;
   longitude?: unknown;
   lat?: unknown;
@@ -76,7 +80,7 @@ export function savedAddressIdentityKey(address?: SavedAddressLike | null): stri
   if (!address) {
     return '';
   }
-  const point = readSavedAddressPoint(address);
+  const point = extractSavedAddressCoordinates(address);
   return JSON.stringify([
     typeof address.id === 'string' ? address.id : null,
     savedStreet(address),
@@ -84,6 +88,9 @@ export function savedAddressIdentityKey(address?: SavedAddressLike | null): stri
     savedPostalCode(address),
     point ? point.lat : null,
     point ? point.lng : null,
+    address.coordinate_source ?? null,
+    address.geocoded_at ?? null,
+    address.google_place_id ?? address.place_id ?? null,
   ]);
 }
 
@@ -275,6 +282,14 @@ export function extractSavedAddressCoordinates(
   if (isZoneSkippedAddress(address)) {
     return null;
   }
+  if ((address.coordinate_source === 'google' || address.google_place_id || address.place_id)
+    && address.coordinate_source !== 'manual' && address.coordinate_source !== 'provider') {
+    const fetchedAt = Date.parse(address.geocoded_at || '');
+    if (!Number.isFinite(fetchedAt) || fetchedAt > Date.now()
+      || Date.now() - fetchedAt >= 28 * 86_400_000) {
+      return null;
+    }
+  }
   return readSavedAddressPoint(address);
 }
 
@@ -288,7 +303,7 @@ export function isUnlocatedZoneAddress(address?: SavedAddressLike | null): boole
   if (!address) {
     return false;
   }
-  return !isZoneSkippedAddress(address) && !readSavedAddressPoint(address);
+  return !isZoneSkippedAddress(address) && !extractSavedAddressCoordinates(address);
 }
 
 export function buildSavedAddressQuery(address?: SavedAddressLike | null): string {

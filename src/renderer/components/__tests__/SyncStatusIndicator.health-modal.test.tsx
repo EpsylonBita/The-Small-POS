@@ -428,8 +428,64 @@ describe('SyncStatusIndicator Health Status modal contract', () => {
       expect(bridge.diagnostics.export).toHaveBeenCalledWith({
         includeLogs: true,
         redactSensitive: true,
+        // What the operator saw, for the bundle's health_view.json.
+        healthView: expect.objectContaining({
+          format: 'thesmall-pos-health-view-v1',
+          platform: 'windows',
+          source: 'health_modal',
+          availability: 'ready',
+          state: 'healthy',
+          primaryAction: 'none',
+          escalated: false,
+        }),
       })
     })
+  })
+
+  it('the export carries the incoming-order alert’s missed / escalated entries for support', async () => {
+    const missed = {
+      at: '2026-09-30T14:18:03.000Z',
+      event: 'missed',
+      orderId: 'ef-1',
+      orderNumber: '4545',
+      platform: 'efood',
+      view: 'dashboard',
+      waitedMs: 31_000,
+      pendingCount: 1,
+      audioEnabled: true,
+      overlayShown: false,
+      escalated: true,
+    }
+    window.localStorage.setItem(
+      'pos-incoming-order-alert-log',
+      JSON.stringify([{ ...missed, event: 'alerting', waitedMs: 0 }, missed]),
+    )
+    try {
+      renderHealthModal()
+
+      fireEvent.click(
+        await screen.findByRole('button', {
+          name: i18n.t('sync.healthModal.actions.export'),
+        }),
+      )
+
+      await waitFor(() => {
+        expect(bridge.diagnostics.export).toHaveBeenCalledWith(
+          expect.objectContaining({
+            healthView: expect.objectContaining({
+              format: 'thesmall-pos-health-view-v1',
+              incomingOrderAlerts: {
+                format: 'pos-incoming-order-alert-log-v1',
+                counts: { missed: 1, escalated: 0, render_error: 0 },
+                entries: [missed],
+              },
+            }),
+          }),
+        )
+      })
+    } finally {
+      window.localStorage.removeItem('pos-incoming-order-alert-log')
+    }
   })
 
   it.each([

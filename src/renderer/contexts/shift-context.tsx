@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef, ReactNode } from 'react';
 import { StaffShift } from '../types';
 import {
   getCachedTerminalCredentials,
@@ -6,6 +6,7 @@ import {
 } from '../services/terminal-credentials';
 import { getBridge, offEvent, onEvent } from '../../lib';
 import { getSecureSessionSync } from '../lib/secure-session-cache';
+import { invalidateFinancialOpening, isFinancialOpeningAuthorizedFor } from '../lib/financial-opening';
 
 interface StaffData {
   staffId: string;
@@ -91,10 +92,34 @@ function normalizeStoredShift(value: unknown): StaffShift | null {
   return candidate;
 }
 
+type TerminalScope = { organizationId: string; branchId: string; terminalId: string };
+
+/** Canonical native scope; a failed or placeholder read is unreadable, never a cached fallback. */
+async function readCanonicalTerminalScope(bridge: ReturnType<typeof getBridge>): Promise<TerminalScope | null> {
+  const read = (lookup: () => Promise<unknown>) =>
+    Promise.resolve().then(lookup).then(normalizeContextValue, () => null);
+  const [organizationId, branchId, terminalId] = await Promise.all([
+    read(() => bridge.terminalConfig.getOrganizationId()),
+    read(() => bridge.terminalConfig.getBranchId()),
+    read(() => bridge.terminalConfig.getTerminalId()),
+  ]);
+  return organizationId && branchId && terminalId ? { organizationId, branchId, terminalId } : null;
+}
+
+function sameStaffScope(left: StaffData | null, right: StaffData | null): boolean {
+  return !!left && !!right && left.staffId === right.staffId && left.branchId === right.branchId &&
+    left.terminalId === right.terminalId && (left.organizationId ?? null) === (right.organizationId ?? null);
+}
+
 export function ShiftProvider({ children }: { children: ReactNode }) {
   const bridge = getBridge();
   const [staff, setStaffState] = useState<StaffData | null>(null);
   const [activeShift, setActiveShift] = useState<StaffShift | null>(null);
+  const staffRef = useRef<StaffData | null>(null);
+
+  useEffect(() => {
+    staffRef.current = staff;
+  }, [staff]);
 
   // Load staff from localStorage on mount
   useEffect(() => {
@@ -443,6 +468,12 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
 
 
   const setStaff = (newStaff: StaffData | null) => {
+    // Dedicated financial authority survives only an unchanged staff scope or the exact tuple of a
+    // current usable, authorized native projection (same-cashier publication by the opening modal).
+    if (!newStaff || !(isFinancialOpeningAuthorizedFor(newStaff) || sameStaffScope(staffRef.current, newStaff))) {
+      invalidateFinancialOpening();
+    }
+    staffRef.current = newStaff;
     setStaffState(newStaff);
     if (newStaff) {
       localStorage.setItem('staff', JSON.stringify(newStaff));
@@ -452,6 +483,8 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
   };
 
   const clearShift = () => {
+    invalidateFinancialOpening();
+    staffRef.current = null;
     setStaffState(null);
     setActiveShift(null);
     localStorage.removeItem('staff');
@@ -482,6 +515,40 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
 
     void monitorTerminalSwitch();
     return () => { disposed = true; };
+  }, []);
+
+  // Dedicated financial authority follows the canonical native terminal scope, independent of
+  // shift, user and realtime state. Only the latest read decides; an unchanged scope keeps it.
+  useEffect(() => {
+    let disposed = false;
+    let latestRead = 0;
+    let verified: TerminalScope | null = null;
+
+    const verifyTerminalScope = () => {
+      const read = ++latestRead;
+      void readCanonicalTerminalScope(bridge).then((scope) => {
+        if (disposed || read !== latestRead) return;
+        if (!scope) {
+          invalidateFinancialOpening();
+          return;
+        }
+        const previous = verified;
+        verified = scope;
+        if (previous && (previous.organizationId !== scope.organizationId ||
+            previous.branchId !== scope.branchId || previous.terminalId !== scope.terminalId)) {
+          invalidateFinancialOpening();
+        }
+      });
+    };
+
+    const scopeEvents = ['terminal-settings-updated', 'terminal-config-updated', 'terminal-credentials-updated'];
+    scopeEvents.forEach((event) => onEvent(event, verifyTerminalScope));
+    verifyTerminalScope();
+    return () => {
+      disposed = true;
+      scopeEvents.forEach((event) => offEvent(event, verifyTerminalScope));
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const isShiftActive = activeShift !== null && activeShift.status === 'active';

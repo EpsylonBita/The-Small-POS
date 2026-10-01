@@ -3,17 +3,21 @@
 //! Implements Task 21a of `.claude/specs/fiscalization-core/tasks.md`.
 //! Satisfies Req 4.10, Req 4.11.
 //!
-//! The fiscal dispatcher consults this cache BEFORE enqueueing to the
-//! offline `parity_sync_queue`. When the cache says "Inactive" (the last
-//! successful `/api/plugins/fiscal/health` poll told us no fiscal plugin
-//! is configured for this branch), the dispatcher skips the enqueue
-//! entirely — otherwise the local outbox would fill with payloads that
-//! will only ever resolve to `status='skipped'` once replayed.
+//! Fed by [`super::status`] from `GET /api/pos/fiscal/status`. A FRESH
+//! "Inactive" answer (the server told us no fiscal plugin is active for this
+//! branch) is used for exactly one thing: queued fiscal rows of that branch
+//! do not hold the Z — neither the close-day guard
+//! ([`super::close_day_guard`]) nor the closeout drain's failure accounting
+//! (`sync_queue::fiscal_row_is_closeout_exempt`).
 //!
-//! When the cache says "Unknown" (no recent successful poll, or TTL
-//! expired), the dispatcher falls back to the normal online/offline path
-//! — never enqueue speculatively on unknown, so genuine network outages
-//! don't accidentally lose receipts while the cache is stale.
+//! It is NOT used to skip queuing a receipt (review of the 29/09/2026 fixes,
+//! decided for both POS apps): a store with a fiscal plugin lost every receipt
+//! after one `active:false` answer while the dispatcher skipped the enqueue on
+//! it. Receipts are always queued; the server answers `skipped` for a branch
+//! without a plugin and the row drains.
+//!
+//! "Unknown" (no recent successful poll, or TTL expired) keeps every queued
+//! row fail-closed for the Z.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -23,23 +27,26 @@ use std::time::{Duration, Instant};
 /// How long a successful health-poll result is considered fresh.
 pub const FRESHNESS_TTL: Duration = Duration::from_secs(5 * 60);
 
-/// What the local dispatcher should do with this branch.
+/// Whether this branch's queued fiscal rows hold the Z.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CacheVerdict {
     /// Last poll confirmed at least one plugin is active for this branch.
-    /// Dispatcher proceeds with normal online / offline-enqueue path.
+    /// Queued rows hold the Z until the server accepts them.
     Active,
-    /// Last poll confirmed NO plugin is active for this branch.
-    /// Dispatcher SHALL NOT enqueue — skip silently.
+    /// Last poll (still fresh) confirmed NO plugin is active for this branch.
+    /// Queued rows stay queued (they drain as `skipped`) but do not hold the Z.
     Inactive,
-    /// No recent poll, or last poll TTL expired. Fall back to online
-    /// attempt; on failure, enqueue (don't drop the receipt on unknown).
+    /// No recent poll, or last poll TTL expired: fail closed, queued rows
+    /// hold the Z.
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct CacheEntry {
     active: bool,
+    /// The plugin the server named with the answer (`fiscalization_gr`, ...),
+    /// when it named one.
+    plugin_id: Option<String>,
     fetched_at: Instant,
 }
 
@@ -82,21 +89,63 @@ pub fn verdict(branch_id: &str) -> CacheVerdict {
     }
 }
 
-/// Record the result of a successful `/api/plugins/fiscal/health` poll.
+/// Record the result of a successful `GET /api/pos/fiscal/status` answer
+/// (fed by [`super::status`]).
 ///
-/// `active=true` means at least one plugin returned a record with no
-/// `activeReason` (i.e. it is configured AND fully active per Req 2.4).
-/// `active=false` means every record either had a reason or there were
-/// no records at all.
+/// `active=true` means a submission from this branch is dispatched (or fails
+/// loudly because two plugins are active); `active=false` means the server
+/// would skip it (no active plugin, missing branch config, ...).
 pub fn update(branch_id: impl Into<String>, active: bool) {
+    update_with_plugin(branch_id, active, None);
+}
+
+/// [`update`], keeping the plugin the server named with the answer (the
+/// fiscal currency check reads it).
+pub fn update_with_plugin(branch_id: impl Into<String>, active: bool, plugin_id: Option<String>) {
     let mut s = state();
     s.by_branch.insert(
         branch_id.into(),
         CacheEntry {
             active,
+            plugin_id: plugin_id
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
             fetched_at: Instant::now(),
         },
     );
+}
+
+/// The plugin of a branch whose FRESH verdict is active, when the server
+/// named one (two active plugins answer without one).
+pub fn fresh_active_plugin_id(branch_id: &str) -> Option<String> {
+    let s = state();
+    s.by_branch
+        .get(branch_id)
+        .filter(|entry| entry.is_fresh() && entry.active)
+        .and_then(|entry| entry.plugin_id.clone())
+}
+
+/// Branches whose fresh verdict is `Inactive`, for the SQL predicates that
+/// exempt their fiscal rows from the Z closeout drain. Only ids made of
+/// `[A-Za-z0-9_-]` (UUIDs, test ids) are returned, so a caller may embed them
+/// as SQL string literals.
+pub fn inactive_branch_ids() -> Vec<String> {
+    let s = state();
+    let mut ids: Vec<String> = s
+        .by_branch
+        .iter()
+        .filter(|(branch_id, entry)| {
+            entry.is_fresh()
+                && !entry.active
+                && !branch_id.is_empty()
+                && branch_id
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+        })
+        .map(|(branch_id, _)| branch_id.clone())
+        .collect();
+    ids.sort();
+    ids
 }
 
 /// Test-only: clear all cached entries between tests. NEVER call in production.
@@ -130,6 +179,19 @@ mod tests {
         reset_for_tests();
         update("branch-b", false);
         assert_eq!(verdict("branch-b"), CacheVerdict::Inactive);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn inactive_branch_ids_lists_only_fresh_inactive_sql_safe_ids() {
+        reset_for_tests();
+        update("d28cef2e-bbf2-496a-b922-45b497525715", false);
+        update("branch_active", true);
+        update("x'); DROP TABLE orders; --", false);
+        assert_eq!(
+            inactive_branch_ids(),
+            vec!["d28cef2e-bbf2-496a-b922-45b497525715".to_string()]
+        );
     }
 
     #[test]

@@ -3,12 +3,14 @@ import { useTranslation } from 'react-i18next';
 import { useModules } from '../../contexts/module-context';
 import { FoodDashboard } from './FoodDashboard';
 import type { BusinessType } from '../../../shared/types/organization';
+import { getBusinessCategory, type BusinessCategory } from './dashboardOrderScope';
+
+// The category mapping lives in dashboardOrderScope.ts so the app-shell
+// incoming-order alert scopes orders exactly as the chosen dashboard does.
+export { getBusinessCategory };
 
 const ServiceDashboard = lazy(() => import('./ServiceDashboard').then(m => ({ default: m.ServiceDashboard })));
 const ProductDashboard = lazy(() => import('./ProductDashboard').then(m => ({ default: m.ProductDashboard })));
-
-// Define BusinessCategory locally to avoid import issues
-type BusinessCategory = 'food' | 'service' | 'product';
 
 /**
  * Business Category Dashboard
@@ -29,57 +31,6 @@ interface BusinessCategoryDashboardProps {
   overrideBusinessType?: BusinessType;
   /** Override the auto-detected category (for testing/preview) */
   overrideCategory?: BusinessCategory;
-}
-
-/**
- * Maps business types to their business categories.
- * This mapping determines which dashboard layout is used.
- */
-const BUSINESS_TYPE_TO_CATEGORY: Record<BusinessType, BusinessCategory> = {
-  // Food businesses - order-focused, kitchen operations
-  restaurant: 'food',
-  fast_food: 'food',
-  bar_cafe: 'food',
-  food_truck: 'food',
-  chain: 'food',
-  franchise: 'food',
-  cafe: 'food',
-  bar: 'food',
-  bakery: 'food',
-  catering: 'food',
-  ghost_kitchen: 'food',
-
-  // Service businesses - appointment/booking-focused
-  salon: 'service',
-  spa: 'service',
-  barbershop: 'service',
-  beauty_salon: 'service',
-  wellness: 'service',
-  fitness: 'service',
-  clinic: 'service',
-  dental: 'service',
-  medical_clinic: 'service',
-  veterinary: 'service',
-  physiotherapy: 'service',
-  hotel: 'service',
-  hotel_restaurant: 'service',
-
-  // Product businesses - inventory/retail-focused
-  retail: 'product',
-  shop: 'product',
-  boutique: 'product',
-  convenience: 'product',
-  grocery: 'product',
-};
-
-/**
- * Get the business category for a given business type
- */
-export function getBusinessCategory(businessType: BusinessType | null): BusinessCategory {
-  if (!businessType) {
-    return 'food'; // Default to food dashboard
-  }
-  return BUSINESS_TYPE_TO_CATEGORY[businessType] || 'food';
 }
 
 export const BusinessCategoryDashboard = memo<BusinessCategoryDashboardProps>(({

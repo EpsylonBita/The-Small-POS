@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 
 import ReactDOM from 'react-dom';
 import {
   ArrowRightLeft,
+  Ban,
   Banknote,
   Check,
   CreditCard,
@@ -24,6 +25,12 @@ import { AnimatePresence, motion } from 'framer-motion';
 import toast from 'react-hot-toast';
 import { emitCompatEvent, getBridge, type RecordPaymentParams } from '../../../lib';
 import { useI18n } from '../../contexts/i18n-context';
+import { usePrivilegedActionConfirmation } from '../../hooks/usePrivilegedActionConfirmation';
+import {
+  isOwingCancelDismissed,
+  owingCancelFailureMessage,
+  refuseOwingCancelUpFront,
+} from '../../hooks/useTableReleaseGuard';
 import type { Order } from '../../types/orders';
 import type { RestaurantTable } from '../../types/tables';
 import { posApiGet, posApiPatch, posApiPost } from '../../utils/api-helpers';
@@ -68,7 +75,7 @@ import {
 } from '../../utils/tableSessionOfflineQueue';
 
 type PaymentMethod = 'cash' | 'card';
-type SecondaryModal = 'pay-table' | 'item-actions' | 'transfer-item' | 'batch-pay' | 'batch-transfer' | 'batch-discount' | 'move-table' | 'merge-table' | 'covers' | 'assign-waiter' | null;
+type SecondaryModal = 'pay-table' | 'item-actions' | 'transfer-item' | 'batch-pay' | 'batch-transfer' | 'batch-discount' | 'move-table' | 'merge-table' | 'covers' | 'assign-waiter' | 'cancel-order' | null;
 type ItemActionMode = 'menu' | 'pay' | 'price' | 'discount';
 type DiscountMode = 'percentage' | 'fixed';
 
@@ -984,6 +991,13 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
     [t],
   );
   const translatedItemFallback = tr('labels.item', 'Item');
+  // Item D1 (fix review 30/09/2026): an order that owes money is cancelled
+  // from its check only explicitly, with a reason and the manager's approval.
+  const {
+    runWithPrivilegedConfirmation: runCancelApproval,
+    confirmationModal: cancelApprovalModal,
+  } = usePrivilegedActionConfirmation();
+  const [cancelReason, setCancelReason] = useState('');
   const [movedTableId, setMovedTableId] = useState<string | null>(null);
   useEffect(() => { setMovedTableId(null); }, [selectedTable?.id]);
   const table = tables.find(candidate => candidate.id === movedTableId) || selectedTable;
@@ -2231,6 +2245,91 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
     );
   };
 
+  // The order is cancelled: its session ends and the table is freed. Forced,
+  // like the automatic close, since the cancellation may reach the server
+  // after the close; queued when the check is still syncing.
+  const releaseCancelledTable = async (tableSessionId: string) => {
+    const requestBody = {
+      action: 'close',
+      status: 'cancelled',
+      release_status: 'available',
+      force: true,
+      client_event_id: `pos-tauri-table-cancel-${tableSessionId}-${Date.now()}`,
+    };
+    const queue = () =>
+      enqueueTableSessionUpdate({
+        organizationId: table?.organizationId,
+        branchId: table?.branchId,
+        sessionId: tableSessionId,
+        payload: requestBody,
+      });
+    try {
+      if (isSessionLocalOnly) {
+        await queue();
+      } else {
+        const result = await posApiPatch<{ success?: boolean; error?: string }>(
+          `/api/pos/table-sessions/${encodeURIComponent(tableSessionId)}`,
+          requestBody,
+        );
+        if (!result.success || result.data?.success === false) {
+          throw new Error(result.error || result.data?.error || 'Table session update failed');
+        }
+      }
+    } catch (error) {
+      console.warn('[TableCheckManagerModal] Releasing the cancelled table failed; queued:', error);
+      await queue().catch((queueError) => {
+        console.warn('[TableCheckManagerModal] Queueing the cancelled table release failed:', queueError);
+      });
+    }
+  };
+
+  const cancelOrderFromCheck = async () => {
+    const orderId = session?.active_order_id;
+    const tableSessionId = session?.id;
+    const reason = cancelReason.trim();
+    if (!orderId || !tableSessionId || !reason) {
+      return;
+    }
+    setIsSaving(true);
+    try {
+      await runCancelApproval({
+        scope: 'cash_drawer_control',
+        action: () => getBridge().orders.cancelWithApproval({ orderId, reason }),
+        title: String(t('tableRelease.cancelApprovalTitle', {
+          defaultValue: 'Approve cancelling the order',
+        })),
+        subtitle: String(t('tableRelease.cancelApprovalSubtitle', {
+          defaultValue: 'Enter the cashier or manager PIN. Nothing is charged.',
+        })),
+      });
+    } catch (error) {
+      setIsSaving(false);
+      if (isOwingCancelDismissed(error)) {
+        return;
+      }
+      toast.error(owingCancelFailureMessage(error, t));
+      return;
+    }
+    await releaseCancelledTable(tableSessionId);
+    setIsSaving(false);
+    setCancelReason('');
+    toast.success(String(t('tableRelease.orderCancelled', {
+      defaultValue: 'Order cancelled and table released.',
+    })));
+    emitCompatEvent('table-session-settled', {
+      tableId: table?.id,
+      tableSessionId,
+      orderId,
+      releaseStatus: 'available',
+    });
+    closeSecondaryModal();
+    onClose();
+    void Promise.all([
+      Promise.resolve(onRefreshTables()),
+      Promise.resolve(onRefreshOrders()),
+    ]).catch(() => undefined);
+  };
+
   const linkedTableLabels = (session?.tables || [])
     .filter(link => !link.released_at)
     .map(link => {
@@ -2601,6 +2700,28 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                   <Check className="h-4 w-4" />
                   {tr('actions.closeTable', 'Close Table')}
                 </ActionButton>
+                {outstanding > 0 && session?.active_order_id ? (
+                  <ActionButton
+                    onClick={() => {
+                      // Founder rule (30/09 and 01/10/2026): an order the
+                      // till refuses to cancel (money taken on it, or a paid
+                      // label with no payment record here) is refused
+                      // before the reason is asked.
+                      const orderId = session.active_order_id as string;
+                      void (async () => {
+                        if (await refuseOwingCancelUpFront(orderId, t)) return;
+                        setCancelReason('');
+                        setSecondaryModal('cancel-order');
+                      })();
+                    }}
+                    disabled={isSaving}
+                    tone="warn"
+                    className="mt-2 w-full"
+                  >
+                    <Ban className="h-4 w-4" />
+                    {String(t('tableRelease.cancelOrder', { defaultValue: 'Cancel the order' }))}
+                  </ActionButton>
+                ) : null}
               </div>
             </aside>
           </div>
@@ -3134,6 +3255,47 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
             </SecondarySheet>
           ) : null}
 
+          {secondaryModal === 'cancel-order' ? (
+            <SecondarySheet
+              title={String(t('tableRelease.cancelOrder', { defaultValue: 'Cancel the order' }))}
+              subtitle={tr('labels.outstandingAmount', 'Outstanding {{amount}}', { amount: money(outstanding) })}
+              icon={<Ban className="h-5 w-5" />}
+              onClose={closeSecondaryModal}
+              closeLabel={tr('actions.close', 'Close')}
+            >
+              <label className="block text-sm font-semibold liquid-glass-modal-text" htmlFor="table-check-cancel-reason">
+                {String(t('tableRelease.cancelReasonLabel', { defaultValue: 'Why is the order cancelled?' }))}
+              </label>
+              <textarea
+                id="table-check-cancel-reason"
+                value={cancelReason}
+                onChange={(event) => setCancelReason(event.target.value)}
+                rows={3}
+                maxLength={300}
+                className={glassInputClass}
+                placeholder={String(t('tableRelease.cancelReasonPlaceholder', {
+                  defaultValue: 'For example: the customer left without ordering',
+                }))}
+              />
+              <p className="text-xs liquid-glass-modal-text-muted">
+                {String(t('tableRelease.cancelApprovalHint', {
+                  defaultValue: 'A cashier or manager PIN approves the cancellation. Nothing is charged.',
+                }))}
+              </p>
+              <ActionButton
+                onClick={() => {
+                  void cancelOrderFromCheck();
+                }}
+                disabled={isSaving || cancelReason.trim().length === 0}
+                tone="warn"
+                className="w-full"
+              >
+                {isSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Ban className="h-4 w-4" />}
+                {String(t('tableRelease.confirmCancel', { defaultValue: 'Cancel the order' }))}
+              </ActionButton>
+            </SecondarySheet>
+          ) : null}
+
           {secondaryModal === 'covers' ? (
             <SecondarySheet
               title={tr('labels.covers', 'Covers')}
@@ -3166,7 +3328,12 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
     </motion.div>
   );
 
-  return ReactDOM.createPortal(modalContent, document.body);
+  return (
+    <>
+      {ReactDOM.createPortal(modalContent, document.body)}
+      {cancelApprovalModal}
+    </>
+  );
 };
 
 export default TableCheckManagerModal;

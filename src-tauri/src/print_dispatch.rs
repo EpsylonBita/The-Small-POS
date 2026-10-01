@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use thiserror::Error;
+use tracing::warn;
 use uuid::Uuid;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -46,6 +47,24 @@ pub(crate) fn shared_attempt_blocker_predicate_sql(alias: &str) -> String {
               AND {alias}.spool_job_id BETWEEN 1 AND {MAX_WINDOWS_SPOOL_JOB_ID_SQL}))"
     )
 }
+
+/// `last_error` of an attempt the lane sweep closed because its print job is
+/// gone. Support evidence on the attempt row; staff never see it, because
+/// the print queue lists jobs and this attempt no longer has one.
+pub(crate) const ORPHANED_ATTEMPT_ERROR: &str =
+    "The print job of this attempt no longer exists; it was removed while the attempt \
+     was still open. The attempt was closed so the printer can take new jobs. \
+     Whether this output printed was not confirmed.";
+
+/// `recovery_action_log.action_id` of the lane sweep's orphan remedy. One row
+/// per closed attempt, written in the transaction that closes it, so the trail
+/// outlives the attempt row (the next day close deletes a closed orphan).
+pub(crate) const ORPHANED_ATTEMPT_ACTION_ID: &str = "print_orphan_attempt_closed";
+/// The shipped recipe behind that row; bump the version if its rule changes.
+pub(crate) const ORPHANED_ATTEMPT_RECIPE_ID: &str = "print-orphan-attempt.close";
+pub(crate) const ORPHANED_ATTEMPT_RECIPE_VERSION: i64 = 1;
+/// The symptom this remedy heals, as `incident_reporting` reports it.
+pub(crate) const ORPHANED_ATTEMPT_ISSUE_CODE: &str = "printer.jobs_not_printing";
 
 pub(crate) fn attempt_state_is_shared_blocker(
     state: Option<&str>,
@@ -1749,6 +1768,219 @@ fn active_target_blockers(
         .collect()
 }
 
+/// A blocking attempt whose `print_jobs` row is gone, as the lane sweep reads
+/// it before closing it.
+struct OrphanedAttempt {
+    attempt_id: String,
+    target_key: String,
+    /// The attempt row as it was before the close, as a JSON object: the
+    /// snapshot the audit row keeps (ids, previous state, transport, target,
+    /// bytes, timestamps and previous `last_error`).
+    preimage_json: String,
+}
+
+/// Attempts that still block a printer although their `print_jobs` row is
+/// gone.
+///
+/// Such a row cannot resolve by itself: nothing finalizes an attempt without
+/// its job, and staff cannot cancel it because the queue lists jobs. A day
+/// close that ran with foreign keys off used to leave them behind (Tomikro
+/// Parisi, 30/09/2026: one orphan in `submitting` stopped every later print).
+///
+/// A Windows attempt with a persisted native JobId is not listed. It keeps
+/// its oracle: `reconcile_owned_windows_attempt_with_cancel` does not need
+/// the job row, confirms the native job's absence and then releases the
+/// printer. Closing it here could release a printer while Windows still holds
+/// the output.
+fn orphaned_blocking_attempts(conn: &Connection) -> Result<Vec<OrphanedAttempt>, DispatchError> {
+    let mut statement = conn.prepare(&format!(
+        "SELECT a.id, a.transport, a.resolved_target,
+                json_object(
+                    'attemptId', a.id,
+                    'printJobId', a.print_job_id,
+                    'attemptNumber', a.attempt_number,
+                    'transport', a.transport,
+                    'target', a.resolved_target,
+                    'documentName', a.document_name,
+                    'previousState', a.state,
+                    'spoolJobId', a.spool_job_id,
+                    'bytesRequested', a.bytes_requested,
+                    'bytesWritten', a.bytes_written,
+                    'startedAt', a.started_at,
+                    'previousLastSeenAt', a.last_seen_at,
+                    'previousCompletedAt', a.completed_at,
+                    'previousCancelRequestedAt', a.cancel_requested_at,
+                    'previousCancelConfirmedAt', a.cancel_confirmed_at,
+                    'previousLastError', a.last_error
+                )
+         FROM print_job_attempts a
+         WHERE {}
+           AND NOT EXISTS (SELECT 1 FROM print_jobs job WHERE job.id = a.print_job_id)
+           AND NOT (a.transport = 'windows'
+                    AND typeof(a.spool_job_id) = 'integer'
+                    AND a.spool_job_id BETWEEN 1 AND {MAX_WINDOWS_SPOOL_JOB_ID_SQL})
+         ORDER BY a.started_at, a.id",
+        shared_attempt_blocker_predicate_sql("a"),
+    ))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+
+    rows.into_iter()
+        .map(|(attempt_id, transport, resolved_target, preimage_json)| {
+            let target = target_from_storage(&transport, &resolved_target)?;
+            Ok(OrphanedAttempt {
+                attempt_id,
+                target_key: normalize_target(&target)?,
+                preimage_json,
+            })
+        })
+        .collect()
+}
+
+/// Close the orphaned blockers whose printer lane no worker holds, and return
+/// the ones this call closed.
+///
+/// Runs inside the sweep's IMMEDIATE transaction with the lane registry
+/// locked (SQLite first, lanes second, as everywhere in this module). A
+/// `Held`/`OpenHeld` lane is a worker sending right now; its attempt is
+/// skipped and becomes eligible once that worker's lease is dropped.
+/// `cancelled` accepts any prior state (the state CHECK is the only
+/// constraint on this column; no trigger guards attempt transitions), and the
+/// timestamps never move backwards.
+///
+/// Idempotent. The health-recovery rule asks an automatic remedy for a
+/// persisted attempt cap or cooldown; this one needs no separate counter or
+/// timer because it is one state change per attempt row, never a retry. The
+/// UPDATE re-checks eligibility (a blocker state and no job row) in the same
+/// transaction, and the state it writes, `cancelled`, fails that check. So a
+/// row is closed at most once, the row's own durable state is the attempt
+/// cap, and a later pass neither selects nor changes it. Nothing is re-sent
+/// to a printer or to the server, so there is nothing to cool down. The audit
+/// row is written only for a row this call changed, so a second pass writes
+/// none.
+fn close_orphaned_attempts(
+    conn: &Connection,
+    lanes: &HashMap<String, LaneBlock>,
+    orphans: Vec<OrphanedAttempt>,
+    now: DateTime<Utc>,
+) -> Result<Vec<OrphanedAttempt>, DispatchError> {
+    let update_sql = format!(
+        "UPDATE print_job_attempts
+         SET state = 'cancelled',
+             cancel_requested_at = COALESCE(cancel_requested_at, ?1),
+             cancel_confirmed_at = COALESCE(cancel_confirmed_at, ?1),
+             completed_at = COALESCE(completed_at, ?1),
+             last_seen_at = CASE
+                 WHEN last_seen_at IS NULL OR last_seen_at <= ?1 THEN ?1
+                 ELSE last_seen_at
+             END,
+             last_error = ?2 || COALESCE(' Previous error: ' || last_error, '')
+         WHERE id = ?3
+           AND {}
+           AND NOT EXISTS (
+               SELECT 1 FROM print_jobs job
+               WHERE job.id = print_job_attempts.print_job_id
+           )",
+        shared_attempt_blocker_predicate_sql("print_job_attempts"),
+    );
+    let now = timestamp(now);
+    let mut closed = Vec::new();
+    for orphan in orphans {
+        if matches!(
+            lanes.get(&orphan.target_key),
+            Some(LaneBlock::Held(_) | LaneBlock::OpenHeld(_))
+        ) {
+            continue;
+        }
+        let changed = conn.execute(
+            &update_sql,
+            params![now, ORPHANED_ATTEMPT_ERROR, orphan.attempt_id],
+        )?;
+        if changed == 1 {
+            closed.push(orphan);
+        }
+    }
+    Ok(closed)
+}
+
+/// Whether the durable audit table exists. A real POS database always has it
+/// (migration v62). Without it the orphan remedy does not run, because an
+/// automatic remedy must leave an audit trail.
+fn recovery_action_log_present(conn: &Connection) -> Result<bool, DispatchError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM sqlite_master
+             WHERE type = 'table' AND name = 'recovery_action_log'
+         )",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?)
+}
+
+/// One `recovery_action_log` row per closed orphan, in the sweep's
+/// transaction, so the close and its trail commit or roll back together.
+///
+/// The attempt row does not last: once closed it is a finished orphan, and
+/// the next day close deletes it. This row does, because the day close never
+/// touches `recovery_action_log`. `outcome` is `resolved` because the close is
+/// verified by the UPDATE's own re-check. `printerReleased` says whether this
+/// same pass also released the printer lane; another live blocker on that
+/// printer can keep it.
+fn record_orphaned_attempt_closures(
+    conn: &Connection,
+    closed: &[OrphanedAttempt],
+    released_keys: &[String],
+    now: DateTime<Utc>,
+) -> Result<(), DispatchError> {
+    let now = timestamp(now);
+    for orphan in closed {
+        let printer_released = released_keys.contains(&orphan.target_key);
+        conn.execute(
+            "INSERT INTO recovery_action_log (
+                 id, action_id, issue_code, recipe_id, recipe_version,
+                 entity_type, entity_id, success, message, payload_json, created_at
+             ) VALUES (
+                 ?1, ?2, ?3, ?4, ?5,
+                 'print_job_attempt', ?6, 1, ?7,
+                 json_set(
+                     ?8,
+                     '$.outcome', 'resolved',
+                     '$.snapshotKind', 'print_attempt_preimage',
+                     '$.newState', 'cancelled',
+                     '$.closedAt', ?9,
+                     '$.targetKey', ?10,
+                     '$.printerReleased', json(?11)
+                 ),
+                 ?9
+             )",
+            params![
+                Uuid::new_v4().to_string(),
+                ORPHANED_ATTEMPT_ACTION_ID,
+                ORPHANED_ATTEMPT_ISSUE_CODE,
+                ORPHANED_ATTEMPT_RECIPE_ID,
+                ORPHANED_ATTEMPT_RECIPE_VERSION,
+                orphan.attempt_id,
+                "Closed a print attempt whose print job no longer exists; \
+                 whether its output printed was not confirmed",
+                orphan.preimage_json,
+                now,
+                orphan.target_key,
+                if printer_released { "true" } else { "false" },
+            ],
+        )?;
+    }
+    Ok(())
+}
+
 fn target_has_reconciliation_blockers(
     conn: &Connection,
     target: &PrinterTargetKey,
@@ -2056,6 +2288,22 @@ impl DispatchManager {
             token,
             release_on_drop: false,
         })
+    }
+
+    /// Read-only peek: would `claim()` refuse this target right now?
+    ///
+    /// Advisory only — the lane can change between this peek and a claim, and
+    /// `claim()` stays the authority. The dispatcher uses it to skip a job
+    /// bound for a blocked printer BEFORE building and rendering its document,
+    /// so a printer that cannot print costs each tick almost nothing and the
+    /// scan can move on to jobs for printers that can.
+    pub(crate) fn target_is_blocked(
+        &self,
+        target: &PrinterTargetKey,
+    ) -> Result<bool, DispatchError> {
+        let normalized_key = normalize_target(target)?;
+        let lanes = self.lanes.lock().map_err(|_| DispatchError::LockPoisoned)?;
+        Ok(lanes.contains_key(&normalized_key))
     }
 
     /// Test adapter over the shipped finalizer.
@@ -2409,6 +2657,23 @@ impl DispatchManager {
     /// Lock order matches the rest of this module: SQLite transaction first,
     /// lane registry second, and the registry guard is kept across COMMIT so a
     /// claim cannot interleave.
+    ///
+    /// A durable blocker whose print job no longer exists is not a reason to
+    /// keep a lane: it can never be finalized, and staff cannot cancel it
+    /// because the queue lists jobs, not attempts. Before the blockers are
+    /// read, the same transaction closes such orphans (see
+    /// `orphaned_blocking_attempts`), so their lanes are released in this very
+    /// pass. Tomikro Parisi printed nothing from the 03:25 Z until a manual
+    /// repair on 30/09/2026 because of one. An orphan always hydrates as a
+    /// retained lane, so it is always among this pass's candidates.
+    ///
+    /// Each close writes one `recovery_action_log` row (action
+    /// `print_orphan_attempt_closed`, with the attempt row's previous values)
+    /// in this same transaction; without that table the orphans are left
+    /// alone. The lanes leave the in-memory registry only after COMMIT, so a
+    /// failed commit keeps them retained, as the rolled-back durable state
+    /// still says. Why this remedy needs no persisted cap or cooldown: see
+    /// `close_orphaned_attempts`.
     pub(crate) fn sweep_orphaned_lanes(
         &self,
         conn: &Connection,
@@ -2429,14 +2694,27 @@ impl DispatchManager {
         }
 
         let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-        let blocked: std::collections::HashSet<String> = active_target_blockers(&tx)?
-            .into_iter()
-            .map(|(key, _)| key)
-            .collect();
+        let mut orphans = orphaned_blocking_attempts(&tx)?;
+        if !orphans.is_empty() && !recovery_action_log_present(&tx)? {
+            warn!(
+                count = orphans.len(),
+                "recovery_action_log is missing; orphaned print attempts stay open because their close could not be audited"
+            );
+            orphans.clear();
+        }
 
         let mut released = Vec::new();
         {
             let mut lanes = self.lanes.lock().map_err(|_| DispatchError::LockPoisoned)?;
+            let closed_orphans = if orphans.is_empty() {
+                Vec::new()
+            } else {
+                close_orphaned_attempts(&tx, &lanes, orphans, now)?
+            };
+            let blocked: std::collections::HashSet<String> = active_target_blockers(&tx)?
+                .into_iter()
+                .map(|(key, _)| key)
+                .collect();
             for key in candidates {
                 if blocked.contains(&key) {
                     continue;
@@ -2458,10 +2736,24 @@ impl DispatchManager {
                      WHERE target_key = ?1",
                     params![key, timestamp(now)],
                 )?;
-                lanes.remove(&key);
                 released.push(key);
             }
+            record_orphaned_attempt_closures(&tx, &closed_orphans, &released, now)?;
             tx.commit()?;
+            for key in &released {
+                lanes.remove(key);
+            }
+            if !closed_orphans.is_empty() {
+                let attempt_ids: Vec<&str> = closed_orphans
+                    .iter()
+                    .map(|orphan| orphan.attempt_id.as_str())
+                    .collect();
+                warn!(
+                    count = closed_orphans.len(),
+                    attempt_ids = ?attempt_ids,
+                    "Closed print attempts whose print job no longer exists; their output was not confirmed"
+                );
+            }
         }
 
         Ok(released)
@@ -2959,6 +3251,577 @@ mod tests {
             "the live worker must keep its lane"
         );
         drop(lease);
+    }
+
+    /// Deletes a job the way the day close did before the Tomikro fix:
+    /// foreign keys off, so the cascade to its attempts never fires.
+    fn delete_job_with_foreign_keys_off(conn: &Connection, job_id: &str) {
+        conn.execute_batch("PRAGMA foreign_keys = OFF").unwrap();
+        conn.execute("DELETE FROM print_jobs WHERE id = ?1", [job_id])
+            .unwrap();
+        // Production runs with foreign keys on; the orphan must heal there.
+        conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+    }
+
+    fn claimed_raw_attempt(
+        conn: &Connection,
+        manager: &DispatchManager,
+        job_id: &str,
+        host: &str,
+        second: u32,
+    ) -> (AttemptLease, AttemptIdentity) {
+        insert_job(conn, job_id);
+        let target = PrinterTargetKey::RawTcp {
+            host: host.into(),
+            port: 9100,
+        };
+        let lease = manager.claim(target.clone()).unwrap();
+        let attempt = prepare_managed_attempt(
+            conn,
+            PrepareManagedAttempt {
+                local_job_id: job_id.into(),
+                printer_profile_id: "profile".into(),
+                target,
+                document_kind: "order_receipt".into(),
+                payload: vec![1, 2, 3],
+                render_profile_snapshot_json: r#"{"version":1}"#.into(),
+                now: at(second),
+            },
+        )
+        .unwrap();
+        transition_attempt(
+            conn,
+            attempt.attempt_id,
+            DispatchState::Submitting,
+            observation(second + 1),
+        )
+        .unwrap();
+        (lease, attempt)
+    }
+
+    fn orphan_count(conn: &Connection) -> i64 {
+        conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM print_job_attempts a
+                 WHERE {}
+                   AND NOT EXISTS (SELECT 1 FROM print_jobs j WHERE j.id = a.print_job_id)",
+                shared_attempt_blocker_predicate_sql("a")
+            ),
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    /// One audit row of the orphan remedy, as stored.
+    #[derive(Debug)]
+    struct OrphanAuditRow {
+        issue_code: String,
+        recipe_id: Option<String>,
+        recipe_version: Option<i64>,
+        entity_type: Option<String>,
+        entity_id: Option<String>,
+        success: i64,
+        created_at: String,
+        payload: serde_json::Value,
+    }
+
+    fn orphan_audit_rows(conn: &Connection) -> Vec<OrphanAuditRow> {
+        let mut statement = conn
+            .prepare(
+                "SELECT issue_code, recipe_id, recipe_version, entity_type, entity_id,
+                        success, created_at, payload_json
+                 FROM recovery_action_log
+                 WHERE action_id = ?1
+                 ORDER BY created_at, rowid",
+            )
+            .unwrap();
+        let rows = statement
+            .query_map([ORPHANED_ATTEMPT_ACTION_ID], |row| {
+                let payload: String = row.get(7)?;
+                Ok(OrphanAuditRow {
+                    issue_code: row.get(0)?,
+                    recipe_id: row.get(1)?,
+                    recipe_version: row.get(2)?,
+                    entity_type: row.get(3)?,
+                    entity_id: row.get(4)?,
+                    success: row.get(5)?,
+                    created_at: row.get(6)?,
+                    payload: serde_json::from_str(&payload).expect("audit payload is JSON"),
+                })
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        rows
+    }
+
+    /// Tomikro Parisi, 30/09/2026 (desktop 1.4.119): the closing Z deleted a
+    /// job while its raw_tcp attempt was `submitting`, with foreign keys off.
+    /// The orphan attempt was a durable blocker for 192.168.1.19:9100:
+    /// hydration retained the lane on every tick, this sweep refused to
+    /// release it, and every later job was deferred with no attempt and no
+    /// error until a manual repair. Restarts did not help.
+    #[test]
+    fn sweep_closes_an_orphaned_raw_blocker_and_releases_its_printer() {
+        let conn = test_db();
+        let job_id = Uuid::new_v4().to_string();
+        let target = PrinterTargetKey::RawTcp {
+            host: "192.168.1.19".into(),
+            port: 9100,
+        };
+        let key = normalize_target(&target).unwrap();
+        let attempt = {
+            let worker = DispatchManager::isolated_for_test();
+            let (lease, attempt) = claimed_raw_attempt(&conn, &worker, &job_id, "192.168.1.19", 4);
+            drop(lease);
+            attempt
+        };
+        delete_job_with_foreign_keys_off(&conn, &job_id);
+
+        // A restarted process: hydration alone cannot help.
+        let manager = DispatchManager::hydrate_isolated_for_test(&conn).unwrap();
+        assert!(
+            matches!(
+                manager.lanes.lock().unwrap().get(&key),
+                Some(LaneBlock::Retained(_))
+            ),
+            "precondition: the orphan retains the printer lane"
+        );
+        assert!(matches!(
+            manager.claim(target.clone()),
+            Err(DispatchError::LaneBusy)
+        ));
+
+        let before = read_attempt(&conn, attempt.attempt_id).unwrap().unwrap();
+        assert!(
+            orphan_audit_rows(&conn).is_empty(),
+            "precondition: nothing audited yet"
+        );
+
+        let released = manager.sweep_orphaned_lanes(&conn, at(30)).unwrap();
+
+        assert_eq!(released, vec![key.clone()], "the printer must be released");
+        let closed = read_attempt(&conn, attempt.attempt_id).unwrap().unwrap();
+        assert_eq!(closed.state, DispatchState::Cancelled);
+        let closed_at = timestamp(at(30));
+        assert_eq!(closed.completed_at.as_deref(), Some(closed_at.as_str()));
+        assert_eq!(
+            closed.cancel_confirmed_at.as_deref(),
+            Some(closed_at.as_str())
+        );
+        assert_eq!(closed.last_seen_at.as_deref(), Some(closed_at.as_str()));
+        assert_eq!(closed.last_error.as_deref(), Some(ORPHANED_ATTEMPT_ERROR));
+        assert_eq!(orphan_count(&conn), 0);
+
+        // The close is audited in the same transaction, with the attempt row
+        // as it was before (the row itself leaves with the next day close).
+        let audit = orphan_audit_rows(&conn);
+        assert_eq!(audit.len(), 1, "one audit row per closed orphan");
+        let row = &audit[0];
+        assert_eq!(row.issue_code, ORPHANED_ATTEMPT_ISSUE_CODE);
+        assert_eq!(row.recipe_id.as_deref(), Some(ORPHANED_ATTEMPT_RECIPE_ID));
+        assert_eq!(row.recipe_version, Some(ORPHANED_ATTEMPT_RECIPE_VERSION));
+        assert_eq!(row.entity_type.as_deref(), Some("print_job_attempt"));
+        let attempt_id = attempt.attempt_id.to_string();
+        assert_eq!(row.entity_id.as_deref(), Some(attempt_id.as_str()));
+        assert_eq!(row.success, 1);
+        assert_eq!(row.created_at, closed_at);
+        assert_eq!(
+            row.payload,
+            serde_json::json!({
+                "attemptId": attempt_id,
+                "printJobId": job_id,
+                "attemptNumber": before.identity.attempt_number,
+                "transport": "raw_tcp",
+                "target": before.resolved_target,
+                "documentName": before.document_name,
+                "previousState": "submitting",
+                "spoolJobId": null,
+                "bytesRequested": 3,
+                "bytesWritten": 0,
+                "startedAt": before.started_at,
+                "previousLastSeenAt": before.last_seen_at,
+                "previousCompletedAt": null,
+                "previousCancelRequestedAt": null,
+                "previousCancelConfirmedAt": null,
+                "previousLastError": null,
+                "outcome": "resolved",
+                "snapshotKind": "print_attempt_preimage",
+                "newState": "cancelled",
+                "closedAt": closed_at,
+                "targetKey": key,
+                "printerReleased": true,
+            })
+        );
+
+        let lease = manager
+            .claim(target)
+            .expect("the next job must be able to claim the printer");
+
+        // Idempotent: a later pass finds nothing to close, changes nothing
+        // and audits nothing.
+        drop(lease);
+        let again = manager.sweep_orphaned_lanes(&conn, at(40)).unwrap();
+        assert_eq!(again, vec![key]);
+        assert_eq!(
+            read_attempt(&conn, attempt.attempt_id).unwrap().unwrap(),
+            closed,
+            "a closed orphan is never rewritten"
+        );
+        assert_eq!(
+            orphan_audit_rows(&conn).len(),
+            1,
+            "a closed orphan is audited once"
+        );
+    }
+
+    /// An orphan that already opened its printer's circuit (`unknown` after
+    /// a failed write) is closed too, keeps its original error as evidence,
+    /// and the circuit it opened closes with the lane.
+    #[test]
+    fn sweep_closes_an_orphaned_unknown_attempt_and_its_open_circuit() {
+        let conn = test_db();
+        let job_id = Uuid::new_v4().to_string();
+        let target = PrinterTargetKey::RawTcp {
+            host: "10.0.9.1".into(),
+            port: 9100,
+        };
+        let key = normalize_target(&target).unwrap();
+        let attempt = {
+            let worker = DispatchManager::isolated_for_test();
+            let (mut lease, attempt) = claimed_raw_attempt(&conn, &worker, &job_id, "10.0.9.1", 4);
+            conn.execute(
+                "UPDATE print_jobs SET status = 'printing' WHERE id = ?1",
+                [&job_id],
+            )
+            .unwrap();
+            worker
+                .finalize_attempt_and_parent(
+                    &conn,
+                    &mut lease,
+                    attempt.attempt_id,
+                    DispatchState::Unknown,
+                    ParentTransition::ManualFailure {
+                        error: "write timed out".into(),
+                    },
+                    AttemptObservation {
+                        now: at(6),
+                        last_error: Some("write timed out".into()),
+                        ..AttemptObservation::default()
+                    },
+                )
+                .unwrap();
+            drop(lease);
+            attempt
+        };
+        delete_job_with_foreign_keys_off(&conn, &job_id);
+
+        let manager = DispatchManager::hydrate_isolated_for_test(&conn).unwrap();
+        assert!(matches!(
+            manager.claim(target.clone()),
+            Err(DispatchError::CircuitOpen)
+        ));
+
+        let released = manager.sweep_orphaned_lanes(&conn, at(30)).unwrap();
+
+        assert_eq!(released, vec![key.clone()]);
+        let closed = read_attempt(&conn, attempt.attempt_id).unwrap().unwrap();
+        assert_eq!(closed.state, DispatchState::Cancelled);
+        assert_eq!(
+            closed.last_error,
+            Some(format!(
+                "{ORPHANED_ATTEMPT_ERROR} Previous error: write timed out"
+            ))
+        );
+        let audit = orphan_audit_rows(&conn);
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].payload["previousState"], "unknown");
+        assert_eq!(audit[0].payload["previousLastError"], "write timed out");
+        assert_eq!(audit[0].payload["printJobId"], job_id.as_str());
+        assert_eq!(audit[0].payload["printerReleased"], true);
+        let circuit: String = conn
+            .query_row(
+                "SELECT circuit_state FROM print_target_state WHERE target_key = ?1",
+                [&key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(circuit, "closed");
+        assert!(manager.claim(target).is_ok());
+    }
+
+    /// A held lane is a worker sending right now. Its orphan waits until that
+    /// worker's lease is gone; then the next pass closes it.
+    #[test]
+    fn sweep_leaves_an_orphan_on_a_held_lane_until_its_worker_lets_go() {
+        let conn = test_db();
+        let manager = DispatchManager::isolated_for_test();
+        let live_job = Uuid::new_v4().to_string();
+        let (live_lease, live_attempt) =
+            claimed_raw_attempt(&conn, &manager, &live_job, "10.0.9.2", 1);
+        let live_key = normalize_target(&live_attempt.target_key).unwrap();
+        // A second, retained lane makes this pass run at all.
+        let idle_job = Uuid::new_v4().to_string();
+        let (idle_lease, idle_attempt) =
+            claimed_raw_attempt(&conn, &manager, &idle_job, "10.0.9.3", 1);
+        let idle_key = normalize_target(&idle_attempt.target_key).unwrap();
+        transition_attempt(
+            &conn,
+            idle_attempt.attempt_id,
+            DispatchState::Sent,
+            observation(3),
+        )
+        .unwrap();
+        drop(idle_lease);
+        delete_job_with_foreign_keys_off(&conn, &live_job);
+
+        let released = manager.sweep_orphaned_lanes(&conn, at(9)).unwrap();
+
+        assert_eq!(released, vec![idle_key]);
+        assert_eq!(
+            read_attempt(&conn, live_attempt.attempt_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            DispatchState::Submitting,
+            "a live worker's attempt is never closed under it"
+        );
+        assert!(
+            orphan_audit_rows(&conn).is_empty(),
+            "nothing closed, nothing audited"
+        );
+        assert!(matches!(
+            manager.lanes.lock().unwrap().get(&live_key),
+            Some(LaneBlock::Held(_))
+        ));
+
+        drop(live_lease);
+        let released = manager.sweep_orphaned_lanes(&conn, at(10)).unwrap();
+        assert_eq!(released, vec![live_key]);
+        assert_eq!(
+            read_attempt(&conn, live_attempt.attempt_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            DispatchState::Cancelled
+        );
+        let audit = orphan_audit_rows(&conn);
+        assert_eq!(audit.len(), 1);
+        let live_attempt_id = live_attempt.attempt_id.to_string();
+        assert_eq!(
+            audit[0].entity_id.as_deref(),
+            Some(live_attempt_id.as_str())
+        );
+    }
+
+    /// The close and its audit row commit together. If the audit row cannot
+    /// be written, the attempt stays open and its printer stays retained, in
+    /// SQLite and in the lane registry alike.
+    #[test]
+    fn sweep_keeps_an_orphan_open_when_its_audit_row_cannot_be_written() {
+        let conn = test_db();
+        let job_id = Uuid::new_v4().to_string();
+        let attempt = {
+            let worker = DispatchManager::isolated_for_test();
+            let (lease, attempt) = claimed_raw_attempt(&conn, &worker, &job_id, "10.0.9.5", 1);
+            drop(lease);
+            attempt
+        };
+        let key = normalize_target(&attempt.target_key).unwrap();
+        delete_job_with_foreign_keys_off(&conn, &job_id);
+        conn.execute_batch(
+            "CREATE TRIGGER reject_audit BEFORE INSERT ON recovery_action_log
+             BEGIN SELECT RAISE(ABORT, 'test audit failure'); END;",
+        )
+        .unwrap();
+        let manager = DispatchManager::hydrate_isolated_for_test(&conn).unwrap();
+
+        assert!(manager.sweep_orphaned_lanes(&conn, at(9)).is_err());
+
+        assert_eq!(
+            read_attempt(&conn, attempt.attempt_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            DispatchState::Submitting,
+            "the close rolls back with its audit row"
+        );
+        assert_eq!(orphan_count(&conn), 1);
+        assert!(matches!(
+            manager.lanes.lock().unwrap().get(&key),
+            Some(LaneBlock::Retained(_))
+        ));
+
+        conn.execute_batch("DROP TRIGGER reject_audit").unwrap();
+        assert_eq!(
+            manager.sweep_orphaned_lanes(&conn, at(10)).unwrap(),
+            vec![key]
+        );
+        assert_eq!(orphan_audit_rows(&conn).len(), 1);
+    }
+
+    /// Without the audit table there is no automatic remedy: the orphan stays
+    /// open and keeps its printer, and the sweep does not fail.
+    #[test]
+    fn sweep_leaves_orphans_alone_without_the_audit_table() {
+        let conn = test_db();
+        let job_id = Uuid::new_v4().to_string();
+        let attempt = {
+            let worker = DispatchManager::isolated_for_test();
+            let (lease, attempt) = claimed_raw_attempt(&conn, &worker, &job_id, "10.0.9.6", 1);
+            drop(lease);
+            attempt
+        };
+        let key = normalize_target(&attempt.target_key).unwrap();
+        delete_job_with_foreign_keys_off(&conn, &job_id);
+        conn.execute_batch("DROP TABLE recovery_action_log")
+            .unwrap();
+        let manager = DispatchManager::hydrate_isolated_for_test(&conn).unwrap();
+
+        let released = manager.sweep_orphaned_lanes(&conn, at(9)).unwrap();
+
+        assert!(released.is_empty());
+        assert_eq!(
+            read_attempt(&conn, attempt.attempt_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            DispatchState::Submitting
+        );
+        assert!(matches!(
+            manager.lanes.lock().unwrap().get(&key),
+            Some(LaneBlock::Retained(_))
+        ));
+    }
+
+    /// An orphan closes even when a live attempt on the same printer keeps
+    /// that printer busy. The audit row says the printer was not released in
+    /// that pass, and the live attempt is left exactly as it was.
+    #[test]
+    fn sweep_audits_an_orphan_whose_printer_another_blocker_still_holds() {
+        let conn = test_db();
+        let host = "10.0.9.7";
+        let live_job = Uuid::new_v4().to_string();
+        let live_attempt = {
+            let worker = DispatchManager::isolated_for_test();
+            let (lease, attempt) = claimed_raw_attempt(&conn, &worker, &live_job, host, 1);
+            drop(lease);
+            attempt
+        };
+        let orphan_job = Uuid::new_v4().to_string();
+        let orphan_attempt = {
+            let worker = DispatchManager::isolated_for_test();
+            let (lease, attempt) = claimed_raw_attempt(&conn, &worker, &orphan_job, host, 2);
+            drop(lease);
+            attempt
+        };
+        let key = normalize_target(&live_attempt.target_key).unwrap();
+        delete_job_with_foreign_keys_off(&conn, &orphan_job);
+        let manager = DispatchManager::hydrate_isolated_for_test(&conn).unwrap();
+
+        let released = manager.sweep_orphaned_lanes(&conn, at(9)).unwrap();
+
+        assert!(
+            released.is_empty(),
+            "the live attempt still holds the printer"
+        );
+        assert_eq!(
+            read_attempt(&conn, orphan_attempt.attempt_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            DispatchState::Cancelled
+        );
+        assert_eq!(
+            read_attempt(&conn, live_attempt.attempt_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            DispatchState::Submitting
+        );
+        let audit = orphan_audit_rows(&conn);
+        assert_eq!(audit.len(), 1);
+        let orphan_attempt_id = orphan_attempt.attempt_id.to_string();
+        assert_eq!(
+            audit[0].entity_id.as_deref(),
+            Some(orphan_attempt_id.as_str())
+        );
+        assert_eq!(audit[0].payload["printerReleased"], false);
+        assert_eq!(audit[0].payload["targetKey"], key.as_str());
+        assert!(matches!(
+            manager.lanes.lock().unwrap().get(&key),
+            Some(LaneBlock::Retained(_))
+        ));
+    }
+
+    /// A worker whose job vanished mid-send cannot finalize it (there is no
+    /// job left to settle, so the finalizer reports `NotApplied` and keeps the
+    /// lane). That is safe because the lane sweep then closes the orphan on
+    /// the next pass; the finalizer itself stays untouched.
+    #[test]
+    fn a_job_that_vanishes_mid_send_is_closed_by_the_next_sweep() {
+        let conn = test_db();
+        let job_id = Uuid::new_v4().to_string();
+        let (manager, mut lease, attempt) = prepared_raw_attempt(&conn, &job_id, "10.0.9.4", 3, 1);
+        let key = normalize_target(&attempt.target_key).unwrap();
+        delete_job_with_foreign_keys_off(&conn, &job_id);
+
+        let result = manager
+            .finish_attempt_for_test(
+                &conn,
+                &mut lease,
+                attempt.attempt_id,
+                DispatchState::Sent,
+                None,
+                at(5),
+            )
+            .unwrap();
+        assert_eq!(result, ApplyResult::NotApplied);
+        drop(lease);
+        assert!(matches!(
+            manager.lanes.lock().unwrap().get(&key),
+            Some(LaneBlock::Retained(_))
+        ));
+
+        let released = manager.sweep_orphaned_lanes(&conn, at(9)).unwrap();
+
+        assert_eq!(released, vec![key]);
+        assert_eq!(
+            read_attempt(&conn, attempt.attempt_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            DispatchState::Cancelled
+        );
+    }
+
+    /// A Windows attempt with a persisted native JobId keeps its oracle: the
+    /// spooler reconciliation confirms the native job is gone before the
+    /// printer is released, job row or not. The sweep never closes it.
+    #[test]
+    fn sweep_leaves_an_orphaned_windows_job_with_a_native_id_to_reconciliation() {
+        let conn = test_db();
+        let attempt = queued_windows_attempt(&conn, "Orphan Queue", 41, 1);
+        let key = normalize_target(&attempt.target_key).unwrap();
+        delete_job_with_foreign_keys_off(&conn, &attempt.local_job_id);
+
+        let manager = DispatchManager::hydrate_isolated_for_test(&conn).unwrap();
+        let released = manager.sweep_orphaned_lanes(&conn, at(9)).unwrap();
+
+        assert!(released.is_empty());
+        assert_eq!(
+            read_attempt(&conn, attempt.attempt_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            DispatchState::WindowsQueued
+        );
+        assert!(orphan_audit_rows(&conn).is_empty());
+        assert!(matches!(
+            manager.lanes.lock().unwrap().get(&key),
+            Some(LaneBlock::Retained(_))
+        ));
     }
 
     #[derive(Default)]

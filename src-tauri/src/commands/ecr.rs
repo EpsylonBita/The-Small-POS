@@ -9,6 +9,290 @@ use tracing::{info, warn};
 
 use crate::{db, ecr, payload_arg0_as_string, value_str};
 
+/// A direct EFT sale whose exact card payment is not in the ledger.
+/// Legacy rows are held too, but only a pre-dispatch v89 original can be
+/// offered for in-app recovery without guessing what the terminal did.
+///
+/// The SALE is represented by its one exact card row in ANY status (schema
+/// 91, 30/09/2026): completed, set aside for review (`duplicate_review`), or
+/// voided/refunded later, that row records this money, and booking the SALE
+/// again would count it twice. A SALE a manager recorded as given back to the
+/// customer (`receiptData.returnedToCustomer`, `unsaved_payments`) is settled
+/// and never booked.
+#[derive(Clone, Debug)]
+pub(crate) struct UnresolvedDirectSale {
+    pub id: String,
+    pub device_id: String,
+    pub amount_cents: i64,
+    pub currency: String,
+    pub status: String,
+    pub terminal_reference: Option<String>,
+    pub authorization_code: Option<String>,
+    pub card_type: Option<String>,
+    pub card_last_four: Option<String>,
+    pub recoverable_original: bool,
+}
+
+pub(crate) fn unresolved_direct_sales(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+) -> Result<Vec<UnresolvedDirectSale>, String> {
+    let aliases: (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT supabase_id, client_request_id FROM orders WHERE id = ?1",
+            [order_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|error| format!("read direct-sale order aliases: {error}"))?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, device_id, amount, currency, status, terminal_reference,
+                    authorization_code, card_type, card_last_four, receipt_data
+             FROM ecr_transactions
+             WHERE LOWER(TRIM(transaction_type)) = 'sale'
+               AND (order_id = ?1 OR order_id = ?2 OR order_id = ?3)
+               AND LOWER(TRIM(status)) <> 'declined'
+               AND (CASE WHEN json_valid(receipt_data)
+                         THEN json_extract(receipt_data, '$.returnedToCustomer') END) IS NULL
+             ORDER BY created_at ASC, id ASC",
+        )
+        .map_err(|error| format!("prepare direct-sale admission: {error}"))?;
+    let rows = stmt
+        .query_map(rusqlite::params![order_id, aliases.0, aliases.1], |row| {
+            let receipt_data: Option<String> = row.get(9)?;
+            let marker = receipt_data
+                .as_deref()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+                .and_then(|value| {
+                    value
+                        .get("directSaleAdmissionVersion")
+                        .and_then(|v| v.as_i64())
+                })
+                == Some(1);
+            Ok(UnresolvedDirectSale {
+                id: row.get(0)?,
+                device_id: row.get(1)?,
+                amount_cents: row.get(2)?,
+                currency: row.get(3)?,
+                status: row.get(4)?,
+                terminal_reference: row.get(5)?,
+                authorization_code: row.get(6)?,
+                card_type: row.get(7)?,
+                card_last_four: row.get(8)?,
+                recoverable_original: marker,
+            })
+        })
+        .map_err(|error| format!("query direct-sale admission: {error}"))?;
+    let mut unresolved = Vec::new();
+    for row in rows {
+        let sale = row.map_err(|error| format!("read direct-sale admission: {error}"))?;
+        let represented: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM order_payments
+                 WHERE order_id = ?1
+                   AND LOWER(TRIM(method)) = 'card'
+                   AND transaction_ref = ?2 AND amount_cents = ?3
+                   AND UPPER(TRIM(currency)) = UPPER(TRIM(?4))
+                   AND LOWER(TRIM(payment_origin)) = 'terminal'
+                   AND (terminal_device_id IS NULL OR terminal_device_id = ?5)",
+                rusqlite::params![
+                    order_id,
+                    sale.id,
+                    sale.amount_cents,
+                    sale.currency,
+                    sale.device_id
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("match direct SALE to completed card payment: {error}"))?;
+        if represented != 1 {
+            unresolved.push(sale);
+        }
+    }
+    Ok(unresolved)
+}
+
+pub(crate) fn direct_sale_admission(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+    original: Option<&crate::payments::PaymentRecordInput>,
+) -> Result<(), String> {
+    let sales = unresolved_direct_sales(conn, order_id)?;
+    if sales.is_empty() {
+        return Ok(());
+    }
+    if let ([sale], Some(input)) = (sales.as_slice(), original) {
+        let cents = crate::money::Cents::round_half_even(input.amount).as_i64();
+        if sale.recoverable_original
+            && sale.status.eq_ignore_ascii_case("approved")
+            && input.method == "card"
+            && input.payment_origin == "terminal"
+            && input.transaction_ref.as_deref() == Some(sale.id.as_str())
+            && cents == sale.amount_cents
+            && input.currency.eq_ignore_ascii_case(&sale.currency)
+            && input.terminal_device_id.as_deref() == Some(sale.device_id.as_str())
+        {
+            return Ok(());
+        }
+    }
+    Err("An earlier direct card SALE is not represented by its exact completed payment; reconcile it before collecting more money".to_string())
+}
+
+pub(crate) fn direct_sale_projection(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+) -> Result<serde_json::Value, String> {
+    let sales = unresolved_direct_sales(conn, order_id)?;
+    Ok(match sales.as_slice() {
+        [] => serde_json::Value::Null,
+        [sale] if sale.recoverable_original && sale.status.eq_ignore_ascii_case("approved") => {
+            serde_json::json!({
+                "recoverable": true, "id": sale.id, "deviceId": sale.device_id,
+                "amount": sale.amount_cents as f64 / 100.0, "amountCents": sale.amount_cents,
+                "currency": sale.currency, "status": sale.status,
+                "terminalReference": sale.terminal_reference,
+                "authorizationCode": sale.authorization_code,
+                "cardType": sale.card_type, "cardLastFour": sale.card_last_four,
+            })
+        }
+        _ => serde_json::json!({ "recoverable": false, "requiresReconciliation": true }),
+    })
+}
+
+fn reserve_direct_sale(
+    db: &db::DbState,
+    attempt: &serde_json::Value,
+    order_id: Option<&str>,
+) -> Result<(), String> {
+    let conn = db.conn.lock().map_err(|error| error.to_string())?;
+    db::with_full_sync(&conn, |conn| {
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .map_err(|error| format!("begin direct-sale reservation: {error}"))?;
+        let reserved = (|| {
+            if let Some(order_id) = order_id {
+                direct_sale_admission(conn, order_id, None)?;
+                let unresolved_gift: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM gift_card_redemption_attempts
+                     WHERE local_order_id = ?1 AND status IN ('pending', 'remote_applied')",
+                        [order_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| format!("inspect gift debit before direct SALE: {error}"))?;
+                if unresolved_gift != 0 {
+                    return Err(
+                        "An earlier gift card debit must be reconciled before a direct card SALE"
+                            .to_string(),
+                    );
+                }
+                let requested_cents = attempt
+                    .get("amount")
+                    .and_then(serde_json::Value::as_i64)
+                    .ok_or("Direct SALE has no exact amount")?;
+                let balance = crate::payments::load_order_payment_balance_snapshot(conn, order_id)?;
+                let remaining_cents =
+                    crate::money::Cents::round_half_even(balance.outstanding_amount).as_i64();
+                if requested_cents <= 0 || requested_cents > remaining_cents {
+                    return Err("The order balance changed before the direct card SALE".to_string());
+                }
+                let outstanding_prefix = format!("{order_id}:collect-outstanding:");
+                let prior_fiscal: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM ecr_transactions et
+                         WHERE et.transaction_type = 'fiscal_receipt'
+                           AND et.status IN ('processing', 'timeout', 'approved', 'approved_persisting')
+                           AND substr(et.order_id, 1, length(?1)) = ?1
+                           AND NOT EXISTS (
+                             SELECT 1 FROM order_payments p
+                             WHERE p.order_id = ?2 AND p.status = 'completed'
+                               AND p.transaction_ref = et.id AND p.idempotency_key = et.id
+                           )",
+                        rusqlite::params![outstanding_prefix, order_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| format!("inspect prior fiscal collection: {error}"))?;
+                if prior_fiscal != 0 {
+                    return Err("An earlier fiscal collection needs reconciliation before a direct card SALE".to_string());
+                }
+            }
+            db::ecr_insert_transaction(conn, attempt)
+        })();
+        match reserved {
+            Ok(()) => conn
+                .execute_batch("COMMIT")
+                .map_err(|error| format!("commit direct-sale reservation: {error}")),
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    })
+}
+
+async fn dispatch_after_durable_direct_sale<T, Dispatch, Future>(
+    db: &db::DbState,
+    attempt: &serde_json::Value,
+    order_id: Option<&str>,
+    dispatch: Dispatch,
+) -> Result<T, String>
+where
+    Dispatch: FnOnce() -> Future,
+    Future: std::future::Future<Output = T>,
+{
+    reserve_direct_sale(db, attempt, order_id)?;
+    Ok(dispatch().await)
+}
+
+fn persist_direct_sale_outcome(
+    db: &db::DbState,
+    attempt_id: &str,
+    status: &str,
+    response: Option<&ecr::protocol::TransactionResponse>,
+    error_message: Option<&str>,
+) -> Result<(), String> {
+    let conn = db.conn.lock().map_err(|error| error.to_string())?;
+    db::with_full_sync(&conn, |conn| {
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .map_err(|error| format!("begin direct-sale outcome: {error}"))?;
+        let stored = conn
+            .execute(
+                "UPDATE ecr_transactions SET status = ?2,
+                    authorization_code = ?3, terminal_reference = ?4,
+                    card_type = ?5, card_last_four = ?6, entry_method = ?7,
+                    error_message = ?8, raw_response = ?9, completed_at = ?10
+                 WHERE id = ?1 AND transaction_type = 'sale' AND status = 'processing'",
+                rusqlite::params![
+                    attempt_id,
+                    status,
+                    response.and_then(|r| r.authorization_code.as_deref()),
+                    response.and_then(|r| r.terminal_reference.as_deref()),
+                    response.and_then(|r| r.card_type.as_deref()),
+                    response.and_then(|r| r.card_last_four.as_deref()),
+                    response.and_then(|r| r.entry_method.as_deref()),
+                    error_message.or_else(|| response.and_then(|r| r.error_message.as_deref())),
+                    response
+                        .and_then(|r| r.raw_response.as_ref())
+                        .map(serde_json::Value::to_string),
+                    chrono::Utc::now().to_rfc3339(),
+                ],
+            )
+            .map_err(|error| format!("persist direct-sale outcome: {error}"));
+        match stored {
+            Ok(1) => conn
+                .execute_batch("COMMIT")
+                .map_err(|error| format!("commit direct-sale outcome: {error}")),
+            Ok(_) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err("The reserved direct SALE changed before its outcome was saved".to_string())
+            }
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    })
+}
+
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct EcrDiscoverCompatPayload {
@@ -1682,12 +1966,27 @@ pub async fn ecr_process_payment(
 
     if let Some(ref did) = resolved_device_id {
         if mgr.is_connected(did) {
+            let canonical_order_id = if let Some(requested) = order_id.as_deref() {
+                let conn = db.conn.lock().map_err(|error| error.to_string())?;
+                Some(
+                    crate::resolve_order_id(&conn, requested)
+                        .ok_or("Order not found for direct card SALE")?,
+                )
+            } else {
+                None
+            };
+            // Share the existing per-order physical collection gate with
+            // payment_record's fiscal checkout while the SALE is in flight.
+            let _order_collection_guard = canonical_order_id
+                .as_deref()
+                .map(crate::commands::payments::reserve_payment_record)
+                .transpose()?;
             let request = ecr::protocol::TransactionRequest {
                 transaction_id: tx_id.clone(),
                 transaction_type: ecr::protocol::TransactionType::Sale,
                 amount: amount_cents,
                 currency: currency.clone(),
-                order_id: order_id.clone(),
+                order_id: canonical_order_id.clone(),
                 tip_amount: options
                     .get("tipAmount")
                     .and_then(|v| v.as_f64())
@@ -1695,12 +1994,35 @@ pub async fn ecr_process_payment(
                 original_transaction_id: None,
                 fiscal_data: None,
             };
-            // The card exchange can span the whole customer interaction
-            // (up to ~60s) — run it on the blocking pool, not a Tokio
-            // worker. Same envelope as the sync call.
-            match mgr.process_transaction_offloaded(did, request).await {
+            let attempt = serde_json::json!({
+                "id": tx_id,
+                "deviceId": did,
+                "orderId": canonical_order_id,
+                "transactionType": "sale",
+                "amount": amount_cents,
+                "currency": currency,
+                "status": "processing",
+                "startedAt": started,
+                "receiptData": { "directSaleAdmissionVersion": 1,
+                    "requestReference": options.get("reference").and_then(|v| v.as_str()) },
+            });
+            // The row and its order binding survive before the hardware can
+            // move money. A failed reservation never reaches the device.
+            // The card exchange runs on the blocking pool inside this seam.
+            let dispatched = dispatch_after_durable_direct_sale(
+                &db,
+                &attempt,
+                canonical_order_id.as_deref(),
+                || mgr.process_transaction_offloaded(did, request),
+            )
+            .await?;
+            match dispatched {
                 Ok(resp) => {
+                    if resp.transaction_id != tx_id {
+                        return Err("The terminal returned a different direct SALE identity; reconcile the reserved attempt".to_string());
+                    }
                     let status_str = format!("{:?}", resp.status).to_lowercase();
+                    persist_direct_sale_outcome(&db, &tx_id, &status_str, Some(&resp), None)?;
                     let transaction = serde_json::json!({
                         "id": resp.transaction_id,
                         "amount": amount,
@@ -1714,30 +2036,6 @@ pub async fn ecr_process_payment(
                         "startedAt": resp.started_at,
                         "completedAt": resp.completed_at,
                     });
-                    // Log transaction to DB
-                    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-                    let _ = db::ecr_insert_transaction(
-                        &conn,
-                        &serde_json::json!({
-                            "id": resp.transaction_id,
-                            "deviceId": did,
-                            "orderId": order_id,
-                            "transactionType": "sale",
-                            "amount": amount_cents,
-                            "currency": currency,
-                            "status": status_str,
-                            "authorizationCode": resp.authorization_code,
-                            "terminalReference": resp.terminal_reference,
-                            "cardType": resp.card_type,
-                            "cardLastFour": resp.card_last_four,
-                            "entryMethod": resp.entry_method,
-                            "errorMessage": resp.error_message,
-                            "rawResponse": resp.raw_response,
-                            "startedAt": resp.started_at,
-                            "completedAt": resp.completed_at,
-                        }),
-                    );
-
                     let _ = app.emit("ecr_event_transaction_completed", transaction.clone());
                     return Ok(serde_json::json!({
                         "success": status_str == "approved",
@@ -1750,23 +2048,9 @@ pub async fn ecr_process_payment(
                         "ecr_event_error",
                         serde_json::json!({ "error": e, "deviceId": did }),
                     );
-                    // Log failed transaction
-                    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-                    let _ = db::ecr_insert_transaction(
-                        &conn,
-                        &serde_json::json!({
-                            "id": tx_id,
-                            "deviceId": did,
-                            "orderId": order_id,
-                            "transactionType": "sale",
-                            "amount": amount_cents,
-                            "currency": currency,
-                            "status": "error",
-                            "errorMessage": e,
-                            "startedAt": started,
-                            "completedAt": chrono::Utc::now().to_rfc3339(),
-                        }),
-                    );
+                    // The device error may hide an approval. Keep the
+                    // reserved row blocking fresh money even after restart.
+                    persist_direct_sale_outcome(&db, &tx_id, "error", None, Some(&e))?;
                     return Ok(serde_json::json!({
                         "success": false,
                         "error": e,
@@ -2235,7 +2519,7 @@ pub async fn ecr_test_print(
     }))
 }
 
-fn find_approved_fiscal_transaction(
+pub(crate) fn find_approved_fiscal_transaction(
     conn: &rusqlite::Connection,
     order_reference: &str,
 ) -> Result<Option<serde_json::Value>, String> {
@@ -2618,7 +2902,9 @@ fn outstanding_fiscal_transaction_id(order_reference: &str) -> String {
     )
 }
 
-fn outstanding_fiscal_payload_fingerprint(order: &serde_json::Value) -> Result<[u8; 32], String> {
+pub(crate) fn outstanding_fiscal_payload_fingerprint(
+    order: &serde_json::Value,
+) -> Result<[u8; 32], String> {
     let items = order
         .get("items")
         .and_then(serde_json::Value::as_array)
@@ -2682,7 +2968,7 @@ fn outstanding_fiscal_payload_fingerprint(order: &serde_json::Value) -> Result<[
     Ok(digest.finalize().into())
 }
 
-fn fiscal_receipt_data_fingerprint(
+pub(crate) fn fiscal_receipt_data_fingerprint(
     data: &ecr::protocol::FiscalReceiptData,
 ) -> Result<[u8; 32], String> {
     let encoded = serde_json::to_vec(data)
@@ -2693,7 +2979,7 @@ fn fiscal_receipt_data_fingerprint(
     Ok(digest.finalize().into())
 }
 
-fn completed_payment_fingerprint(
+pub(crate) fn completed_payment_fingerprint(
     completed_payments: &[serde_json::Value],
 ) -> Result<[u8; 32], String> {
     let normalized: Vec<serde_json::Value> = completed_payments
@@ -2721,7 +3007,7 @@ fn completed_payment_fingerprint(
     Ok(digest.finalize().into())
 }
 
-fn load_authoritative_outstanding_fiscal_order(
+pub(crate) fn load_authoritative_outstanding_fiscal_order(
     conn: &rusqlite::Connection,
     order_id: &str,
 ) -> Result<serde_json::Value, String> {
@@ -2860,6 +3146,17 @@ where
             conn.execute_batch("BEGIN IMMEDIATE")
                 .map_err(|error| format!("begin durable outstanding attempt: {error}"))?;
             let result = reject_existing_unresolved_outstanding_attempt(conn, attempt)
+                .and_then(|()| {
+                    let reference = attempt
+                        .get("orderId")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or("Outstanding fiscal attempt has no order reference")?;
+                    let order_id = reference
+                        .split_once(":collect-outstanding:")
+                        .map(|(order_id, _)| order_id)
+                        .ok_or("Outstanding fiscal attempt has no order identity")?;
+                    direct_sale_admission(conn, order_id, None)
+                })
                 .and_then(|()| verify(conn))
                 .and_then(|()| db::ecr_insert_transaction(conn, attempt));
             match result {
@@ -3133,6 +3430,15 @@ pub(crate) async fn fiscal_checkout_for_order_payload(
         )
         .await
     } else {
+        {
+            let conn = db.conn.lock().map_err(|error| error.to_string())?;
+            // Initial checkout may not have inserted its order yet. Existing
+            // orders, including the full-balance pay-later path, have a
+            // canonical local row and must honor any saved direct SALE.
+            if let Some(order_id) = crate::resolve_order_id(&conn, order_reference) {
+                direct_sale_admission(&conn, &order_id, None)?;
+            }
+        }
         Ok(mgr.process_transaction_offloaded(&device_id, request).await)
     };
 
@@ -3470,6 +3776,22 @@ pub async fn ecr_fiscal_print(
                 "skipped": true,
                 "alreadyIssued": true
             }));
+        }
+        // A settled gift card order gets its one receipt from its own durable
+        // operation: never printed twice, an unresolved one blocks every other
+        // receipt, and its gift tender is never printed here.
+        let local_order_id =
+            crate::resolve_order_id(&conn, &order_id).unwrap_or_else(|| order_id.to_string());
+        if let Some(skipped) =
+            super::gift_card_fiscal::settled_gift_print_guard(&conn, &local_order_id)?
+        {
+            return Ok(skipped);
+        }
+        if super::gift_card_fiscal::order_has_completed_gift_payment(&conn, &local_order_id)? {
+            return Err(
+                "GIFT_CARD_FISCAL_FINALIZE_REQUIRED: this order was settled by gift card; issue its receipt with gift_card_fiscal_finalize"
+                    .to_string(),
+            );
         }
     }
 
@@ -3966,6 +4288,316 @@ mod dto_tests {
         }
     }
 
+    fn direct_sale_attempt(
+        id: &str,
+        order_id: &str,
+        status: &str,
+        amount_cents: i64,
+        marked: bool,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "deviceId": "race-attempt-device",
+            "orderId": order_id,
+            "transactionType": "sale",
+            "amount": amount_cents,
+            "currency": "EUR",
+            "status": status,
+            "receiptData": if marked { serde_json::json!({"directSaleAdmissionVersion": 1}) } else { serde_json::Value::Null },
+            "startedAt": "2026-09-30T12:00:00Z",
+        })
+    }
+
+    #[tokio::test]
+    async fn direct_sale_reservation_is_durable_before_dispatch_and_exact_original_only() {
+        let (_cleanup, first, restarted) =
+            file_backed_outstanding_attempt_test_dbs("direct-sale-order");
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let original = direct_sale_attempt(
+            "direct-sale-original",
+            "direct-sale-order",
+            "processing",
+            2100,
+            true,
+        );
+        dispatch_after_durable_direct_sale(
+            &first,
+            &original,
+            Some("direct-sale-order"),
+            || async {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            },
+        )
+        .await
+        .expect("original reserved before hardware");
+        let competing = direct_sale_attempt(
+            "direct-sale-second",
+            "direct-sale-order",
+            "processing",
+            2100,
+            true,
+        );
+        assert!(dispatch_after_durable_direct_sale(
+            &restarted,
+            &competing,
+            Some("direct-sale-order"),
+            || async {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        )
+        .await
+        .is_err());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        persist_direct_sale_outcome(&first, "direct-sale-original", "approved", None, None)
+            .expect("approved result persisted on the reserved row");
+        let conn = restarted.conn.lock().unwrap();
+        assert_eq!(
+            direct_sale_projection(&conn, "direct-sale-order").unwrap()["id"],
+            "direct-sale-original"
+        );
+        assert!(direct_sale_admission(&conn, "direct-sale-order", None).is_err());
+        let original_payment = crate::payments::build_payment_record_input(&serde_json::json!({
+            "orderId": "direct-sale-order", "method": "card", "amount": 21.0,
+            "currency": "EUR", "transactionRef": "direct-sale-original",
+            "paymentOrigin": "terminal", "terminalApproved": true,
+            "terminalDeviceId": "race-attempt-device",
+        }))
+        .unwrap();
+        assert!(direct_sale_admission(&conn, "direct-sale-order", Some(&original_payment)).is_ok());
+        for (id, method, amount, amount_cents, currency, ref_id, origin, device) in [
+            (
+                "cash-sibling",
+                "cash",
+                21.0,
+                2100,
+                "EUR",
+                "direct-sale-original",
+                Some("manual"),
+                Some("race-attempt-device"),
+            ),
+            (
+                "null-origin",
+                "card",
+                21.0,
+                2100,
+                "EUR",
+                "direct-sale-original",
+                None,
+                Some("race-attempt-device"),
+            ),
+            (
+                "wrong-device",
+                "card",
+                21.0,
+                2100,
+                "EUR",
+                "direct-sale-original",
+                Some("terminal"),
+                Some("other-device"),
+            ),
+            (
+                "wrong-cents",
+                "card",
+                21.0,
+                2099,
+                "EUR",
+                "direct-sale-original",
+                Some("terminal"),
+                Some("race-attempt-device"),
+            ),
+            (
+                "wrong-currency",
+                "card",
+                21.0,
+                2100,
+                "USD",
+                "direct-sale-original",
+                Some("terminal"),
+                Some("race-attempt-device"),
+            ),
+            (
+                "wrong-ref",
+                "card",
+                21.0,
+                2100,
+                "EUR",
+                "sibling-reference",
+                Some("terminal"),
+                Some("race-attempt-device"),
+            ),
+        ] {
+            assert!(conn.execute(
+                "INSERT INTO order_payments (id,order_id,method,amount,amount_cents,currency,status,transaction_ref,payment_origin,terminal_device_id,created_at,updated_at)
+                 VALUES (?1,'direct-sale-order',?2,?3,?4,?5,'completed',?6,?7,?8,'now','now')",
+                rusqlite::params![id,method,amount,amount_cents,currency,ref_id,origin,device],
+            ).is_err(), "{id} must not represent or bypass the original");
+        }
+        conn.execute(
+            "INSERT INTO orders (id,items,total_amount,total_amount_cents) VALUES ('foreign-order','[]',42,4200)",
+            [],
+        ).unwrap();
+        assert!(conn.execute(
+            "INSERT INTO order_payments (id,order_id,method,amount,amount_cents,currency,status,transaction_ref,payment_origin,terminal_device_id,created_at,updated_at)
+             VALUES ('foreign-sibling','foreign-order','card',21.0,2100,'EUR','completed','direct-sale-original','terminal','race-attempt-device','now','now')",
+            [],
+        ).is_err(), "a foreign order cannot book the same ECR sale id");
+        conn.execute(
+            "INSERT INTO order_payments (id,order_id,method,amount,amount_cents,currency,status,transaction_ref,payment_origin,terminal_device_id,created_at,updated_at)
+             VALUES ('exact-original','direct-sale-order','card',21.0,2100,'EUR','completed','direct-sale-original','terminal','race-attempt-device','now','now')",
+            [],
+        ).expect("only the exact original card payment may book");
+        assert!(conn.execute(
+            "INSERT INTO order_payments (id,order_id,method,amount,amount_cents,currency,status,transaction_ref,payment_origin,terminal_device_id,created_at,updated_at)
+             VALUES ('duplicate-original','direct-sale-order','card',21.0,2100,'EUR','completed','direct-sale-original','terminal','race-attempt-device','now','now')",
+            [],
+        ).is_err());
+        assert!(unresolved_direct_sales(&conn, "direct-sale-order")
+            .unwrap()
+            .is_empty());
+        drop(conn);
+        reserve_direct_sale(&restarted, &competing, Some("direct-sale-order"))
+            .expect("a distinct remaining split portion may collect after exact booking");
+    }
+
+    #[tokio::test]
+    async fn direct_sale_reservation_failure_sends_nothing_and_decline_releases() {
+        let (_cleanup, first, _) = file_backed_outstanding_attempt_test_dbs("direct-sale-failure");
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let declined = direct_sale_attempt(
+            "direct-sale-declined",
+            "direct-sale-failure",
+            "processing",
+            2100,
+            true,
+        );
+        reserve_direct_sale(&first, &declined, Some("direct-sale-failure")).unwrap();
+        persist_direct_sale_outcome(&first, "direct-sale-declined", "declined", None, None)
+            .unwrap();
+        let retry = direct_sale_attempt(
+            "direct-sale-retry",
+            "direct-sale-failure",
+            "processing",
+            2100,
+            true,
+        );
+        dispatch_after_durable_direct_sale(&first, &retry, Some("direct-sale-failure"), || async {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        })
+        .await
+        .expect("definite decline allows fresh SALE");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let conn = first.conn.lock().unwrap();
+        conn.execute_batch("DROP TABLE ecr_transactions").unwrap();
+        drop(conn);
+        assert!(dispatch_after_durable_direct_sale(
+            &first,
+            &direct_sale_attempt(
+                "never-dispatched",
+                "direct-sale-failure",
+                "processing",
+                2100,
+                true
+            ),
+            Some("direct-sale-failure"),
+            || async {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        )
+        .await
+        .is_err());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn direct_sale_legacy_split_needs_exact_completed_card_reference_not_a_sibling() {
+        let (_cleanup, state, _) = file_backed_outstanding_attempt_test_dbs("direct-sale-legacy");
+        let conn = state.conn.lock().unwrap();
+        // These rows predate v89. Its INSERT triggers never retroactively
+        // rewrite a historical card row or require a new idempotency key.
+        conn.execute_batch("DROP TRIGGER trg_direct_sale_payment_insert; DROP TRIGGER trg_direct_sale_payment_identity;").unwrap();
+        db::ecr_insert_transaction(
+            &conn,
+            &direct_sale_attempt("legacy-sale", "direct-sale-legacy", "approved", 2100, false),
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (id,order_id,method,amount,amount_cents,currency,status,transaction_ref,payment_origin,created_at,updated_at)
+             VALUES ('legacy-sibling','direct-sale-legacy','card',21.0,2100,'EUR','completed','different-sale','terminal','now','now')",
+            [],
+        ).unwrap();
+        assert_eq!(
+            unresolved_direct_sales(&conn, "direct-sale-legacy")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(direct_sale_admission(&conn, "direct-sale-legacy", None).is_err());
+        conn.execute(
+            "INSERT INTO order_payments (id,order_id,method,amount,amount_cents,currency,status,transaction_ref,payment_origin,created_at,updated_at)
+             VALUES ('legacy-original','direct-sale-legacy','card',21.0,2100,'EUR','completed','legacy-sale','terminal','now','now')",
+            [],
+        ).unwrap();
+        assert!(unresolved_direct_sales(&conn, "direct-sale-legacy").unwrap().is_empty(),
+            "a historical split may lack terminal_device_id but its exact card/ref/cents/currency prove coverage");
+    }
+
+    #[tokio::test]
+    async fn direct_sale_and_gift_debit_reservations_exclude_each_other_across_connections() {
+        let (_cleanup, first, second) =
+            file_backed_outstanding_attempt_test_dbs("direct-sale-gift-race");
+        let insert_gift = |conn: &rusqlite::Connection, key: &str| {
+            conn.execute(
+            "INSERT INTO gift_card_redemption_attempts
+             (idempotency_key,organization_id,branch_id,terminal_id,local_order_id,remote_order_id,
+              amount_cents,currency,card_fingerprint,request_fingerprint,status,created_at,updated_at)
+             VALUES (?1,'org','branch','terminal','direct-sale-gift-race','remote-order',1000,'EUR','fingerprint','request','pending','now','now')",
+            [key],
+        )
+        };
+        {
+            let conn = second.conn.lock().unwrap();
+            insert_gift(&conn, "gift-first").unwrap();
+        }
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let sale = direct_sale_attempt(
+            "sale-after-gift",
+            "direct-sale-gift-race",
+            "processing",
+            1000,
+            true,
+        );
+        assert!(dispatch_after_durable_direct_sale(
+            &first,
+            &sale,
+            Some("direct-sale-gift-race"),
+            || async {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        )
+        .await
+        .is_err());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        {
+            let conn = second.conn.lock().unwrap();
+            // A proven never-sent rejection releases the original gift hold.
+            conn.execute("UPDATE gift_card_redemption_attempts SET status='abandoned', definitive_rejection=1 WHERE idempotency_key='gift-first'", []).unwrap();
+        }
+        dispatch_after_durable_direct_sale(
+            &first,
+            &sale,
+            Some("direct-sale-gift-race"),
+            || async {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            },
+        )
+        .await
+        .unwrap();
+        let conn = second.conn.lock().unwrap();
+        assert!(insert_gift(&conn, "gift-after-sale").is_err());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
     #[tokio::test]
     async fn second_connection_cannot_reserve_a_different_key_for_the_same_order() {
         let (_cleanup, first, second) =
@@ -4169,6 +4801,16 @@ mod dto_tests {
     #[tokio::test]
     async fn durable_attempt_is_visible_before_dispatch_and_insert_failure_skips_hardware() {
         let state = outstanding_attempt_test_db();
+        state
+            .conn
+            .lock()
+            .expect("lock durable attempt fixture")
+            .execute(
+                "INSERT INTO orders (id, items, total_amount, total_amount_cents)
+                 VALUES ('order-durable', '[]', 42.00, 4200)",
+                [],
+            )
+            .expect("seed the order whose outstanding amount is collected");
         let attempt_id = outstanding_fiscal_transaction_id(
             "order-durable:collect-outstanding:stable-generation",
         );

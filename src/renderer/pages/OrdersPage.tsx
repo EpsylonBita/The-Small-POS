@@ -25,6 +25,9 @@ import { formatCurrency } from '../utils/format';
 import { formatCompactOrderNumberForDisplay } from '../utils/orderNumberUtils';
 import { mergeHybridOrders, toIdentitySet } from '../utils/hybridOrderMerge';
 import { resolveTableServiceCustomerNumber } from '../utils/tableOrderFlow';
+import { KitchenStageBadge, selectActiveKitchenStage } from '../components/order/KitchenStageBadge';
+import { useLocalPreparationSnapshot } from '../hooks/useLocalPreparation';
+import type { LocalPreparationPhase, LocalPreparationSnapshot } from '../services/KdsLocalPhaseStore';
 import { getBridge, isBrowser, offEvent, onEvent } from '../../lib';
 
 interface OrderItem {
@@ -80,6 +83,10 @@ interface Order {
   integration_environment?: 'sandbox' | 'production';
   is_test?: boolean;
   source?: 'local' | 'remote';
+  organization_id?: string;
+  branch_id?: string;
+  /** Local ledger id, kept when a newer remote row wins the hybrid merge (kitchen stage lookup). */
+  local_order_id?: string;
 }
 
 interface FetchOrdersOptions {
@@ -210,8 +217,24 @@ const normalizeOrder = (raw: any, source: 'local' | 'remote'): Order | null => {
       || (asString(raw.integration_environment) || asString(raw.integrationEnvironment)) === 'sandbox',
     cancelled_at: asString(raw.cancelled_at) || asString(raw.cancelledAt),
     source,
+    organization_id: asString(raw.organization_id) || asString(raw.organizationId),
+    branch_id: asString(raw.branch_id) || asString(raw.branchId),
+    // Local rows only: the key is absent on remote rows, so the merge spread keeps it.
+    ...(source === 'local' ? { local_order_id: id } : {}),
   };
 };
+
+// Local kitchen handoff stage of a row, from this terminal's KDS (display only: it
+// never feeds status, filters or payment). A newer remote row that won the hybrid
+// merge carries the cloud id, so the kept local ledger id is tried as well.
+const selectRowKitchenStage = (
+  snapshot: LocalPreparationSnapshot,
+  order: Order,
+): LocalPreparationPhase | undefined =>
+  selectActiveKitchenStage(snapshot, order) ??
+  (order.local_order_id && order.local_order_id !== order.id
+    ? selectActiveKitchenStage(snapshot, { ...order, id: order.local_order_id })
+    : undefined);
 
 const extractOrderArray = (raw: any): any[] => {
   if (Array.isArray(raw)) return raw;
@@ -325,6 +348,7 @@ const OrdersPage: React.FC = () => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const bridge = getBridge();
+  const localPreparation = useLocalPreparationSnapshot();
 
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
@@ -850,6 +874,7 @@ const OrdersPage: React.FC = () => {
                 const customerDisplayName = tableCustomerNumber
                   ? t('orderFlow.tableCustomer', { table: tableCustomerNumber })
                   : order.customer_name;
+                const kitchenStage = selectRowKitchenStage(localPreparation, order);
 
                 return (
                   <motion.div
@@ -869,7 +894,7 @@ const OrdersPage: React.FC = () => {
                   >
                     <div className="flex items-start justify-between">
                       <div className="flex-1">
-                        <div className="flex items-center gap-3 mb-2">
+                        <div className="flex flex-wrap items-center gap-3 mb-2">
                           <span className="font-mono font-bold text-lg">{displayOrderNumber}</span>
                           {order.is_test && (
                             <span className="rounded-full border border-cyan-500 bg-cyan-500/15 px-2 py-1 text-[11px] font-black tracking-wide text-cyan-700 dark:text-cyan-200">
@@ -879,6 +904,7 @@ const OrdersPage: React.FC = () => {
                           <span className={`inline-flex items-center justify-center rounded-full border px-3 py-1.5 text-[13px] leading-none font-bold whitespace-nowrap ${getOrderStatusPillClasses(order.status)}`}>
                             {getOrderStatusLabel(order.status)}
                           </span>
+                          {kitchenStage && <KitchenStageBadge phase={kitchenStage} size="md" />}
                           <div className={`flex items-center gap-1 text-xs font-medium ${isDark ? 'text-zinc-300' : 'text-gray-700'}`}>
                             {getOrderTypeIcon(order.order_type)}
                             <span>{getOrderTypeLabel(order.order_type)}</span>

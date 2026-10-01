@@ -20,6 +20,7 @@ const projectRoot = process.cwd();
 const modalPath = path.join(projectRoot, 'src', 'renderer', 'components', 'modals', 'ZReportModal.tsx');
 const typesPath = path.join(projectRoot, 'src', 'renderer', 'types', 'reports.ts');
 const contractsPath = path.join(projectRoot, 'src', 'lib', 'ipc-contracts.ts');
+const paymentIntegrityPath = path.join(projectRoot, 'src', 'lib', 'payment-integrity.ts');
 const pluginIconsPath = path.join(projectRoot, 'src', 'renderer', 'utils', 'plugin-icons.tsx');
 const sharedPlatformsPath = path.join(projectRoot, '..', 'shared', 'platforms', 'order-platforms.ts');
 const zreportRsPath = path.join(projectRoot, 'src-tauri', 'src', 'zreport.rs');
@@ -121,8 +122,14 @@ test('the Z modal shows the reconciliation and blocks the close on real findings
   assert.match(source, /Array\.isArray\(integrity\?\.findings\)/);
 
   // Preview findings and submit-time rejections are merged, de-duplicated on
-  // orderId + reasonCode.
-  assert.match(source, /merged\.set\(`\$\{blocker\.orderId\}:\$\{blocker\.reasonCode\}`, blocker\)/);
+  // orderId + reasonCode. A payment set aside for review, or a card charged
+  // but not saved (30/09/2026), adds its own identity: one order can hold
+  // several, and each is decided on its own.
+  assert.match(source, /merged\.set\(paymentBlockerKey\(blocker\), blocker\)/);
+  assert.match(
+    read(paymentIntegrityPath),
+    /export function paymentBlockerKey\(blocker: UnsettledPaymentBlocker\): string \{\s*return `\$\{blocker\.orderId\}:\$\{blocker\.reasonCode\}:\$\{blocker\.reviewPayment\?\.paymentId \?\? blocker\.unsavedPayment\?\.idempotencyKey \?\? ""\}`;/,
+  );
 
   // The submit gate and the checklist key on the merged blocking set, not on
   // submit-time rejections alone.

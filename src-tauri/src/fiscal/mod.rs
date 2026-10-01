@@ -12,10 +12,12 @@
 //! The POS order flow MUST never crash because of any fiscal state.
 //! Every entry point in this module either returns silently or logs and
 //! continues — none of them propagate errors back to the order command.
-//! When the local cached `fiscal_active` state (see [`active_cache`]) says
-//! "no active plugin", the dispatcher skips even the local enqueue so the
-//! offline outbox doesn't fill with payloads that will only ever resolve
-//! to `status='skipped'` once replayed.
+//! Every receipt is queued, whatever the cached `fiscal_active` state (see
+//! [`active_cache`]) says: the server answers `skipped` for a branch without
+//! a plugin and the row drains. A fresh "no active plugin" answer only keeps
+//! queued rows from holding the Z (review of the 29/09/2026 fixes: skipping
+//! the enqueue on it dropped a fiscal store's receipts after one
+//! `active:false` answer).
 //!
 //! # Module layout (filled in as Phase 4 tasks land)
 //!
@@ -23,8 +25,13 @@
 //!   value from a locally persisted order, using integer cents (W4).
 //! - `dispatcher`      — T19: online POST + offline-enqueue entry point.
 //! - `replay`          — T20: process a queued `module_type='fiscal'` row.
-//! - `active_cache`    — T21a: 5-minute TTL cache of the last successful
-//!   `/api/plugins/fiscal/health` poll. Short-circuits the offline enqueue.
+//! - `active_cache`    — T21a: 5-minute TTL cache of the branch's fiscal
+//!   verdict. A fresh inactive verdict exempts the branch's queued rows from
+//!   the Z (close-day guard and closeout drain); it never skips the enqueue.
+//! - `status`          — feeds `active_cache` from `GET /api/pos/fiscal/status`
+//!   (29/09/2026: nothing wrote the cache before, so it was always unknown).
+//! - `currency`        — release-safety check: warns (never fails) when the
+//!   branch's active plugin cannot accept the currency its receipts carry.
 //! - `close_day_guard` — T23: z-report close refuses to complete while
 //!   any fiscal row is `pending`/`processing` for the business day under
 //!   a currently active plugin (stale-plugin rows are auto-marked
@@ -37,7 +44,9 @@
 
 pub mod active_cache;
 pub mod close_day_guard;
+pub mod currency;
 pub mod dispatcher;
 pub mod payload_builder;
 pub mod replay;
 pub mod sequence_counter;
+pub mod status;

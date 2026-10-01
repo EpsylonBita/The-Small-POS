@@ -1,5 +1,5 @@
 import type { ZReportData, ZReportDayOrder, StaffPerformance } from '../types/reports';
-import { resolveZReportPeriod } from './zReport';
+import { buildZReportGiftCloseCsvRows, resolveZReportPeriod } from './zReport';
 
 export function exportArrayToCSV(data: Record<string, any>[], filename: string) {
   if (!data || data.length === 0) {
@@ -49,6 +49,8 @@ export function exportZReportToCSV(zReport: ZReportData, filename: string = 'z-r
   rows.push({ Section: 'Cash Drawer', Metric: 'Total Variance', Value: zReport.cashDrawer.totalVariance });
   rows.push({ Section: 'Cash Drawer', Metric: 'Total Cash Drops', Value: zReport.cashDrawer.totalCashDrops });
   rows.push({ Section: 'Cash Drawer', Metric: 'Unreconciled Drawers', Value: zReport.cashDrawer.unreconciledCount });
+  // Gift card cash is a drawer liability: reconciliation and proof rows only, never sales/tender/tax.
+  rows.push(...buildZReportGiftCloseCsvRows(zReport));
 
   rows.push({ Section: 'Expenses', Metric: 'Total', Value: zReport.expenses.total });
   rows.push({ Section: 'Expenses', Metric: 'Pending Count', Value: zReport.expenses.pendingCount });

@@ -166,8 +166,8 @@ const AvailableState: React.FC<AvailableStateProps> = ({
   onClose,
   currentVersion
 }) => {
-  const { t } = useI18n();
-  const releaseNotes = getReleaseNotesHtml(updateInfo?.releaseNotes);
+  const { t, language } = useI18n();
+  const releaseNotes = getReleaseNotesHtml(updateInfo?.releaseNotes, language);
 
   return (
     <div className="space-y-4">

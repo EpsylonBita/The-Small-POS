@@ -10,16 +10,35 @@ import { calculateSubtotalFromItems } from './order-math';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { formatCompactOrderNumberForDisplay } from '../../utils/orderNumberUtils';
 import { getPluginColor, getPluginName, isExternalPlugin } from '../../utils/plugin-icons';
+import { INCOMING_ORDER_APPROVAL_MARKER_ATTR } from '../../services/incomingOrderAlert';
+import { usePrepTimePicker } from '../../hooks/usePrepTimePicker';
 
 interface OrderApprovalPanelProps {
   order: Order;
-  onApprove: (orderId: string, estimatedTime?: number) => Promise<void>;
-  onDecline: (orderId: string, reason: string) => Promise<void>;
+  /**
+   * Approves the order. `false`: it was not approved (the caller already
+   * told the operator why), so the panel stays open and reports no success.
+   * The panel announces a success itself, once.
+   */
+  onApprove: (orderId: string, estimatedTime?: number) => Promise<boolean | void>;
+  /**
+   * Declines the order. `false`: it was not declined (the caller already
+   * told the operator why), so the panel stays open and reports no success.
+   */
+  onDecline: (orderId: string, reason: string) => Promise<boolean | void>;
+  /**
+   * Asked when Decline is pressed, before the reason (founder rule 30/09 and
+   * 01/10/2026: a refusal comes before any reason or PIN). `false`: the till
+   * refuses to decline it (the caller already told the operator why), so
+   * no reason is asked.
+   */
+  onBeforeDecline?: (orderId: string) => Promise<boolean>;
   onClose: () => void;
   viewOnly?: boolean;
 }
 
 const ESTIMATED_TIME_OPTIONS = [15, 20, 25, 30, 45, 60];
+const DEFAULT_ESTIMATED_TIME = 20;
 const DECLINE_REASON_MAX_LENGTH = 500;
 const KIOSK_ORDER_NUMBER_PATTERN = /^#?[A-Za-z]+-[A-Za-z0-9]{1,16}-\d{8}-\d{6}-\d+$/;
 const KIOSK_SHORT_ORDER_NUMBER_PATTERN = /^#?K[A-Za-z]*-\d+$/i;
@@ -265,20 +284,30 @@ export function OrderApprovalPanel({
   order,
   onApprove,
   onDecline,
+  onBeforeDecline,
   onClose,
   viewOnly = false,
 }: OrderApprovalPanelProps) {
   const bridge = getBridge();
   const { t } = useI18n();
-  const [estimatedTime, setEstimatedTime] = useState(20);
+  // What staff picked; null keeps the default (20′, or less inside the
+  // platform's pickup window — see usePrepTimePicker).
+  const [pickedTime, setPickedTime] = useState<number | null>(null);
   const [isApproving, setIsApproving] = useState(false);
   const [isDeclining, setIsDeclining] = useState(false);
+  const [isCheckingDecline, setIsCheckingDecline] = useState(false);
   const [showDeclineModal, setShowDeclineModal] = useState(false);
   const [declineReason, setDeclineReason] = useState('');
   const [isPrinting, setIsPrinting] = useState(false);
   const [isLoadingItems, setIsLoadingItems] = useState(false);
   const [itemsLoadError, setItemsLoadError] = useState<string | null>(null);
   const canClose = viewOnly;
+  // Tells the app-shell incoming-order alert that this order's approval is
+  // on screen (it hit-tests these marked elements). A view-only panel cannot
+  // accept anything, so it carries no marker.
+  const approvalMarker = viewOnly
+    ? {}
+    : { [INCOMING_ORDER_APPROVAL_MARKER_ATTR]: order.id };
 
   // Normalize fields to handle different shapes
   const rawOrderNumber = order.order_number || order.orderNumber || '';
@@ -313,6 +342,36 @@ export function OrderApprovalPanel({
     ? String(resolveFoodDeliveryMetadata(order)?.short_code ?? '').trim() || null
     : null;
   const headerOrderNumber = platformShortCode ?? orderNumber;
+  // The platform's pickup window, when its own fleet delivers: the longer
+  // times are locked and the most it takes is offered (shared with Android).
+  const { picker: prepTimePicker, minutesToSend } = usePrepTimePicker({
+    ghostMetadata: orderAsRecord['ghost_metadata'] ?? orderAsRecord['ghostMetadata'],
+    options: ESTIMATED_TIME_OPTIONS,
+    defaultMinutes: DEFAULT_ESTIMATED_TIME,
+    selected: pickedTime,
+  });
+  const estimatedTime = prepTimePicker.selected;
+  const pickupWindowPlatform = orderPlatform ? getPluginName(orderPlatform) : '';
+  const pickupWindowLabel = prepTimePicker.maxMinutes === null
+    ? null
+    : prepTimePicker.passed
+      ? t('orderApprovalPanel.pickupWindowPassed', {
+        platform: pickupWindowPlatform,
+        min: prepTimePicker.selected,
+        defaultValue: "{{platform}}'s latest pickup time has passed: {{min}}′ will be sent.",
+      })
+      : prepTimePicker.providerEstimateMinutes === null
+        ? t('orderApprovalPanel.pickupWindowNoEstimate', {
+          platform: pickupWindowPlatform,
+          max: prepTimePicker.maxMinutes,
+          defaultValue: '{{platform}}: up to {{max}}′',
+        })
+        : t('orderApprovalPanel.pickupWindow', {
+          platform: pickupWindowPlatform,
+          estimate: prepTimePicker.providerEstimateMinutes,
+          max: prepTimePicker.maxMinutes,
+          defaultValue: '{{platform}}: {{estimate}}′ · up to {{max}}′',
+        });
 
   // Additional delivery fields (snake_case from normalized data)
   const deliveryCity = order.delivery_city || '';
@@ -637,7 +696,11 @@ export function OrderApprovalPanel({
     }
     setIsApproving(true);
     try {
-      await onApprove(order.id, estimatedTime);
+      // Read the window again now: the most the platform takes keeps shrinking.
+      const approved = await onApprove(order.id, minutesToSend());
+      // Not approved: the caller said why, and the order stays open here.
+      // Never "Approved" next to that message (round 3 item DR4).
+      if (approved === false) return;
       toast.success(t('orderApprovalPanel.approved'));
       onClose();
     } catch (error) {
@@ -645,7 +708,7 @@ export function OrderApprovalPanel({
     } finally {
       setIsApproving(false);
     }
-  }, [order.id, estimatedTime, onApprove, onClose, t]);
+  }, [order.id, estimatedTime, minutesToSend, onApprove, onClose, t]);
 
   const handleDecline = useCallback(async () => {
     const trimmedReason = declineReason.trim();
@@ -655,7 +718,10 @@ export function OrderApprovalPanel({
     }
     setIsDeclining(true);
     try {
-      await onDecline(order.id, trimmedReason);
+      const declined = await onDecline(order.id, trimmedReason);
+      // Not declined (refused, or it failed): the caller said why, and the
+      // order stays open here. Never "Declined" next to that message.
+      if (declined === false) return;
       toast.success(t('orderApprovalPanel.declined'));
       onClose();
     } catch (error) {
@@ -665,6 +731,28 @@ export function OrderApprovalPanel({
       setShowDeclineModal(false);
     }
   }, [order.id, declineReason, onDecline, onClose, t]);
+
+  // Founder rule (30/09 and 01/10/2026): an order the till refuses to
+  // decline (money was taken on it, or it is labelled paid with no payment
+  // record here) is refused BEFORE the reason is asked. A check that cannot
+  // run asks the reason anyway: the till refuses the decline itself too.
+  const openDeclineModal = useCallback(async () => {
+    if (!onBeforeDecline) {
+      setShowDeclineModal(true);
+      return;
+    }
+    setIsCheckingDecline(true);
+    try {
+      if (await onBeforeDecline(order.id)) {
+        setShowDeclineModal(true);
+      }
+    } catch (error) {
+      console.warn('[OrderApprovalPanel] The decline check failed; the till checks again:', error);
+      setShowDeclineModal(true);
+    } finally {
+      setIsCheckingDecline(false);
+    }
+  }, [onBeforeDecline, order.id]);
 
   const handlePrint = useCallback(async () => {
     console.log('[OrderApprovalPanel] Print button clicked, order ID:', order.id);
@@ -738,7 +826,10 @@ export function OrderApprovalPanel({
         contentClassName="px-5 py-4 sm:px-6"
         ariaLabel={t('orderApprovalPanel.reviewOrder', { defaultValue: 'Review incoming order' })}
         header={(
-          <div className="flex-shrink-0 border-b liquid-glass-modal-border bg-white/5 px-5 py-4 dark:bg-black/20 sm:px-6">
+          <div
+            {...approvalMarker}
+            className="flex-shrink-0 border-b liquid-glass-modal-border bg-white/5 px-5 py-4 dark:bg-black/20 sm:px-6"
+          >
             <div className="flex items-start justify-between gap-4">
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -809,24 +900,44 @@ export function OrderApprovalPanel({
             {!viewOnly ? (
               <>
                 <div className="flex flex-col gap-2 lg:flex-row lg:items-center">
-                  <div className="flex items-center gap-2 text-sm font-bold uppercase tracking-wider liquid-glass-modal-text-muted lg:w-48">
-                    <Clock className="h-4 w-4" />
-                    {t('orderApprovalPanel.estimatedTimeShort', { defaultValue: 'Prep time' })}
+                  <div className="flex flex-col gap-1 lg:w-48">
+                    <div className="flex items-center gap-2 text-sm font-bold uppercase tracking-wider liquid-glass-modal-text-muted">
+                      <Clock className="h-4 w-4" />
+                      {t('orderApprovalPanel.estimatedTimeShort', { defaultValue: 'Prep time' })}
+                    </div>
+                    {pickupWindowLabel ? (
+                      <p
+                        data-testid="order-approval-pickup-window"
+                        className="text-xs font-semibold text-amber-500 dark:text-amber-300"
+                      >
+                        {pickupWindowLabel}
+                      </p>
+                    ) : null}
                   </div>
-                  <div className="grid flex-1 grid-cols-6 gap-2">
-                    {ESTIMATED_TIME_OPTIONS.map((time) => (
+                  <div
+                    className="grid flex-1 gap-2"
+                    style={{ gridTemplateColumns: `repeat(${prepTimePicker.choices.length}, minmax(0, 1fr))` }}
+                  >
+                    {prepTimePicker.choices.map(({ minutes: time, disabled, isMax }) => (
                       <button
                         key={time}
                         type="button"
-                        onClick={() => setEstimatedTime(time)}
+                        onClick={() => setPickedTime(time)}
+                        disabled={disabled}
+                        data-testid={`order-approval-prep-${time}`}
                         className={`min-h-[2.75rem] rounded-lg px-2 text-sm font-bold transition ${
                           estimatedTime === time
                             ? 'border border-amber-400 bg-amber-400 text-black shadow-lg shadow-amber-400/30'
                             : 'liquid-glass-modal-button'
-                        }`}
+                        } ${disabled ? 'cursor-not-allowed opacity-35' : ''}`}
                         aria-pressed={estimatedTime === time}
                       >
                         {time}{t('common.units.minutesShort', { defaultValue: 'm' })}
+                        {isMax && !disabled ? (
+                          <span className="block text-[0.65rem] font-semibold leading-none">
+                            {t('orderApprovalPanel.maxChoice', { defaultValue: 'max' })}
+                          </span>
+                        ) : null}
                       </button>
                     ))}
                   </div>
@@ -835,7 +946,7 @@ export function OrderApprovalPanel({
                   <button
                     type="button"
                     onClick={handleApprove}
-                    disabled={isApproving || isDeclining}
+                    disabled={isApproving || isDeclining || isCheckingDecline}
                     className="liquid-glass-modal-button min-h-[3.25rem] justify-center gap-2 border-green-500/30 bg-green-600/20 text-green-400 active:bg-green-600/30"
                   >
                     <Check className="h-4 w-4" />
@@ -843,8 +954,10 @@ export function OrderApprovalPanel({
                   </button>
                   <button
                     type="button"
-                    onClick={() => setShowDeclineModal(true)}
-                    disabled={isApproving || isDeclining}
+                    onClick={() => {
+                      void openDeclineModal();
+                    }}
+                    disabled={isApproving || isDeclining || isCheckingDecline}
                     className="liquid-glass-modal-button min-h-[3.25rem] justify-center gap-2 border-red-500/30 bg-red-600/20 text-red-400 active:bg-red-600/30"
                   >
                     <XCircle className="h-4 w-4" />
@@ -1099,7 +1212,7 @@ export function OrderApprovalPanel({
           </div>
         )}
       >
-        <div className="space-y-4">
+        <div {...approvalMarker} className="space-y-4">
           <p className="text-sm liquid-glass-modal-text-muted">
             {t('orderApprovalPanel.declinePromptDescription', {
               defaultValue: 'Add the reason the customer will see when this order is denied.',

@@ -18,11 +18,597 @@ import { sortOrdersOldestFirst } from '../utils/order-sorting';
 import { debugLog } from '../utils/debugLog';
 import { getVisibleOrderNumber } from '../utils/orderNumberUtils';
 import { orderNeedsApproval } from '../../../../shared/order-approval';
+import {
+  giftCardCheckoutService,
+  giftCardOrderKey,
+  type GiftCardAdmission,
+  type GiftCardOrdinaryHold,
+  type GiftCardOrdinaryResolution,
+} from '../services/GiftCardCheckoutService';
+import type { GiftCardScope } from '../services/GiftCardsApiService';
 
 // Track self-created order IDs to suppress "new order received" toasts for own orders.
 // Since Rust no longer emits order_created for self-created orders, this is a safety net
 // in case order_save_from_remote echoes back our own order.
 const _recentlyCreatedOrderIds = new Set<string>();
+
+// ---------------------------------------------------------------------------
+// Existing-order ordinary collection owners (memory only).
+//
+// The gift checkout service keeps one gift/ordinary collection hold per
+// organization, public terminal and order. The records below keep each
+// ordinary hold's exact token, its original operation and the raw facts of
+// its reply above any modal or host lifetime, so a late authoritative result
+// still settles the original hold and a remount continues it instead of
+// minting another. Nothing here is persisted, logged or serialized; unmount,
+// module, auth or elapsed time never clear an unknown owner.
+// ---------------------------------------------------------------------------
+
+export interface OrdinaryCollectionScope {
+  organizationId?: string | null;
+  terminalId?: string | null;
+}
+
+/** Fixed when the first send starts and never replaced. */
+export interface OrdinaryCollectionOriginal {
+  method: 'cash' | 'card';
+  amount: number;
+  /** Caller reference; for outstanding collection it is also the idempotency key. */
+  transactionRef: string | null;
+  idempotencyKey: string | null;
+  /** Opaque native settlement generation the write was validated against. */
+  settlementGeneration: string | null;
+  /** Exact EFT transaction ID once the terminal answered. */
+  terminalTransactionId: string | null;
+}
+
+/** Raw facts of the original write reply; never reduced to one failure flag. */
+export interface OrdinaryCollectionFacts {
+  replyLost: boolean;
+  success: boolean | null;
+  paymentApproved: boolean | null;
+  paymentPersisted: boolean | null;
+  requiresReconciliation: boolean | null;
+  paymentId: string | null;
+  code: string | null;
+}
+
+/** Ownership of one ordinary hold, checked by identity; never copy, log or persist it. */
+export interface OrdinaryCollectionOwner {
+  readonly key: string;
+  readonly orderId: string;
+  readonly scope: Readonly<{ organizationId: string; terminalId: string }>;
+  readonly hold: GiftCardOrdinaryHold;
+}
+
+export type OrdinaryCollectionClaim =
+  | { claimed: true; owner: OrdinaryCollectionOwner }
+  | {
+      claimed: false;
+      code: string;
+      admission: GiftCardAdmission;
+      /** The retained owner of this order's unknown ordinary collection, if any. */
+      retained: OrdinaryCollectionOwner | null;
+    };
+
+export type OrdinaryCollectionPhase = 'held' | 'preflight' | 'sending' | 'unknown';
+
+export interface OrdinaryCollectionView {
+  phase: OrdinaryCollectionPhase;
+  original: OrdinaryCollectionOriginal | null;
+  facts: OrdinaryCollectionFacts | null;
+}
+
+export type OrdinaryCollectionVerdict = 'completed' | 'not_sent' | 'unknown';
+
+export type OrdinaryCollectionRun<T> =
+  | { status: 'refused'; code: string }
+  | { status: OrdinaryCollectionVerdict; value: T | undefined; code: string | null };
+
+export type OrdinaryTerminalVerdict =
+  | { verdict: 'approved'; transactionId: string; message: string | null }
+  | { verdict: 'not_sent'; transactionId: string; message: string | null }
+  | { verdict: 'unknown'; transactionId: string | null; message: string | null };
+
+export type OrdinaryCollectionProbe<T> = {
+  status: 'completed' | 'unknown' | 'not_current';
+  value: T | null;
+};
+
+/** One write of a multi-write original, with its own caller reference. */
+interface OrdinaryBatchWrite {
+  facts: OrdinaryCollectionFacts;
+  transactionRef: string | null;
+}
+
+interface OrdinaryOwnerRecord extends OrdinaryCollectionView {
+  owner: OrdinaryCollectionOwner;
+  probe: Promise<OrdinaryCollectionProbe<unknown>> | null;
+  /** Every write of a multi-write original, in send order; empty for a single write. */
+  writes: OrdinaryBatchWrite[];
+}
+
+const ORDINARY_CODE_PATTERN = /^[A-Z][A-Z0-9_]{2,63}$/;
+// Native payment refusals returned before any fiscal device call or money
+// write (idempotency key and expected-settlement checks). No other code proves
+// nothing moved: a fiscal checkout failure may follow the device call.
+const ORDINARY_PRE_DISPATCH_CODES: ReadonlySet<string> = new Set([
+  'IDEMPOTENCY_KEY_REQUIRED',
+  'IDEMPOTENCY_KEY_INVALID',
+  'BALANCE_CHANGED',
+  'EXPECTED_SETTLEMENT_REQUIRED',
+  // `payment_record` refuses a new tender first thing, before any fiscal
+  // dispatch or write, while a charged payment of the order is not saved
+  // (`unsaved_payments`, 30/09/2026). Nothing moved; that record holds the Z.
+  'PAYMENT_NOT_SAVED_PENDING',
+]);
+/**
+ * Native answer for money that moved on an order already covered: persisted
+ * set aside for a manager to give back (`payment_review`, 30/09/2026). The
+ * original operation is booked, so its ordinary hold ends, but it is never a
+ * collection: the caller shows the set-aside notice (`isSetAsideOrdinaryWrite`).
+ */
+const PAYMENT_SET_ASIDE_CODE = 'PAYMENT_SET_ASIDE_FOR_REVIEW';
+const ordinaryOwnerRecords = new Map<string, OrdinaryOwnerRecord>();
+const ordinaryOwnerTokens = new WeakMap<OrdinaryCollectionOwner, OrdinaryOwnerRecord>();
+const adoptedGiftPaymentIds = new Map<string, Set<string>>();
+
+const toGiftScope = (scope: OrdinaryCollectionScope | null | undefined): GiftCardScope => ({
+  organizationId: scope?.organizationId ?? null,
+  terminalId: scope?.terminalId ?? null,
+});
+const trimmedText = (value: unknown): string => (typeof value === 'string' ? value.trim() : '');
+const ordinaryFlag = (value: unknown): boolean | null => (typeof value === 'boolean' ? value : null);
+const ordinaryCode = (...values: unknown[]): string | null => {
+  for (const value of values) {
+    const code = trimmedText(value);
+    if (ORDINARY_CODE_PATTERN.test(code)) return code;
+  }
+  return null;
+};
+
+const dropOrdinaryRecord = (record: OrdinaryOwnerRecord): void => {
+  if (ordinaryOwnerRecords.get(record.owner.key) === record) ordinaryOwnerRecords.delete(record.owner.key);
+};
+
+/** The owner's record while the service still holds its exact token. */
+const currentOrdinaryRecord = (
+  owner: OrdinaryCollectionOwner | null | undefined,
+): OrdinaryOwnerRecord | null => {
+  const record = owner ? ordinaryOwnerTokens.get(owner) : undefined;
+  if (!record) return null;
+  if (giftCardCheckoutService.ordinaryHoldStatus(record.owner.hold) === null) {
+    dropOrdinaryRecord(record);
+    return null;
+  }
+  return record;
+};
+
+const settleOrdinaryRecord = (
+  record: OrdinaryOwnerRecord,
+  verdict: OrdinaryCollectionVerdict,
+  code: string | null,
+): void => {
+  const resolution: GiftCardOrdinaryResolution =
+    verdict === 'completed'
+      ? { outcome: 'completed' }
+      : verdict === 'not_sent'
+        ? { outcome: 'not_sent', basis: 'original_operation' }
+        : { outcome: 'unknown', code };
+  const release = giftCardCheckoutService.resolveOrdinaryCollection(record.owner.hold, resolution);
+  // Keyed on the resolution sent, not the verdict: an unknown hold keeps its record.
+  if (resolution.outcome !== 'unknown' && release.applied) {
+    dropOrdinaryRecord(record);
+    return;
+  }
+  record.phase = 'unknown';
+};
+
+/**
+ * Claims the order for one ordinary cash/card collection. Synchronous: call it
+ * before the first await (selection delay, print policy, terminal discovery,
+ * recovery or write). Refused while any gift or ordinary hold exists, and
+ * without a resolved organization and public terminal.
+ */
+export function claimOrdinaryCollectionOwner(
+  scope: OrdinaryCollectionScope | null | undefined,
+  orderId: string | null | undefined,
+): OrdinaryCollectionClaim {
+  const giftScope = toGiftScope(scope);
+  const id = trimmedText(orderId);
+  const claim = giftCardCheckoutService.claimOrdinaryCollection(giftScope, id);
+  if (!claim.claimed) {
+    return {
+      claimed: false,
+      code: claim.code,
+      admission: claim.admission,
+      retained: retainedOrdinaryOwner(scope, id),
+    };
+  }
+  const owner: OrdinaryCollectionOwner = Object.freeze({
+    key: giftCardOrderKey(giftScope, id),
+    orderId: claim.hold.orderId,
+    scope: Object.freeze({
+      organizationId: claim.hold.organizationId,
+      terminalId: claim.hold.terminalId,
+    }),
+    hold: claim.hold,
+  });
+  const record: OrdinaryOwnerRecord = { owner, phase: 'held', original: null, facts: null, probe: null, writes: [] };
+  ordinaryOwnerRecords.set(owner.key, record);
+  ordinaryOwnerTokens.set(owner, record);
+  return { claimed: true, owner };
+}
+
+/** The retained owner of this order's unknown ordinary collection; the original, never a copy. */
+export function retainedOrdinaryOwner(
+  scope: OrdinaryCollectionScope | null | undefined,
+  orderId: string | null | undefined,
+): OrdinaryCollectionOwner | null {
+  const id = trimmedText(orderId);
+  if (!id) return null;
+  const record = ordinaryOwnerRecords.get(giftCardOrderKey(toGiftScope(scope), id));
+  if (!record || currentOrdinaryRecord(record.owner) !== record) return null;
+  return record.phase === 'unknown' ? record.owner : null;
+}
+
+export function ordinaryCollectionView(
+  owner: OrdinaryCollectionOwner | null | undefined,
+): OrdinaryCollectionView | null {
+  const record = currentOrdinaryRecord(owner);
+  if (!record) return null;
+  return {
+    phase: record.phase,
+    original: record.original ? { ...record.original } : null,
+    facts: record.facts ? { ...record.facts } : null,
+  };
+}
+
+/** Ends a claim nothing was sent under. Refused once the owner's send gate opened. */
+export function releaseOrdinaryOwnerBeforeSend(
+  owner: OrdinaryCollectionOwner | null | undefined,
+): boolean {
+  const record = currentOrdinaryRecord(owner);
+  if (!record || record.phase !== 'held') return false;
+  const release = giftCardCheckoutService.resolveOrdinaryCollection(record.owner.hold, {
+    outcome: 'not_sent',
+    basis: 'before_send',
+  });
+  if (release.applied) dropOrdinaryRecord(record);
+  return release.applied;
+}
+
+/**
+ * Runs the owner's one send. The gate is synchronous, so a second callback
+ * sharing this owner is refused while the first runs or after it sent, and
+ * never touches the hold. The holder preflight runs after every earlier await
+ * and immediately before `send`; its refusal sent nothing and ends the claim.
+ * `send` classifies its own raw replies; a throw after the gate may hide a
+ * send and stays unknown. Unknown keeps the hold and this record so only the
+ * original operation's retry can settle it.
+ */
+export async function runOrdinaryCollection<T>(
+  owner: OrdinaryCollectionOwner,
+  original: OrdinaryCollectionOriginal,
+  send: () => Promise<{ verdict: OrdinaryCollectionVerdict; value: T; code?: string | null }>,
+): Promise<OrdinaryCollectionRun<T>> {
+  const record = currentOrdinaryRecord(owner);
+  if (!record) return { status: 'refused', code: 'GIFT_CARD_HOLD_NOT_CURRENT' };
+  if (record.phase !== 'held') return { status: 'refused', code: 'ORDINARY_COLLECTION_ALREADY_OWNED' };
+  record.phase = 'preflight';
+  let proceed = false;
+  let code: string | null = null;
+  try {
+    const preflight = await giftCardCheckoutService.preflightOrdinaryCollection(record.owner.hold);
+    proceed = preflight.proceed;
+    code = preflight.code;
+  } catch {
+    code = 'GIFT_CARD_RECOVERY_REQUIRED';
+  }
+  if (!proceed || currentOrdinaryRecord(owner) !== record || record.phase !== 'preflight') {
+    if (record.phase === 'preflight') {
+      record.phase = 'held';
+      releaseOrdinaryOwnerBeforeSend(owner);
+    }
+    return { status: 'refused', code: code ?? 'GIFT_CARD_HOLD_NOT_CURRENT' };
+  }
+  record.phase = 'sending';
+  record.original = { ...original };
+  let outcome: { verdict: OrdinaryCollectionVerdict; value: T | undefined; code: string | null };
+  try {
+    const result = await send();
+    // Anything but an explicit completed/not_sent may hide a send.
+    const verdict: OrdinaryCollectionVerdict =
+      result.verdict === 'completed' || result.verdict === 'not_sent' ? result.verdict : 'unknown';
+    outcome = { verdict, value: result.value, code: result.code ?? null };
+  } catch {
+    outcome = { verdict: 'unknown', value: undefined, code: 'ORDINARY_COLLECTION_OUTCOME_UNKNOWN' };
+  }
+  settleOrdinaryRecord(record, outcome.verdict, outcome.code);
+  return { status: outcome.verdict, value: outcome.value, code: outcome.code };
+}
+
+/** Reads a native payment write reply without reducing it to one failure flag. */
+export function readOrdinaryWriteReply(raw: unknown, threw = false): OrdinaryCollectionFacts {
+  const reply = !threw && raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : null;
+  if (!reply) {
+    return {
+      replyLost: true,
+      success: null,
+      paymentApproved: null,
+      paymentPersisted: null,
+      requiresReconciliation: null,
+      paymentId: null,
+      code: null,
+    };
+  }
+  const data = reply.data && typeof reply.data === 'object' ? (reply.data as Record<string, unknown>) : null;
+  return {
+    replyLost: false,
+    success: ordinaryFlag(reply.success),
+    paymentApproved: ordinaryFlag(reply.paymentApproved),
+    paymentPersisted: ordinaryFlag(reply.paymentPersisted),
+    requiresReconciliation: ordinaryFlag(reply.requiresReconciliation),
+    paymentId: trimmedText(reply.paymentId) || trimmedText(data?.paymentId) || null,
+    code: ordinaryCode(reply.errorCode, reply.code),
+  };
+}
+
+/**
+ * Only native's own reply classifies the original write: success with a
+ * payment ID completes it, and explicit not-approved/not-persisted flags
+ * prove it moved no money only together with a refusal native returns before
+ * any fiscal dispatch. A fiscal checkout failure (which may follow the device
+ * call), transport loss, a generic refusal or approval without booking stays
+ * unknown; false flags alone never prove nothing was sent. A payment set aside
+ * for review is booked (`isSetAsideOrdinaryWrite`), and a charged payment not
+ * saved (`PAYMENT_NOT_SAVED`) stays unknown while its native record holds the Z.
+ */
+export function classifyOrdinaryWrite(
+  facts: Pick<
+    OrdinaryCollectionFacts,
+    'replyLost' | 'success' | 'paymentApproved' | 'paymentPersisted' | 'requiresReconciliation' | 'paymentId'
+  > & { code?: string | null },
+): OrdinaryCollectionVerdict {
+  if (facts.replyLost || facts.requiresReconciliation === true) return 'unknown';
+  if (isSetAsideOrdinaryWrite(facts)) return 'completed';
+  if (facts.success === true) {
+    return facts.paymentId && facts.paymentPersisted !== false ? 'completed' : 'unknown';
+  }
+  if (
+    facts.success === false &&
+    facts.paymentApproved === false &&
+    facts.paymentPersisted === false &&
+    typeof facts.code === 'string' &&
+    ORDINARY_PRE_DISPATCH_CODES.has(facts.code)
+  ) {
+    return 'not_sent';
+  }
+  return 'unknown';
+}
+
+/**
+ * The write persisted money that moved as a payment set aside for review (the
+ * order was already covered). Booked, never a collection: show the set-aside
+ * notice and never offer the amount as still due.
+ */
+export function isSetAsideOrdinaryWrite(
+  facts: Pick<OrdinaryCollectionFacts, 'success' | 'paymentPersisted'> & { code?: string | null },
+): boolean {
+  return facts.success === false && facts.paymentPersisted === true && facts.code === PAYMENT_SET_ASIDE_CODE;
+}
+
+/** Keeps the original reply facts; a later probe or retry never replaces them. */
+export function noteOrdinaryWriteFacts(
+  owner: OrdinaryCollectionOwner,
+  facts: OrdinaryCollectionFacts,
+): void {
+  const record = currentOrdinaryRecord(owner);
+  if (!record || record.facts) return;
+  record.facts = {
+    replyLost: facts.replyLost,
+    success: facts.success,
+    paymentApproved: facts.paymentApproved,
+    paymentPersisted: facts.paymentPersisted,
+    requiresReconciliation: facts.requiresReconciliation,
+    paymentId: facts.paymentId,
+    code: facts.code,
+  };
+}
+
+/**
+ * Keeps one write of a multi-write original (Split Confirm) with its own
+ * reference. Every write is retained: an earlier booked write never stands in
+ * for a later uncertain one.
+ */
+export function noteOrdinaryBatchWrite(
+  owner: OrdinaryCollectionOwner,
+  facts: OrdinaryCollectionFacts,
+  transactionRef: string | null | undefined,
+): void {
+  const record = currentOrdinaryRecord(owner);
+  if (!record || record.phase !== 'sending') return;
+  noteOrdinaryWriteFacts(owner, facts);
+  record.writes.push({ facts: { ...facts }, transactionRef: trimmedText(transactionRef) || null });
+}
+
+const completedLedgerRows = (completedPayments: readonly unknown[]): Record<string, unknown>[] =>
+  completedPayments.filter((row): row is Record<string, unknown> => {
+    if (!row || typeof row !== 'object') return false;
+    const status = trimmedText((row as Record<string, unknown>).status).toLowerCase();
+    return !status || status === 'completed' || status === 'paid';
+  });
+
+/**
+ * A multi-write original is proven only when every uncertain write has its
+ * own distinct completed row, by that write's payment ID or reference. The row
+ * of an already booked write never proves another write, and an uncertain
+ * write with neither identity leaves the batch unprovable.
+ */
+function ledgerHasEveryUncertainWrite(
+  writes: readonly OrdinaryBatchWrite[],
+  completedPayments: readonly unknown[],
+): boolean {
+  const rows = completedLedgerRows(completedPayments);
+  const booked = new Set<string>();
+  for (const write of writes) {
+    if (write.facts.paymentId && classifyOrdinaryWrite(write.facts) === 'completed') booked.add(write.facts.paymentId);
+  }
+  const uncertain = writes.filter((write) => classifyOrdinaryWrite(write.facts) === 'unknown');
+  if (uncertain.length === 0) return false;
+  const used = new Set<number>();
+  return uncertain.every((write) => {
+    const paymentId = write.facts.paymentId;
+    const ref = write.transactionRef;
+    if (!paymentId && !ref) return false;
+    const index = rows.findIndex((payment, position) => {
+      if (used.has(position)) return false;
+      const ids = [payment.id, payment.paymentId, payment.localPaymentId].map(trimmedText).filter(Boolean);
+      if (ids.some((id) => booked.has(id))) return false;
+      const rowRef = trimmedText(payment.transactionRef) || trimmedText(payment.transaction_ref);
+      return (Boolean(paymentId) && ids.includes(paymentId as string)) || (Boolean(ref) && rowRef === ref);
+    });
+    if (index < 0) return false;
+    used.add(index);
+    return true;
+  });
+}
+
+/**
+ * A direct EFT reply proves approval only with an exact transaction ID and an
+ * approved status, and proves no money moved only with that ID and a final
+ * declined or cancelled status. A thrown call, a generic failure or any other
+ * status may hide a charge and stays unknown.
+ */
+export function classifyOrdinaryTerminalReply(raw: unknown, threw = false): OrdinaryTerminalVerdict {
+  const reply = !threw && raw && typeof raw === 'object' ? (raw as Record<string, any>) : null;
+  if (!reply) return { verdict: 'unknown', transactionId: null, message: null };
+  const tx = reply.transaction ?? reply.data?.transaction ?? reply.data ?? reply;
+  const transactionId =
+    trimmedText(tx?.transactionId) ||
+    trimmedText(tx?.id) ||
+    trimmedText(reply.transactionId) ||
+    trimmedText(reply.id) ||
+    null;
+  const status = trimmedText(tx?.status ?? reply.status).toLowerCase();
+  const message = trimmedText(tx?.errorMessage ?? reply.error ?? reply.data?.error) || null;
+  if (transactionId && reply.success === true && status === 'approved') {
+    return { verdict: 'approved', transactionId, message };
+  }
+  if (
+    transactionId &&
+    typeof reply.success === 'boolean' &&
+    (status === 'declined' || status === 'cancelled' || status === 'canceled')
+  ) {
+    return { verdict: 'not_sent', transactionId, message };
+  }
+  return { verdict: 'unknown', transactionId, message };
+}
+
+/** Records the exact EFT transaction ID of the original send; never replaced. */
+export function noteOrdinaryTerminalTransaction(
+  owner: OrdinaryCollectionOwner,
+  transactionId: string | null | undefined,
+): void {
+  const record = currentOrdinaryRecord(owner);
+  const id = trimmedText(transactionId);
+  if (!record?.original || record.original.terminalTransactionId || !id) return;
+  record.original = { ...record.original, terminalTransactionId: id };
+}
+
+/** Whether a completed canonical row is the original payment, by exact payment ID or reference. */
+export function ledgerHasOriginalOrdinaryPayment(
+  owner: OrdinaryCollectionOwner,
+  completedPayments: readonly unknown[] | null | undefined,
+): boolean {
+  const record = currentOrdinaryRecord(owner);
+  if (!record?.original || !Array.isArray(completedPayments)) return false;
+  if (record.writes.length > 0) return ledgerHasEveryUncertainWrite(record.writes, completedPayments);
+  const paymentId = record.facts?.paymentId ?? null;
+  const refs = [record.original.transactionRef, record.original.terminalTransactionId].filter(
+    (ref): ref is string => Boolean(ref),
+  );
+  if (!paymentId && refs.length === 0) return false;
+  return completedPayments.some((row) => {
+    if (!row || typeof row !== 'object') return false;
+    const payment = row as Record<string, unknown>;
+    const status = trimmedText(payment.status).toLowerCase();
+    if (status && status !== 'completed' && status !== 'paid') return false;
+    if (paymentId && [payment.id, payment.paymentId, payment.localPaymentId].some((value) => trimmedText(value) === paymentId)) {
+      return true;
+    }
+    const ref = trimmedText(payment.transactionRef) || trimmedText(payment.transaction_ref);
+    return Boolean(ref) && refs.includes(ref);
+  });
+}
+
+/**
+ * Snapshot-only continuation of the retained original: never a resend and
+ * never a new key. Completed only when the canonical ledger holds the
+ * original payment; anything else keeps the hold. Probes of one owner share
+ * one read.
+ */
+export function probeOrdinaryOwner<T>(
+  owner: OrdinaryCollectionOwner,
+  read: () => Promise<{ completedPayments: readonly unknown[]; value: T } | null>,
+): Promise<OrdinaryCollectionProbe<T>> {
+  const record = currentOrdinaryRecord(owner);
+  if (!record) return Promise.resolve({ status: 'not_current', value: null });
+  if (record.phase !== 'unknown') return Promise.resolve({ status: 'unknown', value: null });
+  if (record.probe) return record.probe as Promise<OrdinaryCollectionProbe<T>>;
+  const probe = (async (): Promise<OrdinaryCollectionProbe<T>> => {
+    let snapshot: { completedPayments: readonly unknown[]; value: T } | null = null;
+    try {
+      snapshot = await read();
+    } catch {
+      snapshot = null;
+    }
+    if (currentOrdinaryRecord(owner) !== record) {
+      return { status: 'not_current', value: snapshot?.value ?? null };
+    }
+    if (snapshot && ledgerHasOriginalOrdinaryPayment(owner, snapshot.completedPayments)) {
+      settleOrdinaryRecord(record, 'completed', null);
+      return { status: 'completed', value: snapshot.value };
+    }
+    return { status: 'unknown', value: snapshot?.value ?? null };
+  })();
+  record.probe = probe;
+  void probe.then(() => {
+    if (record.probe === probe) record.probe = null;
+  });
+  return probe;
+}
+
+/**
+ * Canonical gift payment IDs this renderer already adopted for the order.
+ * Returns only unseen IDs so adoption stays idempotent across remounts; a
+ * gift payment is never re-recorded anywhere.
+ */
+export function adoptGiftCardPaymentIds(
+  scope: OrdinaryCollectionScope | null | undefined,
+  orderId: string | null | undefined,
+  paymentIds: readonly string[],
+): string[] {
+  const id = trimmedText(orderId);
+  if (!id) return [];
+  const key = giftCardOrderKey(toGiftScope(scope), id);
+  const seen = adoptedGiftPaymentIds.get(key) ?? new Set<string>();
+  adoptedGiftPaymentIds.set(key, seen);
+  const fresh: string[] = [];
+  for (const paymentId of paymentIds) {
+    const value = trimmedText(paymentId);
+    if (value && !seen.has(value)) {
+      seen.add(value);
+      fresh.push(value);
+    }
+  }
+  return fresh;
+}
+
+const isGiftCardPaymentMethod = (method: unknown): boolean => {
+  const normalized = String(method ?? '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  return normalized === 'gift_card' || normalized === 'giftcard' || normalized === 'gift';
+};
 
 const isCancelledOrderStatus = (status: unknown): boolean => {
   const normalized = String(status || '').toLowerCase();
@@ -52,7 +638,40 @@ interface UpdateOrderStatusDetailedResult {
   success: boolean;
   errorMessage?: string;
   paymentIntegrityPayload?: PaymentIntegrityErrorPayload | null;
+  /**
+   * `ORDER_HAS_PAYMENTS`: the till refused to cancel an order money was
+   * taken on (fix review 30/09/2026); the screen tells the cashier to void or
+   * refund it from the order first, or to collect the rest.
+   * `ORDER_PAYMENT_NOT_RECORDED`: the order is labelled paid but its payment
+   * is not recorded on this till (founder rule 01/10/2026); the screen tells
+   * the cashier to restore it from the server or record it first.
+   */
+  errorCode?: 'ORDER_HAS_PAYMENTS' | 'ORDER_PAYMENT_NOT_RECORDED';
 }
+
+/** The till's refusal to cancel an order money was taken on. */
+const ORDER_HAS_PAYMENTS = 'ORDER_HAS_PAYMENTS';
+/** The till's refusal to cancel a paid label with no payment record here. */
+const ORDER_PAYMENT_NOT_RECORDED = 'ORDER_PAYMENT_NOT_RECORDED';
+
+/**
+ * A checkout that carries its payment can wait on the card terminal for as
+ * long as the terminal's own timeout (120 s by default for the CAP driver,
+ * 60 s for ZVT); the till then answers definitively. The screen used to give
+ * up after 15 s and call it a failure while the terminal still waited for the
+ * card: pressing Pay again started a second checkout and a second charge (fix
+ * review 30/09/2026). It now waits past the terminal's timeout, and a checkout
+ * still without an answer is reported as unknown, never as failed.
+ */
+const CHECKOUT_WITH_PAYMENT_TIMEOUT_MS = 180_000;
+const CHECKOUT_OUTCOME_UNKNOWN = 'CHECKOUT_OUTCOME_UNKNOWN';
+const CHECKOUT_IN_PROGRESS = 'CHECKOUT_IN_PROGRESS';
+
+const rawErrorText = (error: unknown): string => {
+  if (typeof error === 'string') return error;
+  const message = (error as { message?: unknown } | null)?.message;
+  return typeof message === 'string' ? message : '';
+};
 
 interface RoomChargeOrderResult {
   applied: boolean;
@@ -135,6 +754,23 @@ interface OrderStore {
     error?: string;
     savedForRetry?: boolean;
     roomCharge?: RoomChargeOrderResult;
+    /**
+     * Item E (30/09/2026): the card was charged at checkout and the order
+     * could not be saved yet. The till holds the order for "Save payment
+     * again": never retry it as a new checkout (that is a second charge).
+     */
+    paymentNotSaved?: boolean;
+    errorCode?: string;
+    amountCents?: number;
+    unsavedPayment?: unknown;
+    /**
+     * Fix review 30/09/2026: the checkout's payment has no answer yet (the
+     * card terminal is still waiting, `CHECKOUT_OUTCOME_UNKNOWN`, or the same
+     * checkout is still in progress, `CHECKOUT_IN_PROGRESS`). Never a
+     * failure to retry as a new checkout: the screen keeps the cart and its
+     * checkout id, so pressing Pay again checks the same payment.
+     */
+    outcomeUnknown?: boolean;
   }>;
   setSelectedOrder: (order: Order | null) => void;
   setFilter: (filter: Partial<OrderStore['filter']>) => void;
@@ -533,6 +1169,15 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
       // Self-created orders are added to state directly in createOrder().
       const handleOrderCreated = (orderData: any) => {
         if (!orderData || !orderData.id) {
+          // Rust sends only `{ orderId }` when it could not read the row it
+          // just pulled back from the local cache. Dropping that event hid the
+          // order (and its incoming-order alert) until something else
+          // refreshed the list: re-read the local cache instead.
+          if (typeof orderData?.orderId === 'string' && orderData.orderId.trim()) {
+            console.warn('⚠️ [useOrderStore] order-created without its row, refreshing:', orderData.orderId);
+            void get().silentRefresh().catch(() => {});
+            return;
+          }
           console.warn('⚠️ [useOrderStore] Invalid order data received:', orderData);
           return;
         }
@@ -945,6 +1590,28 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
           };
         }
 
+        // A paid label with no payment record here (founder rule
+        // 01/10/2026): a typed refusal the screen explains.
+        if (rawErrorText(error).includes(ORDER_PAYMENT_NOT_RECORDED)) {
+          get()._setLoading(operation, false);
+          return {
+            success: false,
+            errorCode: ORDER_PAYMENT_NOT_RECORDED,
+            errorMessage: rawErrorText(error),
+          };
+        }
+
+        // Money was taken on the order: a typed refusal the screen explains,
+        // never a generic failure (fix review 30/09/2026).
+        if (rawErrorText(error).includes(ORDER_HAS_PAYMENTS)) {
+          get()._setLoading(operation, false);
+          return {
+            success: false,
+            errorCode: ORDER_HAS_PAYMENTS,
+            errorMessage: rawErrorText(error),
+          };
+        }
+
         // Handle error
         const posError = errorHandler.handle(error);
         get()._setError(posError);
@@ -984,10 +1651,15 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
         const orderService = OrderService.getInstance();
 
         // Create is side-effectful; keep timeout protection but do not retry.
+        // A checkout carrying its payment waits past the card terminal's own
+        // timeout (fix review 30/09/2026).
+        const carriesPayment = Boolean(
+          (orderData as any).initialPayment ?? (orderData as any).initial_payment,
+        );
         const newOrder = await withTimeout(
           orderService.createOrder(orderData),
-          TIMING.ORDER_CREATE_TIMEOUT,
-          'Create order'
+          carriesPayment ? CHECKOUT_WITH_PAYMENT_TIMEOUT_MS : TIMING.ORDER_CREATE_TIMEOUT,
+          carriesPayment ? CHECKOUT_OUTCOME_UNKNOWN : 'Create order'
         );
 
         // Track the ID so handleOrderCreated ignores any echo from remote sync
@@ -1000,7 +1672,22 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
         if (newOrder.id) {
           set((state) => {
             const combined = [...state.orders, ...state.pendingExternalOrders];
-            const orderForState = { ...orderData, ...newOrder, id: newOrder.id } as Order;
+            // The label on screen comes from storage, never from the caller
+            // (founder rule 30/09 and 01/10/2026: an order is never paid
+            // without its payment record). When the stored order could not be
+            // read back after the create, the screen says `pending` until the
+            // next refresh, not the checkout's `completed` claim.
+            const storedPaymentStatus =
+              (newOrder as Partial<Order>).paymentStatus ??
+              (newOrder as Partial<Order>).payment_status ??
+              'pending';
+            const orderForState = {
+              ...orderData,
+              ...newOrder,
+              id: newOrder.id,
+              paymentStatus: storedPaymentStatus,
+              payment_status: storedPaymentStatus,
+            } as Order;
             return splitOrdersForState([orderForState, ...combined]);
           });
         }
@@ -1048,6 +1735,43 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
           roomCharge: (newOrder as any).roomCharge,
         };
       } catch (error) {
+        // A card charged at checkout whose order the till could not save yet
+        // (item E): the caller tells the cashier in the store's language and
+        // ends the checkout. Its details must survive, never be flattened
+        // into a generic failure the screen would let the cashier retry.
+        const notSaved = error as {
+          paymentNotSaved?: boolean;
+          amountCents?: number;
+          unsavedPayment?: unknown;
+          message?: string;
+        } | null;
+        if (notSaved?.paymentNotSaved === true) {
+          get()._setLoading(operation, false);
+          return {
+            success: false,
+            error: notSaved.message,
+            savedForRetry: false,
+            paymentNotSaved: true,
+            errorCode: 'PAYMENT_NOT_SAVED',
+            amountCents: notSaved.amountCents,
+            unsavedPayment: notSaved.unsavedPayment,
+          };
+        }
+        // The payment has no answer yet (fix review 30/09/2026): the terminal
+        // is still waiting, or this same checkout is still in progress. Never
+        // a failure the screen retries as a new checkout.
+        const unknown = error as { message?: string; checkoutInProgress?: boolean } | null;
+        if (unknown?.checkoutInProgress === true || unknown?.message === CHECKOUT_OUTCOME_UNKNOWN) {
+          get()._setLoading(operation, false);
+          return {
+            success: false,
+            error: unknown.message,
+            savedForRetry: false,
+            outcomeUnknown: true,
+            errorCode:
+              unknown.checkoutInProgress === true ? CHECKOUT_IN_PROGRESS : CHECKOUT_OUTCOME_UNKNOWN,
+          };
+        }
         // Handle error
         const posError = errorHandler.handle(error);
         get()._setError(posError);
@@ -1207,6 +1931,11 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
     },
 
      processPayment: async (orderId: string, paymentData: { method: Order['paymentMethod']; amount: number; [key: string]: any }) => {
+       // Gift card payments are booked only by native gift checkout. Refuse
+       // before the normalization below would record one as `other`.
+       if (isGiftCardPaymentMethod(paymentData?.method)) {
+         return { success: false, error: 'GIFT_CARD_GENERIC_PAYMENT_REFUSED' };
+       }
        try {
          const normalizedMethod = paymentData.method === 'cash' || paymentData.method === 'card'
            ? paymentData.method

@@ -99,14 +99,47 @@ test('missing-payment repair reports one truthful payment outcome and treats ref
   assert.match(handler, /transactionRef:\s*selection\.transactionId/);
   assert.match(handler, /idempotencyKey:\s*selection\.transactionId/);
   assert.doesNotMatch(handler, /idempotencyKey:\s*target\.orderId/);
-  assert.match(handler, /snapshotOnly:\s*selection\.reconciliationOnly/);
-  assert.match(
-    handler,
-    /paymentAttempt\.kind === ["']unknown["'][\s\S]*?return ["']reconciliation-pending["']/,
+  // A reconciliation-only selection is a read probe. Only an ordinary collection takes the write
+  // owner (the one provided or a claim made before any await), so a probe can never send a payment.
+  const ordinaryClaim = handler.slice(
+    handler.indexOf('if (!selection.reconciliationOnly) {'),
+    handler.indexOf('missingPaymentRepairRef.current = true;'),
   );
   assert.match(
-    handler,
-    /paymentAttempt\.kind === ["']unknown["'][\s\S]*?if \(!selection\.reconciliationOnly\) \{[\s\S]*?toast\.error/,
+    ordinaryClaim,
+    /^if \(!selection\.reconciliationOnly\) \{[\s\S]*sendOwner = selection\.ordinaryOwner;[\s\S]*claimOrdinaryCollectionOwner\(collectionScope, orderId\)[\s\S]*sendOwner = claim\.owner;/,
+  );
+  assert.equal(
+    (handler.match(/\bsendOwner = /g) ?? []).length,
+    2,
+    'the write owner may only be assigned inside the ordinary-collection claim',
+  );
+
+  const probeStart = handler.indexOf('if (!sendOwner) {');
+  const writeStart = handler.indexOf('} else {', probeStart);
+  const writeEnd = handler.indexOf('settlement = attempt.settlement;', writeStart);
+  assert.ok(
+    probeStart >= 0 && writeStart > probeStart && writeEnd > writeStart,
+    'the reconciliation read probe and the payment write must be separate branches',
+  );
+  const probeBranch = handler.slice(probeStart, writeStart);
+  const writeBranch = handler.slice(writeStart, writeEnd);
+  assert.match(
+    probeBranch,
+    /await probeOrdinaryOwner\(probeOwner, async \(\) => \{\s*const snapshot = await loadPersistedSplitDismissal\(bridge, orderId, target\.amount\);/,
+  );
+  assert.match(probeBranch, /if \(probe\?\.status === "unknown"\) return "reconciliation-pending";/);
+  assert.doesNotMatch(
+    probeBranch,
+    /repairMissingPayment|recordPayment|runOrdinaryCollection|toast\.error/,
+    'a reconciliation probe must never write a payment or report a failed collection',
+  );
+  assert.match(writeBranch, /await runOrdinaryCollection\(\s*owner,/);
+  assert.match(writeBranch, /recordPayment:\s*\(\) => repairMissingPayment\(bridge\.payments/);
+  assert.match(
+    writeBranch,
+    /if \(run\.status === "unknown" \|\| !attempt \|\| attempt\.kind === "unknown"\) \{\s*toast\.error\([\s\S]*?return "reconciliation-pending";/,
+    'an unknown repair write reports once and stays pending reconciliation',
   );
   assert.match(handler, /await loadOrders\(\)\.catch\(/);
   assert.doesNotMatch(handler, /toast\.success\(/, 'PaymentModal owns the single success toast');

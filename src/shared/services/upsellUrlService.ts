@@ -43,6 +43,8 @@ export function generateModulePurchaseUrl(
     source?: UpsellSource;
     context?: UpsellContext;
     returnUrl?: string;
+    /** Nonsecret hint; the browser must verify membership before purchase. */
+    organizationId?: string;
   }
 ): string {
   const url = new URL('/profile', adminBaseUrl);
@@ -52,6 +54,9 @@ export function generateModulePurchaseUrl(
   url.searchParams.set('purchase', moduleId);
 
   // Optional parameters
+  if (options?.organizationId) {
+    url.searchParams.set('organization_id', options.organizationId);
+  }
   if (options?.billingCycle) {
     url.searchParams.set('billing', options.billingCycle);
   }
@@ -113,6 +118,7 @@ export function generatePurchaseUrlFromParams(
     source: params.source,
     context: params.context,
     returnUrl: params.returnUrl,
+    organizationId: params.organizationId,
   });
 }
 
@@ -298,5 +304,4 @@ export function getAdminBaseUrl(): string {
   // Default to production URL
   return 'https://admin.thesmall.app';
 }
-
 

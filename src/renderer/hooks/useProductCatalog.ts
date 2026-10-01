@@ -7,7 +7,7 @@
  * Task 17.5: Create POS product catalog interface
  */
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import toast from 'react-hot-toast';
 import { offEvent, onEvent } from '../../lib';
 import {
@@ -52,6 +52,9 @@ export function useProductCatalog({
   filters: initialFilters,
   enableRealtime = true,
 }: UseProductCatalogProps): UseProductCatalogReturn {
+  const scope = `${organizationId}/${branchId}`;
+  const activeScope = useRef(scope);
+  activeScope.current = scope;
   const [products, setProducts] = useState<Product[]>([]);
   const [categories, setCategories] = useState<ProductCategory[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -67,13 +70,13 @@ export function useProductCatalog({
 
   // Set context when branch/org changes
   useEffect(() => {
-    if (branchId && organizationId) {
-      productCatalogService.setContext(branchId, organizationId);
-    }
+    productCatalogService.setContext(branchId || '', organizationId || '');
+    setProducts([]);
+    setCategories([]);
   }, [branchId, organizationId]);
 
   // Fetch products and categories
-  const fetchData = useCallback(async (options: { silent?: boolean } = {}) => {
+  const fetchData = useCallback(async (options: { silent?: boolean; force?: boolean } = {}) => {
     const { silent = false } = options;
     // Only organizationId is required (products can be org-wide without branch)
     if (!organizationId) return;
@@ -85,9 +88,10 @@ export function useProductCatalog({
 
     try {
       const [productsData, categoriesData] = await Promise.all([
-        productCatalogService.fetchProducts(filters),
+        productCatalogService.fetchProducts(filters, options.force),
         productCatalogService.fetchCategories(),
       ]);
+      if (activeScope.current !== scope) return;
       setProducts(productsData);
       setCategories(categoriesData);
     } catch (err) {
@@ -101,7 +105,7 @@ export function useProductCatalog({
         setIsLoading(false);
       }
     }
-  }, [organizationId, filters]);
+  }, [organizationId, branchId, filters, scope]);
 
   // Initial fetch and refetch on filter changes
   useEffect(() => {
@@ -221,7 +225,7 @@ export function useProductCatalog({
     stats,
     isLoading,
     error,
-    refetch: fetchData,
+    refetch: () => fetchData({ force: true }),
     searchByBarcode,
     scanBarcode,
     updateQuantity,

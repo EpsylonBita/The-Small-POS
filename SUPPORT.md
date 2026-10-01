@@ -42,22 +42,46 @@ review but does not trigger Telegram by default.
 3. Confirm generated `.zip` path.
 4. Click **Open Folder** and attach the file for support.
 
-Bundle contents:
+Bundle contents (format `thesmall-pos-diagnostics-v2`, the same file names and
+top-level shapes as the Android bundle):
 
+- `diagnostics_manifest.json`: the same keys as the Android bundle (contract: `shared/pos/health/__fixtures__/diagnostics-manifest-contract.json`, which both apps' tests read) — `format`, `formatVersion`, `platform` (`windows`, `android`), `source` (where the export was started, from the Health view snapshot; `unknown` without one), `app` (`versionName`; `versionCode`/`packageName` are Android's, null here; the desktop adds `buildTimestamp` and `gitSha`), `arch`, `generatedAt`, `collectedInMs`, `redaction` (`enabled: true`, `rules`), `logsIncluded: false`, `compression`, `limits` (`listRows: 50`, `stringChars: 1024`), `entries` (the file list), `collectors` (each `entry`, `status` — `ok`, `not_collected`, `unavailable` — `durationMs` and `error`), `errors` (`entry`, `error`) and `truncated` (lists cut to 50 rows, as `file: path (total N)`)
 - `about.json`: app/build/platform metadata
 - `system_health.json`: runtime health snapshot, including terminal context and sync-status summary
 - `terminal_context.json`: explicit terminal, branch, org, ownership, mode, and sync-health identity
 - `sync_status.json`: queue telemetry, backpressure state, latest queue failure, and financial sync counts
-- `closeout_readiness.json`: resolved closeout window, active-staff blockers, payment blockers, sync blockers, and last z-report
+- `closeout_readiness.json`: resolved closeout window, active-staff blockers, payment blockers, sync blockers, last z-report, `fiscalQueueBlockers` (queued fiscal submissions of the branch: `count` for any day, `forReportDate` for the Z window, the fiscal-active verdict, `wouldBlockClose`, and up to 50 rows with attempts, next retry and the sanitized last error) and `lastCloseoutAttempt` (`at`, `stage`, `code`, `message` of the last Z submission on this terminal)
 - `terminal_settings_snapshot.json`: cached terminal, organization, and restaurant settings snapshot
+- `parity_queue_status.json`, `parity_actionable_items.json`, `parity_failure_families.json`: parity sync queue counts, actionable rows and failure families
+- `financial_queue_status.json`, `financial_queue_items.json`: canonical financial sync counts and the rows that still need action, including payments
+- `financial_integrity.json`: waiting-parent financial issues and `legacy_financial_parity_orphan` recovery blockers
+- `last_parity_sync.json`, `credential_state.json`: the last parity sync run and credential presence (`hasAdminUrl`, `hasApiKey`)
 - `sync_backlog.json`: queue counts by entity type
 - `payment_adjustment_backlog.json`: adjustment-specific deferred/waiting-parent breakdown
-- `financial_queue_items.json`: canonical financial sync rows that still need action, including payments
-- `financial_integrity.json`: waiting-parent financial issues and `legacy_financial_parity_orphan` recovery blockers
 - `sync_blocker_details.json`: self-describing blocker rows with payment/order context for failed payment sync issues
 - `sync_errors.json`: recent sync failures
 - `printer_diagnostics.json`: printer profiles and print-job state
-- `logs/`: recent application log files
+- `health_view.json`: what the operator saw in the Health view when the export was started there, or `{ "status": "not_collected" }`
+
+A collector that fails writes `{ "status": "unavailable", "error": ... }` and
+the rest of the bundle still ships; an empty value never stands in for
+"healthy". Raw application logs are never included.
+
+Redaction is always on: there is no unredacted export, whatever the export
+options ask for (`redactSensitive` is accepted and ignored). Secret keys,
+payloads and personal names (staff, customers, drivers) become `[REDACTED]`;
+emails and phone numbers inside text become `[REDACTED_EMAIL]` /
+`[REDACTED_PHONE]`, including spaced and international forms
+(`+41 79 123 45 67`, `+41 (0)79 123 45 67`, groups joined by no-break or
+narrow spaces, tabs or zero-width characters), dotted forms that only look
+like an address (`079.123.45.67`, or `79.123.45.67` after `+41` or a phone
+label) and numbers glued to a label (`τηλ:6941234567`, `phone=…`,
+`Key (phone)=(…)`). Dates, times, IPv4 addresses in canonical form, version
+strings, amounts, UUIDs and terminal ids stay readable, and presence booleans
+(`hasApiKey`, `apiKeyPresent`) are never hidden. Strings are capped at 1 KB
+(only about the first kilobyte is scanned; a number the cap falls in is
+redacted whole) and lists at 50 rows. The cases both apps must agree on are in
+`shared/pos/health/__fixtures__/redaction-vectors.json`.
 
 The diagnostics bundle is intended to be self-identifying. Support should be able to determine the affected `terminal_id`, `branch_id`, and `organization_id` from the bundle alone without opening raw logs.
 
@@ -72,6 +96,17 @@ Health Status first shows a simple operator view:
 - whether support was notified.
 
 Technical details are hidden under **Advanced details for support**.
+
+**Sync now** in the Health view works on the queue rows behind the problem
+(both POS apps). Rows waiting out a retry delay are made due first: only
+their retry time changes, attempts are never reset, and the previous times
+are written to the recovery action log beforehand (`syncNow`, outcome
+`pending`, `madeDue`). The attempt is then judged only on the rows the sync
+actually tried: a row it did not reach stays pending and never counts as a
+failed attempt, so it cannot switch the recommendation to Export
+diagnostics. On Android a Sync now pressed on a day close (Z) row is fixed
+only once the Z no longer shows that row, and "Keep this device's version"
+on an order conflict stays pending until the order is sent again.
 
 System Health diagnostics still include:
 

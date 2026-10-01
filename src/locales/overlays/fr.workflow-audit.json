@@ -10,10 +10,10 @@
   "sync": {
     "healthModal": {
       "problems": {
-        "syncFailed": "La synchronisation a échoué. Ouvrez la récupération pour vérifier les éléments concernés."
+        "syncFailed": "Certains enregistrements n’ont pas pu être synchronisés. Ils restent enregistrés en toute sécurité sur cet appareil."
       },
       "recommendations": {
-        "openRecovery": "Ouvrez la récupération et vérifiez l’élément en échec avant de réessayer."
+        "openRecovery": "Vérifiez les enregistrements en échec avant de réessayer."
       }
     }
   }

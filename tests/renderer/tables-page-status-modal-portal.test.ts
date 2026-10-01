@@ -127,3 +127,46 @@ test('NewOrderPage references the valid localized terminal key, not the missing 
   assert.match(newOrderSource, /settings\.terminal\.messages\.orderCreationDisabled/);
   assert.doesNotMatch(newOrderSource, /t\('terminal\.messages\.featureDisabled'/);
 });
+
+// Item D1 (30/09/2026): a status that releases a table (the server frees it
+// and ends its session, leaving an order that owes money open) asks first:
+// collect, cancel with a reason and the manager's approval, or keep an open
+// tab. Releasing used to leave the order to linger as an orphan.
+test('every table release asks first when the order still owes money', () => {
+  assert.match(pageSource, /const TABLE_RELEASE_STATUSES[\s\S]{0,200}'available',\s*'cleaning',\s*'maintenance'/);
+  assert.match(
+    pageSource,
+    /if \(table && TABLE_RELEASE_STATUSES\.has\(status\)\) \{\s*await guardTableRelease\(table, applyStatus\);/,
+  );
+  assert.match(pageSource, /\{tableReleaseModal\}\s*\{tableReleaseApprovalModal\}/);
+
+  const dashboard = readFileSync(
+    path.join(process.cwd(), 'src', 'renderer', 'components', 'OrderDashboard.tsx'),
+    'utf8',
+  );
+  const setAvailable = dashboard.slice(
+    dashboard.indexOf('const handleTableSetAvailable = useCallback('),
+    dashboard.indexOf('// Handle reservation form submission'),
+  );
+  assert.match(setAvailable, /await guardTableRelease\(table, async \(\) => \{\s*const success = await updateTableStatus\(table\.id, "available"\);/);
+  // Reservation releases go through the same question.
+  assert.equal(
+    (dashboard.match(/await guardTableRelease\(/g) ?? []).length >= 4,
+    true,
+    'set available, stale reservation, no-show and cancelled reservation',
+  );
+  assert.doesNotMatch(
+    dashboard,
+    /await updateTableStatus\(selectedTable\.id, "available", \{ __release: true \}\);/,
+    'no reservation release bypasses the question',
+  );
+
+  const check = readFileSync(
+    path.join(process.cwd(), 'src', 'renderer', 'components', 'tables', 'TableCheckManagerModal.tsx'),
+    'utf8',
+  );
+  // The check can cancel an owing order explicitly, with a reason and approval.
+  assert.match(check, /secondaryModal === 'cancel-order'/);
+  assert.match(check, /getBridge\(\)\.orders\.cancelWithApproval\(\{ orderId, reason \}\)/);
+  assert.match(check, /scope: 'cash_drawer_control'/);
+});

@@ -76,10 +76,19 @@ test('initial checkout waits for fiscal approval before order and payment persis
   );
   const checkoutCommandSource = ordersCommandSource.slice(checkoutCommandAt);
   const checkoutAt = checkoutCommandSource.indexOf('fiscal_checkout_for_order_payload');
-  const createAt = checkoutCommandSource.indexOf('sync::create_order(&db, &normalized, &app)');
+  const createAt = checkoutCommandSource.indexOf('sync::create_order(db, &normalized, invalidator)');
   assert.ok(checkoutCommandAt >= 0, 'initial-payment command missing');
   assert.ok(checkoutAt >= 0, 'native fiscal checkout orchestration missing');
   assert.ok(createAt > checkoutAt, 'order must only be created after fiscal approval');
+  // Item E (30/09/2026): a card the checkout charged is held in its durable
+  // record before the order write, and written with the same keys, so a
+  // failed write is never a plain failure that invites a second charge.
+  const holdAt = checkoutCommandSource.indexOf('UnsavedChargedPayment::for_new_order_checkout');
+  const keyedWriteAt = checkoutCommandSource.indexOf(
+    'write_new_order_checkout(db, &keyed_order, invalidator)',
+  );
+  assert.ok(holdAt > checkoutAt, 'the charged checkout must be held after fiscal approval');
+  assert.ok(keyedWriteAt > holdAt, 'the charged checkout must be written after it is held');
   assert.match(
     checkoutCommandSource,
     /fiscal_checkout_for_order_payload[\s\S]*Err\(error\)[\s\S]*"errorCode": "FISCAL_CHECKOUT_NOT_APPROVED"[\s\S]*sync::create_order/,

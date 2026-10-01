@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from "react";
+import React, { useState, useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../contexts/theme-context';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
@@ -17,13 +17,16 @@ import {
   PlatformHeldPaymentNotice,
   usePlatformHeldNotice,
 } from '../ui/PlatformHeldPaymentNotice';
-import RefundVoidModal from './RefundVoidModal';
+import RefundVoidModal, { type RefundCompleteDetail } from './RefundVoidModal';
+import { UnsavedChargedPaymentBanner } from '../ui/UnsavedChargedPaymentBanner';
+import { useUnsavedChargedPayments } from '../../utils/unsavedPayments';
 import { SplitPaymentModal } from './SplitPaymentModal';
 import type { SplitPaymentResult } from './SplitPaymentModal';
 import { getBridge } from '../../../lib';
 import { buildSplitPaymentItems } from '../../utils/splitPaymentItems';
 import { menuService, type Ingredient, type MenuCategory, type MenuItem } from '../../services/MenuService';
 import { AddCustomerModal } from './AddCustomerModal';
+import { isGiftCardPayment } from '../../lib/gift-card-returns';
 
 interface OrderDetailsModalProps {
   isOpen: boolean;
@@ -50,6 +53,11 @@ function unwrapBridgeArray<T>(result: any): T[] {
   }
 
   return [];
+}
+
+/** True only when the bridge answered with rows `unwrapBridgeArray` can read. */
+function isBridgeArray(result: any): boolean {
+  return Array.isArray(result) || Array.isArray(result?.data);
 }
 
 function isSystemGeneratedServiceNote(note: string): boolean {
@@ -272,10 +280,39 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   const [editingAddressId, setEditingAddressId] = useState<string | null>(null);
   const [catalogLookups, setCatalogLookups] = useState<OrderCatalogLookups>(() => createEmptyOrderCatalogLookups());
   const paymentAutoOpenKeyRef = useRef<string | null>(null);
+  // Net paid and outstanding of an order with a gift card row, from the native settlement read.
+  const [giftSettlement, setGiftSettlement] = useState<
+    { orderId: string; netPaid: number; outstanding: number } | 'unavailable' | null
+  >(null);
+  const giftSettlementRequestRef = useRef(0);
+  // After a confirmed gift return: the order's reread, until all its reads succeeded.
+  const [giftRefresh, setGiftRefresh] = useState<
+    { orderId: string; status: 'running' | 'failed' | 'ok' } | null
+  >(null);
+  const giftRefreshRequestRef = useRef(0);
+  const orderReadRequestRef = useRef(0);
+  const paymentReadRequestRef = useRef(0);
+  // The newest order read of this view; a superseded read answers with it.
+  const latestOrderReadRef = useRef<Promise<boolean>>(Promise.resolve(false));
+  // The order this modal shows now: late reads for another order are dropped.
+  const currentOrderIdRef = useRef(orderId);
+  useLayoutEffect(() => {
+    currentOrderIdRef.current = orderId;
+  }, [orderId]);
+  // One open view of one order. Close, reopen and order switches start a new epoch,
+  // so a held read from an earlier view publishes nothing.
+  const viewEpochRef = useRef(0);
+  useLayoutEffect(() => {
+    viewEpochRef.current += 1;
+  }, [isOpen, orderId]);
+  const isCurrentView = (epoch: number, targetOrderId: string) =>
+    viewEpochRef.current === epoch && currentOrderIdRef.current === targetOrderId;
 
   useEffect(() => {
     if (!isOpen) {
       setOrderData(null);
+      setGiftSettlement(null);
+      setGiftRefresh(null);
       setOrderPayments([]);
       setPaidItems([]);
       setCustomerOrders([]);
@@ -350,15 +387,34 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
     };
   }, [isOpen]);
 
-  const loadOrderData = async (targetOrderId = orderId) => {
+  /**
+   * Resolves true only when this view's newest read hydrated the order. A read that
+   * a newer one superseded in the same view answers with the newer read's outcome.
+   */
+  const loadOrderData = (targetOrderId = orderId): Promise<boolean> => {
+    const read = readOrderData(targetOrderId);
+    latestOrderReadRef.current = read;
+    return read;
+  };
+
+  const readOrderData = async (targetOrderId: string): Promise<boolean> => {
     if (!targetOrderId) {
-      return;
+      return false;
     }
 
+    const epoch = viewEpochRef.current;
+    const request = ++orderReadRequestRef.current;
+    const isCurrent = () =>
+      orderReadRequestRef.current === request && isCurrentView(epoch, targetOrderId);
+    const newer = () => (isCurrentView(epoch, targetOrderId) ? latestOrderReadRef.current : false);
     try {
       setLoading(true);
       const result: any = await bridge.orders.getById(targetOrderId);
-      const hydratedOrder = result?.order ?? result?.data ?? result;
+      if (!isCurrent()) {
+        return newer();
+      }
+      const hydratedOrder =
+        result?.success === false ? null : result?.order ?? result?.data ?? result;
       if (hydratedOrder) {
         setOrderData(hydratedOrder);
         const hydratedPhone =
@@ -371,35 +427,120 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
         } else {
           setCustomerOrders([]);
         }
+        return true;
       }
+      return false;
     } catch (error) {
       console.error('Error loading order:', error);
+      if (!isCurrent()) {
+        return newer();
+      }
       toast.error(t('errors.loadOrderFailed') || 'Failed to load order');
+      return false;
     } finally {
-      setLoading(false);
+      // A late read for an order or view no longer shown must not end the current load.
+      if (isCurrent()) {
+        setLoading(false);
+      }
     }
   };
 
-  const loadPaymentState = async () => {
-    if (!orderId) {
+  /** Resolves true only when this view's newest read returned both row sets. */
+  const loadPaymentState = async (
+    options: { targetOrderId?: string; keepOnFailure?: boolean } = {},
+  ): Promise<boolean> => {
+    const targetOrderId = options.targetOrderId ?? orderId;
+    if (!targetOrderId) {
       setOrderPayments([]);
       setPaidItems([]);
-      return;
+      return false;
     }
 
+    const epoch = viewEpochRef.current;
+    const request = ++paymentReadRequestRef.current;
+    const isCurrent = () =>
+      paymentReadRequestRef.current === request && isCurrentView(epoch, targetOrderId);
     try {
       const [paymentsResult, paidItemsResult] = await Promise.all([
-        bridge.payments.getOrderPayments(orderId),
-        bridge.payments.getPaidItems(orderId),
+        bridge.payments.getOrderPayments(targetOrderId),
+        bridge.payments.getPaidItems(targetOrderId),
       ]);
+      if (!isCurrent()) {
+        return false;
+      }
 
-      setOrderPayments(unwrapBridgeArray<any>(paymentsResult));
-      setPaidItems(unwrapBridgeArray<any>(paidItemsResult));
+      const read = isBridgeArray(paymentsResult) && isBridgeArray(paidItemsResult);
+      // After a confirmed gift return a failed read keeps the rows it cannot replace.
+      if (read || !options.keepOnFailure) {
+        setOrderPayments(unwrapBridgeArray<any>(paymentsResult));
+        setPaidItems(unwrapBridgeArray<any>(paidItemsResult));
+      }
+      return read;
     } catch (error) {
       console.error('Error loading order payment state:', error);
-      setOrderPayments([]);
-      setPaidItems([]);
+      if (!isCurrent()) {
+        return false;
+      }
+      if (!options.keepOnFailure) {
+        setOrderPayments([]);
+        setPaidItems([]);
+      }
+      return false;
     }
+  };
+
+  // A gift card row's gross amount stops being coverage once part of it went back
+  // to the card, so net paid and outstanding come from the native settlement read.
+  const loadGiftSettlement = async (targetOrderId: string): Promise<boolean> => {
+    const epoch = viewEpochRef.current;
+    const request = ++giftSettlementRequestRef.current;
+    let next: { orderId: string; netPaid: number; outstanding: number } | 'unavailable' = 'unavailable';
+    try {
+      const snapshot = await bridge.payments.getSettlementSnapshot(targetOrderId);
+      if (
+        snapshot?.success === true &&
+        snapshot.orderId === targetOrderId &&
+        Number.isFinite(snapshot.netPaid) &&
+        Number.isFinite(snapshot.outstandingAmount)
+      ) {
+        next = { orderId: targetOrderId, netPaid: snapshot.netPaid, outstanding: snapshot.outstandingAmount };
+      }
+    } catch (error) {
+      console.error('Error loading order settlement:', error);
+    }
+    if (giftSettlementRequestRef.current !== request || !isCurrentView(epoch, targetOrderId)) {
+      return false;
+    }
+    setGiftSettlement(next);
+    return next !== 'unavailable';
+  };
+
+  /**
+   * After a confirmed gift card return: reread this exact local order, its payment
+   * rows and its settlement even when the dashboard passed an order prop, which
+   * predates the return. A completion for an order no longer shown changes nothing.
+   * Resolves true only when all three reads of this same view succeeded; otherwise
+   * fresh actions stay blocked and a retry is offered.
+   */
+  const refreshAfterGiftReturn = async (targetOrderId: string): Promise<boolean> => {
+    if (!targetOrderId || currentOrderIdRef.current !== targetOrderId) {
+      return false;
+    }
+    const epoch = viewEpochRef.current;
+    const request = ++giftRefreshRequestRef.current;
+    setGiftRefresh({ orderId: targetOrderId, status: 'running' });
+    // Each read reports its own success: a swallowed failure is not a refresh.
+    const [orderRead, paymentsRead, settlementRead] = await Promise.all([
+      loadOrderData(targetOrderId),
+      loadPaymentState({ targetOrderId, keepOnFailure: true }),
+      loadGiftSettlement(targetOrderId),
+    ]);
+    if (giftRefreshRequestRef.current !== request || !isCurrentView(epoch, targetOrderId)) {
+      return false;
+    }
+    const refreshed = orderRead && paymentsRead && settlementRead;
+    setGiftRefresh({ orderId: targetOrderId, status: refreshed ? 'ok' : 'failed' });
+    return refreshed;
   };
 
   const loadCustomerHistory = async (phone: string) => {
@@ -1010,6 +1151,26 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   };
 
   const canRefund = paymentStatus === 'paid' || paymentStatus === 'completed';
+  // Gift card rows go back only to their original card. A partial return moves the
+  // header to partially_paid, so the entry stays while a completed gift row remains;
+  // ordinary refunds keep the paid/completed rule.
+  const hasGiftPaymentRow = orderPayments.some((payment: any) => isGiftCardPayment(payment?.method));
+  const canGiftReturn =
+    !canRefund && completedPayments.some((payment: any) => isGiftCardPayment(payment?.method));
+  const showRefundEntry = canRefund || canGiftReturn;
+  // Until the reread after a confirmed gift return succeeded, no fresh action starts here.
+  const giftRefreshBlocked =
+    giftRefresh !== null && giftRefresh.orderId === orderId && giftRefresh.status !== 'ok';
+  const giftRefreshFailed =
+    giftRefresh !== null && giftRefresh.orderId === orderId && giftRefresh.status === 'failed';
+
+  useEffect(() => {
+    if (!isOpen || !orderId || !hasGiftPaymentRow) {
+      setGiftSettlement(null);
+      return;
+    }
+    void loadGiftSettlement(orderId);
+  }, [isOpen, orderId, hasGiftPaymentRow]);
 
   // Presentation for money the platform is holding (prepaid online, or COD its
   // own rider collected). Read from the order's disposition through the shared
@@ -1027,6 +1188,12 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
     [displayOrder, orderId],
   );
   const platformHeldNotice = usePlatformHeldNotice(platformHeldOrder);
+  // A card of this order charged on this till whose payment is not saved yet
+  // (30/09/2026): said here too, after a restart, with Save payment again;
+  // no new collection is offered while it stands.
+  const unsaved = useUnsavedChargedPayments(orderId, isOpen, t, formatCurrency, () => {
+    void loadPaymentState();
+  });
 
   // The collect action is hidden for platform-held money, and the banner below
   // says why. The write paths refuse it anyway; this keeps the operator from
@@ -1034,6 +1201,8 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   const canSplitPayment =
     !isCancelledOrder &&
     platformHeldNotice === null &&
+    unsaved.payments.length === 0 &&
+    !giftRefreshBlocked &&
     (paymentStatus === 'pending' || paymentStatus === 'partially_paid');
 
   useEffect(() => {
@@ -1059,7 +1228,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   const footerButtonCount =
     (onPrintReceipt ? 1 : 0) +
     (canSplitPayment ? 1 : 0) +
-    (canRefund ? 1 : 0) +
+    (showRefundEntry ? 1 : 0) +
     1; // Close button is always shown
   const footerGridCols =
     footerButtonCount === 4 ? 'grid-cols-4' :
@@ -1186,13 +1355,17 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
             {t('payment.split.title', { defaultValue: 'Split Payment' })}
           </button>
         )}
-        {canRefund && (
+        {showRefundEntry && (
           <button
+            data-testid="order-details-void-refund"
             onClick={() => setShowRefundModal(true)}
-            className="flex min-h-[52px] w-full items-center justify-center gap-2 rounded-2xl border border-red-300/70 bg-red-50 px-4 text-sm font-semibold text-red-700 transition active:bg-red-100 dark:border-red-500/25 dark:bg-red-500/10 dark:text-red-200 dark:active:bg-red-500/15"
+            disabled={giftRefreshBlocked}
+            className="flex min-h-[52px] w-full items-center justify-center gap-2 rounded-2xl border border-red-300/70 bg-red-50 px-4 text-sm font-semibold text-red-700 transition active:bg-red-100 disabled:opacity-50 dark:border-red-500/25 dark:bg-red-500/10 dark:text-red-200 dark:active:bg-red-500/15"
           >
             <RotateCcw className="h-4 w-4" />
-            {t('modals.orderDetails.voidRefund', { defaultValue: 'Void / Refund' })}
+            {canRefund
+              ? t('modals.orderDetails.voidRefund', { defaultValue: 'Void / Refund' })
+              : t('modals.refund.gift.action', { defaultValue: 'Return to gift card' })}
           </button>
         )}
         <button
@@ -1304,6 +1477,31 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                       <div className="text-sm capitalize liquid-glass-modal-text-muted">
                         {t('modals.orderDetails.paymentStatus', { defaultValue: 'Payment status' })}: {getPaymentStatusLabel(paymentStatus)}
                       </div>
+                      {hasGiftPaymentRow && (
+                        <div data-testid="order-details-net-coverage" className="text-sm liquid-glass-modal-text-muted">
+                          {giftSettlement && giftSettlement !== 'unavailable' && giftSettlement.orderId === orderId
+                            ? t('modals.refund.gift.netCoverage', {
+                                paid: formatCurrency(giftSettlement.netPaid),
+                                outstanding: formatCurrency(giftSettlement.outstanding),
+                              })
+                            : giftSettlement === 'unavailable'
+                              ? t('modals.refund.gift.netCoverageUnavailable')
+                              : t('modals.refund.gift.netCoverageLoading')}
+                        </div>
+                      )}
+                      {giftRefreshFailed && (
+                        <div data-testid="order-details-gift-refresh-failed" role="alert" className="mt-2 space-y-2 text-sm text-red-600 dark:text-red-300">
+                          <p>{t('modals.refund.gift.orderRefreshFailed')}</p>
+                          <button
+                            type="button"
+                            data-testid="order-details-gift-refresh-retry"
+                            onClick={() => void refreshAfterGiftReturn(orderId)}
+                            className="min-h-[44px] rounded-xl border border-red-300/70 bg-red-50 px-3 font-semibold text-red-700 active:bg-red-100 dark:border-red-500/25 dark:bg-red-500/10 dark:text-red-200"
+                          >
+                            {t('modals.refund.gift.retry')}
+                          </button>
+                        </div>
+                      )}
                     </div>
                   </div>
                   {/* Right under the status the operator reads before deciding
@@ -1311,6 +1509,12 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                       failed settlement leaves it `pending`, which looks
                       exactly like money still owed. */}
                   <PlatformHeldPaymentNotice order={platformHeldOrder} className="mt-3" />
+                  <UnsavedChargedPaymentBanner
+                    payments={unsaved.payments}
+                    onSaveAgain={unsaved.saveAgain}
+                    isSaving={unsaved.isSaving}
+                    className="mt-3"
+                  />
                 </div>
 
                 <div className={`${insetPanelClass} px-4 py-3`}>
@@ -1924,12 +2128,18 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
         onClose={() => setShowRefundModal(false)}
         orderId={orderId}
         orderTotal={total}
-        onRefundComplete={() => {
+        giftReturnOnly={!canRefund}
+        onRefundComplete={(detail?: RefundCompleteDetail) => {
+          if (detail?.giftReturn) {
+            // Awaited by the gift panel: false keeps fresh returns blocked behind a retry.
+            return refreshAfterGiftReturn(detail.giftReturn.orderId);
+          }
           // Reload order data to reflect updated payment status
           if (orderId && !order) {
             loadOrderData();
           }
           void loadPaymentState();
+          return undefined;
         }}
       />
     )}

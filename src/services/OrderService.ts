@@ -1000,6 +1000,43 @@ export class OrderService {
               ),
               { code: 'FISCAL_CHECKOUT_NOT_APPROVED', retryable: false },
             );
+          } else if (resp?.errorCode === 'PAYMENT_NOT_SAVED') {
+            // Item E (30/09/2026): the card was charged at checkout and the
+            // order write failed. The till holds the order and its payment for
+            // "Save payment again". Never an Admin API create or an offline
+            // retry record: that would write a second order, and the next
+            // checkout a second charge.
+            bridgeCreateHardFailure = true;
+            bridgeCreateError = Object.assign(
+              ErrorFactory.system(
+                typeof ipcError === 'string' ? ipcError : JSON.stringify(ipcError),
+              ),
+              {
+                code: 'PAYMENT_NOT_SAVED',
+                errorCode: 'PAYMENT_NOT_SAVED',
+                retryable: false,
+                paymentNotSaved: true,
+                orderPersisted: false,
+                amountCents: resp?.amountCents,
+                unsavedPayment: resp?.unsavedPayment,
+              },
+            );
+          } else if (resp?.errorCode === 'CHECKOUT_IN_PROGRESS') {
+            // Fix review 30/09/2026: this same checkout is still waiting on
+            // the card terminal. Final here: never an Admin API create or an
+            // offline retry record (a second order, or a second charge).
+            bridgeCreateHardFailure = true;
+            bridgeCreateError = Object.assign(
+              ErrorFactory.system(
+                typeof ipcError === 'string' ? ipcError : JSON.stringify(ipcError),
+              ),
+              {
+                code: 'CHECKOUT_IN_PROGRESS',
+                errorCode: 'CHECKOUT_IN_PROGRESS',
+                retryable: false,
+                checkoutInProgress: true,
+              },
+            );
           } else if (!this.allowAdminApiFallback()) {
             bridgeCreateError = ErrorFactory.system(
               typeof ipcError === 'string' ? ipcError : JSON.stringify(ipcError),
@@ -1016,6 +1053,17 @@ export class OrderService {
             debugLogger.warn('Bridge create failed; will try Admin API', ipcErr, 'OrderService');
           }
         }
+      }
+
+      // A charged checkout held for "Save payment again" is final here: no
+      // Admin API payload is built and nothing below may turn it into a retry
+      // record or a second create.
+      if (
+        bridgeCreateHardFailure &&
+        ((bridgeCreateError as any)?.paymentNotSaved === true ||
+          (bridgeCreateError as any)?.checkoutInProgress === true)
+      ) {
+        throw bridgeCreateError;
       }
 
       // 2) Fallback to Admin API
@@ -1296,6 +1344,14 @@ export class OrderService {
     } catch (error) {
       if ((error as { code?: string } | null)?.code === 'FISCAL_CHECKOUT_NOT_APPROVED') {
         debugLogger.error('Fiscal checkout rejected order creation', error, 'OrderService');
+        throw error;
+      }
+      if ((error as { paymentNotSaved?: boolean } | null)?.paymentNotSaved === true) {
+        debugLogger.error('A charged checkout could not be saved yet', error, 'OrderService');
+        throw error;
+      }
+      if ((error as { checkoutInProgress?: boolean } | null)?.checkoutInProgress === true) {
+        debugLogger.warn('The same checkout is still in progress', error, 'OrderService');
         throw error;
       }
       if (queuedFallbackContext && this.shouldQueueOrderCreate(error)) {

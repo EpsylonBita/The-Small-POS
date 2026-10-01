@@ -1,4 +1,38 @@
 {
+  "displayPurchase": {
+    "beforePurchase": "Para se ta blesh",
+    "operation": "Si funksionon",
+    "equipment": "Pajisjet e nevojshme",
+    "compatibility": "Kontrollo përputhshmërinë",
+    "videoOutput": "Nevojitet një dalje video e pavarur dhe e përputhshme: HDMI ose USB-C me mbështetje video dhe kabllo, përshtatës ose stacion lidhjeje të përshtatshëm, ose ekran pa tela i mbështetur nga sistemi operativ, si Miracast, me marrës të përputhshëm. Vetëm lidhja në të njëjtin rrjet Wi-Fi nuk krijon dalje video.",
+    "shopHardware": "Ekranet, ekranet me prekje, kabllot, lidhjet USB për prekjen, përshtatësit, stacionet e lidhjes dhe marrësit pa tela sigurohen nga lokali dhe nuk përfshihen në abonimin e modulit.",
+    "hardwareCheck": "USB-C duhet të mbështesë daljen video; jo çdo POS Android e ka këtë mundësi. Para blerjes kontrollo pajisjen konkrete, sistemin operativ, grafikën, portat, firmuerin dhe marrësin. Mbështetja për dy ekrane pa tela nuk është e garantuar.",
+    "twoScreens": "Përdorimi i KDS dhe Ekranit të klientit së bashku kërkon ekranin kryesor të POS-it dhe dy ekrane të jashtme të ndryshme, që mund të kontrollohen në mënyrë të pavarur. Pajisja duhet të mbështesë të dyja daljet. Një ndarës i thjeshtë HDMI përsërit të njëjtën pamje.",
+    "localOnly": "Këto janë ekrane të lidhura lokalisht, pa lidhje cloud për shfletues ose Smart TV, URL çiftimi apo shërbim cloud të posaçëm për ekranet. Sinkronizimi i zakonshëm i porosive dhe licencimi i POS-it mbeten të veçanta.",
+    "kitchen_display": {
+      "summary": "Një pamje e veçantë për kuzhinën me porositë lokale të POS-it, ndërsa POS-i kryesor mbetet i lirë për të marrë porosi.",
+      "requirements": "Për një ekran të jashtëm ndërveprues, kontrollo videon e përputhshme HDMI/USB-C ose ekranin pa tela të sistemit operativ dhe kthimin e prekjes apo komandave. Pajisjet sigurohen nga lokali dhe nuk përfshihen. Të dy modulet e ekranit kërkojnë dy dalje të jashtme të veçanta.",
+      "features": {
+        "local": "Pamje lokale për kuzhinën",
+        "workflow": "Arka vazhdon të marrë porosi",
+        "status": "Veprimet Gati dhe Marrë në kuzhinë"
+      },
+      "operation": "Hap KDS brenda POS-it Windows ose Android. Lexon porositë lokale dhe shfaq një pamje të veçantë për kuzhinën, ndërsa POS-i kryesor mund të marrë porosi. Mbaje aplikacionin hapur; ndryshimi i faqes nuk ndalon një projeksion aktiv.",
+      "collection": "Veprimet Gati dhe Marrë në kuzhinë përditësojnë Dashboard-in dhe porositë aktive, si edhe Ekranin e klientit nëse është blerë. Marrë nënkupton vetëm marrjen nga kuzhina; shitja dhe pagesa mbeten aktive deri në përfundimin e procesit të tyre të zakonshëm.",
+      "input": "Ndërveprimi në kuzhinë kërkon kthim të përputhshëm të prekjes ose komandave: për shembull video HDMI dhe prekje përmes USB, të lidhura saktë nga pajisja dhe sistemi operativ, ose një marrës pa tela me kthim komandash. Vetëm videoja HDMI nuk mundëson prekjen."
+    },
+    "customer_display": {
+      "summary": "Një modul që blihet veçmas: tabelë lokale Në përgatitje/Gati në një ekran tjetër të lidhur, që fsheh porositë e marra ndërsa POS-i kryesor mbetet i lirë.",
+      "requirements": "Kërkon një ekran të veçantë dhe dalje video të pavarur e të përputhshme; tabela pasive nuk ka nevojë për ekran me prekje. Pajisjet sigurohen nga lokali dhe nuk përfshihen. Të dy modulet e ekranit kërkojnë dy dalje të jashtme të veçanta.",
+      "features": {
+        "local": "Tabelë lokale për klientët",
+        "workflow": "Modul që blihet veçmas",
+        "status": "Në përgatitje/Gati; porositë e marra fshihen"
+      },
+      "operation": "Ekrani i klientit punon lokalisht në një ekran tjetër të lidhur. Shfaq porositë Në përgatitje dhe Gati dhe fsheh porositë e marra, ndërsa POS-i kryesor mbetet i lirë për të regjistruar porosi. Ky është një modul që blihet veçmas.",
+      "input": "Tabela pasive e Ekranit të klientit nuk kërkon ekran me prekje."
+    }
+  },
   "primaryActions": {
     "trigger": "Krijo",
     "newSale": "Shitje e re",
@@ -541,6 +575,9 @@
     }
   },
   "auth": {
+    "managerApproval": {
+      "subtitle": "Askush nuk është në turn në këtë arkë. Një menaxher me të drejtë miratimi fut PIN-in e vet. Nuk tarifohet asgjë."
+    },
     "login": {
       "title": "Hyrja e stafit",
       "subtitle": "Shkruaj PIN-in për të vazhduar",
@@ -659,6 +696,11 @@
       "rejected": "Refuzuar",
       "inProgress": "Në vazhdim",
       "delivered": "Dorëzuar"
+    },
+    "kitchenStage": {
+      "preparing": "Kuzhina: në përgatitje",
+      "ready": "Kuzhina: gati për marrje",
+      "collected": "U mor nga kuzhina"
     },
     "type": {
       "dineIn": "Në lokal",
@@ -1621,6 +1663,29 @@
       "amount": "Shuma e bakshishit",
       "total": "Totali me bakshish",
       "thankYou": "Faleminderit për bujarinë tuaj!"
+    },
+    "setAside": {
+      "message": "Kjo porosi ishte paguar tashmë. {{amount}} që sapo u morën janë regjistruar që t'i kthejë një menaxher dhe nuk llogariten. Mos i arkëto përsëri.",
+      "exceedsMessage": "Në këtë porosi kishin mbetur për t'u paguar vetëm {{due}}. {{amount}} që sapo u morën janë regjistruar që t'i kthejë një menaxher dhe nuk llogariten. Arkëto vetëm shumën që detyrohet."
+    },
+    "notSaved": {
+      "title": "U debitua, por ende pa u ruajtur",
+      "newOrder": "Porosi e re, ende pa u ruajtur",
+      "message": "Karta u debitua {{amount}}. Pagesa ende nuk u ruajt dot në këtë arkë. MOS e debito kartën përsëri: ruaje pagesën sërish.",
+      "pendingMessage": "Një pagesë me kartë prej {{amount}} në këtë porosi u debitua, por ende nuk është ruajtur në këtë arkë. Ruaje sërish para se të marrësh një pagesë tjetër. MOS e debito kartën përsëri.",
+      "chargedAt": "u debitua {{time}}",
+      "saveAgain": "Ruaje pagesën sërish",
+      "saving": "Po ruhet…",
+      "saved": "Pagesa u ruajt",
+      "stillNotSaved": "{{amount}} e debituara ende nuk janë ruajtur në këtë arkë. MOS e debito kartën përsëri. Provo sërish «Ruaje pagesën sërish»; nëse nuk ruhet dot, ktheja paratë klientit dhe një menaxher e konfirmon në raportin Z.",
+      "cannotSave": "{{amount}} e debituara nuk mund të ruhen në këtë arkë. MOS e debito kartën përsëri. Ktheja paratë klientit, pastaj një menaxher e konfirmon në raportin Z."
+    },
+    "checkoutOutcomeUnknown": "Terminali i kartave nuk është përgjigjur ende. Mos nis një pagesë të re: prit, pastaj shtyp përsëri Paguaj. Kontrollon të njëjtën pagesë dhe nuk tarifon kurrë dy herë.",
+    "checkoutInProgress": "Kjo pagesë është ende në proces në terminalin e kartave. Prit të përfundojë, pastaj shtyp përsëri Paguaj: kontrollon të njëjtën pagesë dhe nuk tarifon kurrë dy herë.",
+    "moneySettings": {
+      "unavailableTitle": "Mbyllja e porosisë u ndal",
+      "unavailableMessage": "Norma e TVSH-së dhe kufiri i zbritjes së dyqanit nuk u lexuan, ndaj asgjë nuk llogaritet me hamendje. Provo sërish; nëse vazhdon të dështojë, rinis aplikacionin.",
+      "retry": "Provo sërish"
     }
   },
   "paymentPrintPrompt": {
@@ -3112,6 +3177,9 @@
         "capEftIndex": "Numri i EFT POS-it të lidhur",
         "capCashCode": "Kodi i keshit",
         "capCardCode": "Kodi i kartës",
+        "capVoucherCode": "Kodi i kuponit (opsional)",
+        "capVoucherCodeHelp": "Bosh derisa tekniku yt të caktojë një",
+        "capVoucherCodeInvalid": "Kodi i kuponit duhet të jetë 2–20 dhe i ndryshëm nga kodet e parave në dorë dhe të kartës",
         "capDepartmentRequired": "Shkruaj departamentin e kasës (1–99) për çdo normë TVSH-je",
         "capFoldersRequired": "Duhen dosjet Capture dhe të daljes të CAP Driver",
         "capCodesInvalid": "Kodet e pagesës CAP duhet të jenë 1–20, kurse numri i EFT POS-it 1–99",
@@ -3467,6 +3535,7 @@
     },
     "system": {
       "syncBacklog": "Radha e sinkronizimit",
+      "backlogUnavailable": "Radha e sinkronizimit nuk u lexua dot. Kontrollo sërish; nëse vazhdon të dështojë, eksporto diagnostikën për suportin.",
       "invalidOrders": "Porosi të pavlefshme",
       "invalidOrdersDesc": "Porositë kanë artikuj menuje që s'janë në cache-in lokal",
       "removeInvalidOrders": "Hiq porositë e pavlefshme",
@@ -3581,7 +3650,24 @@
         "printerNotConfigured": "Ky POS s'ka asnjë printer të konfiguruar. Porositë ruhen, por kuponët s'printohen derisa të konfigurohet një printer.",
         "syncWaiting": "Disa të dhëna presin të sinkronizohen. POS-i i ka ruajtur lokalisht dhe do të provojë vetë përsëri.",
         "ready": "Kontrollet e porosive, sinkronizimit, internetit dhe printerit dolën të gjitha në rregull.",
-        "shiftInactive": "S'ka asnjë turn aktiv. Nis turnin para se të marrësh porosi."
+        "shiftInactive": "S'ka asnjë turn aktiv. Nis turnin para se të marrësh porosi.",
+        "terminalNotAuthorized": "Ky terminal nuk po arrin të hyjë në sistemin e dyqanit. Shitjet ruhen në këtë pajisje, por asgjë nuk sinkronizohet derisa të lidhet sërish.",
+        "closeoutBlocked": "Duhet rregulluar diçka para se të mbyllet dita (Z).",
+        "closeoutOverdue": "Një ditë pune e mëparshme nuk është mbyllur ende (Z).",
+        "closeoutWaitingSync": "Disa pagesa ose lëvizje arke nuk kanë arritur ende në server, ndaj dita nuk mund të mbyllet (Z).",
+        "liveUpdatesDown": "Përditësimet live janë shkëputur. Porositë sinkronizohen gjithsesi, por pajisjet e tjera mund t'i shohin ndryshimet me vonesë.",
+        "syncStuck": {
+          "one": "1 regjistrim në radhë nuk është sinkronizuar prej {{duration}}.",
+          "other": "{{count}} regjistrime në radhë nuk janë sinkronizuar prej {{duration}}."
+        },
+        "fiscalNotSent": {
+          "one": "1 kupon fiskal nuk është dërguar prej {{duration}}.",
+          "other": "{{count}} kupona fiskalë nuk janë dërguar prej {{duration}}."
+        },
+        "printingStalled": {
+          "one": "Kuponat presin dhe nuk printohen: 1 printim pret prej {{duration}}.",
+          "other": "Kuponat presin dhe nuk printohen: {{count}} printime në pritje, më i vjetri prej {{duration}}."
+        }
       },
       "recommendations": {
         "doNotClearData": "Mos fshi asnjë të dhënë.",
@@ -3594,14 +3680,16 @@
         "useNormally": "Vazhdo ta përdorësh POS-in normalisht.",
         "keepTakingOrders": "Vazhdo të marrësh porosi.",
         "startShift": "Nis turnin para se të marrësh porosi.",
-        "configurePrinter": "Konfiguro një printer për këtë POS."
+        "configurePrinter": "Konfiguro një printer për këtë POS.",
+        "checkPrinter": "Kontrollo që printeri të jetë i ndezur, të ketë letër dhe të jetë i lidhur."
       },
       "services": {
         "orders": "Porosi",
         "internet": "Interneti",
         "sync": "Sinkronizimi",
         "printer": "Printeri",
-        "support": "Suport"
+        "support": "Suport",
+        "closeout": "Mbyllja e ditës (Z)"
       },
       "status": {
         "working": "Punon",
@@ -3632,7 +3720,9 @@
         "applied": "Aplikuar",
         "completed": "Përfunduar",
         "error": "Gabim",
-        "unavailable": "Jo në dispozicion"
+        "unavailable": "Jo në dispozicion",
+        "stuck": "Ka ngecur",
+        "viaMainTerminal": "Përmes terminalit kryesor"
       },
       "support": {
         "sentToast": "Raporti diagnostik iu dërgua suportit.",
@@ -3704,6 +3794,150 @@
         "update": "Përditëso",
         "delete": "Fshi",
         "unknown": "Veprim sinkronizimi"
+      },
+      "impact": {
+        "dayCloseBlockedUntilSent": "Mbyllja e ditës (Z) nuk do të përfundojë derisa të dërgohen.",
+        "dayCloseBlocked": "Mbyllja e ditës (Z) nuk do të përfundojë derisa të rregullohet kjo.",
+        "dayCloseOverdue": "Mbyll fillimisht ditën e mëparshme (Z).",
+        "receiptsMayNotPrint": "Kuponat mund të mos printohen.",
+        "otherDevicesNotUpdated": "Pajisjet e tjera dhe sistemi i menaxhimit mund të mos i shohin ende ndryshimet e fundit.",
+        "printingStopped": "Kuponat dhe fletët e kuzhinës nuk po dalin nga printeri. Porositë ruhen gjithsesi."
+      },
+      "primaryAction": {
+        "syncNow": {
+          "label": "Sinkronizo tani",
+          "detail": "Dërgo tani në server regjistrimet që presin.",
+          "verification": "Pastaj POS-i kontrollon sërish për t'u siguruar që u dërguan."
+        },
+        "exportDiagnostics": {
+          "label": "Eksporto diagnostikën",
+          "detail": "Sinkronizimi nuk e zgjidhi problemin. Eksporto skedarin e diagnostikës dhe dërgoja suportit.",
+          "verification": "Skedari e ndihmon suportin të gjejë shkakun, por vetë nuk e rregullon problemin."
+        },
+        "openRecovery": {
+          "label": "Shiko problemin",
+          "detail": "Shiko cilat regjistrime preken dhe hapin e sigurt të radhës për secilin.",
+          "verification": "Çdo rregullim kontrollohet sërish para se të shënohet si i zgjidhur."
+        },
+        "reconnect": {
+          "label": "Rilidh përditësimet live",
+          "detail": "Porositë vazhdojnë të sinkronizohen edhe kur përditësimet live nuk punojnë.",
+          "verification": "Pas rilidhjes, POS-i e kontrollon sërish lidhjen."
+        },
+        "openConnectionSettings": {
+          "label": "Hap cilësimet e terminalit",
+          "detail": "Lidhe sërish këtë terminal me dyqanin nga cilësimet e terminalit. Nëse s'i ke të dhënat, kërkoji te pronari i dyqanit ose te suporti.",
+          "verification": "Sinkronizimi rinis sapo terminali të lidhet."
+        },
+        "waitForConnection": {
+          "label": "Në pritje të lidhjes",
+          "detail": "Vazhdo të shesësh. Gjithçka që ruhet këtu sinkronizohet vetë kur të kthehet interneti.",
+          "verification": "POS-i vazhdon ta kontrollojë lidhjen."
+        },
+        "startShift": {
+          "label": "Nis turnin",
+          "detail": "Nis turnin para se të marrësh porosi.",
+          "verification": "Mund të marrësh porosi sapo të nisë turni."
+        },
+        "configurePrinter": {
+          "label": "Cilësimet e printerit",
+          "detail": "Kontrollo që printeri të jetë i ndezur dhe i konfiguruar për këtë POS.",
+          "verification": "Printo një kupon prove për ta konfirmuar."
+        },
+        "openZReport": {
+          "label": "Hap mbylljen e ditës (Z)",
+          "detail": "Ekrani i raportit Z tregon çfarë ka mbetur dhe si rregullohet.",
+          "verification": "Raporti Z i kontrollon sërish të gjitha para se ta mbyllë ditën."
+        },
+        "refresh": {
+          "label": "Kontrollo sërish",
+          "detail": "Statusi nuk u lexua dot. Kontrollo sërish; nëse vazhdon të dështojë, eksporto diagnostikën për suportin.",
+          "verification": "Ndërkohë POS-i vazhdon të punojë lokalisht."
+        },
+        "none": {
+          "label": "S'duhet bërë asgjë",
+          "detail": "Vazhdo ta përdorësh POS-in normalisht.",
+          "verification": "POS-i vazhdon kontrollet në sfond."
+        },
+        "checkPrinting": {
+          "label": "Kontrollo printerin",
+          "detail": "Hap cilësimet e printerit dhe kontrollo që printeri të jetë i ndezur, të ketë letër dhe të jetë i lidhur. Nëse kuponat ende nuk printohen, kontakto suportin.",
+          "verification": "POS-i kontrollon sërish radhën e printimit. Paralajmërimi zhduket sapo të printohen kuponat në pritje."
+        }
+      },
+      "outcome": {
+        "pending": "U kërkua. S'është konfirmuar ende — POS-i po kontrollon sërish.",
+        "failed": "Nuk funksionoi. Puna që ke ruajtur nuk humbet.",
+        "unknown": "U krye, por ende s'ka konfirmim që u rregullua. Problemi mbetet derisa një kontroll i ri të tregojë që është zgjidhur.",
+        "resolved": "U rregullua: e konfirmon një kontroll i ri."
+      },
+      "closeout": {
+        "title": "Mbyllja e ditës (Z)",
+        "affects": "Mund të vazhdosh të shesësh. Mbyllja e ditës (Z) nuk do të përfundojë derisa të zgjidhen këto.",
+        "status": {
+          "ready": "Gati",
+          "open": "Dita e hapur",
+          "blocked": "Bllokuar",
+          "overdue": "Ditë e kaluar e hapur",
+          "submitted": "Dërguar",
+          "unavailable": "Jo në dispozicion",
+          "notChecked": "Kontrollohet te ekrani i raportit Z",
+          "notApplicable": "Në terminalin kryesor"
+        },
+        "summary": {
+          "ready": "Asgjë nuk e pengon mbylljen e ditës.",
+          "open": "Mbeten këto para se të mbyllet dita:",
+          "blocked": "Rregulloji këto para se të mbyllet dita:",
+          "overdue": "Një ditë pune e mëparshme është ende e hapur. Mbylle fillimisht atë (Z).",
+          "submitted": "Raporti Z u dërgua dhe pret konfirmimin nga serveri.",
+          "unavailable": "S'u kontrollua dot nëse dita mund të mbyllet (Z).",
+          "notChecked": "Ky ekran nuk i sheh të gjitha kontrollet e mbylljes së ditës. Ekrani i raportit Z i kontrollon të gjitha para se ta mbyllë ditën.",
+          "notApplicable": "Mbyllja e ditës (Z) bëhet në terminalin kryesor."
+        },
+        "blockers": {
+          "transferred_drivers": "Turne shoferësh me para të transferuara: {{count}}",
+          "active_shifts": "Turne të hapura: {{count}}",
+          "unreconciled_drawers": "Arka pa u barazuar: {{count}}",
+          "pending_orders": "Porosi të papërfunduara: {{count}}",
+          "unpaid_finalized_orders": "Porosi të përfunduara pa pagesë: {{count}}",
+          "unsynced_financial_rows": "Pagesa ose lëvizje arke të pasinkronizuara: {{count}}",
+          "payments_need_review": "Pagesa të lëna mënjanë si dyfishime të mundshme: {{count}}",
+          "payments_not_saved": "Pagesa të tarifuara të paruajtura: {{count}}",
+          "paid_orders_without_payment": "Porosi të paguara pa regjistrim pagese: {{count}}",
+          "fiscal_queue_not_empty": "Kupona fiskalë të padërguar: {{count}}",
+          "other": "Kontrolle të tjera: {{count}}"
+        },
+        "links": {
+          "openShifts": "Turne",
+          "openOrders": "Porosi",
+          "openOrder": "Hap porosinë",
+          "syncNow": "Sinkronizo tani",
+          "openZReport": "Hap raportin Z"
+        }
+      },
+      "duration": {
+        "lessThanMinute": "më pak se një minute",
+        "minutes": {
+          "one": "{{count}} minute",
+          "other": "{{count}} minutash"
+        },
+        "hours": {
+          "one": "{{count}} ore",
+          "other": "{{count}} orësh"
+        },
+        "days": {
+          "one": "{{count}} dite",
+          "other": "{{count}} ditësh"
+        }
+      },
+      "queue": {
+        "state": {
+          "waiting": "Në pritje",
+          "retrying": "Po provohet sërish",
+          "stuck": "I bllokuar",
+          "failed": "Dështoi",
+          "conflict": "Konflikt"
+        }
       }
     },
     "blocker": {
@@ -4206,6 +4440,72 @@
       "countedCashRequired": "Shkruaj keshin e numëruar para se ta mbyllësh turnin.",
       "actualCashReturnedRequired": "Shkruaj keshin që iu dorëzua realisht arkëtarit para se ta mbyllësh turnin.",
       "invalidOpeningCash": "Shkruaj një shumë të saktë për keshin në hapje (0 ose më shumë)",
+      "financialOpeningChecking": "Po kontrollohet hapja…",
+      "financialOpeningResume": "Kontrollo hapjen fillestare",
+      "financialOpeningPending": "Konfirmimi është në pritje. Ruaje këtë hapje fillestare dhe kontrollo përsëri.",
+      "financialOpeningUnknown": "Rezultati është i panjohur. Kontrollo të njëjtën hapje pa nisur një tjetër.",
+      "financialOpeningReauthorize": "Shkruaj PIN-in e të njëjtit arkëtar për të vazhduar hapjen fillestare.",
+      "financialOpeningUnusable": "Kjo hapje fillestare është mbyllur ose nuk mund të përdoret.",
+      "financialOpeningUnavailable": "Hapja financiare nuk është e disponueshme. Kontrollo caktimin e terminalit dhe monedhën e konfiguruar.",
+      "giftClose": {
+        "title": "Mbyllja e parave të kartave dhuratë",
+        "loadingStatus": "Po lexohet mbyllja e ruajtur…",
+        "pendingTitle": "Në pritje të konfirmimit financiar",
+        "pendingBody": "Turni është mbyllur në këtë terminal. Mbyllja e parave të kartave dhuratë pret konfirmimin financiar dhe nuk do të mbyllet përsëri.",
+        "confirmedTitle": "Mbyllja financiare u konfirmua",
+        "blockedStateTitle": "Konfirmimi i mbylljes është bllokuar",
+        "retainedCount": "Numërimi i ruajtur",
+        "localPreview": "Parapamje lokale, e pakonfirmuar",
+        "ordinaryExpected": "Para të zakonshme të pritura",
+        "giftCash": "Para nga kartat dhuratë",
+        "expectedTotal": "Të pritura në arkë",
+        "counted": "Para të numëruara",
+        "variance": "Diferenca",
+        "canonical": "Shumat e konfirmuara",
+        "closedAt": "Mbyllur më",
+        "confirmedAt": "Konfirmuar më",
+        "canonicalDiffers": "Shumat e konfirmuara ndryshojnë nga parapamja e shfaqur në mbyllje.",
+        "authRequired": "Arkëtari fillestar duhet të fusë PIN-in e vet për të rinovuar autorizimin e mbylljes.",
+        "pinLabel": "PIN-i i arkëtarit fillestar",
+        "pinInvalid": "Fut PIN-in e arkëtarit fillestar.",
+        "authorize": "Rinovo autorizimin dhe provo përsëri",
+        "queued": "Riprovimi i konfirmimit u vu në radhë. Kontrollo sërish statusin pas pak.",
+        "checkStatus": "Kontrollo statusin",
+        "retry": "Riprovo konfirmimin",
+        "print": "Printo mbylljen",
+        "printQueued": "Printimi i mbylljes u vu në radhë.",
+        "printFailed": "Printimi i mbylljes dështoi. Provo përsëri.",
+        "done": "U krye",
+        "pendingListTitle": "Mbyllje në pritje me karta dhuratë",
+        "pendingListHelper": "Zgjidh një mbyllje të ruajtur për ta kontrolluar ose riprovuar. Nga këtu nuk krijohet kurrë mbyllje e re.",
+        "pendingListFailed": "Mbylljet në pritje me karta dhuratë të këtij arkëtari nuk mund të kontrolloheshin.",
+        "pendingListTruncated": "Ka më shumë mbyllje të ruajtura se sa shfaqen këtu.",
+        "shiftLabel": "Turni {{id}}",
+        "open": "Hap",
+        "checkAgain": "Kontrollo përsëri",
+        "blockedUnresolved": "Veprimet e pazgjidhura me para të kartave dhuratë ({{count}}) duhet të zgjidhen para mbylljes.",
+        "blockedAttemptsUnknown": "Veprimet me para të kartave dhuratë nuk mund të kontrolloheshin. Mbyllja mbetet e bllokuar.",
+        "blockedSummary": "Përmbledhja e zakonshme e turnit nuk mund të lexohej. Mbyllja mbetet e bllokuar.",
+        "drawerUnavailable": "Shumat e parave të kartave dhuratë nuk mund të lexoheshin. Asgjë nuk supozohet zero.",
+        "termsChanged": "Shumat e mbylljes ndryshuan. Rishiko shumat e rifreskuara, numëro përsëri dhe mirato përsëri.",
+        "originalExists": "Për këtë turn ekziston tashmë një mbyllje e ruajtur. Hape atë në vend që të mbyllësh përsëri.",
+        "originalMissing": "Origjinali i mbylljes së ruajtur mungon. Nuk mund të riprovohet nga ky terminal.",
+        "proofUnavailable": "Prova e mbylljes nuk është e disponueshme. Kontrollo sërish statusin më vonë.",
+        "openingNotReady": "Hapja e turnit me karta dhuratë nuk është konfirmuar ende, prandaj mbyllja mbetet e bllokuar.",
+        "localUnavailable": "Ky terminal nuk mundi ta lexonte mbylljen e ruajtur. Provo përsëri.",
+        "refused": "Mbyllja me karta dhuratë u refuzua ({{code}}).",
+        "checking": "Po kontrollohet nëse ky turn mbyllet me para të kartave dhuratë…",
+        "preparing": "Po përgatiten shumat e mbylljes me karta dhuratë…",
+        "countLabel": "Para të numëruara në arkë",
+        "countInvalid": "Fut paratë e numëruara me jo më shumë se dy shifra dhjetore.",
+        "countChanged": "Numërimi ndryshoi pas rishikimit. Rishikoje përsëri.",
+        "approveTitle": "Mirato mbylljen me karta dhuratë",
+        "approveBody": "Të mbyllet ky turn me shumat dhe numërimin e shfaqur më sipër?",
+        "approve": "Mirato dhe mbyll",
+        "cancel": "Anulo",
+        "footerNote": "Rishiko paratë e pritura më sipër.",
+        "printPending": "Mbyllja printohet vetëm pas konfirmimit financiar."
+      },
       "invalidStartingAmount": "Shkruaj një shumë fillestare të saktë (0 ose më shumë)",
       "zeroCashConfirmTitle": "Konfirmo hapjen me 0 kesh",
       "zeroCashConfirmMessage": "Po e nis turnin me 0 kesh në arkë. Do të vazhdosh vërtet?",
@@ -4521,7 +4821,10 @@
         "overpaid_order": "Mbipagesë",
         "duplicate_payment": "Pagesë e dyfishtë",
         "platform_settlement_mismatch": "Shlyerje platforme me mënyrë pagese të gabuar",
-        "platform_settlement_missing": "Mungon shlyerja e platformës"
+        "platform_settlement_missing": "Mungon shlyerja e platformës",
+        "payments_need_review": "Pagesë e lënë mënjanë për kontroll",
+        "payments_not_saved": "Kartë e debituar, pagesë e paruajtur",
+        "cancelled_order_claims_payment": "Porosi e anuluar shfaqet ende si e paguar"
       },
       "revenueSplitHint": "Kesh + Kartë + Platforma = Xhiroja reale",
       "liveShiftBreakdown": "Pasqyra live e turneve",
@@ -4695,12 +4998,84 @@
       "submitFailed": "Dështoi: {{error}}",
       "resolveBlockerCash": "Regjistro pagesë me kesh",
       "resolveBlockerCard": "Regjistro pagesë me kartë",
+      "recordConfirmTitle": "Ta regjistrosh këtë pagesë?",
+      "recordConfirmMessage": "Regjistro {{amount}} ({{method}}) për porosinë {{order}} vetëm nëse klienti e ka paguar tashmë. Nuk debitohet asgjë dhe regjistrimi mban emrin tënd.",
+      "recordConfirmAction": "Regjistroje",
+      "recordApprovalTitle": "Mirato regjistrimin e pagesës",
+      "recordApprovalSubtitle": "Fut PIN-in e arkëtarit ose të menaxherit. Nuk debitohet asgjë.",
+      "recordAlreadyRecorded": "Kjo pagesë ({{method}}) për {{orderNumber}} ishte regjistruar tashmë. Nuk u shtua asgjë.",
       "resolvingPayment": "Duke regjistruar pagesën…",
       "resolveBlockerSuccess": "U regjistrua pagesa ({{method}}) për {{orderNumber}}. Shiko raportin e rifreskuar dhe dërgoje përsëri Raportin Z.",
       "resolveBlockerFailed": "{{orderNumber}} nuk u zgjidh: {{error}}",
       "unknownError": "Gabim i panjohur",
       "submissionFailed": "Dërgimi dështoi",
-      "close": "Mbyll"
+      "close": "Mbyll",
+      "finalPrintUnavailable": "Printimi përfundimtar është i disponueshëm pasi të ruhet raporti Z.",
+      "giftClose": {
+        "title": "Para nga kartat dhuratë",
+        "outsideSales": "Jashtë shitjeve, mënyrave të pagesës dhe taksave. Llogariten një herë te paratë e pritura.",
+        "ordinaryExpected": "Paratë e zakonshme të pritura",
+        "ordinaryAdjustment": "Rregullimi i parave të tjera",
+        "giftLiabilityCash": "Para nga kartat dhuratë",
+        "expected": "Paratë e pritura",
+        "counted": "Paratë e numëruara",
+        "variance": "Diferenca",
+        "currency": "Monedha",
+        "confirmedAt": "Konfirmuar më",
+        "proofFinal": "Mbyllja u konfirmua",
+        "proofNotFinal": "Jo përfundimtar: një mbyllje karte dhuratë nuk është konfirmuar",
+        "proofUnreadable": "Konfirmimi i mbylljes nuk është i disponueshëm",
+        "checklistFinal": "Paratë nga kartat dhuratë {{amount}} janë konfirmuar dhe mbahen jashtë shitjeve.",
+        "blocked": "Printimi përfundimtar dhe dërgimi mbeten të çaktivizuara derisa çdo mbyllje karte dhuratë të konfirmohet.",
+        "recovery": {
+          "GIFT_CLOSE_PROOF_PENDING": "Mbyllja e kartës dhuratë për {{staff}} pret konfirmim. Mbaje këtë terminal online, pastaj shtyp Rifresko.",
+          "GIFT_CLOSE_PROOF_UNAVAILABLE": "Mbyllja e konfirmuar e kartës dhuratë për {{staff}} nuk lexohet. Shtyp Rifresko; nëse vazhdon, kontakto mbështetjen para se ta mbyllësh ditën.",
+          "GIFT_CLOSE_PROOF_MISMATCH": "Mbyllja e kartës dhuratë për {{staff}} nuk përputhet më me arkën e saj. Mos e mbyll ditën; kontakto mbështetjen.",
+          "GIFT_CLOSE_JOURNAL_MISSING": "Nuk u regjistrua asnjë mbyllje e konfirmuar karte dhuratë për {{staff}}. Kontakto mbështetjen para se ta mbyllësh ditën.",
+          "GIFT_OPENING_UNCONFIRMED": "Hapja e kartës dhuratë për {{staff}} nuk është konfirmuar ende. Lidhe këtë terminal, pastaj shtyp Rifresko.",
+          "unknown": "Mbyllja e kartës dhuratë për {{staff}} nuk është konfirmuar. Shtyp Rifresko; nëse vazhdon, kontakto mbështetjen.",
+          "unreadable": "Mbyllja e kartës dhuratë në këtë raport nuk lexohet. Shtyp Rifresko; nëse vazhdon, kontakto mbështetjen para se ta mbyllësh ditën."
+        },
+        "errors": {
+          "proofRequired": "Dita nuk mund të mbyllet ende: një mbyllje arke me karta dhuratë nuk është konfirmuar. Mbaje këtë terminal online, shtyp Rifresko dhe ndiq njoftimin e kartës dhuratë.",
+          "snapshotStale": "Ky raport Z u ruajt para se të konfirmohej një mbyllje karte dhuratë, prandaj nuk mund të ripërdoret. Kontakto mbështetjen; raporti i ruajtur nuk u ndryshua."
+        }
+      },
+      "fiscalCloseBlocked": "Dita nuk mund të mbyllet ende: {{count}} dërgesa fiskale të datës {{date}} nuk janë dërguar ende. Mund të vazhdosh shitjet; mbaje terminalin të lidhur dhe dërgoji përsëri nga ky raport.",
+      "fiscalCloseBlockedNoDate": "Dita nuk mund të mbyllet ende: {{count}} dërgesa fiskale nuk janë dërguar ende. Mund të vazhdosh shitjet; mbaje terminalin të lidhur dhe dërgoji përsëri nga ky raport.",
+      "fiscalCloseCheckFailed": "Dita nuk mund të mbyllet ende: dërgesat fiskale të datës {{date}} nuk u kontrolluan dot. Mund të vazhdosh shitjet; provo sërish pas pak dhe, nëse vazhdon të dështojë, eksporto diagnostikën për suportin.",
+      "fiscalCloseCheckFailedNoDate": "Dita nuk mund të mbyllet ende: dërgesat fiskale nuk u kontrolluan dot. Mund të vazhdosh shitjet; provo sërish pas pak dhe, nëse vazhdon të dështojë, eksporto diagnostikën për suportin.",
+      "fiscalQueue": {
+        "label": "Dërgesat fiskale",
+        "pending": "{{count}} dërgesa fiskale të datës {{date}} nuk kanë arritur ende te shërbimi fiskal. Mund të vazhdosh shitjet; dita mbyllet sapo të dërgohen.",
+        "pendingNoDate": "{{count}} dërgesa fiskale nuk kanë arritur ende te shërbimi fiskal. Mund të vazhdosh shitjet; dita mbyllet sapo të dërgohen.",
+        "retryAction": "Dërgo përsëri",
+        "retryRequested": "Dërgesat fiskale po dërgohen përsëri. Lista përditësohet sapo të pranohen.",
+        "retryFailed": "Dërgesat fiskale nuk u dërguan dot përsëri: {{error}}",
+        "listTitle": "Dërgesa fiskale në pritje ({{count}})",
+        "attempts": "Përpjekje {{attempts}}/{{max}}"
+      },
+      "setAsideConfirmTitle": "Iu kthyen paratë?",
+      "setAsideConfirmMessage": "Konfirmo që {{amount}} ({{method}}) për porosinë {{order}} iu kthyen klientit. Shuma mbetet jashtë totaleve.",
+      "setAsideConfirmAction": "Konfirmo",
+      "setAsideApprovalTitle": "Konfirmo që paratë u kthyen",
+      "setAsideApprovalSubtitle": "Fut PIN-in e arkëtarit ose të menaxherit për ta konfirmuar.",
+      "setAsideResolved": "U regjistrua si e kthyer klientit. Mbetet jashtë totaleve.",
+      "setAsideAlreadyResolved": "Kjo pagesë është regjistruar tashmë si e kthyer.",
+      "setAsideResolveFailed": "Nuk u regjistrua dot: {{error}}",
+      "setAsideShiftRequired": "Që ta konfirmosh, në këtë terminal duhet të ketë një turn aktiv arkëtari ose menaxheri.",
+      "unsavedConfirmTitle": "Iu kthyen paratë?",
+      "unsavedConfirmMessage": "Konfirmo që {{amount}} e debituara për porosinë {{order}} iu kthyen klientit. Pagesa nuk do të ruhet dhe porosia mbetet siç është.",
+      "unsavedConfirmMessageNewOrder": "Konfirmo që {{amount}} e debituara për një porosi të re që kjo arkë nuk e ruajti kurrë iu kthyen klientit. Porosia dhe pagesa e saj nuk do të ruhen.",
+      "unsavedConfirmAction": "Konfirmo",
+      "unsavedApprovalTitle": "Konfirmo që paratë u kthyen",
+      "unsavedApprovalSubtitle": "Fut PIN-in e arkëtarit ose të menaxherit për ta konfirmuar.",
+      "unsavedResolved": "U regjistrua si e kthyer klientit. Pagesa nuk do të ruhet.",
+      "unsavedAlreadyResolved": "Kjo pagesë është regjistruar tashmë si e kthyer.",
+      "unsavedSavedAfterAll": "Kjo pagesë u ruajt në fund të fundit: s'ka asgjë për të kthyer.",
+      "unsavedResolveFailed": "Nuk u regjistrua dot: {{error}}",
+      "unsavedSaved": "Pagesa u ruajt.",
+      "unsavedStillNotSaved": "Ende nuk është ruajtur në këtë arkë. Mos e debito përsëri. Provo sërish, ose ktheja paratë klientit dhe konfirmoje këtu."
     },
     "expense": {
       "title": "Dalje nga arka",
@@ -5209,7 +5584,104 @@
       "refundSuccess": "Rimbursimi u regjistrua",
       "refundFailed": "Rimbursimi dështoi",
       "voidSuccess": "Pagesa u anulua",
-      "voidFailed": "Anulimi dështoi"
+      "voidFailed": "Anulimi dështoi",
+      "gift": {
+        "title": "Kthim në kartën dhuratë origjinale",
+        "destination": "Paratë kthehen vetëm në kartën dhuratë që pagoi këtë rresht.",
+        "action": "Kthe në kartën dhuratë",
+        "methodLabel": "Kartë dhuratë",
+        "historyLabel": "U kthye në kartën dhuratë origjinale",
+        "close": "Mbyll kthimin e kartës dhuratë",
+        "noStaff": "Hyr si anëtar i stafit për të kthyer një pagesë me kartë dhuratë.",
+        "authorizeTitle": "{{name}}: fut PIN-in për të kthyer këtë pagesë me kartë dhuratë",
+        "pinLabel": "PIN",
+        "pinRequired": "Fut PIN-in.",
+        "authorize": "Autorizo",
+        "authorizing": "Po kontrollohet…",
+        "authRefused": "Autorizimi u refuzua: {{error}}",
+        "authUnavailable": "terminali nuk mundi të kontrollonte PIN-in",
+        "authExpired": "Autorizimi skadoi. Fut përsëri PIN-in.",
+        "authRequired": "{{name}}: duhet PIN-i përsëri. Kthimi ruhet siç ishte.",
+        "contextChanged": "Konfigurimi i terminalit ndryshoi. Fut përsëri PIN-in.",
+        "loading": "Po lexohet pagesa me kartë dhuratë…",
+        "unavailable": "Gjendja e kthimit të kartës dhuratë nuk u lexua. Asnjë kthim i ri nuk mund të fillojë derisa të lexohet.",
+        "moneyUnavailable": "Shumat e kartës dhuratë nuk u konfirmuan. Asnjë kthim i ri nuk mund të fillojë.",
+        "retry": "Provo përsëri",
+        "gross": "Paguar",
+        "returned": "Kthyer",
+        "remaining": "E kthyeshme",
+        "actionLabel": "Lloji i kthimit",
+        "actionRefund": "Rimbursim i pjesshëm",
+        "actionVoid": "Anulim",
+        "amountLabel": "Shuma për t'u kthyer ({{currency}})",
+        "amountHint": "Deri në {{amount}}",
+        "invalidAmount": "Fut një shumë si 4 ose 4,00, me jo më shumë se dy shifra dhjetore.",
+        "exceedsRemaining": "Shuma është më e madhe se e kthyeshmja {{amount}}.",
+        "voidNote": "Anulimi kthen gjithçka që është ende e kthyeshme. Nuk ke nevojë të futësh shumë.",
+        "reasonLabel": "Arsyeja",
+        "reasonPlaceholder": "Pse kthehet kjo pagesë me kartë dhuratë?",
+        "reasonRequired": "Arsyeja është e detyrueshme.",
+        "review": "Rishiko kthimin",
+        "reviewTitle": "Kontrollo para kthimit",
+        "reviewPayment": "Pagesa me kartë dhuratë",
+        "reviewDestination": "Shkon në",
+        "destinationValue": "Karta dhuratë origjinale",
+        "reviewAction": "Lloji",
+        "reviewAmount": "Shuma",
+        "voidNoAmount": "Gjithçka që është ende e kthyeshme",
+        "reviewCurrency": "Monedha",
+        "reviewReason": "Arsyeja",
+        "confirm": "Kthe në kartën dhuratë",
+        "back": "Mbrapa",
+        "sending": "Po kthehet në kartën dhuratë…",
+        "completed": "{{amount}} u kthye në kartën dhuratë. Ende e kthyeshme: {{remaining}}.",
+        "rereading": "Po rilexohen pagesat e porosisë…",
+        "rereadFailed": "Kthimi përfundoi, por pagesat e porosisë nuk u rilexuan. Asnjë kthim i ri nuk mund të fillojë derisa të lexohen.",
+        "orderRefreshFailed": "Kthimi në kartën dhuratë u konfirmua, por kjo porosi nuk u rilexua. Veprimet e tjera mbeten të padisponueshme derisa të lexohet.",
+        "checkProof": "Kontrollo këtë kthim",
+        "proofConfirmed": "U konfirmua: {{amount}} u kthyen në kartën dhuratë.",
+        "refused": "Kthimi u refuzua ({{code}}): {{error}}",
+        "rejected": "Kthimi nuk u pranua ({{code}}): {{error}}",
+        "pendingTitle": "Kthim në proces",
+        "foundTitle": "U gjet kthim",
+        "pendingBody": "Ky kthim u dërgua, por rezultati nuk është konfirmuar. Mbyllja e kësaj dritareje nuk e anulon. Rikuperoje për të përfunduar pikërisht këtë kthim.",
+        "priorUnreconciled": "Një kthim i mëparshëm në këtë kartë nuk është regjistruar ende në këtë terminal. Ky kthim mbetet në pritje; nuk nevojitet provë e re.",
+        "recover": "Rikupero këtë kthim",
+        "unknownTitle": "Rezultati nuk u konfirmua",
+        "unknownBody": "Terminali nuk mori përgjigje të qartë. Asgjë nuk u llogarit si e kthyer. Kontrollo fillimisht gjendjen.",
+        "checkStatus": "Kontrollo gjendjen",
+        "otherPending": "Një kthim tjetër për këtë pagesë me kartë dhuratë është në proces. Vetëm anëtari i stafit që e filloi mund ta përfundojë.",
+        "notEligible": "Kjo pagesë me kartë dhuratë nuk mund të kthehet ({{code}}).",
+        "nothingRemaining": "Nuk ka mbetur asgjë për t'u kthyer në këtë pagesë me kartë dhuratë.",
+        "attemptsTitle": "Kthimet tuaja për këtë pagesë",
+        "statePending": "Në pritje",
+        "stateCompleted": "Përfundoi",
+        "stateRefused": "U refuzua",
+        "netCoverage": "Paguar neto {{paid}} · Mbetet {{outstanding}}",
+        "netCoverageLoading": "Po lexohet pagesa neto…",
+        "netCoverageUnavailable": "Pagesa neto nuk u lexua.",
+        "noCapture": "Kërkesa e fundit nuk la asnjë kthim në kartën dhuratë: nuk u kthye asgjë. Mund ta nisësh përsëri."
+      },
+      "statusSetAside": "Lënë mënjanë për kontroll",
+      "placeholderNotMoney": "Ky rresht pagese nuk regjistron para (arka e nxori nga etiketa e porosisë): nuk mund të rimbursohet as të anulohet. Rikthe pagesat e porosisë nga serveri me «Sinkronizo tani».",
+      "otherRefund": "E njëjta mënyrë (tjetër)",
+      "tenderRequired": "Zgjidh si u kthye rimbursimi",
+      "platformSettlementLocked": "Shlyerja e platformës së dërgesave: nuk anulohet dhe nuk rimbursohet kurrë në arkë. Serveri vendos çfarë bëhet me të.",
+      "refundRoute": "Mënyra e rimbursimit",
+      "cashRefund": "Rimbursim me para në dorë",
+      "cashReturnedBy": "Paratë i kthen",
+      "amount": "Shuma",
+      "editAllocationRequired": "Ndarja e rimbursimit duhet të jetë saktësisht sa shuma e paguar tepër",
+      "editSettlementHint": "Zgjidh saktësisht si u kthye shuma, që të përfundojë ndryshimi i porosisë.",
+      "editSettlementOverpaidRequired": "Ky ndryshim e lë porosinë të paguar tepër dhe kërkon një rimbursim të regjistruar",
+      "editSettlementReducedRequired": "Ky ndryshim e ul një porosi të paguar dhe kërkon një rimbursim të regjistruar",
+      "editSettlementTitle": "Rimbursimi i ndryshimit",
+      "enterAmountFirst": "Shkruaj një shumë rimbursimi për të zgjedhur si u kthye kjo pagesë.",
+      "netPaidAfterRefunds": "Paguar pas rimbursimeve të mëparshme: €{{amount}}",
+      "originalVsNext": "Totali i porosisë ndryshoi nga €{{from}} në €{{to}}",
+      "requiredAmount": "Rimbursimi i kërkuar",
+      "selectAllocation": "Ndaje rimbursimin të paktën në një pagesë",
+      "useRemaining": "Përdor mbetjen"
     }
   },
   "errors": {
@@ -5508,7 +5980,11 @@
     "roomGuestCustomer": "Dhoma {{room}} — {{guest}}",
     "roomCustomer": "Dhoma {{room}}",
     "tableCustomer": "Tavolina {{table}}",
-    "reservationComingSoon": "Rezervimet vijnë së shpejti"
+    "reservationComingSoon": "Rezervimet vijnë së shpejti",
+    "addressUpdated": "Adresa u përditësua",
+    "invalidCartItems": "Porosia nuk krijohet dot sepse disa artikuj në shportë nuk janë artikuj menuje të sinkronizuar. Sinkronizo menunë dhe provo përsëri.",
+    "missingContext": "Mungon konteksti i degës ose i organizatës",
+    "noAddressForDelivery": "Ky klient nuk ka adresë të ruajtur. Shto një adresë për të vazhduar me porosi për dërgesë."
   },
   "orderDashboard": {
     "delivery": "Dërgesa",
@@ -5535,13 +6011,15 @@
     "orderCreated": "Porosia u krijua!",
     "markDeliveredFailed": "Porosia {{orderNumber}} nuk u shënua si e dorëzuar",
     "pickupDelivered": "Porosi me vete të shënuara si të dorëzuara: {{count}}",
-    "platformReadySent": "Platforma u njoftua — korrieri është rrugës",
+    "platformReadySent": "U shënua gati",
     "platformReadyFailed": "Platforma nuk u njoftua për {{orderNumber}}",
     "deliveriesCompleted": "Porosi me dërgesë të përfunduara: {{count}}",
     "dispatchDeliveryBeforeComplete": "Cakto një korrier ose ktheji porositë me dërgesë në porosi me vete para se t'i përfundosh.",
     "noOrdersForCancel": "S'ke zgjedhur asnjë porosi për anulim",
     "noOrdersForEdit": "S'ke zgjedhur asnjë porosi për ndryshim",
     "cancelOrderFailed": "Porosia {{orderNumber}} nuk u anulua",
+    "cancelRefusedPaid": "Porosia {{orderNumber}} nuk u anulua: për të janë marrë para. Anulo ose kthe pagesën nga porosia më parë, ose arkëto pjesën tjetër.",
+    "cancelRefusedNotRecorded": "Porosia {{orderNumber}} nuk u anulua: është shënuar e paguar, por pagesa e saj nuk është regjistruar në këtë arkë. Riktheje nga serveri me «Sinkronizo tani» ose regjistro pagesën nga Raporti Z, pastaj anuloje.",
     "ordersCancelled": "Porosi të anuluara: {{count}}",
     "cancelFailed": "Porositë nuk u anuluan",
     "customerInfoUpdated": "Të dhënat e klientit u përditësuan për {{count}} porosi",
@@ -5580,7 +6058,40 @@
       "route_split_launches": "Google Maps hap deri në {{maxStops}} ndalesa njëherësh — itinerari u hap në {{launchCount}} pjesë.",
       "route_matrix_stop_cap_fallback": "Optimizimi bëhet deri në {{maxStops}} ndalesa — u përdor një renditje më e thjeshtë.",
       "generic": "Itinerari u hap me disa ndryshime."
-    }
+    },
+    "bulkPaidEditUnsupported": "Porositë e paguara ose pjesërisht të paguara me ndryshime në shlyerje ndryshohen një nga një.",
+    "cardPaymentRecorded": "Pagesa me kartë u regjistrua.",
+    "cashPaymentRecorded": "Pagesa me para në dorë u regjistrua.",
+    "changeOrderTypeSingleOnly": "Lloji i porosisë ndryshohet vetëm për një porosi në një kohë.",
+    "collectCardNow": "Merr pagesën me kartë",
+    "collectCashNow": "Merr pagesën me para në dorë",
+    "collectSinglePaymentDescription": "Kjo porosi është e bllokuar sepse pagesa e pritur nuk u ruajt.",
+    "collectSinglePaymentTitle": "Merr pagesën që mungon për të vazhduar",
+    "convertToDeliveryFailed": "Porosia nuk u kthye dot në dërgesë.",
+    "convertedToDelivery": "Porosia {{orderNumber}} u kthye në dërgesë.",
+    "deliveryOverrideDenied": "Për ta kthyer këtë porosi në dërgesë duhet miratimi i menaxherit.",
+    "deliveryValidationFailed": "Adresa e zgjedhur nuk mund të përdoret për dërgesë.",
+    "editSettlementRefundReason": "Rimbursim nga ndryshimi i porosisë",
+    "noCompletedOrdersSelected": "Nuk zgjodhe asnjë porosi të përfunduar",
+    "noPickupOrderSelected": "Zgjidh një porosi të vetme për marrje në lokal që ta kthesh në dërgesë.",
+    "order": "Porosia",
+    "orderEditPartialPaymentSaved": "Ndryshimet e porosisë u ruajtën. Shuma e mbetur pret ende pagesë.",
+    "orderNotFound": "Porosia e zgjedhur nuk u gjet.",
+    "orderSavedToTable": "Porosia u ruajt te tavolina",
+    "orderStatusUpdated": "Statusi i porosisë u përditësua.",
+    "outstandingAmount": "Për t'u paguar",
+    "paymentMethod": "Mënyra e pagesës",
+    "paymentMethodSyncRetried": "Sinkronizimi i ri i pagesës u vu në radhë",
+    "paymentProgress": "U regjistruan {{settled}} nga {{total}}. Shuma e mbetur merret tani.",
+    "paymentRequired": "Kërkohet pagesë",
+    "pickupToDeliveryOverrideReason": "Porosia për marrje në lokal {{orderNumber}} u kthye në dërgesë",
+    "platformHeldNotCollected": "Paratë e kësaj porosie i mban platforma e dërgesave. Riktheji nga serveri («Sinkronizo tani»); nuk merren kurrë në arkë.",
+    "receiptPreview": "Pamja paraprake e kuponit",
+    "receiptQueued": "Printimi i kuponit u vu në radhë",
+    "refundNoEligiblePayment": "Nuk ka asnjë pagesë të përfunduar me mjaftueshëm mbetje për rimbursim.",
+    "tableOrderNotLoaded": "Llogaria e tavolinës është e hapur, por porosia e lidhur nuk është ngarkuar ende në këtë arkë. Rifresko porositë dhe provo përsëri.",
+    "tableSessionQueued": "Tavolina u ruajt lokalisht; sinkronizimi i sesionit u vu në radhë.",
+    "tableSessionSyncFailed": "Porosia u ruajt, por sinkronizimi i sesionit të tavolinës duhet përsëritur."
   },
   "bulkActions": {
     "driver": "Korrieri",
@@ -5606,12 +6117,29 @@
     "openInMaps": "Hap në Google Maps",
     "addressNotAvailable": "Adresa mungon",
     "loadingAddress": "Duke ngarkuar adresën...",
-    "customer": "Klienti"
+    "customer": "Klienti",
+    "paymentPending": "PAGESË NË PRITJE",
+    "paymentPendingA11y": "Pagesë në pritje"
+  },
+  "incomingOrderAlert": {
+    "title": "Porosi e re nga {{platform}}",
+    "titleCustomer": "Porosi e re për t'u pranuar",
+    "explain": "Hapeni për ta pranuar ose refuzuar.",
+    "waitingOver": "Po pret mbi {{seconds}} sekonda pa përgjigje",
+    "moreWaiting_one": "+{{count}} porosi tjetër në pritje",
+    "moreWaiting_other": "+{{count}} porosi të tjera në pritje",
+    "open": "Hap porosinë",
+    "later": "Më vonë"
   },
   "orderApprovalPanel": {
     "selectTime": "Zgjidh kohën e parashikuar",
     "approved": "Porosia u miratua",
     "approveFailed": "Porosia nuk u miratua",
+    "preparationShortened": "{{platform}} pranon deri në {{max}} min për këtë porosi, ndaj u dërguan {{sent}} min në vend të {{requested}} min. Nëse të duhet më shumë kohë, ndryshoje te aplikacioni i {{platform}}.",
+    "pickupWindow": "{{platform}}: {{estimate}}′ · deri në {{max}}′",
+    "pickupWindowNoEstimate": "{{platform}}: deri në {{max}}′",
+    "pickupWindowPassed": "Ora e fundit e marrjes nga {{platform}} ka kaluar: do të dërgohet {{min}}′.",
+    "maxChoice": "maks.",
     "reasonRequired": "Shkruaj arsyen e refuzimit",
     "declined": "Porosia u refuzua",
     "declineFailed": "Porosia nuk u refuzua",
@@ -7006,7 +7534,9 @@
     },
     "external": {
       "monitors": "Monitorë dhe TV të lidhur",
-      "help": "Këtu shfaqen ekranet me kabllo dhe ekranet wireless të lidhura nga sistemi operativ. Për Smart TV pa modalitet monitori, kopjo linkun për TV."
+      "running": "Po shfaqet ekrani i klientit",
+      "inUse": "Në përdorim",
+      "help": "Ekranet me kabllo dhe ekranet pa tel të sistemit shfaqen këtu. Zgjidh një për të shfaqur ekranin e klientit."
     },
     "status": {
       "connected": "Lidhur",
@@ -7031,6 +7561,7 @@
     "pollingFallback": "Rifreskim rezervë",
     "pending": "Në pritje",
     "preparing": "Në përgatitje",
+    "ready": "Gati",
     "total": "Totali",
     "avgTime": "Koha mesatare",
     "min": "min",
@@ -7038,9 +7569,11 @@
     "justNow": "Tani sapo",
     "startPreparing": "Fillo përgatitjen",
     "markReady": "Shëno si gati",
+    "markCollected": "Shëno si të marrë",
     "orderBumped": "Porosia u përditësua",
     "bumpError": "Porosia nuk u përditësua",
     "loadError": "Porositë s'u ngarkuan dot",
+    "staleState": "Po shfaqet gjendja e fundit e ruajtur e kuzhinës. Ndryshimet më të fundit nuk mund të lexoheshin.",
     "noOrders": "S'ka porosi aktive",
     "noOrdersDesc": "Porositë e reja do të shfaqen këtu automatikisht",
     "view": {
@@ -7056,17 +7589,16 @@
       "resume": "Vazhdo rifreskimin live"
     },
     "externalDisplay": {
-      "copyTvLink": "Kopjo linkun për TV",
       "open": "Hap në ekranin e lidhur",
       "stop": "Ndalo ekranin e jashtëm",
       "connectedDisplays": "Monitorë dhe TV të lidhur",
-      "help": "Këtu shfaqen ekranet me kabllo dhe ekranet wireless të lidhura nga sistemi operativ. Për Smart TV pa modalitet monitori, kopjo linkun për TV.",
+      "help": "Lidh një ekran HDMI ose një ekran pa tel përmes sistemit operativ, pastaj zgjidhe këtu.",
       "running": "Ekrani i kuzhinës po punon në monitorin ose TV-në e zgjedhur.",
+      "runningHere": "Po shfaqet ekrani i kuzhinës",
+      "inUse": "Në përdorim",
       "stopped": "Ekrani i jashtëm i kuzhinës u ndal.",
       "openFailed": "Ekrani i kuzhinës nuk u hap",
-      "closeFailed": "Ekrani i kuzhinës nuk u mbyll",
-      "tvLinkCopied": "Linku i KDS-së për TV u kopjua. Hape në shfletuesin e një Smart TV ose në një marrës wireless.",
-      "tvLinkFailed": "Linku i KDS-së për TV nuk u krijua"
+      "closeFailed": "Ekrani i kuzhinës nuk u mbyll"
     },
     "liveDraft": {
       "badge": "Draft live",
@@ -7194,6 +7726,292 @@
     "toast": {
       "readyToDownload": "Versioni {{version}} është gati për shkarkim",
       "clickToView": "Kliko për të parë detajet"
+    }
+  },
+  "giftCardCheckout": {
+    "title": "Kartë dhuratë",
+    "due": "Për t'u paguar {{amount}}",
+    "checkingAttempts": "Po kontrollohen përpjekjet e mëparshme me kartë dhuratë…",
+    "checkingService": "Po kontrollohet shërbimi i kartave dhuratë…",
+    "uncertain": "Rezultati i kartës dhuratë nuk është konfirmuar. Mos arkëto përsëri; kontrollo fillimisht.",
+    "checkAgain": "Kontrollo përsëri",
+    "applied": "Pagesa me kartë dhuratë u regjistrua: {{amount}}",
+    "cardNumber": "Numri i kartës dhuratë",
+    "cardNumberPlaceholder": "Skano ose shkruaj numrin e kartës",
+    "check": "Kontrollo kartën",
+    "card": "Karta {{masked}} · gjendja {{balance}}",
+    "amount": "Shuma për t'u tarifuar",
+    "pay": "Tarifo kartën dhuratë",
+    "refusal": {
+      "scope": "Ky terminal nuk ka identitet të konfirmuar organizate ose terminali. Çifto përsëri POS-in.",
+      "order": "Krijo porosinë përpara se të pranosh një kartë dhuratë.",
+      "unsynced": "Prit derisa porosia të sinkronizohet, pastaj provo përsëri.",
+      "module": "Moduli Kartat dhuratë nuk është aktiv për këtë dyqan.",
+      "offline": "Kartat dhuratë kërkojnë lidhje. Rilidhu dhe provo përsëri.",
+      "unavailable": "Shërbimi i kartave dhuratë nuk është i disponueshëm. Provo përsëri pas pak.",
+      "cardNumber": "Kontrollo numrin e kartës dhe provo përsëri.",
+      "notFound": "Asnjë kartë dhuratë nuk përputhet me këtë numër.",
+      "amount": "Vendos një shumë mbi zero me jo më shumë se dy shifra dhjetore.",
+      "currency": "Monedha e kartës nuk përputhet me monedhën e porosisë.",
+      "balance": "Gjendja e kartës nuk mjafton për këtë shumë.",
+      "expired": "Kjo kartë dhuratë ka skaduar.",
+      "inactive": "Kjo kartë dhuratë nuk është aktive.",
+      "exceedsOutstanding": "Shuma është më e madhe se detyrimi i mbetur i porosisë.",
+      "nothingDue": "Nuk ka detyrim të mbetur për këtë porosi.",
+      "itemSplit": "Karta dhuratë paguan vetëm ndarje sipas shumës. Kalo në ndarje sipas shumës ose përdor një mënyrë tjetër pagese.",
+      "split": "Kjo pjesë e ndarjes nuk është e vlefshme. Rihap ndarjen dhe provo përsëri.",
+      "coverageUnavailable": "Gjendja e porosisë nuk mund të lexohej. Provo përsëri.",
+      "admission": "Përpjekjet e mëparshme me kartë dhuratë duhet të kontrollohen fillimisht.",
+      "fiscalPending": "Një faturë për këtë porosi është ende në pritje. Kontrollo fillimisht faturën.",
+      "staff": "Kërkohet një seancë e identifikuar e stafit. Identifikohu përsëri dhe provo sërish.",
+      "readiness": "Rruga e faturës fiskale nuk është gati për kartat dhuratë.",
+      "rejected": "Pagesa me kartë dhuratë u refuzua."
+    },
+    "fiscal": {
+      "ready": "Fatura është gati për lëshim",
+      "partial": "Arkëto pjesën tjetër me para në dorë ose kartë; fatura ndjek atë pagesë",
+      "pending": "Fatura pret konfirmim",
+      "approved": "Fatura u miratua",
+      "notRequired": "Nuk kërkohet faturë fiskale",
+      "unsupported": "Kjo rrugë faturimi nuk mbështet kartat dhuratë",
+      "unavailable": "Arka fiskale nuk është e disponueshme",
+      "error": "Fatura dështoi",
+      "unknown": "Gjendja e faturës e panjohur",
+      "uncertified": "Mbështetja e arkës nuk është e certifikuar",
+      "issue": "Lësho faturën",
+      "check": "Kontrollo faturën"
+    }
+  },
+  "giftCards": {
+    "title": "Kartat dhuratë",
+    "description": "Kërko karta dhuratë, lësho të reja, rimbushi dhe rregullo gjendjen e tyre.",
+    "refresh": "Rifresko",
+    "status": {
+      "label": "Shërbimi i kartave dhuratë",
+      "checking": "Po kontrollohet shërbimi i kartave dhuratë…",
+      "unavailable": "Shërbimi i kartave dhuratë nuk është i disponueshëm tani. Provo sërish pas pak.",
+      "notInstalled": "Kartat dhuratë nuk janë konfiguruar ende në server.",
+      "notConfigured": "Siguria e kartave dhuratë nuk është konfiguruar ende në server.",
+      "notEnabled": "Kartat dhuratë nuk janë aktivizuar për këtë terminal.",
+      "moduleRequired": "Moduli Kartat dhuratë nuk është aktiv për këtë biznes.",
+      "offline": "Ky terminal është jashtë linje. Kërkimi dhe ndryshimet e gjendjes kërkojnë lidhje aktive."
+    },
+    "badge": {
+      "checking": "Po kontrollohet",
+      "unavailable": "Jo i disponueshëm",
+      "enabled": "Aktiv",
+      "disabled": "Joaktiv",
+      "offline": "Jashtë linje"
+    },
+    "errors": {
+      "numberRequired": "Shkruaj numrin e kartës dhuratë.",
+      "numberInvalid": "Numri i kartës ka 8 deri në 64 shkronja ose shifra.",
+      "lookupFailed": "Kërkimi i kartës dhuratë dështoi.",
+      "notFound": "Asnjë kartë dhuratë nuk përputhet me këtë numër.",
+      "issueAmount": "Shkruaj një shumë mbi zero me jo më shumë se 2 shifra dhjetore.",
+      "issueFailed": "Karta dhuratë nuk u lëshua dot.",
+      "selectCard": "Kërko fillimisht një kartë dhuratë.",
+      "reloadAmount": "Shkruaj një shumë rimbushjeje mbi zero me jo më shumë se 2 shifra dhjetore.",
+      "reloadFailed": "Karta dhuratë nuk u rimbush dot.",
+      "redeemAmount": "Shkruaj një shumë rregullimi mbi zero me jo më shumë se 2 shifra dhjetore.",
+      "redeemFailed": "Gjendja e kartës dhuratë nuk u rregullua dot.",
+      "historyFailed": "Historiku i lëvizjeve nuk u ngarkua dot.",
+      "unknownOutcome": "Serveri nuk e konfirmoi këtë ndryshim. Kontrollo lidhjen dhe provo sërish me të njëjtat vlera; ndryshimi nuk do të zbatohet dy herë.",
+      "currencyMissing": "Nuk është caktuar monedhë POS, ndaj nuk mund të lëshohet kartë e re.",
+      "terminalMissing": "Identiteti i këtij terminali nuk është i disponueshëm. Fillo një turn dhe provo sërish.",
+      "details": "Kodi: {{code}}"
+    },
+    "messages": {
+      "balanceLoaded": "Gjendja u ngarkua.",
+      "issued": "Karta dhuratë u lëshua.",
+      "issuedWithNumber": "Karta dhuratë u lëshua: {{number}}",
+      "reloaded": "Karta dhuratë u rimbush.",
+      "redeemed": "Gjendja u rregullua."
+    },
+    "lookup": {
+      "title": "Kërko kartë",
+      "placeholder": "Numri i kartës",
+      "action": "Kërko"
+    },
+    "balance": {
+      "current": "Gjendja aktuale",
+      "card": "Karta",
+      "currency": "Monedha",
+      "status": "Statusi i kartës",
+      "expires": "Skadon më {{date}}"
+    },
+    "cardStatus": {
+      "active": "Aktive",
+      "expired": "E skaduar",
+      "disabled": "E çaktivizuar"
+    },
+    "issue": {
+      "title": "Lësho kartë të re",
+      "numberPlaceholder": "Numri i kartës (lëre bosh që të krijohet automatikisht)",
+      "amountPlaceholder": "Shuma fillestare",
+      "currency": "Monedha: {{currency}}",
+      "busy": "Po lëshohet…",
+      "action": "Lësho kartën",
+      "deliverTitle": "Numri i kartës së re",
+      "deliverHint": "Numri i plotë shfaqet vetëm tani. Jepja klientit para se ta mbyllësh këtë panel.",
+      "dismiss": "Numri u dorëzua"
+    },
+    "amountPlaceholder": "Shuma",
+    "reload": {
+      "title": "Rimbushje",
+      "action": "Rimbush",
+      "busy": "Po rimbushet…"
+    },
+    "redeem": {
+      "title": "Rregullim i gjendjes",
+      "hint": "Zbret vlerë nga karta jashtë çdo porosie. Për të paguar një porosi me kartë dhuratë, përdor arkën.",
+      "action": "Zbrit nga gjendja",
+      "busy": "Po rregullohet…",
+      "confirmTitle": "Konfirmo rregullimin e gjendjes",
+      "confirmBody": "Të zbritet {{amount}} nga karta {{card}}? Ky është rregullim manual i gjendjes, jo pagesë për porosi.",
+      "confirm": "Konfirmo rregullimin",
+      "cancel": "Anulo"
+    },
+    "history": {
+      "title": "Historiku i lëvizjeve",
+      "empty": "Ende nuk ka lëvizje.",
+      "balanceAfter": "Gjendja pas: {{amount}}",
+      "types": {
+        "issue": "Lëshim",
+        "reload": "Rimbushje",
+        "redeem": "Përdorim",
+        "refund": "Rimbursim",
+        "adjustment": "Rregullim"
+      }
+    },
+    "note": {
+      "title": "Shënim",
+      "placeholder": "Shënim opsional për këtë ndryshim"
+    },
+    "funding": {
+      "description": "Kërko karta dhe shto vlerë të financuar. Pagesa e një porosie me kartë dhuratë bëhet në arkë.",
+      "title": "Shto vlerë",
+      "hint": "Çdo lëshim ose rimbushje mbulohet nga një pagesë e regjistruar ose nga një dhënie e menaxherit.",
+      "cashier": "Arkëtari: {{name}}",
+      "checking": "Po kontrollohet disponueshmëria e financimit…",
+      "retry": "Kontrollo përsëri",
+      "readFailed": "Disponueshmëria e financimit nuk u lexua. Veprimet me para mbeten të çaktivizuara.",
+      "journalFailed": "Financimet në pritje nuk u lexuan. Veprimet me para mbeten të çaktivizuara derisa të kontrollohen.",
+      "unavailable": "Financimi i kartave dhuratë nuk është i disponueshëm në këtë terminal tani.",
+      "noCurrency": "Nuk është konfiguruar monedhë e dyqanit, prandaj financimi nuk është i disponueshëm.",
+      "noShift": "Zgjidh një punonjës me turn aktiv për të financuar karta dhuratë.",
+      "currency": "Monedha e dyqanit: {{currency}}",
+      "operatorNotReady": "Autorizimi yt në POS nuk është gati, prandaj financimi me para në dorë ose me kartë është i çaktivizuar.",
+      "operation": {
+        "label": "Veprimi",
+        "issue": "Lësho një kartë të re",
+        "reload": "Rimbush kartën e zgjedhur",
+        "reloadNeedsCard": "Kërko një kartë për ta rimbushur.",
+        "currencyMismatch": "Monedha e kësaj karte nuk është monedha e dyqanit, prandaj nuk mund të rimbushet këtu."
+      },
+      "mode": {
+        "label": "Financuar me",
+        "cash_confirmed": "Para në dorë",
+        "external_card_recorded": "Terminal i jashtëm kartash",
+        "manager_grant": "Dhënie nga menaxheri",
+        "unavailable": "E padisponueshme",
+        "reason": "Arsyeja: {{reason}}",
+        "cashUnavailable": "Financimi me para në dorë nuk është i disponueshëm në këtë terminal.",
+        "cashDrawer": "Paratë në dorë kërkojnë sirtarin tënd të konfirmuar për këtë turn në {{currency}}.",
+        "externalHint": "Referencat e terminalit të kartave i regjistron vetë. Nuk është pagesë e verifikuar as faturë fiskale.",
+        "grantHint": "Një menaxher shton vlerë pa pagesë me PIN-in e vet. Menaxheri mund të jesh edhe ti."
+      },
+      "amount": "Shuma",
+      "reason": "Arsyeja",
+      "reasonPlaceholder": "Pse po shtohet vlerë?",
+      "prepare": "Përgatit financimin",
+      "pendingBlocks": "Ekziston një financim në pritje i këtij lloji. Kontrolloje ose përfundoje më poshtë para se të fillosh një të ri.",
+      "collect": {
+        "title": "Arkëto {{amount}}",
+        "cash": "Merr {{amount}} para në dorë, pastaj konfirmo.",
+        "cashConfirm": "Arkëtova {{amount}} para në dorë",
+        "external": "Tarifo {{amount}} në terminalin e jashtëm të kartave, pastaj regjistro referencat e tij.",
+        "externalConfirm": "Regjistro pagesën me kartë",
+        "recordedNotice": "Regjistruar nga ti. Nuk është pagesë e verifikuar as faturë fiskale."
+      },
+      "evidence": {
+        "provider": "Ofruesi i kartës",
+        "merchantId": "ID e tregtarit",
+        "terminalReference": "Referenca e terminalit",
+        "transactionReference": "Referenca e transaksionit",
+        "incomplete": "Plotëso të katër referencat e terminalit të kartave."
+      },
+      "pending": {
+        "title": "Financime në pritje dhe të fundit",
+        "empty": "Nuk ka financime në pritje ose të fundit.",
+        "states": {
+          "prepare_pending": "Në përgatitje",
+          "prepared": "Përgatitur, asgjë e arkëtuar",
+          "collection_pending": "Po fillon arkëtimi",
+          "collection_started": "Arkëtimi filloi",
+          "complete_pending": "Në përfundim",
+          "cancel_pending": "Në anulim",
+          "completed": "Përfunduar",
+          "canceled": "Anuluar",
+          "refused": "Refuzuar",
+          "abandoned": "Braktisur"
+        },
+        "noCollectAgain": "Mos e arkëto përsëri këtë pagesë. Kontrollo statusin e saj.",
+        "begin": "Fillo arkëtimin",
+        "check": "Kontrollo statusin",
+        "cancel": "Anulo (asgjë e arkëtuar)",
+        "cancelReason": "Arsyeja e anulimit",
+        "cancelConfirm": "Konfirmo anulimin",
+        "back": "Kthehu",
+        "recordCollected": "Regjistro pagesën e arkëtuar tashmë",
+        "recordCollectedWarning": "Vetëm nëse kjo pagesë është arkëtuar tashmë. Mos e arkëto përsëri."
+      },
+      "manager": {
+        "title": "Autorizimi i menaxherit",
+        "select": "Menaxheri",
+        "selectPlaceholder": "Zgjidh një menaxher",
+        "pin": "PIN-i i menaxherit",
+        "authorize": "Autorizo menaxherin",
+        "authorized": "I autorizuar për dhënie: {{name}}",
+        "notReady": "Ky menaxher nuk mund të japë vlerë tani.",
+        "expired": "Autorizimi i menaxherit skadoi. Autorizo përsëri.",
+        "review": "Rishiko dhënien",
+        "confirmTitle": "Konfirmo dhënien nga menaxheri",
+        "confirmBody": "{{manager}} shton {{amount}} pa pagesë ({{operation}}).",
+        "confirm": "Konfirmo dhënien",
+        "back": "Kthehu",
+        "pendingTitle": "Dhënie në pritje nga {{name}}"
+      },
+      "renew": {
+        "title": "Rinovo autorizimin tënd në POS",
+        "required": "Autorizimi yt për këtë turn ka skaduar ose mungon. Vendos PIN-in për ta rinovuar. Nuk hapet turn ose sirtar i ri.",
+        "optional": "Nëse autorizimi yt ka skaduar, vendos PIN-in për ta rinovuar për këtë turn.",
+        "pin": "PIN-i yt",
+        "action": "Rinovo autorizimin",
+        "done": "Autorizimi u rinovua.",
+        "noOpening": "Nuk u gjet hapje e konfirmuar për këtë turn në këtë terminal, prandaj autorizimi nuk mund të rinovohet këtu."
+      },
+      "messages": {
+        "prepared": "Financimi u përgatit. Fillo arkëtimin kur klienti të jetë gati të paguajë.",
+        "collect": "Arkëtimi mund të fillojë tani.",
+        "completed": "Financimi përfundoi. Balanca e re: {{balance}}.",
+        "canceled": "Financimi u anulua. Asgjë nuk u arkëtua.",
+        "refused": "Ky hap u refuzua.",
+        "final": "Serveri nuk e shtoi këtë vlerë.",
+        "pendingOutcome": "Rezultati nuk është konfirmuar ende. Mos arkëto përsëri; kontrollo statusin.",
+        "unknownOutcome": "Rezultati është i panjohur. Mos arkëto përsëri; kontrollo statusin me të njëjtën përpjekje.",
+        "notPermitted": "Arkëtimi nuk u lejua. Mos arkëto; kontrollo statusin.",
+        "managerAuthorized": "Menaxheri u autorizua."
+      },
+      "errors": {
+        "amount": "Vendos një shumë mbi zero me jo më shumë se 2 dhjetore.",
+        "reason": "Vendos një arsye.",
+        "pin": "Vendos PIN-in.",
+        "managerRequired": "Zgjidh një menaxher.",
+        "managerFailed": "Autorizimi i menaxherit dështoi.",
+        "renewFailed": "Autorizimi nuk u rinovua.",
+        "noReply": "Terminali nuk konfirmoi përgjigje. Asgjë nuk supozohet."
+      }
     }
   },
   "coupons": {
@@ -7760,6 +8578,9 @@
         "transactionTimeoutMs": "Koha limit (ms)",
         "cashPaymentCode": "Kodi i pagesës me kesh",
         "cardPaymentCode": "Kodi i pagesës me kartë",
+        "voucherPaymentCode": "Kodi i pagesës me kupon (opsional)",
+        "voucherPaymentCodeHelp": "Lëre bosh derisa tekniku yt të caktojë kodin e kuponit.",
+        "voucherPaymentCodeInvalid": "Përdor 2–20 dhe një kod të ndryshëm nga kodet e parave në dorë dhe të kartës.",
         "eftPosIndex": "Indeksi EFT POS"
       },
       "capSetup": {
@@ -7804,7 +8625,10 @@
     "routingTarget": "Terminali pritës",
     "routingAll": "Të gjitha terminalet",
     "routingLoading": "Duke ngarkuar terminalet...",
-    "routingEmpty": "S'u gjet asnjë terminal për këtë degë."
+    "routingEmpty": "S'u gjet asnjë terminal për këtë degë.",
+    "wolt": {
+      "adminManagedSetup": "Wolt lidhet te paneli i adminit me llogarinë tënde Wolt; në POS s'shkruhet asnjë çelës API. Ky ekran tregon vetëm statusin."
+    }
   },
   "errorBoundary": {
     "whatCanYouDo": "Çfarë mund të bësh?",
@@ -7862,7 +8686,8 @@
     "portionPaid": "{{person}} pagoi",
     "priorPayments": "Pagesat e mëparshme",
     "terminalApproved": "Terminali",
-    "waitingForApproval": "Në pritje të miratimit të kartës te terminali i pagesave..."
+    "waitingForApproval": "Në pritje të miratimit të kartës te terminali i pagesave...",
+    "portionNotSaved": "Karta u debitua, pagesa ende nuk është ruajtur. Mos e debito përsëri."
   },
   "recovery": {
     "common": {
@@ -7911,6 +8736,9 @@
       },
       "auto_retry": {
         "label": "Përsëritje automatike"
+      },
+      "print_orphan_attempt_closed": {
+        "label": "Printimi i bllokuar u mbyll automatikisht"
       },
       "retryParityItem": {
         "label": "Provo përsëri këtë ndryshim"
@@ -8021,7 +8849,31 @@
         "label": "Kontakto Dev-in"
       },
       "confirmTitle": "Konfirmo veprimin e rikuperimit",
-      "confirmMessage": "Ky veprim ndryshon të dhënat lokale të rikuperimit për problemin e zgjedhur."
+      "confirmMessage": "Ky veprim ndryshon të dhënat lokale të rikuperimit për problemin e zgjedhur.",
+      "syncNow": {
+        "label": "Sinkronizo tani"
+      },
+      "retryItem": {
+        "label": "Provo përsëri"
+      },
+      "reviewDetails": {
+        "label": "Hap detajet"
+      },
+      "reconnect": {
+        "label": "Rilidh"
+      },
+      "configurePrinter": {
+        "label": "Cilësimet e printerit"
+      },
+      "openZReport": {
+        "label": "Hap raportin Z"
+      },
+      "openShifts": {
+        "label": "Turne"
+      },
+      "openOrders": {
+        "label": "Porosi"
+      }
     },
     "context": {
       "terminalId": "ID e terminalit",
@@ -8272,6 +9124,81 @@
         "summary_one": "Një ndryshim klienti i ruajtur në këtë kasë nuk u dërgua dot. Nuk e pengon mbylljen e ditës dhe porositë e mbajnë emrin dhe telefonin e klientit.",
         "summary_other": "{{count}} ndryshime klientësh të ruajtura në këtë kasë nuk u dërguan dot. Nuk e pengojnë mbylljen e ditës dhe porositë e mbajnë emrin dhe telefonin e klientit.",
         "guidance": "Provoje edhe një herë ndryshimin. Nëse dështon përsëri, hap detajet për suportin; ditën mund ta mbyllësh gjithsesi."
+      },
+      "terminalNotAuthorized": {
+        "title": "Terminali nuk është i lidhur me dyqanin",
+        "summary": "Serveri nuk i pranoi të dhënat e hyrjes së këtij terminali, ndaj nuk sinkronizohet asgjë.",
+        "guidance": "Lidhe sërish terminalin nga cilësimet e terminalit. Ndërkohë shitjet mbeten të ruajtura në këtë pajisje."
+      },
+      "offline": {
+        "title": "Nuk ka lidhje interneti",
+        "summary": "POS-i nuk po lidhet dot me serverin tani.",
+        "guidance": "Vazhdo të shesësh. Gjithçka që ruhet këtu sinkronizohet kur të kthehet lidhja."
+      },
+      "syncWaiting": {
+        "title": "Regjistrime në pritje të sinkronizimit: {{count}}",
+        "summary": "Janë ruajtur në këtë pajisje dhe do të dërgohen automatikisht.",
+        "guidance": "S'ka asgjë për të rregulluar. Shtyp «Sinkronizo tani» nëse do që të dërgohen menjëherë."
+      },
+      "syncRetrying": {
+        "title": "Regjistrime që po provohen sërish: {{count}}",
+        "summary": "Serveri nuk i ka pranuar ende; POS-i provon sërish vetë.",
+        "guidance": "Mbaje POS-in të hapur dhe të lidhur me internetin. Shtyp «Sinkronizo tani» për të provuar sërish menjëherë."
+      },
+      "syncStuck": {
+        "title": "Regjistrime të ngecura në radhë: {{count}}",
+        "summary": "Regjistrimi më i vjetër pret prej {{duration}}.",
+        "guidance": "Shtyp «Sinkronizo tani». Nëse mbeten të ngecura edhe pas kësaj, eksporto diagnostikën dhe dërgoja skedarin suportit. Mos fshi asnjë të dhënë."
+      },
+      "syncFailed": {
+        "title": "Regjistrime që s'u sinkronizuan dot: {{count}}",
+        "summary": "Përpjekjet automatike mbaruan. Regjistrimet janë ende të ruajtura këtu.",
+        "guidance": "Hap detajet për t'i provuar sërish një nga një. Nëse dështojnë përsëri, kontakto suportin."
+      },
+      "syncConflict": {
+        "title": "Regjistrime në konflikt: {{count}}",
+        "summary": "Serveri ka një version tjetër të këtyre regjistrimeve.",
+        "guidance": "Hap detajet për të zgjedhur cilin version do të mbash. Nëse ke dyshime, pyet më parë suportin."
+      },
+      "fiscalQueueNotEmpty": {
+        "title": "Kupona fiskalë të padërguar: {{count}}",
+        "summary": "Disa kupona të kësaj dite nuk kanë arritur ende te shërbimi fiskal. Mbyllja e ditës (Z) i pret.",
+        "guidance": "Mbaje POS-in të lidhur dhe shtyp «Sinkronizo tani». Nëse ende nuk dërgohen, eksporto diagnostikën dhe kontakto suportin."
+      },
+      "closeoutBlocked": {
+        "title": "Mbyllja e ditës (Z) është e bllokuar",
+        "summary": "Disa kontrolle duhet të kalojnë para se të mbyllet dita.",
+        "guidance": "Hap raportin Z për të parë çdo pengesë dhe si rregullohet."
+      },
+      "closeoutOverdue": {
+        "title": "Një ditë e mëparshme është ende e hapur",
+        "summary": "Dita e punës {{reportDate}} nuk është mbyllur (Z).",
+        "guidance": "Mbyll fillimisht atë ditë: hap raportin Z."
+      },
+      "printerUnavailable": {
+        "title": "Printeri nuk përgjigjet",
+        "summary": "Porositë ruhen, por kuponat mund të mos printohen.",
+        "guidance": "Kontrollo që printeri të jetë i ndezur, të ketë letër dhe të jetë i lidhur, pastaj printo një kupon prove."
+      },
+      "printerNotConfigured": {
+        "title": "Nuk ka printer të konfiguruar",
+        "summary": "Ky POS nuk mund të printojë kupona.",
+        "guidance": "Shto printerin te cilësimet e printerit."
+      },
+      "realtimeDisconnected": {
+        "title": "Përditësimet live u shkëputën",
+        "summary": "Porositë sinkronizohen gjithsesi, por ndryshimet nga pajisjet e tjera mund të shfaqen me vonesë.",
+        "guidance": "Rilidh përditësimet live. Mund ta provosh pa rrezik në çdo kohë."
+      },
+      "telemetryStale": {
+        "title": "Statusi i sinkronizimit nuk është i përditësuar",
+        "summary": "Sinkronizimi nuk ka raportuar prej njëfarë kohe, edhe pse ka punë në pritje.",
+        "guidance": "Shtyp «Sinkronizo tani». Nëse s'ndryshon asgjë, eksporto diagnostikën për suportin."
+      },
+      "printingStalled": {
+        "title": "Kupona që nuk printohen: {{count}}",
+        "summary": "Printimi më i vjetër pret prej {{duration}}. Porositë ruhen gjithsesi.",
+        "guidance": "Kontrollo që printeri të jetë i ndezur, të ketë letër dhe të jetë i lidhur, pastaj printo një kupon prove nga cilësimet e printerit. Nëse kuponat ende nuk printohen, kontakto suportin. Mos fshi asnjë të dhënë."
       }
     }
   },
@@ -8709,7 +9636,36 @@
       "unavailable": "Jo në dispozicion"
     }
   },
+  "tableRelease": {
+    "owedTitle": "Tavolina {{table}} ka ende detyrim {{amount}}",
+    "owedMessage": "Lirimi i tavolinës nuk e paguan dhe nuk e anulon porosinë e saj. Zgjidh çfarë ndodh me {{amount}} që detyrohen.",
+    "collect": "Arkëto pagesën",
+    "keepOpenTab": "Mbaje si llogari të hapur",
+    "keepOpenTabHint": "Tavolina lirohet; porosia mbetet e hapur dhe e papaguar derisa të arkëtohet ose të anulohet.",
+    "cancelOrder": "Anulo porosinë",
+    "cancelReasonLabel": "Pse anulohet porosia?",
+    "cancelReasonPlaceholder": "Për shembull: klienti iku pa porositur",
+    "cancelApprovalHint": "PIN-i i arkëtarit ose i menaxherit e miraton anulimin. Nuk debitohet asgjë.",
+    "confirmCancel": "Anulo porosinë",
+    "cancelApprovalTitle": "Mirato anulimin e porosisë",
+    "cancelApprovalSubtitle": "Fut PIN-in e arkëtarit ose të menaxherit. Nuk debitohet asgjë.",
+    "orderCancelled": "Porosia u anulua dhe tavolina u lirua.",
+    "shiftRequired": "Që ta miratosh, në këtë terminal duhet të ketë një turn aktiv arkëtari ose menaxheri.",
+    "cancelFailed": "Porosia nuk u anulua dot. Tavolina nuk u lirua.",
+    "cancelRefusedPaid": "Për këtë porosi janë marrë para. Anulo ose kthe pagesën nga porosia më parë, ose arkëto pjesën tjetër.",
+    "cancelRefusedNotRecorded": "Kjo porosi është shënuar e paguar, por pagesa e saj nuk është regjistruar në këtë arkë. Riktheje nga serveri me «Sinkronizo tani» ose regjistro pagesën nga Raporti Z, pastaj anuloje.",
+    "notRecordedTitle": "Tavolina {{table}}: pagesa nuk është regjistruar",
+    "notRecordedMessage": "Porosia e saj është shënuar e paguar, por pagesa nuk është regjistruar në këtë arkë. Mos e arkëto përsëri: riktheje nga serveri me «Sinkronizo tani» ose regjistro pagesën nga Raporti Z.",
+    "keepOpenNotRecordedHint": "Tavolina lirohet; porosia mbetet siç është derisa pagesa e saj të rikthehet ose të regjistrohet."
+  },
   "reservationForm": {
+    "toasts": {
+      "created": "Rezervimi u krijua",
+      "updated": "Rezervimi u përditësua",
+      "createFailed": "Rezervimi nuk u krijua",
+      "updateFailed": "Rezervimi nuk u përditësua",
+      "missingContext": "Mungon dega ose organizata"
+    },
     "title": "Rezervim i ri",
     "editTitle": "Ndrysho rezervimin",
     "subtitle": "Tavolina {{tableNumber}} • Kapaciteti: {{capacity}} {{guests}}",
@@ -8831,6 +9787,23 @@
       "title": "Menaxhimi i kioskut",
       "todayOrders": "Porositë e sotme",
       "toggleError": "Statusi i kioskut nuk u përditësua"
+    },
+    "launchPurchase": {
+      "title": "Blerje moduli",
+      "cycle": "Periudha e faturimit",
+      "monthly": "Muaj",
+      "annual": "Vit",
+      "includes": "Përfshin: {{features}}",
+      "alsoIncluded": "Përfshihet gjithashtu në: {{offers}}",
+      "resources": "Përfshin {{branches}} degë dhe {{terminals}} terminale.",
+      "staffIncluded": "Stafi përfshihet pa tarifë për person.",
+      "staffLimit": "Përfshin deri në {{count}} anëtarë të stafit.",
+      "confirmInBrowser": "Kontrollo ofertën për biznesin tënd dhe konfirmo blerjen në panelin e administrimit.",
+      "open": "Shiko blerjen",
+      "unavailable": "Çmimet nuk janë të disponueshme. Rilidhu dhe provo përsëri.",
+      "loading": "Po ngarkohen çmimet aktuale…",
+      "openFailed": "Faqja e blerjes nuk u hap. Provo përsëri.",
+      "retry": "Provo përsëri"
     }
   },
   "reservationInfoPanel": {
@@ -8849,5 +9822,38 @@
     "seatError": "Vendosja në tavolinë dështoi",
     "cancelReservation": "Anulo rezervimin",
     "lateWarning": "{{minutes}} minuta vonesë"
+  },
+  "paymentIntegrity": {
+    "statuses": {
+      "duplicate_review": "Lënë mënjanë për kontroll",
+      "not_saved": "Pa u ruajtur"
+    },
+    "reasonCodes": {
+      "payments_need_review": "Në porosinë {{orderNumber}} u mor një pagesë prej {{paymentAmount}} ({{paymentMethod}}) kur ajo ishte paguar tashmë. Është lënë mënjanë dhe nuk llogaritet: klienti mund të ketë paguar dy herë.",
+      "payments_need_review__platform_held": "Në porosinë {{orderNumber}} u mor një pagesë prej {{paymentAmount}} ({{paymentMethod}}), por paratë e kësaj porosie i mban tashmë platforma e dërgesave. Është lënë mënjanë dhe nuk llogaritet: klienti mund të ketë paguar dy herë.",
+      "payments_not_saved": "Në porosinë {{orderNumber}} u debitua një pagesë me kartë prej {{paymentAmount}}, por ende nuk është ruajtur në këtë arkë. Klienti u debitua: mos e debito përsëri.",
+      "payments_not_saved__new_order": "U debitua një pagesë me kartë prej {{paymentAmount}} për një porosi të re që ende nuk është ruajtur në këtë arkë: porosia dhe pagesa e saj mbahen derisa të ruhen. Klienti u debitua: mos e debito përsëri.",
+      "payments_not_saved__new_order_cannot_save": "U debitua një pagesë me kartë prej {{paymentAmount}} për një porosi të re që ende nuk është ruajtur në këtë arkë: porosia dhe pagesa e saj mbahen derisa të ruhen. Klienti u debitua: mos e debito përsëri.",
+      "cancelled_order_claims_payment": "Kjo porosi është anuluar, por shfaqet ende si e paguar, dhe ky terminal nuk ka asnjë regjistrim pagese për të. Nuk është në këtë Raport Z. Kjo nuk e bllokon mbylljen e ditës."
+    },
+    "fixCodes": {
+      "payments_need_review": "Ktheja paratë klientit, pastaj konfirmoje këtu. Nëse pagesa në server është ajo e gabuara, kontakto mbështetjen para se ta mbyllësh ditën.",
+      "payments_need_review__platform_held": "Ktheja paratë klientit, pastaj konfirmoje këtu. Platforma ia paguan këtë porosi dyqanit me shlyerjen e saj.",
+      "payments_not_saved": "Ruaje pagesën sërish. Nëse nuk ruhet dot, ktheja paratë klientit dhe konfirmoje këtu.",
+      "payments_not_saved__cannot_save": "Kjo pagesë nuk mund të ruhet në këtë arkë. Ktheja paratë klientit, pastaj konfirmoje këtu.",
+      "payments_not_saved__new_order": "Ruaje pagesën sërish: kjo ruan porosinë dhe pagesën e saj, pa debitim të ri. Nëse nuk ruhet dot, ktheja paratë klientit dhe konfirmoje këtu.",
+      "payments_not_saved__new_order_cannot_save": "Kjo porosi dhe pagesa e saj nuk mund të ruhen në këtë arkë. Ktheja paratë klientit, pastaj konfirmoje këtu.",
+      "cancelled_order_claims_payment": "Rikthe nga serveri («Sinkronizo tani»): një pagesë që ka serveri kopjohet këtu. Nëse nuk ka asnjë, pronari vendos çfarë duhet të tregojë porosia."
+    },
+    "setAsidePaymentLabel": "Pagesë e lënë mënjanë",
+    "takenAtLabel": "Marrë në",
+    "setAsideReturnedAction": "Paratë iu kthyen klientit",
+    "setAsideResolving": "Po regjistrohet...",
+    "unsavedPaymentLabel": "E debituar, pa u ruajtur",
+    "chargedAtLabel": "Debituar në",
+    "unsavedSaveAgainAction": "Ruaje pagesën sërish",
+    "unsavedReturnedAction": "Paratë iu kthyen klientit",
+    "unsavedSaving": "Po ruhet...",
+    "unsavedResolving": "Po regjistrohet..."
   }
 }

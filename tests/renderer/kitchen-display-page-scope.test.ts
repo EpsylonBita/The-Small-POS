@@ -1,9 +1,9 @@
 /**
- * Module audit 2026-09-16 — desktop kitchen board pins:
- * - the fallback poll runs only while realtime is down (it used to fire every 1.5 s on top
- *   of the realtime channel and could exhaust the terminal's POS read budget mid-service);
- * - a ticket whose order carries only `owner_terminal_id` (a uuid the client cannot compare
- *   with its public terminal id) is trusted because the server already applied the scope.
+ * Module audit 2026-09-16, revised 2026-09-28 (founder: the Windows KDS has no cloud) — desktop kitchen board pins:
+ * - the board is composed from the local order store; there is no KDS API read, ticket
+ *   realtime channel, fallback poll or status PATCH, so nothing can drain the POS read budget;
+ * - a bump saves a local kitchen phase and never writes the canonical order status;
+ * - local orders stay terminal scoped.
  */
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -14,15 +14,19 @@ import { fileURLToPath } from 'node:url'
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const source = readFileSync(join(ROOT, 'src', 'renderer', 'pages', 'KitchenDisplayPage.tsx'), 'utf8')
 
-test('the fallback poll is gated on the realtime connection and runs every 4 s', () => {
-  assert.match(source, /const KDS_FALLBACK_POLL_INTERVAL_MS = 4000;/)
-  assert.match(source, /if \(!autoRefresh \|\| !isIdentityReady \|\| !branchId \|\| isRealtimeConnected\) \{/)
-  assert.match(source, /\}, \[autoRefresh, branchId, fetchOrders, isIdentityReady, isRealtimeConnected\]\);/)
+test('the board is local-only: no KDS API, realtime channel or fallback poll', () => {
+  assert.doesNotMatch(source, /\/api\/pos\/kds|kds_tickets|subscriptionManager|KDS_FALLBACK_POLL_INTERVAL_MS|fetchFromAdmin|posApiFetch/)
+  assert.match(source, /composeLocalKitchenOrders\(localOrders, terminalId/)
 })
 
-test('owner-only tickets returned by the server are kept on the board', () => {
-  assert.match(source, /if \(ticketOwnerTerminalId\) return true;/)
-  assert.doesNotMatch(source, /ticketOwnerTerminalId === terminalId\) return true/)
+test('a bump saves a local kitchen phase and never writes the order status', () => {
+  // The expected stage and the write resolve the same identity keys as the board read.
+  assert.match(source, /await localPreparationStore\.mark\(bumpScope, current\.id, next, findLocalPreparationMark\(state, keys\)\?\.phase \?\? null, keys\)/)
+  assert.doesNotMatch(source, /updateOrderStatusDetailed|updateOrderStatus\(|order_update_status|useOrderStore\.setState/)
+})
+
+test('local orders stay terminal scoped', () => {
+  assert.match(source, /!isActiveLocalKitchenOrder\(record\) \|\| !matchesKdsTerminal\(terminalId, record\)/)
 })
 
 test('elapsed hours use a locale key instead of an English literal', () => {

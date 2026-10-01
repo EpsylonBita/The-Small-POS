@@ -416,40 +416,173 @@ pub fn upsert_driver_earning(
     }
 }
 
+/// What a courier carries for one order, in cents, read from its payment rows
+/// only (founder rule 30/09/2026).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CourierTender {
+    pub cash_cents: i64,
+    pub card_cents: i64,
+}
+
+/// The cash and card money a courier carries for `order_id` (item D9, round
+/// 2 of the 01/10/2026 fix review; shared rule R2, round 3): each row net of
+/// the refunds taken back from it, and the courier's cash net of every cash
+/// refund the courier handed back. The same reading as Android's
+/// `readCourierOrderTenders`, so both apps count each refund once.
+///
+/// - A refund's tender is the one it names, else its payment's own.
+/// - A cash refund is the COURIER's (they handed it back) when it says
+///   `cash_handler = 'driver_shift'`, or names no handler (a refund recorded
+///   before the field existed: on a courier's order, which every caller here
+///   reads, the drawer never counts it, `refunds::refund_paid_by_drawer_sql`;
+///   Android reads the same through its `driver_earnings` test). Every other
+///   cash refund is a drawer's.
+/// - A cash row is lowered by the courier's cash refunds of it. A refund the
+///   drawer paid leaves the courier holding (and handing over) the cash, and
+///   so does a card refund of a cash row (no cash left anyone's hands).
+/// - A card row is lowered by its non-cash refunds (card or other: the sale
+///   reversed off the cash).
+/// - Cash the courier handed back for a card (or other) payment comes out of
+///   the courier's cash for the order, never below zero.
+///
+/// Symptom before (round 3 review, 01/10/2026): a cash refund of a CARD
+/// payment on a courier order whose earning was unsettled was booked
+/// `driver_shift` and lowered the earning's cash at once, but every recount
+/// (reassignment, a payment-method edit, the summary backfill) put it back,
+/// because only refunds of CASH rows lowered the courier's cash; the drawer
+/// skips a `driver_shift` refund. So the money the courier handed back was
+/// counted nowhere and the courier looked short by it (7.00 cash + 6.00 card,
+/// 5.00 handed back for the card: 2.00 expected after the write, 7.00 again
+/// after a recount).
+///
+/// Rows: completed, or refunded on this till (a local refund adjustment
+/// exists). A row the server voided or refunded with no local refund is gone
+/// (`release_driver_earning_money_for_payment` already took it out), and a
+/// set-aside, voided or 1.4.119 placeholder row is no money. Each row nets at
+/// zero at least.
+pub(crate) fn courier_order_tender_cents(
+    conn: &Connection,
+    order_id: &str,
+) -> Result<CourierTender, String> {
+    let refund_tender = "LOWER(TRIM(COALESCE(NULLIF(TRIM(pa.refund_method), ''), op.method, '')))";
+    // A handler-less refund counts as the courier's whether or not the
+    // earning row exists yet: assignment reads this BEFORE it writes the
+    // earning, and the drawer stops counting such a refund once it does.
+    let courier_cash_refund = "LOWER(TRIM(COALESCE(pa.cash_handler, ''))) IN ('driver_shift', '')";
+    let sum_refunds = |filter: &str| {
+        format!(
+            "COALESCE((
+                SELECT SUM(COALESCE(pa.amount_cents, CAST(ROUND(pa.amount * 100) AS INTEGER), 0))
+                FROM payment_adjustments pa
+                WHERE pa.payment_id = op.id
+                  AND pa.adjustment_type = 'refund'
+                  AND {filter}
+            ), 0)"
+        )
+    };
+    let sql = format!(
+        "SELECT LOWER(TRIM(COALESCE(op.method, ''))),
+                COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0),
+                {courier_cash},
+                {non_cash}
+         FROM order_payments op
+         WHERE op.order_id = ?1
+           AND NOT {placeholder}
+           AND (
+                op.status = 'completed'
+                OR (op.status = 'refunded'
+                    AND EXISTS (
+                        SELECT 1 FROM payment_adjustments local_refund
+                         WHERE local_refund.payment_id = op.id
+                           AND local_refund.adjustment_type = 'refund'
+                    ))
+           )",
+        courier_cash = sum_refunds(&format!(
+            "{refund_tender} = 'cash' AND {courier_cash_refund}"
+        )),
+        non_cash = sum_refunds(&format!("{refund_tender} <> 'cash'")),
+        placeholder = crate::payments::placeholder_payment_sql("op"),
+    );
+    let mut statement = conn
+        .prepare(&sql)
+        .map_err(|e| format!("prepare courier tender for {order_id}: {e}"))?;
+    let rows = statement
+        .query_map(params![order_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })
+        .map_err(|e| format!("query courier tender for {order_id}: {e}"))?;
+    let mut tender = CourierTender::default();
+    let mut cash_handed_back_for_non_cash = 0_i64;
+    for row in rows {
+        let (method, gross, courier_cash_refunds, non_cash_refunds) =
+            row.map_err(|e| format!("read courier tender row for {order_id}: {e}"))?;
+        match method.as_str() {
+            "cash" => tender.cash_cents += (gross - courier_cash_refunds.max(0)).max(0),
+            "card" => {
+                tender.card_cents += (gross - non_cash_refunds.max(0)).max(0);
+                cash_handed_back_for_non_cash += courier_cash_refunds.max(0);
+            }
+            // Other tenders are no courier money here; cash the courier
+            // handed back for one still left the courier's pocket.
+            _ => cash_handed_back_for_non_cash += courier_cash_refunds.max(0),
+        }
+    }
+    tender.cash_cents = (tender.cash_cents - cash_handed_back_for_non_cash).max(0);
+    Ok(tender)
+}
+
+/// The money a courier carries for an order: its completed cash and card
+/// payment rows, nothing else ([`courier_order_tender_cents`]).
+///
+/// Founder's rule (30/09/2026): driver cash, driver earnings and the driver's
+/// settlement come only from payment rows, never from the order's own total or
+/// tender when rows are missing. An order with no row used to be charged to
+/// the courier as its whole total in cash; a card-paid order whose row had not
+/// been mirrored yet, a charge set aside as a duplicate, or money given back
+/// all became cash the courier owed. Rows set aside for review or voided are
+/// money the order does not hold; only a refund the courier handed back
+/// lowers the courier's cash (item D9, round 2).
+///
+/// Item D3 (fix review 30/09/2026): the same guard as the payment record
+/// path. On an order whose money a delivery platform holds (prepaid online,
+/// or cash its own rider collected; [`order_money_is_platform_held`]) the
+/// till refuses a cash or card collection, so a completed cash/card row there
+/// is a mistake or predates that refusal: it is never cash or card the
+/// store's courier carries. Assignment used to charge it to the courier.
 pub fn get_order_payment_totals(
     conn: &Connection,
     order_id: &str,
 ) -> Result<(String, f64, f64, f64), String> {
-    let (payment_count, cash_collected, card_amount, total_paid): (i64, f64, f64, f64) = conn
+    let total_paid: f64 = conn
         .query_row(
-            "SELECT
-                COUNT(*),
-                COALESCE(SUM(CASE WHEN status = 'completed' AND method = 'cash' THEN amount ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN status = 'completed' AND method = 'card' THEN amount ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN status = 'completed' THEN amount ELSE 0 END), 0)
-             FROM order_payments
-             WHERE order_id = ?1",
+            &format!(
+                "SELECT COALESCE(SUM(CASE WHEN {counted} THEN op.amount ELSE 0 END), 0)
+                 FROM order_payments op
+                 WHERE op.order_id = ?1",
+                counted = crate::payments::counted_completed_payment_sql("op"),
+            ),
             params![order_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| row.get(0),
         )
         .map_err(|e| format!("load order payments: {e}"))?;
+    let tender = courier_order_tender_cents(conn, order_id)?;
+    let cash_collected = Cents::new(tender.cash_cents).to_f64_dp2();
+    let card_amount = Cents::new(tender.card_cents).to_f64_dp2();
+    let (cash_collected, card_amount, total_paid) = if order_money_is_platform_held(conn, order_id)
+    {
+        (0.0, 0.0, total_paid)
+    } else {
+        (cash_collected, card_amount, total_paid)
+    };
 
-    if payment_count == 0 {
-        // W6: `orders.payment_method` was dropped in v55. With no
-        // completed payment rows there's nothing to derive the method
-        // from — default to "cash" (the same COALESCE default the
-        // pre-drop code used) so the attribution fallback stays stable.
-        let total_amount = conn
-            .query_row(
-                "SELECT COALESCE(total_amount, 0) FROM orders WHERE id = ?1",
-                params![order_id],
-                |row| row.get::<_, f64>(0),
-            )
-            .map_err(|e| format!("load order payment fallback: {e}"))?;
-
-        return Ok(("cash".to_string(), total_amount, 0.0, total_amount));
-    }
-
+    // The label is descriptive only: `driver_earnings.payment_method` must be
+    // cash, card or mixed, and with no money collected it keeps the historic
+    // `cash` default. No amount and no tip is ever derived from it.
     let payment_method = if cash_collected > 0.0 && card_amount > 0.0 {
         "mixed".to_string()
     } else if card_amount > 0.0 {
@@ -459,6 +592,16 @@ pub fn get_order_payment_totals(
     };
 
     Ok((payment_method, cash_collected, card_amount, total_paid))
+}
+
+/// Whether a delivery platform holds this order's money: prepaid online, or
+/// cash collected by the platform's own rider (`ghost_metadata.food_delivery`,
+/// read by [`crate::payments::platform_settlement_kind`]). The platform pays
+/// it to the store by bank (its `platform_settlement:*` row, method `other`),
+/// and the till refuses a cash or card collection on it. A platform order the
+/// store's own driver carries as cash on delivery is the store's money.
+pub(crate) fn order_money_is_platform_held(conn: &Connection, order_id: &str) -> bool {
+    crate::payments::platform_settlement_kind(conn, order_id).is_some()
 }
 
 /// Refresh the payment-dependent fields of an existing courier earning from
@@ -569,25 +712,17 @@ pub fn refresh_existing_driver_earning_payment_snapshot(
         return Err("DRIVER_SETTLEMENT_NOT_EDITABLE".into());
     }
 
-    let (cash_cents, card_cents): (i64, i64) = conn
-        .query_row(
-            "SELECT
-                COALESCE(SUM(CASE
-                    WHEN LOWER(TRIM(status)) = 'completed' AND LOWER(TRIM(method)) = 'cash'
-                    THEN COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER))
-                    ELSE 0
-                END), 0),
-                COALESCE(SUM(CASE
-                    WHEN LOWER(TRIM(status)) = 'completed' AND LOWER(TRIM(method)) = 'card'
-                    THEN COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER))
-                    ELSE 0
-                END), 0)
-             FROM order_payments
-             WHERE order_id = ?1",
-            params![order_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
+    // Item D9: only a refund the courier handed back lowers the courier's
+    // cash (`courier_order_tender_cents`).
+    let tender = courier_order_tender_cents(conn, order_id)
         .map_err(|e| format!("load courier payment snapshot: {e}"))?;
+    let (cash_cents, card_cents) = (tender.cash_cents, tender.card_cents);
+    // Item D3: money a delivery platform holds is never the courier's.
+    let (cash_cents, card_cents) = if order_money_is_platform_held(conn, order_id) {
+        (0, 0)
+    } else {
+        (cash_cents, card_cents)
+    };
     let payment_method = if cash_cents > 0 && card_cents > 0 {
         "mixed"
     } else if card_cents > 0 {
@@ -619,6 +754,127 @@ pub fn refresh_existing_driver_earning_payment_snapshot(
     )
     .map_err(|e| format!("refresh courier payment snapshot: {e}"))?;
 
+    Ok(Some(earning_id))
+}
+
+/// Take one payment's money back out of the courier earning that carries it,
+/// when that money left the order: the payment was set aside for review (a
+/// possible duplicate, `payments_need_review`) or voided.
+///
+/// Founder's rule (30/09/2026): the courier's cash comes only from payment
+/// rows, and the courier is never charged for money that is not there. The
+/// earning is a snapshot taken at assignment (and added to when the courier
+/// collects), and nothing took the money back out when it left the order, so
+/// a charge set aside as a duplicate, or voided, stayed cash the courier owed
+/// at checkout and in the Z. A set-aside payment later given back to the
+/// customer has already left at this point.
+///
+/// Only a payment booked to the earning's own courier shift is the courier's
+/// money: assignment books the order's completed rows there, and a payment
+/// mirrored from another till keeps that till's shift. The same decrement as
+/// a courier-handled refund (`refunds.rs`), so money the courier refunded is
+/// never counted back. An earning that is financial history (its shift not
+/// active, or settled, or handed over) keeps its numbers. Returns the
+/// earning's id when it changed.
+pub fn release_driver_earning_money_for_payment(
+    conn: &Connection,
+    payment_id: &str,
+    now: &str,
+) -> Result<Option<String>, String> {
+    let payment: Option<(String, String, i64, Option<String>)> = conn
+        .query_row(
+            "SELECT order_id,
+                    LOWER(TRIM(COALESCE(method, ''))),
+                    COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER), 0),
+                    staff_shift_id
+             FROM order_payments
+             WHERE id = ?1",
+            params![payment_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(|e| format!("load payment leaving a courier earning: {e}"))?;
+    let Some((order_id, method, amount_cents, Some(payment_shift_id))) = payment else {
+        return Ok(None);
+    };
+    if amount_cents <= 0 || !matches!(method.as_str(), "cash" | "card") {
+        return Ok(None);
+    }
+
+    let earning: Option<(String, i64, i64, i64)> = conn
+        .query_row(
+            "SELECT de.id,
+                    COALESCE(de.cash_collected_cents, CAST(ROUND(de.cash_collected * 100) AS INTEGER), 0),
+                    COALESCE(de.card_amount_cents, CAST(ROUND(de.card_amount * 100) AS INTEGER), 0),
+                    COALESCE(de.cash_to_return_cents, CAST(ROUND(de.cash_to_return * 100) AS INTEGER), 0)
+             FROM driver_earnings de
+             JOIN staff_shifts ss ON ss.id = de.staff_shift_id
+             WHERE de.order_id = ?1
+               AND de.staff_shift_id = ?2
+               AND COALESCE(de.settled, 0) = 0
+               AND COALESCE(de.is_transferred, 0) = 0
+               AND LOWER(TRIM(COALESCE(ss.status, ''))) = 'active'
+             LIMIT 1",
+            params![order_id, payment_shift_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(|e| format!("load courier earning for {order_id}: {e}"))?;
+    let Some((earning_id, cash_cents, card_cents, to_return_cents)) = earning else {
+        return Ok(None);
+    };
+
+    let (cash_cents_after, card_cents_after, to_return_cents_after) = if method == "cash" {
+        (
+            (cash_cents - amount_cents).max(0),
+            card_cents,
+            (to_return_cents - amount_cents).max(0),
+        )
+    } else {
+        (
+            cash_cents,
+            (card_cents - amount_cents).max(0),
+            to_return_cents,
+        )
+    };
+    if (cash_cents_after, card_cents_after, to_return_cents_after)
+        == (cash_cents, card_cents, to_return_cents)
+    {
+        return Ok(None);
+    }
+    let payment_method = if cash_cents_after > 0 && card_cents_after > 0 {
+        "mixed"
+    } else if card_cents_after > 0 {
+        "card"
+    } else {
+        "cash"
+    };
+    conn.execute(
+        "UPDATE driver_earnings
+         SET payment_method = ?1,
+             cash_collected = ?2,
+             cash_collected_cents = ?3,
+             card_amount = ?4,
+             card_amount_cents = ?5,
+             cash_to_return = ?6,
+             cash_to_return_cents = ?7,
+             updated_at = ?8
+         WHERE id = ?9",
+        params![
+            payment_method,
+            Cents::new(cash_cents_after).to_f64_dp2(),
+            cash_cents_after,
+            Cents::new(card_cents_after).to_f64_dp2(),
+            card_cents_after,
+            Cents::new(to_return_cents_after).to_f64_dp2(),
+            to_return_cents_after,
+            now,
+            earning_id,
+        ],
+    )
+    .map_err(|e| format!("release courier money for {earning_id}: {e}"))?;
+    let payload = build_driver_earning_sync_payload(conn, &earning_id)?;
+    enqueue_or_refresh_driver_earning_sync_row(conn, &earning_id, &payload)?;
     Ok(Some(earning_id))
 }
 

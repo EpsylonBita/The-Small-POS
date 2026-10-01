@@ -1,11 +1,47 @@
 {
+  "displayPurchase": {
+    "beforePurchase": "Vor dem Kauf",
+    "operation": "So funktioniert es",
+    "equipment": "Benötigte Ausstattung",
+    "compatibility": "Kompatibilität prüfen",
+    "videoOutput": "Benötigt wird ein kompatibler, unabhängiger Bildausgang: HDMI oder USB-C mit Videoausgabe und passendem Kabel, Adapter oder Dock, oder eine vom Betriebssystem unterstützte drahtlose Anzeige wie Miracast mit kompatiblem Empfänger. Ein gemeinsames WLAN allein stellt keinen Bildausgang bereit.",
+    "shopHardware": "Bildschirme, Touchscreens, Kabel, USB-Verbindungen für Touch, Adapter, Docks und drahtlose Empfänger stellt der Betrieb bereit. Sie sind nicht im Modulabonnement enthalten.",
+    "hardwareCheck": "USB-C muss die Videoausgabe unterstützen; nicht jedes Android-POS bietet diese Funktion. Prüfen Sie vor dem Kauf das konkrete Gerät, Betriebssystem, die Grafik, Anschlüsse, Firmware und den Empfänger. Die Unterstützung von zwei drahtlosen Anzeigen ist nicht garantiert.",
+    "twoScreens": "KDS und Kundenanzeige gemeinsam benötigen den Hauptbildschirm des POS sowie zwei verschiedene, unabhängig ansteuerbare externe Bildschirme. Die Hardware muss beide Ausgänge unterstützen. Ein einfacher HDMI-Splitter wiederholt dasselbe Bild.",
+    "localOnly": "Dies sind lokal angeschlossene Bildschirme, ohne Cloud-Links für Browser oder Smart-TV, Kopplungs-URLs oder einen eigenen Cloud-Dienst für die Anzeigen. Die normale POS-Bestellsynchronisierung und Lizenzierung bleiben davon getrennt.",
+    "kitchen_display": {
+      "summary": "Eine separate Küchenansicht der lokalen POS-Bestellungen, während das Haupt-POS für neue Bestellungen verfügbar bleibt.",
+      "requirements": "Prüfen Sie für einen externen interaktiven Bildschirm die kompatible Bildausgabe über HDMI/USB-C oder die drahtlose Anzeige des Betriebssystems sowie die Rückübertragung von Touch oder Eingaben. Die Ausstattung stellt der Betrieb; sie ist nicht enthalten. Beide Anzeigemodule benötigen zwei separate externe Ausgänge.",
+      "features": {
+        "local": "Lokale Küchenansicht",
+        "workflow": "Die Kasse nimmt weiter Bestellungen an",
+        "status": "Küchenaktionen Bereit und Abgeholt"
+      },
+      "operation": "Öffnen Sie KDS im Windows- oder Android-POS. Es liest lokale Bestellungen und zeigt eine separate Küchenansicht, während das Haupt-POS Bestellungen annehmen kann. Lassen Sie die App geöffnet; ein Seitenwechsel beendet eine aktive Projektion nicht.",
+      "collection": "Die Küchenaktionen Bereit und Abgeholt aktualisieren das Dashboard und aktive Bestellungen sowie eine gekaufte Kundenanzeige. Abgeholt bedeutet nur die Abholung aus der Küche; Verkauf und Zahlung bleiben aktiv, bis ihr normaler Ablauf abgeschlossen ist.",
+      "input": "Die Bedienung in der Küche benötigt eine kompatible Rückübertragung von Touch oder Eingaben: zum Beispiel HDMI-Bild und USB-Touch, vom Gerät und Betriebssystem richtig zugeordnet, oder einen drahtlosen Empfänger mit Eingaberückkanal. HDMI-Bild allein bietet keine Touchfunktion."
+    },
+    "customer_display": {
+      "summary": "Ein separat gekauftes Modul: eine lokale Anzeige für In Vorbereitung/Bereit auf einem weiteren angeschlossenen Bildschirm. Abgeholte Bestellungen werden ausgeblendet, während das Haupt-POS verfügbar bleibt.",
+      "requirements": "Benötigt einen separaten Bildschirm und einen kompatiblen unabhängigen Bildausgang; die passive Anzeige braucht keinen Touchscreen. Die Ausstattung stellt der Betrieb; sie ist nicht enthalten. Beide Anzeigemodule benötigen zwei separate externe Ausgänge.",
+      "features": {
+        "local": "Lokale Anzeige für Kunden",
+        "workflow": "Separat gekauftes Modul",
+        "status": "In Vorbereitung/Bereit; abgeholte Bestellungen ausgeblendet"
+      },
+      "operation": "Die Kundenanzeige läuft lokal auf einem weiteren angeschlossenen Bildschirm. Sie zeigt Bestellungen In Vorbereitung und Bereit und blendet abgeholte Bestellungen aus, während das Haupt-POS für die Bestelleingabe verfügbar bleibt. Dies ist ein separat gekauftes Modul.",
+      "input": "Die passive Kundenanzeige benötigt keinen Touchscreen."
+    }
+  },
   "primaryActions": {
     "trigger": "Neu",
     "newSale": "Neuer Verkauf",
     "newRepair": "Neue Reparatur",
     "quickService": "Schnellservice",
     "newAppointment": "Neuer Termin",
-    "status": { "comingSoon": "Demnächst im Reparaturen-Betaablauf" }
+    "status": {
+      "comingSoon": "Demnächst im Reparaturen-Betaablauf"
+    }
   },
   "repairs": {
     "title": "Reparaturen",
@@ -15,22 +51,248 @@
     "refresh": "Reparaturen aktualisieren",
     "searchLabel": "Reparaturen suchen",
     "searchPlaceholder": "Reparaturnummer, Offline-Alias oder sichere Gerätebezeichnung",
-    "filters": { "status": "Status", "priority": "Priorität", "due": "Fällig", "sync": "Sync", "all": "Alle", "overdue": "Überfällig" },
-    "tabs": { "overview": "Übersicht", "diagnosis": "Diagnose", "partsLabour": "Teile & Arbeit", "estimateApproval": "Kostenvoranschlag & Freigabe", "timeline": "Verlauf", "photos": "Fotos", "payments": "Zahlungen", "communication": "Kommunikation" },
-    "status": { "received": "Angenommen", "diagnosing": "In Diagnose", "waiting_customer_approval": "Wartet auf Kundenfreigabe", "approved": "Freigegeben", "waiting_parts": "Wartet auf Teile", "repairing": "In Reparatur", "quality_check": "Qualitätsprüfung", "ready": "Abholbereit", "delivered": "Ausgeliefert", "cancelled": "Storniert", "unrepairable": "Nicht reparierbar" },
-    "priority": { "low": "Niedrig", "normal": "Normal", "high": "Hoch", "urgent": "Dringend" },
-    "intake": { "standard": "Standardreparatur", "quickService": "Schnellservice", "anonymous": "Anonymer Schnellservice", "linked": "Kunden verknüpfen", "mode": "Kundenmodus für Schnellservice", "customerDevice": "Kunde und Gerät", "customerSearch": "Kundensuche", "searchCustomers": "Kunden suchen", "customerResults": "Kundenergebnisse", "deviceResults": "Kundengeräte", "newDevice": "Neues Gerät", "deviceType": "Gerätetyp", "deviceLabel": "Gerätebezeichnung", "manufacturer": "Hersteller", "model": "Modell", "saveDevice": "Gerät speichern", "title": "Reparaturtitel", "customerRequired": "Wählen Sie für eine Standardreparatur Kunde und Gerät aus.", "quickCustomerRequired": "Wählen Sie einen Kunden für den verknüpften Schnellservice aus.", "anonymousHelp": "Anonymer Schnellservice hat keinen Kundenverlauf und keine automatischen Nachrichten." },
-    "sync": { "synced": "Synchronisiert", "pending": "Zur Synchronisierung vorgemerkt", "conflict": "Prüfung erforderlich", "needs_refetch": "Aktualisierung erforderlich", "local": "Lokal" },
-    "list": { "loading": "Reparaturen werden geladen…", "empty": "Keine Reparaturen entsprechen diesen Filtern.", "select": "Wählen Sie eine Reparatur, um den Arbeitsbereich zu öffnen.", "overdue": "Überfällig", "due": "Fällig {{date}}", "aliases": "Auch bekannt als {{aliases}}" },
-    "pagination": { "label": "Reparaturseiten", "previous": "Zurück", "next": "Weiter", "summary": "{{start}}–{{end}} von {{total}}" },
-    "timeline": { "created": "Reparatur erstellt", "status_changed": "Status geändert", "note_added": "Notiz hinzugefügt", "assignment_changed": "Zuweisung geändert", "diagnosis_updated": "Diagnose aktualisiert", "line_changed": "Reparaturposition geändert", "part_consumed": "Teil verbraucht", "part_reversed": "Teileverbrauch rückgängig gemacht", "estimate_created": "Kostenvoranschlag erstellt", "approval_recorded": "Freigabe erfasst", "attachment_added": "Anhang hinzugefügt", "attachment_retention_changed": "Aufbewahrung des Anhangs geändert", "settlement_linked": "Abrechnung verknüpft", "branch_transferred": "Filiale gewechselt", "reopened": "Reparatur wieder geöffnet", "unknown": "Reparaturaktivität" },
-    "fields": { "customer": "Kunde", "device": "Gerät", "assignedTo": "Zugewiesen an", "assigned": "Zugewiesen", "dueAt": "Fälligkeitsdatum", "intakeNotes": "Annahmenotizen", "diagnosis": "Diagnose", "anonymous": "Anonymer Kunde", "unassigned": "Nicht zugewiesen", "notRecorded": "Nicht erfasst" },
-    "actions": {"create": "Reparatur erstellen", "operations": "Reparaturaktionen", "changeStatus": "Status ändern", "transitionReason": "Protokollierter Grund", "remainConsumed": "Verbrauchte Teile bleiben verbraucht", "addNote": "Notiz hinzufügen", "assign": "Zuweisen", "assignToMe": "Mir zuweisen", "unassign": "Zuweisung aufheben", "updateDiagnosis": "Diagnoseentwurf speichern", "finalizeDiagnosis": "Endgültige Diagnose speichern", "planLine": "Geplante Position hinzufügen", "consumePart": "Teil verbrauchen", "reversePart": "Verbrauch rückgängig machen", "reversalReason": "Grund der Rücknahme", "lineType": "Positionstyp", "part": "Teil", "labour": "Arbeit", "charge": "Gebühr", "lineName": "Positionsname", "sku": "SKU", "quantity": "Menge", "unitPrice": "Einzelpreis", "vatRate": "MwSt.-Satz", "discount": "Rabatt", "validUntil": "Gültig bis", "estimateNote": "Anmerkung zum Kostenvoranschlag", "createEstimate": "Kostenvoranschlag erstellen", "recordApproval": "Persönliche Freigabe erfassen", "stagePhoto": "Foto hinzufügen", "openAttachment": "Anhang öffnen", "acceptServer": "Serverversion verwenden", "rebase": "Meine Änderungen neu anwenden", "close": "Schließen", "catalogSearch": "Katalogsuche", "printIntake": "Annahme drucken", "printLabel": "Etikett drucken", "searchCatalog": "Katalog durchsuchen"},
-    "panels": { "partsEmpty": "Noch keine geplanten Teile, Arbeiten oder Gebühren.", "estimateEmpty": "Noch kein Kostenvoranschlag erstellt.", "timelineEmpty": "Noch keine Verlaufsereignisse.", "photosEmpty": "Keine Anhangsmetadaten verfügbar.", "conflictsTitle": "Synchronisierungskonflikte", "conflictsEmpty": "Keine Reparaturkonflikte zu prüfen." },
-    "messages": {"readyQueued": "Der Status „Abholbereit“ ist zur Synchronisierung vorgemerkt.", "noNotificationSent": "Es wurde noch keine Kundenbenachrichtigung gesendet.", "offline": "Offline-Änderungen bleiben bis zur erneuten Verbindung dieses Terminals vorgemerkt.", "onlineActionRequired": "Diese Aktion erfordert eine Online-Serverprüfung.", "activeShiftRequired": "Starten Sie eine Mitarbeiterschicht, um Reparaturdaten und Aktionen zu laden.", "selectorOnline": "Die Kunden- und Gerätesuche erfordert eine native Online-Verbindung. Bereits ausgewählte kanonische Kunden und Geräte können weiterhin offline übermittelt werden.", "createUnavailable": "Zum Erstellen von Reparaturen sind eine aktive Schicht und die Berechtigung zum Erstellen erforderlich.", "conflictResolutionUnavailable": "Die Konfliktlösung erfordert eine aktive Schicht, eine native Online-Verbindung und die Berechtigung zum Aktualisieren.", "submitInProgress": "Die Reparatur wird gespeichert. Schließen ist vorübergehend deaktiviert.", "finalDiagnosisOnline": "Die endgültige Diagnose erfordert eine Online-Prüfung; Entwürfe können offline vorgemerkt werden.", "estimateOnline": "Kostenvoranschläge und Freigaben erfordern eine Online-Serverprüfung.", "estimateNeedsLines": "Fügen Sie mindestens eine geplante Position hinzu, bevor Sie einen Kostenvoranschlag erstellen.", "photoOneShot": "Das ausgewählte Foto wird einmal gelesen und an die verschlüsselte native Ablage übergeben; der Renderer speichert es nicht.", "photoUnavailable": "Foto-Staging erfordert geladene Einstellungen, Reparaturberechtigung, bekannten Verbindungsstatus und eine aktive Schicht.", "attachmentTypeInvalid": "Dieser Dateityp ist laut Reparatureinstellungen nicht zulässig.", "attachmentTooLarge": "Dieses Foto überschreitet die Größenbegrenzung für Reparaturanhänge.", "attachmentInvalid": "Wählen Sie ein nicht leeres, laut Reparatureinstellungen zulässiges Foto.", "attachmentStageFailed": "Das Foto konnte nicht vorgemerkt werden.", "attachmentOpenFailed": "Der Anhang konnte nicht sicher geöffnet werden.", "loadFailed": "Reparaturen konnten nicht geladen werden.", "commandFailed": "Die Reparaturänderung konnte nicht gespeichert werden.", "assignmentUnavailable": "Die Selbstzuweisung erfordert eine kanonische Mitarbeiteridentität und die Berechtigung zur Reparaturzuweisung.", "settingsUnavailable": "Die Reparaturannahme bleibt deaktiviert, bis verbindliche oder zwischengespeicherte Einstellungen verfügbar sind.", "invalidIntake": "Prüfen Sie die Annahmedaten und versuchen Sie es erneut.", "customerSearchFailed": "Die Kundensuche konnte nicht abgeschlossen werden.", "deviceLoadFailed": "Die Kundengeräte konnten nicht geladen werden.", "deviceCreateFailed": "Das Gerät konnte nicht gespeichert werden.", "secureIdUnavailable": "Sichere Gerätekennungen sind nicht verfügbar. Starten Sie die Anwendung neu, bevor Sie eine Reparatur erstellen.", "catalogNoMatch": "Keine sichere Katalogübereinstimmung gefunden.", "catalogUnavailable": "Die Katalogsuche ist nicht verfügbar.", "printFailed": "Das Reparaturdokument konnte nicht sicher in die Warteschlange gestellt werden."},
-    "locked": { "communication": "Customer Messaging ist in diesem Private-Beta-Build nicht aktiviert.", "money": "Reparaturzahlungen, Erstattungen, Fiskalisierung und Auslieferung bleiben gesperrt, bis der typisierte native Geldtransport verfügbar ist.", "approvalTransition": "Der Status Freigegeben wird nur über die protokollierte Freigabeaktion unter Kostenvoranschlag & Freigabe erreicht.", "assignment": "Zuweisungsänderungen bleiben gesperrt, bis eine bereichsgebundene, reparatursichere Personalprojektion verfügbar ist.", "stockReversal": "Die Bestandsrücknahme bleibt gesperrt, weil der native Arbeitsbereich die ursprüngliche Bewegungsreferenz nicht bereitstellt.", "catalog": "Produkt- und Dienstleistungssuche bleibt gesperrt, bis eine reparatursichere native Nur-Lese-Projektion verfügbar ist.", "attachmentOpen": "Vorhandene Anhänge können erst mit signiertem nativen Abruf geöffnet werden.", "printing": "Reparaturdruck bleibt gesperrt, bis die typisierte native Druckwarteschlange verfügbar ist." },
-    "money": {"readiness": {"loading": "Fiskalische Bereitschaft wird geprüft…", "retry": "Erneut versuchen", "nonFiscalInfo": "myDATA ist optional. Reparaturzahlungen können auch ohne das Plugin erfasst werden.", "setupRequired": "Die fiskalische Einrichtung dieser Filiale ist unvollständig.", "countryRequired": "Vor dieser Aktion ist ein Filialland erforderlich.", "providerRequired": "Für fiskalische Aktionen ist ein Fiskalanbieter erforderlich.", "certificationRequired": "Für fiskalische Aktionen ist eine Fiskalzertifizierung erforderlich.", "transportUnavailable": "Die Übermittlung von Fiskaldokumenten ist für diese Integration nicht verfügbar.", "statusUnavailable": "Die fiskalische Bereitschaft konnte nicht ermittelt werden."}, "title": "Reparaturzahlungen", "onlineRequired": "Zahlungen erfordern eine Online-Verbindung.", "activeShiftRequired": "Öffnen Sie eine Schicht, um Reparaturzahlungen durchzuführen.", "loading": "Abrechnung wird geladen…", "total": "Gesamt", "paid": "Bezahlt", "balance": "Offen", "createSettlement": "Abrechnung erstellen", "fiscalize": "Fiskalbeleg ausstellen", "collect": "Zahlung kassieren", "refund": "Zahlung erstatten", "refundPayment": "Zu erstattende Zahlung", "deliver": "Reparatur übergeben", "delivery": "Übergabe", "deliveryReason": "Grund für die Übergabe-Ausnahme", "paymentAmount": "Zahlungsbetrag", "paymentMethod": "Zahlungsart", "refundAmount": "Erstattungsbetrag", "refundMethod": "Erstattungsart", "refundReason": "Erstattungsgrund", "providerReference": "Anbieterreferenz", "depositUnsupported": "Teilanzahlungen für Reparaturen werden von diesem Fiskalprofil nicht unterstützt."},
-    "a11y": { "resultsUpdated": "{{count}} Reparaturergebnisse verfügbar.", "currentRepair": "Aktuelle Reparatur: {{number}}", "tabHint": "Wechseln Sie mit der linken und rechten Pfeiltaste zwischen den Tabs.", "statusLabel": "Reparaturstatus: {{status}}" }
+    "filters": {
+      "status": "Status",
+      "priority": "Priorität",
+      "due": "Fällig",
+      "sync": "Sync",
+      "all": "Alle",
+      "overdue": "Überfällig"
+    },
+    "tabs": {
+      "overview": "Übersicht",
+      "diagnosis": "Diagnose",
+      "partsLabour": "Teile & Arbeit",
+      "estimateApproval": "Kostenvoranschlag & Freigabe",
+      "timeline": "Verlauf",
+      "photos": "Fotos",
+      "payments": "Zahlungen",
+      "communication": "Kommunikation"
+    },
+    "status": {
+      "received": "Angenommen",
+      "diagnosing": "In Diagnose",
+      "waiting_customer_approval": "Wartet auf Kundenfreigabe",
+      "approved": "Freigegeben",
+      "waiting_parts": "Wartet auf Teile",
+      "repairing": "In Reparatur",
+      "quality_check": "Qualitätsprüfung",
+      "ready": "Abholbereit",
+      "delivered": "Ausgeliefert",
+      "cancelled": "Storniert",
+      "unrepairable": "Nicht reparierbar"
+    },
+    "priority": {
+      "low": "Niedrig",
+      "normal": "Normal",
+      "high": "Hoch",
+      "urgent": "Dringend"
+    },
+    "intake": {
+      "standard": "Standardreparatur",
+      "quickService": "Schnellservice",
+      "anonymous": "Anonymer Schnellservice",
+      "linked": "Kunden verknüpfen",
+      "mode": "Kundenmodus für Schnellservice",
+      "customerDevice": "Kunde und Gerät",
+      "customerSearch": "Kundensuche",
+      "searchCustomers": "Kunden suchen",
+      "customerResults": "Kundenergebnisse",
+      "deviceResults": "Kundengeräte",
+      "newDevice": "Neues Gerät",
+      "deviceType": "Gerätetyp",
+      "deviceLabel": "Gerätebezeichnung",
+      "manufacturer": "Hersteller",
+      "model": "Modell",
+      "saveDevice": "Gerät speichern",
+      "title": "Reparaturtitel",
+      "customerRequired": "Wählen Sie für eine Standardreparatur Kunde und Gerät aus.",
+      "quickCustomerRequired": "Wählen Sie einen Kunden für den verknüpften Schnellservice aus.",
+      "anonymousHelp": "Anonymer Schnellservice hat keinen Kundenverlauf und keine automatischen Nachrichten."
+    },
+    "sync": {
+      "synced": "Synchronisiert",
+      "pending": "Zur Synchronisierung vorgemerkt",
+      "conflict": "Prüfung erforderlich",
+      "needs_refetch": "Aktualisierung erforderlich",
+      "local": "Lokal"
+    },
+    "list": {
+      "loading": "Reparaturen werden geladen…",
+      "empty": "Keine Reparaturen entsprechen diesen Filtern.",
+      "select": "Wählen Sie eine Reparatur, um den Arbeitsbereich zu öffnen.",
+      "overdue": "Überfällig",
+      "due": "Fällig {{date}}",
+      "aliases": "Auch bekannt als {{aliases}}"
+    },
+    "pagination": {
+      "label": "Reparaturseiten",
+      "previous": "Zurück",
+      "next": "Weiter",
+      "summary": "{{start}}–{{end}} von {{total}}"
+    },
+    "timeline": {
+      "created": "Reparatur erstellt",
+      "status_changed": "Status geändert",
+      "note_added": "Notiz hinzugefügt",
+      "assignment_changed": "Zuweisung geändert",
+      "diagnosis_updated": "Diagnose aktualisiert",
+      "line_changed": "Reparaturposition geändert",
+      "part_consumed": "Teil verbraucht",
+      "part_reversed": "Teileverbrauch rückgängig gemacht",
+      "estimate_created": "Kostenvoranschlag erstellt",
+      "approval_recorded": "Freigabe erfasst",
+      "attachment_added": "Anhang hinzugefügt",
+      "attachment_retention_changed": "Aufbewahrung des Anhangs geändert",
+      "settlement_linked": "Abrechnung verknüpft",
+      "branch_transferred": "Filiale gewechselt",
+      "reopened": "Reparatur wieder geöffnet",
+      "unknown": "Reparaturaktivität"
+    },
+    "fields": {
+      "customer": "Kunde",
+      "device": "Gerät",
+      "assignedTo": "Zugewiesen an",
+      "assigned": "Zugewiesen",
+      "dueAt": "Fälligkeitsdatum",
+      "intakeNotes": "Annahmenotizen",
+      "diagnosis": "Diagnose",
+      "anonymous": "Anonymer Kunde",
+      "unassigned": "Nicht zugewiesen",
+      "notRecorded": "Nicht erfasst"
+    },
+    "actions": {
+      "create": "Reparatur erstellen",
+      "operations": "Reparaturaktionen",
+      "changeStatus": "Status ändern",
+      "transitionReason": "Protokollierter Grund",
+      "remainConsumed": "Verbrauchte Teile bleiben verbraucht",
+      "addNote": "Notiz hinzufügen",
+      "assign": "Zuweisen",
+      "assignToMe": "Mir zuweisen",
+      "unassign": "Zuweisung aufheben",
+      "updateDiagnosis": "Diagnoseentwurf speichern",
+      "finalizeDiagnosis": "Endgültige Diagnose speichern",
+      "planLine": "Geplante Position hinzufügen",
+      "consumePart": "Teil verbrauchen",
+      "reversePart": "Verbrauch rückgängig machen",
+      "reversalReason": "Grund der Rücknahme",
+      "lineType": "Positionstyp",
+      "part": "Teil",
+      "labour": "Arbeit",
+      "charge": "Gebühr",
+      "lineName": "Positionsname",
+      "sku": "SKU",
+      "quantity": "Menge",
+      "unitPrice": "Einzelpreis",
+      "vatRate": "MwSt.-Satz",
+      "discount": "Rabatt",
+      "validUntil": "Gültig bis",
+      "estimateNote": "Anmerkung zum Kostenvoranschlag",
+      "createEstimate": "Kostenvoranschlag erstellen",
+      "recordApproval": "Persönliche Freigabe erfassen",
+      "stagePhoto": "Foto hinzufügen",
+      "openAttachment": "Anhang öffnen",
+      "acceptServer": "Serverversion verwenden",
+      "rebase": "Meine Änderungen neu anwenden",
+      "close": "Schließen",
+      "catalogSearch": "Katalogsuche",
+      "printIntake": "Annahme drucken",
+      "printLabel": "Etikett drucken",
+      "searchCatalog": "Katalog durchsuchen"
+    },
+    "panels": {
+      "partsEmpty": "Noch keine geplanten Teile, Arbeiten oder Gebühren.",
+      "estimateEmpty": "Noch kein Kostenvoranschlag erstellt.",
+      "timelineEmpty": "Noch keine Verlaufsereignisse.",
+      "photosEmpty": "Keine Anhangsmetadaten verfügbar.",
+      "conflictsTitle": "Synchronisierungskonflikte",
+      "conflictsEmpty": "Keine Reparaturkonflikte zu prüfen."
+    },
+    "messages": {
+      "readyQueued": "Der Status „Abholbereit“ ist zur Synchronisierung vorgemerkt.",
+      "noNotificationSent": "Es wurde noch keine Kundenbenachrichtigung gesendet.",
+      "offline": "Offline-Änderungen bleiben bis zur erneuten Verbindung dieses Terminals vorgemerkt.",
+      "onlineActionRequired": "Diese Aktion erfordert eine Online-Serverprüfung.",
+      "activeShiftRequired": "Starten Sie eine Mitarbeiterschicht, um Reparaturdaten und Aktionen zu laden.",
+      "selectorOnline": "Die Kunden- und Gerätesuche erfordert eine native Online-Verbindung. Bereits ausgewählte kanonische Kunden und Geräte können weiterhin offline übermittelt werden.",
+      "createUnavailable": "Zum Erstellen von Reparaturen sind eine aktive Schicht und die Berechtigung zum Erstellen erforderlich.",
+      "conflictResolutionUnavailable": "Die Konfliktlösung erfordert eine aktive Schicht, eine native Online-Verbindung und die Berechtigung zum Aktualisieren.",
+      "submitInProgress": "Die Reparatur wird gespeichert. Schließen ist vorübergehend deaktiviert.",
+      "finalDiagnosisOnline": "Die endgültige Diagnose erfordert eine Online-Prüfung; Entwürfe können offline vorgemerkt werden.",
+      "estimateOnline": "Kostenvoranschläge und Freigaben erfordern eine Online-Serverprüfung.",
+      "estimateNeedsLines": "Fügen Sie mindestens eine geplante Position hinzu, bevor Sie einen Kostenvoranschlag erstellen.",
+      "photoOneShot": "Das ausgewählte Foto wird einmal gelesen und an die verschlüsselte native Ablage übergeben; der Renderer speichert es nicht.",
+      "photoUnavailable": "Foto-Staging erfordert geladene Einstellungen, Reparaturberechtigung, bekannten Verbindungsstatus und eine aktive Schicht.",
+      "attachmentTypeInvalid": "Dieser Dateityp ist laut Reparatureinstellungen nicht zulässig.",
+      "attachmentTooLarge": "Dieses Foto überschreitet die Größenbegrenzung für Reparaturanhänge.",
+      "attachmentInvalid": "Wählen Sie ein nicht leeres, laut Reparatureinstellungen zulässiges Foto.",
+      "attachmentStageFailed": "Das Foto konnte nicht vorgemerkt werden.",
+      "attachmentOpenFailed": "Der Anhang konnte nicht sicher geöffnet werden.",
+      "loadFailed": "Reparaturen konnten nicht geladen werden.",
+      "commandFailed": "Die Reparaturänderung konnte nicht gespeichert werden.",
+      "assignmentUnavailable": "Die Selbstzuweisung erfordert eine kanonische Mitarbeiteridentität und die Berechtigung zur Reparaturzuweisung.",
+      "settingsUnavailable": "Die Reparaturannahme bleibt deaktiviert, bis verbindliche oder zwischengespeicherte Einstellungen verfügbar sind.",
+      "invalidIntake": "Prüfen Sie die Annahmedaten und versuchen Sie es erneut.",
+      "customerSearchFailed": "Die Kundensuche konnte nicht abgeschlossen werden.",
+      "deviceLoadFailed": "Die Kundengeräte konnten nicht geladen werden.",
+      "deviceCreateFailed": "Das Gerät konnte nicht gespeichert werden.",
+      "secureIdUnavailable": "Sichere Gerätekennungen sind nicht verfügbar. Starten Sie die Anwendung neu, bevor Sie eine Reparatur erstellen.",
+      "catalogNoMatch": "Keine sichere Katalogübereinstimmung gefunden.",
+      "catalogUnavailable": "Die Katalogsuche ist nicht verfügbar.",
+      "printFailed": "Das Reparaturdokument konnte nicht sicher in die Warteschlange gestellt werden."
+    },
+    "locked": {
+      "communication": "Customer Messaging ist in diesem Private-Beta-Build nicht aktiviert.",
+      "money": "Reparaturzahlungen, Erstattungen, Fiskalisierung und Auslieferung bleiben gesperrt, bis der typisierte native Geldtransport verfügbar ist.",
+      "approvalTransition": "Der Status Freigegeben wird nur über die protokollierte Freigabeaktion unter Kostenvoranschlag & Freigabe erreicht.",
+      "assignment": "Zuweisungsänderungen bleiben gesperrt, bis eine bereichsgebundene, reparatursichere Personalprojektion verfügbar ist.",
+      "stockReversal": "Die Bestandsrücknahme bleibt gesperrt, weil der native Arbeitsbereich die ursprüngliche Bewegungsreferenz nicht bereitstellt.",
+      "catalog": "Produkt- und Dienstleistungssuche bleibt gesperrt, bis eine reparatursichere native Nur-Lese-Projektion verfügbar ist.",
+      "attachmentOpen": "Vorhandene Anhänge können erst mit signiertem nativen Abruf geöffnet werden.",
+      "printing": "Reparaturdruck bleibt gesperrt, bis die typisierte native Druckwarteschlange verfügbar ist."
+    },
+    "money": {
+      "readiness": {
+        "loading": "Fiskalische Bereitschaft wird geprüft…",
+        "retry": "Erneut versuchen",
+        "nonFiscalInfo": "myDATA ist optional. Reparaturzahlungen können auch ohne das Plugin erfasst werden.",
+        "setupRequired": "Die fiskalische Einrichtung dieser Filiale ist unvollständig.",
+        "countryRequired": "Vor dieser Aktion ist ein Filialland erforderlich.",
+        "providerRequired": "Für fiskalische Aktionen ist ein Fiskalanbieter erforderlich.",
+        "certificationRequired": "Für fiskalische Aktionen ist eine Fiskalzertifizierung erforderlich.",
+        "transportUnavailable": "Die Übermittlung von Fiskaldokumenten ist für diese Integration nicht verfügbar.",
+        "statusUnavailable": "Die fiskalische Bereitschaft konnte nicht ermittelt werden."
+      },
+      "title": "Reparaturzahlungen",
+      "onlineRequired": "Zahlungen erfordern eine Online-Verbindung.",
+      "activeShiftRequired": "Öffnen Sie eine Schicht, um Reparaturzahlungen durchzuführen.",
+      "loading": "Abrechnung wird geladen…",
+      "total": "Gesamt",
+      "paid": "Bezahlt",
+      "balance": "Offen",
+      "createSettlement": "Abrechnung erstellen",
+      "fiscalize": "Fiskalbeleg ausstellen",
+      "collect": "Zahlung kassieren",
+      "refund": "Zahlung erstatten",
+      "refundPayment": "Zu erstattende Zahlung",
+      "deliver": "Reparatur übergeben",
+      "delivery": "Übergabe",
+      "deliveryReason": "Grund für die Übergabe-Ausnahme",
+      "paymentAmount": "Zahlungsbetrag",
+      "paymentMethod": "Zahlungsart",
+      "refundAmount": "Erstattungsbetrag",
+      "refundMethod": "Erstattungsart",
+      "refundReason": "Erstattungsgrund",
+      "providerReference": "Anbieterreferenz",
+      "depositUnsupported": "Teilanzahlungen für Reparaturen werden von diesem Fiskalprofil nicht unterstützt."
+    },
+    "a11y": {
+      "resultsUpdated": "{{count}} Reparaturergebnisse verfügbar.",
+      "currentRepair": "Aktuelle Reparatur: {{number}}",
+      "tabHint": "Wechseln Sie mit der linken und rechten Pfeiltaste zwischen den Tabs.",
+      "statusLabel": "Reparaturstatus: {{status}}"
+    }
   },
   "common": {
     "requiresOnline": "Diese Aktion erfordert eine Online-Verbindung.",
@@ -313,6 +575,9 @@
     }
   },
   "auth": {
+    "managerApproval": {
+      "subtitle": "An dieser Kasse ist niemand eingecheckt. Ein Manager mit der Berechtigung gibt seine eigene PIN ein. Es wird nichts belastet."
+    },
     "login": {
       "title": "Mitarbeiter-Anmeldung",
       "subtitle": "Geben Sie Ihre PIN ein, um fortzufahren",
@@ -431,6 +696,11 @@
       "rejected": "Abgelehnt",
       "inProgress": "In Bearbeitung",
       "delivered": "Geliefert"
+    },
+    "kitchenStage": {
+      "preparing": "Küche: in Zubereitung",
+      "ready": "Küche: abholbereit",
+      "collected": "Aus der Küche abgeholt"
     },
     "type": {
       "dineIn": "Vor Ort",
@@ -1393,6 +1663,29 @@
       "amount": "Trinkgeldbetrag",
       "total": "Gesamt mit Trinkgeld",
       "thankYou": "Vielen Dank für Ihre Großzügigkeit!"
+    },
+    "setAside": {
+      "message": "Diese Bestellung war bereits bezahlt. Die soeben angenommenen {{amount}} sind zur Rückgabe durch einen Manager erfasst und werden nicht gezählt. Nicht erneut kassieren.",
+      "exceedsMessage": "Auf dieser Bestellung waren nur noch {{due}} offen. Die soeben angenommenen {{amount}} sind zur Rückgabe durch einen Manager erfasst und werden nicht gezählt. Kassieren Sie nur den offenen Betrag."
+    },
+    "notSaved": {
+      "title": "Belastet, noch nicht gespeichert",
+      "newOrder": "Neue Bestellung, noch nicht gespeichert",
+      "message": "Die Karte wurde mit {{amount}} belastet. Die Zahlung konnte an dieser Kasse noch nicht gespeichert werden. NICHT erneut belasten: Speichern Sie die Zahlung erneut.",
+      "pendingMessage": "Eine Kartenzahlung von {{amount}} für diese Bestellung wurde belastet, ist an dieser Kasse aber noch nicht gespeichert. Speichern Sie sie erneut, bevor Sie eine weitere Zahlung annehmen. NICHT erneut belasten.",
+      "chargedAt": "belastet {{time}}",
+      "saveAgain": "Zahlung erneut speichern",
+      "saving": "Wird gespeichert…",
+      "saved": "Zahlung gespeichert",
+      "stillNotSaved": "Die belasteten {{amount}} sind an dieser Kasse noch immer nicht gespeichert. NICHT erneut belasten. Versuchen Sie erneut „Zahlung erneut speichern“; lässt sie sich nicht speichern, geben Sie das Geld zurück, und ein Manager bestätigt es im Z-Report.",
+      "cannotSave": "Die belasteten {{amount}} können an dieser Kasse nicht gespeichert werden. NICHT erneut belasten. Geben Sie dem Kunden das Geld zurück; ein Manager bestätigt es anschließend im Z-Report."
+    },
+    "checkoutOutcomeUnknown": "Das Kartenterminal hat noch nicht geantwortet. Starten Sie keine neue Zahlung: Warten Sie und tippen Sie dann erneut auf Bezahlen. Es prüft dieselbe Zahlung und belastet nie zweimal.",
+    "checkoutInProgress": "Diese Zahlung läuft noch am Kartenterminal. Warten Sie, bis sie abgeschlossen ist, und tippen Sie dann erneut auf Bezahlen: Es prüft dieselbe Zahlung und belastet nie zweimal.",
+    "moneySettings": {
+      "unavailableTitle": "Kassiervorgang angehalten",
+      "unavailableMessage": "Der Steuersatz und das Rabattlimit des Geschäfts konnten nicht gelesen werden, daher wird nichts auf Vermutung berechnet. Versuchen Sie es erneut; wenn es weiter fehlschlägt, starten Sie die App neu.",
+      "retry": "Erneut versuchen"
     }
   },
   "paymentPrintPrompt": {
@@ -2884,6 +3177,9 @@
         "capEftIndex": "Nummer des gekoppelten EFT-POS",
         "capCashCode": "Barzahlungscode",
         "capCardCode": "Kartenzahlungscode",
+        "capVoucherCode": "Gutschein-Zahlungscode (optional)",
+        "capVoucherCodeHelp": "Leer lassen, bis Ihr Techniker einen vergibt",
+        "capVoucherCodeInvalid": "Der Gutschein-Zahlungscode muss 2–20 sein und sich von den Bar- und Kartencodes unterscheiden",
         "capDepartmentRequired": "Geben Sie für jeden MwSt.-Satz die Kassenabteilung (1–99) ein",
         "capFoldersRequired": "Capture- und Ausgabeordner des CAP Drivers sind erforderlich",
         "capCodesInvalid": "CAP-Zahlungscodes müssen 1–20 und die EFT-POS-Nummer 1–99 sein",
@@ -3273,7 +3569,7 @@
       "lastChecked": "Zuletzt geprüft: {{value}}",
       "notCheckedYet": "Noch nicht geprüft",
       "sections": {
-        "recommendedActions": "Das solltest du tun",
+        "recommendedActions": "Was Sie tun sollten",
         "problemExplanation": "Was gerade passiert",
         "supportActions": "Support-Aktionen"
       },
@@ -3310,7 +3606,24 @@
         "printerNotConfigured": "Für dieses POS ist kein Drucker eingerichtet. Bestellungen bleiben gespeichert, Belege können jedoch erst nach der Einrichtung eines Druckers gedruckt werden.",
         "syncWaiting": "Einige Daten warten auf die Synchronisierung. Das POS hat sie lokal gespeichert und versucht es automatisch erneut.",
         "ready": "Die Prüfungen für Bestellungen, Synchronisierung, Internet und Drucker waren erfolgreich.",
-        "shiftInactive": "Es ist keine Schicht aktiv. Starten Sie eine Schicht, bevor Sie Bestellungen aufnehmen."
+        "shiftInactive": "Es ist keine Schicht aktiv. Starten Sie eine Schicht, bevor Sie Bestellungen aufnehmen.",
+        "terminalNotAuthorized": "Dieses Terminal kann sich nicht beim System Ihres Geschäfts anmelden. Verkäufe werden auf diesem Gerät gespeichert, aber bis zur erneuten Verbindung wird nichts synchronisiert.",
+        "closeoutBlocked": "Vor dem Tagesabschluss (Z) muss noch etwas behoben werden.",
+        "closeoutOverdue": "Ein früherer Geschäftstag wurde noch nicht abgeschlossen (Z).",
+        "closeoutWaitingSync": "Zahlungen oder Kassenvorgänge haben den Server noch nicht erreicht, daher ist der Tagesabschluss (Z) nicht möglich.",
+        "liveUpdatesDown": "Die Live-Aktualisierungen sind getrennt. Bestellungen werden weiter synchronisiert, andere Geräte sehen Änderungen aber eventuell verspätet.",
+        "syncStuck": {
+          "one": "1 Eintrag in der Warteschlange ist seit {{duration}} nicht synchronisiert.",
+          "other": "{{count}} Einträge in der Warteschlange sind seit {{duration}} nicht synchronisiert."
+        },
+        "fiscalNotSent": {
+          "one": "1 Fiskalbeleg wartet seit {{duration}} auf den Versand.",
+          "other": "{{count}} Fiskalbelege warten seit {{duration}} auf den Versand."
+        },
+        "printingStalled": {
+          "one": "Belege warten und werden nicht gedruckt: 1 Druckauftrag wartet seit {{duration}}.",
+          "other": "Belege warten und werden nicht gedruckt: {{count}} Druckaufträge warten, der älteste seit {{duration}}."
+        }
       },
       "recommendations": {
         "doNotClearData": "Löschen Sie keine Daten.",
@@ -3323,14 +3636,16 @@
         "useNormally": "Nutzen Sie das POS ganz normal weiter.",
         "keepTakingOrders": "Nehmen Sie weiter Bestellungen auf.",
         "startShift": "Starten Sie eine Schicht, bevor Sie Bestellungen aufnehmen.",
-        "configurePrinter": "Richten Sie einen Drucker für dieses POS ein."
+        "configurePrinter": "Richten Sie einen Drucker für dieses POS ein.",
+        "checkPrinter": "Prüfen Sie, ob der Drucker eingeschaltet ist, Papier hat und verbunden ist."
       },
       "services": {
         "orders": "Bestellungen",
         "internet": "Internet",
         "sync": "Sync",
         "printer": "Drucker",
-        "support": "Support"
+        "support": "Support",
+        "closeout": "Tagesabschluss (Z)"
       },
       "status": {
         "working": "Verfügbar",
@@ -3361,7 +3676,9 @@
         "applied": "Übernommen",
         "completed": "Abgeschlossen",
         "error": "Fehler",
-        "unavailable": "Nicht verfügbar"
+        "unavailable": "Nicht verfügbar",
+        "stuck": "Hängt fest",
+        "viaMainTerminal": "Über Hauptterminal"
       },
       "support": {
         "sentToast": "Diagnosebericht an den Support gesendet.",
@@ -3433,6 +3750,150 @@
         "update": "Aktualisieren",
         "delete": "Löschen",
         "unknown": "Synchronisierungsaktion"
+      },
+      "impact": {
+        "dayCloseBlockedUntilSent": "Der Tagesabschluss (Z) ist erst möglich, wenn sie gesendet sind.",
+        "dayCloseBlocked": "Der Tagesabschluss (Z) ist erst möglich, wenn das behoben ist.",
+        "dayCloseOverdue": "Schließen Sie zuerst den früheren Tag ab (Z).",
+        "receiptsMayNotPrint": "Belege werden eventuell nicht gedruckt.",
+        "otherDevicesNotUpdated": "Andere Geräte und das Verwaltungssystem sehen die neuesten Änderungen eventuell noch nicht.",
+        "printingStopped": "Belege und Küchenbons kommen nicht aus dem Drucker. Bestellungen bleiben gespeichert."
+      },
+      "primaryAction": {
+        "syncNow": {
+          "label": "Jetzt synchronisieren",
+          "detail": "Senden Sie die wartenden Einträge jetzt an den Server.",
+          "verification": "Danach prüft das POS erneut, ob sie gesendet wurden."
+        },
+        "exportDiagnostics": {
+          "label": "Diagnose exportieren",
+          "detail": "Die Synchronisierung hat das Problem nicht gelöst. Exportieren Sie die Diagnosedatei und senden Sie sie an den Support.",
+          "verification": "Die Datei hilft dem Support, die Ursache zu finden. Das Problem wird dadurch allein nicht behoben."
+        },
+        "openRecovery": {
+          "label": "Problem prüfen",
+          "detail": "Sehen Sie, welche Einträge betroffen sind und was jeweils der sichere nächste Schritt ist.",
+          "verification": "Jede Korrektur wird erneut geprüft, bevor sie als gelöst gilt."
+        },
+        "reconnect": {
+          "label": "Live-Aktualisierungen neu verbinden",
+          "detail": "Bestellungen werden weiter synchronisiert, auch wenn die Live-Aktualisierungen ausgefallen sind.",
+          "verification": "Nach dem Neuverbinden prüft das POS die Verbindung erneut."
+        },
+        "openConnectionSettings": {
+          "label": "Terminaleinstellungen öffnen",
+          "detail": "Verbinden Sie dieses Terminal in den Terminaleinstellungen wieder mit Ihrem Geschäft. Wenn Ihnen die Angaben fehlen, fragen Sie den Inhaber oder den Support.",
+          "verification": "Die Synchronisierung startet wieder, sobald das Terminal verbunden ist."
+        },
+        "waitForConnection": {
+          "label": "Verbindung wird abgewartet",
+          "detail": "Verkaufen Sie einfach weiter. Alles, was hier gespeichert ist, wird automatisch synchronisiert, sobald das Internet wieder da ist.",
+          "verification": "Das POS prüft die Verbindung laufend."
+        },
+        "startShift": {
+          "label": "Schicht starten",
+          "detail": "Starten Sie eine Schicht, bevor Sie Bestellungen aufnehmen.",
+          "verification": "Sobald die Schicht läuft, können Bestellungen aufgenommen werden."
+        },
+        "configurePrinter": {
+          "label": "Druckereinstellungen",
+          "detail": "Prüfen Sie, ob der Drucker eingeschaltet und für dieses POS eingerichtet ist.",
+          "verification": "Drucken Sie zur Kontrolle einen Testbeleg."
+        },
+        "openZReport": {
+          "label": "Tagesabschluss (Z) öffnen",
+          "detail": "Der Z-Bildschirm zeigt, was noch offen ist und wie es sich beheben lässt.",
+          "verification": "Vor dem Abschluss des Tages prüft der Z-Bericht noch einmal alles."
+        },
+        "refresh": {
+          "label": "Erneut prüfen",
+          "detail": "Der Status konnte nicht gelesen werden. Prüfen Sie erneut; wenn es weiter fehlschlägt, exportieren Sie die Diagnose für den Support.",
+          "verification": "Das POS arbeitet in der Zwischenzeit lokal weiter."
+        },
+        "none": {
+          "label": "Keine Aktion nötig",
+          "detail": "Nutzen Sie das POS ganz normal weiter.",
+          "verification": "Das POS prüft im Hintergrund weiter."
+        },
+        "checkPrinting": {
+          "label": "Drucker prüfen",
+          "detail": "Öffnen Sie die Druckereinstellungen und prüfen Sie, ob der Drucker eingeschaltet ist, Papier hat und verbunden ist. Wenn die Belege danach immer noch nicht gedruckt werden, wenden Sie sich an den Support.",
+          "verification": "Das POS prüft die Druckwarteschlange erneut. Die Warnung verschwindet, sobald die wartenden Belege gedruckt sind."
+        }
+      },
+      "outcome": {
+        "pending": "Angefordert. Noch nicht bestätigt – das POS prüft erneut.",
+        "failed": "Das hat nicht funktioniert. Gespeicherte Vorgänge bleiben erhalten.",
+        "unknown": "Erledigt, aber eine Behebung ist noch nicht bestätigt. Das Problem bleibt angezeigt, bis eine neue Prüfung zeigt, dass es behoben ist.",
+        "resolved": "Behoben: Eine neue Prüfung bestätigt es."
+      },
+      "closeout": {
+        "title": "Tagesabschluss (Z)",
+        "affects": "Sie können weiter verkaufen. Der Tagesabschluss (Z) ist erst möglich, wenn diese Punkte erledigt sind.",
+        "status": {
+          "ready": "Bereit",
+          "open": "Tag offen",
+          "blocked": "Blockiert",
+          "overdue": "Früherer Tag offen",
+          "submitted": "Gesendet",
+          "unavailable": "Nicht verfügbar",
+          "notChecked": "Wird im Z-Bildschirm geprüft",
+          "notApplicable": "Am Hauptterminal"
+        },
+        "summary": {
+          "ready": "Dem Tagesabschluss steht nichts im Weg.",
+          "open": "Vor dem Tagesabschluss noch offen:",
+          "blocked": "Beheben Sie diese Punkte vor dem Tagesabschluss:",
+          "overdue": "Ein früherer Geschäftstag ist noch offen. Schließen Sie ihn zuerst ab (Z).",
+          "submitted": "Der Z-Bericht wurde gesendet und wartet auf die Bestätigung durch den Server.",
+          "unavailable": "Ob der Tagesabschluss (Z) möglich ist, konnte nicht geprüft werden.",
+          "notChecked": "Dieser Bildschirm sieht nicht alle Prüfungen für den Tagesabschluss. Der Z-Bildschirm prüft alles, bevor er den Tag abschließt.",
+          "notApplicable": "Der Tagesabschluss (Z) erfolgt am Hauptterminal."
+        },
+        "blockers": {
+          "transferred_drivers": "Fahrerschichten mit übergebenem Bargeld: {{count}}",
+          "active_shifts": "Offene Schichten: {{count}}",
+          "unreconciled_drawers": "Nicht abgeglichene Kassenladen: {{count}}",
+          "pending_orders": "Nicht abgeschlossene Bestellungen: {{count}}",
+          "unpaid_finalized_orders": "Abgeschlossene, unbezahlte Bestellungen: {{count}}",
+          "unsynced_financial_rows": "Nicht synchronisierte Zahlungen oder Kassenvorgänge: {{count}}",
+          "payments_need_review": "Als mögliche Doppelzahlung zurückgestellte Zahlungen: {{count}}",
+          "payments_not_saved": "Belastete, nicht gespeicherte Zahlungen: {{count}}",
+          "paid_orders_without_payment": "Bezahlte Bestellungen ohne Zahlungseintrag: {{count}}",
+          "fiscal_queue_not_empty": "Nicht gesendete Fiskalbelege: {{count}}",
+          "other": "Weitere Prüfungen: {{count}}"
+        },
+        "links": {
+          "openShifts": "Schichten",
+          "openOrders": "Bestellungen",
+          "openOrder": "Bestellung öffnen",
+          "syncNow": "Jetzt synchronisieren",
+          "openZReport": "Z-Bericht öffnen"
+        }
+      },
+      "duration": {
+        "lessThanMinute": "weniger als einer Minute",
+        "minutes": {
+          "one": "{{count}} Minute",
+          "other": "{{count}} Minuten"
+        },
+        "hours": {
+          "one": "{{count}} Stunde",
+          "other": "{{count}} Stunden"
+        },
+        "days": {
+          "one": "{{count}} Tag",
+          "other": "{{count}} Tagen"
+        }
+      },
+      "queue": {
+        "state": {
+          "waiting": "Wartet",
+          "retrying": "Neuer Versuch",
+          "stuck": "Hängt fest",
+          "failed": "Fehlgeschlagen",
+          "conflict": "Konflikt"
+        }
       }
     },
     "blocker": {
@@ -3456,6 +3917,7 @@
     },
     "system": {
       "syncBacklog": "Sync-Rückstand",
+      "backlogUnavailable": "Der Sync-Rückstand konnte nicht gelesen werden. Prüfen Sie erneut; wenn es weiter fehlschlägt, exportieren Sie die Diagnose für den Support.",
       "invalidOrders": "Ungültige Bestellungen",
       "invalidOrdersDesc": "Bestellungen haben Menüartikel, die nicht im lokalen Cache sind",
       "removeInvalidOrders": "Ungültige Bestellungen entfernen",
@@ -3974,6 +4436,72 @@
       "countedCashRequired": "Geben Sie das gezählte Bargeld vor dem Checkout ein.",
       "actualCashReturnedRequired": "Geben Sie das tatsächlich an die Kasse übergebene Bargeld vor dem Checkout ein.",
       "invalidOpeningCash": "Bitte geben Sie einen gültigen Anfangsbestand ein (0 oder mehr)",
+      "financialOpeningChecking": "Öffnung wird geprüft…",
+      "financialOpeningResume": "Ursprüngliche Öffnung prüfen",
+      "financialOpeningPending": "Die Bestätigung steht noch aus. Behalten Sie diese ursprüngliche Öffnung bei und prüfen Sie erneut.",
+      "financialOpeningUnknown": "Das Ergebnis ist unbekannt. Prüfen Sie dieselbe Öffnung erneut, ohne eine weitere zu starten.",
+      "financialOpeningReauthorize": "Geben Sie die PIN desselben Kassierers ein, um die ursprüngliche Öffnung fortzusetzen.",
+      "financialOpeningUnusable": "Diese ursprüngliche Öffnung ist geschlossen oder nicht nutzbar und kann nicht übernommen werden.",
+      "financialOpeningUnavailable": "Die finanzielle Öffnung ist nicht verfügbar. Prüfen Sie die Terminalzuordnung und die eingestellte Währung.",
+      "giftClose": {
+        "title": "Abschluss mit Geschenkkarten-Bargeld",
+        "loadingStatus": "Gespeicherter Abschluss wird gelesen…",
+        "pendingTitle": "Warten auf finanzielle Bestätigung",
+        "pendingBody": "Die Schicht ist an diesem Terminal geschlossen. Ihr Abschluss mit Geschenkkarten-Bargeld wartet auf die finanzielle Bestätigung und wird nicht erneut abgeschlossen.",
+        "confirmedTitle": "Finanzieller Abschluss bestätigt",
+        "blockedStateTitle": "Die Abschlussbestätigung ist blockiert",
+        "retainedCount": "Gespeicherte Zählung",
+        "localPreview": "Lokale Vorschau, nicht bestätigt",
+        "ordinaryExpected": "Erwartetes reguläres Bargeld",
+        "giftCash": "Geschenkkarten-Bargeld",
+        "expectedTotal": "Erwartet in der Kasse",
+        "counted": "Gezähltes Bargeld",
+        "variance": "Differenz",
+        "canonical": "Bestätigte Werte",
+        "closedAt": "Geschlossen um",
+        "confirmedAt": "Bestätigt um",
+        "canonicalDiffers": "Die bestätigten Werte weichen von der beim Abschluss angezeigten Vorschau ab.",
+        "authRequired": "Die ursprüngliche Kassierperson muss ihre PIN eingeben, um die Abschlussfreigabe zu erneuern.",
+        "pinLabel": "PIN der ursprünglichen Kassierperson",
+        "pinInvalid": "Geben Sie die PIN der ursprünglichen Kassierperson ein.",
+        "authorize": "Freigabe erneuern und erneut versuchen",
+        "queued": "Erneute Bestätigung eingereiht. Prüfen Sie den Status in Kürze erneut.",
+        "checkStatus": "Status prüfen",
+        "retry": "Bestätigung erneut versuchen",
+        "print": "Abschluss drucken",
+        "printQueued": "Abschlussdruck eingereiht.",
+        "printFailed": "Der Abschlussdruck ist fehlgeschlagen. Versuchen Sie es erneut.",
+        "done": "Fertig",
+        "pendingListTitle": "Ausstehende Geschenkkarten-Abschlüsse",
+        "pendingListHelper": "Wählen Sie einen gespeicherten Abschluss, um ihn zu prüfen oder erneut zu versuchen. Hier wird nie ein neuer Abschluss erstellt.",
+        "pendingListFailed": "Ausstehende Geschenkkarten-Abschlüsse dieser Kassierperson konnten nicht geprüft werden.",
+        "pendingListTruncated": "Es gibt mehr gespeicherte Abschlüsse, als hier angezeigt werden.",
+        "shiftLabel": "Schicht {{id}}",
+        "open": "Öffnen",
+        "checkAgain": "Erneut prüfen",
+        "blockedUnresolved": "Offene Geschenkkarten-Bargeldvorgänge ({{count}}) müssen vor dem Abschluss geklärt werden.",
+        "blockedAttemptsUnknown": "Geschenkkarten-Bargeldvorgänge konnten nicht geprüft werden. Der Abschluss bleibt blockiert.",
+        "blockedSummary": "Die reguläre Schichtübersicht konnte nicht gelesen werden. Der Abschluss bleibt blockiert.",
+        "drawerUnavailable": "Die Geschenkkarten-Bargeldwerte konnten nicht gelesen werden. Es wird nichts als null angenommen.",
+        "termsChanged": "Die Abschlusswerte haben sich geändert. Prüfen Sie die aktualisierten Werte, zählen Sie erneut und bestätigen Sie erneut.",
+        "originalExists": "Für diese Schicht gibt es bereits einen gespeicherten Abschluss. Öffnen Sie ihn, statt erneut abzuschließen.",
+        "originalMissing": "Das Original des gespeicherten Abschlusses fehlt. Es kann an diesem Terminal nicht erneut versucht werden.",
+        "proofUnavailable": "Der Abschlussnachweis ist nicht verfügbar. Prüfen Sie den Status später erneut.",
+        "openingNotReady": "Die Schichteröffnung mit Geschenkkarten ist noch nicht bestätigt, daher bleibt der Abschluss blockiert.",
+        "localUnavailable": "Dieses Terminal konnte den gespeicherten Abschluss nicht lesen. Versuchen Sie es erneut.",
+        "refused": "Der Geschenkkarten-Abschluss wurde abgelehnt ({{code}}).",
+        "checking": "Es wird geprüft, ob diese Schicht mit Geschenkkarten-Bargeld abschließt…",
+        "preparing": "Die Geschenkkarten-Abschlusswerte werden vorbereitet…",
+        "countLabel": "Gezähltes Bargeld in der Kasse",
+        "countInvalid": "Geben Sie das gezählte Bargeld mit höchstens zwei Dezimalstellen ein.",
+        "countChanged": "Die Zählung hat sich nach der Prüfung geändert. Prüfen Sie sie erneut.",
+        "approveTitle": "Geschenkkarten-Abschluss bestätigen",
+        "approveBody": "Diese Schicht mit den oben angezeigten Werten und der Zählung abschließen?",
+        "approve": "Bestätigen und abschließen",
+        "cancel": "Abbrechen",
+        "footerNote": "Prüfen Sie das oben erwartete Bargeld.",
+        "printPending": "Der Abschluss wird erst nach der finanziellen Bestätigung gedruckt."
+      },
       "invalidStartingAmount": "Bitte geben Sie einen gültigen Startbetrag ein (0 oder mehr)",
       "zeroCashConfirmTitle": "Null-Anfangsbestand bestätigen",
       "zeroCashConfirmMessage": "Sie starten Ihre Schicht mit 0 € in der Kassenlade. Sind Sie sicher, dass Sie fortfahren möchten?",
@@ -4293,7 +4821,10 @@
         "overpaid_order": "Überzahlung",
         "duplicate_payment": "Doppelte Zahlung",
         "platform_settlement_mismatch": "Plattformabrechnung in falscher Zahlungsart",
-        "platform_settlement_missing": "Fehlende Plattformabrechnung"
+        "platform_settlement_missing": "Fehlende Plattformabrechnung",
+        "payments_need_review": "Zur Prüfung zurückgestellte Zahlung",
+        "payments_not_saved": "Karte belastet, Zahlung nicht gespeichert",
+        "cancelled_order_claims_payment": "Stornierte Bestellung gilt noch als bezahlt"
       },
       "revenueSplitHint": "Bargeld + Karte + Plattformen = Tatsächlich verdient",
       "liveShiftBreakdown": "Live-Schichtübersicht",
@@ -4463,6 +4994,12 @@
       "submitFailed": "Fehlgeschlagen: {{error}}",
       "resolveBlockerCash": "Fehlende Barzahlung Erfassen",
       "resolveBlockerCard": "Fehlende Kartenzahlung Erfassen",
+      "recordConfirmTitle": "Diese Zahlung erfassen?",
+      "recordConfirmMessage": "Erfassen Sie {{amount}} ({{method}}) für Bestellung {{order}} nur, wenn der Kunde bereits bezahlt hat. Es wird nichts belastet, und die Erfassung trägt Ihren Namen.",
+      "recordConfirmAction": "Erfassen",
+      "recordApprovalTitle": "Erfassen der Zahlung freigeben",
+      "recordApprovalSubtitle": "Geben Sie die PIN eines Kassierers oder Managers ein. Es wird nichts belastet.",
+      "recordAlreadyRecorded": "Diese Zahlung ({{method}}) für {{orderNumber}} war bereits erfasst. Es wurde nichts hinzugefügt.",
       "resolvingPayment": "Zahlung wird erfasst…",
       "resolveBlockerSuccess": "Für {{orderNumber}} wurde eine {{method}}-Zahlung erfasst. Prüfen Sie den aktualisierten Bericht und senden Sie den Z-Report erneut.",
       "resolveBlockerFailed": "{{orderNumber}} konnte nicht behoben werden: {{error}}",
@@ -4472,7 +5009,73 @@
       "pendingDateLocked": "Dieses Datum ist gesperrt, weil der vorherige Geschäftstag bereits geschlossen ist und noch auf die lokale Übermittlung des Z-Reports wartet.",
       "pendingLocalSubmitTitle": "Der vorherige Geschäftstag ist geschlossen und wartet noch auf die lokale Z-Übermittlung",
       "pendingLocalSubmitHelp": "Nutzen Sie die Hauptaktion unten, um den vorherigen Tag lokal abzuschließen. Das Datum bleibt gesperrt, damit nicht der falsche Geschäftstag übermittelt wird.",
-      "paymentIntegrityResolveHelper": "Beheben Sie hier den fehlenden Betrag. Die Korrektur wird auf der ursprünglichen Kasse des Geschäftstags gespeichert, bevor Sie den Z-Report erneut versuchen."
+      "paymentIntegrityResolveHelper": "Beheben Sie hier den fehlenden Betrag. Die Korrektur wird auf der ursprünglichen Kasse des Geschäftstags gespeichert, bevor Sie den Z-Report erneut versuchen.",
+      "finalPrintUnavailable": "Der endgültige Druck ist verfügbar, nachdem der Z-Bericht gespeichert wurde.",
+      "giftClose": {
+        "title": "Geschenkkarten-Bargeld",
+        "outsideSales": "Außerhalb von Umsatz, Zahlungsarten und Steuer. Einmal im erwarteten Bargeld enthalten.",
+        "ordinaryExpected": "Reguläres erwartetes Bargeld",
+        "ordinaryAdjustment": "Anpassung der übrigen Bargeldbeträge",
+        "giftLiabilityCash": "Geschenkkarten-Bargeld",
+        "expected": "Erwartetes Bargeld",
+        "counted": "Gezähltes Bargeld",
+        "variance": "Differenz",
+        "currency": "Währung",
+        "confirmedAt": "Bestätigt am",
+        "proofFinal": "Abschluss bestätigt",
+        "proofNotFinal": "Nicht endgültig: ein Geschenkkarten-Abschluss ist nicht bestätigt",
+        "proofUnreadable": "Die Abschlussbestätigung ist nicht verfügbar",
+        "checklistFinal": "Geschenkkarten-Bargeld {{amount}} ist bestätigt und bleibt außerhalb des Umsatzes.",
+        "blocked": "Endgültiger Druck und Übermittlung bleiben deaktiviert, bis jeder Geschenkkarten-Abschluss bestätigt ist.",
+        "recovery": {
+          "GIFT_CLOSE_PROOF_PENDING": "Der Geschenkkarten-Abschluss für {{staff}} wartet auf Bestätigung. Lassen Sie dieses Terminal online und tippen Sie dann auf Aktualisieren.",
+          "GIFT_CLOSE_PROOF_UNAVAILABLE": "Der bestätigte Geschenkkarten-Abschluss für {{staff}} ist nicht lesbar. Tippen Sie auf Aktualisieren; bleibt es so, kontaktieren Sie den Support, bevor Sie den Tag abschließen.",
+          "GIFT_CLOSE_PROOF_MISMATCH": "Der Geschenkkarten-Abschluss für {{staff}} passt nicht mehr zu seiner Kasse. Schließen Sie den Tag nicht ab; kontaktieren Sie den Support.",
+          "GIFT_CLOSE_JOURNAL_MISSING": "Für {{staff}} wurde kein bestätigter Geschenkkarten-Abschluss erfasst. Kontaktieren Sie den Support, bevor Sie den Tag abschließen.",
+          "GIFT_OPENING_UNCONFIRMED": "Die Geschenkkarten-Eröffnung für {{staff}} ist noch nicht bestätigt. Verbinden Sie dieses Terminal und tippen Sie dann auf Aktualisieren.",
+          "unknown": "Der Geschenkkarten-Abschluss für {{staff}} ist nicht bestätigt. Tippen Sie auf Aktualisieren; bleibt es so, kontaktieren Sie den Support.",
+          "unreadable": "Der Geschenkkarten-Abschluss in diesem Bericht ist nicht lesbar. Tippen Sie auf Aktualisieren; bleibt es so, kontaktieren Sie den Support, bevor Sie den Tag abschließen."
+        },
+        "errors": {
+          "proofRequired": "Der Tag kann noch nicht abgeschlossen werden: ein Kassenabschluss mit Geschenkkarten ist nicht bestätigt. Lassen Sie dieses Terminal online, tippen Sie auf Aktualisieren und folgen Sie dem Geschenkkarten-Hinweis.",
+          "snapshotStale": "Dieser Z-Bericht wurde gespeichert, bevor ein Geschenkkarten-Abschluss bestätigt war, und kann nicht wiederverwendet werden. Kontaktieren Sie den Support; der gespeicherte Bericht wurde nicht geändert."
+        }
+      },
+      "fiscalCloseBlocked": "Der Tag kann noch nicht abgeschlossen werden: {{count}} Fiskalübermittlung(en) vom {{date}} wurden noch nicht gesendet. Sie können weiter verkaufen; halten Sie das Terminal online und senden Sie sie aus diesem Bericht erneut.",
+      "fiscalCloseBlockedNoDate": "Der Tag kann noch nicht abgeschlossen werden: {{count}} Fiskalübermittlung(en) wurden noch nicht gesendet. Sie können weiter verkaufen; halten Sie das Terminal online und senden Sie sie aus diesem Bericht erneut.",
+      "fiscalCloseCheckFailed": "Der Tag kann noch nicht abgeschlossen werden: Die Fiskalübermittlungen vom {{date}} konnten nicht geprüft werden. Sie können weiter verkaufen; versuchen Sie es gleich erneut, und wenn es weiter fehlschlägt, exportieren Sie die Diagnose für den Support.",
+      "fiscalCloseCheckFailedNoDate": "Der Tag kann noch nicht abgeschlossen werden: Die Fiskalübermittlungen konnten nicht geprüft werden. Sie können weiter verkaufen; versuchen Sie es gleich erneut, und wenn es weiter fehlschlägt, exportieren Sie die Diagnose für den Support.",
+      "fiscalQueue": {
+        "label": "Fiskalübermittlungen",
+        "pending": "{{count}} Fiskalübermittlung(en) vom {{date}} haben den Fiskaldienst noch nicht erreicht. Sie können weiter verkaufen; der Tag wird abgeschlossen, sobald sie gesendet sind.",
+        "pendingNoDate": "{{count}} Fiskalübermittlung(en) haben den Fiskaldienst noch nicht erreicht. Sie können weiter verkaufen; der Tag wird abgeschlossen, sobald sie gesendet sind.",
+        "retryAction": "Erneut senden",
+        "retryRequested": "Die Fiskalübermittlungen werden erneut gesendet. Die Liste wird aktualisiert, sobald sie angenommen wurden.",
+        "retryFailed": "Die Fiskalübermittlungen konnten nicht erneut gesendet werden: {{error}}",
+        "listTitle": "Ausstehende Fiskalübermittlungen ({{count}})",
+        "attempts": "Versuche {{attempts}}/{{max}}"
+      },
+      "setAsideConfirmTitle": "Geld zurückgegeben?",
+      "setAsideConfirmMessage": "Bestätigen Sie, dass {{amount}} ({{method}}) für Bestellung {{order}} an den Kunden zurückgegeben wurden. Der Betrag bleibt außerhalb der Summen.",
+      "setAsideConfirmAction": "Bestätigen",
+      "setAsideApprovalTitle": "Rückgabe des Geldes bestätigen",
+      "setAsideApprovalSubtitle": "Geben Sie die PIN eines Kassierers oder Managers ein, um es zu bestätigen.",
+      "setAsideResolved": "Als an den Kunden zurückgegeben erfasst. Die Zahlung bleibt außerhalb der Summen.",
+      "setAsideAlreadyResolved": "Diese Zahlung wurde bereits als zurückgegeben erfasst.",
+      "setAsideResolveFailed": "Konnte nicht erfasst werden: {{error}}",
+      "setAsideShiftRequired": "Zum Bestätigen muss an diesem Terminal ein Kassierer oder Manager eingecheckt sein.",
+      "unsavedConfirmTitle": "Geld zurückgegeben?",
+      "unsavedConfirmMessage": "Bestätigen Sie, dass die für Bestellung {{order}} belasteten {{amount}} dem Kunden zurückgegeben wurden. Die Zahlung wird nicht gespeichert, und die Bestellung bleibt unverändert.",
+      "unsavedConfirmMessageNewOrder": "Bestätigen Sie, dass die für eine nie an dieser Kasse gespeicherte neue Bestellung belasteten {{amount}} dem Kunden zurückgegeben wurden. Die Bestellung und ihre Zahlung werden nicht gespeichert.",
+      "unsavedConfirmAction": "Bestätigen",
+      "unsavedApprovalTitle": "Rückgabe des Geldes bestätigen",
+      "unsavedApprovalSubtitle": "Geben Sie zur Bestätigung die PIN eines Kassierers oder Managers ein.",
+      "unsavedResolved": "Als an den Kunden zurückgegeben erfasst. Die Zahlung wird nicht gespeichert.",
+      "unsavedAlreadyResolved": "Diese Zahlung wurde bereits als zurückgegeben erfasst.",
+      "unsavedSavedAfterAll": "Diese Zahlung wurde doch gespeichert: Es gibt nichts zurückzugeben.",
+      "unsavedResolveFailed": "Konnte nicht erfasst werden: {{error}}",
+      "unsavedSaved": "Zahlung gespeichert.",
+      "unsavedStillNotSaved": "An dieser Kasse noch immer nicht gespeichert. Nicht erneut belasten. Versuchen Sie es erneut, oder geben Sie dem Kunden das Geld zurück und bestätigen Sie es hier."
     },
     "expense": {
       "title": "Kassenabflüsse",
@@ -4981,7 +5584,104 @@
       "refundSuccess": "Erstattung erfasst",
       "refundFailed": "Erstattung fehlgeschlagen",
       "voidSuccess": "Zahlung storniert",
-      "voidFailed": "Storno fehlgeschlagen"
+      "voidFailed": "Storno fehlgeschlagen",
+      "gift": {
+        "title": "Rückgabe auf die ursprüngliche Geschenkkarte",
+        "destination": "Das Geld geht nur auf die Geschenkkarte zurück, mit der diese Zeile bezahlt wurde.",
+        "action": "Auf Geschenkkarte zurückgeben",
+        "methodLabel": "Geschenkkarte",
+        "historyLabel": "Auf die ursprüngliche Geschenkkarte zurückgegeben",
+        "close": "Geschenkkarten-Rückgabe schließen",
+        "noStaff": "Melden Sie sich als Mitarbeiter an, um eine Geschenkkartenzahlung zurückzugeben.",
+        "authorizeTitle": "{{name}}: PIN eingeben, um diese Geschenkkartenzahlung zurückzugeben",
+        "pinLabel": "PIN",
+        "pinRequired": "Geben Sie Ihre PIN ein.",
+        "authorize": "Autorisieren",
+        "authorizing": "Wird geprüft…",
+        "authRefused": "Autorisierung abgelehnt: {{error}}",
+        "authUnavailable": "das Terminal konnte die PIN nicht prüfen",
+        "authExpired": "Ihre Autorisierung ist abgelaufen. Geben Sie Ihre PIN erneut ein.",
+        "authRequired": "{{name}} muss die PIN erneut eingeben. Die Rückgabe bleibt unverändert erhalten.",
+        "contextChanged": "Die Terminalkonfiguration hat sich geändert. Geben Sie Ihre PIN erneut ein.",
+        "loading": "Geschenkkartenzahlung wird gelesen…",
+        "unavailable": "Der Rückgabestatus der Geschenkkarte konnte nicht gelesen werden. Eine neue Rückgabe ist erst nach dem Lesen möglich.",
+        "moneyUnavailable": "Die Beträge der Geschenkkarte konnten nicht bestätigt werden. Keine neue Rückgabe möglich.",
+        "retry": "Erneut versuchen",
+        "gross": "Bezahlt",
+        "returned": "Zurückgegeben",
+        "remaining": "Rückgabefähig",
+        "actionLabel": "Art der Rückgabe",
+        "actionRefund": "Teilerstattung",
+        "actionVoid": "Storno",
+        "amountLabel": "Rückgabebetrag ({{currency}})",
+        "amountHint": "Bis zu {{amount}}",
+        "invalidAmount": "Geben Sie einen Betrag wie 4 oder 4,00 mit höchstens zwei Dezimalstellen ein.",
+        "exceedsRemaining": "Der Betrag ist höher als der rückgabefähige Betrag von {{amount}}.",
+        "voidNote": "Ein Storno gibt alles noch Rückgabefähige zurück. Sie geben keinen Betrag ein.",
+        "reasonLabel": "Grund",
+        "reasonPlaceholder": "Warum wird diese Geschenkkartenzahlung zurückgegeben?",
+        "reasonRequired": "Ein Grund ist erforderlich.",
+        "review": "Rückgabe prüfen",
+        "reviewTitle": "Vor der Rückgabe prüfen",
+        "reviewPayment": "Geschenkkartenzahlung",
+        "reviewDestination": "Geht an",
+        "destinationValue": "Die ursprüngliche Geschenkkarte",
+        "reviewAction": "Art",
+        "reviewAmount": "Betrag",
+        "voidNoAmount": "Alles noch Rückgabefähige",
+        "reviewCurrency": "Währung",
+        "reviewReason": "Grund",
+        "confirm": "Auf Geschenkkarte zurückgeben",
+        "back": "Zurück",
+        "sending": "Rückgabe auf die Geschenkkarte läuft…",
+        "completed": "{{amount}} auf die Geschenkkarte zurückgegeben. Noch rückgabefähig: {{remaining}}.",
+        "rereading": "Zahlungen der Bestellung werden neu gelesen…",
+        "rereadFailed": "Die Rückgabe ist abgeschlossen, aber die Zahlungen der Bestellung konnten nicht neu gelesen werden. Eine neue Rückgabe ist erst danach möglich.",
+        "orderRefreshFailed": "Die Rückgabe auf die Geschenkkarte ist bestätigt, aber diese Bestellung konnte nicht neu gelesen werden. Andere Aktionen bleiben bis dahin gesperrt.",
+        "checkProof": "Diese Rückgabe prüfen",
+        "proofConfirmed": "Bestätigt: {{amount}} wurden auf die Geschenkkarte zurückgebucht.",
+        "refused": "Die Rückgabe wurde abgelehnt ({{code}}): {{error}}",
+        "rejected": "Die Rückgabe wurde nicht angenommen ({{code}}): {{error}}",
+        "pendingTitle": "Rückgabe läuft",
+        "foundTitle": "Rückgabe gefunden",
+        "pendingBody": "Diese Rückgabe wurde gesendet, das Ergebnis ist aber nicht bestätigt. Das Schließen dieses Fensters storniert sie nicht. Stellen Sie sie wieder her, um genau diese Rückgabe abzuschließen.",
+        "priorUnreconciled": "Eine frühere Rückgabe dieser Karte ist auf diesem Terminal noch nicht erfasst. Diese Rückgabe bleibt ausstehend; ein erneuter Versuch ist nicht nötig.",
+        "recover": "Diese Rückgabe wiederherstellen",
+        "unknownTitle": "Ergebnis nicht bestätigt",
+        "unknownBody": "Das Terminal hat keine eindeutige Antwort erhalten. Nichts wurde als zurückgegeben gezählt. Prüfen Sie zuerst den Status.",
+        "checkStatus": "Status prüfen",
+        "otherPending": "Für diese Geschenkkartenzahlung läuft bereits eine Rückgabe. Nur die Person, die sie begonnen hat, kann sie abschließen.",
+        "notEligible": "Diese Geschenkkartenzahlung kann nicht zurückgegeben werden ({{code}}).",
+        "nothingRemaining": "Bei dieser Geschenkkartenzahlung ist nichts mehr zurückzugeben.",
+        "attemptsTitle": "Ihre Rückgaben für diese Zahlung",
+        "statePending": "Ausstehend",
+        "stateCompleted": "Abgeschlossen",
+        "stateRefused": "Abgelehnt",
+        "netCoverage": "Netto bezahlt {{paid}} · Offen {{outstanding}}",
+        "netCoverageLoading": "Netto bezahlt wird gelesen…",
+        "netCoverageUnavailable": "Netto bezahlt konnte nicht gelesen werden.",
+        "noCapture": "Die letzte Anfrage hat keine Rückgabe auf der Geschenkkarte hinterlassen: Es wurde nichts zurückgegeben. Sie können sie erneut starten."
+      },
+      "statusSetAside": "Zur Prüfung zurückgestellt",
+      "placeholderNotMoney": "Diese Zahlungszeile erfasst kein Geld (die Kasse hat sie aus der Kennzeichnung der Bestellung abgeleitet): Sie kann weder erstattet noch storniert werden. Stellen Sie die Zahlungen der Bestellung mit „Jetzt synchronisieren“ vom Server wieder her.",
+      "otherRefund": "Gleiche Zahlungsart (andere)",
+      "tenderRequired": "Wählen Sie, wie die Erstattung ausgezahlt wurde",
+      "platformSettlementLocked": "Abrechnung der Lieferplattform: Sie wird an der Kasse nie storniert oder erstattet. Der Server entscheidet, was damit geschieht.",
+      "refundRoute": "Erstattungsweg",
+      "cashRefund": "Barerstattung",
+      "cashReturnedBy": "Bargeld zurückgegeben von",
+      "amount": "Betrag",
+      "editAllocationRequired": "Die Aufteilung der Erstattung muss genau dem überzahlten Betrag entsprechen",
+      "editSettlementHint": "Wählen Sie genau, wie der erstattete Betrag beglichen wurde, damit die Bestelländerung abgeschlossen werden kann.",
+      "editSettlementOverpaidRequired": "Diese Änderung lässt die Bestellung überzahlt und erfordert eine erfasste Erstattung",
+      "editSettlementReducedRequired": "Diese Änderung verringert eine bezahlte Bestellung und erfordert eine erfasste Erstattung",
+      "editSettlementTitle": "Erstattung der Änderung",
+      "enterAmountFirst": "Geben Sie einen Erstattungsbetrag ein, um zu wählen, wie diese Zahlung erstattet wurde.",
+      "netPaidAfterRefunds": "Bezahlt nach früheren Erstattungen: €{{amount}}",
+      "originalVsNext": "Bestellsumme geändert von €{{from}} auf €{{to}}",
+      "requiredAmount": "Erforderliche Erstattung",
+      "selectAllocation": "Ordnen Sie die Erstattung mindestens einer Zahlung zu",
+      "useRemaining": "Rest verwenden"
     }
   },
   "errors": {
@@ -5280,7 +5980,11 @@
     "roomGuestCustomer": "Zimmer {{room}} — {{guest}}",
     "roomCustomer": "Zimmer {{room}}",
     "tableCustomer": "Tisch {{table}}",
-    "reservationComingSoon": "Reservierungsfunktion kommt bald"
+    "reservationComingSoon": "Reservierungsfunktion kommt bald",
+    "addressUpdated": "Adresse aktualisiert",
+    "invalidCartItems": "Die Bestellung kann nicht erstellt werden, weil einige Artikel im Warenkorb keine synchronisierten Menüartikel sind. Synchronisieren Sie das Menü und versuchen Sie es erneut.",
+    "missingContext": "Filial- oder Organisationskontext fehlt",
+    "noAddressForDelivery": "Dieser Kunde hat keine gespeicherte Adresse. Fügen Sie eine Adresse hinzu, um mit einer Lieferbestellung fortzufahren."
   },
   "orderDashboard": {
     "delivery": "Lieferung",
@@ -5307,13 +6011,15 @@
     "orderCreated": "Bestellung erfolgreich erstellt!",
     "markDeliveredFailed": "Bestellung {{orderNumber}} konnte nicht als geliefert markiert werden",
     "pickupDelivered": "{{count}} Abholbestellung(en) als geliefert markiert",
-    "platformReadySent": "Plattform benachrichtigt — der Fahrer ist unterwegs",
+    "platformReadySent": "Als fertig markiert",
     "platformReadyFailed": "Benachrichtigung der Plattform für {{orderNumber}} fehlgeschlagen",
     "deliveriesCompleted": "{{count}} Lieferbestellung(en) abgeschlossen",
     "dispatchDeliveryBeforeComplete": "Weisen Sie einen Fahrer zu oder wandeln Sie Lieferbestellungen in Abholung um, bevor Sie sie abschließen.",
     "noOrdersForCancel": "Keine Bestellungen zum Stornieren ausgewählt",
     "noOrdersForEdit": "Keine Bestellungen zum Bearbeiten ausgewählt",
     "cancelOrderFailed": "Bestellung {{orderNumber}} konnte nicht storniert werden",
+    "cancelRefusedPaid": "Bestellung {{orderNumber}} wurde nicht storniert: Darauf wurde bereits Geld kassiert. Stornieren oder erstatten Sie zuerst die Zahlung in der Bestellung, oder kassieren Sie den Rest.",
+    "cancelRefusedNotRecorded": "Bestellung {{orderNumber}} wurde nicht storniert: Sie ist als bezahlt markiert, aber ihre Zahlung ist an dieser Kasse nicht erfasst. Stellen Sie sie mit „Jetzt synchronisieren“ vom Server wieder her oder erfassen Sie die Zahlung im Z-Report, und stornieren Sie dann.",
     "ordersCancelled": "{{count}} Bestellung(en) erfolgreich storniert",
     "cancelFailed": "Stornierung fehlgeschlagen",
     "customerInfoUpdated": "Kundeninformationen für {{count}} Bestellung(en) aktualisiert",
@@ -5352,7 +6058,40 @@
       "route_split_launches": "Google Maps öffnet bis zu {{maxStops}} Stopps auf einmal — die Route wurde in {{launchCount}} Teilen geöffnet.",
       "route_matrix_stop_cap_fallback": "Die Optimierung ist auf {{maxStops}} Stopps begrenzt — es wurde eine einfachere Reihenfolge verwendet.",
       "generic": "Die Route wurde mit Anpassungen geöffnet."
-    }
+    },
+    "bulkPaidEditUnsupported": "Bezahlte oder teilweise bezahlte Bestellungen mit Abrechnungsänderungen müssen einzeln bearbeitet werden.",
+    "cardPaymentRecorded": "Kartenzahlung erfasst.",
+    "cashPaymentRecorded": "Barzahlung erfasst.",
+    "changeOrderTypeSingleOnly": "Der Bestelltyp kann nur für jeweils eine Bestellung geändert werden.",
+    "collectCardNow": "Kartenzahlung kassieren",
+    "collectCashNow": "Barzahlung kassieren",
+    "collectSinglePaymentDescription": "Diese Bestellung ist blockiert, weil die erwartete Zahlung nicht gespeichert wurde.",
+    "collectSinglePaymentTitle": "Kassieren Sie die fehlende Zahlung, um fortzufahren",
+    "convertToDeliveryFailed": "Die Bestellung konnte nicht in eine Lieferung umgewandelt werden.",
+    "convertedToDelivery": "Bestellung {{orderNumber}} wurde in eine Lieferung umgewandelt.",
+    "deliveryOverrideDenied": "Für die Umwandlung dieser Bestellung in eine Lieferung ist die Freigabe eines Managers erforderlich.",
+    "deliveryValidationFailed": "Die gewählte Adresse kann nicht für die Lieferung verwendet werden.",
+    "editSettlementRefundReason": "Erstattung nach Bestelländerung",
+    "noCompletedOrdersSelected": "Keine abgeschlossenen Bestellungen ausgewählt",
+    "noPickupOrderSelected": "Wählen Sie eine einzelne Abholbestellung aus, um sie in eine Lieferung umzuwandeln.",
+    "order": "Bestellung",
+    "orderEditPartialPaymentSaved": "Die Änderungen an der Bestellung wurden gespeichert. Der Restbetrag ist noch offen.",
+    "orderNotFound": "Die ausgewählte Bestellung wurde nicht gefunden.",
+    "orderSavedToTable": "Bestellung am Tisch gespeichert",
+    "orderStatusUpdated": "Bestellstatus aktualisiert.",
+    "outstandingAmount": "Offen",
+    "paymentMethod": "Zahlungsmethode",
+    "paymentMethodSyncRetried": "Erneute Synchronisierung der Zahlung eingereiht",
+    "paymentProgress": "{{settled}} von {{total}} erfasst. Der Restbetrag wird jetzt kassiert.",
+    "paymentRequired": "Zahlung erforderlich",
+    "pickupToDeliveryOverrideReason": "Abholbestellung {{orderNumber}} in eine Lieferung umgewandelt",
+    "platformHeldNotCollected": "Das Geld dieser Bestellung liegt bei der Lieferplattform. Stellen Sie es vom Server wieder her („Jetzt synchronisieren“); es wird nie an der Kasse kassiert.",
+    "receiptPreview": "Belegvorschau",
+    "receiptQueued": "Belegdruck eingereiht",
+    "refundNoEligiblePayment": "Keine abgeschlossene Zahlung mit ausreichendem Restbetrag für eine Erstattung.",
+    "tableOrderNotLoaded": "Diese Tischrechnung ist offen, aber die zugehörige Bestellung ist hier noch nicht geladen. Aktualisieren Sie die Bestellungen und versuchen Sie es erneut.",
+    "tableSessionQueued": "Tisch lokal gespeichert; Synchronisierung der Sitzung eingereiht.",
+    "tableSessionSyncFailed": "Bestellung gespeichert, aber die Synchronisierung der Tischsitzung muss wiederholt werden."
   },
   "bulkActions": {
     "driver": "Fahrer",
@@ -5378,12 +6117,29 @@
     "openInMaps": "In Google Maps öffnen",
     "addressNotAvailable": "Adresse nicht verfügbar",
     "loadingAddress": "Adresse wird geladen...",
-    "customer": "Kunde"
+    "customer": "Kunde",
+    "paymentPending": "AUSSTEHEND",
+    "paymentPendingA11y": "Zahlung ausstehend"
+  },
+  "incomingOrderAlert": {
+    "title": "Neue {{platform}}-Bestellung",
+    "titleCustomer": "Neue Bestellung zum Annehmen",
+    "explain": "Öffnen Sie sie, um sie anzunehmen oder abzulehnen.",
+    "waitingOver": "Wartet seit über {{seconds}} Sekunden auf eine Antwort",
+    "moreWaiting_one": "+{{count}} weitere Bestellung wartet",
+    "moreWaiting_other": "+{{count}} weitere Bestellungen warten",
+    "open": "Bestellung öffnen",
+    "later": "Später"
   },
   "orderApprovalPanel": {
     "selectTime": "Bitte wählen Sie die geschätzte Zeit",
     "approved": "Bestellung genehmigt",
     "approveFailed": "Bestellung konnte nicht genehmigt werden",
+    "preparationShortened": "{{platform}} akzeptiert für diese Bestellung höchstens {{max}} Min., daher wurden {{sent}} Min. statt {{requested}} Min. gesendet. Wenn Sie mehr Zeit brauchen, ändern Sie sie in der {{platform}}-App.",
+    "pickupWindow": "{{platform}}: {{estimate}}′ · bis {{max}}′",
+    "pickupWindowNoEstimate": "{{platform}}: bis {{max}}′",
+    "pickupWindowPassed": "Die späteste Abholzeit von {{platform}} ist vorbei: Es wird {{min}}′ gesendet.",
+    "maxChoice": "max.",
     "reasonRequired": "Bitte geben Sie einen Grund für die Ablehnung an",
     "declined": "Bestellung abgelehnt",
     "declineFailed": "Bestellung konnte nicht abgelehnt werden",
@@ -6778,7 +7534,9 @@
     },
     "external": {
       "monitors": "Verbundene Monitore und TVs",
-      "help": "Kabelgebundene Displays und drahtlose Displays des Betriebssystems erscheinen hier. Für Smart-TVs ohne Monitormodus kopieren Sie den TV-Link."
+      "running": "Kundenanzeige wird angezeigt",
+      "inUse": "In Verwendung",
+      "help": "Kabelgebundene Bildschirme und drahtlose Bildschirme des Betriebssystems erscheinen hier. Wählen Sie einen aus, um die Kundenanzeige zu zeigen."
     },
     "status": {
       "connected": "Verbunden",
@@ -6803,6 +7561,7 @@
     "pollingFallback": "Polling-Fallback",
     "pending": "Ausstehend",
     "preparing": "In Vorbereitung",
+    "ready": "Fertig",
     "total": "Gesamt",
     "avgTime": "Durchschn. Zeit",
     "min": "Min.",
@@ -6810,9 +7569,11 @@
     "justNow": "Gerade eben",
     "startPreparing": "Vorbereitung starten",
     "markReady": "Als bereit markieren",
+    "markCollected": "Als abgeholt markieren",
     "orderBumped": "Bestellung aktualisiert",
     "bumpError": "Bestellung konnte nicht aktualisiert werden",
     "loadError": "Bestellungen konnten nicht geladen werden",
+    "staleState": "Der zuletzt gespeicherte Küchenstatus wird angezeigt. Die neuesten Änderungen konnten nicht gelesen werden.",
     "noOrders": "Keine aktiven Bestellungen",
     "noOrdersDesc": "Neue Bestellungen erscheinen hier automatisch",
     "view": {
@@ -6828,17 +7589,16 @@
       "resume": "Live-Aktualisierung fortsetzen"
     },
     "externalDisplay": {
-      "copyTvLink": "TV-Link kopieren",
       "open": "Auf verbundenem Display öffnen",
       "stop": "Externes Display stoppen",
       "connectedDisplays": "Verbundene Monitore und TVs",
-      "help": "Kabelgebundene Displays und drahtlose Displays des Betriebssystems erscheinen hier. Für Smart-TVs ohne Monitormodus kopieren Sie den TV-Link.",
+      "help": "Verbinden Sie einen HDMI-Bildschirm oder einen drahtlosen Bildschirm über das Betriebssystem und wählen Sie ihn hier aus.",
       "running": "Das Küchendisplay läuft auf dem ausgewählten Monitor oder TV.",
+      "runningHere": "Küchendisplay wird angezeigt",
+      "inUse": "In Verwendung",
       "stopped": "Externes Küchendisplay gestoppt.",
       "openFailed": "Küchendisplay konnte nicht geöffnet werden",
-      "closeFailed": "Küchendisplay konnte nicht geschlossen werden",
-      "tvLinkCopied": "KDS-TV-Link kopiert. Öffnen Sie ihn in einem Smart-TV-Browser oder drahtlosen Empfänger.",
-      "tvLinkFailed": "KDS-TV-Link konnte nicht erstellt werden"
+      "closeFailed": "Küchendisplay konnte nicht geschlossen werden"
     },
     "liveDraft": {
       "badge": "Live-Entwurf",
@@ -6966,6 +7726,292 @@
     "toast": {
       "readyToDownload": "Version {{version}} ist zum Download bereit",
       "clickToView": "Klicken Sie für Details"
+    }
+  },
+  "giftCardCheckout": {
+    "title": "Geschenkkarte",
+    "due": "Offen {{amount}}",
+    "checkingAttempts": "Frühere Geschenkkartenversuche werden geprüft…",
+    "checkingService": "Geschenkkartendienst wird geprüft…",
+    "uncertain": "Das Geschenkkartenergebnis ist nicht bestätigt. Nicht erneut kassieren; zuerst erneut prüfen.",
+    "checkAgain": "Erneut prüfen",
+    "applied": "Geschenkkartenzahlung erfasst: {{amount}}",
+    "cardNumber": "Geschenkkartennummer",
+    "cardNumberPlaceholder": "Kartennummer scannen oder eingeben",
+    "check": "Karte prüfen",
+    "card": "Karte {{masked}} · Guthaben {{balance}}",
+    "amount": "Zu belastender Betrag",
+    "pay": "Geschenkkarte belasten",
+    "refusal": {
+      "scope": "Dieses Terminal hat keine bestätigte Organisations- oder Terminalidentität. Koppeln Sie das POS erneut.",
+      "order": "Legen Sie die Bestellung an, bevor Sie eine Geschenkkarte annehmen.",
+      "unsynced": "Warten Sie, bis die Bestellung synchronisiert ist, und versuchen Sie es erneut.",
+      "module": "Das Modul Geschenkkarten ist für dieses Geschäft nicht aktiv.",
+      "offline": "Geschenkkarten benötigen eine Verbindung. Verbinden Sie sich erneut und versuchen Sie es noch einmal.",
+      "unavailable": "Der Geschenkkartendienst ist nicht verfügbar. Versuchen Sie es in Kürze erneut.",
+      "cardNumber": "Prüfen Sie die Kartennummer und versuchen Sie es erneut.",
+      "notFound": "Keine Geschenkkarte passt zu dieser Nummer.",
+      "amount": "Geben Sie einen Betrag über null mit höchstens zwei Dezimalstellen ein.",
+      "currency": "Die Kartenwährung entspricht nicht der Bestellwährung.",
+      "balance": "Das Kartenguthaben reicht für diesen Betrag nicht aus.",
+      "expired": "Diese Geschenkkarte ist abgelaufen.",
+      "inactive": "Diese Geschenkkarte ist nicht aktiv.",
+      "exceedsOutstanding": "Der Betrag übersteigt den noch offenen Betrag der Bestellung.",
+      "nothingDue": "Für diese Bestellung ist nichts mehr offen.",
+      "itemSplit": "Geschenkkarten können nur eine Betragsaufteilung bezahlen. Wechseln Sie zu einer Betragsaufteilung oder nutzen Sie eine andere Zahlungsart.",
+      "split": "Dieser Teilbetrag ist ungültig. Öffnen Sie die Aufteilung erneut und versuchen Sie es noch einmal.",
+      "coverageUnavailable": "Der Bestellsaldo konnte nicht gelesen werden. Versuchen Sie es erneut.",
+      "admission": "Frühere Geschenkkartenversuche müssen zuerst geprüft werden.",
+      "fiscalPending": "Ein Beleg für diese Bestellung ist noch ausstehend. Prüfen Sie zuerst den Beleg.",
+      "staff": "Eine angemeldete Mitarbeitersitzung ist erforderlich. Melden Sie sich erneut an und versuchen Sie es noch einmal.",
+      "readiness": "Der Fiskalbelegweg ist für Geschenkkarten nicht bereit.",
+      "rejected": "Die Geschenkkartenzahlung wurde abgelehnt."
+    },
+    "fiscal": {
+      "ready": "Beleg bereit zur Ausgabe",
+      "partial": "Kassieren Sie den Rest bar oder mit Karte; der Beleg folgt dieser Zahlung",
+      "pending": "Beleg wartet auf Bestätigung",
+      "approved": "Beleg bestätigt",
+      "notRequired": "Kein Fiskalbeleg erforderlich",
+      "unsupported": "Dieser Belegweg unterstützt keine Geschenkkarten",
+      "unavailable": "Fiskalkasse nicht verfügbar",
+      "error": "Beleg fehlgeschlagen",
+      "unknown": "Belegstatus unbekannt",
+      "uncertified": "Kassenunterstützung nicht zertifiziert",
+      "issue": "Beleg ausgeben",
+      "check": "Beleg prüfen"
+    }
+  },
+  "giftCards": {
+    "title": "Geschenkkarten",
+    "description": "Geschenkkarten suchen, neue ausgeben, aufladen und Guthaben anpassen.",
+    "refresh": "Aktualisieren",
+    "status": {
+      "label": "Geschenkkarten-Dienst",
+      "checking": "Geschenkkarten-Dienst wird geprüft…",
+      "unavailable": "Der Geschenkkarten-Dienst ist gerade nicht verfügbar. Versuchen Sie es gleich noch einmal.",
+      "notInstalled": "Geschenkkarten sind auf dem Server noch nicht eingerichtet.",
+      "notConfigured": "Die Sicherheit für Geschenkkarten ist auf dem Server noch nicht konfiguriert.",
+      "notEnabled": "Geschenkkarten sind für dieses Terminal nicht aktiviert.",
+      "moduleRequired": "Das Modul Geschenkkarten ist für dieses Unternehmen nicht aktiv.",
+      "offline": "Dieses Terminal ist offline. Abfragen und Guthabenänderungen brauchen eine aktive Verbindung."
+    },
+    "badge": {
+      "checking": "Prüfung",
+      "unavailable": "Nicht verfügbar",
+      "enabled": "Aktiviert",
+      "disabled": "Deaktiviert",
+      "offline": "Offline"
+    },
+    "errors": {
+      "numberRequired": "Geben Sie eine Geschenkkartennummer ein.",
+      "numberInvalid": "Eine Kartennummer hat 8 bis 64 Buchstaben oder Ziffern.",
+      "lookupFailed": "Die Geschenkkarte konnte nicht abgefragt werden.",
+      "notFound": "Zu dieser Nummer gibt es keine Geschenkkarte.",
+      "issueAmount": "Geben Sie einen Betrag über null mit höchstens 2 Nachkommastellen ein.",
+      "issueFailed": "Die Geschenkkarte konnte nicht ausgegeben werden.",
+      "selectCard": "Suchen Sie zuerst eine Geschenkkarte.",
+      "reloadAmount": "Geben Sie einen Aufladebetrag über null mit höchstens 2 Nachkommastellen ein.",
+      "reloadFailed": "Die Geschenkkarte konnte nicht aufgeladen werden.",
+      "redeemAmount": "Geben Sie einen Anpassungsbetrag über null mit höchstens 2 Nachkommastellen ein.",
+      "redeemFailed": "Das Guthaben der Geschenkkarte konnte nicht angepasst werden.",
+      "historyFailed": "Der Transaktionsverlauf konnte nicht geladen werden.",
+      "unknownOutcome": "Der Server hat diese Änderung nicht bestätigt. Prüfen Sie die Verbindung und wiederholen Sie den Vorgang mit denselben Werten; die Änderung wird nicht doppelt ausgeführt.",
+      "currencyMissing": "Es ist keine POS-Währung konfiguriert, daher kann keine neue Karte ausgegeben werden.",
+      "terminalMissing": "Die Identität dieses Terminals ist nicht verfügbar. Starten Sie eine Schicht und versuchen Sie es erneut.",
+      "details": "Code: {{code}}"
+    },
+    "messages": {
+      "balanceLoaded": "Guthaben geladen.",
+      "issued": "Geschenkkarte ausgegeben.",
+      "issuedWithNumber": "Geschenkkarte ausgegeben: {{number}}",
+      "reloaded": "Geschenkkarte aufgeladen.",
+      "redeemed": "Guthaben angepasst."
+    },
+    "lookup": {
+      "title": "Karte suchen",
+      "placeholder": "Kartennummer",
+      "action": "Suchen"
+    },
+    "balance": {
+      "current": "Aktuelles Guthaben",
+      "card": "Karte",
+      "currency": "Währung",
+      "status": "Kartenstatus",
+      "expires": "Gültig bis {{date}}"
+    },
+    "cardStatus": {
+      "active": "Aktiv",
+      "expired": "Abgelaufen",
+      "disabled": "Deaktiviert"
+    },
+    "issue": {
+      "title": "Neue Karte ausgeben",
+      "numberPlaceholder": "Kartennummer (leer lassen, um eine zu erzeugen)",
+      "amountPlaceholder": "Anfangsbetrag",
+      "currency": "Währung: {{currency}}",
+      "busy": "Wird ausgegeben…",
+      "action": "Karte ausgeben",
+      "deliverTitle": "Neue Kartennummer",
+      "deliverHint": "Die vollständige Nummer wird nur jetzt angezeigt. Geben Sie sie dem Kunden, bevor Sie diesen Bereich schließen.",
+      "dismiss": "Nummer übergeben"
+    },
+    "amountPlaceholder": "Betrag",
+    "reload": {
+      "title": "Aufladen",
+      "action": "Aufladen",
+      "busy": "Wird aufgeladen…"
+    },
+    "redeem": {
+      "title": "Guthabenanpassung",
+      "hint": "Zieht Wert von der Karte ab, ohne Bezug zu einer Bestellung. Um eine Bestellung mit einer Geschenkkarte zu bezahlen, verwenden Sie den Checkout.",
+      "action": "Vom Guthaben abziehen",
+      "busy": "Wird angepasst…",
+      "confirmTitle": "Guthabenanpassung bestätigen",
+      "confirmBody": "{{amount}} von Karte {{card}} abziehen? Das ist eine manuelle Guthabenanpassung, keine Zahlung für eine Bestellung.",
+      "confirm": "Anpassung bestätigen",
+      "cancel": "Abbrechen"
+    },
+    "history": {
+      "title": "Transaktionsverlauf",
+      "empty": "Noch keine Transaktionen.",
+      "balanceAfter": "Guthaben danach: {{amount}}",
+      "types": {
+        "issue": "Ausgegeben",
+        "reload": "Aufladung",
+        "redeem": "Einlösung",
+        "refund": "Erstattung",
+        "adjustment": "Anpassung"
+      }
+    },
+    "note": {
+      "title": "Notiz",
+      "placeholder": "Optionale Notiz zu dieser Änderung"
+    },
+    "funding": {
+      "description": "Karten suchen und finanzierten Wert hinzufügen. Die Bezahlung einer Bestellung mit Geschenkkarte erfolgt an der Kasse.",
+      "title": "Wert hinzufügen",
+      "hint": "Jede Ausgabe oder Aufladung ist durch eine erfasste Zahlung oder eine Freigabe durch eine Leitung gedeckt.",
+      "cashier": "Kasse: {{name}}",
+      "checking": "Verfügbarkeit der Finanzierung wird geprüft…",
+      "retry": "Erneut prüfen",
+      "readFailed": "Die Verfügbarkeit der Finanzierung konnte nicht gelesen werden. Geldaktionen bleiben deaktiviert.",
+      "journalFailed": "Offene Finanzierungen konnten nicht gelesen werden. Geldaktionen bleiben deaktiviert, bis sie geprüft werden können.",
+      "unavailable": "Die Geschenkkartenfinanzierung ist auf diesem Terminal derzeit nicht verfügbar.",
+      "noCurrency": "Es ist keine Filialwährung konfiguriert, daher ist keine Finanzierung möglich.",
+      "noShift": "Wählen Sie eine Person mit aktiver Schicht, um Geschenkkarten zu finanzieren.",
+      "currency": "Filialwährung: {{currency}}",
+      "operatorNotReady": "Ihre POS-Autorisierung ist nicht bereit, daher sind Bar- und Kartenfinanzierung deaktiviert.",
+      "operation": {
+        "label": "Vorgang",
+        "issue": "Neue Karte ausgeben",
+        "reload": "Ausgewählte Karte aufladen",
+        "reloadNeedsCard": "Suchen Sie eine Karte, um sie aufzuladen.",
+        "currencyMismatch": "Die Währung dieser Karte ist nicht die Filialwährung, daher kann sie hier nicht aufgeladen werden."
+      },
+      "mode": {
+        "label": "Finanziert durch",
+        "cash_confirmed": "Bargeld",
+        "external_card_recorded": "Externes Kartenterminal",
+        "manager_grant": "Freigabe durch Leitung",
+        "unavailable": "Nicht verfügbar",
+        "reason": "Grund: {{reason}}",
+        "cashUnavailable": "Die Barfinanzierung ist auf diesem Terminal nicht verfügbar.",
+        "cashDrawer": "Bargeld erfordert Ihre bestätigte Kassenlade für diese Schicht in {{currency}}.",
+        "externalHint": "Sie erfassen die Referenzen des Kartenterminals selbst. Das ist weder eine verifizierte Zahlung noch ein Fiskalbeleg.",
+        "grantHint": "Eine Leitung fügt mit ihrer eigenen PIN Wert ohne Zahlung hinzu. Diese Leitung können auch Sie sein."
+      },
+      "amount": "Betrag",
+      "reason": "Grund",
+      "reasonPlaceholder": "Warum wird Wert hinzugefügt?",
+      "prepare": "Finanzierung vorbereiten",
+      "pendingBlocks": "Eine offene Finanzierung dieser Art besteht bereits. Prüfen oder beenden Sie sie unten, bevor Sie eine neue beginnen.",
+      "collect": {
+        "title": "{{amount}} kassieren",
+        "cash": "Kassieren Sie {{amount}} in bar und bestätigen Sie dann.",
+        "cashConfirm": "Ich habe {{amount}} in bar kassiert",
+        "external": "Belasten Sie {{amount}} am externen Kartenterminal und erfassen Sie dann dessen Referenzen.",
+        "externalConfirm": "Kartenzahlung erfassen",
+        "recordedNotice": "Von Ihnen erfasst. Das ist weder eine verifizierte Zahlung noch ein Fiskalbeleg."
+      },
+      "evidence": {
+        "provider": "Kartenanbieter",
+        "merchantId": "Händler-ID",
+        "terminalReference": "Terminalreferenz",
+        "transactionReference": "Transaktionsreferenz",
+        "incomplete": "Geben Sie alle vier Referenzen des Kartenterminals ein."
+      },
+      "pending": {
+        "title": "Offene und kürzlich abgeschlossene Finanzierungen",
+        "empty": "Keine offenen oder kürzlich abgeschlossenen Finanzierungen.",
+        "states": {
+          "prepare_pending": "Wird vorbereitet",
+          "prepared": "Vorbereitet, nichts kassiert",
+          "collection_pending": "Kassiervorgang startet",
+          "collection_started": "Kassiervorgang begonnen",
+          "complete_pending": "Wird abgeschlossen",
+          "cancel_pending": "Wird storniert",
+          "completed": "Abgeschlossen",
+          "canceled": "Storniert",
+          "refused": "Abgelehnt",
+          "abandoned": "Aufgegeben"
+        },
+        "noCollectAgain": "Kassieren Sie diese Zahlung nicht erneut. Prüfen Sie stattdessen ihren Status.",
+        "begin": "Kassiervorgang beginnen",
+        "check": "Status prüfen",
+        "cancel": "Stornieren (nichts kassiert)",
+        "cancelReason": "Stornogrund",
+        "cancelConfirm": "Stornierung bestätigen",
+        "back": "Zurück",
+        "recordCollected": "Bereits kassierte Zahlung erfassen",
+        "recordCollectedWarning": "Nur wenn diese Zahlung bereits kassiert wurde. Kassieren Sie sie nicht erneut."
+      },
+      "manager": {
+        "title": "Autorisierung durch Leitung",
+        "select": "Leitung",
+        "selectPlaceholder": "Leitung auswählen",
+        "pin": "PIN der Leitung",
+        "authorize": "Leitung autorisieren",
+        "authorized": "Für Freigaben autorisiert: {{name}}",
+        "notReady": "Diese Leitung kann derzeit keinen Wert freigeben.",
+        "expired": "Die Autorisierung der Leitung ist abgelaufen. Autorisieren Sie erneut.",
+        "review": "Freigabe prüfen",
+        "confirmTitle": "Freigabe durch Leitung bestätigen",
+        "confirmBody": "{{manager}} fügt {{amount}} ohne Zahlung hinzu ({{operation}}).",
+        "confirm": "Freigabe bestätigen",
+        "back": "Zurück",
+        "pendingTitle": "Offene Freigaben von {{name}}"
+      },
+      "renew": {
+        "title": "POS-Autorisierung erneuern",
+        "required": "Ihre Autorisierung für diese Schicht ist abgelaufen oder fehlt. Geben Sie Ihre PIN ein, um sie zu erneuern. Es wird keine neue Schicht und keine neue Kassenlade eröffnet.",
+        "optional": "Falls Ihre Autorisierung abgelaufen ist, geben Sie Ihre PIN ein, um sie für diese Schicht zu erneuern.",
+        "pin": "Ihre PIN",
+        "action": "Autorisierung erneuern",
+        "done": "Autorisierung erneuert.",
+        "noOpening": "Für diese Schicht wurde auf diesem Terminal keine bestätigte Eröffnung gefunden, daher kann die Autorisierung hier nicht erneuert werden."
+      },
+      "messages": {
+        "prepared": "Finanzierung vorbereitet. Beginnen Sie den Kassiervorgang, wenn die Kundschaft zahlen möchte.",
+        "collect": "Der Kassiervorgang kann jetzt beginnen.",
+        "completed": "Finanzierung abgeschlossen. Neues Guthaben: {{balance}}.",
+        "canceled": "Finanzierung storniert. Es wurde nichts kassiert.",
+        "refused": "Dieser Schritt wurde abgelehnt.",
+        "final": "Der Server hat diesen Wert nicht hinzugefügt.",
+        "pendingOutcome": "Das Ergebnis ist noch nicht bestätigt. Nicht erneut kassieren; prüfen Sie den Status.",
+        "unknownOutcome": "Das Ergebnis ist unbekannt. Nicht erneut kassieren; prüfen Sie den Status mit demselben Versuch.",
+        "notPermitted": "Der Kassiervorgang wurde nicht erlaubt. Nicht kassieren; prüfen Sie den Status.",
+        "managerAuthorized": "Leitung autorisiert."
+      },
+      "errors": {
+        "amount": "Geben Sie einen Betrag über null mit höchstens 2 Dezimalstellen ein.",
+        "reason": "Geben Sie einen Grund ein.",
+        "pin": "Geben Sie die PIN ein.",
+        "managerRequired": "Wählen Sie eine Leitung aus.",
+        "managerFailed": "Die Autorisierung der Leitung ist fehlgeschlagen.",
+        "renewFailed": "Die Autorisierung wurde nicht erneuert.",
+        "noReply": "Das Terminal hat keine Antwort bestätigt. Es wird nichts angenommen."
+      }
     }
   },
   "coupons": {
@@ -7532,6 +8578,9 @@
         "transactionTimeoutMs": "Zeitlimit (ms)",
         "cashPaymentCode": "Barzahlungscode",
         "cardPaymentCode": "Kartenzahlungscode",
+        "voucherPaymentCode": "Gutschein-Zahlungscode (optional)",
+        "voucherPaymentCodeHelp": "Leer lassen, bis Ihr Techniker den Gutschein-Zahlungscode vergibt.",
+        "voucherPaymentCodeInvalid": "Verwenden Sie 2–20 und einen anderen Code als für Bar- und Kartenzahlung.",
         "eftPosIndex": "EFT-POS-Index"
       },
       "capSetup": {
@@ -7576,7 +8625,10 @@
     "routingTarget": "Zielterminal",
     "routingAll": "Alle Terminals",
     "routingLoading": "Terminals werden geladen...",
-    "routingEmpty": "Keine Terminals für diese Filiale gefunden."
+    "routingEmpty": "Keine Terminals für diese Filiale gefunden.",
+    "wolt": {
+      "adminManagedSetup": "Wolt wird im Admin-Dashboard mit Ihrem Wolt-Konto verbunden; am POS wird kein API-Schlüssel eingegeben. Dieser Bildschirm zeigt nur den Status."
+    }
   },
   "errorBoundary": {
     "whatCanYouDo": "Was können Sie tun?",
@@ -7634,7 +8686,8 @@
     "portionPaid": "{{person}} erfolgreich bezahlt",
     "priorPayments": "Frühere Zahlungen",
     "terminalApproved": "Terminal",
-    "waitingForApproval": "Warten auf Kartenfreigabe am Zahlungsterminal..."
+    "waitingForApproval": "Warten auf Kartenfreigabe am Zahlungsterminal...",
+    "portionNotSaved": "Karte belastet, Zahlung noch nicht gespeichert. Nicht erneut belasten."
   },
   "recovery": {
     "common": {
@@ -7683,6 +8736,9 @@
       },
       "auto_retry": {
         "label": "Automatische Wiederholung"
+      },
+      "print_orphan_attempt_closed": {
+        "label": "Hängender Druckauftrag automatisch geschlossen"
       },
       "retryParityItem": {
         "label": "Diese Änderung erneut versuchen"
@@ -7793,6 +8849,30 @@
         "confirmTitle": "Diese Bestellung auf Plattformgeld korrigieren?",
         "confirmMessage": "Die Kundin oder der Kunde hat die Plattform bezahlt, nicht diese Kasse: die eigenen Lieferangaben der Bestellung nennen Vorauszahlung online oder Kassierung durch den Fahrer der Plattform. Dies storniert die dagegen erfasste Bar- oder Kartenzeile — mit Begründung, damit das Büro die Korrektur sieht — und erfasst stattdessen die Abrechnung. Die Kassenzählung ändert sich nicht, denn dieses Geld war nie in der Kasse.",
         "confirmCheckbox": "Ich bestätige, dass an dieser Kasse für diese Bestellung weder Bargeld noch Karte angenommen wurde."
+      },
+      "syncNow": {
+        "label": "Jetzt synchronisieren"
+      },
+      "retryItem": {
+        "label": "Erneut versuchen"
+      },
+      "reviewDetails": {
+        "label": "Details öffnen"
+      },
+      "reconnect": {
+        "label": "Neu verbinden"
+      },
+      "configurePrinter": {
+        "label": "Druckereinstellungen"
+      },
+      "openZReport": {
+        "label": "Z-Bericht öffnen"
+      },
+      "openShifts": {
+        "label": "Schichten"
+      },
+      "openOrders": {
+        "label": "Bestellungen"
       }
     },
     "context": {
@@ -8044,6 +9124,81 @@
         "summary_one": "Eine an dieser Kasse gespeicherte Kundenänderung konnte nicht gesendet werden. Sie verhindert den Tagesabschluss nicht, und Bestellungen behalten Name und Telefonnummer des Kunden.",
         "summary_other": "{{count}} an dieser Kasse gespeicherte Kundenänderungen konnten nicht gesendet werden. Sie verhindern den Tagesabschluss nicht, und Bestellungen behalten Name und Telefonnummer des Kunden.",
         "guidance": "Versuchen Sie die Änderung noch einmal. Schlägt sie erneut fehl, öffnen Sie die Supportdetails; den Tag können Sie trotzdem abschließen."
+      },
+      "terminalNotAuthorized": {
+        "title": "Terminal nicht mit dem Geschäft verbunden",
+        "summary": "Der Server hat die Zugangsdaten dieses Terminals abgelehnt, daher kann nichts synchronisiert werden.",
+        "guidance": "Verbinden Sie das Terminal in den Terminaleinstellungen erneut. Verkäufe bleiben in der Zwischenzeit auf diesem Gerät gespeichert."
+      },
+      "offline": {
+        "title": "Keine Internetverbindung",
+        "summary": "Das POS erreicht den Server gerade nicht.",
+        "guidance": "Verkaufen Sie einfach weiter. Alles, was hier gespeichert ist, wird synchronisiert, sobald die Verbindung wieder da ist."
+      },
+      "syncWaiting": {
+        "title": "Einträge, die auf die Synchronisierung warten: {{count}}",
+        "summary": "Sie sind auf diesem Gerät gespeichert und werden automatisch gesendet.",
+        "guidance": "Nichts zu beheben. Nutzen Sie „Jetzt synchronisieren“, wenn sie sofort gesendet werden sollen."
+      },
+      "syncRetrying": {
+        "title": "Einträge, die erneut gesendet werden: {{count}}",
+        "summary": "Der Server hat sie noch nicht angenommen; das POS versucht es automatisch erneut.",
+        "guidance": "Lassen Sie das POS geöffnet und online. Mit „Jetzt synchronisieren“ versuchen Sie es sofort erneut."
+      },
+      "syncStuck": {
+        "title": "Festhängende Einträge in der Warteschlange: {{count}}",
+        "summary": "Der älteste Eintrag wartet seit {{duration}}.",
+        "guidance": "Nutzen Sie „Jetzt synchronisieren“. Wenn sie danach weiterhin festhängen, exportieren Sie die Diagnose und senden Sie die Datei an den Support. Löschen Sie keine Daten."
+      },
+      "syncFailed": {
+        "title": "Einträge mit fehlgeschlagener Synchronisierung: {{count}}",
+        "summary": "Die automatischen Versuche sind aufgebraucht. Die Einträge sind weiterhin hier gespeichert.",
+        "guidance": "Öffnen Sie die Details, um sie einzeln erneut zu versuchen. Wenn sie wieder fehlschlagen, wenden Sie sich an den Support."
+      },
+      "syncConflict": {
+        "title": "Einträge mit Konflikt: {{count}}",
+        "summary": "Der Server hat eine andere Version dieser Einträge.",
+        "guidance": "Öffnen Sie die Details, um zu wählen, welche Version behalten wird. Wenn Sie unsicher sind, fragen Sie zuerst den Support."
+      },
+      "fiscalQueueNotEmpty": {
+        "title": "Nicht gesendete Fiskalbelege: {{count}}",
+        "summary": "Belege dieses Geschäftstags haben den Fiskaldienst noch nicht erreicht. Der Tagesabschluss (Z) wartet auf sie.",
+        "guidance": "Halten Sie das POS online und nutzen Sie „Jetzt synchronisieren“. Wenn sie weiterhin nicht gesendet werden, exportieren Sie die Diagnose und wenden Sie sich an den Support."
+      },
+      "closeoutBlocked": {
+        "title": "Tagesabschluss (Z) blockiert",
+        "summary": "Vor dem Tagesabschluss müssen noch einige Prüfungen bestanden werden.",
+        "guidance": "Öffnen Sie den Z-Bericht, um jedes Hindernis und seine Lösung zu sehen."
+      },
+      "closeoutOverdue": {
+        "title": "Ein früherer Tag ist noch offen",
+        "summary": "Der Geschäftstag vom {{reportDate}} wurde nicht abgeschlossen (Z).",
+        "guidance": "Schließen Sie zuerst diesen Tag ab: Öffnen Sie den Z-Bericht."
+      },
+      "printerUnavailable": {
+        "title": "Drucker antwortet nicht",
+        "summary": "Bestellungen werden gespeichert, Belege werden aber eventuell nicht gedruckt.",
+        "guidance": "Prüfen Sie, ob der Drucker eingeschaltet ist, Papier hat und verbunden ist, und drucken Sie dann einen Testbeleg."
+      },
+      "printerNotConfigured": {
+        "title": "Kein Drucker eingerichtet",
+        "summary": "Auf diesem POS können keine Belege gedruckt werden.",
+        "guidance": "Fügen Sie den Drucker in den Druckereinstellungen hinzu."
+      },
+      "realtimeDisconnected": {
+        "title": "Live-Aktualisierungen getrennt",
+        "summary": "Bestellungen werden weiter synchronisiert, Änderungen von anderen Geräten erscheinen aber eventuell verspätet.",
+        "guidance": "Verbinden Sie die Live-Aktualisierungen neu. Das ist jederzeit gefahrlos möglich."
+      },
+      "telemetryStale": {
+        "title": "Synchronisierungsstatus ist veraltet",
+        "summary": "Die Synchronisierung hat sich eine Weile nicht gemeldet, obwohl Vorgänge warten.",
+        "guidance": "Nutzen Sie „Jetzt synchronisieren“. Wenn sich nichts ändert, exportieren Sie die Diagnose für den Support."
+      },
+      "printingStalled": {
+        "title": "Belege werden nicht gedruckt: {{count}}",
+        "summary": "Der älteste wartet seit {{duration}}. Bestellungen bleiben gespeichert.",
+        "guidance": "Prüfen Sie, ob der Drucker eingeschaltet ist, Papier hat und verbunden ist, und drucken Sie dann in den Druckereinstellungen einen Testbeleg. Wenn die Belege weiterhin nicht gedruckt werden, wenden Sie sich an den Support. Löschen Sie keine Daten."
       }
     }
   },
@@ -8481,7 +9636,36 @@
       "unavailable": "Nicht verfügbar"
     }
   },
+  "tableRelease": {
+    "owedTitle": "Tisch {{table}} schuldet noch {{amount}}",
+    "owedMessage": "Das Freigeben des Tisches begleicht oder storniert seine Bestellung nicht. Wählen Sie, was mit den geschuldeten {{amount}} geschieht.",
+    "collect": "Zahlung kassieren",
+    "keepOpenTab": "Als offene Rechnung behalten",
+    "keepOpenTabHint": "Der Tisch wird frei; die Bestellung bleibt offen und unbezahlt, bis sie kassiert oder storniert wird.",
+    "cancelOrder": "Bestellung stornieren",
+    "cancelReasonLabel": "Warum wird die Bestellung storniert?",
+    "cancelReasonPlaceholder": "Zum Beispiel: Der Kunde ist ohne Bestellung gegangen",
+    "cancelApprovalHint": "Die PIN eines Kassierers oder Managers genehmigt die Stornierung. Es wird nichts belastet.",
+    "confirmCancel": "Bestellung stornieren",
+    "cancelApprovalTitle": "Stornierung der Bestellung genehmigen",
+    "cancelApprovalSubtitle": "Geben Sie die PIN eines Kassierers oder Managers ein. Es wird nichts belastet.",
+    "orderCancelled": "Bestellung storniert und Tisch freigegeben.",
+    "shiftRequired": "Zum Genehmigen muss an diesem Terminal ein Kassierer oder Manager eingecheckt sein.",
+    "cancelFailed": "Die Bestellung konnte nicht storniert werden. Der Tisch wurde nicht freigegeben.",
+    "cancelRefusedPaid": "Auf diese Bestellung wurde bereits Geld kassiert. Stornieren oder erstatten Sie die Zahlung zuerst in der Bestellung, oder kassieren Sie den Rest.",
+    "cancelRefusedNotRecorded": "Diese Bestellung ist als bezahlt markiert, aber ihre Zahlung ist an dieser Kasse nicht erfasst. Stellen Sie sie mit „Jetzt synchronisieren“ vom Server wieder her oder erfassen Sie die Zahlung im Z-Report, und stornieren Sie dann.",
+    "notRecordedTitle": "Tisch {{table}}: Zahlung nicht erfasst",
+    "notRecordedMessage": "Seine Bestellung ist als bezahlt markiert, aber ihre Zahlung ist an dieser Kasse nicht erfasst. Kassieren Sie sie nicht erneut: Stellen Sie sie mit „Jetzt synchronisieren“ vom Server wieder her oder erfassen Sie die Zahlung im Z-Report.",
+    "keepOpenNotRecordedHint": "Der Tisch wird frei; die Bestellung bleibt unverändert, bis ihre Zahlung wiederhergestellt oder erfasst ist."
+  },
   "reservationForm": {
+    "toasts": {
+      "created": "Reservierung erfolgreich erstellt",
+      "updated": "Reservierung erfolgreich aktualisiert",
+      "createFailed": "Reservierung konnte nicht erstellt werden",
+      "updateFailed": "Reservierung konnte nicht aktualisiert werden",
+      "missingContext": "Filial- oder Organisationskontext fehlt"
+    },
     "title": "Neue Reservierung",
     "editTitle": "Reservierung bearbeiten",
     "subtitle": "Tisch {{tableNumber}} • Kapazität: {{capacity}} {{guests}}",
@@ -8526,15 +9710,45 @@
     "guestCount": "{{count}} Gäste"
   },
   "customerMessaging": {
-    "title": "Kundennachrichten", "customerRequired": "Verknüpfen Sie einen Kunden, um Nachrichten zu senden.", "onlineOnly": "Nachrichtenaktionen benötigen eine Online-Verbindung.",
-    "unavailable": "Der Nachrichtenverlauf ist vorübergehend nicht verfügbar.", "sessionRequired": "Eine aktive Mitarbeitersitzung ist erforderlich.", "readOnly": "Der Verlauf bleibt sichtbar; Verknüpfen, Senden und Wiederholen sind gesperrt.",
-    "optedOut": "Dieser Kunde hat transaktionale Nachrichten abbestellt.", "noPreference": "Keine Kommunikationspräferenz erfasst; Senden ist gesperrt.",
-    "preferenceTitle": "Transaktionale Updates", "preferenceDescription": "Erfassen Sie die ausdrückliche Wahl des Kunden. Kein Kanal wird vorausgewählt.",
-    "preferenceNoPreference": "Keine automatischen Updates", "preferenceDeny": "Nicht senden", "preferenceSms": "SMS", "preferenceWhatsApp": "WhatsApp", "preferenceFailed": "Die Kommunikationspräferenz wurde nicht gespeichert.",
-    "sendReady": "Abholbereitschaft senden", "retry": "Wiederholen", "link": "{{provider}} verknüpfen", "linkingUnavailable": "Die Kundenverknüpfung über {{provider}} ist nicht verfügbar.", "queued": "Nachricht eingereiht.",
-    "sendFailed": "Nachricht konnte nicht eingereiht werden.", "retryFailed": "Wiederholung wurde nicht eingereiht.", "linkOpened": "Sicherer Anbieterlink geöffnet.", "linkFailed": "Sicherer Anbieterlink konnte nicht geöffnet werden.",
-    "attemptCount": "{{count}} Versuch(e)", "attempt": "Versuch {{number}}",
-    "status": { "queued": "Eingereiht", "delayed": "Verzögert", "sending": "Wird gesendet", "accepted": "Akzeptiert", "sent": "Gesendet", "delivered": "Zugestellt", "read": "Gelesen", "failed": "Fehlgeschlagen", "skipped": "Übersprungen", "dead_lettered": "Wiederholungslimit erreicht", "unknown": "Ergebnis unbekannt" }
+    "title": "Kundennachrichten",
+    "customerRequired": "Verknüpfen Sie einen Kunden, um Nachrichten zu senden.",
+    "onlineOnly": "Nachrichtenaktionen benötigen eine Online-Verbindung.",
+    "unavailable": "Der Nachrichtenverlauf ist vorübergehend nicht verfügbar.",
+    "sessionRequired": "Eine aktive Mitarbeitersitzung ist erforderlich.",
+    "readOnly": "Der Verlauf bleibt sichtbar; Verknüpfen, Senden und Wiederholen sind gesperrt.",
+    "optedOut": "Dieser Kunde hat transaktionale Nachrichten abbestellt.",
+    "noPreference": "Keine Kommunikationspräferenz erfasst; Senden ist gesperrt.",
+    "preferenceTitle": "Transaktionale Updates",
+    "preferenceDescription": "Erfassen Sie die ausdrückliche Wahl des Kunden. Kein Kanal wird vorausgewählt.",
+    "preferenceNoPreference": "Keine automatischen Updates",
+    "preferenceDeny": "Nicht senden",
+    "preferenceSms": "SMS",
+    "preferenceWhatsApp": "WhatsApp",
+    "preferenceFailed": "Die Kommunikationspräferenz wurde nicht gespeichert.",
+    "sendReady": "Abholbereitschaft senden",
+    "retry": "Wiederholen",
+    "link": "{{provider}} verknüpfen",
+    "linkingUnavailable": "Die Kundenverknüpfung über {{provider}} ist nicht verfügbar.",
+    "queued": "Nachricht eingereiht.",
+    "sendFailed": "Nachricht konnte nicht eingereiht werden.",
+    "retryFailed": "Wiederholung wurde nicht eingereiht.",
+    "linkOpened": "Sicherer Anbieterlink geöffnet.",
+    "linkFailed": "Sicherer Anbieterlink konnte nicht geöffnet werden.",
+    "attemptCount": "{{count}} Versuch(e)",
+    "attempt": "Versuch {{number}}",
+    "status": {
+      "queued": "Eingereiht",
+      "delayed": "Verzögert",
+      "sending": "Wird gesendet",
+      "accepted": "Akzeptiert",
+      "sent": "Gesendet",
+      "delivered": "Zugestellt",
+      "read": "Gelesen",
+      "failed": "Fehlgeschlagen",
+      "skipped": "Übersprungen",
+      "dead_lettered": "Wiederholungslimit erreicht",
+      "unknown": "Ergebnis unbekannt"
+    }
   },
   "driveThru": {
     "selectBranch": "Bitte eine Filiale wählen, um den Drive-Through zu sehen",
@@ -8573,6 +9787,23 @@
       "title": "Kiosk-Verwaltung",
       "todayOrders": "Heutige Bestellungen",
       "toggleError": "Kiosk-Status konnte nicht aktualisiert werden"
+    },
+    "launchPurchase": {
+      "title": "Modul kaufen",
+      "cycle": "Abrechnungszeitraum",
+      "monthly": "Monat",
+      "annual": "Jahr",
+      "includes": "Enthält: {{features}}",
+      "alsoIncluded": "Auch enthalten in: {{offers}}",
+      "resources": "Enthält {{branches}} Filiale(n) und {{terminals}} Terminal(s).",
+      "staffIncluded": "Personal ist ohne Gebühr pro Person enthalten.",
+      "staffLimit": "Enthält bis zu {{count}} Mitarbeitende.",
+      "confirmInBrowser": "Prüfen Sie das Angebot für Ihren Betrieb und bestätigen Sie den Kauf im Admin-Dashboard.",
+      "open": "Kauf ansehen",
+      "unavailable": "Preise sind nicht verfügbar. Verbinden Sie sich erneut und versuchen Sie es noch einmal.",
+      "loading": "Aktuelle Preise werden geladen…",
+      "openFailed": "Die Kaufseite konnte nicht geöffnet werden. Versuchen Sie es erneut.",
+      "retry": "Erneut versuchen"
     }
   },
   "reservationInfoPanel": {
@@ -8591,5 +9822,38 @@
     "seatError": "Gäste konnten nicht platziert werden",
     "cancelReservation": "Reservierung stornieren",
     "lateWarning": "{{minutes}} Minuten verspätet"
+  },
+  "paymentIntegrity": {
+    "statuses": {
+      "duplicate_review": "Zur Prüfung zurückgestellt",
+      "not_saved": "Nicht gespeichert"
+    },
+    "reasonCodes": {
+      "payments_need_review": "Auf Bestellung {{orderNumber}} wurde eine Zahlung über {{paymentAmount}} ({{paymentMethod}}) angenommen, obwohl sie bereits bezahlt war. Sie ist zurückgestellt und wird nicht gezählt: Der Kunde hat möglicherweise doppelt bezahlt.",
+      "payments_need_review__platform_held": "Auf Bestellung {{orderNumber}} wurde eine Zahlung über {{paymentAmount}} ({{paymentMethod}}) angenommen, aber die Lieferplattform hält das Geld dieser Bestellung bereits. Sie ist zurückgestellt und wird nicht gezählt: Der Kunde hat möglicherweise doppelt bezahlt.",
+      "payments_not_saved": "Eine Kartenzahlung von {{paymentAmount}} wurde für Bestellung {{orderNumber}} belastet, ist an dieser Kasse aber noch nicht gespeichert. Der Kunde wurde belastet: nicht erneut belasten.",
+      "payments_not_saved__new_order": "Eine Kartenzahlung von {{paymentAmount}} wurde für eine neue Bestellung belastet, die an dieser Kasse noch nicht gespeichert ist: Die Bestellung und ihre Zahlung werden gehalten, bis sie gespeichert sind. Der Kunde wurde belastet: nicht erneut belasten.",
+      "payments_not_saved__new_order_cannot_save": "Eine Kartenzahlung von {{paymentAmount}} wurde für eine neue Bestellung belastet, die an dieser Kasse noch nicht gespeichert ist: Die Bestellung und ihre Zahlung werden gehalten, bis sie gespeichert sind. Der Kunde wurde belastet: nicht erneut belasten.",
+      "cancelled_order_claims_payment": "Diese Bestellung ist storniert, gilt aber noch als bezahlt, und diese Kasse hat für sie keinen Zahlungsdatensatz. Sie ist nicht in diesem Z-Report. Der Tagesabschluss wird dadurch nicht blockiert."
+    },
+    "fixCodes": {
+      "payments_need_review": "Geben Sie dem Kunden das Geld zurück und bestätigen Sie es dann hier. Wenn die Zahlung auf dem Server die falsche ist, wenden Sie sich vor dem Tagesabschluss an den Support.",
+      "payments_need_review__platform_held": "Geben Sie dem Kunden das Geld zurück und bestätigen Sie es dann hier. Die Plattform zahlt diese Bestellung über ihre eigene Abrechnung an das Geschäft aus.",
+      "payments_not_saved": "Speichern Sie die Zahlung erneut. Lässt sie sich nicht speichern, geben Sie dem Kunden das Geld zurück und bestätigen Sie es hier.",
+      "payments_not_saved__cannot_save": "Diese Zahlung kann an dieser Kasse nicht gespeichert werden. Geben Sie dem Kunden das Geld zurück und bestätigen Sie es dann hier.",
+      "payments_not_saved__new_order": "Speichern Sie die Zahlung erneut: Das speichert die Bestellung und ihre Zahlung, ohne neue Belastung. Lässt sie sich nicht speichern, geben Sie dem Kunden das Geld zurück und bestätigen Sie es hier.",
+      "payments_not_saved__new_order_cannot_save": "Diese Bestellung und ihre Zahlung können an dieser Kasse nicht gespeichert werden. Geben Sie dem Kunden das Geld zurück und bestätigen Sie es dann hier.",
+      "cancelled_order_claims_payment": "Vom Server wiederherstellen („Jetzt synchronisieren“): Eine Zahlung, die der Server hat, wird hierher kopiert. Gibt es keine, entscheidet der Inhaber, was die Bestellung anzeigen soll."
+    },
+    "setAsidePaymentLabel": "Zurückgestellte Zahlung",
+    "takenAtLabel": "Angenommen um",
+    "setAsideReturnedAction": "Geld an den Kunden zurückgegeben",
+    "setAsideResolving": "Wird erfasst...",
+    "unsavedPaymentLabel": "Belastet, nicht gespeichert",
+    "chargedAtLabel": "Belastet um",
+    "unsavedSaveAgainAction": "Zahlung erneut speichern",
+    "unsavedReturnedAction": "Geld an den Kunden zurückgegeben",
+    "unsavedSaving": "Wird gespeichert...",
+    "unsavedResolving": "Wird erfasst..."
   }
 }

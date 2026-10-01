@@ -4,6 +4,7 @@ import { toast } from 'react-hot-toast'
 import { getBridge, offEvent, onEvent } from '../../../lib'
 import { requireSettingsSuccess } from '../../utils/settings-operation'
 import { renderModalPortal } from '../../utils/render-modal-portal'
+import { myDataVoucherCodeIssue } from '../../utils/mydata-device-setup'
 import {
   CreditCard,
   Printer,
@@ -60,6 +61,8 @@ interface CapDriverSettings {
   probeDeviceTcp: boolean
   /** Encoding of command files and of the service's Output/log files. */
   fileEncoding: CapFileEncoding
+  /** Optional voucher (gift) payment code; blank until a technician sets it. */
+  voucherPaymentCode?: number
 }
 
 interface ECRCashDevice {
@@ -196,6 +199,7 @@ const asCapFileEncoding = (value: unknown): CapFileEncoding => {
 
 const asCapDriverSettings = (value: unknown): CapDriverSettings => {
   const settings = asRecord(value)
+  const voucher = settings.voucherPaymentCode ?? settings.voucher_payment_code
   return {
     capturePath:
       typeof settings.capturePath === 'string' && settings.capturePath.trim()
@@ -228,6 +232,11 @@ const asCapDriverSettings = (value: unknown): CapDriverSettings => {
     requireService: settings.requireService !== false,
     probeDeviceTcp: settings.probeDeviceTcp === true,
     fileEncoding: asCapFileEncoding(settings.fileEncoding),
+    // No default voucher code: keep a technician's value exactly so validation
+    // refuses an invalid one instead of silently dropping it.
+    ...(voucher === undefined || voucher === null || voucher === ''
+      ? {}
+      : { voucherPaymentCode: voucher as number }),
   }
 }
 
@@ -738,6 +747,21 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
           t(
             'settings.peripherals.cashRegister.capCodesInvalid',
             'CAP payment codes must be 1–20 and the EFT POS number must be 1–99'
+          )
+        )
+        return
+      }
+      if (
+        myDataVoucherCodeIssue(
+          form.settings.voucherPaymentCode,
+          form.settings.cashPaymentCode,
+          form.settings.cardPaymentCode
+        )
+      ) {
+        toast.error(
+          t(
+            'settings.peripherals.cashRegister.capVoucherCodeInvalid',
+            'The voucher code must be 2–20 and differ from the cash and card codes'
           )
         )
         return
@@ -1403,6 +1427,32 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
                   className="liquid-glass-modal-input"
                 />
               </div>
+            </div>
+            <div>
+              <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
+                {t('settings.peripherals.cashRegister.capVoucherCode', 'Voucher code (optional)')}
+              </label>
+              <input
+                type="number"
+                min="2"
+                max="20"
+                aria-label={t('settings.peripherals.cashRegister.capVoucherCode', 'Voucher code (optional)')}
+                placeholder={t(
+                  'settings.peripherals.cashRegister.capVoucherCodeHelp',
+                  'Blank until your technician assigns one'
+                )}
+                value={form.settings.voucherPaymentCode ?? ''}
+                onChange={(event) => {
+                  const raw = event.target.value.trim()
+                  updateForm({
+                    settings: {
+                      ...form.settings,
+                      voucherPaymentCode: raw === '' ? undefined : Number(raw),
+                    },
+                  })
+                }}
+                className="liquid-glass-modal-input"
+              />
             </div>
             <div>
               <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">

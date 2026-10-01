@@ -229,8 +229,23 @@ test('P0-02: settlement and recording use the normalized card portion, never the
   );
   assert.match(
     handlerSource,
-    /recordPayment: \(transactionId\) => recordPortionPayment\(cardPortion, 'terminal', transactionId/,
-    'recordPayment must persist the card portion (method card), not the stale draft (method cash)',
+    /recordPayment: \(transactionId\) => \{\s*if \(!isCurrent\(\)\) throw new Error\('The split payment view changed before card recording'\);\s*return recordPortionPayment\(cardPortion, 'terminal', transactionId, terminal!\.deviceId\);\s*\}/,
+    'recordPayment must persist the card portion (method card) with its terminal device, not the stale draft (method cash), and only for the current view',
+  );
+  // Stale-view fence: a charge and its record belong only to the modal view that started them.
+  assert.match(handlerSource, /const isCurrent = \(\) => isOpen && viewEpoch\.current === startedEpoch;/);
+  // The terminal is charged exactly the normalized card portion's amount on the resolved device.
+  assert.match(handlerSource, /bridge\.ecr\.processPayment\(cardPortion\.amount, \{ deviceId: terminal!\.deviceId/);
+  // The existing-order (ordinary owner) path settles, charges and records the same normalized card
+  // portion behind the same fence.
+  assert.match(
+    handlerSource,
+    /settleOrdinaryTerminalPortion\(ordinaryOwner, cardPortion, terminal, isCurrent, sale \?\? undefined\)/,
+  );
+  assert.match(modalSource, /bridge\.ecr\.processPayment\(cardPortion\.amount, \{ deviceId: terminal\.deviceId/);
+  assert.match(
+    modalSource,
+    /recordPayment: async \(transactionId: string\) => \{\s*if \(!isCurrent\(\)\) throw new Error\('The split payment view changed before card recording'\);\s*try \{ return await recordPortionPayment\(cardPortion, 'terminal', transactionId, terminal\.deviceId, noteWrite\);/,
   );
   assert.doesNotMatch(
     handlerSource,

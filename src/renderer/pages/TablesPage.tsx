@@ -22,8 +22,12 @@ import { useTheme } from '../contexts/theme-context';
 import { useTables } from '../hooks/useTables';
 import { useTerminalSettings } from '../hooks/useTerminalSettings';
 import { useFeatures } from '../hooks/useFeatures';
+import { MODULE_IDS, useAcquiredModules } from '../hooks/useAcquiredModules';
 import { TableActionModal } from '../components/tables/TableActionModal';
 import { TableCheckManagerModal } from '../components/tables/TableCheckManagerModal';
+import { usePrivilegedActionConfirmation } from '../hooks/usePrivilegedActionConfirmation';
+import { useTableReleaseGuard } from '../hooks/useTableReleaseGuard';
+import { ReservationForm, type CreateReservationDto } from '../components/tables/ReservationForm';
 import type { RestaurantTable, TableStatus, TableFilters, TableStats } from '../types/tables';
 import { getStatusClasses } from '../types/tables';
 import {
@@ -52,6 +56,18 @@ import {
 import { getBridge } from '../../lib';
 import { pageMotionContainer, pageMotionItem } from '../components/ui/page-motion';
 import { formatTableSeats } from '../utils/i18nLabels';
+import { submitTableReservation } from '../utils/table-reservation-submit';
+
+/**
+ * Statuses that release a table: the server frees it and ends its session,
+ * leaving an order that still owes money open (item D1, 30/09/2026).
+ */
+const TABLE_RELEASE_STATUSES: ReadonlySet<TableStatus> = new Set<TableStatus>([
+  'available',
+  'cleaning',
+  'maintenance',
+  'unavailable',
+]);
 
 // ============================================================
 // CONSTANTS
@@ -369,6 +385,8 @@ interface StatusChangeModalProps {
   onStatusChange: (tableId: string, status: TableStatus) => void;
   onNewOrder: (table: RestaurantTable) => void;
   onNewReservation: (table: RestaurantTable) => void;
+  /** The store owns the Reservations module, so a table can be booked. */
+  canCreateReservation: boolean;
   isDark: boolean;
   canCreateOrders: boolean;
   featuresLoading: boolean;
@@ -382,6 +400,7 @@ const StatusChangeModal = memo<StatusChangeModalProps>(({
   onStatusChange,
   onNewOrder,
   onNewReservation,
+  canCreateReservation,
   isDark,
   canCreateOrders,
   featuresLoading,
@@ -492,7 +511,7 @@ const StatusChangeModal = memo<StatusChangeModalProps>(({
                 <Receipt className="w-4 h-4" />
                 <span>{table.currentOrderId ? t('tables.actions.viewOrder', 'View Order') : t('tables.actions.newOrder', 'New Order')}</span>
               </button>
-              {table.status === 'available' && (
+              {table.status === 'available' && canCreateReservation && (
                 <button
                   onClick={() => onNewReservation(table)}
                   className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-xl font-medium transition-colors ${
@@ -573,6 +592,9 @@ const TablesPage: React.FC = () => {
   const { getSetting } = useTerminalSettings();
   const { isFeatureEnabled, loading: featuresLoading } = useFeatures();
   const canCreateOrders = isFeatureEnabled('orderCreation');
+  // Booking a table needs the Reservations module, as on the dashboard.
+  const { hasModule } = useAcquiredModules();
+  const hasReservationsModule = hasModule(MODULE_IDS.RESERVATIONS);
   const isDark = resolvedTheme === 'dark';
   const orderCreationDisabledMessage = t(
     'settings.terminal.messages.orderCreationDisabled',
@@ -611,6 +633,8 @@ const TablesPage: React.FC = () => {
   const [showCheckManager, setShowCheckManager] = useState(false);
   const [checkManagerTable, setCheckManagerTable] = useState<RestaurantTable | null>(null);
   const [showStatusModal, setShowStatusModal] = useState(false);
+  // The table whose reservation form is open.
+  const [reservationTable, setReservationTable] = useState<RestaurantTable | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [floorFilter, setFloorFilter] = useState<string>('all');
@@ -670,16 +694,41 @@ const TablesPage: React.FC = () => {
     setShowStatusModal(true);
   }, []);
 
+  // Item D1 (fix review 30/09/2026): a status that releases the table (the
+  // server frees it and ends its session) asks first when the table's order
+  // still owes money: collect, cancel with approval, or keep an open tab.
+  const openCheckForCollection = useCallback((table: RestaurantTable) => {
+    setShowStatusModal(false);
+    setCheckManagerTable(table);
+    setShowCheckManager(true);
+  }, []);
+  const {
+    runWithPrivilegedConfirmation: runTableReleaseApproval,
+    confirmationModal: tableReleaseApprovalModal,
+  } = usePrivilegedActionConfirmation();
+  const { guardRelease: guardTableRelease, modal: tableReleaseModal } = useTableReleaseGuard({
+    runWithPrivilegedConfirmation: runTableReleaseApproval,
+    onCollect: openCheckForCollection,
+  });
+
   const handleStatusChange = useCallback(async (tableId: string, status: TableStatus) => {
-    const success = await updateTableStatus(tableId, status);
-    if (success) {
-      toast.success(t('tables.messages.statusUpdated', 'Table status updated to {{status}}', {
-        status: t(`tables.status.${status}`, STATUS_LABELS[status]),
-      }));
-    } else {
-      toast.error(t('tables.messages.statusUpdateFailed', 'Failed to update table status'));
+    const applyStatus = async () => {
+      const success = await updateTableStatus(tableId, status);
+      if (success) {
+        toast.success(t('tables.messages.statusUpdated', 'Table status updated to {{status}}', {
+          status: t(`tables.status.${status}`, STATUS_LABELS[status]),
+        }));
+      } else {
+        toast.error(t('tables.messages.statusUpdateFailed', 'Failed to update table status'));
+      }
+    };
+    const table = tables.find((candidate) => candidate.id === tableId);
+    if (table && TABLE_RELEASE_STATUSES.has(status)) {
+      await guardTableRelease(table, applyStatus);
+      return;
     }
-  }, [updateTableStatus, t]);
+    await applyStatus();
+  }, [guardTableRelease, tables, updateTableStatus, t]);
 
   const handleNewOrder = useCallback((table: RestaurantTable) => {
     // Occupied table with an existing order ("View Order"): open the existing
@@ -727,11 +776,39 @@ const TablesPage: React.FC = () => {
     void refetch();
   }, [refetch]);
 
+  // Reserve opens the same reservation form as the Orders dashboard, on this
+  // table. It used to navigate to /reservations?tableId=..., which no route or
+  // view reads, so the modal closed and no booking opened.
   const handleNewReservation = useCallback((table: RestaurantTable) => {
     setShowStatusModal(false);
-    // Navigate to reservations with table pre-selected
-    navigate(`/reservations?tableId=${table.id}&tableNumber=${table.tableNumber}`);
-  }, [navigate]);
+    setSelectedTable(null);
+    setReservationTable(table);
+  }, []);
+
+  const handleReservationSubmit = useCallback(async (data: CreateReservationDto) => {
+    try {
+      const result = await submitTableReservation({
+        data,
+        editingReservation: null,
+        branchId,
+        organizationId,
+      });
+      if (result === 'missing-context') {
+        toast.error(t('reservationForm.toasts.missingContext', 'Missing branch or organization context'));
+        return;
+      }
+      toast.success(t('reservationForm.toasts.created', 'Reservation created successfully'));
+      setReservationTable(null);
+      await refetch();
+    } catch (error) {
+      console.error('Failed to create reservation:', error);
+      toast.error(t('reservationForm.toasts.createFailed', 'Failed to create reservation'));
+    }
+  }, [branchId, organizationId, refetch, t]);
+
+  const handleReservationCancel = useCallback(() => {
+    setReservationTable(null);
+  }, []);
 
   const handleClearFilters = useCallback(() => {
     setFilter({ statusFilter: 'all' });
@@ -1034,6 +1111,7 @@ const TablesPage: React.FC = () => {
         onStatusChange={handleStatusChange}
         onNewOrder={handleNewOrder}
         onNewReservation={handleNewReservation}
+        canCreateReservation={hasReservationsModule}
         isDark={isDark}
         canCreateOrders={canCreateOrders}
         featuresLoading={featuresLoading}
@@ -1042,6 +1120,9 @@ const TablesPage: React.FC = () => {
 
       {/* Existing table order / check flow (View Order on an occupied table).
           Renders through LiquidGlassModal: app-level portal + blurred backdrop. */}
+      {tableReleaseModal}
+      {tableReleaseApprovalModal}
+
       <TableCheckManagerModal
         isOpen={showCheckManager}
         table={checkManagerTable}
@@ -1051,6 +1132,18 @@ const TablesPage: React.FC = () => {
         onRefreshOrders={refetch}
         onClose={handleCheckManagerClose}
       />
+
+      {/* Reserve: the dashboard's reservation form, for the chosen table. */}
+      {reservationTable && (
+        <ReservationForm
+          isOpen
+          tableId={reservationTable.id}
+          tableCapacity={reservationTable.capacity}
+          tableNumber={reservationTable.tableNumber}
+          onSubmit={handleReservationSubmit}
+          onCancel={handleReservationCancel}
+        />
+      )}
     </motion.div>
   );
 };

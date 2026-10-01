@@ -96,6 +96,28 @@ pub fn sync_queue_retry_item(db: State<'_, DbState>, item_id: String) -> Result<
     sync_queue::renderer_retry_item(&conn, item_id.as_str())
 }
 
+/// Health "Sync now": make these renderer-visible pending rows due now
+/// (their retry time only, recorded in the recovery action log first).
+#[tauri::command]
+pub fn sync_queue_make_due(
+    db: State<'_, DbState>,
+    item_ids: Vec<String>,
+    issue_code: Option<String>,
+) -> Result<sync_queue::MakeDueResult, String> {
+    let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
+    sync_queue::renderer_make_items_due(&conn, &item_ids, issue_code.as_deref().unwrap_or("sync"))
+}
+
+/// Renderer-visible parity queue rows by id (a missing row is gone).
+#[tauri::command]
+pub fn sync_queue_items_by_id(
+    db: State<'_, DbState>,
+    item_ids: Vec<String>,
+) -> Result<Vec<sync_queue::SyncQueueItem>, String> {
+    let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
+    sync_queue::renderer_items_by_id(&conn, &item_ids)
+}
+
 /// Retry all actionable parity queue items for a module.
 #[tauri::command]
 pub fn sync_queue_retry_module(

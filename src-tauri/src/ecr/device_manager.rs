@@ -18,6 +18,8 @@ use tracing::{info, warn};
 struct ManagedDevice {
     device_id: String,
     protocol: Box<dyn EcrProtocol>,
+    /// Fingerprint of the exact connection inputs `protocol` consumed.
+    config_fingerprint: String,
 }
 
 type DeviceHandle = Arc<Mutex<ManagedDevice>>;
@@ -162,6 +164,39 @@ struct InitializedProtocol {
     transport_description: String,
     initial_transport_state: transport::TransportState,
     protocol_display_name: String,
+    config_fingerprint: String,
+}
+
+/// Key-sorted JSON text, so equal settings fingerprint equally whatever
+/// order their keys were stored in.
+fn canonical_json(value: &serde_json::Value, out: &mut String) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut entries: Vec<_> = map.iter().collect();
+            entries.sort_by(|left, right| left.0.cmp(right.0));
+            out.push('{');
+            for (index, (key, item)) in entries.into_iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                out.push_str(&serde_json::Value::String(key.clone()).to_string());
+                out.push(':');
+                canonical_json(item, out);
+            }
+            out.push('}');
+        }
+        serde_json::Value::Array(items) => {
+            out.push('[');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                canonical_json(item, out);
+            }
+            out.push(']');
+        }
+        other => out.push_str(&other.to_string()),
+    }
 }
 
 /// Create transport + protocol and run the device handshake.
@@ -197,6 +232,12 @@ fn build_initialized_protocol(
         transport_description,
         initial_transport_state,
         protocol_display_name,
+        config_fingerprint: DeviceManager::config_fingerprint_for(
+            connection_type,
+            connection_details,
+            protocol_name,
+            protocol_config,
+        ),
     })
 }
 
@@ -245,12 +286,14 @@ impl DeviceManager {
             transport_description,
             initial_transport_state,
             protocol_display_name,
+            config_fingerprint,
         } = init;
 
         // Store managed device behind its own Mutex
         let handle: DeviceHandle = Arc::new(Mutex::new(ManagedDevice {
             device_id: device_id.to_string(),
             protocol,
+            config_fingerprint,
         }));
         {
             let mut devices = self.devices.lock().map_err(|e| e.to_string())?;
@@ -404,6 +447,116 @@ impl DeviceManager {
         })
         .await
         .map_err(|e| format!("ecr_process_transaction join error: {e}"))?
+    }
+
+    /// Settled gift card receipt dispatch. `NotPublished` only when no handle
+    /// is connected or the adapter proves it refused before publishing; a
+    /// join failure or panic may follow publication and stays an uncertain
+    /// `Err`.
+    pub async fn process_settled_receipt_offloaded(
+        &self,
+        device_id: &str,
+        request: TransactionRequest,
+    ) -> Result<crate::ecr::protocol::SettledDispatch, String> {
+        let Some(handle) = self.handle_for(device_id)? else {
+            return Ok(crate::ecr::protocol::SettledDispatch::NotPublished(
+                format!("Device {device_id} not connected"),
+            ));
+        };
+        let device_id = device_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let mut dev = handle.lock().unwrap_or_else(|poisoned| {
+                warn!(
+                    device_id = %device_id,
+                    "ManagedDevice mutex poisoned by prior transaction panic; recovering"
+                );
+                poisoned.into_inner()
+            });
+            dev.protocol.process_settled_receipt(&request)
+        })
+        .await
+        .map_err(|e| format!("ecr_process_transaction join error: {e}"))?
+    }
+
+    /// Stable fingerprint of the exact inputs a protocol is connected with.
+    /// Gift readiness compares it with the stored register row, so a settled
+    /// gift receipt is never planned against settings the live adapter did
+    /// not load.
+    pub fn config_fingerprint_for(
+        connection_type: &str,
+        connection_details: &serde_json::Value,
+        protocol_name: &str,
+        protocol_config: &serde_json::Value,
+    ) -> String {
+        use sha2::{Digest, Sha256};
+        let mut canonical = String::new();
+        canonical_json(
+            &serde_json::json!({
+                "connectionType": connection_type,
+                "connectionDetails": connection_details,
+                "protocol": protocol_name,
+                "settings": protocol_config,
+            }),
+            &mut canonical,
+        );
+        let mut digest = Sha256::new();
+        digest.update(b"the-small/ecr-consumed-config/v1\0");
+        digest.update(canonical.as_bytes());
+        digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    /// Read-only look at a connected device that never queues behind an
+    /// in-flight exchange. `Ok(None)` means not connected; busy is an error.
+    fn inspect_device<T>(
+        &self,
+        device_id: &str,
+        inspect: impl FnOnce(&ManagedDevice) -> T,
+    ) -> Result<Option<T>, String> {
+        let Some(handle) = self.handle_for(device_id)? else {
+            return Ok(None);
+        };
+        let dev = match handle.try_lock() {
+            Ok(dev) => dev,
+            Err(TryLockError::Poisoned(poisoned)) => {
+                warn!(
+                    device_id = %device_id,
+                    "ManagedDevice mutex poisoned; recovering for inspection"
+                );
+                poisoned.into_inner()
+            }
+            Err(TryLockError::WouldBlock) => {
+                return Err(format!("Device {device_id} is busy with another exchange"));
+            }
+        };
+        Ok(Some(inspect(&dev)))
+    }
+
+    /// Fingerprint of the configuration the connected handle consumed.
+    pub fn connected_config_fingerprint(&self, device_id: &str) -> Result<Option<String>, String> {
+        self.inspect_device(device_id, |dev| dev.config_fingerprint.clone())
+    }
+
+    /// Payment codes the connected adapter emits for a settled gift receipt.
+    pub fn gift_tender_codes(&self, device_id: &str) -> Result<Option<GiftTenderCodes>, String> {
+        Ok(self
+            .inspect_device(device_id, |dev| dev.protocol.gift_tender_codes())?
+            .flatten())
+    }
+
+    /// Restart-proof correlation for the next fiscal dispatch with this id.
+    pub fn fiscal_dispatch_correlation(
+        &self,
+        device_id: &str,
+        transaction_id: &str,
+    ) -> Result<serde_json::Value, String> {
+        self.inspect_device(device_id, |dev| {
+            dev.protocol.fiscal_dispatch_correlation(transaction_id)
+        })?
+        .ok_or_else(|| format!("Device {device_id} not connected"))?
     }
 
     /// Get status of a connected device.
@@ -780,6 +933,7 @@ mod tests {
         let handle: DeviceHandle = Arc::new(Mutex::new(ManagedDevice {
             device_id: device_id.to_string(),
             protocol,
+            config_fingerprint: String::new(),
         }));
         mgr.devices
             .lock()
@@ -799,6 +953,32 @@ mod tests {
     fn test_disconnect_nonexistent_is_ok() {
         let mgr = DeviceManager::new();
         assert!(mgr.disconnect_device("does-not-exist").is_ok());
+    }
+
+    #[test]
+    fn consumed_config_fingerprint_ignores_key_order_and_detects_any_change() {
+        let fingerprint = |settings: serde_json::Value| {
+            DeviceManager::config_fingerprint_for(
+                "network",
+                &serde_json::json!({ "ip": "10.0.0.5", "port": 9100 }),
+                "cap_driver",
+                &settings,
+            )
+        };
+        let base =
+            fingerprint(serde_json::json!({ "voucherPaymentCode": 7, "cashPaymentCode": 1 }));
+        assert_eq!(
+            base,
+            fingerprint(serde_json::json!({ "cashPaymentCode": 1, "voucherPaymentCode": 7 }))
+        );
+        assert_ne!(
+            base,
+            fingerprint(serde_json::json!({ "voucherPaymentCode": 8, "cashPaymentCode": 1 }))
+        );
+        let mgr = DeviceManager::new();
+        assert_eq!(mgr.connected_config_fingerprint("absent").unwrap(), None);
+        assert_eq!(mgr.gift_tender_codes("absent").unwrap(), None);
+        assert!(mgr.fiscal_dispatch_correlation("absent", "tx").is_err());
     }
 
     #[test]

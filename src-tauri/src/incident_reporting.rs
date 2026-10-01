@@ -557,11 +557,13 @@ fn backlog_total(health: &Value) -> i64 {
 /// pauses the queue for a few minutes does not raise an incident.
 const PRINT_JOB_STALL_ALERT_MINUTES: i64 = 20;
 
-/// Age in minutes of the oldest job still `pending`, or `None` when nothing is
+/// Age in minutes of the oldest job still waiting, or `None` when nothing is
 /// waiting.
 ///
 /// Prefers `printerStatus.pendingJobs.oldestCreatedAt`, an aggregate over the
-/// WHOLE queue, and falls back to scanning the five-row `recentJobs` window only
+/// WHOLE queue (jobs `pending`, or `printing` and not finished; jobs held by a
+/// paused queue or printer are left out, see `diagnostics::read_print_queue_waiting`),
+/// and falls back to scanning the five-row `recentJobs` window only
 /// for terminals still sending the older payload. Timestamps that will not parse
 /// are skipped rather than treated as infinitely old — a malformed row must not
 /// manufacture an alert.
@@ -570,14 +572,21 @@ fn oldest_pending_print_job_age_minutes(health: &Value, now: DateTime<Utc>) -> O
     // only the five NEWEST jobs, so on a till with two printers a job stuck on
     // one slides out of that window while jobs keep completing through the
     // other — and the alert would fall silent exactly when it matters most.
-    let from_aggregate = string_path(health, &["printerStatus", "pendingJobs", "oldestCreatedAt"])
-        .and_then(|created| DateTime::parse_from_rfc3339(&created).ok())
-        .map(|created| (now - created.with_timezone(&Utc)).num_minutes());
-    if from_aggregate.is_some() {
-        return from_aggregate;
+    //
+    // When the `pendingJobs` key is present at all, the aggregate is the whole
+    // answer. It already leaves out jobs held by a global or per-printer pause,
+    // so `oldestCreatedAt: null` means nothing un-paused is waiting, and a null
+    // aggregate means the queue read failed (unknown — never page on unknown).
+    // Rescanning `recentJobs` there would count the very paused rows the
+    // aggregate excluded and page support for a queue staff paused on purpose.
+    if let Some(aggregate) = value_path(health, &["printerStatus", "pendingJobs"]) {
+        return string_path(aggregate, &["oldestCreatedAt"])
+            .and_then(|created| DateTime::parse_from_rfc3339(&created).ok())
+            .map(|created| (now - created.with_timezone(&Utc)).num_minutes());
     }
 
-    // Fallback for a terminal still reporting the older payload shape.
+    // Fallback only for a terminal still reporting the older payload shape,
+    // which has no `pendingJobs` key.
     let jobs = value_path(health, &["printerStatus", "recentJobs"]).and_then(Value::as_array)?;
 
     jobs.iter()

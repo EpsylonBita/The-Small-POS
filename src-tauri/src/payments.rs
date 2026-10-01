@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use crate::commands::gift_cards::{self, OriginalGiftSplit};
 use crate::db::DbState;
 use crate::money::Cents;
 use crate::{
@@ -429,6 +430,19 @@ pub(crate) struct PaymentInsertOptions {
     pub sync_order_owner_with_payment: bool,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
+    /// Record the payment set aside for review instead of as a collection
+    /// (`payment_review`): money that moved but found the order covered.
+    pub set_aside: Option<SetAsideInsert>,
+}
+
+/// How a payment recorded set aside found its order (see
+/// [`PaymentInsertOptions::set_aside`]).
+#[derive(Clone, Debug)]
+pub(crate) struct SetAsideInsert {
+    pub reason: crate::payment_review::SetAsideReason,
+    pub amount_due_cents: i64,
+    pub order_total_cents: i64,
+    pub order_settled_cents: i64,
 }
 
 impl PaymentInsertOptions {
@@ -444,6 +458,7 @@ impl PaymentInsertOptions {
             sync_order_owner_with_payment: true,
             created_at: None,
             updated_at: None,
+            set_aside: None,
         }
     }
 
@@ -459,6 +474,26 @@ impl PaymentInsertOptions {
             sync_order_owner_with_payment: true,
             created_at: None,
             updated_at: None,
+            set_aside: None,
+        }
+    }
+
+    /// Money that moved (a card the terminal approved) but found its order
+    /// already covered: kept exactly as taken, counted nowhere, never sent,
+    /// never touching the drawer, the driver earning or the order's owner.
+    pub(crate) fn set_aside(set_aside: SetAsideInsert) -> Self {
+        Self {
+            payment_id: None,
+            remote_payment_id: None,
+            sync_status: "synced".to_string(),
+            sync_state: Some("applied".to_string()),
+            enqueue_sync: false,
+            update_cash_drawer: false,
+            mark_order_sync_pending_on_owner_change: false,
+            sync_order_owner_with_payment: false,
+            created_at: None,
+            updated_at: None,
+            set_aside: Some(set_aside),
         }
     }
 }
@@ -658,6 +693,34 @@ pub(crate) fn prepare_outstanding_collection_payload(
     Ok(())
 }
 
+/// Method of canonical gift card payments. The server's atomic redemption is
+/// the only writer; this terminal mirrors those rows as applied, and a
+/// renderer payload can never record one (`build_payment_record_input`
+/// rejects the method).
+pub(crate) const GIFT_CARD_METHOD: &str = "gift_card";
+pub(crate) const GIFT_CARD_REVERSAL_UNSUPPORTED: &str = "GIFT_CARD_REVERSAL_UNSUPPORTED: Gift card payments cannot be refunded or voided on the POS yet. Nothing was changed; ask a manager to settle it with the customer.";
+pub(crate) const GIFT_CARD_PAYMENT_IMMUTABLE: &str = "GIFT_CARD_PAYMENT_IMMUTABLE: A gift card payment cannot be changed to another payment method. Nothing was changed.";
+
+/// Insert input for a canonical server payment mirrored as applied. Gift card
+/// rows keep their own method; every other method follows
+/// `build_payment_record_input`.
+pub(crate) fn build_applied_canonical_payment_record_input(
+    payload: &Value,
+) -> Result<PaymentRecordInput, String> {
+    let is_gift = str_field(payload, "method")
+        .is_some_and(|method| method.trim().eq_ignore_ascii_case(GIFT_CARD_METHOD));
+    if !is_gift {
+        return build_payment_record_input(payload);
+    }
+    let mut stand_in = payload.clone();
+    if let Some(fields) = stand_in.as_object_mut() {
+        fields.insert("method".to_string(), Value::String("other".to_string()));
+    }
+    let mut input = build_payment_record_input(&stand_in)?;
+    input.method = GIFT_CARD_METHOD.to_string();
+    Ok(input)
+}
+
 pub(crate) fn build_payment_record_input(payload: &Value) -> Result<PaymentRecordInput, String> {
     let order_id = str_field(payload, "orderId")
         .or_else(|| str_field(payload, "order_id"))
@@ -775,39 +838,445 @@ pub(crate) fn build_payment_record_input(payload: &Value) -> Result<PaymentRecor
     })
 }
 
+/// SQL predicate over an `order_payments` row aliased `alias`: a placeholder
+/// 1.4.119 invented from a pulled order's own label and total
+/// (`payment_origin = 'sync_reconstructed'` with no server payment id). Such
+/// a row records no money anyone saw; it only hid a missing record. It is
+/// never counted as coverage, net paid or drawer money (founder rule
+/// 30/09/2026: no order is registered paid without its payment record), and
+/// it is never deleted here: the ledger restore adopts it with the server's
+/// real payment, which gives it a `remote_payment_id`. A real server payment
+/// mirrored here also carries `sync_reconstructed`, always WITH its id.
+pub(crate) fn placeholder_payment_sql(alias: &str) -> String {
+    format!(
+        "(COALESCE({alias}.payment_origin, '') = 'sync_reconstructed' \
+          AND TRIM(COALESCE({alias}.remote_payment_id, '')) = '')"
+    )
+}
+
+/// Refusal of a refund or void of a [`placeholder_payment_sql`] row (item
+/// D3, round 2 review): it records no money, so nothing is paid out or taken
+/// back against it; the server ledger restore adopts or replaces it.
+pub(crate) const PLACEHOLDER_PAYMENT_NOT_MONEY_ERROR: &str = "PAYMENT_PLACEHOLDER_NOT_MONEY: this payment row records no money (the till guessed it from the order's label). It cannot be refunded or voided. Restore the order's payments from the server (Sync Now).";
+
+/// Is this payment row a [`placeholder_payment_sql`] placeholder?
+pub(crate) fn payment_is_placeholder(conn: &Connection, payment_id: &str) -> Result<bool, String> {
+    conn.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM order_payments op WHERE op.id = ?1 AND {})",
+            placeholder_payment_sql("op")
+        ),
+        params![payment_id],
+        |row| row.get(0),
+    )
+    .map_err(|e| format!("read whether payment {payment_id} is a placeholder: {e}"))
+}
+
+/// SQL predicate: a completed row that counts as money (completed, and not a
+/// [`placeholder_payment_sql`] placeholder).
+pub(crate) fn counted_completed_payment_sql(alias: &str) -> String {
+    format!(
+        "({alias}.status = 'completed' AND NOT {})",
+        placeholder_payment_sql(alias)
+    )
+}
+
+/// SQL predicate: the server already holds this row (it answered with its id,
+/// or the row was mirrored from it). An unsynced row is money this till took
+/// that the server has not recorded yet.
+pub(crate) fn server_held_payment_sql(alias: &str) -> String {
+    format!(
+        "(COALESCE({alias}.sync_state, '') = 'applied' \
+          OR TRIM(COALESCE({alias}.remote_payment_id, '')) <> '')"
+    )
+}
+
+/// Orders with a placeholder row whose one-shot ledger restore (requested by
+/// migration v92 in `metadata.placeholder_ledger_restore.requested_at`) has
+/// not run yet. Orders never tried come first, then the one whose last
+/// failure is oldest ([`mark_placeholder_ledger_restore_failed`]): an order
+/// whose restore always fails goes to the back of the line, never ahead of
+/// every other (round 2 review, 01/10/2026: a fixed order let one failing
+/// order block every later restore).
+pub(crate) fn orders_awaiting_placeholder_ledger_restore(
+    conn: &Connection,
+    limit: i64,
+) -> Result<Vec<String>, String> {
+    let mut statement = conn
+        .prepare(&format!(
+            "SELECT op.order_id
+             FROM order_payments op
+             JOIN orders o ON o.id = op.order_id
+             WHERE {placeholder}
+               AND op.status = 'completed'
+               AND (CASE WHEN json_valid(op.metadata)
+                         THEN json_extract(op.metadata, '$.placeholder_ledger_restore.requested_at')
+                    END) IS NOT NULL
+               AND (CASE WHEN json_valid(op.metadata)
+                         THEN json_extract(op.metadata, '$.placeholder_ledger_restore.restored_at')
+                    END) IS NULL
+               AND lower(trim(COALESCE(o.order_context, ''))) <> 'repair_settlement'
+             GROUP BY op.order_id
+             ORDER BY MAX(CASE WHEN json_valid(op.metadata)
+                               THEN json_extract(op.metadata, '$.placeholder_ledger_restore.last_failed_at')
+                          END) IS NOT NULL,
+                      MAX(CASE WHEN json_valid(op.metadata)
+                               THEN json_extract(op.metadata, '$.placeholder_ledger_restore.last_failed_at')
+                          END),
+                      op.order_id
+             LIMIT ?1",
+            placeholder = placeholder_payment_sql("op")
+        ))
+        .map_err(|e| format!("prepare placeholder ledger restore scan: {e}"))?;
+    let rows = statement
+        .query_map(params![limit.max(1)], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("query placeholder ledger restore scan: {e}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("read placeholder ledger restore scan: {e}"))
+}
+
+/// Stamp the order's pending placeholder restore: this pass could not mirror
+/// its server ledger. The order goes to the back of the line
+/// ([`orders_awaiting_placeholder_ledger_restore`]) and is tried again later.
+pub(crate) fn mark_placeholder_ledger_restore_failed(
+    conn: &Connection,
+    order_id: &str,
+    failed_at: &str,
+) -> Result<usize, String> {
+    conn.execute(
+        "UPDATE order_payments
+         SET metadata = json_set(
+                 CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                 '$.placeholder_ledger_restore.last_failed_at',
+                 ?1
+             )
+         WHERE order_id = ?2
+           AND (CASE WHEN json_valid(metadata)
+                     THEN json_extract(metadata, '$.placeholder_ledger_restore.requested_at')
+                END) IS NOT NULL
+           AND (CASE WHEN json_valid(metadata)
+                     THEN json_extract(metadata, '$.placeholder_ledger_restore.restored_at')
+                END) IS NULL",
+        params![failed_at, order_id],
+    )
+    .map_err(|e| format!("stamp placeholder ledger restore failure: {e}"))
+}
+
+/// Stamp the order's placeholder rows: its server ledger was mirrored. A
+/// placeholder the server adopted has a server id by now and is no longer
+/// one; the rest keep their row, uncounted.
+pub(crate) fn mark_placeholder_ledger_restored(
+    conn: &Connection,
+    order_id: &str,
+    restored_at: &str,
+) -> Result<usize, String> {
+    conn.execute(
+        "UPDATE order_payments
+         SET metadata = json_set(
+                 CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                 '$.placeholder_ledger_restore.restored_at',
+                 ?1
+             )
+         WHERE order_id = ?2
+           AND (CASE WHEN json_valid(metadata)
+                     THEN json_extract(metadata, '$.placeholder_ledger_restore.requested_at')
+                END) IS NOT NULL
+           AND (CASE WHEN json_valid(metadata)
+                     THEN json_extract(metadata, '$.placeholder_ledger_restore.restored_at')
+                END) IS NULL",
+        params![restored_at, order_id],
+    )
+    .map_err(|e| format!("stamp placeholder ledger restore: {e}"))
+}
+
 pub(crate) fn load_net_paid_for_order(
     conn: &rusqlite::Connection,
     order_id: &str,
 ) -> Result<f64, String> {
-    conn.query_row(
-        // W4b: aggregate using cents-with-real-fallback shim. The shim
-        // (`COALESCE(*_cents, CAST(ROUND(*_real * 100) AS INTEGER))`)
-        // tolerates any row whose cents was never populated (pre-W4c
-        // production rows or test fixtures). 4e removes the shim when
-        // the REAL columns are dropped.
-        "SELECT COALESCE(SUM(
-            CASE
-                WHEN COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0)
-                     > COALESCE(refunds.refunded_cents, 0)
-                    THEN COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0)
-                         - COALESCE(refunds.refunded_cents, 0)
-                ELSE 0
-            END
-        ), 0)
-         FROM order_payments op
-         LEFT JOIN (
-             SELECT payment_id,
-                    SUM(COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER))) AS refunded_cents
-             FROM payment_adjustments
-             WHERE adjustment_type = 'refund'
-             GROUP BY payment_id
-         ) refunds ON refunds.payment_id = op.id
-         WHERE op.order_id = ?1
-           AND op.status = 'completed'",
-        params![order_id],
-        |row| row.get::<_, i64>(0).map(|c| Cents::new(c).to_f64_dp2()),
+    load_net_paid_cents_matching(conn, order_id, &counted_completed_payment_sql("op"))
+        .map(|cents| Cents::new(cents).to_f64_dp2())
+}
+
+/// SQL predicate over an `order_payments` row aliased `alias`: a delivery
+/// platform's settlement, written by the server at ingest
+/// (`ensurePlatformSettlementPayment`: method `other`, external id
+/// `platform_settlement:{online|cod}:{order}`, key `platform-settle-{order}`,
+/// `metadata.platform_settlement`) or by THE-437's
+/// [`auto_settle_platform_order`]. Money the platform banks to the store,
+/// never money the store took at its till: it never counts for the
+/// cancel/decline refusal, the till never voids or refunds it
+/// ([`PLATFORM_SETTLEMENT_NOT_REVERSIBLE`]), while it stays the order's
+/// payment record (coverage, the paid label, the Z).
+///
+/// One classifier in both apps (shared rule R1, round 3 review 01/10/2026;
+/// Android `platformSettlementRowSql`): the row names a method other than
+/// cash or card, AND one of the server's marks says so: the external id
+/// (`transaction_ref` here) or the idempotency key starts with
+/// `platform_settlement:`, the key starts with `platform-settle-`, or its
+/// metadata names `payment_origin = 'platform_settlement'` or carries
+/// `platform_settlement`. A cash or card row is always money a till took,
+/// whatever its reference says (the Z and the drawer read it so too).
+/// Symptom before: desktop matched the prefix on any method, so a cash or
+/// card row carrying it let a cancel through that Android refused, and an
+/// `other` row marked only by key or metadata was store money here and the
+/// platform's on Android. `substr`, not LIKE: `_` is a LIKE wildcard.
+/// Always 0 or 1, never NULL (a NULL inside `NOT (...)` drops every row).
+pub(crate) fn platform_settlement_row_sql(alias: &str) -> String {
+    format!(
+        "(COALESCE((LOWER(TRIM(COALESCE({alias}.method, ''))) NOT IN ('cash', 'card') \
+          AND (LOWER(TRIM(COALESCE({alias}.payment_origin, ''))) = 'platform_settlement' \
+               OR substr(COALESCE({alias}.transaction_ref, ''), 1, 20) = 'platform_settlement:' \
+               OR substr(COALESCE({alias}.idempotency_key, ''), 1, 20) = 'platform_settlement:' \
+               OR substr(COALESCE({alias}.idempotency_key, ''), 1, 16) = 'platform-settle-' \
+               OR (CASE WHEN json_valid({alias}.metadata) \
+                        THEN COALESCE(json_extract({alias}.metadata, '$.payment_origin'), '') = 'platform_settlement' \
+                             OR json_extract({alias}.metadata, '$.platform_settlement') IS NOT NULL \
+                        ELSE 0 END) = 1)), 0) = 1)"
     )
-    .map_err(|e| format!("load net paid for order {order_id}: {e}"))
+}
+
+/// Refusal of a void or refund of a delivery platform's settlement row
+/// ([`platform_settlement_row_sql`]; shared rule R1, round 3 review
+/// 01/10/2026; Android `PLATFORM_SETTLEMENT_NOT_REVERSIBLE`). The row is the
+/// platform's money, mirrored from the server: the till never reverses it,
+/// the server decides what becomes of it (a store decline voids it there).
+/// Symptom before: the refund screen offered Void and Refund on it, and the
+/// adjustment synced to the server against its canonical settlement payment.
+pub(crate) const PLATFORM_SETTLEMENT_NOT_REVERSIBLE: &str = "PLATFORM_SETTLEMENT_NOT_REVERSIBLE: the delivery platform's settlement cannot be voided or refunded at the till. The server decides what becomes of it.";
+
+/// Is this payment row a delivery platform's settlement
+/// ([`platform_settlement_row_sql`])?
+pub(crate) fn payment_is_platform_settlement(
+    conn: &Connection,
+    payment_id: &str,
+) -> Result<bool, String> {
+    conn.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM order_payments op WHERE op.id = ?1 AND {})",
+            platform_settlement_row_sql("op")
+        ),
+        params![payment_id],
+        |row| row.get(0),
+    )
+    .map_err(|e| format!("read whether payment {payment_id} is a platform settlement: {e}"))
+}
+
+/// SQL predicate over an `order_payments` row aliased `alias`: a payment the
+/// server refused because the delivery platform holds the order's money
+/// (`409 PLATFORM_HELD_ORDER`, set aside with reason `platform_held` by
+/// [`crate::payment_review::set_aside_platform_held_payment`]). Android
+/// `platformHeldSetAsideRowSql`.
+pub(crate) fn platform_held_set_aside_row_sql(alias: &str) -> String {
+    format!(
+        "(COALESCE((CASE WHEN json_valid({alias}.metadata) \
+                        THEN json_extract({alias}.metadata, '$.duplicate_review.reason') END) \
+                   = 'platform_held', 0) = 1)"
+    )
+}
+
+/// Is this payment row one the server refused as platform-held money
+/// ([`platform_held_set_aside_row_sql`])?
+pub(crate) fn payment_is_platform_held_set_aside(
+    conn: &Connection,
+    payment_id: &str,
+) -> Result<bool, String> {
+    conn.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM order_payments op WHERE op.id = ?1 AND {})",
+            platform_held_set_aside_row_sql("op")
+        ),
+        params![payment_id],
+        |row| row.get(0),
+    )
+    .map_err(|e| format!("read whether payment {payment_id} was refused as platform-held: {e}"))
+}
+
+/// Did the server refuse a payment of this order because the delivery
+/// platform holds its money ([`platform_held_set_aside_row_sql`])? Then the
+/// order's money is the platform's, whatever this till's metadata says
+/// (shared rule R4, round 3 review 01/10/2026; Android
+/// `hasPlatformHeldSetAsideAsync`): no cash, card or gift collection, no
+/// "Record the payment", and no "paid but not recorded" cancel refusal.
+pub(crate) fn order_has_platform_held_set_aside(conn: &Connection, order_id: &str) -> bool {
+    conn.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM order_payments op WHERE op.order_id = ?1 AND {})",
+            platform_held_set_aside_row_sql("op")
+        ),
+        params![order_id],
+        |row| row.get::<_, bool>(0),
+    )
+    .unwrap_or(false)
+}
+
+/// Is the order a hotel folio charge (shared rule R6, round 3, 01/10/2026)?
+/// The server stamps `payment_method = 'room_charge'` when
+/// `folio_charge_order` moves the order onto a guest folio, and this till
+/// keeps that as `orders.folio_charged` (v93,
+/// [`crate::sync::stamp_remote_folio_charge`]); a completed `room_charge`
+/// row says the same. The folio charge is the order's record: such an order
+/// is never refused a cancel as paid without a payment record, and its paid
+/// label is never withheld from an order write.
+pub(crate) fn order_is_folio_charged(conn: &Connection, order_id: &str) -> Result<bool, String> {
+    conn.query_row(
+        &format!(
+            "SELECT EXISTS(
+                 SELECT 1 FROM orders o
+                  WHERE o.id = ?1 AND COALESCE(o.folio_charged, 0) = 1
+             ) OR EXISTS(
+                 SELECT 1 FROM order_payments op
+                  WHERE op.order_id = ?1
+                    AND LOWER(TRIM(COALESCE(op.method, ''))) = 'room_charge'
+                    AND {}
+             )",
+            counted_completed_payment_sql("op")
+        ),
+        params![order_id],
+        |row| row.get(0),
+    )
+    .map_err(|e| format!("read the folio charge of {order_id}: {e}"))
+}
+
+/// The completed money the STORE took on the order, net of refunds, in
+/// cents: [`load_net_paid_for_order`] without the platform's settlement rows
+/// ([`platform_settlement_row_sql`]). What a cancel of a platform order the
+/// platform holds is refused for.
+pub(crate) fn load_store_taken_net_paid_cents(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+) -> Result<i64, String> {
+    let filter = format!(
+        "{} AND NOT {}",
+        counted_completed_payment_sql("op"),
+        platform_settlement_row_sql("op")
+    );
+    load_net_paid_cents_matching(conn, order_id, &filter)
+}
+
+/// The order's completed money the SERVER already holds, net of refunds, in
+/// cents (counted rows that are [`server_held_payment_sql`]). Every refund
+/// recorded here lowers it, synced or not: a claim never rests on money
+/// already given back.
+pub(crate) fn load_server_held_net_paid_cents(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+) -> Result<i64, String> {
+    let filter = format!(
+        "{} AND {}",
+        counted_completed_payment_sql("op"),
+        server_held_payment_sql("op")
+    );
+    load_net_paid_cents_matching(conn, order_id, &filter)
+}
+
+/// Completed money net of refunds over the rows `row_filter` (an SQL
+/// predicate over `op`) selects, in cents.
+fn load_net_paid_cents_matching(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+    row_filter: &str,
+) -> Result<i64, String> {
+    let load_err = |e: rusqlite::Error| format!("load net paid for order {order_id}: {e}");
+    let ordinary_cents: i64 = conn
+        .query_row(
+            // W4b: aggregate using cents-with-real-fallback shim. The shim
+            // (`COALESCE(*_cents, CAST(ROUND(*_real * 100) AS INTEGER))`)
+            // tolerates any row whose cents was never populated (pre-W4c
+            // production rows or test fixtures). 4e removes the shim when
+            // the REAL columns are dropped.
+            &format!(
+                "SELECT COALESCE(SUM(
+                    CASE
+                        WHEN COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0)
+                             > COALESCE(refunds.refunded_cents, 0)
+                            THEN COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0)
+                                 - COALESCE(refunds.refunded_cents, 0)
+                        ELSE 0
+                    END
+                ), 0)
+                 FROM order_payments op
+                 LEFT JOIN (
+                     SELECT payment_id,
+                            SUM(COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER))) AS refunded_cents
+                     FROM payment_adjustments
+                     WHERE adjustment_type = 'refund'
+                     GROUP BY payment_id
+                 ) refunds ON refunds.payment_id = op.id
+                 WHERE op.order_id = ?1
+                   AND {row_filter}
+                   AND op.method IS NOT ?2"
+            ),
+            params![order_id, GIFT_CARD_METHOD],
+            |row| row.get(0),
+        )
+        .map_err(load_err)?;
+    // Gift card rows are read one by one: each nets max(refunds, proven
+    // return floor), and an unreadable amount or proof fails closed.
+    let mut statement = conn
+        .prepare(&format!(
+            "SELECT op.id,
+                    COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0),
+                    COALESCE((
+                        SELECT SUM(COALESCE(pa.amount_cents, CAST(ROUND(pa.amount * 100) AS INTEGER)))
+                        FROM payment_adjustments pa
+                        WHERE pa.payment_id = op.id
+                          AND pa.adjustment_type = 'refund'
+                    ), 0)
+             FROM order_payments op
+             WHERE op.order_id = ?1
+               AND {row_filter}
+               AND op.method = ?2"
+        ))
+        .map_err(load_err)?;
+    let rows = statement
+        .query_map(params![order_id, GIFT_CARD_METHOD], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(load_err)?;
+    let mut net_cents = ordinary_cents;
+    for row in rows {
+        let (payment_id, gross_cents, refunded_cents) = row.map_err(load_err)?;
+        let reversed_cents = effective_reversed_cents(
+            conn,
+            &payment_id,
+            order_id,
+            GIFT_CARD_METHOD,
+            gross_cents,
+            refunded_cents,
+        )?;
+        net_cents += (gross_cents - reversed_cents).max(0);
+    }
+    Ok(net_cents)
+}
+
+/// Cents a payment row no longer covers. An ordinary row: its recorded
+/// adjustments as the caller summed them, unchanged. A gift card row: the
+/// larger of those and the cumulative its completed original-card returns
+/// proved (`gift_card_returns::proven_return_floor_cents`), never their sum,
+/// so an earlier return made on another terminal counts once, also after its
+/// real adjustment is imported. A read-only coverage value; nothing is recorded.
+pub(crate) fn effective_reversed_cents(
+    conn: &Connection,
+    payment_id: &str,
+    order_id: &str,
+    method: &str,
+    gross_cents: i64,
+    adjusted_cents: i64,
+) -> Result<i64, String> {
+    if method != GIFT_CARD_METHOD {
+        return Ok(adjusted_cents);
+    }
+    let floor = crate::commands::gift_card_returns::proven_return_floor_cents(
+        conn,
+        payment_id,
+        order_id,
+        gross_cents,
+    )?;
+    Ok(adjusted_cents.max(floor))
 }
 
 pub(crate) fn load_order_payment_balance_snapshot(
@@ -827,7 +1296,10 @@ pub(crate) fn load_order_payment_balance_snapshot(
     let net_paid = load_net_paid_for_order(conn, order_id)?;
     let completed_payment_count = conn
         .query_row(
-            "SELECT COUNT(*) FROM order_payments WHERE order_id = ?1 AND status = 'completed'",
+            &format!(
+                "SELECT COUNT(*) FROM order_payments op WHERE op.order_id = ?1 AND {}",
+                counted_completed_payment_sql("op")
+            ),
             params![order_id],
             |row| row.get::<_, i64>(0),
         )
@@ -851,7 +1323,7 @@ fn load_completed_payment_ledger_generation(
 ) -> Result<[u8; 32], String> {
     let mut statement = conn
         .prepare(
-            "SELECT op.id, op.method,
+            &"SELECT op.id, op.method,
                     COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0),
                     op.transaction_ref, COALESCE(op.payment_origin, 'manual'),
                     COALESCE((
@@ -862,8 +1334,9 @@ fn load_completed_payment_ledger_generation(
                     ), 0)
              FROM order_payments op
              WHERE op.order_id = ?1
-               AND op.status = 'completed'
-             ORDER BY op.id ASC",
+               AND $COUNTED
+             ORDER BY op.id ASC"
+                .replace("$COUNTED", &counted_completed_payment_sql("op")),
         )
         .map_err(|error| format!("prepare payment-ledger generation for {order_id}: {error}"))?;
     let rows = statement
@@ -885,11 +1358,29 @@ fn load_completed_payment_ledger_generation(
     digest.update(order_id.as_bytes());
     digest.update(order_total_cents.to_le_bytes());
     for row in rows {
-        let row = row.map_err(|error| {
-            format!("read completed payment for ledger generation {order_id}: {error}")
-        })?;
-        let encoded = serde_json::to_vec(&row)
-            .map_err(|error| format!("encode payment-ledger generation: {error}"))?;
+        let (payment_id, method, gross_cents, reference, origin, refunded_cents) =
+            row.map_err(|error| {
+                format!("read completed payment for ledger generation {order_id}: {error}")
+            })?;
+        // A gift row fingerprints its effective reversal, so a newly proven
+        // return floor invalidates a held settlement; other rows hash as before.
+        let reversed_cents = effective_reversed_cents(
+            conn,
+            &payment_id,
+            order_id,
+            &method,
+            gross_cents,
+            refunded_cents,
+        )?;
+        let encoded = serde_json::to_vec(&(
+            payment_id,
+            method,
+            gross_cents,
+            reference,
+            origin,
+            reversed_cents,
+        ))
+        .map_err(|error| format!("encode payment-ledger generation: {error}"))?;
         digest.update((encoded.len() as u64).to_le_bytes());
         digest.update(encoded);
     }
@@ -909,7 +1400,7 @@ pub(crate) fn settlement_generation_token(generation: &[u8; 32]) -> String {
     token
 }
 
-fn settlement_snapshot_json(snapshot: OrderSettlementSnapshot) -> Value {
+pub(crate) fn settlement_snapshot_json(snapshot: OrderSettlementSnapshot) -> Value {
     serde_json::json!({
         "orderTotal": snapshot.order_total,
         "netPaid": snapshot.net_paid,
@@ -1180,7 +1671,7 @@ pub(crate) fn enforce_paid_status_requires_ledger_coverage(
 
 /// Does the completed ledger back this exact claim? `paid` needs the whole
 /// total, `partially_paid` needs some money to exist at all.
-fn ledger_backs_claimed_status(
+pub(crate) fn ledger_backs_claimed_status(
     conn: &Connection,
     order_id: &str,
     claimed: &str,
@@ -1197,6 +1688,111 @@ fn ledger_backs_claimed_status(
         "paid" => net_paid_cents >= order_total_cents,
         "partially_paid" => net_paid_cents > 0,
         _ => true,
+    })
+}
+
+/// Lower the order's payment label to what its counted completed rows prove,
+/// never raise it (item D4, founder rule 30/09 and 01/10/2026). Called in the
+/// same write that takes money off the order without a local void or refund:
+/// a payment set aside for review. The label is the screen's and the Z's
+/// claim; a paid label left over a payment that no longer counts claimed money
+/// no record backs. The background ledger restore and the next pull raise it
+/// again from the server's own rows. `updated_at` is left alone, like the
+/// set-aside itself (`payment_review::repoint_order_payment_reference`), so
+/// the order never moves between Z windows. A zero total needs no money.
+/// Answers the new label when it changed.
+pub(crate) fn settle_order_label_down_to_counted_rows(
+    conn: &Connection,
+    order_id: &str,
+) -> Result<Option<&'static str>, String> {
+    fn rank(label: &str) -> u8 {
+        match label {
+            "paid" | "completed" => 2,
+            "partially_paid" | "partial" => 1,
+            _ => 0,
+        }
+    }
+    let current: Option<String> = conn
+        .query_row(
+            "SELECT LOWER(TRIM(COALESCE(payment_status, ''))) FROM orders WHERE id = ?1",
+            params![order_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("load the payment label of {order_id}: {e}"))?;
+    let Some(current) = current else {
+        return Ok(None);
+    };
+    let current_rank = rank(&current);
+    if current_rank == 0 {
+        return Ok(None);
+    }
+    let snapshot = load_order_payment_balance_snapshot(conn, order_id)?;
+    let order_total_cents = Cents::round_half_even(snapshot.order_total).as_i64();
+    if order_total_cents <= 0 {
+        return Ok(None);
+    }
+    let net_paid_cents = Cents::round_half_even(snapshot.net_paid).as_i64();
+    let proven = if net_paid_cents <= 0 {
+        "pending"
+    } else if net_paid_cents >= order_total_cents {
+        "paid"
+    } else {
+        "partially_paid"
+    };
+    if rank(proven) >= current_rank {
+        return Ok(None);
+    }
+    conn.execute(
+        "UPDATE orders SET payment_status = ?1 WHERE id = ?2",
+        params![proven, order_id],
+    )
+    .map_err(|e| format!("settle the payment label of {order_id}: {e}"))?;
+    Ok(Some(proven))
+}
+
+/// Does the money the SERVER already holds back this claim? The claim an
+/// order write may carry to `PATCH /api/pos/orders` (founder rule
+/// 30/09/2026, the sequence order → payment → grid): `paid` needs the
+/// server-held completed rows, net of refunds, to cover the total;
+/// `partially_paid` needs some of them. A row this till took and has not
+/// sent yet does not count: its own POST moves the server's order, and a
+/// claim sent ahead of it labelled Tomikro 7c2f75dd (30/09/2026, 10.20 held
+/// + 5.00 unsent of 15.20) paid for 10 s with the difference unrecorded.
+///
+/// Exempt, as on Android (`paymentClaim.paymentStatusForServerWrite`) and on
+/// the server: a zero total (nothing to record) and a room-folio charge
+/// ([`order_is_folio_charged`]: the folio charge is its record).
+pub(crate) fn server_ledger_backs_claimed_status(
+    conn: &Connection,
+    order_id: &str,
+    claimed: &str,
+) -> Result<bool, String> {
+    if !matches!(claimed, "paid" | "partially_paid") {
+        return Ok(true);
+    }
+    let order_total_cents: Option<i64> = conn
+        .query_row(
+            "SELECT COALESCE(total_amount_cents, CAST(ROUND(total_amount * 100) AS INTEGER), 0)
+             FROM orders WHERE id = ?1",
+            params![order_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("load order total for server-held claim {order_id}: {e}"))?;
+    let Some(order_total_cents) = order_total_cents else {
+        return Ok(false);
+    };
+    if order_total_cents <= 0 {
+        return Ok(true);
+    }
+    if order_is_folio_charged(conn, order_id)? {
+        return Ok(true);
+    }
+    let held_cents = load_server_held_net_paid_cents(conn, order_id)?;
+    Ok(match claimed {
+        "paid" => held_cents >= order_total_cents,
+        _ => held_cents > 0,
     })
 }
 
@@ -1434,6 +2030,26 @@ pub(crate) fn record_payment_in_connection(
                 kind.slug()
             ));
         }
+        // Shared rule R4 (round 3 review, 01/10/2026; Android
+        // `assertOrderIsStoreCollectable`): the server already refused a till
+        // payment on this order because the platform holds its money (a
+        // payment set aside as `platform_held`). Whatever this till's
+        // metadata says, a new cash or card row (a collection, or "Record
+        // the payment" from the dashboard or the Z) would be refused again
+        // and set aside again: never taken here. A mirror of a row the
+        // server itself holds (`sync_reconstructed`) is the server's record,
+        // not a till collection.
+        if !input
+            .payment_origin
+            .trim()
+            .eq_ignore_ascii_case("sync_reconstructed")
+            && order_has_platform_held_set_aside(conn, &input.order_id)
+        {
+            return Err(format!(
+                "{PLATFORM_HELD_COLLECTION_ERROR}: order {} is settled by the platform (the server refused a till payment on it). The money is not in this till — it arrives by bank settlement.",
+                input.order_id
+            ));
+        }
     }
 
     let sync_state = options.sync_state.clone().unwrap_or_else(|| {
@@ -1555,7 +2171,11 @@ pub(crate) fn record_payment_in_connection(
             resolved_staff_id.as_deref(),
         )?;
 
-    validate_payment_amount_against_outstanding(conn, input, options)?;
+    // A payment recorded set aside already failed this very check: it is kept
+    // because its money moved, not because the order had room for it.
+    if options.set_aside.is_none() {
+        validate_payment_amount_against_outstanding(conn, input, options)?;
+    }
 
     if options.sync_order_owner_with_payment
         && (resolved_shift_id != order_staff_shift_id || resolved_staff_id != order_staff_id)
@@ -1597,6 +2217,26 @@ pub(crate) fn record_payment_in_connection(
         .map(|v| Cents::round_half_even(v).as_i64());
     let discount_amount_cents = Cents::round_half_even(input.discount_amount).as_i64();
     let tip_amount_cents = Cents::round_half_even(input.tip_amount).as_i64();
+    let (payment_status, payment_metadata) = match options.set_aside.as_ref() {
+        Some(set_aside) => (
+            crate::payment_review::DUPLICATE_REVIEW_PAYMENT_STATUS,
+            Some(
+                serde_json::json!({
+                    "duplicate_review": {
+                        "reason": set_aside.reason.as_str(),
+                        "server_payment_id": Value::Null,
+                        "detected_at": created_at,
+                        "previous_sync_state": Value::Null,
+                        "amount_due_cents": set_aside.amount_due_cents,
+                        "order_total_cents": set_aside.order_total_cents,
+                        "order_settled_cents": set_aside.order_settled_cents,
+                    }
+                })
+                .to_string(),
+            ),
+        ),
+        None => ("completed", None),
+    };
     conn.execute(
         "INSERT INTO order_payments (
             id, order_id, method, amount, amount_cents, currency, status,
@@ -1606,11 +2246,11 @@ pub(crate) fn record_payment_in_connection(
             tip_recipient_staff_id, tip_recipient_staff_shift_id,
             payment_origin, terminal_device_id,
             remote_payment_id, idempotency_key, staff_id, staff_shift_id, sync_status,
-            sync_state, created_at, updated_at, table_session_id, seat_number
+            sync_state, created_at, updated_at, table_session_id, seat_number, metadata
         ) VALUES (
-            ?1, ?2, ?3, ?4, ?5, ?6, 'completed', ?7, ?8, ?9, ?10,
+            ?1, ?2, ?3, ?4, ?5, ?6, ?31, ?7, ?8, ?9, ?10,
             ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21,
-            ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30
+            ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?32
         )",
         params![
             payment_id,
@@ -1643,6 +2283,8 @@ pub(crate) fn record_payment_in_connection(
             updated_at,
             input.table_session_id,
             input.seat_number,
+            payment_status,
+            payment_metadata,
         ],
     )
     .map_err(|e| format!("insert payment: {e}"))?;
@@ -1667,6 +2309,17 @@ pub(crate) fn record_payment_in_connection(
             ],
         )
         .map_err(|e| format!("insert payment item: {e}"))?;
+    }
+
+    if options.set_aside.is_some() {
+        // Counted nowhere: the order's payment state, the driver's earning
+        // and the drawer (options) stay exactly as they were.
+        return Ok(RecordedPayment {
+            payment_id,
+            payment_origin: input.payment_origin.clone(),
+            sync_status: options.sync_status.clone(),
+            sync_state,
+        });
     }
 
     recompute_order_payment_state(conn, &input.order_id, &updated_at, &payment_id)?;
@@ -1938,6 +2591,27 @@ pub(crate) fn platform_settlement_kind(
     None
 }
 
+/// Does the store itself collect this order's money? The shared contract
+/// (`shared/platforms/payment-coverage.ts` `isStoreCollectableOrder`, founder
+/// review 16/09/2026: "unknown means ask the operator, never assume"), as on
+/// Android: no only on real evidence that the delivery platform holds it,
+/// that is its disposition ([`platform_settlement_kind`]: prepaid online, or
+/// cash the platform's own rider collected) or the server's refusal of a
+/// till payment on it ([`order_has_platform_held_set_aside`], shared rule
+/// R4). Yes for every store order, a platform order the store's own driver
+/// carries, and a platform order whose disposition this till does not know.
+///
+/// Symptom before (round 3 review, 01/10/2026): desktop also answered no for
+/// a platform order of unknown disposition (a marketplace slug or an external
+/// id without `ghost_metadata.food_delivery`), so such an order labelled paid
+/// with no payment record was cancelled here and refused on Android; and the
+/// `platform_held` set-aside was ignored, so the cancel of an order the
+/// server had called platform-held was refused as "record the payment".
+pub(crate) fn order_money_is_store_collectable(conn: &Connection, order_id: &str) -> bool {
+    platform_settlement_kind(conn, order_id).is_none()
+        && !order_has_platform_held_set_aside(conn, order_id)
+}
+
 /// The completed cash/card rows on an order the PLATFORM settles.
 ///
 /// Eligibility is the order's own disposition, never a guess:
@@ -1991,6 +2665,24 @@ pub(crate) fn auto_settle_platform_order(
     let Some(kind) = platform_settlement_kind(conn, order_id) else {
         return Ok(false);
     };
+    // A cancelled or refunded order is never settled here (item D8,
+    // 01/10/2026): a stale Ready on an order the platform cancelled could
+    // record a settlement on a cancelled order. The server's own settlement
+    // row, when there is one, is mirrored like any other payment.
+    let order_status: Option<String> = conn
+        .query_row(
+            "SELECT LOWER(TRIM(COALESCE(status, ''))) FROM orders WHERE id = ?1",
+            params![order_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("load order status before platform settlement: {e}"))?;
+    if matches!(
+        order_status.as_deref(),
+        Some("cancelled" | "canceled" | "refunded" | "declined" | "rejected")
+    ) {
+        return Ok(false);
+    }
     let snapshot = load_order_payment_balance_snapshot(conn, order_id)?;
     if Cents::round_half_even(snapshot.outstanding_amount).as_i64() <= 0 {
         return Ok(false);
@@ -2045,6 +2737,158 @@ pub(crate) fn auto_settle_platform_order(
     }
 }
 
+fn payload_reports_terminal_approval(payload: &Value) -> bool {
+    payload
+        .get("terminalApproved")
+        .or_else(|| payload.get("terminal_approved"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// A collection recorded set aside (see [`decide_moved_money_collection`]).
+#[derive(Clone, Debug)]
+struct SetAsideCollection {
+    payment_id: String,
+    reason: crate::payment_review::SetAsideReason,
+    amount_due_cents: i64,
+}
+
+enum MovedMoneyDecision {
+    /// The order still has room: an ordinary collection.
+    Collect,
+    /// The order is covered: record it set aside.
+    SetAside(SetAsideInsert),
+    /// This very approval was already recorded set aside.
+    AlreadySetAside(SetAsideCollection),
+}
+
+/// Money that moved (a terminal-approved card) and the order it pays.
+///
+/// Fix review 30/09/2026 (Android 1.0.13): a restore, or another terminal's
+/// payment, can land while the customer is at the card terminal. The
+/// outstanding check then refused the charged card and it existed only on
+/// the terminal. Now: an order that still has room records it as usual; an
+/// order already covered records it set aside (`order_already_covered`, or
+/// `exceeds_amount_due` when part was still due: the whole payment is set
+/// aside and the order keeps what it owed), counted nowhere, for a manager to
+/// give back. The same approval (transaction reference) is never recorded
+/// twice: a set-aside one is answered again, a collected one takes the
+/// ordinary path (and its refusal) as before. Without a transaction
+/// reference nothing proves it is not a retry, so the ordinary path decides.
+fn decide_moved_money_collection(
+    conn: &Connection,
+    input: &PaymentRecordInput,
+) -> Result<MovedMoneyDecision, String> {
+    let Some(transaction_ref) = input
+        .transaction_ref
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(MovedMoneyDecision::Collect);
+    };
+    let existing: Option<(String, String, Option<String>)> = conn
+        .query_row(
+            "SELECT id, LOWER(TRIM(COALESCE(status, ''))), metadata
+             FROM order_payments
+             WHERE order_id = ?1
+               AND TRIM(COALESCE(transaction_ref, '')) = ?2
+             ORDER BY created_at ASC, id ASC
+             LIMIT 1",
+            params![input.order_id, transaction_ref],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(|e| format!("look up the approved payment's earlier record: {e}"))?;
+    if let Some((payment_id, status, metadata)) = existing {
+        let review = metadata
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+            .and_then(|value| value.get("duplicate_review").cloned());
+        return Ok(match review {
+            Some(review)
+                if status == crate::payment_review::DUPLICATE_REVIEW_PAYMENT_STATUS
+                    || status == "voided" =>
+            {
+                let reason = match review.get("reason").and_then(Value::as_str) {
+                    Some("exceeds_amount_due") => {
+                        crate::payment_review::SetAsideReason::ExceedsAmountDue
+                    }
+                    Some("already_paid") => crate::payment_review::SetAsideReason::AlreadyPaid,
+                    _ => crate::payment_review::SetAsideReason::OrderAlreadyCovered,
+                };
+                MovedMoneyDecision::AlreadySetAside(SetAsideCollection {
+                    payment_id,
+                    reason,
+                    amount_due_cents: review
+                        .get("amount_due_cents")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0),
+                })
+            }
+            _ => MovedMoneyDecision::Collect,
+        });
+    }
+
+    let balance = load_order_payment_balance_snapshot(conn, &input.order_id)?;
+    let amount_cents = Cents::round_half_even(input.amount).as_i64();
+    let outstanding_cents = Cents::round_half_even(balance.outstanding_amount).as_i64();
+    if amount_cents <= outstanding_cents {
+        return Ok(MovedMoneyDecision::Collect);
+    }
+    Ok(MovedMoneyDecision::SetAside(SetAsideInsert {
+        reason: if outstanding_cents <= 0 {
+            crate::payment_review::SetAsideReason::OrderAlreadyCovered
+        } else {
+            crate::payment_review::SetAsideReason::ExceedsAmountDue
+        },
+        amount_due_cents: outstanding_cents.max(0),
+        order_total_cents: Cents::round_half_even(balance.order_total).as_i64(),
+        order_settled_cents: Cents::round_half_even(balance.net_paid).as_i64(),
+    }))
+}
+
+/// The answer to money recorded set aside: not a collection (no paid
+/// status, no drawer, no receipt), a typed refusal the renderer words in the
+/// operator's language.
+fn set_aside_collection_response(
+    input: &PaymentRecordInput,
+    collection: &SetAsideCollection,
+    settlement: Value,
+) -> Value {
+    let amount_cents = Cents::round_half_even(input.amount).as_i64();
+    let message = match collection.reason {
+        crate::payment_review::SetAsideReason::ExceedsAmountDue => format!(
+            "Only {:.2} was still due on this order. The {:.2} just taken is recorded for a manager to give back and is not counted. Collect only what is due.",
+            Cents::new(collection.amount_due_cents).to_f64_dp2(),
+            input.amount
+        ),
+        _ => format!(
+            "This order was already paid. The {:.2} just taken is recorded for a manager to give back and is not counted. Do not charge it again.",
+            input.amount
+        ),
+    };
+    serde_json::json!({
+        "success": false,
+        "errorCode": crate::payment_review::PAYMENT_SET_ASIDE_ERROR_CODE,
+        "paymentSetAside": true,
+        "paymentApproved": true,
+        "paymentPersisted": true,
+        "requiresReconciliation": false,
+        "orderId": input.order_id,
+        "paymentId": collection.payment_id,
+        "method": input.method,
+        "amount": input.amount,
+        "amountCents": amount_cents,
+        "amountDue": Cents::new(collection.amount_due_cents).to_f64_dp2(),
+        "amountDueCents": collection.amount_due_cents,
+        "reason": collection.reason.as_str(),
+        "settlement": settlement,
+        "error": message,
+        "message": message,
+    })
+}
+
 #[allow(clippy::type_complexity)]
 pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
     record_payment_with_expected_balance(db, payload, None)
@@ -2075,6 +2919,14 @@ pub(crate) fn record_payment_with_expected_balance(
     input.order_id = resolve_order_id(&conn, &input.order_id)
         .ok_or_else(|| format!("Order not found: {}", input.order_id))?;
     let collect_outstanding = payload_collects_outstanding_balance(&prepared_payload);
+    // A card the directly integrated terminal already approved: its money
+    // has moved, so it is never refused into thin air. The collect-outstanding
+    // flow strips the flag and holds the ledger with the v74 interlock
+    // instead (see `commands::payments::payment_record`).
+    let money_moved = !collect_outstanding
+        && input.method == "card"
+        && payload_reports_terminal_approval(&prepared_payload);
+    let mut set_aside_collection: Option<SetAsideCollection> = None;
     let mut persist_transaction =
         || -> Result<(RecordedPayment, OrderSettlementSnapshot), String> {
             conn.execute_batch("BEGIN IMMEDIATE")
@@ -2142,7 +2994,49 @@ pub(crate) fn record_payment_with_expected_balance(
                         &input.order_id,
                     )?;
                 }
-                let recorded = record_payment_in_connection(&conn, &input, &options)?;
+                let insert_options = if money_moved {
+                    match decide_moved_money_collection(&conn, &input)? {
+                        MovedMoneyDecision::Collect => options.clone(),
+                        MovedMoneyDecision::AlreadySetAside(existing) => {
+                            // The same approval, sent again: answer as the
+                            // first time, record nothing new.
+                            let recorded = RecordedPayment {
+                                payment_id: existing.payment_id.clone(),
+                                payment_origin: input.payment_origin.clone(),
+                                sync_status: "synced".to_string(),
+                                sync_state: "applied".to_string(),
+                            };
+                            set_aside_collection = Some(existing);
+                            let settlement =
+                                load_order_settlement_snapshot(&conn, &input.order_id)?;
+                            return Ok((recorded, settlement));
+                        }
+                        MovedMoneyDecision::SetAside(insert) => {
+                            set_aside_collection = Some(SetAsideCollection {
+                                payment_id: String::new(),
+                                reason: insert.reason,
+                                amount_due_cents: insert.amount_due_cents,
+                            });
+                            PaymentInsertOptions::set_aside(insert)
+                        }
+                    }
+                } else {
+                    options.clone()
+                };
+                let recorded = record_payment_in_connection(&conn, &input, &insert_options)?;
+                if let Some(collection) = set_aside_collection.as_mut() {
+                    collection.payment_id = recorded.payment_id.clone();
+                    crate::payment_review::audit_recorded_set_aside(
+                        &conn,
+                        &recorded.payment_id,
+                        &input.order_id,
+                        collection.reason,
+                        &input.method,
+                        Cents::round_half_even(input.amount).as_i64(),
+                        collection.amount_due_cents,
+                        &Utc::now().to_rfc3339(),
+                    )?;
+                }
                 if let Some(attempt_id) = outstanding_attempt_id.as_deref() {
                     crate::db::ecr_finish_outstanding_payment_persist(
                         &conn,
@@ -2176,6 +3070,13 @@ pub(crate) fn record_payment_with_expected_balance(
     } else {
         persist_transaction()?
     };
+    if let Some(collection) = set_aside_collection {
+        return Ok(set_aside_collection_response(
+            &input,
+            &collection,
+            settlement_snapshot_json(settlement),
+        ));
+    }
     info!(
         payment_id = %recorded.payment_id,
         order_id = %input.order_id,
@@ -2220,6 +3121,40 @@ pub fn resolve_unsettled_payment_blocker_payment(
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let actual_order_id =
         resolve_order_id(&conn, &order_id_raw).ok_or_else(|| "Order not found".to_string())?;
+    // Item F: the amount the operator confirmed keys the payment
+    // (`z-record:<order>:<cents>`), so a second tap, or a replayed request,
+    // finds the payment it already recorded instead of recording it twice.
+    let confirmed_cents = payload
+        .get("amountCents")
+        .and_then(Value::as_i64)
+        .filter(|cents| *cents > 0);
+    if let Some(cents) = confirmed_cents {
+        let key = format!("z-record:{actual_order_id}:{cents}");
+        if let Some((payment_id, recorded_cents)) = conn
+            .query_row(
+                "SELECT id, COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER), 0)
+                 FROM order_payments WHERE idempotency_key = ?1 LIMIT 1",
+                params![key],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()
+            .map_err(|e| format!("look up a recorded blocker payment: {e}"))?
+        {
+            let remaining =
+                payment_integrity::load_order_payment_blockers(&conn, &actual_order_id)?;
+            return Ok(serde_json::json!({
+                "success": true,
+                "alreadyRecorded": true,
+                "orderId": actual_order_id,
+                "paymentId": payment_id,
+                "method": method,
+                "amount": Cents::new(recorded_cents).to_f64_dp2(),
+                "idempotencyKey": key,
+                "charged": false,
+                "remainingBlockers": remaining,
+            }));
+        }
+    }
     let blockers = payment_integrity::load_order_payment_blockers(&conn, &actual_order_id)?;
     let Some(blocker) = blockers.first() else {
         return Ok(build_payment_blocker_failure(
@@ -2237,16 +3172,30 @@ pub fn resolve_unsettled_payment_blocker_payment(
 
     let balance_snapshot = load_order_payment_balance_snapshot(&conn, &actual_order_id)?;
     let outstanding_amount = balance_snapshot.outstanding_amount;
+    let outstanding_cents = Cents::round_half_even(outstanding_amount).as_i64();
+    let idempotency_key = format!(
+        "z-record:{actual_order_id}:{}",
+        confirmed_cents.unwrap_or(outstanding_cents)
+    );
     // W4e: integer-cent zero check. The bare-literal regression (Wave 2a C3
     // commentary) is now structurally impossible because `Cents` doesn't
     // permit arbitrary literals — every comparison goes through
     // `round_half_even`.
-    if Cents::round_half_even(outstanding_amount).as_i64() <= 0 {
+    if outstanding_cents <= 0 {
         return Ok(build_payment_blocker_failure(
             "This order no longer has a collectible outstanding balance. Refresh the payment blockers and try again.",
             &blockers,
         ));
     }
+    if confirmed_cents.is_some_and(|cents| cents != outstanding_cents) {
+        return Ok(build_payment_blocker_failure(
+            "The outstanding balance changed since it was confirmed. Refresh the payment blockers and try again.",
+            &blockers,
+        ));
+    }
+    let blocker_reason_code = blocker.reason_code.clone();
+    let recorded_by = str_field(payload, "recordedBy");
+    let approval_via = str_field(payload, "approvalVia");
     let requested_shift_id = str_field(payload, "staffShiftId")
         .or_else(|| str_field(payload, "staff_shift_id").or_else(|| str_field(payload, "shiftId")));
     let requested_staff_id =
@@ -2286,6 +3235,7 @@ pub fn resolve_unsettled_payment_blocker_payment(
             "staffId": repair_context.staff_id.clone(),
             "staffShiftId": repair_context.shift_id.clone(),
             "collectedBy": "cashier_drawer",
+            "idempotencyKey": idempotency_key.clone(),
         });
         let input = build_payment_record_input(&record_payload)?;
         let mut options = PaymentInsertOptions::local();
@@ -2295,6 +3245,21 @@ pub fn resolve_unsettled_payment_blocker_payment(
         options.updated_at = Some(now.clone());
 
         let recorded = record_payment_in_connection(&conn, &input, &options)?;
+        write_blocker_record_audit(
+            &conn,
+            BlockerRecordAudit {
+                order_id: &actual_order_id,
+                payment_id: &recorded.payment_id,
+                blocker_reason_code: &blocker_reason_code,
+                method,
+                amount_cents: outstanding_cents,
+                idempotency_key: &idempotency_key,
+                cashier_shift_id: &repair_context.shift_id,
+                recorded_by: recorded_by.as_deref(),
+                approval_via: approval_via.as_deref(),
+                recorded_at: &now,
+            },
+        )?;
 
         if repair_context.shift_status == "closed" {
             shifts::recompute_closed_cashier_shift_financial_snapshot(
@@ -2320,6 +3285,8 @@ pub fn resolve_unsettled_payment_blocker_payment(
             "amount": outstanding_amount,
             "recordedAt": now,
             "cashierShiftId": repair_context.shift_id.clone(),
+            "idempotencyKey": idempotency_key.clone(),
+            "charged": false,
             "remainingBlockers": remaining_blockers,
         }))
     })();
@@ -2335,6 +3302,78 @@ pub fn resolve_unsettled_payment_blocker_payment(
             Err(error)
         }
     }
+}
+
+struct BlockerRecordAudit<'a> {
+    order_id: &'a str,
+    payment_id: &'a str,
+    blocker_reason_code: &'a str,
+    method: &'a str,
+    amount_cents: i64,
+    idempotency_key: &'a str,
+    cashier_shift_id: &'a str,
+    recorded_by: Option<&'a str>,
+    /// How the money approval was given: `shift_session`, or `manager_pin`
+    /// with nobody on shift at this terminal.
+    approval_via: Option<&'a str>,
+    recorded_at: &'a str,
+}
+
+/// The audit entry of a payment recorded from a blocker (item F): who, when,
+/// which blocker, the tender, and `charged: false`: nothing was charged, the
+/// operator recorded money already taken. Written with the payment, in its
+/// transaction.
+fn write_blocker_record_audit(
+    conn: &Connection,
+    audit: BlockerRecordAudit<'_>,
+) -> Result<(), String> {
+    if !crate::payment_review::table_exists(conn, "recovery_action_log")? {
+        return Err("recovery_action_log is missing; the audit entry cannot be written".into());
+    }
+    let order_number: Option<String> = conn
+        .query_row(
+            "SELECT NULLIF(TRIM(COALESCE(order_number, '')), '') FROM orders WHERE id = ?1",
+            params![audit.order_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("load the order number for the record audit: {e}"))?
+        .flatten();
+    let message = format!(
+        "A {:.2} {} payment the customer already paid was recorded from a payment blocker; nothing was charged",
+        Cents::new(audit.amount_cents).to_f64_dp2(),
+        audit.method
+    );
+    conn.execute(
+        "INSERT INTO recovery_action_log (
+             id, action_id, issue_code, entity_type, entity_id, order_id, order_number,
+             success, message, actor_staff_id, payload_json, created_at
+         ) VALUES (?1, 'z_record_payment', ?2, 'order', ?3, ?3, ?4, 1, ?5, ?6, ?7, ?8)",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            audit.blocker_reason_code,
+            audit.order_id,
+            order_number,
+            message,
+            audit.recorded_by,
+            serde_json::json!({
+                "blockerReasonCode": audit.blocker_reason_code,
+                "paymentId": audit.payment_id,
+                "method": audit.method,
+                "amountCents": audit.amount_cents,
+                "idempotencyKey": audit.idempotency_key,
+                "cashierShiftId": audit.cashier_shift_id,
+                "recordedBy": audit.recorded_by,
+                "approvalVia": audit.approval_via,
+                "recordedAt": audit.recorded_at,
+                "charged": false,
+            })
+            .to_string(),
+            audit.recorded_at,
+        ],
+    )
+    .map_err(|e| format!("write the record audit entry: {e}"))?;
+    Ok(())
 }
 
 pub(crate) fn build_payment_sync_payload_for_payment(
@@ -2491,6 +3530,10 @@ pub(crate) fn refresh_payment_sync_queue_entry(
     conn: &Connection,
     payment_id: &str,
 ) -> Result<(), String> {
+    // A payment set aside for review is never re-sent (see `payment_review`).
+    if crate::payment_review::payment_is_set_aside(conn, payment_id)? {
+        return Ok(());
+    }
     let (order_id, has_supabase_id): (String, i64) = conn
         .query_row(
             "SELECT op.order_id,
@@ -2664,6 +3707,10 @@ fn refresh_driver_earning_for_payment_method_edit(
     crate::order_ownership::enqueue_or_refresh_driver_earning_sync_row(conn, &earning_id, &payload)
 }
 
+/// Also true for an order holding a payment set aside for review
+/// (`duplicate_review`): its tender is a decision for the Z review, never a
+/// method edit, and the "no local payment row" snapshot fallback must not
+/// write a method for it (fix review 30/09/2026).
 fn order_has_adjustment_or_finalized_payment(
     conn: &Connection,
     order_id: &str,
@@ -2676,7 +3723,7 @@ fn order_has_adjustment_or_finalized_payment(
             ) OR EXISTS(
                 SELECT 1 FROM order_payments
                 WHERE order_id = ?1
-                  AND LOWER(TRIM(COALESCE(status, ''))) IN ('refunded', 'voided')
+                  AND LOWER(TRIM(COALESCE(status, ''))) IN ('refunded', 'voided', 'duplicate_review')
             )
             THEN 1 ELSE 0 END",
         params![order_id],
@@ -2797,6 +3844,14 @@ pub fn update_payment_method_for_payment(
     let target_payment_id = target_payment_id
         .map(str::trim)
         .filter(|payment_id| !payment_id.is_empty());
+
+    // A gift card row mirrors an immutable server payment; converting it would
+    // relabel card value as cash or card.
+    if completed_payments.iter().any(|(payment_id, method, _)| {
+        method == GIFT_CARD_METHOD && target_payment_id.is_none_or(|target| target == payment_id)
+    }) {
+        return Err(GIFT_CARD_PAYMENT_IMMUTABLE.into());
+    }
 
     if order_has_adjustment_or_finalized_payment(&conn, &order_id)? {
         return Err("PAYMENT_METHOD_EDIT_ADJUSTED_ORDER_NOT_EDITABLE".into());
@@ -3015,7 +4070,29 @@ type PaymentRow = (
     Option<i64>,
     f64,
     Option<String>,
+    Option<i64>,
 );
+
+/// Additive projection on a canonical gift row: `split` and `full` only when
+/// the gift journal proved them, otherwise `unavailable` with a safe reason.
+/// Secret-free and money-free by construction.
+fn original_gift_split_json(split: &OriginalGiftSplit) -> Value {
+    match split {
+        OriginalGiftSplit::Split {
+            group_id,
+            portion_id,
+        } => serde_json::json!({
+            "classification": "split",
+            "splitGroupId": group_id,
+            "splitPortionId": portion_id,
+        }),
+        OriginalGiftSplit::Full => serde_json::json!({ "classification": "full" }),
+        OriginalGiftSplit::Unavailable(reason) => serde_json::json!({
+            "classification": "unavailable",
+            "reason": reason,
+        }),
+    }
+}
 
 fn load_order_payment_rows(conn: &Connection, order_id: &str) -> Result<Vec<Value>, String> {
     let mut stmt = conn
@@ -3041,7 +4118,8 @@ fn load_order_payment_rows(conn: &Connection, order_id: &str) -> Result<Vec<Valu
                           AND pa.adjustment_type = 'refund'
                     ), 0), op.table_session_id, op.seat_number,
                     COALESCE(op.tip_amount_cents, CAST(ROUND(op.tip_amount * 100) AS INTEGER), 0),
-                    op.remote_payment_id
+                    op.remote_payment_id,
+                    CASE WHEN typeof(op.amount_cents) = 'integer' THEN op.amount_cents END
              FROM order_payments op
              WHERE op.order_id = ?1
              ORDER BY op.created_at DESC",
@@ -3078,6 +4156,7 @@ fn load_order_payment_rows(conn: &Connection, order_id: &str) -> Result<Vec<Valu
                 row.get(22)?,
                 Cents::new(row.get::<_, i64>(23)?).to_f64_dp2(),
                 row.get(24)?,
+                row.get(25)?,
             ))
         })
         .map_err(|error| error.to_string())?
@@ -3091,11 +4170,49 @@ fn load_order_payment_rows(conn: &Connection, order_id: &str) -> Result<Vec<Valu
         .collect();
     drop(stmt);
 
+    // Resolved once, and only when a gift row needs its original split proven.
+    let gift_scope = if rows.iter().any(|row| row.2 == GIFT_CARD_METHOD) {
+        gift_cards::resolve_trusted_scope(conn)
+    } else {
+        None
+    };
+
     rows.into_iter()
         .map(|row| {
             let items = load_payment_items_for_payment(conn, &row.0)?;
-            let remaining_refundable = ((row.3 - row.20).max(0.0) * 100.0).round() / 100.0;
-            Ok(serde_json::json!({
+            // Read-only coverage view: a gift row's refunded amount is its
+            // effective reversal, proven return floor included, not a payout.
+            let refunded_amount = if row.2 == GIFT_CARD_METHOD {
+                Cents::new(effective_reversed_cents(
+                    conn,
+                    &row.0,
+                    &row.1,
+                    &row.2,
+                    Cents::round_half_even(row.3).as_i64(),
+                    Cents::round_half_even(row.20).as_i64(),
+                )?)
+                .to_f64_dp2()
+            } else {
+                row.20
+            };
+            let remaining_refundable = ((row.3 - refunded_amount).max(0.0) * 100.0).round() / 100.0;
+            // Proven by the gift journal against the stored integer gross (col
+            // 25); money, refunds and status stay this canonical row's own.
+            let original_gift_split = (row.2 == GIFT_CARD_METHOD).then(|| {
+                original_gift_split_json(&gift_cards::original_gift_split(
+                    conn,
+                    gift_scope.as_ref(),
+                    &gift_cards::CanonicalGiftRow {
+                        method: &row.2,
+                        local_payment_id: &row.0,
+                        remote_payment_id: row.24.as_deref(),
+                        local_order_id: &row.1,
+                        currency: &row.4,
+                        gross_cents: row.25,
+                    },
+                ))
+            });
+            let mut payment = serde_json::json!({
                 "id": row.0,
                 "orderId": row.1,
                 "method": row.2,
@@ -3117,7 +4234,7 @@ fn load_order_payment_rows(conn: &Connection, order_id: &str) -> Result<Vec<Valu
                 "syncStatus": row.17,
                 "createdAt": row.18,
                 "updatedAt": row.19,
-                "refundedAmount": row.20,
+                "refundedAmount": refunded_amount,
                 "tableSessionId": row.21,
                 "table_session_id": row.21,
                 "seatNumber": row.22,
@@ -3125,9 +4242,90 @@ fn load_order_payment_rows(conn: &Connection, order_id: &str) -> Result<Vec<Valu
                 "remotePaymentId": row.24,
                 "remainingRefundable": remaining_refundable,
                 "items": items,
-            }))
+            });
+            if let Some(original_gift_split) = original_gift_split {
+                payment["originalGiftSplit"] = original_gift_split;
+            }
+            // Shared rule R1 (round 3 review, 01/10/2026): the delivery
+            // platform's settlement row is never voided or refunded at the
+            // till; the refund screen offers neither on it. Named only on
+            // such a row, so every other row keeps its JSON shape.
+            if payment_is_platform_settlement(conn, &row.0)? {
+                payment["platformSettlement"] = Value::Bool(true);
+            }
+            // Shared rule R4: the server refused this till payment because
+            // the platform holds the order's money. The payment edit never
+            // offers to collect or record the order's money again.
+            if payment_is_platform_held_set_aside(conn, &row.0)? {
+                payment["platformHeldSetAside"] = Value::Bool(true);
+            }
+            Ok(payment)
         })
         .collect()
+}
+
+/// One completed payment as a settled gift card fiscal receipt reads it.
+#[derive(Debug, Clone)]
+pub(crate) struct SettledFiscalTender {
+    pub id: String,
+    pub method: String,
+    /// The stored ISO currency, unconverted; `None` when the row has none.
+    pub currency: Option<String>,
+    /// Amount less its refund and void adjustments (a gift card row: or its
+    /// proven return floor when larger), in cents.
+    pub net_cents: i64,
+}
+
+/// Strict read of an order's completed payments for a settled gift card
+/// fiscal receipt. Unlike `load_order_payment_rows`, a row that cannot be read
+/// is an error, never an omitted tender, and currencies are returned as
+/// stored. Read-only: nothing is recorded or converted.
+pub(crate) fn load_settled_fiscal_tenders(
+    conn: &Connection,
+    order_id: &str,
+) -> Result<Vec<SettledFiscalTender>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT op.id, op.method, op.currency,
+                    COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER)),
+                    COALESCE((
+                        SELECT SUM(COALESCE(pa.amount_cents, CAST(ROUND(pa.amount * 100) AS INTEGER)))
+                        FROM payment_adjustments pa
+                        WHERE pa.payment_id = op.id
+                          AND pa.adjustment_type IN ('refund', 'void')
+                    ), 0)
+             FROM order_payments op
+             WHERE op.order_id = ?1 AND op.status = 'completed'
+             ORDER BY op.created_at ASC, op.id ASC",
+        )
+        .map_err(|error| format!("prepare settled fiscal tenders: {error}"))?;
+    let rows = stmt
+        .query_map(params![order_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })
+        .map_err(|error| format!("read settled fiscal tenders: {error}"))?;
+    let mut tenders = Vec::new();
+    for row in rows {
+        let (id, method, currency, amount_cents, adjusted_cents) =
+            row.map_err(|error| format!("read settled fiscal tender: {error}"))?;
+        let amount_cents =
+            amount_cents.ok_or_else(|| format!("payment {id} has no readable amount"))?;
+        let reversed_cents =
+            effective_reversed_cents(conn, &id, order_id, &method, amount_cents, adjusted_cents)?;
+        tenders.push(SettledFiscalTender {
+            id,
+            method,
+            currency,
+            net_cents: amount_cents - reversed_cents,
+        });
+    }
+    Ok(tenders)
 }
 
 pub(crate) fn load_order_settlement_snapshot(
@@ -3319,6 +4517,79 @@ mod tests {
             conn: std::sync::Mutex::new(conn),
             db_path: std::path::PathBuf::from(":memory:"),
         }
+    }
+
+    #[test]
+    fn ordinary_payment_rows_keep_the_legacy_json_contract() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().expect("lock legacy seed database");
+            conn.execute(
+                "INSERT INTO orders (
+                     id, items, total_amount, total_amount_cents, status, order_type,
+                     payment_status, sync_status, created_at, updated_at
+                 ) VALUES ('order-legacy', '[]', 10.0, 1000, 'completed', 'takeaway',
+                           'paid', 'synced', '2026-09-28T10:00:00Z', '2026-09-28T10:00:00Z')",
+                [],
+            )
+            .expect("insert legacy order");
+            conn.execute(
+                "INSERT INTO order_payments (
+                     id, order_id, method, amount, amount_cents, currency, status,
+                     payment_origin, sync_status, sync_state, created_at, updated_at
+                 ) VALUES ('pay-cash', 'order-legacy', 'cash', 10.0, 1000, 'EUR', 'completed',
+                           'manual', 'synced', 'applied',
+                           '2026-09-28T10:01:00Z', '2026-09-28T10:01:00Z')",
+                [],
+            )
+            .expect("insert legacy cash payment");
+        }
+
+        let rows = get_order_payments(&db, "order-legacy").expect("legacy payments");
+        let mut keys: Vec<&str> = rows[0]
+            .as_object()
+            .expect("payment row object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        let mut legacy = vec![
+            "amount",
+            "cashReceived",
+            "changeGiven",
+            "createdAt",
+            "currency",
+            "discountAmount",
+            "id",
+            "items",
+            "method",
+            "orderId",
+            "paymentOrigin",
+            "refundedAmount",
+            "remainingRefundable",
+            "remotePaymentId",
+            "seatNumber",
+            "staffId",
+            "staffShiftId",
+            "status",
+            "syncStatus",
+            "tableSessionId",
+            "table_session_id",
+            "terminalApproved",
+            "terminalDeviceId",
+            "tipAmount",
+            "transactionRef",
+            "updatedAt",
+            "voidReason",
+            "voidedAt",
+            "voidedBy",
+        ];
+        legacy.sort_unstable();
+        assert_eq!(keys, legacy, "a non-gift row gains no gift projection");
+        assert_eq!(rows[0]["amount"], serde_json::json!(10.0));
+        let snapshot =
+            get_order_settlement_snapshot(&db, "order-legacy").expect("legacy settlement");
+        assert_eq!(snapshot["completedPayments"], rows);
     }
 
     fn seed_driver_delivery_with_completed_payments(
@@ -5567,6 +6838,54 @@ mod tests {
             .expect("read untouched payment method");
         assert_eq!(first_method, "card");
         assert_eq!(second_method, "cash");
+    }
+
+    /// An order holding a payment set aside for review has no tender to
+    /// guess: the "no local payment row" snapshot fallback must not write a
+    /// method for it, and no method edit changes it while it is reviewed.
+    #[test]
+    fn a_method_edit_never_writes_a_tender_for_an_order_holding_a_set_aside_payment() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (
+                    id, items, total_amount, total_amount_cents, status, sync_status,
+                    payment_status, supabase_id, created_at, updated_at
+                 ) VALUES ('ord-set-aside-edit', '[]', 13.0, 1300, 'completed', 'synced',
+                           'paid', 'remote-set-aside-edit', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO order_payments (id, order_id, method, amount, amount_cents,
+                    status, sync_status, sync_state, created_at, updated_at)
+                 VALUES ('pay-set-aside-edit', 'ord-set-aside-edit', 'cash', 13.0, 1300,
+                         'completed', 'pending', 'syncing', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            crate::payment_review::set_aside_already_paid_payment(
+                &conn,
+                "pay-set-aside-edit",
+                Some("srv-card"),
+                "2026-09-30T10:06:00Z",
+            )
+            .unwrap();
+        }
+
+        let refused = update_payment_method(&db, "ord-set-aside-edit", "card")
+            .expect_err("the tender of an order under review is not edited");
+        assert_eq!(refused, "PAYMENT_METHOD_EDIT_ADJUSTED_ORDER_NOT_EDITABLE");
+        let conn = db.conn.lock().unwrap();
+        let queued: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE record_id = 'ord-set-aside-edit'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        assert_eq!(queued, 0, "no order snapshot carrying a guessed method");
     }
 
     #[test]

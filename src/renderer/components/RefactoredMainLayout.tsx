@@ -1,4 +1,4 @@
-import React, { memo, useEffect, useRef, lazy, Suspense, useState } from 'react';
+import React, { memo, useEffect, useLayoutEffect, useRef, lazy, Suspense, useState } from 'react';
 import { AnimatePresence } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
 import { ReceiptText } from 'lucide-react';
@@ -22,6 +22,8 @@ import { clearSecureSession, getSecureSessionSync } from '../lib/secure-session-
 import { getOfflinePageBanner } from '../services/offline-page-capabilities';
 import { useEfoodPartner } from '../hooks/useEfoodPartner';
 import { efoodPartnerBridge } from '../services/efoodPartner';
+import { ErrorBoundary } from './error/ErrorBoundary';
+import { setPosLayoutView } from '../services/posLayoutView';
 import {
   consumeAuthorizedPendingPostLoginIntent,
   savePendingPostLoginIntent,
@@ -41,6 +43,7 @@ const OrdersPage = lazy(() => import('../pages/OrdersPage'));
 const DeliveryZonesPage = lazy(() => import('../pages/DeliveryZonesPage'));
 const CouponsPage = lazy(() => import('../pages/CouponsPage'));
 const LoyaltyPage = lazy(() => import('../pages/LoyaltyPage'));
+const GiftCardsPage = lazy(() => import('../pages/GiftCardsPage'));
 const SuppliersPage = lazy(() => import('../pages/SuppliersPage'));
 const InventoryPage = lazy(() => import('../pages/InventoryPage'));
 const KitchenDisplayPage = lazy(() => import('../pages/KitchenDisplayPage'));
@@ -149,6 +152,7 @@ const DeliveryZonesView = () => <DeliveryZonesPage />;
 const AnalyticsView = () => <AnalyticsPage />;
 const CouponsView = () => <CouponsPage />;
 const LoyaltyView = () => <LoyaltyPage />;
+const GiftCardsView = () => <GiftCardsPage />;
 const SuppliersView = () => <SuppliersPage />;
 const InventoryView = () => <InventoryPage />;
 const KitchenDisplayView = () => <KitchenDisplayPage />;
@@ -215,6 +219,14 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
   // Use useModuleAccess hook for checking current view access
   // This provides centralized access checking for the current view
   const currentViewAccess = useModuleAccess(currentView as any);
+
+  // The page on screen, for App-level listeners outside this layout (the
+  // incoming-order alert, IncomingOrderAlertManager). Set before paint;
+  // cleared when the layout unmounts (/new-order renders without it).
+  useLayoutEffect(() => {
+    setPosLayoutView(currentView);
+  }, [currentView]);
+  useLayoutEffect(() => () => setPosLayoutView(null), []);
 
   useEffect(() => {
     if (currentView !== 'settings') {
@@ -475,6 +487,7 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
     // Marketing & Loyalty
     coupons: CouponsView,
     loyalty: LoyaltyView,
+    gift_cards: GiftCardsView,
 
     // Operations & Back-office
     suppliers: SuppliersView,
@@ -624,7 +637,11 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
                   ? 'h-full min-h-0'
                   : 'h-full min-h-[400px] sm:min-h-[500px] md:min-h-[600px]'}
               >
-                {renderCurrentView()}
+                {/* A page that crashes stays inside its own boundary, so the
+                    sidebar and the rest of the register keep working. */}
+                <ErrorBoundary>
+                  {renderCurrentView()}
+                </ErrorBoundary>
               </PageLoadMotion>
             </AnimatePresence>
 

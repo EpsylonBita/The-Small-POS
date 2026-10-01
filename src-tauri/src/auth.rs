@@ -151,6 +151,10 @@ struct StaffAuthCacheEntry {
     /// ultimate guarantee; this field drives UX pre-emptively.
     #[serde(default, alias = "currentShift")]
     current_shift: Option<StaffAuthCacheCurrentShift>,
+    /// What the staff member may do in this store (THE-448 catalogue names,
+    /// from the staff directory); empty when unknown.
+    #[serde(default)]
+    permissions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -190,6 +194,50 @@ impl PrivilegedActionScope {
     }
 }
 
+/// A money action a manager approves with their own PIN when no cashier or
+/// manager is on shift at this terminal (fix review 30/09/2026): the Z needs
+/// everyone checked out, so its own fix buttons ("Record cash/card", "Money
+/// given back") and the owing-order cancel used to answer "shift required"
+/// exactly when they were needed. The same rights Android asks
+/// `resolvePrivilegedStaffId` for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MoneyApproval {
+    /// Record, give back or void a payment (Android `void_payments`).
+    VoidPayments,
+    /// Cancel an order (Android `void_orders`).
+    VoidOrders,
+}
+
+impl MoneyApproval {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::VoidPayments => "void_payments",
+            Self::VoidOrders => "void_orders",
+        }
+    }
+
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "void_payments" => Some(Self::VoidPayments),
+            "void_orders" => Some(Self::VoidOrders),
+            _ => None,
+        }
+    }
+
+    /// The store permissions (THE-448 catalogue names, as on Android) that
+    /// allow a staff member to approve it.
+    fn catalogue_permissions(self) -> &'static [&'static str] {
+        match self {
+            Self::VoidPayments => &["pos.refunds.process"],
+            Self::VoidOrders => &["pos.orders.cancel"],
+        }
+    }
+}
+
+/// Why a money action asks for a manager's own PIN.
+pub(crate) const MANAGER_APPROVAL_REQUIRED_REASON: &str =
+    "No cashier or manager is on shift at this terminal: a manager approves with their own PIN";
+
 #[derive(Debug, Clone, Serialize, thiserror::Error, PartialEq, Eq)]
 #[error("{code}: {reason}")]
 pub struct PrivilegedActionError {
@@ -198,6 +246,9 @@ pub struct PrivilegedActionError {
     pub reason: String,
     #[serde(rename = "ttlSeconds", skip_serializing_if = "Option::is_none")]
     pub ttl_seconds: Option<i64>,
+    /// Set when a manager's own PIN can give this approval ([`MoneyApproval`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval: Option<&'static str>,
 }
 
 impl PrivilegedActionError {
@@ -210,6 +261,7 @@ impl PrivilegedActionError {
                 .to_string(),
             reason: reason.into(),
             ttl_seconds: None,
+            approval: None,
         }
     }
 
@@ -219,6 +271,17 @@ impl PrivilegedActionError {
             scope: scope.as_str().to_string(),
             reason: reason.into(),
             ttl_seconds: Some(PRIVILEGED_ACTION_TTL_SECONDS),
+            approval: None,
+        }
+    }
+
+    fn manager_approval_required(scope: PrivilegedActionScope, approval: MoneyApproval) -> Self {
+        Self {
+            code: "REAUTH_REQUIRED",
+            scope: scope.as_str().to_string(),
+            reason: MANAGER_APPROVAL_REQUIRED_REASON.to_string(),
+            ttl_seconds: Some(PRIVILEGED_ACTION_TTL_SECONDS),
+            approval: Some(approval.as_str()),
         }
     }
 }
@@ -250,6 +313,26 @@ pub struct AuthState {
     current_session_id: Mutex<Option<String>>,
     lockout: Mutex<LockoutEntry>,
     privileged_grants: Mutex<HashMap<String, DateTime<Utc>>>,
+    /// Single-use approvals a manager gave with their own PIN while nobody
+    /// was on shift at this terminal, by session, scope and approval.
+    manager_grants: Mutex<HashMap<String, ManagerGrant>>,
+}
+
+/// A manager's approval, used once within its time to live.
+#[derive(Clone, Debug)]
+struct ManagerGrant {
+    approver_staff_id: String,
+    expires_at: DateTime<Utc>,
+}
+
+/// Who approved a money action ([`authorize_money_action`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MoneyApprover {
+    /// The manager whose own PIN approved it; `None` when the terminal
+    /// session on a cashier or manager shift did (the session names who).
+    pub manager_staff_id: Option<String>,
+    /// `shift_session` or `manager_pin`.
+    pub via: &'static str,
 }
 
 impl AuthState {
@@ -262,6 +345,7 @@ impl AuthState {
                 last_attempt: Utc::now(),
             }),
             privileged_grants: Mutex::new(HashMap::new()),
+            manager_grants: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -283,6 +367,13 @@ fn extract_pin(arg: &Value) -> Option<String> {
         }
     }
     None
+}
+
+fn extract_approval(arg: &Value) -> Option<MoneyApproval> {
+    arg.as_object()?
+        .get("approval")
+        .and_then(Value::as_str)
+        .and_then(MoneyApproval::parse)
 }
 
 fn extract_scope(arg: &Value) -> Option<PrivilegedActionScope> {
@@ -357,6 +448,20 @@ fn parse_staff_auth_entry(value: &Value) -> Option<StaffAuthCacheEntry> {
         .or_else(|| value.get("currentShift"))
         .and_then(parse_staff_auth_current_shift);
 
+    let permissions = value
+        .get("permissions")
+        .and_then(Value::as_array)
+        .map(|names| {
+            names
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+
     Some(StaffAuthCacheEntry {
         id,
         can_login_pos: value_bool_alias(value, &["can_login_pos", "canLoginPos", "canLoginPOS"]),
@@ -364,6 +469,7 @@ fn parse_staff_auth_entry(value: &Value) -> Option<StaffAuthCacheEntry> {
         pin_hash: value_string_alias(value, &["pin_hash", "pinHash"]),
         is_active: value_bool_alias(value, &["is_active", "isActive"]),
         current_shift,
+        permissions,
     })
 }
 
@@ -649,10 +755,55 @@ fn prune_expired_privileged_grants(auth: &AuthState, now: DateTime<Utc>) {
 }
 
 fn clear_privileged_grants_for_session(auth: &AuthState, session_id: &str) {
+    let prefix = format!("{session_id}:");
     if let Ok(mut grants) = auth.privileged_grants.lock() {
-        let prefix = format!("{session_id}:");
         grants.retain(|key, _| !key.starts_with(&prefix));
     }
+    if let Ok(mut grants) = auth.manager_grants.lock() {
+        grants.retain(|key, _| !key.starts_with(&prefix));
+    }
+}
+
+fn manager_grant_key(session_id: &str, approval: MoneyApproval) -> String {
+    format!(
+        "{session_id}:{}:{}",
+        PrivilegedActionScope::CashDrawerControl.as_str(),
+        approval.as_str()
+    )
+}
+
+fn record_manager_grant_at(
+    auth: &AuthState,
+    session_id: &str,
+    approval: MoneyApproval,
+    approver_staff_id: &str,
+    now: DateTime<Utc>,
+) -> Result<DateTime<Utc>, String> {
+    let expires_at = now + Duration::seconds(PRIVILEGED_ACTION_TTL_SECONDS);
+    let mut grants = auth
+        .manager_grants
+        .lock()
+        .map_err(|e| format!("manager grants mutex poisoned: {e}"))?;
+    grants.insert(
+        manager_grant_key(session_id, approval),
+        ManagerGrant {
+            approver_staff_id: approver_staff_id.to_string(),
+            expires_at,
+        },
+    );
+    Ok(expires_at)
+}
+
+/// Use the manager's approval: once, while fresh.
+fn take_manager_grant_at(
+    auth: &AuthState,
+    session_id: &str,
+    approval: MoneyApproval,
+    now: DateTime<Utc>,
+) -> Option<ManagerGrant> {
+    let mut grants = auth.manager_grants.lock().ok()?;
+    grants.retain(|_, grant| grant.expires_at > now);
+    grants.remove(&manager_grant_key(session_id, approval))
 }
 
 fn record_privileged_grant_at(
@@ -703,6 +854,20 @@ fn resolve_current_terminal_id(db: &db::DbState) -> Result<String, String> {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .ok_or("Current terminal is not configured in local storage".to_string())
+}
+
+fn resolve_current_branch_id(db: &db::DbState) -> Result<String, String> {
+    if let Some(branch_id) = storage::get_credential("branch_id")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(branch_id);
+    }
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    db::get_setting(&conn, "terminal", "branch_id")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or("Current branch is not configured in local storage".to_string())
 }
 
 fn current_terminal_has_cash_drawer_role(db: &db::DbState) -> Result<bool, String> {
@@ -780,6 +945,140 @@ fn verify_privileged_pin_with_lockout(
     })?;
 
     Ok(pin_ok)
+}
+
+/// The staff member whose own PIN this is, among this branch's staff who may
+/// log in to the POS and whose store permissions allow `approval` (fix review
+/// 30/09/2026). The PIN is checked on this till against the PIN hashes of the
+/// staff directory, the same data the shift check-in trusts; it never checks
+/// anyone in. Wrong PINs count toward the terminal's lockout like any other.
+/// `Ok(None)`: no such staff member has this PIN.
+fn verify_manager_pin_with_lockout(
+    pin: &str,
+    approval: MoneyApproval,
+    db: &db::DbState,
+    auth: &AuthState,
+) -> Result<Option<String>, String> {
+    // Lock order as in `login`: `auth.lockout` before `db.conn`.
+    let mut lockout = auth
+        .lockout
+        .lock()
+        .map_err(|e| format!("mutex poisoned: {e}"))?;
+    let branch_id = resolve_current_branch_id(db)?;
+    let candidates: Vec<(String, String)> = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| format!("begin manager approval lockout check: {e}"))?;
+        let persisted_lockout = load_lockout_from_db(&conn);
+        if let Err(e) = check_lockout(&persisted_lockout) {
+            let _ = conn.execute_batch("ROLLBACK");
+            *lockout = persisted_lockout;
+            return Err(e);
+        }
+        let cache = db::get_setting(
+            &conn,
+            STAFF_AUTH_CACHE_CATEGORY,
+            &staff_auth_cache_key(&branch_id),
+        );
+        conn.execute_batch("COMMIT").map_err(|e| {
+            let _ = conn.execute_batch("ROLLBACK");
+            format!("commit manager approval lockout check: {e}")
+        })?;
+        *lockout = persisted_lockout;
+        let cache = match cache.as_deref().map(parse_staff_auth_cache) {
+            Some(Ok(cache)) => cache,
+            _ => {
+                return Err(
+                    "Staff data unavailable offline. Please sync staff while online.".to_string(),
+                )
+            }
+        };
+        if !cache.branch_id.trim().is_empty() && cache.branch_id.trim() != branch_id {
+            return Err(
+                "Staff data unavailable offline. Please sync staff while online.".to_string(),
+            );
+        }
+        let required = approval.catalogue_permissions();
+        cache
+            .staff
+            .into_iter()
+            // Default-deny, as the check-in: every flag must be present and true.
+            .filter(|entry| entry.is_active == Some(true) && entry.can_login_pos == Some(true))
+            .filter(|entry| entry.has_pin == Some(true))
+            .filter(|entry| {
+                entry
+                    .permissions
+                    .iter()
+                    .any(|name| required.contains(&name.as_str()))
+            })
+            .filter_map(|entry| {
+                let hash = entry.pin_hash.as_deref()?.trim().to_string();
+                (!hash.is_empty()).then(|| (entry.id.trim().to_string(), hash))
+            })
+            .collect()
+    };
+
+    // bcrypt without the database lock (see `login`).
+    let approver = candidates
+        .into_iter()
+        .find(|(_, hash)| bcrypt::verify(pin, hash).unwrap_or(false))
+        .map(|(staff_id, _)| staff_id);
+
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| format!("begin manager approval lockout persist: {e}"))?;
+    if approver.is_some() {
+        reset_lockout(&mut lockout);
+    } else {
+        record_failure(&mut lockout);
+    }
+    persist_lockout_to_db(&conn, &lockout);
+    conn.execute_batch("COMMIT").map_err(|e| {
+        let _ = conn.execute_batch("ROLLBACK");
+        format!("commit manager approval lockout persist: {e}")
+    })?;
+    Ok(approver)
+}
+
+/// The audit entry of a manager's approval given with their own PIN: who,
+/// when, which approval, on which terminal session. Written before the grant
+/// can be used; an approval that cannot be audited is not given.
+fn record_manager_approval_audit(
+    db: &db::DbState,
+    session: &StaffSession,
+    approval: MoneyApproval,
+    approver_staff_id: &str,
+    now: DateTime<Utc>,
+) -> Result<(), String> {
+    let payload = serde_json::json!({
+        "approval": approval.as_str(),
+        "scope": PrivilegedActionScope::CashDrawerControl.as_str(),
+        "via": "manager_pin",
+        "approvedBy": approver_staff_id,
+        "sessionStaffId": session.staff_id,
+        "approvedAt": now.to_rfc3339(),
+        "reason": "no cashier or manager on shift at this terminal",
+    });
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO recovery_action_log (
+             id, action_id, issue_code, entity_type, entity_id,
+             success, message, actor_staff_id, payload_json, created_at
+         ) VALUES (?1, 'manager_approval', ?2, 'approval', ?2, 1, ?3, ?4, ?5, ?6)",
+        rusqlite::params![
+            Uuid::new_v4().to_string(),
+            approval.as_str(),
+            format!(
+                "Approved with a manager PIN ({}): nobody on shift at this terminal",
+                approval.as_str()
+            ),
+            approver_staff_id,
+            payload.to_string(),
+            now.to_rfc3339(),
+        ],
+    )
+    .map_err(|e| format!("write the manager approval audit entry: {e}"))?;
+    Ok(())
 }
 
 /// Check whether the terminal is currently locked out.
@@ -1402,6 +1701,61 @@ pub fn authorize_privileged_action(
     authorize_privileged_action_at(scope, db, auth, Utc::now()).map(|_| ())
 }
 
+fn authorize_money_action_at(
+    approval: MoneyApproval,
+    db: &db::DbState,
+    auth: &AuthState,
+    now: DateTime<Utc>,
+) -> Result<MoneyApprover, PrivilegedActionError> {
+    let scope = PrivilegedActionScope::CashDrawerControl;
+    let Some(session) = get_current_session(auth) else {
+        return Err(PrivilegedActionError::unauthorized(
+            Some(scope),
+            "Active session required",
+        ));
+    };
+    match current_terminal_has_cash_drawer_role(db) {
+        // A cashier or manager is on shift here: the session and a fresh PIN,
+        // as before.
+        Ok(true) => {
+            if !has_fresh_privileged_grant_at(auth, &session.session_id, scope, now) {
+                return Err(PrivilegedActionError::reauth_required(
+                    scope,
+                    "Fresh PIN confirmation required",
+                ));
+            }
+            Ok(MoneyApprover {
+                manager_staff_id: None,
+                via: "shift_session",
+            })
+        }
+        // Nobody is on shift here (the Z needs everyone checked out): a
+        // manager's own PIN, used once.
+        Ok(false) => match take_manager_grant_at(auth, &session.session_id, approval, now) {
+            Some(grant) => Ok(MoneyApprover {
+                manager_staff_id: Some(grant.approver_staff_id),
+                via: "manager_pin",
+            }),
+            None => Err(PrivilegedActionError::manager_approval_required(
+                scope, approval,
+            )),
+        },
+        Err(error) => Err(PrivilegedActionError::unauthorized(Some(scope), error)),
+    }
+}
+
+/// The desktop's approval for a money action (`CashDrawerControl`): with a
+/// cashier or manager on shift at this terminal, the session and a fresh PIN;
+/// with nobody on shift, a manager's own PIN whose store permissions allow
+/// `approval` (fix review 30/09/2026). Answers who approved it.
+pub fn authorize_money_action(
+    approval: MoneyApproval,
+    db: &db::DbState,
+    auth: &AuthState,
+) -> Result<MoneyApprover, PrivilegedActionError> {
+    authorize_money_action_at(approval, db, auth, Utc::now())
+}
+
 fn confirm_privileged_action_at(
     arg0: Option<Value>,
     db: &db::DbState,
@@ -1443,10 +1797,15 @@ fn confirm_privileged_action_at(
             match current_terminal_has_cash_drawer_role(db) {
                 Ok(true) => session,
                 Ok(false) => {
-                    return Err(PrivilegedActionError::unauthorized(
-                        Some(scope),
-                        "Active cashier or manager shift required on this terminal",
-                    ));
+                    // Nobody is on shift here: a manager approves with their
+                    // own PIN (fix review 30/09/2026).
+                    let Some(approval) = extract_approval(&payload) else {
+                        return Err(PrivilegedActionError::unauthorized(
+                            Some(scope),
+                            "Active cashier or manager shift required on this terminal",
+                        ));
+                    };
+                    return confirm_manager_approval_at(&pin, approval, &session, db, auth, now);
                 }
                 Err(error) => {
                     return Err(PrivilegedActionError::unauthorized(Some(scope), error));
@@ -1476,12 +1835,55 @@ fn confirm_privileged_action_at(
     }))
 }
 
+/// A manager's own PIN approves `approval` while nobody is on shift at this
+/// terminal: verified against the staff directory, audited, then granted once.
+fn confirm_manager_approval_at(
+    pin: &str,
+    approval: MoneyApproval,
+    session: &StaffSession,
+    db: &db::DbState,
+    auth: &AuthState,
+    now: DateTime<Utc>,
+) -> Result<Value, PrivilegedActionError> {
+    let scope = PrivilegedActionScope::CashDrawerControl;
+    let approver = verify_manager_pin_with_lockout(pin, approval, db, auth)
+        .map_err(|error| PrivilegedActionError::unauthorized(Some(scope), error))?;
+    let Some(approver_staff_id) = approver else {
+        // A PIN of no one who may approve it: the same answer as a wrong PIN.
+        return Err(PrivilegedActionError::unauthorized(
+            Some(scope),
+            "Invalid PIN",
+        ));
+    };
+    record_manager_approval_audit(db, session, approval, &approver_staff_id, now)
+        .map_err(|error| PrivilegedActionError::unauthorized(Some(scope), error))?;
+    let expires_at =
+        record_manager_grant_at(auth, &session.session_id, approval, &approver_staff_id, now)
+            .map_err(|error| PrivilegedActionError::unauthorized(Some(scope), error))?;
+    Ok(serde_json::json!({
+        "success": true,
+        "scope": scope.as_str(),
+        "approval": approval.as_str(),
+        "approvedBy": approver_staff_id,
+        "via": "manager_pin",
+        "sessionId": session.session_id,
+        "ttlSeconds": PRIVILEGED_ACTION_TTL_SECONDS,
+        "expiresAt": expires_at.to_rfc3339(),
+    }))
+}
+
 pub fn confirm_privileged_action(
     arg0: Option<Value>,
     db: &db::DbState,
     auth: &AuthState,
 ) -> Result<Value, PrivilegedActionError> {
     confirm_privileged_action_at(arg0, db, auth, Utc::now())
+}
+
+/// Whether a confirmation asks for a manager's approval ([`MoneyApproval`]):
+/// the command refreshes the staff directory first when it can.
+pub fn confirmation_asks_manager_approval(arg0: Option<&Value>) -> bool {
+    arg0.and_then(extract_approval).is_some()
 }
 
 #[cfg(test)]

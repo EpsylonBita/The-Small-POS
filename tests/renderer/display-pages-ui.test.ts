@@ -25,17 +25,33 @@ function flattenKeys(value: unknown, prefix = '', out = new Set<string>()) {
   return out;
 }
 
-test('CustomerDisplayPage is connected to POS display API and desktop/TV outputs', () => {
+test('CustomerDisplayPage reads local orders and projects them natively to desktop/TV outputs', () => {
   const source = customerDisplaySource();
 
-  assert.match(source, /\/api\/pos\/customer-display\?limit=200/);
+  // Local owner: a native read of the local SQLite orders, refreshed by local order events and the
+  // central order store. The retired hosted display API and customer TV link must not return.
+  assert.match(source, /const orders: unknown = await bridge\.orders\.getAll\(\);/);
+  assert.match(source, /const LOCAL_ORDER_EVENTS = \['order-created', 'order-status-updated', 'order-deleted'\];/);
   assert.match(source, /useOrderStore/);
-  assert.match(source, /getOrderIdentifier\(order, findLocalOrderForDisplayRow\(order\)\)/);
+  assert.doesNotMatch(source, /\/api\/pos\//, 'the customer display must not read a hosted POS API');
+  assert.doesNotMatch(source, /\/display\/customer\//, 'the hosted customer TV link is retired');
+  assert.doesNotMatch(source, /\bfetch\(/, 'the customer display has no network transport');
+  // Rows stay tenant- and terminal-scoped and are deduplicated across every order identity.
+  assert.match(
+    source,
+    /!matchesKdsTenant\(organizationId \|\| null, branchId \|\| null, order\) \|\| !matchesKdsTerminal\(terminalId \|\| null, order\)/,
+  );
+  assert.match(source, /const keys = getKdsRecordIdentityKeys\(order\);/);
+  assert.match(source, /order_number: getOrderIdentifier\(order, keys\[0\]\)/);
   assert.match(source, /formatCompactOrderNumberForDisplay/);
-  assert.match(source, /client_order_id/);
   assert.match(source, /break-words/);
-  assert.match(source, /contentType: CUSTOMER_DISPLAY_CONTENT_TYPE/);
-  assert.match(source, /\/display\/customer\/\$\{encodeURIComponent/);
+  // Desktop/TV output: a native external window fed by a native snapshot, never a hosted page.
+  assert.match(
+    source,
+    /bridge\.externalDisplay\.open\(externalOpenParams\(CUSTOMER_DISPLAY_CONTENT_TYPE, display, presentation\.ownedToken\)\)/,
+  );
+  assert.match(source, /getBridge\(\)\.invoke\('customer-display-publish', snapshot\)/);
+  assert.match(source, /getBridge\(\)\.invoke\('customer-display-snapshot'\)/);
   assert.match(source, /externalDisplay'\) === CUSTOMER_DISPLAY_CONTENT_TYPE/);
   assert.match(source, /scrollbar-hide/);
   assert.match(source, /pending', 'preparing', 'ready'/);
@@ -60,19 +76,34 @@ test('CustomerDisplayPage is connected to POS display API and desktop/TV outputs
   assert.doesNotMatch(source, /phase\.bg/);
 });
 
-test('KitchenDisplayPage keeps API-scoped tickets and exposes desktop/TV outputs', () => {
+test('KitchenDisplayPage keeps terminal-scoped local tickets and exposes desktop/TV outputs', () => {
   const source = kitchenDisplaySource();
 
-  assert.match(source, /\/api\/pos\/kds\?status=\$\{statusParam\}&include_live_drafts=true&scope=terminal/);
-  assert.match(source, /terminalId\s*\?\s*matchesKdsTerminal\(ticket, terminalId, localOrder\)\s*:\s*true/);
-  assert.match(source, /localOrderLookup\.get\(readKdsString\(ticket, 'client_order_id'\)\)/);
-  assert.match(source, /getKdsVisibleOrderNumber\(localOrder, ticket\)/);
+  // Local owner: tickets come from the local order store plus same-scope in-memory live cart
+  // drafts. The retired hosted KDS API, KDS display endpoint and TV link must not return.
+  assert.match(source, /const localOrders = useOrderStore\(\(state\) => state\.orders\);/);
+  assert.match(source, /useSyncExternalStore\(subscribeKdsLocalDrafts, getKdsLocalDrafts\)/);
+  assert.match(source, /\.filter\(\(draft\) => draft\.scope === identityScope\)/);
+  assert.doesNotMatch(source, /\/api\/pos\//, 'the kitchen display must not read a hosted POS API');
+  assert.doesNotMatch(source, /\/display\/kds\//, 'the hosted kitchen TV link is retired');
+  assert.doesNotMatch(source, /\bfetch\(/, 'the kitchen display has no network transport');
+  assert.doesNotMatch(source, /copyTvLink|tvLinkCopied|tvLinkFailed/, 'the retired kitchen TV-link actions must not return');
+  // Tickets stay terminal- and tenant-scoped and are deduplicated across every order identity.
+  assert.match(
+    source,
+    /!matchesKdsTerminal\(terminalId, record\) \|\| !matchesKdsTenant\(organizationId, branchId, record\)/,
+  );
+  assert.match(source, /const keys = getKdsRecordIdentityKeys\(record\);\s*if \(keys\.some\(\(key\) => seen\.has\(key\)\)\) return;/);
+  assert.match(source, /getKdsVisibleOrderNumber\(order\) \|\| id/);
   assert.match(source, /formatCompactOrderNumberForDisplay\(order\.order_number\)/);
-  assert.match(source, /dedupeKeys/);
   assert.match(source, /grid-cols-\[repeat\(auto-fit,minmax\(320px,1fr\)\)\]/);
-  assert.match(source, /contentType: KITCHEN_DISPLAY_CONTENT_TYPE/);
-  assert.match(source, /\/api\/pos\/kds-display/);
-  assert.match(source, /\/display\/kds\/\$\{encodeURIComponent/);
+  // Desktop/TV output: a native external window fed by a native snapshot, never a hosted page.
+  assert.match(
+    source,
+    /bridge\.externalDisplay\.open\(externalOpenParams\(KITCHEN_DISPLAY_CONTENT_TYPE, display, presentation\.ownedToken\)\)/,
+  );
+  assert.match(source, /getBridge\(\)\.invoke\('kds-display-publish', snapshot\)/);
+  assert.match(source, /getBridge\(\)\.invoke\('kds-display-snapshot'\)/);
   assert.match(source, /scrollbar-hide/);
   assert.doesNotMatch(source, /<ChefHat className=\{`w-6 h-6/);
   assert.doesNotMatch(source, /<h1 className="text-xl font-bold">\{t\('kitchen\.title', 'Kitchen Display'\)\}<\/h1>/);
@@ -141,6 +172,7 @@ test('Display page translation keys exist in every POS locale', () => {
     'errors.stopExternalFailed',
     'errors.createTvLinkFailed',
   ];
+  // The kitchen TV-link actions are retired and the page no longer consumes their keys.
   const kitchenKeys = [
     'title',
     'subtitle',
@@ -159,7 +191,6 @@ test('Display page translation keys exist in every POS locale', () => {
     'loadError',
     'noOrders',
     'noOrdersDesc',
-    'externalDisplay.copyTvLink',
     'externalDisplay.open',
     'externalDisplay.stop',
     'externalDisplay.connectedDisplays',
@@ -168,8 +199,6 @@ test('Display page translation keys exist in every POS locale', () => {
     'externalDisplay.stopped',
     'externalDisplay.openFailed',
     'externalDisplay.closeFailed',
-    'externalDisplay.tvLinkCopied',
-    'externalDisplay.tvLinkFailed',
     'view.list',
     'view.grid',
     'sound.disable',

@@ -673,6 +673,14 @@ interface LiquidGlassModalProps {
   closeDisabled?: boolean;
 
   /**
+   * Runs synchronously when a user close is accepted (backdrop, Escape or the
+   * default header control), before the exit animation or `onClose`, so a caller
+   * can fence held work at the moment of intent. Omitted by default.
+   * @optional
+   */
+  onCloseIntent?: () => void;
+
+  /**
    * Optional element ref that should receive focus when the modal opens.
    * Falls back to the first focusable element when not provided.
    */
@@ -725,6 +733,7 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
   closeOnEscape = true,
   closeMode = 'internal',
   closeDisabled = false,
+  onCloseIntent,
   initialFocusRef,
   ariaLabel,
   onEnterKey,
@@ -741,6 +750,7 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
   const enterActionRef = React.useRef(onEnterKey)
   const enterKeyEnabledRef = React.useRef(enterKeyEnabled)
   const closeActionRef = React.useRef(onClose)
+  const closeIntentRef = React.useRef(onCloseIntent)
   const closeModeRef = React.useRef(closeMode)
   const closeDisabledRef = React.useRef(closeDisabled)
 
@@ -789,9 +799,10 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
 
   React.useEffect(() => {
     closeActionRef.current = onClose
+    closeIntentRef.current = onCloseIntent
     closeModeRef.current = closeMode
     closeDisabledRef.current = closeDisabled
-  }, [closeDisabled, closeMode, onClose])
+  }, [closeDisabled, closeMode, onClose, onCloseIntent])
 
   // Handle close with animation
   // Close intent is read from refs so this callback keeps a stable identity. It is a
@@ -801,6 +812,9 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
   // timer and yanking the caret out of whatever field was being typed into.
   const handleClose = React.useCallback(() => {
     if (isClosing || closeDisabledRef.current) return
+
+    // An accepted user close: the caller fences held work before any animation.
+    closeIntentRef.current?.()
 
     if (closeModeRef.current === 'request') {
       closeActionRef.current()

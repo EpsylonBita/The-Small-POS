@@ -15,6 +15,44 @@ fn now_rfc3339() -> String {
     Utc::now().to_rfc3339()
 }
 
+/// Complete unresolved inventory overlays; unlike the queue UI this has no 500-row cap.
+#[tauri::command]
+pub fn inventory_snapshot_overlays(db: tauri::State<'_, db::DbState>) -> Result<Value, String> {
+    let org = organization_id(&db, &json!({}));
+    let branch = branch_id(&db, &json!({}));
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT table_name, record_id, data FROM parity_sync_queue
+         WHERE organization_id = ?1 AND table_name IN ('products', 'inventory_adjustments')
+         AND status IN ('pending', 'processing', 'failed', 'conflict') ORDER BY created_at, rowid",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![org], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut overlays = Vec::new();
+    for row in rows {
+        let (table, id, payload) = row.map_err(|e| e.to_string())?;
+        let data: Value = serde_json::from_str(&payload).map_err(|e| e.to_string())?;
+        if data
+            .get("branch_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| id != branch)
+        {
+            continue;
+        }
+        overlays.push(json!({ "table": table, "id": id, "data": data }));
+    }
+    Ok(json!(overlays))
+}
+
 fn object_payload(arg0: Option<Value>, arg1: Option<Value>) -> Result<Value, String> {
     let payload = crate::parse_channel_payload(arg0, arg1);
     if payload.is_object() {

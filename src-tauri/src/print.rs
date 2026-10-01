@@ -58,6 +58,17 @@ const STALE_PRINTING_JOB_ERROR: &str = "Print attempt did not finish; it may alr
 /// `printing` row. The unbounded Windows spooler transport is the reason this
 /// exists — see `run_dispatch_with_timeout`.
 const DISPATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Attempts one worker tick prepares at most (unchanged from the old window).
+const PRINT_DISPATCH_BATCH_LIMIT: usize = 10;
+/// Ready jobs read per page while a tick scans past deferred ones.
+const PRINT_DISPATCH_SCAN_PAGE: usize = 25;
+/// Upper bound on jobs one tick examines. A deferred fresh job costs one profile
+/// resolution and one in-memory lane peek, so this stays cheap on a 5 s tick
+/// while still reaching a healthy printer behind a large blocked backlog.
+const PRINT_DISPATCH_SCAN_LIMIT: usize = 200;
+/// Deferred jobs named in the one per-tick summary log line.
+const PRINT_DISPATCH_DEFERRED_LOG_SAMPLE: usize = 10;
 const NATIVE_QUEUE_CONTROL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 const PRINT_HISTORY_PURGE_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -675,6 +686,26 @@ pub fn enqueue_print_job_with_payload(
 
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
+    // Gift-bound checkout/Z jobs are admitted only with strict adopted proof,
+    // so direct IPC and automatic enqueue cannot queue an unconfirmed close.
+    match entity_type {
+        "shift_checkout" => {
+            gift_close_checkout_binding(&conn, entity_id)?;
+        }
+        "z_report" => {
+            if gift_close_z_report_admission(&conn, entity_id)?.is_none()
+                && entity_payload_json.is_some_and(payload_mentions_gift_close)
+            {
+                return Err(gift_close_not_final(
+                    "z_report",
+                    entity_id,
+                    "GIFT_CLOSE_PRINT_REQUIRES_STORED_REPORT",
+                ));
+            }
+        }
+        _ => {}
+    }
+
     let is_order_document = matches!(
         entity_type,
         "order_receipt"
@@ -921,6 +952,7 @@ fn validate_pre_rendered_test_print(request: &PreRenderedTestPrint) -> Result<()
 
 fn frozen_envelope_for_pre_rendered_test(request: &PreRenderedTestPrint) -> FrozenRenderEnvelope {
     FrozenRenderEnvelope {
+        gift_close_binding: None,
         version: MANAGED_ENVELOPE_VERSION,
         renderer_layout_revision: receipt_renderer::layout_revision().to_owned(),
         effective_profile_id: request.effective_profile_id.clone(),
@@ -1424,7 +1456,10 @@ pub(crate) fn safe_operational_error(value: Option<String>, max_chars: usize) ->
     } else {
         normalized
     };
-    let bounded: String = sanitized.chars().take(max_chars).collect();
+    // Emails and phone numbers are scrubbed before the text is bounded, and
+    // the bound never keeps part of one (review 30/09/2026: cut first, a
+    // number at the 512/1024 boundary kept up to nine digits in exports).
+    let bounded = crate::diagnostics::scrub_and_bound_text(&sanitized, max_chars);
     (!bounded.trim().is_empty()).then_some(bounded)
 }
 
@@ -3197,14 +3232,54 @@ fn lock_conn_recovering(db: &DbState) -> std::sync::MutexGuard<'_, rusqlite::Con
 /// pending rows fill the whole window, so every healthy printer's newer jobs
 /// are silently starved and never printed. Jobs with a NULL profile are always
 /// eligible.
+#[cfg(test)]
 fn select_ready_pending_jobs(
     conn: &rusqlite::Connection,
     now_str: &str,
     paused_profiles: &std::collections::HashSet<String>,
     limit: usize,
 ) -> Result<Vec<(String, String, String, Option<String>, Option<String>)>, String> {
+    Ok(
+        select_ready_pending_jobs_after(conn, now_str, paused_profiles, limit, None)?
+            .into_iter()
+            .map(|job| {
+                (
+                    job.id,
+                    job.entity_type,
+                    job.entity_id,
+                    job.payload_json,
+                    job.printer_profile_id,
+                )
+            })
+            .collect(),
+    )
+}
+
+/// One ready pending job plus the `(created_at, id)` keyset cursor that the
+/// next page continues after.
+struct ReadyPendingJob {
+    id: String,
+    entity_type: String,
+    entity_id: String,
+    payload_json: Option<String>,
+    printer_profile_id: Option<String>,
+    created_at: String,
+}
+
+/// Page through ready pending jobs oldest-first with a `(created_at, id)`
+/// keyset cursor. A keyset rather than OFFSET because the tick changes the set
+/// while it pages: every job it prepares leaves 'pending', and an OFFSET would
+/// then skip the jobs that slid up into the freed positions.
+fn select_ready_pending_jobs_after(
+    conn: &rusqlite::Connection,
+    now_str: &str,
+    paused_profiles: &std::collections::HashSet<String>,
+    limit: usize,
+    after: Option<(&str, &str)>,
+) -> Result<Vec<ReadyPendingJob>, String> {
     let mut sql = String::from(
-        "SELECT id, entity_type, entity_id, entity_payload_json, printer_profile_id FROM print_jobs
+        "SELECT id, entity_type, entity_id, entity_payload_json, printer_profile_id, created_at
+         FROM print_jobs
          WHERE status = 'pending'
            AND (next_retry_at IS NULL OR julianday(next_retry_at) <= julianday(?1))",
     );
@@ -3220,26 +3295,39 @@ fn select_ready_pending_jobs(
             " AND (printer_profile_id IS NULL OR printer_profile_id NOT IN ({placeholders}))"
         ));
     }
-    sql.push_str(&format!(" ORDER BY created_at ASC LIMIT {limit}"));
+    if after.is_some() {
+        let created = paused.len() + 2;
+        let id = paused.len() + 3;
+        sql.push_str(&format!(
+            " AND (created_at > ?{created} OR (created_at = ?{created} AND id > ?{id}))"
+        ));
+    }
+    sql.push_str(&format!(" ORDER BY created_at ASC, id ASC LIMIT {limit}"));
 
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
 
-    // Positional binds: ?1 = now_str, ?2.. = paused profile ids.
-    let mut binds: Vec<String> = Vec::with_capacity(1 + paused.len());
+    // Positional binds: ?1 = now_str, ?2.. = paused profile ids, then the
+    // optional cursor (created_at, id).
+    let mut binds: Vec<String> = Vec::with_capacity(3 + paused.len());
     binds.push(now_str.to_string());
     for profile in &paused {
         binds.push((*profile).clone());
     }
+    if let Some((created_at, id)) = after {
+        binds.push(created_at.to_string());
+        binds.push(id.to_string());
+    }
 
     let rows = stmt
         .query_map(rusqlite::params_from_iter(binds.iter()), |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-            ))
+            Ok(ReadyPendingJob {
+                id: row.get::<_, String>(0)?,
+                entity_type: row.get::<_, String>(1)?,
+                entity_id: row.get::<_, String>(2)?,
+                payload_json: row.get::<_, Option<String>>(3)?,
+                printer_profile_id: row.get::<_, Option<String>>(4)?,
+                created_at: row.get::<_, String>(5)?,
+            })
         })
         .map_err(|e| e.to_string())?
         .filter_map(|r| r.ok())
@@ -3312,7 +3400,10 @@ fn print_queue_pause_key(printer_profile_id: Option<&str>) -> String {
     }
 }
 
-fn paused_printer_profiles(conn: &rusqlite::Connection) -> HashSet<String> {
+/// Printer profiles whose queue is paused (`queue_paused_profile::<id>`).
+/// Also read by the Health aggregate (diagnostics.rs), so a paused printer's
+/// jobs are never reported as "not printing".
+pub(crate) fn paused_printer_profiles(conn: &rusqlite::Connection) -> HashSet<String> {
     let mut paused = HashSet::new();
     let mut stmt = match conn.prepare(
         "SELECT setting_key, setting_value
@@ -3350,7 +3441,7 @@ fn paused_printer_profiles(conn: &rusqlite::Connection) -> HashSet<String> {
     paused
 }
 
-fn is_print_queue_paused_with_conn(
+pub(crate) fn is_print_queue_paused_with_conn(
     conn: &rusqlite::Connection,
     printer_profile_id: Option<&str>,
 ) -> bool {
@@ -5457,6 +5548,7 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
         let label = match method.as_str() {
             "cash" => "Cash",
             "card" => "Card",
+            "gift_card" => "Gift Card",
             _ => "Other",
         };
         let normalized_amount = if method == "cash" {
@@ -5826,6 +5918,7 @@ fn build_split_receipt_doc(db: &DbState, payment_id: &str) -> Result<OrderReceip
     let label = match method.as_str() {
         "cash" => "Cash",
         "card" => "Card",
+        "gift_card" => "Gift Card",
         _ => "Other",
     };
     let normalized_amount = if method == "cash" {
@@ -6407,6 +6500,7 @@ fn build_shift_checkout_doc(
         total_sells: 0.0,
         cancelled_or_refunded_total: 0.0,
         cancelled_or_refunded_count: 0,
+        gift_close: None,
     });
 
     // Populate driver-specific fields
@@ -6912,6 +7006,9 @@ fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &st
         .unwrap_or_default();
 
     ZReportDoc {
+        gift_liability_cash_cents: 0,
+        gift_ordinary_adjustment_cents: 0,
+        gift_close_lines: Vec::new(),
         report_id: entity_id.to_string(),
         report_date,
         generated_at,
@@ -7032,8 +7129,18 @@ fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &st
     }
 }
 
+#[cfg(test)]
 fn build_z_report_doc(db: &DbState, z_report_id: &str) -> Result<ZReportDoc, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    build_z_report_doc_with_conn(&conn, z_report_id)
+}
+
+/// The stored Z document read on a held connection, so a gift-bound print can
+/// admit, render and bind one report version under a single lock.
+fn build_z_report_doc_with_conn(
+    conn: &rusqlite::Connection,
+    z_report_id: &str,
+) -> Result<ZReportDoc, String> {
     let report = conn.query_row(
         "SELECT id, shift_id, terminal_id, report_date, generated_at,
                 gross_sales, net_sales, total_orders, cash_sales, card_sales,
@@ -7139,6 +7246,9 @@ fn build_z_report_doc(db: &DbState, z_report_id: &str) -> Result<ZReportDoc, Str
         number_from_paths(&rj, &["/tips/total", "/tipsTotal"]).unwrap_or(tips_total);
 
     Ok(ZReportDoc {
+        gift_liability_cash_cents: 0,
+        gift_ordinary_adjustment_cents: 0,
+        gift_close_lines: Vec::new(),
         report_id,
         report_date,
         generated_at,
@@ -7289,16 +7399,497 @@ fn build_z_report_doc(db: &DbState, z_report_id: &str) -> Result<ZReportDoc, Str
     })
 }
 
+// ---------------------------------------------------------------------------
+// Gift-bound drawer close print admission
+// ---------------------------------------------------------------------------
+
+/// Typed refusal prefix: a gift-bound checkout or Z cannot print as a completed
+/// close until its strict adopted original proof is available.
+pub(crate) const GIFT_CLOSE_PRINT_NOT_FINAL: &str = "GIFT_CLOSE_PRINT_NOT_FINAL";
+const GIFT_CLOSE_PRINT_BINDING_CONTRACT: &str = "gift_close_print_v1";
+
+/// Nonsecret canonical close of one gift-bound original, exactly as its
+/// adopted `gift_closing_v1` proof states it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GiftClosePrintOriginal {
+    pub(crate) shift_id: String,
+    pub(crate) drawer_id: String,
+    pub(crate) currency: String,
+    pub(crate) ordinary_expected_cents: i64,
+    pub(crate) gift_liability_cash_cents: i64,
+    pub(crate) expected_cents: i64,
+    pub(crate) counted_cents: i64,
+    pub(crate) variance_cents: i64,
+    pub(crate) canonical_closed_at: String,
+    pub(crate) confirmed_at: String,
+}
+
+/// Versioned proof binding frozen into a gift-bound job's managed envelope, so
+/// stored bytes replay only when they were rendered from the proof held now.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GiftClosePrintBinding {
+    pub(crate) contract: String,
+    pub(crate) originals: Vec<GiftClosePrintOriginal>,
+}
+
+impl GiftClosePrintBinding {
+    fn new(originals: Vec<GiftClosePrintOriginal>) -> Self {
+        Self {
+            contract: GIFT_CLOSE_PRINT_BINDING_CONTRACT.to_owned(),
+            originals,
+        }
+    }
+}
+
+fn gift_close_not_final(document: &str, entity_id: &str, reason: &str) -> String {
+    format!(
+        "{GIFT_CLOSE_PRINT_NOT_FINAL}: {document} {entity_id} cannot print as a completed close ({reason})"
+    )
+}
+
+struct GiftOpeningIdentity {
+    opening_key: String,
+    state: String,
+    organization_id: String,
+    branch_id: String,
+    terminal_id: String,
+    staff_id: String,
+    shift_id: String,
+    drawer_id: String,
+}
+
+/// The adopted original plus the immutable identity a frozen Z row repeats.
+struct ProvenGiftClose {
+    print: GiftClosePrintOriginal,
+    staff_id: String,
+    terminal_id: String,
+    drawer_version: i64,
+    local_closed_at: String,
+    adopted_at: String,
+}
+
+struct GiftCloseZAdmission {
+    binding: GiftClosePrintBinding,
+    lines: Vec<receipt_renderer::GiftCloseDrawerLine>,
+    gift_liability_cash_cents: i64,
+    ordinary_adjustment_cents: i64,
+}
+
+fn sqlite_table_exists(conn: &rusqlite::Connection, table: &str) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+        params![table],
+        |row| row.get(0),
+    )
+    .map_err(|error| format!("Read {table} schema: {error}"))
+}
+
+/// Persisted gift openings (all, or one shift's). Without the table no opening
+/// can exist, so databases without the gift schema stay ordinary.
+fn load_gift_openings(
+    conn: &rusqlite::Connection,
+    shift_id: Option<&str>,
+) -> Result<Vec<GiftOpeningIdentity>, String> {
+    if !sqlite_table_exists(conn, "gift_financial_openings")? {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn
+        .prepare(
+            "SELECT opening_key, state, organization_id, branch_id, terminal_id, staff_id,
+                    shift_id, drawer_id
+               FROM gift_financial_openings
+              WHERE ?1 IS NULL OR shift_id = ?1
+              ORDER BY opening_key",
+        )
+        .map_err(|error| format!("Prepare gift openings: {error}"))?;
+    let rows = stmt
+        .query_map(params![shift_id], |row| {
+            Ok(GiftOpeningIdentity {
+                opening_key: row.get(0)?,
+                state: row.get(1)?,
+                organization_id: row.get(2)?,
+                branch_id: row.get(3)?,
+                terminal_id: row.get(4)?,
+                staff_id: row.get(5)?,
+                shift_id: row.get(6)?,
+                drawer_id: row.get(7)?,
+            })
+        })
+        .map_err(|error| format!("Query gift openings: {error}"))?;
+    // An unreadable opening must never downgrade a close to ordinary.
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("Read gift openings: {error}"))
+}
+
+/// The strict adopted original of one persisted opening, read from the journal
+/// only (never the live drawer mirror), so valid frozen history stays stable
+/// after later local edits. Every persisted opening needs it, including an
+/// unusable or zero-cash one.
+fn adopted_gift_close_for_opening(
+    conn: &rusqlite::Connection,
+    opening: &GiftOpeningIdentity,
+) -> Result<ProvenGiftClose, &'static str> {
+    use crate::gift_financial_closing::{self as closing, ClosingState};
+
+    let same = |left: &str, right: &str| left.eq_ignore_ascii_case(right);
+    let original = match closing::load_original_for_opening(conn, &opening.opening_key) {
+        Ok(Some(original)) => original,
+        Ok(None) if opening.state == "pending" => return Err("GIFT_OPENING_UNCONFIRMED"),
+        Ok(None) => return Err("GIFT_CLOSE_JOURNAL_MISSING"),
+        Err(_) => return Err("GIFT_CLOSE_PROOF_UNAVAILABLE"),
+    };
+    let original_in_scope = original.shift_id == opening.shift_id
+        && original.drawer_id == opening.drawer_id
+        && original.terminal_id == opening.terminal_id
+        && same(&original.organization_id, &opening.organization_id)
+        && same(&original.branch_id, &opening.branch_id)
+        && same(&original.staff_id, &opening.staff_id);
+    if !original_in_scope {
+        return Err("GIFT_CLOSE_PROOF_MISMATCH");
+    }
+    if original.state == ClosingState::Pending {
+        return Err("GIFT_CLOSE_PROOF_PENDING");
+    }
+    let adopted = match closing::load_adopted(conn, &original.closing_key) {
+        Ok(Some(adopted)) => adopted,
+        Ok(None) | Err(_) => return Err("GIFT_CLOSE_PROOF_UNAVAILABLE"),
+    };
+    let proof = &adopted.proof;
+    if !(same(&proof.shift_id, &opening.shift_id)
+        && same(&proof.drawer_id, &opening.drawer_id)
+        && same(&proof.branch_id, &opening.branch_id)
+        && same(&proof.organization_id, &opening.organization_id))
+    {
+        return Err("GIFT_CLOSE_PROOF_MISMATCH");
+    }
+    Ok(ProvenGiftClose {
+        print: GiftClosePrintOriginal {
+            shift_id: opening.shift_id.clone(),
+            drawer_id: opening.drawer_id.clone(),
+            currency: proof.currency.clone(),
+            ordinary_expected_cents: proof.drawer.ordinary_expected_cents,
+            gift_liability_cash_cents: proof.drawer.gift_cash_cents,
+            expected_cents: adopted.expected_cents(),
+            counted_cents: adopted.counted_cents(),
+            variance_cents: adopted.variance_cents(),
+            canonical_closed_at: adopted.canonical_closed_at.clone(),
+            confirmed_at: adopted.confirmed_at.clone(),
+        },
+        staff_id: opening.staff_id.clone(),
+        terminal_id: proof.terminal_id.clone(),
+        drawer_version: proof.drawer.version,
+        local_closed_at: adopted.original.closed_at.clone(),
+        adopted_at: adopted.adopted_at.clone(),
+    })
+}
+
+/// Checkout admission: `Ok(None)` for a shift without a persisted gift opening
+/// (ordinary print), `Ok(Some)` with its single strict adopted original,
+/// otherwise a typed not-final refusal.
+pub(crate) fn gift_close_checkout_binding(
+    conn: &rusqlite::Connection,
+    shift_id: &str,
+) -> Result<Option<GiftClosePrintBinding>, String> {
+    let openings = load_gift_openings(conn, Some(shift_id))?;
+    let not_final = |reason: &str| gift_close_not_final("shift_checkout", shift_id, reason);
+    match openings.as_slice() {
+        [] => Ok(None),
+        [opening] => adopted_gift_close_for_opening(conn, opening)
+            .map(|proven| Some(GiftClosePrintBinding::new(vec![proven.print])))
+            .map_err(not_final),
+        _ => Err(not_final("GIFT_CLOSE_PROOF_MISMATCH")),
+    }
+}
+
+fn payload_mentions_gift_close(payload: &Value) -> bool {
+    let text = payload.to_string();
+    [
+        "giftFinancialClose",
+        "giftCloseReadiness",
+        "giftLiabilityCash",
+    ]
+    .iter()
+    .any(|key| text.contains(key))
+}
+
+/// Z admission from the stored frozen report and the journal only (never
+/// recomputed from live drawers): `Ok(None)` when the stored row neither
+/// belongs to a persisted gift opening's shift nor names one in its JSON;
+/// `Ok(Some)` when every frozen original repeats its strict adopted proof and
+/// every referenced opening is frozen.
+fn gift_close_z_report_admission(
+    conn: &rusqlite::Connection,
+    z_report_id: &str,
+) -> Result<Option<GiftCloseZAdmission>, String> {
+    let not_final = |reason: &str| gift_close_not_final("z_report", z_report_id, reason);
+    if !sqlite_table_exists(conn, "z_reports")? {
+        return Ok(None);
+    }
+    let stored = conn
+        .query_row(
+            "SELECT shift_id, report_json FROM z_reports WHERE id = ?1",
+            params![z_report_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| format!("Read stored Z-report for gift close print: {error}"))?;
+    let Some((stored_shift_id, report_json)) = stored else {
+        return Ok(None);
+    };
+    let report_json = report_json.unwrap_or_default();
+    let openings = load_gift_openings(conn, None)?;
+    let report = serde_json::from_str::<Value>(&report_json).ok();
+    // Every persisted gift original the stored report covers: structurally
+    // through the row's own shift, even when older JSON omits every ID, or
+    // named anywhere in the JSON (by drawer or shift).
+    let stored_shift_id = stored_shift_id.unwrap_or_default();
+    let stored_shift_id = stored_shift_id.trim();
+    let searchable = report_json.to_ascii_lowercase();
+    let referenced = openings
+        .iter()
+        .filter(|opening| {
+            let row_member = !stored_shift_id.is_empty()
+                && opening
+                    .shift_id
+                    .trim()
+                    .eq_ignore_ascii_case(stored_shift_id);
+            row_member
+                || [&opening.drawer_id, &opening.shift_id].iter().any(|id| {
+                    let id = id.trim().to_ascii_lowercase();
+                    !id.is_empty() && searchable.contains(&id)
+                })
+        })
+        .map(|opening| opening.opening_key.as_str())
+        .collect::<HashSet<_>>();
+    let Some(frozen) = report
+        .as_ref()
+        .and_then(|report| report.get("giftFinancialClose"))
+    else {
+        // A stored report naming a gift-bound original without its frozen
+        // projection predates the proof and never prints as final.
+        return if referenced.is_empty() {
+            Ok(None)
+        } else {
+            Err(not_final("GIFT_CLOSE_SNAPSHOT_STALE"))
+        };
+    };
+    let ready = frozen.get("contract").and_then(Value::as_str) == Some("gift_close_report_v1")
+        && frozen.get("ready").and_then(Value::as_bool) == Some(true)
+        && frozen
+            .get("blockers")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty);
+    if !ready {
+        return Err(not_final("GIFT_CLOSE_PROOF_PENDING"));
+    }
+    let rows = frozen
+        .get("originals")
+        .and_then(Value::as_array)
+        .filter(|rows| !rows.is_empty())
+        .ok_or_else(|| not_final("GIFT_CLOSE_PROOF_MISMATCH"))?;
+    let mut originals = Vec::with_capacity(rows.len());
+    let mut lines = Vec::with_capacity(rows.len());
+    let mut frozen_openings = HashSet::new();
+    for row in rows {
+        let field = |key: &str| row.get(key);
+        let provenance = |key: &str| {
+            row.get("provenance")
+                .and_then(|value| value.get(key))
+                .and_then(Value::as_str)
+        };
+        let opening = field("drawerId")
+            .and_then(Value::as_str)
+            .and_then(|drawer_id| {
+                openings
+                    .iter()
+                    .find(|opening| opening.drawer_id.eq_ignore_ascii_case(drawer_id))
+            })
+            .ok_or_else(|| not_final("GIFT_CLOSE_PROOF_MISMATCH"))?;
+        if !frozen_openings.insert(opening.opening_key.as_str()) {
+            return Err(not_final("GIFT_CLOSE_PROOF_MISMATCH"));
+        }
+        let proven = adopted_gift_close_for_opening(conn, opening).map_err(not_final)?;
+        let print = &proven.print;
+        let text_is = |key: &str, expected: &str| {
+            field(key)
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.eq_ignore_ascii_case(expected))
+        };
+        let cents_is =
+            |key: &str, expected: i64| field(key).and_then(Value::as_i64) == Some(expected);
+        // The full immutable projection, not only the original IDs.
+        let frozen_matches_proof = text_is("shiftId", &print.shift_id)
+            && text_is("staffId", &proven.staff_id)
+            && field("terminalId").and_then(Value::as_str) == Some(proven.terminal_id.as_str())
+            && field("currency").and_then(Value::as_str) == Some(print.currency.as_str())
+            && cents_is("drawerVersion", proven.drawer_version)
+            && cents_is("ordinaryExpected_cents", print.ordinary_expected_cents)
+            && cents_is("giftLiabilityCash_cents", print.gift_liability_cash_cents)
+            && cents_is("expected_cents", print.expected_cents)
+            && cents_is("counted_cents", print.counted_cents)
+            && cents_is("variance_cents", print.variance_cents)
+            && provenance("contract")
+                == Some(crate::gift_financial_closing::GIFT_CARD_CLOSING_CONTRACT)
+            && provenance("status") == Some("confirmed")
+            && provenance("localClosedAt") == Some(proven.local_closed_at.as_str())
+            && provenance("canonicalClosedAt") == Some(print.canonical_closed_at.as_str())
+            && provenance("confirmedAt") == Some(print.confirmed_at.as_str())
+            && provenance("adoptedAt") == Some(proven.adopted_at.as_str());
+        if !frozen_matches_proof {
+            return Err(not_final("GIFT_CLOSE_PROOF_MISMATCH"));
+        }
+        lines.push(receipt_renderer::GiftCloseDrawerLine {
+            staff_name: field("staffName")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            currency: print.currency.clone(),
+            ordinary_expected_cents: print.ordinary_expected_cents,
+            gift_liability_cash_cents: print.gift_liability_cash_cents,
+            expected_cents: print.expected_cents,
+            counted_cents: print.counted_cents,
+            variance_cents: print.variance_cents,
+            canonical_closed_at: print.canonical_closed_at.clone(),
+        });
+        originals.push(proven.print);
+    }
+    if referenced
+        .iter()
+        .any(|opening_key| !frozen_openings.contains(opening_key))
+    {
+        return Err(not_final("GIFT_CLOSE_SNAPSHOT_STALE"));
+    }
+    let gift_liability_cash_cents = originals
+        .iter()
+        .map(|original| original.gift_liability_cash_cents)
+        .sum::<i64>();
+    let aggregate_matches = frozen
+        .get("giftLiabilityCash_cents")
+        .and_then(Value::as_i64)
+        == Some(gift_liability_cash_cents)
+        && report
+            .as_ref()
+            .and_then(|report| report.pointer("/cashDrawer/giftLiabilityCash_cents"))
+            .map_or(true, |value| {
+                value.as_i64() == Some(gift_liability_cash_cents)
+            });
+    if !aggregate_matches {
+        return Err(not_final("GIFT_CLOSE_PROOF_MISMATCH"));
+    }
+    let ordinary_adjustment_cents = frozen
+        .get("ordinaryAdjustment_cents")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    Ok(Some(GiftCloseZAdmission {
+        binding: GiftClosePrintBinding::new(originals),
+        lines,
+        gift_liability_cash_cents,
+        ordinary_adjustment_cents,
+    }))
+}
+
+pub(crate) fn gift_close_z_report_binding(
+    conn: &rusqlite::Connection,
+    z_report_id: &str,
+) -> Result<Option<GiftClosePrintBinding>, String> {
+    Ok(gift_close_z_report_admission(conn, z_report_id)?.map(|admission| admission.binding))
+}
+
+fn current_gift_close_binding(
+    conn: &rusqlite::Connection,
+    entity_type: &str,
+    entity_id: &str,
+) -> Result<Option<GiftClosePrintBinding>, String> {
+    match entity_type {
+        "shift_checkout" => gift_close_checkout_binding(conn, entity_id),
+        "z_report" => gift_close_z_report_binding(conn, entity_id),
+        _ => Ok(None),
+    }
+}
+
+/// Frozen replay gate: stored bytes print only when they were frozen with the
+/// binding the journal (and stored Z report) proves now. A pre-proof snapshot
+/// never becomes final merely because proof arrived later.
+fn ensure_frozen_gift_close_binding(
+    conn: &rusqlite::Connection,
+    entity_type: &str,
+    entity_id: &str,
+    frozen: Option<&GiftClosePrintBinding>,
+) -> Result<(), String> {
+    let current = current_gift_close_binding(conn, entity_type, entity_id)?;
+    match (current.as_ref(), frozen) {
+        (None, None) => Ok(()),
+        (Some(current), Some(frozen)) if current == frozen => Ok(()),
+        (Some(_), None) => Err(gift_close_not_final(
+            entity_type,
+            entity_id,
+            "GIFT_CLOSE_PRINT_BINDING_MISSING",
+        )),
+        _ => Err(gift_close_not_final(
+            entity_type,
+            entity_id,
+            "GIFT_CLOSE_PRINT_BINDING_MISMATCH",
+        )),
+    }
+}
+
+/// Test seam at the capture-to-transport boundary of a first managed print.
+#[cfg(test)]
+mod gift_close_capture_hook {
+    use super::DbState;
+    use std::cell::RefCell;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Box<dyn Fn(&DbState)>>> = RefCell::new(None);
+    }
+
+    pub(super) fn set(hook: Option<Box<dyn Fn(&DbState)>>) {
+        HOOK.with(|slot| *slot.borrow_mut() = hook);
+    }
+
+    pub(super) fn run(db: &DbState) {
+        HOOK.with(|slot| {
+            if let Some(hook) = slot.borrow().as_ref() {
+                hook(db);
+            }
+        });
+    }
+}
+
+fn gift_cents_amount(cents: i64) -> f64 {
+    cents as f64 / 100.0
+}
+
 fn build_document_for_job(
     db: &DbState,
     entity_type: &str,
     entity_id: &str,
     payload_json: Option<&str>,
 ) -> Result<ReceiptDocument, String> {
+    build_document_and_gift_binding_for_job(db, entity_type, entity_id, payload_json)
+        .map(|(document, _)| document)
+}
+
+/// The document plus the gift-close binding it was built from, captured
+/// together so a frozen envelope never labels built bytes with proof read
+/// later.
+fn build_document_and_gift_binding_for_job(
+    db: &DbState,
+    entity_type: &str,
+    entity_id: &str,
+    payload_json: Option<&str>,
+) -> Result<(ReceiptDocument, Option<GiftClosePrintBinding>), String> {
     let payload =
         payload_json.and_then(|raw_payload| serde_json::from_str::<Value>(raw_payload).ok());
 
-    match entity_type {
+    let mut gift_close_binding = None;
+    let document = match entity_type {
         "order_receipt" => Ok(ReceiptDocument::OrderReceipt(build_order_receipt_doc(
             db, entity_id,
         )?)),
@@ -7327,18 +7918,86 @@ fn build_document_for_job(
                 receipt_renderer::normalize_repair_label_doc(&doc)?,
             ))
         }
-        "shift_checkout" => Ok(ReceiptDocument::ShiftCheckout(build_shift_checkout_doc(
-            db,
-            entity_id,
-            payload.as_ref(),
-        )?)),
-        "z_report" => {
-            if let Some(payload) = payload.as_ref() {
-                return Ok(ReceiptDocument::ZReport(build_z_report_doc_from_payload(
-                    db, payload, entity_id,
-                )));
+        "shift_checkout" => {
+            let binding = {
+                let conn = db.conn.lock().map_err(|e| e.to_string())?;
+                gift_close_checkout_binding(&conn, entity_id)?
+            };
+            match binding
+                .as_ref()
+                .and_then(|binding| binding.originals.first())
+                .cloned()
+            {
+                None => Ok(ReceiptDocument::ShiftCheckout(build_shift_checkout_doc(
+                    db,
+                    entity_id,
+                    payload.as_ref(),
+                )?)),
+                Some(original) => {
+                    // A gift-bound original prints its frozen canonical close only; the
+                    // caller's expected/count/variance/time snapshot is ignored.
+                    let terminal_only = payload
+                        .as_ref()
+                        .and_then(|value| {
+                            object_text_field(value, &["terminalName", "terminal_name"])
+                        })
+                        .map(|name| serde_json::json!({ "terminalName": name }));
+                    let mut doc = build_shift_checkout_doc(db, entity_id, terminal_only.as_ref())?;
+                    doc.expected_amount = Some(gift_cents_amount(original.expected_cents));
+                    doc.closing_amount = Some(gift_cents_amount(original.counted_cents));
+                    doc.variance_amount = Some(gift_cents_amount(original.variance_cents));
+                    doc.check_out = original.canonical_closed_at.clone();
+                    doc.gift_close = Some(receipt_renderer::GiftCloseDrawerLine {
+                        staff_name: None,
+                        currency: original.currency,
+                        ordinary_expected_cents: original.ordinary_expected_cents,
+                        gift_liability_cash_cents: original.gift_liability_cash_cents,
+                        expected_cents: original.expected_cents,
+                        counted_cents: original.counted_cents,
+                        variance_cents: original.variance_cents,
+                        canonical_closed_at: original.canonical_closed_at,
+                    });
+                    gift_close_binding = binding;
+                    Ok(ReceiptDocument::ShiftCheckout(doc))
+                }
             }
-            Ok(ReceiptDocument::ZReport(build_z_report_doc(db, entity_id)?))
+        }
+        "z_report" => {
+            // Admission, the exact stored report and its binding come from one
+            // lock hold, so a concurrent rewrite can never mix one version's
+            // proven gift rows with another version's cash totals.
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            match (
+                gift_close_z_report_admission(&conn, entity_id)?,
+                payload.as_ref(),
+            ) {
+                (Some(admission), _) => {
+                    // A gift-bound Z prints only its stored frozen report (whose drawer
+                    // totals already hold the gift cash once), never a caller payload.
+                    let mut doc = build_z_report_doc_with_conn(&conn, entity_id)?;
+                    doc.gift_liability_cash_cents = admission.gift_liability_cash_cents;
+                    doc.gift_ordinary_adjustment_cents = admission.ordinary_adjustment_cents;
+                    doc.gift_close_lines = admission.lines;
+                    gift_close_binding = Some(admission.binding);
+                    Ok(ReceiptDocument::ZReport(doc))
+                }
+                (None, Some(payload)) => {
+                    drop(conn);
+                    if payload_mentions_gift_close(payload) {
+                        return Err(gift_close_not_final(
+                            "z_report",
+                            entity_id,
+                            "GIFT_CLOSE_PRINT_REQUIRES_STORED_REPORT",
+                        ));
+                    }
+                    Ok(ReceiptDocument::ZReport(build_z_report_doc_from_payload(
+                        db, payload, entity_id,
+                    )))
+                }
+                (None, None) => Ok(ReceiptDocument::ZReport(build_z_report_doc_with_conn(
+                    &conn, entity_id,
+                )?)),
+            }
         }
         "delivery_slip" => {
             let mut doc = build_order_receipt_doc(db, entity_id)?;
@@ -7382,7 +8041,8 @@ fn build_document_for_job(
             Ok(ReceiptDocument::OrderReceipt(doc))
         }
         _ => Err(format!("Unknown entity_type: {entity_type}")),
-    }
+    }?;
+    Ok((document, gift_close_binding))
 }
 
 /// Reject a path segment that could escape the receipts directory or
@@ -7946,6 +8606,10 @@ struct FrozenRenderEnvelope {
     logo_scale: f32,
     drawer: FrozenDrawerConfig,
     warning_codes: Vec<String>,
+    /// Gift-bound checkout/Z only: the proof the frozen bytes were rendered
+    /// from. Omitted for every other job, so ordinary envelopes are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    gift_close_binding: Option<GiftClosePrintBinding>,
 }
 
 impl FrozenRenderEnvelope {
@@ -8493,6 +9157,35 @@ fn prepare_frozen_attempt_with_profile_hooks(
     )
 }
 
+/// Would a fresh job for this profile/role land on a printer lane that is
+/// blocked right now? Read-only and best-effort: any resolution problem answers
+/// "no" so the full preparation path reports it exactly as before.
+fn fresh_job_target_is_blocked(
+    db: &DbState,
+    manager: &DispatchManager,
+    requested_profile_id: Option<&str>,
+    role: &str,
+) -> bool {
+    let Ok(Some(profile)) =
+        printers::resolve_printer_profile_for_role(db, requested_profile_id, Some(role))
+    else {
+        return false;
+    };
+    if !profile
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+    {
+        return false;
+    }
+    let Ok(target) = printers::resolve_printer_target(&profile) else {
+        return false;
+    };
+    manager
+        .target_is_blocked(&dispatch_target_key(&target))
+        .unwrap_or(false)
+}
+
 fn prepare_frozen_attempt_with_hooks(
     db: &DbState,
     data_dir: &Path,
@@ -8516,7 +9209,18 @@ fn prepare_frozen_attempt_with_hooks(
 
     let stored = {
         let conn = lock_conn_recovering(db);
-        load_frozen_job(&conn, job_id, entity_type)?
+        let stored = load_frozen_job(&conn, job_id, entity_type)?;
+        // Restored retries and reprints send stored bytes without rebuilding,
+        // so a gift-bound checkout/Z must carry the binding proven now.
+        if let Some((_, envelope, _)) = stored.as_ref() {
+            ensure_frozen_gift_close_binding(
+                &conn,
+                entity_type,
+                entity_id,
+                envelope.gift_close_binding.as_ref(),
+            )?;
+        }
+        stored
     };
 
     let (bytes, envelope, target, output_path, pending_html, active) =
@@ -8549,10 +9253,26 @@ fn prepare_frozen_attempt_with_hooks(
             } else {
                 "receipt"
             };
+            // A job for a printer that is blocked right now cannot print this
+            // tick whatever else happens, so defer it before paying for its
+            // document and render. Without this, every tick rebuilt and
+            // re-rendered each deferred job, which made scanning past a blocked
+            // printer's backlog to other printers' jobs too costly. Advisory:
+            // an unresolved or unconfigured profile skips the peek, so a missing
+            // source still fails with its actionable error below, and claim()
+            // stays the authority.
+            if fresh_job_target_is_blocked(db, manager, requested_profile_id, role) {
+                return Ok(None);
+            }
             // Validate and freeze the source document before resolving hardware.
             // Missing source entities are permanent preparation failures and should
             // retain their actionable "not found" error even on an unconfigured POS.
-            let document = build_document_for_job(db, entity_type, entity_id, payload_json)?;
+            // The gift-close binding is the one this document was built from,
+            // never proof re-read afterwards and attached to its bytes.
+            let (document, gift_close_binding) =
+                build_document_and_gift_binding_for_job(db, entity_type, entity_id, payload_json)?;
+            #[cfg(test)]
+            gift_close_capture_hook::run(db);
             sanitize_path_segment("entity_type", entity_type)?;
             sanitize_path_segment("entity_id", entity_id)?;
             let profile_association_guard = profile_association_coordination()
@@ -8588,6 +9308,17 @@ fn prepare_frozen_attempt_with_hooks(
             let target = printers::resolve_printer_target(&profile)?;
             let (bytes, layout, warnings, logo_included) =
                 render_managed_payload(db, entity_type, &profile, &document)?;
+            // A first print checks its captured binding against the proof held
+            // now before freezing or transport, exactly as a stored replay does.
+            if matches!(entity_type, "shift_checkout" | "z_report") {
+                let conn = lock_conn_recovering(db);
+                ensure_frozen_gift_close_binding(
+                    &conn,
+                    entity_type,
+                    entity_id,
+                    gift_close_binding.as_ref(),
+                )?;
+            }
             let warning_codes = warnings.into_iter().map(|warning| warning.code).collect();
             let drawer = FrozenDrawerConfig::from_profile(&profile, &profile_id);
             let envelope = FrozenRenderEnvelope {
@@ -8651,6 +9382,7 @@ fn prepare_frozen_attempt_with_hooks(
                 logo_scale: layout.logo_scale,
                 drawer,
                 warning_codes,
+                gift_close_binding,
             };
             envelope.validate(entity_type)?;
             let html = receipt_renderer::render_html(&document, &layout);
@@ -9075,43 +9807,86 @@ fn process_pending_jobs_with_adapters_outcome(
         });
     }
     let paused_profiles = paused_printer_profiles(&conn);
-    let jobs = select_ready_pending_jobs(&conn, &Utc::now().to_rfc3339(), &paused_profiles, 10)?;
+    let now = Utc::now().to_rfc3339();
     drop(conn);
 
-    let selected = jobs.len();
+    // Fair dispatch across printers. The tick used to take the 10 oldest
+    // pending jobs of ALL printers and stop there. A deferral changes nothing
+    // stored, so 10 or more jobs stuck behind one blocked printer refilled that
+    // window every tick and no other printer's job was ever picked: one wedged
+    // lane silenced every printer in the shop. Now the tick pages past deferred
+    // jobs (cheaply, see fresh_job_target_is_blocked) until it has
+    // PRINT_DISPATCH_BATCH_LIMIT attempts ready or has scanned
+    // PRINT_DISPATCH_SCAN_LIMIT jobs.
+    let mut selected = 0usize;
     let mut deferred = 0usize;
+    let mut deferred_sample: Vec<(String, String)> = Vec::new();
     let mut prepared = Vec::new();
-    for (job_id, entity_type, entity_id, payload_json, profile_id) in jobs {
-        match prepare_frozen_attempt(
-            db,
-            data_dir,
-            manager,
-            &job_id,
-            &entity_type,
-            &entity_id,
-            payload_json.as_deref(),
-            profile_id.as_deref(),
-        ) {
-            Ok(Some(attempt)) => prepared.push(attempt),
-            // A deferral is not nothing. This arm used to be empty, and that is
-            // how a wedged lane stayed invisible: seven distinct decisions
-            // (cancel requested, profile paused, LaneBusy, CircuitOpen, guard
-            // not primary, queue paused, parent not eligible) all landed here
-            // and left no attempt row, no last_error and no log — so a till
-            // that printed nothing for fifteen hours looked healthy from every
-            // angle. Leave a trail even when there is nothing to record durably.
-            Ok(None) => {
-                deferred += 1;
-                warn!(
-                    job_id = %job_id,
-                    entity_type = %entity_type,
-                    "Print job deferred without an attempt"
-                );
+    let mut cursor: Option<(String, String)> = None;
+    'scan: while prepared.len() < PRINT_DISPATCH_BATCH_LIMIT && selected < PRINT_DISPATCH_SCAN_LIMIT
+    {
+        let page_limit = PRINT_DISPATCH_SCAN_PAGE.min(PRINT_DISPATCH_SCAN_LIMIT - selected);
+        let page = {
+            let conn = lock_conn_recovering(db);
+            select_ready_pending_jobs_after(
+                &conn,
+                &now,
+                &paused_profiles,
+                page_limit,
+                cursor
+                    .as_ref()
+                    .map(|(created_at, id)| (created_at.as_str(), id.as_str())),
+            )?
+        };
+        let page_len = page.len();
+        for job in page {
+            cursor = Some((job.created_at.clone(), job.id.clone()));
+            selected += 1;
+            match prepare_frozen_attempt(
+                db,
+                data_dir,
+                manager,
+                &job.id,
+                &job.entity_type,
+                &job.entity_id,
+                job.payload_json.as_deref(),
+                job.printer_profile_id.as_deref(),
+            ) {
+                Ok(Some(attempt)) => prepared.push(attempt),
+                // A deferral is not nothing. This arm used to be empty, and that
+                // is how a wedged lane stayed invisible: seven distinct decisions
+                // (cancel requested, profile paused, LaneBusy, CircuitOpen, guard
+                // not primary, queue paused, parent not eligible) all landed here
+                // and left no attempt row, no last_error and no log — so a till
+                // that printed nothing for fifteen hours looked healthy from every
+                // angle. Leave a trail even when there is nothing to record
+                // durably (one summary line per tick, below).
+                Ok(None) => {
+                    deferred += 1;
+                    if deferred_sample.len() < PRINT_DISPATCH_DEFERRED_LOG_SAMPLE {
+                        deferred_sample.push((job.id.clone(), job.entity_type.clone()));
+                    }
+                }
+                Err(error) => {
+                    handle_managed_preparation_failure(db, &job.id, &error);
+                }
             }
-            Err(error) => {
-                handle_managed_preparation_failure(db, &job_id, &error);
+            if prepared.len() >= PRINT_DISPATCH_BATCH_LIMIT {
+                break 'scan;
             }
         }
+        if page_len < page_limit {
+            break;
+        }
+    }
+    if deferred > 0 {
+        warn!(
+            deferred = deferred,
+            scanned = selected,
+            prepared = prepared.len(),
+            jobs = ?deferred_sample,
+            "Print job deferred without an attempt"
+        );
     }
 
     std::thread::scope(|scope| {
@@ -9827,6 +10602,12 @@ mod tests {
         assert!(hook_called.load(Ordering::SeqCst));
         assert!(!data_dir.join(RECEIPTS_DIR).exists());
         let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    /// Gift-close print regressions on this module's real-migration fixtures.
+    mod gift_close_print {
+        use super::*;
+        include!("print_gift_close_tests.rs");
     }
 
     fn test_db() -> DbState {
@@ -12806,6 +13587,44 @@ mod tests {
         assert!(!utf8.contains("IPC-UTF8"));
     }
 
+    /// Review 30/09/2026: the bound was applied before any scrub, so a
+    /// phone number or email the 512/1024 cut fell in kept its first part
+    /// (up to nine digits) in the print queue and the support bundle.
+    #[test]
+    fn safe_operational_error_never_keeps_part_of_a_number_or_an_email() {
+        for (sensitive, forbidden) in [
+            ("+41 79 123 45 67", "79 1"),
+            ("6941234567", "69412"),
+            ("maria.papadopoulou@example.com", "maria"),
+        ] {
+            // The number or email starts between characters 80 and 110: the
+            // 96-character bound falls in it.
+            for offset in 44..74 {
+                let message = format!(
+                    "Sync failed: HTTP 409 {} Key (phone)=({sensitive}) already exists.",
+                    "x".repeat(offset)
+                );
+                let bounded =
+                    safe_operational_error(Some(message.clone()), 96).expect("safe text remains");
+                assert!(bounded.chars().count() <= 96, "{bounded}");
+                assert!(bounded.starts_with("Sync failed: HTTP 409"), "{bounded}");
+                assert!(
+                    !bounded.contains(forbidden),
+                    "{sensitive} at {offset}: {bounded}"
+                );
+            }
+        }
+        // Short text keeps its meaning, the number scrubbed.
+        assert_eq!(
+            safe_operational_error(
+                Some("HTTP 409: Key (phone)=(6941234567) already exists.".into()),
+                1024
+            )
+            .as_deref(),
+            Some("HTTP 409: Key (phone)=([REDACTED_PHONE]) already exists.")
+        );
+    }
+
     #[test]
     fn typed_queue_snapshot_paginates_and_clamps_page_size() {
         let db = test_db();
@@ -14088,6 +14907,383 @@ mod tests {
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
+    /// Tomikro Parisi, 30/09/2026 (desktop 1.4.119): from the closing Z at
+    /// 03:25 every print stayed "pending" with transport "not started" while
+    /// Health said the printer was ready, and restarts did not help. The Z's
+    /// day close had deleted a job whose raw_tcp attempt to 192.168.1.19:9100
+    /// was still `submitting`, with foreign keys off, so the attempt stayed
+    /// behind with no job: a printer blocker nothing could finalize and staff
+    /// could not cancel. Each tick hydrated it into a retained lane, the lane
+    /// sweep would not release a lane with a blocker, and every later job was
+    /// deferred with no attempt and no error. The same tick now closes the
+    /// orphan and prints.
+    #[test]
+    fn worker_tick_prints_again_when_a_day_close_orphaned_an_in_flight_attempt() {
+        let db = test_db();
+        let host = "192.168.1.19";
+        let target = PrinterTargetKey::RawTcp {
+            host: host.into(),
+            port: 9100,
+        };
+        let target_key = crate::print_dispatch::normalize_target(&target).unwrap();
+        let orphan_job = Uuid::new_v4().to_string();
+        let job_id = Uuid::new_v4().to_string();
+        let orphan_attempt = {
+            let conn = db.conn.lock().unwrap();
+            insert_managed_network_profile(&conn, "profile-tomikro", host, 9100, true);
+            insert_receipt_order(&conn, "order-at-close", "Z-1", 9.0);
+            conn.execute(
+                "INSERT INTO print_jobs (id, entity_type, entity_id, status, created_at, updated_at)
+                 VALUES (?1, 'order_receipt', 'order-at-close', 'printing', datetime('now'), datetime('now'))",
+                [&orphan_job],
+            )
+            .unwrap();
+            let attempt = create_attempt(
+                &conn,
+                NewAttempt {
+                    local_job_id: orphan_job.clone(),
+                    target: target.clone(),
+                    document_kind: "receipt".into(),
+                    bytes_requested: 512,
+                    now: Utc::now(),
+                },
+            )
+            .unwrap();
+            transition_attempt(
+                &conn,
+                attempt.attempt_id,
+                DispatchState::Submitting,
+                AttemptObservation::default(),
+            )
+            .unwrap();
+            // The pre-fix day close: foreign keys off, the job deleted, its
+            // attempt left behind.
+            conn.execute_batch("PRAGMA foreign_keys = OFF").unwrap();
+            conn.execute("DELETE FROM print_jobs WHERE id = ?1", [&orphan_job])
+                .unwrap();
+            conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+            // As found at the store: the circuit was closed.
+            conn.execute(
+                "INSERT INTO print_target_state
+                 (target_key, transport, circuit_state, blocked_reason, blocked_at, updated_at)
+                 VALUES (?1, 'raw_tcp', 'closed', NULL, NULL, ?2)",
+                params![target_key, Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+            // The next receipt after the Z.
+            insert_receipt_order(&conn, "order-after-close", "1", 12.5);
+            conn.execute(
+                "INSERT INTO print_jobs (id, entity_type, entity_id, status, created_at, updated_at)
+                 VALUES (?1, 'order_receipt', 'order-after-close', 'pending', datetime('now'), datetime('now'))",
+                [&job_id],
+            )
+            .unwrap();
+            attempt.attempt_id
+        };
+        let data_dir = std::env::temp_dir().join(format!("managed-orphan-{}", Uuid::new_v4()));
+        let raw = CapturingManagedRaw::default();
+        let spooler: Arc<dyn WindowsSpooler> = Arc::new(FakeWindowsSpooler::new(73));
+        // One worker tick, as `process_pending_jobs_outcome` runs it: hydrate
+        // the lanes from durable state, then the managed worker.
+        let manager = {
+            let conn = db.conn.lock().unwrap();
+            DispatchManager::hydrate_isolated_for_test(&conn).unwrap()
+        };
+
+        let processed = process_pending_jobs_with_adapters(
+            &db,
+            &data_dir,
+            &manager,
+            &raw,
+            spooler,
+            Duration::from_secs(10),
+        )
+        .expect("managed worker");
+
+        assert_eq!(processed, 1);
+        let calls = raw.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "the pending receipt must reach the printer");
+        assert_eq!(
+            calls[0].target,
+            printers::ResolvedPrinterTarget::RawTcp {
+                host: host.into(),
+                port: 9100
+            }
+        );
+        drop(calls);
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT status FROM print_jobs WHERE id = ?1",
+                [&job_id],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "dispatched"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT state FROM print_job_attempts WHERE print_job_id = ?1",
+                [&job_id],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            DispatchState::Sent.as_str()
+        );
+        let orphan = crate::print_dispatch::read_attempt(&conn, orphan_attempt)
+            .unwrap()
+            .unwrap();
+        assert_eq!(orphan.state, DispatchState::Cancelled);
+        assert_eq!(
+            orphan.last_error.as_deref(),
+            Some(crate::print_dispatch::ORPHANED_ATTEMPT_ERROR)
+        );
+        let audited: (String, String) = conn
+            .query_row(
+                "SELECT entity_id, json_extract(payload_json, '$.printJobId')
+                 FROM recovery_action_log WHERE action_id = ?1",
+                [crate::print_dispatch::ORPHANED_ATTEMPT_ACTION_ID],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("the close is audited");
+        assert_eq!(audited, (orphan_attempt.to_string(), orphan_job.clone()));
+        drop(conn);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    /// Seed `blocked_jobs` older pending receipts bound to a printer whose lane
+    /// is held, plus one newer receipt bound to a healthy printer.
+    fn seed_blocked_backlog_and_one_healthy_job(
+        db: &DbState,
+        blocked_jobs: usize,
+        blocked_sources_exist: bool,
+    ) -> (Vec<String>, String) {
+        let conn = db.conn.lock().unwrap();
+        insert_managed_network_profile(&conn, "blocked-profile", "blocked.local", 9100, true);
+        insert_managed_network_profile(&conn, "healthy-profile", "healthy.local", 9100, false);
+        let mut blocked_ids = Vec::new();
+        for index in 0..blocked_jobs {
+            let job_id = Uuid::new_v4().to_string();
+            let order_id = format!("blocked-order-{index}");
+            if blocked_sources_exist {
+                insert_receipt_order(&conn, &order_id, &format!("B-{index}"), 5.0);
+            }
+            conn.execute(
+                "INSERT INTO print_jobs
+                 (id, entity_type, entity_id, printer_profile_id, status, created_at, updated_at)
+                 VALUES (?1, 'order_receipt', ?2, 'blocked-profile', 'pending', ?3, ?3)",
+                params![
+                    job_id,
+                    order_id,
+                    format!("2026-09-30 10:00:{:02}", index % 60)
+                ],
+            )
+            .unwrap();
+            blocked_ids.push(job_id);
+        }
+        insert_receipt_order(&conn, "healthy-order", "H-1", 7.8);
+        let healthy_id = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO print_jobs
+             (id, entity_type, entity_id, printer_profile_id, status, created_at, updated_at)
+             VALUES (?1, 'order_receipt', 'healthy-order', 'healthy-profile', 'pending',
+                     '2026-09-30 11:00:00', '2026-09-30 11:00:00')",
+            [&healthy_id],
+        )
+        .unwrap();
+        (blocked_ids, healthy_id)
+    }
+
+    fn job_status_and_attempts(conn: &Connection, job_id: &str) -> (String, i64) {
+        conn.query_row(
+            "SELECT status,
+                    (SELECT COUNT(*) FROM print_job_attempts a WHERE a.print_job_id = print_jobs.id)
+             FROM print_jobs WHERE id = ?1",
+            [job_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap()
+    }
+
+    /// Tomikro 30/09/2026 follow-up: one blocked printer must not starve every
+    /// other printer. The tick used to take the 10 oldest pending jobs of all
+    /// printers; 30 older jobs behind a held lane filled that window on every
+    /// tick, so the healthy printer's receipt was never even looked at.
+    #[test]
+    fn worker_tick_reaches_a_healthy_printer_behind_a_blocked_printers_backlog() {
+        let db = test_db();
+        let (blocked_ids, healthy_id) = seed_blocked_backlog_and_one_healthy_job(&db, 30, true);
+        let data_dir = std::env::temp_dir().join(format!("fair-dispatch-{}", Uuid::new_v4()));
+        let raw = CapturingManagedRaw::default();
+        let spooler: Arc<dyn WindowsSpooler> = Arc::new(FakeWindowsSpooler::new(73));
+        let manager = DispatchManager::isolated_for_test();
+        // Hold the blocked printer's lane for the whole tick, as a stuck
+        // attempt or an open circuit would.
+        let _held = manager
+            .claim(PrinterTargetKey::RawTcp {
+                host: "blocked.local".into(),
+                port: 9100,
+            })
+            .expect("hold the blocked lane");
+
+        process_pending_jobs_with_adapters(
+            &db,
+            &data_dir,
+            &manager,
+            &raw,
+            spooler,
+            Duration::from_secs(10),
+        )
+        .expect("worker tick");
+
+        let calls = raw.calls.lock().unwrap();
+        assert_eq!(
+            calls.len(),
+            1,
+            "exactly the healthy receipt reaches a transport"
+        );
+        assert_eq!(
+            calls[0].target,
+            printers::ResolvedPrinterTarget::RawTcp {
+                host: "healthy.local".into(),
+                port: 9100
+            }
+        );
+        drop(calls);
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            job_status_and_attempts(&conn, &healthy_id),
+            ("dispatched".into(), 1)
+        );
+        for blocked_id in &blocked_ids {
+            assert_eq!(
+                job_status_and_attempts(&conn, blocked_id),
+                ("pending".into(), 0),
+                "a job behind the held lane stays pending with no attempt"
+            );
+        }
+        drop(conn);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    /// The scan defers a blocked printer's fresh jobs before building their
+    /// document: a job whose source vanished behind a blocked printer waits
+    /// instead of being failed on every tick, and it keeps its actionable
+    /// "not found" failure for when its printer can take work again.
+    #[test]
+    fn worker_tick_defers_blocked_printer_jobs_before_building_their_document() {
+        let db = test_db();
+        let (blocked_ids, healthy_id) = seed_blocked_backlog_and_one_healthy_job(&db, 3, false);
+        let data_dir = std::env::temp_dir().join(format!("fair-dispatch-{}", Uuid::new_v4()));
+        let raw = CapturingManagedRaw::default();
+        let spooler: Arc<dyn WindowsSpooler> = Arc::new(FakeWindowsSpooler::new(73));
+        let manager = DispatchManager::isolated_for_test();
+        let mut held = manager
+            .claim(PrinterTargetKey::RawTcp {
+                host: "blocked.local".into(),
+                port: 9100,
+            })
+            .expect("hold the blocked lane");
+
+        process_pending_jobs_with_adapters(
+            &db,
+            &data_dir,
+            &manager,
+            &raw,
+            Arc::clone(&spooler),
+            Duration::from_secs(10),
+        )
+        .expect("worker tick");
+        {
+            let conn = db.conn.lock().unwrap();
+            assert_eq!(
+                job_status_and_attempts(&conn, &healthy_id),
+                ("dispatched".into(), 1)
+            );
+            for blocked_id in &blocked_ids {
+                assert_eq!(
+                    job_status_and_attempts(&conn, blocked_id),
+                    ("pending".into(), 0)
+                );
+            }
+        }
+
+        // Once the lane frees, the same jobs take the normal path again and a
+        // missing source fails with its actionable error.
+        held.release_unstarted();
+        drop(held);
+        process_pending_jobs_with_adapters(
+            &db,
+            &data_dir,
+            &manager,
+            &raw,
+            spooler,
+            Duration::from_secs(10),
+        )
+        .expect("worker tick after release");
+        let conn = db.conn.lock().unwrap();
+        for blocked_id in &blocked_ids {
+            assert_eq!(
+                job_status_and_attempts(&conn, blocked_id).0,
+                "failed",
+                "missing source fails once its printer can take work"
+            );
+        }
+        drop(conn);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn ready_pending_job_pages_follow_a_stable_keyset_cursor() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        for (index, created_at) in [
+            "2026-09-30 10:00:00",
+            "2026-09-30 10:00:00",
+            "2026-09-30 10:00:00",
+            "2026-09-30 10:00:01",
+            "2026-09-30 10:00:02",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            conn.execute(
+                "INSERT INTO print_jobs (id, entity_type, entity_id, status, created_at, updated_at)
+                 VALUES (?1, 'order_receipt', 'o', 'pending', ?2, ?2)",
+                params![format!("job-{index}"), created_at],
+            )
+            .unwrap();
+        }
+        let paused = std::collections::HashSet::new();
+        let now = Utc::now().to_rfc3339();
+        let mut seen = Vec::new();
+        let mut cursor: Option<(String, String)> = None;
+        loop {
+            let page = select_ready_pending_jobs_after(
+                &conn,
+                &now,
+                &paused,
+                2,
+                cursor.as_ref().map(|(c, i)| (c.as_str(), i.as_str())),
+            )
+            .unwrap();
+            if page.is_empty() {
+                break;
+            }
+            // A job leaving 'pending' mid-scan must not shift later pages.
+            conn.execute(
+                "UPDATE print_jobs SET status = 'printing' WHERE id = ?1",
+                [&page[0].id],
+            )
+            .unwrap();
+            for job in page {
+                cursor = Some((job.created_at.clone(), job.id.clone()));
+                seen.push(job.id);
+            }
+        }
+        assert_eq!(seen, ["job-0", "job-1", "job-2", "job-3", "job-4"]);
+    }
+
     #[test]
     fn managed_worker_uses_frozen_bytes_and_target_after_profile_or_entity_mutates() {
         let db = test_db();
@@ -15130,6 +16326,7 @@ mod tests {
             crate::print_snapshot::persist_snapshot_if_absent(&conn, &corrupt_job, &encoded, "{}")
                 .unwrap();
             let mismatched = FrozenRenderEnvelope {
+                gift_close_binding: None,
                 version: MANAGED_ENVELOPE_VERSION,
                 renderer_layout_revision: "test".into(),
                 effective_profile_id: "profile".into(),

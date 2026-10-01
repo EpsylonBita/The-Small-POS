@@ -121,7 +121,8 @@ export const createInFlightGuard = (): InFlightGuard => {
 
 export interface TerminalCardPortionInput {
   method: 'cash' | 'card';
-  status: 'draft' | 'processing' | 'paid';
+  /** `unsaved`: charged on this till, payment not saved yet (30/09/2026). */
+  status: 'draft' | 'processing' | 'paid' | 'unsaved';
   paymentOrigin?: 'manual' | 'terminal';
   terminalDeviceId?: string;
 }

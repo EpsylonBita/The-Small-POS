@@ -55,3 +55,21 @@ test('RecoveryCenterPanel routes visually safe recovery actions through privileg
     'safe-labelled recovery actions must not bypass the wrapper because native commands may still request a fresh PIN',
   );
 });
+
+// Fix review 30/09/2026: with nobody on shift at this terminal the till asks
+// a manager's own PIN and names what it approves.
+test('extractPrivilegedActionError keeps the manager approval the till asks for', () => {
+  const parsed = extractPrivilegedActionError(
+    {
+      code: 'REAUTH_REQUIRED',
+      scope: 'cash_drawer_control',
+      reason: 'No cashier or manager is on shift at this terminal: a manager approves with their own PIN',
+      ttlSeconds: 300,
+      approval: 'void_orders',
+    },
+    'cash_drawer_control',
+  );
+
+  assert.equal(parsed?.code, 'REAUTH_REQUIRED');
+  assert.equal(parsed?.approval, 'void_orders');
+});

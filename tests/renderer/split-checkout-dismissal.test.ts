@@ -259,6 +259,11 @@ test('an unpaid or unavailable post-attempt snapshot keeps recovery safe and ref
   assert.equal(unpaid.recordPaymentFailed, true);
   assert.equal(unpaid.settlement.outstandingAmount, 24.5);
   assert.equal(unpaid.settlement.settlementGeneration, 'd'.repeat(64));
+  assert.equal(unpaid.attempt.dispatched, true);
+  assert.equal(unpaid.attempt.replyLost, false);
+  assert.equal(unpaid.attempt.success, false);
+  assert.equal(unpaid.attempt.paymentId, null);
+  assert.doesNotMatch(JSON.stringify(unpaid.attempt), /private backend detail/);
 
   const unknown = await reconcileOutstandingPaymentAttempt({
     recordPayment: async () => Promise.reject(new Error('secret record error')),
@@ -270,7 +275,23 @@ test('an unpaid or unavailable post-attempt snapshot keeps recovery safe and ref
     orderId: 'order-1',
     fallbackOrderTotal: 24.5,
   });
-  assert.deepEqual(unknown, { kind: 'unknown', recordPaymentFailed: true });
+  // A lost reply over an unreadable ledger stays unknown and carries the
+  // original attempt facts; no private error text reaches them.
+  assert.equal(unknown.kind, 'unknown');
+  assert.equal(unknown.recordPaymentFailed, true);
+  assert.equal('settlement' in unknown, false);
+  assert.deepEqual(unknown.attempt, {
+    dispatched: true,
+    replyLost: true,
+    success: null,
+    paymentApproved: null,
+    paymentPersisted: null,
+    requiresReconciliation: null,
+    paymentId: null,
+    code: null,
+    fiscalCheckout: undefined,
+  });
+  assert.doesNotMatch(JSON.stringify(unknown), /secret/);
 });
 
 test('an unknown attempt retries the authoritative snapshot without issuing another payment write', async () => {
@@ -346,20 +367,59 @@ test('every recovered full-balance payment asks native to collect the authoritat
       /idempotencyKey:\s*pendingPayment\.orderId/,
       `${label} must never reuse the order id as a payment-attempt key`,
     );
+    if (label === 'NewOrderPage') {
+      assert.match(
+        handler,
+        /snapshotOnly:\s*selection\.reconciliationOnly/,
+        `${label} must retry an unknown attempt without another payment write`,
+      );
+      assert.match(
+        handler,
+        /paymentAttempt\.kind === ['"]unknown['"][\s\S]*?return ['"]reconciliation-pending['"]/,
+        `${label} must keep the original tender locked until reconciliation is authoritative`,
+      );
+      assert.match(
+        handler,
+        /paymentAttempt\.kind === ['"]unknown['"][\s\S]*?if \(!selection\.reconciliationOnly\) \{[\s\S]*?toast\.error/,
+        `${label} must notify once without spamming every snapshot-only retry`,
+      );
+      continue;
+    }
+    // The hosts retry an unknown attempt through the retained ordinary
+    // controller: a snapshot-only probe of the original owner, never a write.
     assert.match(
       handler,
-      /snapshotOnly:\s*selection\.reconciliationOnly/,
+      /selection\.reconciliationOnly\s*\?\s*selection\.ordinaryOwner \?\? retainedOrdinaryOwner\(collectionScope, orderId\)/,
+      `${label} must retry only the retained original collection`,
+    );
+    const snapshotStart = handler.indexOf('if (!sendOwner) {');
+    const snapshotEnd = handler.indexOf('} else {', snapshotStart);
+    assert.ok(snapshotStart >= 0 && snapshotEnd > snapshotStart, `${label} must keep a snapshot-only branch`);
+    const snapshotOnly = handler.slice(snapshotStart, snapshotEnd);
+    assert.match(
+      snapshotOnly,
+      /probeOrdinaryOwner\(probeOwner,/,
+      `${label} must retry an unknown attempt without another payment write`,
+    );
+    assert.doesNotMatch(
+      snapshotOnly,
+      /recordPayment|runOrdinaryCollection/,
       `${label} must retry an unknown attempt without another payment write`,
     );
     assert.match(
-      handler,
-      /paymentAttempt\.kind === ['"]unknown['"][\s\S]*?return ['"]reconciliation-pending['"]/,
+      snapshotOnly,
+      /probe\?\.status === ['"]unknown['"]\) return ['"]reconciliation-pending['"]/,
       `${label} must keep the original tender locked until reconciliation is authoritative`,
+    );
+    assert.doesNotMatch(
+      snapshotOnly,
+      /toast\./,
+      `${label} must notify once without spamming every snapshot-only retry`,
     );
     assert.match(
       handler,
-      /paymentAttempt\.kind === ['"]unknown['"][\s\S]*?if \(!selection\.reconciliationOnly\) \{[\s\S]*?toast\.error/,
-      `${label} must notify once without spamming every snapshot-only retry`,
+      /run\.status === ['"]unknown['"] \|\| !attempt \|\| attempt\.kind === ['"]unknown['"]\) \{[\s\S]*?if \(epoch === outstandingEpochRef\.current\) \{\s*toast\.error[\s\S]*?return ['"]reconciliation-pending['"]/,
+      `${label} must notify an unknown collection once, and only on its own screen`,
     );
   }
 });
@@ -430,16 +490,18 @@ for (const [label, segments] of [
     assert.match(handler, /bridge\.payments\.recordPayment\(\{/);
     assert.match(handler, /orderId: pendingPayment\.orderId/);
     assert.match(handler, /amount: pendingPayment\.outstandingAmount/);
-    assert.match(
-      handler,
-      /const paymentAttempt = await reconcileOutstandingPaymentAttempt\(\{/,
+    // NewOrderPage keeps its own attempt; the hosts reconcile inside the
+    // retained controller's single send.
+    const reconcileCall = label === 'NewOrderPage'
+      ? 'const paymentAttempt = await reconcileOutstandingPaymentAttempt({'
+      : 'const attempt = await reconcileOutstandingPaymentAttempt({';
+    assert.ok(
+      handler.includes(reconcileCall),
       'cash/card outcomes must be verified against the persisted ledger',
     );
     assert.match(handler, /latestResolution\.kind === ['"]partial['"]/);
     assert.match(handler, /latestResolution\.kind !== ['"]settled['"]/);
-    const reconcileIndex = handler.indexOf(
-      'const paymentAttempt = await reconcileOutstandingPaymentAttempt({',
-    );
+    const reconcileIndex = handler.indexOf(reconcileCall);
     const finalizeIndex = handler.indexOf('finalizeCreatedOrderPayment(');
     assert.ok(
       reconcileIndex !== -1 && finalizeIndex > reconcileIndex,

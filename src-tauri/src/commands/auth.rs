@@ -75,7 +75,13 @@ pub async fn auth_login(
     db: tauri::State<'_, db::DbState>,
     auth_state: tauri::State<'_, auth::AuthState>,
 ) -> Result<Value, String> {
-    auth::login(arg0, &db, &auth_state)
+    let result = auth::login(arg0, &db, &auth_state);
+    if result.is_ok() {
+        // Refresh the fiscal-active verdict on the next sync pass after a
+        // login, like Android's post-login fiscal status check.
+        crate::fiscal::status::mark_due();
+    }
+    result
 }
 
 #[tauri::command]
@@ -167,6 +173,25 @@ pub async fn auth_confirm_privileged_action(
     db: tauri::State<'_, db::DbState>,
     auth_state: tauri::State<'_, auth::AuthState>,
 ) -> Result<Value, auth::PrivilegedActionError> {
+    // A manager's approval is checked against the store's current staff
+    // permissions when the till is online (as Android does); offline, the
+    // last synced directory decides. Bounded: never holds the approval up.
+    if auth::confirmation_asks_manager_approval(arg0.as_ref()) {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            auth::refresh_staff_auth_directory(&db, None),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                tracing::debug!(error = %error, "Staff directory refresh before a manager approval failed")
+            }
+            Err(_) => {
+                tracing::debug!("Staff directory refresh before a manager approval timed out")
+            }
+        }
+    }
     auth::confirm_privileged_action(arg0, &db, &auth_state)
 }
 

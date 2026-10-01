@@ -71,6 +71,7 @@ import {
   verifyAndSaveMyDataDevice, normalizeMyDataProtocol, isMyDataFiscalProtocol,
   getMyDataCapPrefill,
   myDataCapTargetMatches,
+  myDataVoucherCodeIssue,
 } from '../utils/mydata-device-setup';
 import { MyDataCapSetupAssistant, type MyDataCapSetupStatus } from '../components/integrations/MyDataCapSetupAssistant';
 import { MyDataCashierDiscovery } from '../components/integrations/MyDataCashierDiscovery';
@@ -371,7 +372,10 @@ type PluginFieldKey = 'api_key' | 'api_secret' | 'merchant_id' | 'store_id' | 's
 
 const PLUGIN_FORM_CONFIG: Record<string, { requiredFields: PluginFieldKey[]; supportsCommission?: boolean; supportsAutoAccept?: boolean; supportsPrepMinutes?: boolean; supportsMenuSync?: boolean; supportsAvailabilitySync?: boolean; supportsProductSync?: boolean; supportsOrderSync?: boolean; supportsInventorySync?: boolean; }> = {
   efood: { requiredFields: ['api_key', 'api_secret', 'store_id', 'chain_id', 'webhook_secret'], supportsCommission: true, supportsAutoAccept: true, supportsPrepMinutes: true, supportsMenuSync: true, supportsAvailabilitySync: true },
-  wolt: { requiredFields: ['api_key', 'api_secret', 'merchant_id'], supportsCommission: true, supportsAutoAccept: true, supportsPrepMinutes: true, supportsMenuSync: true, supportsAvailabilitySync: true },
+  // Wolt is OAuth-onboarded through Connect Wolt in the Admin Dashboard: no API
+  // key or secret exists. Mirrors admin-dashboard/src/lib/plugins/required-credentials.ts;
+  // the till never renders this form for wolt (Admin-Dashboard-managed setup).
+  wolt: { requiredFields: ['webhook_secret', 'merchant_id'], supportsCommission: true, supportsAutoAccept: true, supportsPrepMinutes: true, supportsMenuSync: true, supportsAvailabilitySync: true },
   box: { requiredFields: ['api_key', 'api_secret', 'store_id'], supportsCommission: true, supportsAutoAccept: true, supportsPrepMinutes: true, supportsMenuSync: true, supportsAvailabilitySync: true },
   glovo: { requiredFields: ['api_key', 'store_id'], supportsCommission: true, supportsAutoAccept: true, supportsPrepMinutes: true, supportsMenuSync: true, supportsAvailabilitySync: true },
   bolt_food: { requiredFields: ['api_key', 'api_secret', 'store_id'], supportsCommission: true, supportsAutoAccept: true, supportsPrepMinutes: true, supportsMenuSync: true, supportsAvailabilitySync: true },
@@ -487,6 +491,7 @@ const ADMIN_DASHBOARD_SETUP_PLUGIN_IDS = new Set([
   'customer_messaging',
   'efood',
   'box',
+  'wolt',
 ]);
 
 const usesAdminDashboardSetup = (pluginId: string, readOnlyAdminSetup?: boolean): boolean =>
@@ -1339,7 +1344,20 @@ const IntegrationCard = memo<IntegrationCardProps>(({
               )}
             </p>
           )}
-          {isAdminDashboardSetup && integration.id !== 'efood' && integration.id !== 'caller_id' && integration.status === 'pending' && (
+          {/* Round 3 item DR7 (01/10/2026): Wolt is OAuth-connected in the
+              Admin Dashboard with the merchant's Wolt account, and never
+              "becomes active with the first order received". Its card says
+              so whatever its status, in Android's words
+              (`integrations.wolt.adminManagedSetup`). */}
+          {integration.id === 'wolt' && (
+            <p className={`mt-2 text-xs font-medium ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>
+              {t(
+                'integrations.wolt.adminManagedSetup',
+                "Wolt is connected in the Admin Dashboard with your Wolt account; there's no API key to enter on the POS. This screen only shows its status."
+              )}
+            </p>
+          )}
+          {isAdminDashboardSetup && integration.id !== 'efood' && integration.id !== 'caller_id' && integration.id !== 'wolt' && integration.status === 'pending' && (
             <p className={`mt-2 text-xs font-medium ${isDark ? 'text-amber-300' : 'text-amber-700'}`}>
               {t(
                 'integrations.adminSetup.pendingFirstOrder',
@@ -1812,6 +1830,11 @@ export const IntegrationsPage: React.FC = () => {
   const myDataSetupScope = JSON.stringify([integrationScope, myDataConfig?.mode, myDataConfig?.device_connection]);
   const myDataSetupScopeRef = useRef(myDataSetupScope);
   myDataSetupScopeRef.current = myDataSetupScope;
+  const myDataSaveScopeRef = useRef({ scope: myDataSetupScope });
+  if (myDataSaveScopeRef.current.scope !== myDataSetupScope) {
+    myDataSaveScopeRef.current = { scope: myDataSetupScope };
+  }
+  useEffect(() => () => { myDataSaveScopeRef.current = { scope: '' }; }, []);
   const receiveCapStatus = useCallback((status: MyDataCapSetupStatus | null) => {
     if (myDataSetupScopeRef.current !== myDataSetupScope) return;
     const entry = { scope: myDataSetupScope, status };
@@ -1839,6 +1862,7 @@ export const IntegrationsPage: React.FC = () => {
   }, [myDataSetupScope, myDataConfig?.device_connection]);
   const fetchIntegrations = useIntegrationRefresh(integrationScope, loadIntegrations, () => {
     setMyDataModalOpen(false);
+    setMyDataSaving(false);
     setMyDataLocalSettingsReady(false);
     setIntegrations([]);
     setMyDataReportingEnabled(null);
@@ -2165,6 +2189,8 @@ export const IntegrationsPage: React.FC = () => {
     }
 
     setMyDataSaving(true);
+    const originalSaveScope = myDataSaveScopeRef.current;
+    const isSaveCurrent = () => myDataSaveScopeRef.current === originalSaveScope;
     try {
       const deviceConnection: Record<string, any> =
         myDataConnectionType === 'network'
@@ -2235,10 +2261,15 @@ export const IntegrationsPage: React.FC = () => {
       const terminalId =
         getCachedTerminalCredentials().terminalId ||
         String(getSetting('terminal', 'terminal_id') || '').trim();
+      if (!isSaveCurrent()) return;
       const result = await verifyAndSaveMyDataDevice(
         bridge.ecr, nativeDevice, Boolean(existing), terminalId, deviceConnection,
-        payload => posApiPost<{ config?: Record<string, any> }>('/pos/mydata/config', payload)
+        payload => {
+          if (!isSaveCurrent()) throw new Error('Fiscal setup identity changed');
+          return posApiPost<{ config?: Record<string, any> }>('/pos/mydata/config', payload);
+        }
       );
+      if (!isSaveCurrent()) return;
 
       if (!result.success) {
         throw new Error(result.error || 'Failed to save MyData configuration');
@@ -2258,9 +2289,10 @@ export const IntegrationsPage: React.FC = () => {
       // saving device wiring does not by itself enable fiscal transmission.
       void fetchIntegrations();
     } catch (err: any) {
+      if (!isSaveCurrent()) return;
       toast.error(err?.message || 'Failed to save MyData configuration');
     } finally {
-      setMyDataSaving(false);
+      if (isSaveCurrent()) setMyDataSaving(false);
     }
   }, [
     myDataBaudRate,
@@ -2866,6 +2898,18 @@ export const IntegrationsPage: React.FC = () => {
                         onChange={event => setMyDataCapSettings(previous => ({ ...previous, [key]: Number(event.target.value) }))}
                         disabled={!myDataLocalSettingsReady || myDataSaving || saveMyDataAction.disabled} />
                     ))}
+                    <div>
+                      <POSGlassInput label={t('integrations.mydata.capSettings.voucherPaymentCode', 'Voucher payment code (optional)')}
+                        placeholder={t('integrations.mydata.capSettings.voucherPaymentCodeHelp', 'Leave blank until your technician assigns the voucher code.')}
+                        type="number" min={2} max={20} value={myDataCapSettings.voucherPaymentCode ?? ''}
+                        onChange={event => { const raw = event.target.value.trim(); setMyDataCapSettings(previous => ({ ...previous, voucherPaymentCode: raw === '' ? undefined : Number(raw) })); }}
+                        disabled={!myDataLocalSettingsReady || myDataSaving || saveMyDataAction.disabled} />
+                      {myDataVoucherCodeIssue(myDataCapSettings.voucherPaymentCode, myDataCapSettings.cashPaymentCode, myDataCapSettings.cardPaymentCode) && (
+                        <p role="alert" className="mt-1 text-xs text-red-400">
+                          {t('integrations.mydata.capSettings.voucherPaymentCodeInvalid', 'Use 2–20 and a code different from the cash and card codes.')}
+                        </p>
+                      )}
+                    </div>
                   </div>
                 </details>
               )}

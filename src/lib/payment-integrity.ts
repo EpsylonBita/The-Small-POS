@@ -1,7 +1,10 @@
 import type { TFunction } from "i18next";
 
+import { formatFiscalCloseBlockedError } from "./fiscal-closeout";
 import type {
   PaymentIntegrityErrorPayload,
+  ReviewPaymentSummary,
+  UnsavedPaymentSummary,
   SyncBlockerDetail,
   UnsettledPaymentBlocker,
 } from "./ipc-contracts";
@@ -9,6 +12,28 @@ import type {
 export const UNSETTLED_PAYMENT_BLOCKER_ERROR_CODE =
   "UNSETTLED_PAYMENT_BLOCKER";
 export const SYNC_CLOSEOUT_BLOCKED_ERROR_CODE = "SYNC_CLOSEOUT_BLOCKED";
+/**
+ * One unresolved payment set aside as a possible duplicate (30/09/2026). The
+ * native Z gate and the shared Health contract key on this exact code.
+ */
+export const PAYMENTS_NEED_REVIEW_REASON_CODE = "payments_need_review";
+/**
+ * `payment_record` refusal for an approved card that found its order already
+ * covered: recorded set aside for a manager to give back, not collected.
+ */
+export const PAYMENT_SET_ASIDE_ERROR_CODE = "PAYMENT_SET_ASIDE_FOR_REVIEW";
+/**
+ * One card payment charged on this till whose payment row could not be saved
+ * yet (30/09/2026). The Z gate and the shared Health contract key on it.
+ */
+export const PAYMENTS_NOT_SAVED_REASON_CODE = "payments_not_saved";
+/** `payment_record`: the card was charged, the payment is not saved yet. */
+export const PAYMENT_NOT_SAVED_ERROR_CODE = "PAYMENT_NOT_SAVED";
+/**
+ * `payment_record`: a new tender was refused because a charged payment of the
+ * order is not saved yet. Nothing was charged.
+ */
+export const PAYMENT_NOT_SAVED_PENDING_ERROR_CODE = "PAYMENT_NOT_SAVED_PENDING";
 
 export interface SyncCloseoutBlockedPayload {
   errorCode?: string;
@@ -190,6 +215,82 @@ function blockerInterpolation(
   return values;
 }
 
+function normalizeReviewPayment(value: unknown): ReviewPaymentSummary | undefined {
+  const record = asRecord(value);
+  if (!record) {
+    return undefined;
+  }
+  const paymentId = firstString(record, ["paymentId", "payment_id"]);
+  if (!paymentId) {
+    return undefined;
+  }
+  const amountCents = firstNumber(record, ["amountCents", "amount_cents"]);
+  const amount =
+    firstNumber(record, ["amount"]) ??
+    (amountCents !== undefined ? amountCents / 100 : 0);
+  const detectedAt = firstString(record, ["detectedAt", "detected_at"]);
+  return {
+    paymentId,
+    method: firstString(record, ["method", "paymentMethod"]) ?? "pending",
+    amount,
+    amountCents: amountCents ?? Math.round(amount * 100),
+    currency: firstString(record, ["currency"]) ?? "EUR",
+    takenAt: firstString(record, ["takenAt", "taken_at"]) ?? "",
+    reason: firstString(record, ["reason"]) ?? "already_paid",
+    ...(detectedAt ? { detectedAt } : {}),
+  };
+}
+
+function normalizeUnsavedPayment(value: unknown): UnsavedPaymentSummary | undefined {
+  const record = asRecord(value);
+  if (!record) {
+    return undefined;
+  }
+  const idempotencyKey = firstString(record, ["idempotencyKey", "idempotency_key"]);
+  if (!idempotencyKey) {
+    return undefined;
+  }
+  const amountCents = firstNumber(record, ["amountCents", "amount_cents"]);
+  const amount =
+    firstNumber(record, ["amount"]) ??
+    (amountCents !== undefined ? amountCents / 100 : 0);
+  const canSaveAgain = record.canSaveAgain ?? record.can_save_again;
+  return {
+    idempotencyKey,
+    method: firstString(record, ["method", "paymentMethod"]) ?? "card",
+    amount,
+    amountCents: amountCents ?? Math.round(amount * 100),
+    currency: firstString(record, ["currency"]) ?? "EUR",
+    capturedAt: firstString(record, ["capturedAt", "captured_at"]) ?? "",
+    kind: firstString(record, ["kind"]) ?? "single",
+    attempts: firstNumber(record, ["attempts"]) ?? 0,
+    canSaveAgain: canSaveAgain !== false,
+  };
+}
+
+/** Is this the `payments_not_saved` blocker of one charged payment? */
+export function isPaymentsNotSavedBlocker(
+  blocker: Pick<UnsettledPaymentBlocker, "reasonCode">,
+): boolean {
+  return blocker.reasonCode === PAYMENTS_NOT_SAVED_REASON_CODE;
+}
+
+/** Is this the `payments_need_review` blocker of one set-aside payment? */
+export function isPaymentsNeedReviewBlocker(
+  blocker: Pick<UnsettledPaymentBlocker, "reasonCode">,
+): boolean {
+  return blocker.reasonCode === PAYMENTS_NEED_REVIEW_REASON_CODE;
+}
+
+/**
+ * A stable identity for a blocker: one per order and reason, except
+ * `payments_need_review` (one per set-aside payment) and `payments_not_saved`
+ * (one per charged payment not saved): an order can hold more than one.
+ */
+export function paymentBlockerKey(blocker: UnsettledPaymentBlocker): string {
+  return `${blocker.orderId}:${blocker.reasonCode}:${blocker.reviewPayment?.paymentId ?? blocker.unsavedPayment?.idempotencyKey ?? ""}`;
+}
+
 function normalizeBlockers(value: unknown): UnsettledPaymentBlocker[] {
   const parsed = parseJsonString(value);
   if (!Array.isArray(parsed)) {
@@ -229,12 +330,27 @@ function normalizeBlockers(value: unknown): UnsettledPaymentBlocker[] {
         "reasonVariant",
         "reason_variant",
       ]);
+      const reviewPayment = normalizeReviewPayment(
+        record.reviewPayment ?? record.review_payment,
+      );
+      const unsavedPayment = normalizeUnsavedPayment(
+        record.unsavedPayment ?? record.unsaved_payment,
+      );
+      const severity = firstString(record, ["severity"]);
+      const differenceCents = firstNumber(record, [
+        "differenceCents",
+        "difference_cents",
+      ]);
 
       return {
         orderId,
         orderNumber,
         ...(reasonAmounts ? { reasonAmounts } : {}),
         ...(reasonVariant ? { reasonVariant } : {}),
+        ...(reviewPayment ? { reviewPayment } : {}),
+        ...(unsavedPayment ? { unsavedPayment } : {}),
+        ...(severity === "blocking" || severity === "warning" ? { severity } : {}),
+        ...(differenceCents !== undefined ? { differenceCents } : {}),
         totalAmount:
           firstNumber(record, ["totalAmount", "total_amount"]) ?? 0,
         settledAmount:
@@ -530,11 +646,100 @@ export function formatPaymentIntegrityError(
   return fallback;
 }
 
+/**
+ * The cashier's sentence for money that moved but was recorded set aside
+ * (`PAYMENT_SET_ASIDE_FOR_REVIEW`), in the operator's language; `null` for
+ * any other answer. The payment is not a collection: never retry it.
+ */
+export function formatSetAsidePaymentMessage(
+  value: unknown,
+  t: TFunction,
+  formatMoney: (amount: number) => string = defaultFormatMoney,
+): string | null {
+  for (const candidate of collectCandidateRecords(value)) {
+    if (firstString(candidate, ["errorCode", "error_code"]) !== PAYMENT_SET_ASIDE_ERROR_CODE) {
+      continue;
+    }
+    const amount = firstNumber(candidate, ["amount"]) ?? 0;
+    const due = firstNumber(candidate, ["amountDue", "amount_due"]) ?? 0;
+    const reason = firstString(candidate, ["reason"]);
+    if (reason === "exceeds_amount_due") {
+      return t("payment.setAside.exceedsMessage", {
+        amount: formatMoney(amount),
+        due: formatMoney(due),
+        defaultValue:
+          "Only {{due}} was still due on this order. The {{amount}} just taken is recorded for a manager to give back and is not counted. Collect only what is due.",
+      });
+    }
+    return t("payment.setAside.message", {
+      amount: formatMoney(amount),
+      defaultValue:
+        "This order was already paid. The {{amount}} just taken is recorded for a manager to give back and is not counted. Do not charge it again.",
+    });
+  }
+  return null;
+}
+
+/**
+ * The cashier's sentence for a card charged but not saved
+ * (`PAYMENT_NOT_SAVED`), or for a tender refused because one is not saved
+ * (`PAYMENT_NOT_SAVED_PENDING`), in the operator's language; `null` for any
+ * other answer. Never the generic failure: it says not to charge again.
+ */
+export function formatPaymentNotSavedMessage(
+  value: unknown,
+  t: TFunction,
+  formatMoney: (amount: number) => string = defaultFormatMoney,
+): string | null {
+  for (const candidate of collectCandidateRecords(value)) {
+    const code = firstString(candidate, ["errorCode", "error_code"]);
+    if (code !== PAYMENT_NOT_SAVED_ERROR_CODE && code !== PAYMENT_NOT_SAVED_PENDING_ERROR_CODE) {
+      continue;
+    }
+    const cents = firstNumber(candidate, ["amountCents", "amount_cents"]);
+    const amount =
+      cents !== undefined ? cents / 100 : (firstNumber(candidate, ["amount"]) ?? 0);
+    if (code === PAYMENT_NOT_SAVED_PENDING_ERROR_CODE) {
+      return t("payment.notSaved.pendingMessage", {
+        amount: formatMoney(amount),
+        defaultValue:
+          "A card payment of {{amount}} on this order was charged but is not saved on this till yet. Save it again before taking another payment. Do NOT charge again.",
+      });
+    }
+    return t("payment.notSaved.message", {
+      amount: formatMoney(amount),
+      defaultValue:
+        "The card was charged {{amount}}. The payment could not be saved on this till yet. Do NOT charge again: save the payment again.",
+    });
+  }
+  return null;
+}
+
 export function formatOperatorFacingError(
   value: unknown,
   fallback: string,
   t: TFunction,
 ): string {
+  // A card charged but not saved (30/09/2026): never the generic failure.
+  const notSavedMessage = formatPaymentNotSavedMessage(value, t);
+  if (notSavedMessage?.trim()) {
+    return notSavedMessage.trim();
+  }
+
+  // Money that moved but was recorded set aside (30/09/2026): the cashier
+  // reads it in the store's language, never the native English fallback.
+  const setAsideMessage = formatSetAsidePaymentMessage(value, t);
+  if (setAsideMessage?.trim()) {
+    return setAsideMessage.trim();
+  }
+
+  // The Z close-day guard's typed fiscal refusal (29/09/2026): localized from
+  // its code and parameters, never shown as the native English fallback.
+  const fiscalCloseMessage = formatFiscalCloseBlockedError(value, t);
+  if (fiscalCloseMessage?.trim()) {
+    return fiscalCloseMessage.trim();
+  }
+
   const syncCloseoutMessage = formatSyncCloseoutError(value, "", t);
   if (syncCloseoutMessage.trim()) {
     return syncCloseoutMessage.trim();

@@ -1,23 +1,44 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { translateRoleName } from '../../utils/role-labels';
 import { useShift } from '../../contexts/shift-context';
 import { useTheme } from '../../contexts/theme-context';
 import { useFeatures } from '../../hooks/useFeatures';
-import type { ZReportData, ZReportDayOrder } from '../../types/reports';
+import type {
+  ZReportData,
+  ZReportDayOrder,
+  ZReportFiscalQueue,
+  ZReportGiftCloseBlocker,
+} from '../../types/reports';
+import { getSyncQueueBridge } from '../../services/SyncQueueBridge';
 import { exportZReportToCSV, exportDayOrdersToCSV } from '../../utils/reportExport';
 import { formatCurrency, formatDate, formatTime } from '../../utils/format';
 import { parseLocalDateString, toLocalDateString } from '../../utils/date';
 import { clearBusinessDayStorage } from '../../utils/session-utils';
 import {
+  GIFT_CLOSE_LABELS,
+  classifyGiftCloseFinalizationError,
+  giftCloseRecoveryKey,
+  giftCloseStaffLabel,
   normalizeZReportData,
+  resolvePersistedZReportId,
   resolveShiftActivityCount,
   resolveShiftEarnedTotal,
   resolveShiftWindow,
+  resolveZReportGiftClose,
   resolveZReportPeriod,
 } from '../../utils/zReport';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
+import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { UnsettledPaymentBlockersPanel } from '../ui/UnsettledPaymentBlockersPanel';
+import { setAsideResolvingKey } from '../../utils/paymentSetAside';
+import { unsavedResolvingKey, unsavedSavingKey } from '../../utils/unsavedPayments';
+import { usePrivilegedActionConfirmation } from '../../hooks/usePrivilegedActionConfirmation';
+import {
+  useRecordPaymentBlocker,
+  type RecordPaymentBlockerOutcome,
+} from '../../hooks/useRecordPaymentBlocker';
+import { isNewOrderCheckoutBlocker } from '../ui/UnsettledPaymentBlockersPanel';
 import {
   AlertTriangle,
   Banknote,
@@ -46,7 +67,12 @@ import {
   extractPaymentIntegrityPayload,
   formatOperatorFacingError,
   formatPaymentIntegrityError,
+  formatSetAsidePaymentMessage,
+  getLocalizedPaymentMethod,
+  paymentBlockerKey,
 } from '../../../lib/payment-integrity';
+import { extractPrivilegedActionError } from '../../utils/privileged-actions';
+import { formatFiscalCloseBlockedError } from '../../../lib/fiscal-closeout';
 
 interface ZReportModalProps {
   isOpen: boolean;
@@ -125,6 +151,27 @@ function isPlatformTender(value: unknown): boolean {
   return slug === 'platform_online' || slug === 'platform_cod';
 }
 
+// The fiscal close-day guard's view of this Z (native `fiscalQueue`), or null
+// when the preview carries none (older build, or the queue could not be read:
+// the submit's own guard still decides).
+function resolveFiscalQueue(report: ZReportData | null): ZReportFiscalQueue | null {
+  const candidate = report?.fiscalQueue;
+  if (!candidate || typeof candidate !== 'object' || !('blocking' in candidate)) {
+    return null;
+  }
+  return candidate;
+}
+
+// A report day ("2026-09-29") in the screen's date format; unparseable input
+// is shown as is rather than as a dash.
+function formatFiscalBusinessDay(isoDay: string): string {
+  const parsed = parseLocalDateString(isoDay);
+  if (Number.isNaN(parsed.getTime())) {
+    return isoDay;
+  }
+  return formatDate(parsed, { day: '2-digit', month: '2-digit', year: 'numeric' });
+}
+
 const ZReportModal: React.FC<ZReportModalProps> = ({
   isOpen,
   onClose,
@@ -133,7 +180,8 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   lockDate = false,
 }) => {
   const bridge = getBridge();
-  const { clearShift } = useShift();
+  const { clearShift, staff, activeShift } = useShift();
+  const { runWithPrivilegedConfirmation, confirmationModal } = usePrivilegedActionConfirmation();
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const { isFeatureEnabled, isMainTerminal, isMobileWaiter, loading: featuresLoading, parentTerminalId } = useFeatures();
@@ -174,9 +222,25 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     UnsettledPaymentBlocker[]
   >([]);
   const [resolvingBlockerKey, setResolvingBlockerKey] = useState<string | null>(null);
+  // A payment set aside as a possible duplicate, waiting for the operator to
+  // confirm it was given back (always asked, then authorized: 30/09/2026).
+  const [setAsideConfirmation, setSetAsideConfirmation] = useState<UnsettledPaymentBlocker | null>(null);
+  const [unsavedConfirmation, setUnsavedConfirmation] = useState<UnsettledPaymentBlocker | null>(null);
+  const [retryingFiscalQueue, setRetryingFiscalQueue] = useState(false);
   const [reportReloadVersion, setReportReloadVersion] = useState(0);
   const wasOpenRef = useRef(false);
   const pendingOpenDateRef = useRef<string | null>(null);
+  // Async results (print, submit, blocker resolve) belong to the open + branch + business day that
+  // started them. The scope bumps synchronously on every change, so a late result is dropped instead
+  // of landing on the report the operator switched to.
+  const statusScopeRef = useRef(0);
+  useLayoutEffect(() => {
+    statusScopeRef.current += 1;
+    setPrinting(false);
+    setSubmitting(false);
+    setResolvingBlockerKey(null);
+    return () => { statusScopeRef.current += 1; };
+  }, [branchId, isOpen, selectedDate]);
 
   const [orderTypeFilter, setOrderTypeFilter] = useState<'all' | 'delivery' | 'dine-in' | 'pickup'>('all');
   const [paymentMethodFilter, setPaymentMethodFilter] = useState<'all' | 'cash' | 'card' | 'platform'>('all');
@@ -246,7 +310,8 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   }, [staffReportsSorted, zReport]);
   const dayOrderDetailCount = dayOrderDetails.length;
 
-  const formatMoney = (value?: number) => formatCurrency(value ?? 0);
+  const giftClose = useMemo(() => resolveZReportGiftClose(zReport), [zReport]);
+  const formatMoney = (value?: number) => formatCurrency(value ?? 0, giftClose.currency || undefined);
   const formatWindowDateTime = (value?: string | null) => (
     value
       ? `${formatDate(value)} ${formatTime(value)}`
@@ -266,6 +331,8 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
       setPrinting(false);
       setSubmitting(false);
       setResolvingBlockerKey(null);
+      setSetAsideConfirmation(null);
+      setRetryingFiscalQueue(false);
       setZReport(null);
       setLoading(true);
       setSelectedDate(nextDate);
@@ -365,76 +432,351 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     };
   }, [bridge, branchId, isOpen, isUsingLiveDefaultDate, lockDate, reportReloadVersion, selectedDate, t]);
 
-  const handleResolveBlocker = useCallback(
-    async (blocker: UnsettledPaymentBlocker, method: 'cash' | 'card') => {
-      const actionKey = `${blocker.orderId}:${method}`;
-      setResolvingBlockerKey(actionKey);
-      setSubmitResult(null);
-
-      try {
-        const result = await bridge.reports.resolvePaymentBlocker({
-          orderId: blocker.orderId,
-          method,
-        });
-
-        if (result?.success === false) {
-          const paymentIntegrityPayload = extractPaymentIntegrityPayload(result);
+  // "Record cash" / "Record card" (item F, 30/09/2026; parity with Android's
+  // "Record the payment"): recording money no one collected is a sensitive
+  // action. Confirmed first, then approved like the other money actions on
+  // this terminal (cashier or manager shift + PIN); the till keys it
+  // `z-record:<order>:<cents>` and audits who recorded it, with
+  // `charged: false`. Nothing is ever charged.
+  // The report scope the record was started on: a late answer for a branch or
+  // day the operator has left is dropped, like every other async result here.
+  const recordScopeRef = useRef<number | null>(null);
+  const handleRecordBlockerOutcome = useCallback(
+    (
+      blocker: UnsettledPaymentBlocker,
+      method: 'cash' | 'card',
+      outcome: RecordPaymentBlockerOutcome,
+    ) => {
+      const startedScope = recordScopeRef.current;
+      recordScopeRef.current = null;
+      if (startedScope !== null && statusScopeRef.current !== startedScope) return;
+      const methodLabel = t(
+        method === 'cash' ? 'modals.zReport.cash' : 'modals.zReport.card',
+      ).toLowerCase();
+      switch (outcome.kind) {
+        case 'cancelled':
+          return;
+        case 'shift_required':
+          setSubmitResult(
+            t('modals.zReport.setAsideShiftRequired', {
+              defaultValue:
+                'A cashier or manager has to be checked in on this terminal to confirm it.',
+            }),
+          );
+          return;
+        case 'refused': {
+          const paymentIntegrityPayload = extractPaymentIntegrityPayload(outcome.result);
           if (paymentIntegrityPayload?.blockers?.length) {
             setPaymentBlockers(paymentIntegrityPayload.blockers);
           }
-          const errorMessage = formatPaymentIntegrityError(
-            result,
-            t('modals.zReport.submissionFailed'),
-            t,
-          );
           setSubmitResult(
             t('modals.zReport.resolveBlockerFailed', {
               orderNumber: blocker.orderNumber,
-              error: errorMessage,
+              error: formatPaymentIntegrityError(
+                outcome.result,
+                t('modals.zReport.submissionFailed'),
+                t,
+              ),
+            }),
+          );
+          setReportReloadVersion((current) => current + 1);
+          return;
+        }
+        case 'failed': {
+          const paymentIntegrityPayload = extractPaymentIntegrityPayload(outcome.error);
+          if (paymentIntegrityPayload?.blockers?.length) {
+            setPaymentBlockers(paymentIntegrityPayload.blockers);
+          }
+          setSubmitResult(
+            t('modals.zReport.resolveBlockerFailed', {
+              orderNumber: blocker.orderNumber,
+              error: extractErrorMessage(
+                outcome.error,
+                t('modals.zReport.submissionFailed'),
+                t,
+              ),
             }),
           );
           return;
         }
-
-        setError(null);
-        setSubmitResult(
-          t('modals.zReport.resolveBlockerSuccess', {
-            orderNumber: blocker.orderNumber,
-            method: t(
-              method === 'cash'
-                ? 'modals.zReport.cash'
-                : 'modals.zReport.card',
-            ).toLowerCase(),
-          }),
-        );
-        setReportReloadVersion((current) => current + 1);
-      } catch (e: unknown) {
-        const paymentIntegrityPayload = extractPaymentIntegrityPayload(e);
-        if (paymentIntegrityPayload?.blockers?.length) {
-          setPaymentBlockers(paymentIntegrityPayload.blockers);
-        }
-        const errorMessage = extractErrorMessage(
-          e,
-          t('modals.zReport.submissionFailed'),
-          t,
-        );
-        setSubmitResult(
-          t('modals.zReport.resolveBlockerFailed', {
-            orderNumber: blocker.orderNumber,
-            error: errorMessage,
-          }),
-        );
-      } finally {
-        setResolvingBlockerKey(null);
+        case 'already_recorded':
+          setError(null);
+          setSubmitResult(
+            t('modals.zReport.recordAlreadyRecorded', {
+              orderNumber: blocker.orderNumber,
+              method: methodLabel,
+              defaultValue:
+                'This {{method}} payment for {{orderNumber}} was already recorded. Nothing was added.',
+            }),
+          );
+          setReportReloadVersion((current) => current + 1);
+          return;
+        case 'recorded':
+          setError(null);
+          setSubmitResult(
+            t('modals.zReport.resolveBlockerSuccess', {
+              orderNumber: blocker.orderNumber,
+              method: methodLabel,
+            }),
+          );
+          setReportReloadVersion((current) => current + 1);
       }
     },
-    [bridge, t],
+    [t],
   );
+
+  const recordBlocker = useRecordPaymentBlocker({
+    runWithPrivilegedConfirmation,
+    record: (blocker, method, amountCents) => {
+      recordScopeRef.current = statusScopeRef.current;
+      setSubmitResult(null);
+      return bridge.reports.resolvePaymentBlocker({
+        orderId: blocker.orderId,
+        method,
+        amountCents,
+      });
+    },
+    onOutcome: handleRecordBlockerOutcome,
+    setBusyKey: setResolvingBlockerKey,
+    formatMoney,
+  });
+  // The panel's "Record cash" / "Record card": opens the confirmation.
+  const handleResolveBlocker = recordBlocker.requestRecord;
+
+  // "Money given back to the customer" for a set-aside payment. Asked first in
+  // a confirmation dialog, then authorized like a money action on this
+  // terminal (cashier or manager shift + PIN). Local only: the server never
+  // recorded the payment. The report is read again so the blocker only
+  // disappears once a fresh check no longer finds it.
+  const handleConfirmSetAsideReturned = useCallback(async () => {
+    const blocker = setAsideConfirmation;
+    const paymentId = blocker?.reviewPayment?.paymentId;
+    if (!blocker || !paymentId) {
+      setSetAsideConfirmation(null);
+      return;
+    }
+    setSetAsideConfirmation(null);
+    setResolvingBlockerKey(setAsideResolvingKey(paymentId));
+    setSubmitResult(null);
+    try {
+      const resolvedBy =
+        (staff as { databaseStaffId?: string } | null | undefined)?.databaseStaffId
+        || activeShift?.staff_id
+        || null;
+      const result = await runWithPrivilegedConfirmation({
+        scope: 'cash_drawer_control',
+        action: () =>
+          bridge.payments.resolveSetAsidePayment({
+            paymentId,
+            outcome: 'returned_to_customer',
+            resolvedBy,
+          }),
+        title: t('modals.zReport.setAsideApprovalTitle', {
+          defaultValue: 'Confirm the money was given back',
+        }),
+        subtitle: t('modals.zReport.setAsideApprovalSubtitle', {
+          defaultValue: 'Enter the cashier or manager PIN to confirm it.',
+        }),
+      });
+      setSubmitResult(
+        result?.alreadyResolved
+          ? t('modals.zReport.setAsideAlreadyResolved', {
+            defaultValue: 'This payment was already recorded as given back.',
+          })
+          : t('modals.zReport.setAsideResolved', {
+            defaultValue: 'Recorded as given back to the customer. It stays out of the totals.',
+          }),
+      );
+    } catch (e: unknown) {
+      const privilegedError = extractPrivilegedActionError(e, 'cash_drawer_control');
+      if (
+        privilegedError?.code === 'UNAUTHORIZED'
+        && /shift/i.test(privilegedError.reason ?? '')
+      ) {
+        setSubmitResult(
+          t('modals.zReport.setAsideShiftRequired', {
+            defaultValue:
+              'A cashier or manager has to be checked in on this terminal to confirm it.',
+          }),
+        );
+      } else if (e instanceof Error && e.message === 'Privileged action confirmation cancelled') {
+        // The operator closed the PIN prompt: nothing was recorded.
+      } else {
+        setSubmitResult(
+          t('modals.zReport.setAsideResolveFailed', {
+            error: extractErrorMessage(e, t('modals.zReport.unknownError'), t),
+            defaultValue: 'Could not record it: {{error}}',
+          }),
+        );
+      }
+    } finally {
+      setResolvingBlockerKey(null);
+      setReportReloadVersion((current) => current + 1);
+    }
+  }, [activeShift?.staff_id, bridge, runWithPrivilegedConfirmation, setAsideConfirmation, staff, t]);
+
+  // "Save payment again" for a card charged on this till whose payment is not
+  // saved yet: the same write and key, no new charge. The report is read
+  // again so the blocker only disappears on a fresh check (30/09/2026).
+  const handleSaveUnsavedAgain = useCallback(async (blocker: UnsettledPaymentBlocker) => {
+    const idempotencyKey = blocker.unsavedPayment?.idempotencyKey;
+    if (!idempotencyKey) return;
+    setResolvingBlockerKey(unsavedSavingKey(idempotencyKey));
+    setSubmitResult(null);
+    try {
+      const result = await bridge.payments.saveUnsavedPayments({ idempotencyKey });
+      const setAside = Array.isArray(result?.setAside) ? result.setAside : [];
+      if (Number(result?.saved || 0) > 0) {
+        setSubmitResult(t('modals.zReport.unsavedSaved', { defaultValue: 'Payment saved.' }));
+      } else if (setAside.length > 0) {
+        setSubmitResult(
+          formatSetAsidePaymentMessage(setAside[0], t, formatMoney)
+            ?? t('modals.zReport.unsavedSaved', { defaultValue: 'Payment saved.' }),
+        );
+      } else {
+        setSubmitResult(
+          t('modals.zReport.unsavedStillNotSaved', {
+            defaultValue:
+              'Still not saved on this till. Do not charge again. Try again, or give the money back to the customer and confirm it here.',
+          }),
+        );
+      }
+    } catch (e: unknown) {
+      setSubmitResult(
+        t('modals.zReport.unsavedStillNotSaved', {
+          defaultValue:
+            'Still not saved on this till. Do not charge again. Try again, or give the money back to the customer and confirm it here.',
+        }),
+      );
+      console.warn('[ZReportModal] Save payment again failed:', e);
+    } finally {
+      setResolvingBlockerKey(null);
+      setReportReloadVersion((current) => current + 1);
+    }
+  }, [bridge, formatMoney, t]);
+
+  // "Money given back to the customer" for a card charged and never saved:
+  // asked first in a confirmation dialog, then authorized like the other
+  // money actions (cashier or manager shift + PIN). The audit is written
+  // before the record goes; the order is left as it is.
+  const handleConfirmUnsavedReturned = useCallback(async () => {
+    const blocker = unsavedConfirmation;
+    const idempotencyKey = blocker?.unsavedPayment?.idempotencyKey;
+    setUnsavedConfirmation(null);
+    if (!blocker || !idempotencyKey) {
+      return;
+    }
+    setResolvingBlockerKey(unsavedResolvingKey(idempotencyKey));
+    setSubmitResult(null);
+    try {
+      const resolvedBy =
+        (staff as { databaseStaffId?: string } | null | undefined)?.databaseStaffId
+        || activeShift?.staff_id
+        || null;
+      const result = await runWithPrivilegedConfirmation({
+        scope: 'cash_drawer_control',
+        action: () =>
+          bridge.payments.resolveUnsavedPayment({
+            idempotencyKey,
+            outcome: 'returned_to_customer',
+            resolvedBy,
+          }),
+        title: t('modals.zReport.unsavedApprovalTitle', {
+          defaultValue: 'Confirm the money was given back',
+        }),
+        subtitle: t('modals.zReport.unsavedApprovalSubtitle', {
+          defaultValue: 'Enter the cashier or manager PIN to confirm it.',
+        }),
+      });
+      const outcome = result?.result;
+      setSubmitResult(
+        outcome === 'saved'
+          ? t('modals.zReport.unsavedSavedAfterAll', {
+            defaultValue: 'This payment was saved after all: there is nothing to give back.',
+          })
+          : outcome === 'resolved'
+            ? t('modals.zReport.unsavedResolved', {
+              defaultValue: 'Recorded as given back to the customer. The payment will not be saved.',
+            })
+            : t('modals.zReport.unsavedAlreadyResolved', {
+              defaultValue: 'This payment was already recorded as given back.',
+            }),
+      );
+    } catch (e: unknown) {
+      const privilegedError = extractPrivilegedActionError(e, 'cash_drawer_control');
+      if (
+        privilegedError?.code === 'UNAUTHORIZED'
+        && /shift/i.test(privilegedError.reason ?? '')
+      ) {
+        setSubmitResult(
+          t('modals.zReport.setAsideShiftRequired', {
+            defaultValue:
+              'A cashier or manager has to be checked in on this terminal to confirm it.',
+          }),
+        );
+      } else if (e instanceof Error && e.message === 'Privileged action confirmation cancelled') {
+        // The operator closed the PIN prompt: nothing was recorded.
+      } else {
+        setSubmitResult(
+          t('modals.zReport.unsavedResolveFailed', {
+            error: extractErrorMessage(e, t('modals.zReport.unknownError'), t),
+            defaultValue: 'Could not record it: {{error}}',
+          }),
+        );
+      }
+    } finally {
+      setResolvingBlockerKey(null);
+      setReportReloadVersion((current) => current + 1);
+    }
+  }, [activeShift?.staff_id, bridge, runWithPrivilegedConfirmation, staff, t, unsavedConfirmation]);
 
   const title = useMemo(() => t('modals.zReport.title', { date: selectedDate }), [selectedDate, t]);
   const submitButtonLabel = t('modals.zReport.commitZReport');
   const resolvedBusinessDate = zReport?.date || selectedDate;
   const resolvedPeriod = useMemo(() => resolveZReportPeriod(zReport), [zReport]);
+  // Gift card close (native gift_close_report_v1) is read from the frozen report only; nothing here
+  // recomputes a drawer. Pending, missing or unreadable proof keeps the day not final.
+  const giftCloseBlocksFinal = !giftClose.allowsFinal;
+  const giftCloseDrawer = giftClose.drawer;
+  // Final print reprints the stored z_reports row by id; a live preview has no id and cannot print.
+  const persistedZReportId = resolvePersistedZReportId(zReport);
+  const canPrintFinalReport = Boolean(persistedZReportId) && !giftCloseBlocksFinal;
+  type GiftCloseTextKey = Exclude<keyof typeof GIFT_CLOSE_LABELS, 'recovery' | 'errors'>;
+  const giftCloseText = (key: GiftCloseTextKey): string =>
+    t(`modals.zReport.giftClose.${key}`, { defaultValue: GIFT_CLOSE_LABELS[key] });
+  const formatGiftMoney = (cents: number, currency?: string | null) =>
+    formatCurrency(cents / 100, currency || undefined);
+  const giftCloseRecoveryMessage = (blocker: ZReportGiftCloseBlocker | null): string => {
+    if (!blocker) {
+      return t('modals.zReport.giftClose.recovery.unreadable', {
+        defaultValue: GIFT_CLOSE_LABELS.recovery.unreadable,
+      });
+    }
+    const key = giftCloseRecoveryKey(blocker.code);
+    return t(`modals.zReport.giftClose.recovery.${key}`, {
+      staff: giftCloseStaffLabel(blocker),
+      defaultValue: GIFT_CLOSE_LABELS.recovery[key],
+    });
+  };
+  const giftCloseNotices: string[] = giftClose.state === 'unreadable'
+    ? [giftCloseRecoveryMessage(null)]
+    : giftClose.blockers.length > 0
+      ? giftClose.blockers.map((blocker) => giftCloseRecoveryMessage(blocker))
+      : giftCloseBlocksFinal
+        ? [giftCloseRecoveryMessage({ code: 'unknown' })]
+        : [];
+  const giftCloseStatusLabel = giftClose.state === 'final'
+    ? giftCloseText('proofFinal')
+    : giftClose.state === 'unreadable'
+      ? giftCloseText('proofUnreadable')
+      : giftCloseText('proofNotFinal');
+  const printUnavailableHint = !zReport
+    ? undefined
+    : giftCloseBlocksFinal
+      ? giftCloseText('blocked')
+      : !persistedZReportId
+        ? t('modals.zReport.finalPrintUnavailable', { defaultValue: GIFT_CLOSE_LABELS.finalPrintUnavailable })
+        : undefined;
   const summarySales = zReport?.sales || { totalOrders: 0, totalSales: 0, cashSales: 0, cardSales: 0 };
   const summaryCashDrawer: ZReportData['cashDrawer'] = zReport?.cashDrawer || {
     totalVariance: 0,
@@ -583,19 +925,24 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   }, [dayOrderDetails, resolvedBusinessDate]);
 
   const handlePrintReport = useCallback(async () => {
-    if (!zReport) return;
+    // Final print only reprints the persisted z_reports row (native verifies it exists). There is no
+    // renderer snapshot print: a preview without a stored id, or with unconfirmed gift proof, cannot print.
+    if (!zReport || !persistedZReportId || giftCloseBlocksFinal) return;
+    const statusScope = statusScopeRef.current;
     setPrinting(true);
     try {
       const result = await bridge.reports.printZReport({
-        snapshot: zReport,
+        zReportId: persistedZReportId,
         terminalName: typeof zReport.terminalName === 'string' ? zReport.terminalName : undefined,
       });
       if (result?.success === false) {
         throw new Error(result?.error || t('modals.zReport.printFailed', 'Failed to queue print'));
       }
+      if (statusScopeRef.current !== statusScope) return;
       setSubmitResult(t('modals.zReport.printQueued', 'Z-Report print queued'));
     } catch (err) {
       console.error('[ZReportModal] Z-Report print error:', err);
+      if (statusScopeRef.current !== statusScope) return;
       setSubmitResult(
         t('modals.zReport.printFailed', {
           defaultValue: `Print failed: ${err instanceof Error ? err.message : 'unknown error'}`,
@@ -603,33 +950,54 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
         }),
       );
     } finally {
-      setPrinting(false);
+      if (statusScopeRef.current === statusScope) setPrinting(false);
     }
-  }, [bridge, t, zReport]);
+  }, [bridge, giftCloseBlocksFinal, persistedZReportId, t, zReport]);
 
   const handleSubmitReport = useCallback(async () => {
+    // Unconfirmed gift card proof keeps the day open; native refuses it too, so never bypass that.
+    if (giftCloseBlocksFinal) return;
+    const statusScope = statusScopeRef.current;
     setSubmitResult(null);
     setPaymentBlockers([]);
     setSubmitting(true);
     try {
       console.log('[ZReportModal] Starting Z-Report submission...', { branchId, date: selectedDate });
       const res: ZReportSubmitResponse = await bridge.reports.submitZReport({ branchId, date: selectedDate });
+      const isInitiatingScope = statusScopeRef.current === statusScope;
+
+      // The fiscal close-day guard refuses with a code + parameters; the
+      // operator reads it in the store's language, never the native English
+      // fallback (29/09/2026). The reload shows the queued receipts.
+      const fiscalCloseMessage = formatFiscalCloseBlockedError(res, t, formatFiscalBusinessDay);
+      if (fiscalCloseMessage) {
+        console.warn('[ZReportModal] Z-Report held by queued fiscal receipts:', res);
+        setSubmitResult(fiscalCloseMessage);
+        setReportReloadVersion((current) => current + 1);
+        return;
+      }
 
       if (res?.success === false) {
+        if (!isInitiatingScope) return;
         const paymentIntegrityPayload = extractPaymentIntegrityPayload(res);
         setPaymentBlockers(paymentIntegrityPayload?.blockers || []);
-        const errorMessage = formatOperatorFacingError(
-          res,
-          res?.error || res?.message || t('modals.zReport.unknownError'),
-          t,
-        );
+        const giftCloseError = classifyGiftCloseFinalizationError(res);
+        const errorMessage = giftCloseError
+          ? t(`modals.zReport.giftClose.errors.${giftCloseError}`, {
+            defaultValue: GIFT_CLOSE_LABELS.errors[giftCloseError],
+          })
+          : formatOperatorFacingError(
+            res,
+            res?.error || res?.message || t('modals.zReport.unknownError'),
+            t,
+          );
         console.error('[ZReportModal] IPC error response:', { error: errorMessage, fullResponse: res });
         setSubmitResult(t('modals.zReport.submitFailed', { error: errorMessage }));
         return;
       }
 
       if (res?.success && res?.localDayClosed) {
-        setPaymentBlockers([]);
+        if (isInitiatingScope) setPaymentBlockers([]);
         console.log('[ZReportModal] Z-Report submitted successfully:', {
           id: res?.zReportId,
           cleanup: res?.cleanup,
@@ -642,7 +1010,8 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
             : isPendingLocalSubmit
               ? t('modals.zReport.pendingLocalSubmitQueued')
               : t('modals.zReport.submitSuccessQueued');
-        setSubmitResult(successMessage);
+        // The day is closed either way; only the visible message stays bound to the initiating report.
+        if (isInitiatingScope) setSubmitResult(successMessage);
 
         try { await bridge.auth.logout(); } catch { }
         try { clearBusinessDayStorage(); } catch { }
@@ -650,6 +1019,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
 
         setTimeout(() => { window.location.reload(); }, 900);
       } else {
+        if (!isInitiatingScope) return;
         const errorMessage = formatOperatorFacingError(
           res,
           res?.error || res?.message || t('modals.zReport.unknownError'),
@@ -660,18 +1030,63 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
       }
     } catch (e: unknown) {
       console.error('[ZReportModal] Submit error caught:', e);
+      if (statusScopeRef.current !== statusScope) return;
+      const fiscalCloseMessage = formatFiscalCloseBlockedError(e, t, formatFiscalBusinessDay);
+      if (fiscalCloseMessage) {
+        setSubmitResult(fiscalCloseMessage);
+        setReportReloadVersion((current) => current + 1);
+        return;
+      }
       const paymentIntegrityPayload = extractPaymentIntegrityPayload(e);
       setPaymentBlockers(paymentIntegrityPayload?.blockers || []);
-      const errorMessage = extractErrorMessage(
-        e,
-        t('modals.zReport.submissionFailed'),
-        t,
-      );
+      const giftCloseError = classifyGiftCloseFinalizationError(e);
+      const errorMessage = giftCloseError
+        ? t(`modals.zReport.giftClose.errors.${giftCloseError}`, {
+          defaultValue: GIFT_CLOSE_LABELS.errors[giftCloseError],
+        })
+        : extractErrorMessage(
+          e,
+          t('modals.zReport.submissionFailed'),
+          t,
+        );
       setSubmitResult(t('modals.zReport.submitFailed', { error: errorMessage }));
     } finally {
-      setSubmitting(false);
+      if (statusScopeRef.current === statusScope) setSubmitting(false);
     }
-  }, [branchId, bridge, clearShift, isPendingLocalSubmit, selectedDate, t]);
+  }, [branchId, bridge, clearShift, giftCloseBlocksFinal, isPendingLocalSubmit, selectedDate, t]);
+
+  // "Send the fiscal receipts again": reset the queued fiscal rows' backoff
+  // and run the queue now, then re-read the report. Scheduling a retry is not
+  // proof of anything: the row stays listed until a fresh read shows it gone.
+  const handleRetryFiscalQueue = useCallback(async () => {
+    setRetryingFiscalQueue(true);
+    setSubmitResult(null);
+    try {
+      const syncQueue = getSyncQueueBridge();
+      await syncQueue.retryModule('fiscal');
+      try {
+        await syncQueue.processQueue();
+      } catch (processError) {
+        // The background sync keeps trying; the re-read below reports what is left.
+        console.warn('[ZReportModal] Fiscal queue run after retry failed:', processError);
+      }
+      setSubmitResult(
+        t('modals.zReport.fiscalQueue.retryRequested', {
+          defaultValue: 'Sending the fiscal submissions again. The list updates once they are accepted.',
+        }),
+      );
+    } catch (e: unknown) {
+      setSubmitResult(
+        t('modals.zReport.fiscalQueue.retryFailed', {
+          error: extractErrorMessage(e, t('modals.zReport.unknownError'), t),
+          defaultValue: 'Could not send the fiscal submissions again: {{error}}',
+        }),
+      );
+    } finally {
+      setRetryingFiscalQueue(false);
+      setReportReloadVersion((current) => current + 1);
+    }
+  }, [t]);
 
   // Reconciliation from the report itself (1.4.114+). Until now the modal only
   // learned about payment-integrity breaks when a SUBMIT was rejected, so a
@@ -685,12 +1100,13 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     [integrity],
   );
   // Submit-time rejections and preview findings describe the same orders;
-  // merge on orderId + reasonCode so a rejected submit does not double-list.
+  // merge on orderId + reasonCode (+ the set-aside payment, one blocker each)
+  // so a rejected submit does not double-list.
   const effectivePaymentBlockers = useMemo(() => {
     const merged = new Map<string, UnsettledPaymentBlocker>();
     for (const blocker of [...integrityFindings, ...paymentBlockers]) {
       if (!blocker?.orderId) continue;
-      merged.set(`${blocker.orderId}:${blocker.reasonCode}`, blocker);
+      merged.set(paymentBlockerKey(blocker), blocker);
     }
     return [...merged.values()];
   }, [integrityFindings, paymentBlockers]);
@@ -711,14 +1127,23 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   const completedDeliveries = zReport?.driverEarnings?.completedDeliveries ?? zReport?.driverEarnings?.totalDeliveries ?? 0;
   const hasActiveStaffShifts = activeShiftCount > 0;
   const cashDrawerBlocksCloseout = !hasActiveStaffShifts && (closeoutUnreconciledDrawers > 0 || closeoutHasVariance);
+  // Fiscal receipts of this window still queued under an active (or unknown)
+  // plugin hold the Z, exactly as the native guard will at submit. A branch
+  // the server reports as fiscally inactive is never held (29/09/2026).
+  const fiscalQueue = resolveFiscalQueue(zReport);
+  const fiscalQueueBlocking = Boolean(fiscalQueue?.blocking) && (fiscalQueue?.count ?? 0) > 0;
+  const fiscalQueueCount = fiscalQueueBlocking ? fiscalQueue?.count ?? 0 : 0;
+  const fiscalQueueDate = fiscalQueue?.reportDate ? formatFiscalBusinessDay(fiscalQueue.reportDate) : '';
   const closeoutIssueCount =
     blockingPaymentIssues.length +
+    (fiscalQueueBlocking ? 1 : 0) +
     (hasActiveStaffShifts ? 1 : 0) +
     (cashDrawerBlocksCloseout ? closeoutUnreconciledDrawers : 0) +
     closeoutPendingExpenses +
     closeoutUnsettledDrivers +
     (cashDrawerBlocksCloseout && closeoutHasVariance ? 1 : 0) +
     (showMainTerminalWarning ? 1 : 0) +
+    (giftCloseBlocksFinal ? 1 : 0) +
     (error ? 1 : 0);
   const closeoutReady = Boolean(zReport) && !loading && closeoutIssueCount === 0;
   const closeoutHasHardSubmitBlocker =
@@ -726,6 +1151,8 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     lockedTerminal ||
     loading ||
     Boolean(error) ||
+    fiscalQueueBlocking ||
+    giftCloseBlocksFinal ||
     hasActiveStaffShifts ||
     blockingPaymentIssues.length > 0;
   const closeoutNeedsCashierCheckout =
@@ -734,18 +1161,22 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     cashDrawerBlocksCloseout &&
     !closeoutHasVariance &&
     blockingPaymentIssues.length === 0 &&
+    !fiscalQueueBlocking &&
     closeoutPendingExpenses === 0 &&
     closeoutUnsettledDrivers === 0 &&
     !showMainTerminalWarning &&
+    !giftCloseBlocksFinal &&
     !error;
   const closeoutNeedsStaffCheckout =
     !loading &&
     !closeoutReady &&
     hasActiveStaffShifts &&
     blockingPaymentIssues.length === 0 &&
+    !fiscalQueueBlocking &&
     closeoutPendingExpenses === 0 &&
     closeoutUnsettledDrivers === 0 &&
     !showMainTerminalWarning &&
+    !giftCloseBlocksFinal &&
     !error;
   const closeoutStatusLabel = loading
     ? t('modals.zReport.closeoutLoading')
@@ -786,6 +1217,44 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
         : t('modals.zReport.paymentsReady'),
       state: blockingPaymentIssues.length > 0 ? 'error' : 'ready',
     },
+    // Only when receipts are actually waiting: a store without a fiscal
+    // plugin never sees a fiscal row in its checklist.
+    ...(fiscalQueueBlocking
+      ? [
+        {
+          key: 'fiscal',
+          label: t('modals.zReport.fiscalQueue.label', { defaultValue: 'Fiscal submissions' }),
+          description: fiscalQueueDate
+            ? t('modals.zReport.fiscalQueue.pending', {
+              count: fiscalQueueCount,
+              date: fiscalQueueDate,
+              defaultValue:
+                '{{count}} fiscal submission(s) of {{date}} have not reached the fiscal service yet. You can keep selling; the day closes once they are sent.',
+            })
+            : t('modals.zReport.fiscalQueue.pendingNoDate', {
+              count: fiscalQueueCount,
+              defaultValue:
+                '{{count}} fiscal submission(s) have not reached the fiscal service yet. You can keep selling; the day closes once they are sent.',
+            }),
+          state: 'error' as CloseoutChecklistState,
+          actionLabel: t('modals.zReport.fiscalQueue.retryAction', { defaultValue: 'Send again' }),
+        },
+      ]
+      : []),
+    ...(giftClose.state === 'none'
+      ? []
+      : [{
+        key: 'gift-close',
+        label: giftCloseText('title'),
+        // Unconfirmed or unreadable gift card proof is a hard blocker with a concrete next step.
+        description: giftCloseBlocksFinal
+          ? [...giftCloseNotices.slice(0, 1), giftCloseText('blocked')].join(' ')
+          : t('modals.zReport.giftClose.checklistFinal', {
+            amount: formatGiftMoney(giftCloseDrawer?.giftLiabilityCashCents ?? 0, giftClose.currency),
+            defaultValue: GIFT_CLOSE_LABELS.checklistFinal,
+          }),
+        state: (giftCloseBlocksFinal ? 'error' : 'ready') as CloseoutChecklistState,
+      }]),
     {
       key: 'cash-drawer',
       label: t('modals.zReport.cashDrawer'),
@@ -887,14 +1356,17 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   const staffPaymentsTotal = summaryExpenses.staffPaymentsTotal ?? 0;
   const driverCashGiven = summaryCashDrawer.driverCashGiven ?? 0;
   const driverCashReturned = summaryCashDrawer.driverCashReturned ?? 0;
-  const expectedCash =
-    drawerOpening +
-    cashCollected -
-    expensesTotal -
-    staffPaymentsTotal -
-    drawerDrops -
-    driverCashGiven +
-    driverCashReturned;
+  // With a gift card close, expected cash is native's canonical drawer figure (ordinary expected +
+  // ordinary adjustment + gift card cash, each exactly once). Ordinary reports keep the flow sum.
+  const expectedCash = giftCloseDrawer
+    ? giftCloseDrawer.expectedCents / 100
+    : drawerOpening +
+      cashCollected -
+      expensesTotal -
+      staffPaymentsTotal -
+      drawerDrops -
+      driverCashGiven +
+      driverCashReturned;
   const otherCollected = otherTenderCollected;
   // Cash + Card + Platforms (+ Other tender) = the headline, by construction.
   const revenueSplitTiles = [
@@ -971,6 +1443,16 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     ...(totalCashInAdjustments > 0
       ? [{ key: 'returned', label: t('modals.zReport.driverCashReturned'), value: `+${formatMoney(totalCashInAdjustments)}`, tone: 'text-emerald-600 dark:text-emerald-300' }]
       : []),
+    // Gift card cash is a drawer liability: in the canonical expectation once, never a sale.
+    ...(giftCloseDrawer
+      ? [
+        ...(giftCloseDrawer.ordinaryAdjustmentCents !== 0
+          ? [{ key: 'giftOrdinaryAdjustment', label: giftCloseText('ordinaryAdjustment'), value: formatMoney(giftCloseDrawer.ordinaryAdjustmentCents / 100), tone: strongTextClass }]
+          : []),
+        { key: 'giftLiabilityCash', label: giftCloseText('giftLiabilityCash'), value: `+${formatMoney(giftCloseDrawer.giftLiabilityCashCents / 100)}`, tone: strongTextClass },
+        { key: 'giftExpected', label: giftCloseText('expected'), value: formatMoney(expectedCash), tone: strongTextClass },
+      ]
+      : []),
     { key: 'variance', label: t('modals.zReport.variance'), value: formatMoney(closeoutDrawerVariance), tone: closeoutHasVariance ? 'text-amber-600 dark:text-amber-300' : 'text-emerald-600 dark:text-emerald-300' },
   ];
   const drawerRows = Array.isArray(zReport?.drawers) ? zReport.drawers : [];
@@ -1012,6 +1494,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   };
 
   return (
+    <>
     <LiquidGlassModal
       isOpen={isOpen}
       onClose={onClose}
@@ -1229,7 +1712,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
               >
                 {[
                   { key: 'refresh', label: t('modals.zReport.refresh'), icon: RefreshCw, onClick: handleRefreshReport, disabled: loading },
-                  { key: 'print', label: t('modals.zReport.print'), icon: Printer, onClick: handlePrintReport, disabled: printing || !zReport },
+                  { key: 'print', label: t('modals.zReport.print'), icon: Printer, onClick: handlePrintReport, disabled: printing || !canPrintFinalReport, hint: printUnavailableHint },
                   { key: 'export', label: t('modals.zReport.exportCSV'), icon: UploadCloud, onClick: handleExportReport, disabled: !zReport },
                 ].map((action) => {
                   const Icon = action.icon;
@@ -1241,6 +1724,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                       disabled={action.disabled}
                       className={`inline-flex h-9 min-h-[44px] items-center gap-1.5 rounded-lg px-2.5 text-[11px] font-bold ${softTextClass} transition active:bg-white/[0.12] ${action.disabled ? 'cursor-not-allowed opacity-50' : ''}`}
                       aria-label={action.label}
+                      title={action.hint}
                     >
                       <Icon className={`h-4 w-4 ${action.key === 'refresh' && loading ? 'animate-spin' : ''}`} />
                       <span className="hidden md:inline">{action.label}</span>
@@ -1278,11 +1762,79 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                         <div><div className={softTextClass}>{t('modals.zReport.cashSales')}</div><div>{formatMoney(cashCollected)}</div></div>
                         <div className={`hidden md:block ${softTextClass}`}>-</div>
                         <div><div className={softTextClass}>{t('modals.zReport.totalExpenses')}</div><div>{formatMoney(expensesTotal + staffPaymentsTotal)}</div></div>
+                        {giftCloseDrawer && (
+                          <>
+                            <div className={`hidden md:block ${softTextClass}`}>+</div>
+                            <div data-z-report-gift-close-term><div className={softTextClass}>{giftCloseText('giftLiabilityCash')}</div><div>{formatMoney(giftCloseDrawer.giftLiabilityCashCents / 100)}</div></div>
+                          </>
+                        )}
                         <div className={`hidden md:block ${softTextClass}`}>=</div>
                         <div><div className={softTextClass}>{t('modals.zReport.expected')}</div><div className="text-emerald-600 dark:text-emerald-300">{formatMoney(expectedCash)}</div></div>
                       </div>
                     </div>
                   </section>
+                  {giftClose.state !== 'none' && (
+                    <section
+                      data-z-report-gift-close
+                      data-gift-close-state={giftClose.state}
+                      className={`space-y-3 rounded-2xl border p-4 ${giftCloseBlocksFinal ? 'border-rose-400/40 bg-rose-500/10' : dashboardInsetClass}`}
+                    >
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <h3 className={`text-lg font-black ${strongTextClass}`}>{giftCloseText('title')}</h3>
+                          <div className={`mt-1 break-words text-xs font-semibold leading-5 ${mutedTextClass}`}>{giftCloseText('outsideSales')}</div>
+                        </div>
+                        <span
+                          data-z-report-gift-close-status
+                          className={`shrink-0 rounded-full border px-2.5 py-1 text-xs font-black ${giftCloseBlocksFinal
+                            ? 'border-rose-500/30 bg-rose-500/15 text-rose-700 dark:text-rose-200'
+                            : 'border-emerald-500/30 bg-emerald-500/15 text-emerald-800 dark:text-emerald-100'}`}
+                        >
+                          {giftCloseStatusLabel}
+                        </span>
+                      </div>
+                      {/* One row per gift-bound drawer, in its own currency, exactly as the confirmed proof froze it. */}
+                      {giftClose.originals.map((original) => (
+                        <article
+                          key={`${original.shiftId}:${original.drawerId}`}
+                          data-z-report-gift-close-original
+                          className={`rounded-xl border p-3 ${dashboardTileClass}`}
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <span className={`truncate text-sm font-black ${strongTextClass}`}>{giftCloseStaffLabel(original)}</span>
+                            <span data-z-report-gift-close-currency className={`text-[11px] font-black ${softTextClass}`}>
+                              {giftCloseText('currency')}: {original.currency}
+                            </span>
+                          </div>
+                          <div className="mt-2 grid grid-cols-2 gap-2 md:grid-cols-5">
+                            {[
+                              { key: 'ordinaryExpected', label: giftCloseText('ordinaryExpected'), cents: original.ordinaryExpected_cents },
+                              { key: 'giftLiabilityCash', label: giftCloseText('giftLiabilityCash'), cents: original.giftLiabilityCash_cents },
+                              { key: 'expected', label: giftCloseText('expected'), cents: original.expected_cents },
+                              { key: 'counted', label: giftCloseText('counted'), cents: original.counted_cents },
+                              { key: 'variance', label: giftCloseText('variance'), cents: original.variance_cents },
+                            ].map((row) => (
+                              <div key={row.key} className="min-w-0">
+                                <div className={`truncate text-[11px] font-bold ${softTextClass}`}>{row.label}</div>
+                                <div className={`mt-0.5 truncate text-sm font-black ${strongTextClass}`}>{formatGiftMoney(row.cents, original.currency)}</div>
+                              </div>
+                            ))}
+                          </div>
+                          <div className={`mt-2 break-words text-[11px] font-semibold ${softTextClass}`}>
+                            {giftCloseText('confirmedAt')}: {formatWindowDateTime(original.provenance.confirmedAt)}
+                          </div>
+                        </article>
+                      ))}
+                      {giftCloseBlocksFinal && (
+                        <div data-z-report-gift-close-blocked className="space-y-1 text-xs font-bold leading-5 text-rose-700 dark:text-rose-200">
+                          {giftCloseNotices.map((notice, index) => (
+                            <div key={index}>{notice}</div>
+                          ))}
+                          <div>{giftCloseText('blocked')}</div>
+                        </div>
+                      )}
+                    </section>
+                  )}
                 </div>
               )}
 
@@ -1572,19 +2124,74 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                             <div className={`break-words text-sm font-black ${strongTextClass}`}>{item.label}</div>
                             <div className={`mt-0.5 break-words text-xs font-semibold leading-5 ${mutedTextClass}`}>{item.description}</div>
                           </div>
-                          <span
-                            className={`shrink-0 text-[11px] font-black ${
-                              item.state === 'error'
-                                ? 'text-rose-600 dark:text-rose-300'
-                                : item.state === 'pending'
-                                  ? softTextClass
-                                  : 'text-amber-600 dark:text-amber-300'
-                            }`}
-                          >
-                            {item.actionLabel ?? closeoutStateLabel(item.state)}
-                          </span>
+                          {item.key === 'fiscal' ? (
+                            <button
+                              type="button"
+                              data-z-report-fiscal-retry
+                              onClick={handleRetryFiscalQueue}
+                              disabled={retryingFiscalQueue}
+                              aria-busy={retryingFiscalQueue}
+                              className={`inline-flex min-h-[44px] shrink-0 items-center gap-1.5 rounded-xl border px-3 text-xs font-black transition ${glassControlClass} ${retryingFiscalQueue ? 'cursor-not-allowed opacity-60' : ''}`}
+                            >
+                              <RefreshCw className={`h-4 w-4 ${retryingFiscalQueue ? 'animate-spin' : ''}`} />
+                              {item.actionLabel}
+                            </button>
+                          ) : (
+                            <span
+                              className={`shrink-0 text-[11px] font-black ${
+                                item.state === 'error'
+                                  ? 'text-rose-600 dark:text-rose-300'
+                                  : item.state === 'pending'
+                                    ? softTextClass
+                                    : 'text-amber-600 dark:text-amber-300'
+                              }`}
+                            >
+                              {item.actionLabel ?? closeoutStateLabel(item.state)}
+                            </span>
+                          )}
                         </div>
                       ))}
+
+                      {/* The queued fiscal receipts behind the fiscal blocker:
+                          order and receipt number, attempts, last error. What
+                          support needs, without the payload (29/09/2026). */}
+                      {fiscalQueueBlocking && fiscalQueue && fiscalQueue.rows.length > 0 && (
+                        <section
+                          data-z-report-fiscal-queue
+                          className="rounded-2xl border border-rose-400/40 bg-rose-500/10 p-4"
+                        >
+                          <div className={`mb-2 text-xs font-black uppercase tracking-[0.12em] ${softTextClass}`}>
+                            {t('modals.zReport.fiscalQueue.listTitle', {
+                              count: fiscalQueueCount,
+                              defaultValue: 'Fiscal submissions waiting ({{count}})',
+                            })}
+                          </div>
+                          <div className="space-y-1">
+                            {fiscalQueue.rows.map((row) => (
+                              <div
+                                key={row.queueItemId}
+                                className={`flex flex-wrap items-center justify-between gap-2 text-xs font-semibold ${mutedTextClass}`}
+                              >
+                                <span className="min-w-0 truncate">
+                                  {row.receiptNumber || row.orderId}
+                                </span>
+                                <span className="shrink-0 tabular-nums">
+                                  {t('modals.zReport.fiscalQueue.attempts', {
+                                    attempts: row.attempts,
+                                    max: row.maxRetries,
+                                    defaultValue: 'Attempts {{attempts}}/{{max}}',
+                                  })}
+                                </span>
+                                {row.lastError && (
+                                  <span className={`w-full break-words text-[11px] ${softTextClass}`}>
+                                    {row.lastError}
+                                  </span>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </section>
+                      )}
 
                       {/* Reconciliation: the order side of the day next to the
                           payment side, and the money between them. The two are
@@ -1714,6 +2321,9 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                               'Resolve the missing balance here. The fix is recorded against the original business-day drawer before you retry the Z-report.',
                           })}
                           onResolveBlocker={handleResolveBlocker}
+                          onResolveSetAsidePayment={setSetAsideConfirmation}
+                          onSaveUnsavedPayment={(blocker) => { void handleSaveUnsavedAgain(blocker); }}
+                          onResolveUnsavedPayment={setUnsavedConfirmation}
                           resolvingKey={resolvingBlockerKey}
                         />
                       )}
@@ -1731,6 +2341,50 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
         </div>
       </div>
     </LiquidGlassModal>
+    {setAsideConfirmation && (
+    <ConfirmDialog
+      isOpen
+      onClose={() => setSetAsideConfirmation(null)}
+      onConfirm={() => { void handleConfirmSetAsideReturned(); }}
+      variant="warning"
+      title={t('modals.zReport.setAsideConfirmTitle', { defaultValue: 'Money given back?' })}
+      message={t('modals.zReport.setAsideConfirmMessage', {
+        amount: formatMoney(setAsideConfirmation?.reviewPayment?.amount ?? 0),
+        method: getLocalizedPaymentMethod(setAsideConfirmation?.reviewPayment?.method ?? '', t),
+        order: setAsideConfirmation?.orderNumber ?? '',
+        defaultValue:
+          'Confirm that {{amount}} ({{method}}) for order {{order}} was given back to the customer. It stays out of the totals.',
+      })}
+      confirmText={t('modals.zReport.setAsideConfirmAction', { defaultValue: 'Confirm' })}
+      cancelText={t('common.actions.cancel', { defaultValue: 'Cancel' })}
+    />
+    )}
+    {unsavedConfirmation && (
+    <ConfirmDialog
+      isOpen
+      onClose={() => setUnsavedConfirmation(null)}
+      onConfirm={() => { void handleConfirmUnsavedReturned(); }}
+      variant="warning"
+      title={t('modals.zReport.unsavedConfirmTitle', { defaultValue: 'Money given back?' })}
+      message={isNewOrderCheckoutBlocker(unsavedConfirmation)
+        ? t('modals.zReport.unsavedConfirmMessageNewOrder', {
+          amount: formatMoney(unsavedConfirmation?.unsavedPayment?.amount ?? 0),
+          defaultValue:
+            'Confirm that the {{amount}} charged for a new order this till never saved was given back to the customer. The order and its payment will not be saved.',
+        })
+        : t('modals.zReport.unsavedConfirmMessage', {
+          amount: formatMoney(unsavedConfirmation?.unsavedPayment?.amount ?? 0),
+          order: unsavedConfirmation?.orderNumber ?? '',
+          defaultValue:
+            'Confirm that the {{amount}} charged for order {{order}} was given back to the customer. The payment will not be saved, and the order stays as it is.',
+        })}
+      confirmText={t('modals.zReport.unsavedConfirmAction', { defaultValue: 'Confirm' })}
+      cancelText={t('common.actions.cancel', { defaultValue: 'Cancel' })}
+    />
+    )}
+    {recordBlocker.confirmDialog}
+    {confirmationModal}
+    </>
   );
 
 };

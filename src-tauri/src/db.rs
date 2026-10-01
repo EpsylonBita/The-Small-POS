@@ -47,7 +47,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-pub(crate) const CURRENT_SCHEMA_VERSION: i32 = 82;
+pub(crate) const CURRENT_SCHEMA_VERSION: i32 = 94;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -388,10 +388,12 @@ where
     let needs_v56_backfill = needs_v56_claim_generation_backfill(conn, current)?;
     let needs_v79_backfill = needs_v79_repair_aggregate_backfill(conn, current)?;
     let needs_v81_backfill = needs_v81_payment_identity_backfill(conn, current)?;
+    let needs_v83_backfill = needs_v83_gift_payment_backfill(conn, current)?;
     if current == CURRENT_SCHEMA_VERSION
         && !needs_v56_backfill
         && !needs_v79_backfill
         && !needs_v81_backfill
+        && !needs_v83_backfill
     {
         info!("Database schema up to date (v{current})");
         return Ok(());
@@ -401,6 +403,7 @@ where
         needs_v56_backfill,
         needs_v79_backfill,
         needs_v81_backfill,
+        needs_v83_backfill,
     );
 
     if current > 0 {
@@ -686,8 +689,1045 @@ where
     if current < 82 {
         run_migration_tx(conn, 82, migrate_v82)?;
     }
+    if current < 83 || needs_v83_backfill {
+        run_migration_tx(conn, 83, migrate_v83)?;
+    }
+    if current < 84 {
+        run_migration_tx(conn, 84, migrate_v84)?;
+    }
+    if current < 85 {
+        run_migration_tx(conn, 85, migrate_v85)?;
+    }
+    if current < 86 {
+        run_migration_tx(conn, 86, migrate_v86)?;
+    }
+    if current < 87 {
+        run_migration_tx(conn, 87, migrate_v87)?;
+    }
+    if current < 88 {
+        run_migration_tx(conn, 88, migrate_v88)?;
+    }
+    if current < 89 {
+        run_migration_tx(conn, 89, migrate_v89)?;
+    }
+    // The release's payments set aside for review (was its v83; #308 owns 83..89).
+    if current < 90 {
+        run_migration_tx(conn, 90, migrate_v90)?;
+    }
+    if current < 91 {
+        run_migration_tx(conn, 91, migrate_v91)?;
+    }
+    if current < 92 {
+        run_migration_tx(conn, 92, migrate_v92)?;
+    }
+    if current < 93 {
+        run_migration_tx(conn, 93, migrate_v93)?;
+    }
+    if current < 94 {
+        run_migration_tx(conn, 94, migrate_v94)?;
+    }
 
     Ok(())
+}
+
+/// Migration v85: the gift-card financial opening (`gift_opening_v1`). One
+/// nonsecret original intent per opening key, retained with its exact
+/// confirmation proof; see `gift_financial_opening`. Purely additive: no
+/// staff session, PIN or hosted secret has a column.
+fn migrate_v85(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(crate::gift_financial_opening::SCHEMA_SQL)
+        .map_err(|e| format!("Migration v85 (gift financial openings) failed: {e}"))?;
+    conn.execute_batch("INSERT OR IGNORE INTO schema_version (version) VALUES (85);")
+        .map_err(|e| format!("Migration v85 version stamp failed: {e}"))
+}
+
+fn migrate_v86(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(crate::commands::gift_card_funding::SCHEMA_SQL)
+        .map_err(|e| format!("Migration v86 (gift card funding attempts) failed: {e}"))?;
+    conn.execute_batch("INSERT OR IGNORE INTO schema_version (version) VALUES (86);")
+        .map_err(|e| format!("Migration v86 version stamp failed: {e}"))
+}
+
+fn migrate_v87(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(crate::commands::gift_card_returns::SCHEMA_SQL)
+        .map_err(|e| format!("Migration v87 (gift card return attempts) failed: {e}"))?;
+    conn.execute_batch("INSERT OR IGNORE INTO schema_version (version) VALUES (87);")
+        .map_err(|e| format!("Migration v87 version stamp failed: {e}"))
+}
+
+/// Migration v88: the gift-card financial closing journal. One nonsecret
+/// pending original per confirmed financial opening, guarded immutable; see
+/// `gift_financial_closing`. Purely additive: no staff session, PIN or hosted
+/// secret has a column.
+fn migrate_v88(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(crate::gift_financial_closing::SCHEMA_SQL)
+        .map_err(|e| format!("Migration v88 (gift financial closings) failed: {e}"))?;
+    conn.execute_batch("INSERT OR IGNORE INTO schema_version (version) VALUES (88);")
+        .map_err(|e| format!("Migration v88 version stamp failed: {e}"))
+}
+
+/// An unresolved direct EFT SALE owns the next local payment insert. The
+/// original pre-dispatch attempt can be represented only by its exact card
+/// row; legacy/ambiguous rows stay held for operator reconciliation. This is
+/// additive because v74 was already applied on production databases.
+fn migrate_v89(conn: &Connection) -> Result<(), String> {
+    // The gift attempt table was previously created on first use. It must be
+    // present now so cross-process gift and direct-SALE reservations can
+    // exclude each other atomically before either money-moving call.
+    crate::commands::gift_cards::ensure_attempt_schema(conn)?;
+    conn.execute_batch(
+        r#"
+        CREATE TRIGGER IF NOT EXISTS trg_direct_sale_payment_insert
+        BEFORE INSERT ON order_payments
+        FOR EACH ROW
+        WHEN NEW.status = 'completed'
+         AND EXISTS (
+            SELECT 1 FROM ecr_transactions et
+             WHERE LOWER(TRIM(et.transaction_type)) = 'sale'
+               AND LOWER(TRIM(et.status)) <> 'declined'
+               AND (et.order_id = NEW.order_id
+                    OR et.order_id = (SELECT supabase_id FROM orders WHERE id = NEW.order_id)
+                    OR et.order_id = (SELECT client_request_id FROM orders WHERE id = NEW.order_id))
+                AND (SELECT COUNT(*) FROM order_payments represented
+                     WHERE represented.order_id = NEW.order_id
+                       AND represented.status = 'completed'
+                       AND LOWER(TRIM(represented.method)) = 'card'
+                       AND represented.transaction_ref = et.id
+                       AND represented.amount_cents = et.amount
+                       AND UPPER(TRIM(represented.currency)) = UPPER(TRIM(et.currency))
+                       AND LOWER(TRIM(represented.payment_origin)) = 'terminal'
+                        AND (represented.terminal_device_id IS NULL
+                             OR represented.terminal_device_id = et.device_id)
+                ) <> 1
+               AND COALESCE((
+                    LOWER(TRIM(et.status)) = 'approved'
+                    AND CASE WHEN json_valid(et.receipt_data)
+                        THEN json_extract(et.receipt_data, '$.directSaleAdmissionVersion')
+                        ELSE NULL END = 1
+                    AND NEW.method = 'card' AND NEW.payment_origin = 'terminal'
+                    AND NEW.transaction_ref = et.id
+                    AND NEW.amount_cents = et.amount
+                    AND UPPER(TRIM(NEW.currency)) = UPPER(TRIM(et.currency))
+                    AND NEW.terminal_device_id = et.device_id
+               ), 0) = 0
+         )
+        BEGIN
+            SELECT RAISE(ABORT, 'unresolved direct card SALE owns this order');
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_direct_sale_payment_identity
+        BEFORE INSERT ON order_payments
+        FOR EACH ROW
+        WHEN NEW.status = 'completed' AND NEW.transaction_ref IS NOT NULL
+         AND EXISTS (
+            SELECT 1 FROM ecr_transactions et
+             WHERE et.id = NEW.transaction_ref
+               AND LOWER(TRIM(et.transaction_type)) = 'sale'
+               AND (
+                    NEW.method <> 'card' OR COALESCE(NEW.payment_origin, '') <> 'terminal'
+                    OR NEW.amount_cents <> et.amount
+                    OR COALESCE(UPPER(TRIM(NEW.currency)), '') <> COALESCE(UPPER(TRIM(et.currency)), '')
+                    OR COALESCE(NEW.terminal_device_id, '') <> et.device_id
+                    OR COALESCE((et.order_id = NEW.order_id
+                        OR et.order_id = (SELECT supabase_id FROM orders WHERE id = NEW.order_id)
+                        OR et.order_id = (SELECT client_request_id FROM orders WHERE id = NEW.order_id)), 0) = 0
+                    OR EXISTS (
+                        SELECT 1 FROM order_payments previous
+                         WHERE previous.status = 'completed'
+                           AND previous.transaction_ref = et.id
+                    )
+               )
+         )
+        BEGIN
+            SELECT RAISE(ABORT, 'direct card SALE payment identity mismatch or duplicate');
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_gift_attempt_direct_sale_admission
+        BEFORE INSERT ON gift_card_redemption_attempts
+        FOR EACH ROW
+        WHEN NEW.status = 'pending' AND EXISTS (
+            SELECT 1 FROM ecr_transactions et
+             WHERE LOWER(TRIM(et.transaction_type)) = 'sale'
+               AND LOWER(TRIM(et.status)) <> 'declined'
+               AND (et.order_id = NEW.local_order_id
+                    OR et.order_id = (SELECT supabase_id FROM orders WHERE id = NEW.local_order_id)
+                    OR et.order_id = (SELECT client_request_id FROM orders WHERE id = NEW.local_order_id))
+               AND (SELECT COUNT(*) FROM order_payments represented
+                     WHERE represented.order_id = NEW.local_order_id
+                       AND represented.status = 'completed'
+                       AND LOWER(TRIM(represented.method)) = 'card'
+                       AND represented.transaction_ref = et.id
+                       AND represented.amount_cents = et.amount
+                       AND UPPER(TRIM(represented.currency)) = UPPER(TRIM(et.currency))
+                       AND LOWER(TRIM(represented.payment_origin)) = 'terminal'
+                       AND (represented.terminal_device_id IS NULL
+                            OR represented.terminal_device_id = et.device_id)) <> 1
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'unresolved direct card SALE blocks new gift debit');
+        END;
+        INSERT OR IGNORE INTO schema_version (version) VALUES (89);
+        "#,
+    )
+    .map_err(|error| format!("migration v89 direct SALE admission: {error}"))
+}
+
+/// Migration v83: the local payment ledger admits canonical gift card rows.
+///
+/// Gift card payments are created only by the server's atomic redemption and
+/// mirrored here as applied rows, so `order_payments.method` must accept
+/// `gift_card`. SQLite cannot alter a CHECK in place; SQLite's documented
+/// schema-edit procedure widens it without rebuilding the table, so rows,
+/// indexes, triggers and foreign keys stay as they are. If the edit is not
+/// possible the table is left untouched and gift cards stay unavailable on
+/// this terminal (refused before any debit) instead of blocking startup.
+fn migrate_v83(conn: &Connection) -> Result<(), String> {
+    match widen_order_payment_methods_for_gift_cards(conn) {
+        Ok(()) => info!("Migration v83 verified gift_card payment capability"),
+        Err(error) => {
+            warn!(error = %error, "Gift payment capability unavailable; ordinary payments remain usable and v83 capability repair stays pending")
+        }
+    }
+    conn.execute_batch("INSERT OR IGNORE INTO schema_version (version) VALUES (83);")
+        .map_err(|e| format!("migration v83 schema_version: {e}"))?;
+    Ok(())
+}
+
+/// v84: durable identity and acknowledgement of the one fiscal receipt issued
+/// for an order whose gift card (and any cash) tenders are already settled.
+/// A journal separate from the v74 `:collect-outstanding:` attempts: the
+/// canonical gift payment keeps its own server reference and no payment row is
+/// ever added for the receipt. While an outcome is unresolved the order's
+/// ledger, the journal row and its register stay locked. Purely additive.
+fn migrate_v84(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS gift_card_fiscal_operations (
+            operation_id TEXT PRIMARY KEY,
+            organization_id TEXT NOT NULL,
+            branch_id TEXT NOT NULL,
+            terminal_id TEXT NOT NULL,
+            local_order_id TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            protocol TEXT NOT NULL,
+            config_fingerprint TEXT NOT NULL,
+            order_fingerprint TEXT NOT NULL,
+            payload_fingerprint TEXT NOT NULL,
+            ledger_fingerprint TEXT NOT NULL,
+            ledger_generation TEXT NOT NULL,
+            currency TEXT NOT NULL CHECK (currency = 'EUR'),
+            amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
+            gift_cents INTEGER NOT NULL CHECK (gift_cents > 0),
+            cash_cents INTEGER NOT NULL
+                CHECK (cash_cents >= 0 AND gift_cents + cash_cents = amount_cents),
+            correlation TEXT NOT NULL,
+            status TEXT NOT NULL
+                CHECK (status IN ('processing', 'unknown', 'approved', 'failed')),
+            evidence TEXT,
+            error_code TEXT,
+            error_message TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            acknowledged_at TEXT
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_gift_card_fiscal_operations_live_order
+            ON gift_card_fiscal_operations (local_order_id)
+            WHERE status IN ('processing', 'unknown', 'approved');
+        CREATE INDEX IF NOT EXISTS idx_gift_card_fiscal_operations_order_status
+            ON gift_card_fiscal_operations (local_order_id, status);
+        CREATE INDEX IF NOT EXISTS idx_gift_card_fiscal_operations_device_status
+            ON gift_card_fiscal_operations (device_id, status);
+
+        CREATE TRIGGER IF NOT EXISTS trg_gift_fiscal_operation_identity_immutable
+        BEFORE UPDATE OF operation_id, organization_id, branch_id, terminal_id,
+            local_order_id, device_id, protocol, config_fingerprint, order_fingerprint,
+            payload_fingerprint, ledger_fingerprint, ledger_generation, currency,
+            amount_cents, gift_cents, cash_cents, correlation, created_at
+        ON gift_card_fiscal_operations
+        BEGIN
+            SELECT RAISE(ABORT, 'GIFT_FISCAL_OPERATION_IDENTITY_IMMUTABLE');
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_gift_fiscal_operation_terminal
+        BEFORE UPDATE ON gift_card_fiscal_operations
+        WHEN OLD.status IN ('approved', 'failed')
+            OR (OLD.status = 'unknown' AND NEW.status = 'processing')
+        BEGIN
+            SELECT RAISE(ABORT, 'GIFT_FISCAL_OPERATION_TERMINAL');
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_gift_fiscal_operation_retained
+        BEFORE DELETE ON gift_card_fiscal_operations
+        WHEN OLD.status IN ('processing', 'unknown', 'approved')
+        BEGIN
+            SELECT RAISE(ABORT, 'GIFT_FISCAL_OPERATION_RETAINED');
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_gift_fiscal_operation_device_retained
+        BEFORE DELETE ON ecr_devices
+        WHEN EXISTS (
+            SELECT 1 FROM gift_card_fiscal_operations
+            WHERE device_id = OLD.id AND status IN ('processing', 'unknown')
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'GIFT_FISCAL_OPERATION_DEVICE_RETAINED');
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_gift_fiscal_operation_payment_insert_lock
+        BEFORE INSERT ON order_payments
+        WHEN EXISTS (
+            SELECT 1 FROM gift_card_fiscal_operations
+            WHERE local_order_id = NEW.order_id AND status IN ('processing', 'unknown')
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'GIFT_FISCAL_OPERATION_LEDGER_LOCKED');
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_gift_fiscal_operation_payment_update_lock
+        BEFORE UPDATE OF order_id, method, amount, amount_cents, status ON order_payments
+        WHEN (NEW.order_id IS NOT OLD.order_id OR NEW.method IS NOT OLD.method
+                OR NEW.amount IS NOT OLD.amount OR NEW.amount_cents IS NOT OLD.amount_cents
+                OR NEW.status IS NOT OLD.status)
+            AND EXISTS (
+                SELECT 1 FROM gift_card_fiscal_operations
+                WHERE local_order_id IN (OLD.order_id, NEW.order_id)
+                  AND status IN ('processing', 'unknown')
+            )
+        BEGIN
+            SELECT RAISE(ABORT, 'GIFT_FISCAL_OPERATION_LEDGER_LOCKED');
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_gift_fiscal_operation_adjustment_lock
+        BEFORE INSERT ON payment_adjustments
+        WHEN EXISTS (
+            SELECT 1 FROM gift_card_fiscal_operations
+            WHERE status IN ('processing', 'unknown')
+              AND local_order_id IN (
+                  NEW.order_id,
+                  (SELECT order_id FROM order_payments WHERE id = NEW.payment_id)
+              )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'GIFT_FISCAL_OPERATION_LEDGER_LOCKED');
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_gift_fiscal_operation_order_lock
+        BEFORE UPDATE OF items, total_amount, total_amount_cents ON orders
+        WHEN (NEW.items IS NOT OLD.items OR NEW.total_amount IS NOT OLD.total_amount
+                OR NEW.total_amount_cents IS NOT OLD.total_amount_cents)
+            AND EXISTS (
+                SELECT 1 FROM gift_card_fiscal_operations
+                WHERE local_order_id = OLD.id AND status IN ('processing', 'unknown')
+            )
+        BEGIN
+            SELECT RAISE(ABORT, 'GIFT_FISCAL_OPERATION_LEDGER_LOCKED');
+        END;
+
+        INSERT OR IGNORE INTO schema_version (version) VALUES (84);
+        ",
+    )
+    .map_err(|e| format!("migration v84 gift card fiscal operations: {e}"))
+}
+
+const ORDER_PAYMENT_METHOD_CHECK: &str = "CHECK (method IN ('cash', 'card', 'other'))";
+const ORDER_PAYMENT_METHOD_CHECK_WITH_GIFT_CARD: &str =
+    "CHECK (method IN ('cash', 'card', 'other', 'gift_card'))";
+
+fn has_known_order_payment_method_check(sql: &str, check: &str) -> bool {
+    // Recognize the actual v4/v36 method declaration, not quoted data or a
+    // comment containing a CHECK. Other definitions require reviewed repair.
+    let declaration = format!("method TEXT NOT NULL {check},");
+    !sql.contains("/*")
+        && !sql.contains("--")
+        && sql.matches(check).count() == 1
+        && sql.lines().any(|line| line.trim() == declaration)
+}
+
+pub(crate) fn order_payments_support_gift_cards(conn: &Connection) -> Result<bool, String> {
+    let sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'order_payments'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("inspect gift payment capability: {e}"))?;
+    Ok(sql.is_some_and(|sql| {
+        has_known_order_payment_method_check(&sql, ORDER_PAYMENT_METHOD_CHECK_WITH_GIFT_CARD)
+            && !sql.contains(ORDER_PAYMENT_METHOD_CHECK)
+    }))
+}
+
+fn needs_v83_gift_payment_backfill(conn: &Connection, current: i32) -> Result<bool, String> {
+    if current < 83 {
+        return Ok(false);
+    }
+    if !schema_version_exists(conn, 83)? {
+        return Ok(true);
+    }
+    if order_payments_support_gift_cards(conn)? {
+        return Ok(false);
+    }
+    let sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'order_payments'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("inspect v83 backfill eligibility: {e}"))?;
+    let known_check = sql
+        .is_some_and(|sql| has_known_order_payment_method_check(&sql, ORDER_PAYMENT_METHOD_CHECK));
+    let defensive = conn
+        .db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_DEFENSIVE)
+        .map_err(|e| format!("inspect schema edit capability: {e}"))?;
+    // A known old CHECK can be retried when editing is possible. Unknown shapes
+    // and defensive connections remain gift-disabled, without repeated surgery.
+    Ok(known_check && !defensive)
+}
+
+fn widen_order_payment_methods_for_gift_cards(conn: &Connection) -> Result<(), String> {
+    let read_sql = || -> Result<Option<String>, String> {
+        conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'order_payments'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("read order_payments schema: {e}"))
+    };
+    let sql = read_sql()?.ok_or("order_payments table is missing")?;
+    if order_payments_support_gift_cards(conn)? {
+        return Ok(());
+    }
+    if !has_known_order_payment_method_check(&sql, ORDER_PAYMENT_METHOD_CHECK) {
+        return Err("order_payments method CHECK has an unexpected shape".to_string());
+    }
+    let widened = sql.replacen(
+        ORDER_PAYMENT_METHOD_CHECK,
+        ORDER_PAYMENT_METHOD_CHECK_WITH_GIFT_CARD,
+        1,
+    );
+
+    conn.execute_batch("SAVEPOINT v83_order_payment_methods;")
+        .map_err(|e| format!("begin v83 schema edit: {e}"))?;
+    let edited = (|| -> Result<(), String> {
+        let cookie: i64 = conn
+            .query_row("PRAGMA schema_version", [], |row| row.get(0))
+            .map_err(|e| format!("read schema cookie: {e}"))?;
+        conn.execute_batch("PRAGMA writable_schema = ON;")
+            .map_err(|e| format!("enable schema edit: {e}"))?;
+        let bumped = conn
+            .execute(
+                "UPDATE sqlite_master SET sql = ?1 WHERE type = 'table' AND name = 'order_payments'",
+                params![widened],
+            )
+            .map_err(|e| format!("edit order_payments schema: {e}"))
+            .and_then(|rows| match rows {
+                1 => conn
+                    .execute_batch(&format!("PRAGMA schema_version = {};", cookie + 1))
+                    .map_err(|e| format!("bump schema cookie: {e}")),
+                other => Err(format!("edited {other} order_payments schema rows")),
+            });
+        conn.execute_batch("PRAGMA writable_schema = OFF;")
+            .map_err(|e| format!("disable schema edit: {e}"))?;
+        bumped?;
+        // The bumped cookie makes this connection reload the schema; reading
+        // the table proves the edited definition parses.
+        conn.query_row("SELECT 1 FROM order_payments LIMIT 1", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .optional()
+        .map_err(|e| format!("read order_payments after schema edit: {e}"))?;
+        match read_sql()? {
+            Some(sql) if sql == widened && order_payments_support_gift_cards(conn)? => Ok(()),
+            _ => Err("order_payments schema edit did not persist".to_string()),
+        }
+    })();
+    match edited {
+        Ok(()) => conn
+            .execute_batch("RELEASE v83_order_payment_methods;")
+            .map_err(|e| format!("commit v83 schema edit: {e}")),
+        Err(error) => {
+            let _ = conn.execute_batch("PRAGMA writable_schema = OFF;");
+            let _ = conn.execute_batch(
+                "ROLLBACK TO v83_order_payment_methods; RELEASE v83_order_payment_methods;",
+            );
+            Err(error)
+        }
+    }
+}
+
+/// The `status` CHECK of `order_payments` as migration v36 wrote it. v90
+/// widens exactly this text; see [`widen_order_payment_status_check`].
+const ORDER_PAYMENT_STATUS_CHECK_V36: &str =
+    "CHECK (status IN ('completed', 'voided', 'refunded'))";
+const ORDER_PAYMENT_STATUS_CHECK_V90: &str =
+    "CHECK (status IN ('completed', 'voided', 'refunded', 'duplicate_review'))";
+
+/// Migration v90: payments set aside for review (Android 1.0.13 parity, fix
+/// review 30/09/2026).
+///
+/// `POST /api/pos/payments` can answer `already_paid` without recording the
+/// payment: the order was already fully paid by other money. The terminal
+/// used to link its own row to the server payment the answer named, so one
+/// server payment had two local stand-ins (13.00 cash on a card-paid 13.00
+/// order, a Z of 26.00). Such a payment is now kept exactly as recorded but
+/// set aside (`status = 'duplicate_review'`, details in `metadata`), out of
+/// every total until a manager confirms it was given back.
+///
+/// Adds `order_payments.metadata` and lets `status` hold `duplicate_review`.
+/// SQLite cannot alter a CHECK, and a rebuild of this table would have to
+/// drop and recreate every index and trigger on it — including the v74
+/// collection interlock, whose sibling triggers on `payment_adjustments`
+/// make a plain `DROP` + `RENAME` fail. So the CHECK is widened in place
+/// with SQLite's documented procedure for relaxing a CHECK constraint
+/// (<https://www.sqlite.org/lang_altertable.html#otheralter>): every row that
+/// satisfied the old list satisfies the new one. The edit is proven with a
+/// probe insert inside the migration; if the probe fails the edit is rolled
+/// back and the terminal keeps working without the widened status (the
+/// set-aside write then refuses and the payment stays held, see
+/// `payment_review`).
+fn migrate_v90(conn: &Connection) -> Result<(), String> {
+    let has_order_payments: bool = conn
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'order_payments'
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("v90 inspect order_payments table: {e}"))?;
+
+    if has_order_payments {
+        if !column_exists(conn, "order_payments", "metadata")? {
+            conn.execute_batch("ALTER TABLE order_payments ADD COLUMN metadata TEXT;")
+                .map_err(|e| format!("v90 add order_payments.metadata: {e}"))?;
+        }
+        let widened = widen_order_payment_status_check(conn)?;
+        info!(
+            status_check = ?widened,
+            "v90: order_payments can hold payments set aside for review"
+        );
+    }
+
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_version (version) VALUES (90)",
+        [],
+    )
+    .map_err(|e| format!("v90 record schema_version: {e}"))?;
+    info!("Applied migration v90 (payments set aside for review)");
+    Ok(())
+}
+
+/// Migration v91: one approval, one payment, across the direct-SALE admission
+/// (#308, v89) and the payments set aside for review or not saved (v90,
+/// `payment_review`, `unsaved_payments`; merge review 30/09/2026).
+///
+/// v89 read a direct SALE as represented only by a `completed` card row with
+/// its exact identity. Two things the set-aside work records made that wrong:
+/// - money that moved on an order already covered is kept as its exact card
+///   row with `status = 'duplicate_review'` (and `voided` once a manager gave
+///   it back). v89 still saw the SALE unresolved: it held the order's next
+///   payment and gift debit for good, and offered to book the approval again,
+///   counting the same money twice. A normal void or full refund of the row
+///   left it in the same state;
+/// - a charged payment the till could not save, given back by a manager from
+///   the Z, left its approved SALE bookable afterwards.
+///
+/// The triggers are re-created with the SALE represented by its one exact
+/// card row in ANY status, and a SALE marked `receiptData.returnedToCustomer`
+/// settled; the identity trigger refuses a second row for a SALE whatever the
+/// status of the first. `commands::ecr::unresolved_direct_sales` reads the
+/// same rule. Nothing else changes, and v89 stays as it shipped in #308.
+fn migrate_v91(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        DROP TRIGGER IF EXISTS trg_direct_sale_payment_insert;
+        DROP TRIGGER IF EXISTS trg_direct_sale_payment_identity;
+        DROP TRIGGER IF EXISTS trg_gift_attempt_direct_sale_admission;
+
+        CREATE TRIGGER trg_direct_sale_payment_insert
+        BEFORE INSERT ON order_payments
+        FOR EACH ROW
+        WHEN NEW.status = 'completed'
+         AND EXISTS (
+            SELECT 1 FROM ecr_transactions et
+             WHERE LOWER(TRIM(et.transaction_type)) = 'sale'
+               AND LOWER(TRIM(et.status)) <> 'declined'
+               AND (CASE WHEN json_valid(et.receipt_data)
+                         THEN json_extract(et.receipt_data, '$.returnedToCustomer') END) IS NULL
+               AND (et.order_id = NEW.order_id
+                    OR et.order_id = (SELECT supabase_id FROM orders WHERE id = NEW.order_id)
+                    OR et.order_id = (SELECT client_request_id FROM orders WHERE id = NEW.order_id))
+               AND (SELECT COUNT(*) FROM order_payments represented
+                     WHERE represented.order_id = NEW.order_id
+                       AND LOWER(TRIM(represented.method)) = 'card'
+                       AND represented.transaction_ref = et.id
+                       AND represented.amount_cents = et.amount
+                       AND UPPER(TRIM(represented.currency)) = UPPER(TRIM(et.currency))
+                       AND LOWER(TRIM(represented.payment_origin)) = 'terminal'
+                       AND (represented.terminal_device_id IS NULL
+                            OR represented.terminal_device_id = et.device_id)
+                ) <> 1
+               AND COALESCE((
+                    LOWER(TRIM(et.status)) = 'approved'
+                    AND CASE WHEN json_valid(et.receipt_data)
+                        THEN json_extract(et.receipt_data, '$.directSaleAdmissionVersion')
+                        ELSE NULL END = 1
+                    AND NEW.method = 'card' AND NEW.payment_origin = 'terminal'
+                    AND NEW.transaction_ref = et.id
+                    AND NEW.amount_cents = et.amount
+                    AND UPPER(TRIM(NEW.currency)) = UPPER(TRIM(et.currency))
+                    AND NEW.terminal_device_id = et.device_id
+               ), 0) = 0
+         )
+        BEGIN
+            SELECT RAISE(ABORT, 'unresolved direct card SALE owns this order');
+        END;
+
+        CREATE TRIGGER trg_direct_sale_payment_identity
+        BEFORE INSERT ON order_payments
+        FOR EACH ROW
+        WHEN NEW.status = 'completed' AND NEW.transaction_ref IS NOT NULL
+         AND EXISTS (
+            SELECT 1 FROM ecr_transactions et
+             WHERE et.id = NEW.transaction_ref
+               AND LOWER(TRIM(et.transaction_type)) = 'sale'
+               AND (
+                    NEW.method <> 'card' OR COALESCE(NEW.payment_origin, '') <> 'terminal'
+                    OR NEW.amount_cents <> et.amount
+                    OR COALESCE(UPPER(TRIM(NEW.currency)), '') <> COALESCE(UPPER(TRIM(et.currency)), '')
+                    OR COALESCE(NEW.terminal_device_id, '') <> et.device_id
+                    OR COALESCE((et.order_id = NEW.order_id
+                        OR et.order_id = (SELECT supabase_id FROM orders WHERE id = NEW.order_id)
+                        OR et.order_id = (SELECT client_request_id FROM orders WHERE id = NEW.order_id)), 0) = 0
+                    OR (CASE WHEN json_valid(et.receipt_data)
+                             THEN json_extract(et.receipt_data, '$.returnedToCustomer') END) IS NOT NULL
+                    OR EXISTS (
+                        SELECT 1 FROM order_payments previous
+                         WHERE previous.transaction_ref = et.id
+                    )
+               )
+         )
+        BEGIN
+            SELECT RAISE(ABORT, 'direct card SALE payment identity mismatch or duplicate');
+        END;
+
+        CREATE TRIGGER trg_gift_attempt_direct_sale_admission
+        BEFORE INSERT ON gift_card_redemption_attempts
+        FOR EACH ROW
+        WHEN NEW.status = 'pending' AND EXISTS (
+            SELECT 1 FROM ecr_transactions et
+             WHERE LOWER(TRIM(et.transaction_type)) = 'sale'
+               AND LOWER(TRIM(et.status)) <> 'declined'
+               AND (CASE WHEN json_valid(et.receipt_data)
+                         THEN json_extract(et.receipt_data, '$.returnedToCustomer') END) IS NULL
+               AND (et.order_id = NEW.local_order_id
+                    OR et.order_id = (SELECT supabase_id FROM orders WHERE id = NEW.local_order_id)
+                    OR et.order_id = (SELECT client_request_id FROM orders WHERE id = NEW.local_order_id))
+               AND (SELECT COUNT(*) FROM order_payments represented
+                     WHERE represented.order_id = NEW.local_order_id
+                       AND LOWER(TRIM(represented.method)) = 'card'
+                       AND represented.transaction_ref = et.id
+                       AND represented.amount_cents = et.amount
+                       AND UPPER(TRIM(represented.currency)) = UPPER(TRIM(et.currency))
+                       AND LOWER(TRIM(represented.payment_origin)) = 'terminal'
+                       AND (represented.terminal_device_id IS NULL
+                            OR represented.terminal_device_id = et.device_id)) <> 1
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'unresolved direct card SALE blocks new gift debit');
+        END;
+
+        INSERT OR IGNORE INTO schema_version (version) VALUES (91);
+        "#,
+    )
+    .map_err(|error| format!("migration v91 direct SALE representation: {error}"))?;
+    info!("Applied migration v91 (a direct SALE is represented by its one card row)");
+    Ok(())
+}
+
+/// Migration v92: 1.4.119's placeholder payment rows ask for the server's
+/// ledger once (founder rule 30/09/2026: no order is registered paid without
+/// its payment record).
+///
+/// 1.4.119 gave a pulled paid order with no local payment row a completed row
+/// guessed from its own label and total (`payment_origin =
+/// 'sync_reconstructed'`, no `remote_payment_id`). c8c6be004 stopped writing
+/// them, but the ones written still counted as coverage, net paid and drawer
+/// money, and hid the missing record from the Z, the cancel refusal and the
+/// claim an order write sends. They now count nowhere
+/// (`payments::placeholder_payment_sql`). This step only marks each one with
+/// `metadata.placeholder_ledger_restore.requested_at`, so the next sync pass
+/// mirrors its order's server payments
+/// (`sync::restore_ledgers_for_placeholder_payments`): the server's real row
+/// adopts the placeholder. Nothing is deleted and no amount, method or status
+/// changes. A database without the ledger columns (repair fixtures) only
+/// records the version.
+fn migrate_v92(conn: &Connection) -> Result<(), String> {
+    let has_order_payments: bool = conn
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'order_payments'
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("v92 inspect order_payments table: {e}"))?;
+    let has_columns = has_order_payments
+        && column_exists(conn, "order_payments", "metadata")?
+        && column_exists(conn, "order_payments", "payment_origin")?
+        && column_exists(conn, "order_payments", "remote_payment_id")?;
+    if has_columns {
+        let requested = conn
+            .execute(
+                &format!(
+                    "UPDATE order_payments
+                     SET metadata = json_set(
+                             CASE WHEN json_valid(metadata) THEN metadata ELSE '{{}}' END,
+                             '$.placeholder_ledger_restore.requested_at',
+                             strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                         )
+                     WHERE status = 'completed'
+                       AND {}
+                       AND (CASE WHEN json_valid(metadata)
+                                 THEN json_extract(metadata, '$.placeholder_ledger_restore.requested_at')
+                            END) IS NULL",
+                    crate::payments::placeholder_payment_sql("order_payments")
+                ),
+                [],
+            )
+            .map_err(|e| format!("v92 request placeholder ledger restore: {e}"))?;
+        info!(
+            placeholders = requested,
+            "v92: placeholder payment rows count nowhere and wait for the server's ledger"
+        );
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_version (version) VALUES (92)",
+        [],
+    )
+    .map_err(|e| format!("v92 record schema_version: {e}"))?;
+    info!("Applied migration v92 (placeholder payments ask for the server's ledger)");
+    Ok(())
+}
+
+/// Migration v93: two order markers the server owns (round 3, 01/10/2026,
+/// shared rules R6 and R7).
+///
+/// - `orders.folio_charged`: the server settled this order onto a hotel
+///   guest folio (its `payment_method` is `room_charge`). The folio charge is
+///   the order's record, so such an order is never refused a cancel as "paid
+///   with no payment record" (R6). This till dropped `orders.payment_method`
+///   in v55 and `order_payments.method` cannot hold `room_charge`, so before
+///   v93 nothing local said so. Stamped from every pulled order
+///   (`sync::stamp_remote_folio_charge`).
+/// - `orders.server_deleted_at`: the server deleted this order, and this till
+///   kept it because it has payment rows or lies inside a closed Z (R7: a
+///   till never deletes such an order). It is hidden from the order lists and
+///   its payment rows keep counting.
+///
+/// Purely additive; it reads and writes no native repair state.
+fn migrate_v93(conn: &Connection) -> Result<(), String> {
+    if !column_exists(conn, "orders", "folio_charged")? {
+        conn.execute(
+            "ALTER TABLE orders ADD COLUMN folio_charged INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(|e| format!("v93 add orders.folio_charged: {e}"))?;
+    }
+    if !column_exists(conn, "orders", "server_deleted_at")? {
+        conn.execute("ALTER TABLE orders ADD COLUMN server_deleted_at TEXT", [])
+            .map_err(|e| format!("v93 add orders.server_deleted_at: {e}"))?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_version (version) VALUES (93)",
+        [],
+    )
+    .map_err(|e| format!("v93 record schema_version: {e}"))?;
+    info!("Applied migration v93 (orders.folio_charged, orders.server_deleted_at)");
+    Ok(())
+}
+
+/// The `payment_adjustments.refund_method` CHECK as v37's ALTER TABLE stored
+/// it, and as v94 widens it.
+const REFUND_METHOD_CHECK_V37: &str = "CHECK (refund_method IN ('cash', 'card'))";
+const REFUND_METHOD_CHECK_V94: &str = "CHECK (refund_method IN ('cash', 'card', 'other'))";
+
+/// Migration v94: a refund always names its tender (shared rule R5, round 3
+/// review 01/10/2026).
+///
+/// A refund of a payment in any tender but cash or card (`other`) names
+/// `other`, as Android stores it (`resolveRefundCashHandlingAsync`). v37's
+/// CHECK allowed only cash or card, so this till stored no tender for such a
+/// refund: the money read the same (every reader falls back to the payment's
+/// own tender), but the two apps wrote different records for the same refund.
+/// The CHECK is widened in place, as v90 widened `order_payments.status`: no
+/// table rebuild, no row touched. An unknown CHECK shape is left exactly as
+/// it was; the refund writer then stores no tender
+/// ([`payment_adjustments_accept_other_refund`]).
+///
+/// Purely a schema widening; it reads and writes no native repair state.
+fn migrate_v94(conn: &Connection) -> Result<(), String> {
+    let has_adjustments: bool = conn
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'payment_adjustments'
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("v94 inspect payment_adjustments table: {e}"))?;
+    if has_adjustments {
+        let widened = widen_refund_method_check(conn)?;
+        info!(
+            refund_method_check = ?widened,
+            "v94: a refund of an other tender names it"
+        );
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_version (version) VALUES (94)",
+        [],
+    )
+    .map_err(|e| format!("v94 record schema_version: {e}"))?;
+    info!("Applied migration v94 (payment_adjustments.refund_method accepts other)");
+    Ok(())
+}
+
+fn table_sql(conn: &Connection, table: &str) -> Result<Option<String>, String> {
+    conn.query_row(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        params![table],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .map(Option::flatten)
+    .map_err(|e| format!("read {table} schema: {e}"))
+}
+
+fn sql_has_refund_method_check(sql: &str) -> bool {
+    let compact: String = sql
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    compact.contains("check(refund_methodin(")
+}
+
+/// Does `payment_adjustments.refund_method` accept `other` (v94)? Read from
+/// the stored schema; the refund writer stores no tender where it does not
+/// (an unknown CHECK shape v94 left alone), never a failed refund.
+pub(crate) fn payment_adjustments_accept_other_refund(conn: &Connection) -> bool {
+    match table_sql(conn, "payment_adjustments") {
+        Ok(Some(sql)) => {
+            sql.contains(REFUND_METHOD_CHECK_V94) || !sql_has_refund_method_check(&sql)
+        }
+        _ => false,
+    }
+}
+
+/// Widen the `payment_adjustments.refund_method` CHECK to accept `other`.
+/// Runs inside the migration transaction; idempotent. Same technique and
+/// guarantees as [`widen_order_payment_status_check`].
+fn widen_refund_method_check(conn: &Connection) -> Result<OrderPaymentStatusCheck, String> {
+    let Some(sql) = table_sql(conn, "payment_adjustments")? else {
+        return Ok(OrderPaymentStatusCheck::LeftUnchanged);
+    };
+    if sql.contains(REFUND_METHOD_CHECK_V94) {
+        return Ok(OrderPaymentStatusCheck::AlreadyWide);
+    }
+    if !sql_has_refund_method_check(&sql) {
+        return Ok(OrderPaymentStatusCheck::Unconstrained);
+    }
+    if sql.matches(REFUND_METHOD_CHECK_V37).count() != 1 {
+        warn!("v94: payment_adjustments carries an unknown refund_method CHECK; left unchanged");
+        return Ok(OrderPaymentStatusCheck::LeftUnchanged);
+    }
+    let widened_sql = sql.replacen(REFUND_METHOD_CHECK_V37, REFUND_METHOD_CHECK_V94, 1);
+
+    conn.execute_batch("SAVEPOINT v94_widen_refund_method_check")
+        .map_err(|e| format!("v94 savepoint: {e}"))?;
+    let edited = (|| -> Result<(), String> {
+        let schema_version: i64 = conn
+            .query_row("PRAGMA schema_version", [], |row| row.get(0))
+            .map_err(|e| format!("v94 read schema_version pragma: {e}"))?;
+        conn.execute_batch("PRAGMA writable_schema = ON")
+            .map_err(|e| format!("v94 writable_schema on: {e}"))?;
+        let updated = conn.execute(
+            "UPDATE sqlite_master SET sql = ?1 WHERE type = 'table' AND name = 'payment_adjustments'",
+            params![widened_sql],
+        );
+        // Always switch schema editing off again, whatever the UPDATE did.
+        let bumped = conn.execute_batch(&format!("PRAGMA schema_version = {}", schema_version + 1));
+        conn.execute_batch("PRAGMA writable_schema = OFF")
+            .map_err(|e| format!("v94 writable_schema off: {e}"))?;
+        let updated =
+            updated.map_err(|e| format!("v94 rewrite payment_adjustments schema: {e}"))?;
+        bumped.map_err(|e| format!("v94 bump schema_version: {e}"))?;
+        if updated != 1 {
+            return Err(format!(
+                "v94 rewrote {updated} payment_adjustments schema rows"
+            ));
+        }
+        // Prove it: an `other` refund tender must now be accepted. A void
+        // row (no refund trigger reads it), foreign keys deferred so the
+        // probe needs no parent rows; rolled back before anything can see it.
+        conn.execute_batch("PRAGMA defer_foreign_keys = ON; SAVEPOINT v94_probe;")
+            .map_err(|e| format!("v94 probe savepoint: {e}"))?;
+        let probe = conn.execute(
+            "INSERT INTO payment_adjustments (
+                 id, payment_id, order_id, adjustment_type, amount, reason,
+                 refund_method, created_at, updated_at
+             ) VALUES ('__v94_refund_method_probe__', '__v94_probe_payment__',
+                       '__v94_probe_order__', 'void', 0, 'v94 probe', 'other',
+                       '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
+            [],
+        );
+        conn.execute_batch("ROLLBACK TO v94_probe; RELEASE v94_probe;")
+            .map_err(|e| format!("v94 probe rollback: {e}"))?;
+        probe
+            .map(|_| ())
+            .map_err(|e| format!("v94 probe insert refused: {e}"))
+    })();
+
+    match edited {
+        Ok(()) => {
+            conn.execute_batch("RELEASE v94_widen_refund_method_check")
+                .map_err(|e| format!("v94 release: {e}"))?;
+            Ok(OrderPaymentStatusCheck::Widened)
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("PRAGMA writable_schema = OFF");
+            conn.execute_batch(
+                "ROLLBACK TO v94_widen_refund_method_check; RELEASE v94_widen_refund_method_check;",
+            )
+            .map_err(|e| format!("v94 rollback after {error}: {e}"))?;
+            warn!(error = %error, "v94: payment_adjustments refund_method CHECK left unchanged");
+            Ok(OrderPaymentStatusCheck::LeftUnchanged)
+        }
+    }
+}
+
+/// What [`widen_order_payment_status_check`] found or did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OrderPaymentStatusCheck {
+    /// The CHECK already lists `duplicate_review`.
+    AlreadyWide,
+    /// No CHECK on `status` (repair fixtures, very old shapes): any status fits.
+    Unconstrained,
+    /// The v36 CHECK was widened in place.
+    Widened,
+    /// A CHECK shape this migration does not know, or a probe that failed:
+    /// left exactly as it was.
+    LeftUnchanged,
+}
+
+/// Does `order_payments.status` accept `duplicate_review`? Read from the
+/// stored schema; used by the set-aside writer to fail closed on a terminal
+/// whose v90 widening did not apply.
+pub(crate) fn order_payments_accept_duplicate_review(conn: &Connection) -> bool {
+    match order_payments_table_sql(conn) {
+        Ok(Some(sql)) => {
+            sql.contains("'duplicate_review'") || !order_payments_sql_has_status_check(&sql)
+        }
+        _ => false,
+    }
+}
+
+fn order_payments_table_sql(conn: &Connection) -> Result<Option<String>, String> {
+    conn.query_row(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'order_payments'",
+        [],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .map(Option::flatten)
+    .map_err(|e| format!("read order_payments schema: {e}"))
+}
+
+fn order_payments_sql_has_status_check(sql: &str) -> bool {
+    let compact: String = sql
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    compact.contains("check(statusin(")
+}
+
+/// Widen the `order_payments.status` CHECK to accept `duplicate_review`.
+/// Runs inside the migration transaction; idempotent.
+fn widen_order_payment_status_check(conn: &Connection) -> Result<OrderPaymentStatusCheck, String> {
+    let Some(sql) = order_payments_table_sql(conn)? else {
+        return Ok(OrderPaymentStatusCheck::LeftUnchanged);
+    };
+    if sql.contains("'duplicate_review'") {
+        return Ok(OrderPaymentStatusCheck::AlreadyWide);
+    }
+    if !order_payments_sql_has_status_check(&sql) {
+        return Ok(OrderPaymentStatusCheck::Unconstrained);
+    }
+    if sql.matches(ORDER_PAYMENT_STATUS_CHECK_V36).count() != 1 {
+        warn!("v90: order_payments carries an unknown status CHECK; left unchanged");
+        return Ok(OrderPaymentStatusCheck::LeftUnchanged);
+    }
+    let widened_sql = sql.replacen(
+        ORDER_PAYMENT_STATUS_CHECK_V36,
+        ORDER_PAYMENT_STATUS_CHECK_V90,
+        1,
+    );
+
+    conn.execute_batch("SAVEPOINT v90_widen_status_check")
+        .map_err(|e| format!("v90 savepoint: {e}"))?;
+    let edited = (|| -> Result<(), String> {
+        let schema_version: i64 = conn
+            .query_row("PRAGMA schema_version", [], |row| row.get(0))
+            .map_err(|e| format!("v90 read schema_version pragma: {e}"))?;
+        conn.execute_batch("PRAGMA writable_schema = ON")
+            .map_err(|e| format!("v90 writable_schema on: {e}"))?;
+        let updated = conn.execute(
+            "UPDATE sqlite_master SET sql = ?1 WHERE type = 'table' AND name = 'order_payments'",
+            params![widened_sql],
+        );
+        // Always switch schema editing off again, whatever the UPDATE did.
+        let bumped = conn.execute_batch(&format!("PRAGMA schema_version = {}", schema_version + 1));
+        conn.execute_batch("PRAGMA writable_schema = OFF")
+            .map_err(|e| format!("v90 writable_schema off: {e}"))?;
+        let updated = updated.map_err(|e| format!("v90 rewrite order_payments schema: {e}"))?;
+        bumped.map_err(|e| format!("v90 bump schema_version: {e}"))?;
+        if updated != 1 {
+            return Err(format!("v90 rewrote {updated} order_payments schema rows"));
+        }
+        // Prove it: a row with the new status must now be accepted. Foreign
+        // keys are deferred so the probe needs no parent order; the probe is
+        // rolled back before anything else can see it.
+        conn.execute_batch("PRAGMA defer_foreign_keys = ON; SAVEPOINT v90_probe;")
+            .map_err(|e| format!("v90 probe savepoint: {e}"))?;
+        let probe = conn.execute(
+            "INSERT INTO order_payments (id, order_id, method, amount, status, created_at, updated_at)
+             VALUES ('__v90_status_probe__', '__v90_status_probe__', 'cash', 0,
+                     'duplicate_review', '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
+            [],
+        );
+        conn.execute_batch("ROLLBACK TO v90_probe; RELEASE v90_probe;")
+            .map_err(|e| format!("v90 probe rollback: {e}"))?;
+        probe
+            .map(|_| ())
+            .map_err(|e| format!("v90 probe insert refused: {e}"))
+    })();
+
+    match edited {
+        Ok(()) => {
+            conn.execute_batch("RELEASE v90_widen_status_check")
+                .map_err(|e| format!("v90 release: {e}"))?;
+            Ok(OrderPaymentStatusCheck::Widened)
+        }
+        Err(error) => {
+            // Put the schema back exactly as it was; the POS keeps working
+            // and a set-aside write fails closed until support looks.
+            let _ = conn.execute_batch("PRAGMA writable_schema = OFF");
+            conn.execute_batch(
+                "ROLLBACK TO v90_widen_status_check; RELEASE v90_widen_status_check;",
+            )
+            .map_err(|e| format!("v90 rollback after {error}: {e}"))?;
+            warn!(error = %error, "v90: order_payments status CHECK left unchanged");
+            Ok(OrderPaymentStatusCheck::LeftUnchanged)
+        }
+    }
 }
 
 /// Migration v82: no parked conflict may sit without a reason, and customer
@@ -781,13 +1821,16 @@ enum PreMigrationRecoveryMode {
     NativeRepairAtomicOnly,
 }
 
-const NATIVE_REPAIR_ATOMIC_MIGRATION_ALLOWLIST: &[i32] = &[56, 75, 76, 77, 78, 79, 80, 81, 82];
+const NATIVE_REPAIR_ATOMIC_MIGRATION_ALLOWLIST: &[i32] = &[
+    56, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94,
+];
 
 fn computed_pending_migrations(
     current: i32,
     needs_v56_backfill: bool,
     needs_v79_backfill: bool,
     needs_v81_backfill: bool,
+    needs_v83_backfill: bool,
 ) -> Vec<i32> {
     let mut pending = Vec::new();
     if needs_v56_backfill && current >= 56 {
@@ -801,6 +1844,9 @@ fn computed_pending_migrations(
     }
     if needs_v81_backfill && current >= 81 {
         pending.push(81);
+    }
+    if needs_v83_backfill && current >= 83 {
+        pending.push(83);
     }
     pending.sort_unstable();
     pending.dedup();
@@ -6273,6 +7319,30 @@ pub fn ecr_get_default_device(
     }
 }
 
+/// Fallible [`ecr_get_default_device`]: the same enabled/default selection,
+/// but `Ok(None)` only when no such device exists. A SQLite prepare, query or
+/// row failure is an error, never "no device".
+pub fn ecr_try_get_default_device(
+    conn: &Connection,
+    device_type: Option<&str>,
+) -> Result<Option<serde_json::Value>, String> {
+    if let Some(dt) = device_type {
+        ecr_try_query_one(
+            conn,
+            "SELECT * FROM ecr_devices WHERE device_type = ?1 AND enabled = 1
+             ORDER BY is_default DESC LIMIT 1",
+            params![dt],
+        )
+    } else {
+        ecr_try_query_one(
+            conn,
+            "SELECT * FROM ecr_devices WHERE enabled = 1
+             ORDER BY is_default DESC LIMIT 1",
+            [],
+        )
+    }
+}
+
 /// Insert an ECR transaction record.
 pub fn ecr_insert_transaction(conn: &Connection, tx: &serde_json::Value) -> Result<(), String> {
     conn.execute(
@@ -6549,6 +7619,29 @@ fn ecr_query_one<P: rusqlite::Params>(
     .ok()
 }
 
+/// Helper: like `ecr_query_one`, but only an empty result is `Ok(None)`.
+fn ecr_try_query_one<P: rusqlite::Params>(
+    conn: &Connection,
+    sql: &str,
+    params: P,
+) -> Result<Option<serde_json::Value>, String> {
+    let mut stmt = conn.prepare(sql).map_err(|error| error.to_string())?;
+    let column_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+
+    match stmt.query_row(params, |row| {
+        let mut obj = serde_json::Map::new();
+        for (i, col) in column_names.iter().enumerate() {
+            let val: rusqlite::types::Value = row.get(i)?;
+            obj.insert(to_camel_case(col), ecr_sql_value_to_json(col, val));
+        }
+        Ok(serde_json::Value::Object(obj))
+    }) {
+        Ok(value) => Ok(Some(value)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 /// Helper: query multiple rows from ecr tables as JSON.
 fn ecr_query_many<P: rusqlite::Params>(
     conn: &Connection,
@@ -6623,6 +7716,25 @@ fn ecr_sql_value_to_json(column: &str, value: rusqlite::types::Value) -> serde_j
 // ---------------------------------------------------------------------------
 // Settings helpers
 // ---------------------------------------------------------------------------
+
+/// Read a single setting strictly (item H, fix review 30/09/2026): `Ok(None)`
+/// when it is not stored, `Err` when the read fails. `get_setting` answers
+/// both with `None`, which must never read as "missing" for a value money
+/// depends on (the tax rate, the discount cap).
+pub fn read_setting_strict(
+    conn: &Connection,
+    category: &str,
+    key: &str,
+) -> Result<Option<String>, String> {
+    conn.query_row(
+        "SELECT setting_value FROM local_settings WHERE setting_category = ?1 AND setting_key = ?2",
+        params![category, key],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .map(Option::flatten)
+    .map_err(|error| format!("read setting {category}.{key}: {error}"))
+}
 
 /// Get a single setting value.
 pub fn get_setting(conn: &Connection, category: &str, key: &str) -> Option<String> {
@@ -8115,23 +9227,33 @@ mod tests {
     #[test]
     fn migration_v79_native_repair_atomic_only_policy_uses_computed_explicit_allowlist() {
         assert_eq!(
-            computed_pending_migrations(75, true, false, false),
-            vec![56, 76, 77, 78, 79, 80, 81, 82]
+            computed_pending_migrations(75, true, false, false, false),
+            vec![56, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94]
         );
         assert_eq!(
-            computed_pending_migrations(78, false, false, false),
-            vec![79, 80, 81, 82]
+            computed_pending_migrations(78, false, false, false, false),
+            vec![79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94]
         );
         assert_eq!(
-            computed_pending_migrations(79, false, true, false),
-            vec![79, 80, 81, 82]
+            computed_pending_migrations(79, false, true, false, false),
+            vec![79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94]
         );
         // A v81 whose columns went missing is re-run even though it is no longer
         // the newest version and MAX(schema_version) says the database is current.
         assert_eq!(
-            computed_pending_migrations(82, false, false, true),
+            computed_pending_migrations(CURRENT_SCHEMA_VERSION, false, false, true, false),
             vec![81]
         );
+        // v84 only adds the gift card fiscal journal and its guard triggers; it
+        // reads and writes no native repair state.
+        assert!(native_repair_atomic_only_allowed(83, &[84]));
+        // v85 only creates financial-opening tables/indexes and its version
+        // stamp. It does not read or write native repair state.
+        assert!(native_repair_atomic_only_allowed(84, &[85]));
+        assert!(native_repair_atomic_only_allowed(84, &[85, 86]));
+        // v83 only widens the `order_payments.method` CHECK text; it reads and
+        // writes no native repair state.
+        assert!(native_repair_atomic_only_allowed(82, &[83]));
         assert!(native_repair_atomic_only_allowed(80, &[81]));
 
         // v82 only rewrites non-repair `parity_sync_queue` bookkeeping: its
@@ -8142,6 +9264,26 @@ mod tests {
         // REPAIR_MIGRATION_ATOMIC_ONLY_UNSAFE error, not a quiet fallback.
         assert!(native_repair_atomic_only_allowed(81, &[82]));
         assert!(native_repair_atomic_only_allowed(79, &[80, 81, 82]));
+        // v90 (the payments set aside for review) adds
+        // `order_payments.metadata` and widens its status CHECK in one
+        // transaction; it never reads or writes native repair state.
+        assert!(native_repair_atomic_only_allowed(89, &[90]));
+        // v91 only re-creates the direct-SALE admission triggers of v89.
+        assert!(native_repair_atomic_only_allowed(90, &[91]));
+        // v92 only marks 1.4.119 placeholder payment rows in
+        // `order_payments.metadata` for the server's ledger; it never reads or
+        // writes native repair state.
+        assert!(native_repair_atomic_only_allowed(91, &[92]));
+        // v93 only adds two order columns (`folio_charged`,
+        // `server_deleted_at`); it never reads or writes native repair state.
+        assert!(native_repair_atomic_only_allowed(92, &[93]));
+        // v94 only widens the payment_adjustments.refund_method CHECK in place;
+        // it never reads or writes native repair state.
+        assert!(native_repair_atomic_only_allowed(93, &[94]));
+        assert!(native_repair_atomic_only_allowed(
+            79,
+            &[80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94]
+        ));
 
         assert!(native_repair_atomic_only_allowed(75, &[56, 76, 77, 78, 79]));
         assert!(native_repair_atomic_only_allowed(78, &[79]));
@@ -8155,6 +9297,372 @@ mod tests {
             &[74, 76, 77, 78, 79]
         ));
         assert!(!native_repair_atomic_only_allowed(79, &[]));
+    }
+
+    fn gift_v83_rewind_check(conn: &Connection, replacement: &str) {
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name='order_payments'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            sql.matches(ORDER_PAYMENT_METHOD_CHECK_WITH_GIFT_CARD)
+                .count(),
+            1
+        );
+        let cookie: i64 = conn
+            .query_row("PRAGMA schema_version", [], |row| row.get(0))
+            .unwrap();
+        conn.execute_batch("PRAGMA writable_schema=ON;").unwrap();
+        conn.execute(
+            "UPDATE sqlite_master SET sql=?1 WHERE name='order_payments' AND type='table'",
+            [sql.replacen(ORDER_PAYMENT_METHOD_CHECK_WITH_GIFT_CARD, replacement, 1)],
+        )
+        .unwrap();
+        conn.execute_batch(&format!(
+            "PRAGMA writable_schema=OFF; PRAGMA schema_version={};",
+            cookie + 1
+        ))
+        .unwrap();
+        conn.query_row("SELECT count(*) FROM order_payments", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap();
+    }
+
+    fn gift_v83_seed_ordinary_payment(conn: &Connection) {
+        conn.execute_batch(
+            "INSERT INTO orders(id,items,total_amount,status,order_type,payment_status,sync_status,created_at,updated_at)
+             VALUES('v83-order','[]',20,'completed','takeaway','pending','synced','now','now');
+             INSERT INTO order_payments(id,order_id,method,amount,amount_cents,status,sync_state,created_at,updated_at)
+             VALUES('v83-cash','v83-order','cash',5,500,'completed','applied','now','now');",
+        ).unwrap();
+    }
+
+    #[test]
+    fn gift_v83_failure_recorded_then_restart_repairs_capability_without_row_loss() {
+        let (_tmp, conn) = current_file_fixture();
+        gift_v83_seed_ordinary_payment(&conn);
+        gift_v83_rewind_check(&conn, ORDER_PAYMENT_METHOD_CHECK);
+        conn.execute_batch("DELETE FROM schema_version WHERE version=83;")
+            .unwrap();
+        conn.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)
+            .unwrap();
+        run_migration_tx(&conn, 83, migrate_v83)
+            .expect("ordinary startup survives a refused widening");
+        assert_eq!(max_schema_version(&conn), CURRENT_SCHEMA_VERSION);
+        assert!(!order_payments_support_gift_cards(&conn).unwrap());
+        assert!(
+            !needs_v83_gift_payment_backfill(&conn, 83).unwrap(),
+            "do not repeat impossible schema edits while defensive"
+        );
+        assert_eq!(pragma_val(&conn, "writable_schema"), "0");
+        assert!(conn
+            .execute(
+                "UPDATE order_payments SET method='gift_card' WHERE id='v83-cash'",
+                []
+            )
+            .is_err());
+        conn.execute(
+            "UPDATE order_payments SET method='card' WHERE id='v83-cash'",
+            [],
+        )
+        .expect("ordinary card remains supported");
+        conn.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_DEFENSIVE, false)
+            .unwrap();
+        assert!(needs_v83_gift_payment_backfill(&conn, 83).unwrap());
+        let before: Vec<(String, String)> = {
+            let mut stmt = conn.prepare("SELECT name,sql FROM sqlite_master WHERE tbl_name='order_payments' AND type IN ('index','trigger') AND sql IS NOT NULL ORDER BY name").unwrap();
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let foreign_keys: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_foreign_key_list('order_payments')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        run_migrations(&conn)
+            .expect("recorded83 goes through normal snapshot/recovery and repairs capability");
+        assert!(order_payments_support_gift_cards(&conn).unwrap());
+        assert!(!needs_v83_gift_payment_backfill(&conn, 83).unwrap());
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM schema_version WHERE version=83",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT method FROM order_payments WHERE id='v83-cash'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "card"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT amount_cents FROM order_payments WHERE id='v83-cash'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            500
+        );
+        let after: Vec<(String, String)> = {
+            let mut stmt = conn.prepare("SELECT name,sql FROM sqlite_master WHERE tbl_name='order_payments' AND type IN ('index','trigger') AND sql IS NOT NULL ORDER BY name").unwrap();
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(before, after);
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM pragma_foreign_key_list('order_payments')",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            foreign_keys
+        );
+        assert_eq!(pragma_val(&conn, "writable_schema"), "0");
+        assert_eq!(
+            conn.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
+        run_migrations(&conn).expect("second restart is idempotent");
+    }
+
+    #[test]
+    fn gift_v83_unexpected_check_stays_ordinary_usable_and_gift_disabled() {
+        let (_tmp, conn) = current_file_fixture();
+        gift_v83_seed_ordinary_payment(&conn);
+        // A comment containing gift_card is not an admitting method CHECK.
+        gift_v83_rewind_check(
+            &conn,
+            "CHECK (method IN ('cash','card','other')) /* 'gift_card' */",
+        );
+        assert!(!order_payments_support_gift_cards(&conn).unwrap());
+        assert!(!needs_v83_gift_payment_backfill(&conn, 83).unwrap());
+        assert!(widen_order_payment_methods_for_gift_cards(&conn)
+            .unwrap_err()
+            .contains("unexpected shape"));
+        run_migrations(&conn).expect("unknown shape does not prevent ordinary startup");
+        assert!(conn
+            .execute(
+                "UPDATE order_payments SET method='gift_card' WHERE id='v83-cash'",
+                []
+            )
+            .is_err());
+        conn.execute(
+            "UPDATE order_payments SET method='card' WHERE id='v83-cash'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(pragma_val(&conn, "writable_schema"), "0");
+    }
+
+    #[test]
+    fn gift_v83_comment_or_default_literal_cannot_fake_supported_check() {
+        for sql in [
+            "CREATE TABLE order_payments (method TEXT CHECK (method IN ('cash','card','other')) /* CHECK (method IN ('cash', 'card', 'other', 'gift_card')) */)",
+            "CREATE TABLE order_payments (method TEXT CHECK (method IN ('cash','card','other')), note TEXT DEFAULT 'CHECK (method IN (''cash'', ''card'', ''other'', ''gift_card''))')",
+        ] {
+            let conn=Connection::open_in_memory().unwrap(); conn.execute_batch(sql).unwrap();
+            assert!(!order_payments_support_gift_cards(&conn).unwrap());
+            assert!(widen_order_payment_methods_for_gift_cards(&conn).unwrap_err().contains("unexpected shape"));
+        }
+    }
+
+    #[test]
+    fn gift_funding_v86_is_repair_atomic_safe_on_its_own() {
+        // v86 only creates the gift card funding journal, its indexes and its
+        // guard trigger; it reads and writes no native repair state.
+        assert_eq!(
+            computed_pending_migrations(85, false, false, false, false),
+            vec![86, 87, 88, 89, 90, 91, 92, 93, 94]
+        );
+        assert!(native_repair_atomic_only_allowed(85, &[86]));
+    }
+
+    #[test]
+    fn gift_return_v87_is_repair_atomic_safe_on_its_own() {
+        // v87 only creates the gift card return journal, its indexes and its
+        // guard triggers; it reads and writes no native repair state.
+        assert_eq!(
+            computed_pending_migrations(86, false, false, false, false),
+            vec![87, 88, 89, 90, 91, 92, 93, 94]
+        );
+        assert!(native_repair_atomic_only_allowed(86, &[87]));
+        assert!(native_repair_atomic_only_allowed(85, &[86, 87]));
+    }
+
+    /// Shared rule R5 (round 3 review, 01/10/2026): v94 widens v37's
+    /// `refund_method` CHECK in place so a refund of an `other` tender names
+    /// it, on an upgraded terminal (v37's ALTER text) as on a fresh one; it is
+    /// idempotent and repair-atomic safe on its own.
+    #[test]
+    fn migration_v94_lets_a_refund_name_an_other_tender() {
+        let (_tmp, conn) = current_file_fixture();
+        let sql = table_sql(&conn, "payment_adjustments").unwrap().unwrap();
+        assert!(sql.contains(REFUND_METHOD_CHECK_V94), "{sql}");
+        assert!(!sql.contains(REFUND_METHOD_CHECK_V37), "{sql}");
+        assert!(payment_adjustments_accept_other_refund(&conn));
+        assert_eq!(
+            widen_refund_method_check(&conn).unwrap(),
+            OrderPaymentStatusCheck::AlreadyWide
+        );
+        conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+        conn.execute(
+            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount,
+                 reason, refund_method, created_at, updated_at)
+             VALUES ('adj-v94', 'pay-v94', 'ord-v94', 'refund', 1.0, 'Synthetic', 'other',
+                     '2026-10-01T10:00:00Z', '2026-10-01T10:00:00Z')",
+            [],
+        )
+        .expect("an other refund tender is accepted");
+        let refused = conn.execute(
+            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount,
+                 reason, refund_method, created_at, updated_at)
+             VALUES ('adj-v94-bad', 'pay-v94', 'ord-v94', 'refund', 1.0, 'Synthetic', 'gift',
+                     '2026-10-01T10:00:00Z', '2026-10-01T10:00:00Z')",
+            [],
+        );
+        assert!(
+            refused.is_err(),
+            "the CHECK still refuses an unknown tender"
+        );
+        assert!(native_repair_atomic_only_allowed(93, &[94]));
+    }
+
+    /// v94 leaves a CHECK shape it does not know exactly as it was; the
+    /// refund writer then stores no tender rather than failing the refund.
+    #[test]
+    fn migration_v94_leaves_an_unknown_refund_method_check_alone() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE payment_adjustments (
+                 id TEXT PRIMARY KEY,
+                 refund_method TEXT CHECK (refund_method IN ('cash', 'card', 'cheque'))
+             );",
+        )
+        .unwrap();
+        assert!(!payment_adjustments_accept_other_refund(&conn));
+        assert_eq!(
+            widen_refund_method_check(&conn).unwrap(),
+            OrderPaymentStatusCheck::LeftUnchanged
+        );
+        assert!(!payment_adjustments_accept_other_refund(&conn));
+    }
+
+    #[test]
+    fn a_release_branch_schema_83_set_aside_database_gets_gift_cards_and_keeps_set_aside() {
+        // Before the merge with #308 (30/09/2026) the 1.0.13 / 1.4.120 release
+        // branch shipped its set-aside status CHECK as schema 83, the number
+        // #308's gift card methods took. A terminal that ran such an
+        // unpublished build records 83 with `duplicate_review` allowed and the
+        // old method CHECK; it must end with both, at the current schema.
+        let (_tmp, conn) = current_file_fixture();
+        gift_v83_rewind_check(&conn, ORDER_PAYMENT_METHOD_CHECK);
+        conn.execute_batch("DELETE FROM schema_version WHERE version >= 84;")
+            .unwrap();
+        assert_eq!(max_schema_version(&conn), 83);
+        assert!(order_payments_accept_duplicate_review(&conn));
+        assert!(!order_payments_support_gift_cards(&conn).unwrap());
+        assert!(needs_v83_gift_payment_backfill(&conn, 83).unwrap());
+
+        run_migrations(&conn).expect("a release-built schema 83 upgrades");
+
+        assert_eq!(max_schema_version(&conn), CURRENT_SCHEMA_VERSION);
+        assert!(order_payments_support_gift_cards(&conn).unwrap());
+        assert!(order_payments_accept_duplicate_review(&conn));
+        assert!(!needs_v83_gift_payment_backfill(&conn, CURRENT_SCHEMA_VERSION).unwrap());
+        let triggers: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name IN (
+                    'trg_direct_sale_payment_insert',
+                    'trg_direct_sale_payment_identity',
+                    'trg_gift_attempt_direct_sale_admission')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(triggers, 3);
+    }
+
+    #[test]
+    fn gift_closing_v88_is_repair_atomic_safe_on_its_own() {
+        // v88 only creates the gift card financial closing journal, its index
+        // and its original guard trigger; it reads and writes no native repair
+        // state.
+        assert_eq!(
+            computed_pending_migrations(87, false, false, false, false),
+            vec![88, 89, 90, 91, 92, 93, 94]
+        );
+        assert!(native_repair_atomic_only_allowed(87, &[88]));
+        assert!(native_repair_atomic_only_allowed(86, &[87, 88]));
+
+        // Rewind the version markers to v87 so the upgrade exercises v88,
+        // including when later additive migrations have been introduced.
+        let (_tmp, conn) = current_file_fixture();
+        conn.execute_batch(
+            "DROP TABLE gift_financial_closings;
+             DELETE FROM schema_version WHERE version >= 88;",
+        )
+        .unwrap();
+        assert_eq!(max_schema_version(&conn), 87);
+        run_migrations(&conn).expect("v87 to v88 migration");
+        assert_eq!(max_schema_version(&conn), CURRENT_SCHEMA_VERSION);
+        let objects: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name IN (
+                    'gift_financial_closings',
+                    'idx_gift_financial_closings_actor',
+                    'trg_gift_financial_closings_original_immutable')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(objects, 3);
+    }
+
+    #[test]
+    fn gift_v83_known_v82_widening_and_recorded83_backfill_require_recovery_preflight() {
+        let (_tmp, conn) = current_file_fixture();
+        gift_v83_rewind_check(&conn, ORDER_PAYMENT_METHOD_CHECK);
+        conn.execute_batch("DELETE FROM schema_version WHERE version=83;")
+            .unwrap();
+        run_migrations(&conn).expect("known v82 migration");
+        assert!(order_payments_support_gift_cards(&conn).unwrap());
+        gift_v83_rewind_check(&conn, ORDER_PAYMENT_METHOD_CHECK);
+        assert_eq!(
+            computed_pending_migrations(83, false, false, false, true),
+            vec![83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94]
+        );
+        let error = run_migrations_with_preflight(
+            &conn,
+            &|_| Err("fixture blocked path".into()),
+            &|_, _| panic!("path failure must precede snapshot/edit"),
+        )
+        .unwrap_err();
+        assert!(error.contains("MIGRATION_MAIN_DATABASE_PATH_QUERY_FAILED"));
+        assert!(
+            !order_payments_support_gift_cards(&conn).unwrap(),
+            "a recorded83 cannot bypass recovery preflight"
+        );
+        run_migrations(&conn).unwrap();
+        assert!(order_payments_support_gift_cards(&conn).unwrap());
     }
 
     #[test]

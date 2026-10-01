@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -10,11 +10,12 @@ pub const UNSETTLED_PAYMENT_BLOCKER_ERROR_CODE: &str = "UNSETTLED_PAYMENT_BLOCKE
 
 /// Severity of a payment-integrity finding.
 ///
-/// Every shipped reason code is `Blocking`: the Z must not close over money
-/// that does not reconcile. `Warning` exists so a future advisory finding can
-/// be surfaced in the reconciliation panel without freezing the till — it is
-/// deliberately unused today, and the Z gate keys on
-/// [`UnsettledPaymentBlocker::is_blocking`] rather than on the reason code.
+/// Every money reason code is `Blocking`: the Z must not close over money
+/// that does not reconcile. `Warning` is an advisory finding surfaced in the
+/// reconciliation panel without freezing the till; today only
+/// `cancelled_order_claims_payment` (item D7), which the submission gate
+/// never reads. The Z keys on [`UnsettledPaymentBlocker::is_blocking`]
+/// rather than on the reason code.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IntegritySeverity {
     Blocking,
@@ -75,6 +76,66 @@ pub struct UnsettledPaymentBlocker {
     /// this names the arm so the renderer can pick the right sentence.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason_variant: Option<String>,
+    /// `payments_need_review` only: the payment set aside (additive wire
+    /// field, 30/09/2026). One blocker per payment, so the Z can list and
+    /// resolve each one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_payment: Option<ReviewPaymentSummary>,
+    /// `payments_not_saved` only: the card money charged on this till whose
+    /// payment row could not be saved yet (additive wire field, 30/09/2026).
+    /// One blocker per record, so the Z can save or resolve each one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unsaved_payment: Option<UnsavedPaymentSummary>,
+    /// The delivery platform holds this order's money (shared rule R4,
+    /// round 3, 01/10/2026; additive wire field, sent only when true): the
+    /// server refused a till payment on it as platform-held (a payment set
+    /// aside with reason `platform_held`), its disposition says so, or a
+    /// platform settlement is recorded on it. "Record the payment" (cash or
+    /// card) is never offered for it: the money is restored from the server,
+    /// never taken at the till. Android `ZReportModal` flags the same row
+    /// `platformHeld`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub platform_held: bool,
+}
+
+/// A charged payment this till could not save yet, as the Z lists it
+/// (`unsaved_payments`): the order number is on the blocker.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnsavedPaymentSummary {
+    pub idempotency_key: String,
+    pub method: String,
+    #[serde(serialize_with = "serialize_cents_as_f64_dp2")]
+    pub amount: Cents,
+    pub amount_cents: i64,
+    pub currency: String,
+    /// When the terminal approved it (RFC 3339).
+    pub captured_at: String,
+    /// `single`, `split_portion` or `collect_outstanding`.
+    pub kind: String,
+    pub attempts: u32,
+    /// False after a refusal no save can change: the manager's resolution is
+    /// the way out.
+    pub can_save_again: bool,
+}
+
+/// A payment set aside as a possible duplicate, as the Z lists it: order
+/// number (on the blocker), amount, method and when it was taken.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewPaymentSummary {
+    pub payment_id: String,
+    pub method: String,
+    #[serde(serialize_with = "serialize_cents_as_f64_dp2")]
+    pub amount: Cents,
+    pub amount_cents: i64,
+    pub currency: String,
+    /// When the payment was taken (RFC 3339).
+    pub taken_at: String,
+    /// `already_paid`, `order_already_covered` or `exceeds_amount_due`.
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detected_at: Option<String>,
 }
 
 impl UnsettledPaymentBlocker {
@@ -147,6 +208,10 @@ struct RawBlockerRow {
     /// card terminal.
     drawer_tender_amount: Cents,
     is_external_platform: bool,
+    /// A payment on this order was set aside because the server refused it
+    /// on money the delivery platform holds (`duplicate_review.reason =
+    /// 'platform_held'`, shared rule R4).
+    platform_held_set_aside: bool,
 }
 
 impl UnsettledPaymentBlocker {
@@ -215,7 +280,216 @@ fn build_blocker_with_severity(
         difference_cents: (row.total_amount - row.settled_amount).as_i64(),
         reason_amounts: BTreeMap::new(),
         reason_variant: None,
+        review_payment: None,
+        unsaved_payment: None,
+        platform_held: false,
     }
+}
+
+/// `payments_need_review`: one blocker per unresolved payment set aside as a
+/// possible duplicate (`payment_review`), for the branch's Z up to
+/// `cutoff_at`. Such a payment is counted nowhere, so its blocker carries
+/// `difference_cents = 0`: it names a decision the day needs, never money
+/// the day is short or over. Android parity: ReportService
+/// `payments_need_review`.
+///
+/// Deliberately NOT part of [`load_branch_window_payment_blockers`]: the
+/// shift checkout gate reads that one, and a set-aside payment holds the
+/// day's close, not a cashier's checkout (Android holds only the Z too).
+pub fn load_payments_need_review_blockers(
+    conn: &Connection,
+    branch_id: &str,
+    cutoff_at: Option<&str>,
+) -> Result<Vec<UnsettledPaymentBlocker>, String> {
+    let payments =
+        crate::payment_review::load_unresolved_set_aside_payments(conn, branch_id, cutoff_at)?;
+    Ok(payments
+        .into_iter()
+        .map(|payment| {
+            let amount = Cents::new(payment.amount_cents);
+            let mut reason_amounts = BTreeMap::new();
+            reason_amounts.insert("paymentAmount".to_string(), payment.amount_cents.max(0));
+            if let Some(due) = payment.amount_due_cents {
+                reason_amounts.insert("amountDue".to_string(), due.max(0));
+            }
+            // Item D (30/09/2026): the server refused it because the delivery
+            // platform already holds this order's money; said plainly.
+            let platform_held =
+                payment.reason == crate::payment_review::SetAsideReason::PlatformHeld.as_str();
+            let (reason_text, suggested_fix) = if platform_held {
+                (
+                    format!(
+                        "A {} {} payment taken at {} was set aside: the delivery platform already holds this order's money. It is not counted.",
+                        format_money(amount),
+                        normalize_payment_method(&payment.method),
+                        payment.taken_at
+                    ),
+                    "Give the money back to the customer, then confirm it here. The platform pays this order to the store through its own settlement.".to_string(),
+                )
+            } else {
+                (
+                    format!(
+                        "A {} {} payment taken at {} was set aside as a possible duplicate: the order was already paid. It is not counted.",
+                        format_money(amount),
+                        normalize_payment_method(&payment.method),
+                        payment.taken_at
+                    ),
+                    "Give the money back to the customer, then confirm it here. If the payment on the server is the wrong one, contact support before closing the day.".to_string(),
+                )
+            };
+            UnsettledPaymentBlocker {
+                order_id: payment.order_id,
+                order_number: payment.order_number,
+                total_amount: Cents::new(payment.order_total_cents),
+                settled_amount: Cents::new(payment.order_settled_cents),
+                payment_status: normalize_payment_status(&payment.order_payment_status),
+                payment_method: normalize_payment_method(&payment.method),
+                reason_code: crate::payment_review::PAYMENTS_NEED_REVIEW_REASON_CODE.to_string(),
+                reason_text,
+                suggested_fix,
+                severity: IntegritySeverity::Blocking.as_str().to_string(),
+                difference_cents: 0,
+                reason_amounts,
+                reason_variant: platform_held.then(|| {
+                    crate::payment_review::SetAsideReason::PlatformHeld
+                        .as_str()
+                        .to_string()
+                }),
+                review_payment: Some(ReviewPaymentSummary {
+                    payment_id: payment.payment_id,
+                    method: normalize_payment_method(&payment.method),
+                    amount,
+                    amount_cents: payment.amount_cents,
+                    currency: payment.currency,
+                    taken_at: payment.taken_at,
+                    reason: payment.reason,
+                    detected_at: payment.detected_at,
+                }),
+                unsaved_payment: None,
+                platform_held: false,
+            }
+        })
+        .collect())
+}
+
+/// `payments_not_saved`: one blocker per card payment this till charged and
+/// could not save yet (`unsaved_payments`), for orders of `branch_id` (empty
+/// = every branch; an order no longer on this till is listed too). No time
+/// window: a charged payment not saved holds every Z until it is saved or a
+/// manager records the money given back. Its blocker carries
+/// `difference_cents = 0` and names a decision, never money counted. Android
+/// parity: ReportService `payments_not_saved`.
+pub fn load_payments_not_saved_blockers(
+    conn: &Connection,
+    branch_id: &str,
+) -> Result<Vec<UnsettledPaymentBlocker>, String> {
+    let records = crate::unsaved_payments::list(conn, None)?;
+    let mut blockers = Vec::with_capacity(records.len());
+    for record in records {
+        let order: Option<(String, String, String)> = conn
+            .query_row(
+                "SELECT COALESCE(NULLIF(TRIM(order_number), ''), id),
+                        COALESCE(branch_id, ''),
+                        COALESCE(payment_status, 'pending')
+                 FROM orders WHERE id = ?1",
+                params![record.order_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|e| format!("load the order of a charged payment not saved: {e}"))?;
+        if let Some((_, order_branch, _)) = order.as_ref() {
+            if !branch_id.is_empty() && !order_branch.is_empty() && order_branch != branch_id {
+                continue;
+            }
+        }
+        // A new-order checkout whose order is not written yet (item E): the
+        // record holds the order, and its branch is the one the checkout
+        // named.
+        let new_order = order.is_none() && record.is_new_order_checkout();
+        if new_order && !branch_id.is_empty() {
+            let checkout_branch = ["branchId", "branch_id"]
+                .iter()
+                .find_map(|key| record.request.get(*key).and_then(Value::as_str))
+                .map(str::trim)
+                .unwrap_or_default();
+            if !checkout_branch.is_empty() && checkout_branch != branch_id {
+                continue;
+            }
+        }
+        let (order_total, settled) = if order.is_some() {
+            crate::payments::load_order_payment_balance_snapshot(conn, &record.order_id)
+                .map(|balance| {
+                    (
+                        Cents::round_half_even(balance.order_total),
+                        Cents::round_half_even(balance.net_paid),
+                    )
+                })
+                .unwrap_or((Cents::new(0), Cents::new(0)))
+        } else {
+            (Cents::new(0), Cents::new(0))
+        };
+        let (order_number, _, payment_status) =
+            order.unwrap_or_else(|| (record.order_id.clone(), String::new(), String::new()));
+        let amount = Cents::new(record.amount_cents);
+        let mut reason_amounts = BTreeMap::new();
+        reason_amounts.insert("paymentAmount".to_string(), record.amount_cents.max(0));
+        let can_save_again = crate::unsaved_payments::can_save_again(&record);
+        blockers.push(UnsettledPaymentBlocker {
+            order_id: record.order_id.clone(),
+            order_number,
+            total_amount: order_total,
+            settled_amount: settled,
+            payment_status: normalize_payment_status(&payment_status),
+            payment_method: normalize_payment_method(&record.method),
+            reason_code: crate::unsaved_payments::PAYMENTS_NOT_SAVED_REASON_CODE.to_string(),
+            reason_text: if new_order {
+                format!(
+                    "A {} {} payment charged at {} for a new order is not saved on this till yet: the order and its payment are held until they are saved. The customer was charged; do not charge again.",
+                    format_money(amount),
+                    normalize_payment_method(&record.method),
+                    record.captured_at
+                )
+            } else {
+                format!(
+                    "A {} {} payment charged at {} is not saved on this till yet. The customer was charged; do not charge again.",
+                    format_money(amount),
+                    normalize_payment_method(&record.method),
+                    record.captured_at
+                )
+            },
+            suggested_fix: match (new_order, can_save_again) {
+                (true, true) => "Save the payment again: it saves the order and its payment, with no new charge. If it cannot be saved, give the money back to the customer and confirm it here.".to_string(),
+                (true, false) => "This order and its payment cannot be saved on this till. Give the money back to the customer, then confirm it here.".to_string(),
+                (false, true) => "Save the payment again. If it cannot be saved, give the money back to the customer and confirm it here.".to_string(),
+                (false, false) => "This payment cannot be saved on this till. Give the money back to the customer, then confirm it here.".to_string(),
+            },
+            severity: IntegritySeverity::Blocking.as_str().to_string(),
+            difference_cents: 0,
+            reason_amounts,
+            // The sentences differ for an order not written yet, and when no
+            // save can succeed any more.
+            reason_variant: match (new_order, can_save_again) {
+                (true, true) => Some("new_order".to_string()),
+                (true, false) => Some("new_order_cannot_save".to_string()),
+                (false, true) => None,
+                (false, false) => Some("cannot_save".to_string()),
+            },
+            review_payment: None,
+            unsaved_payment: Some(UnsavedPaymentSummary {
+                idempotency_key: record.idempotency_key.clone(),
+                method: normalize_payment_method(&record.method),
+                amount,
+                amount_cents: record.amount_cents,
+                currency: record.currency.clone().unwrap_or_else(|| "EUR".to_string()),
+                captured_at: record.captured_at.clone(),
+                kind: record.kind.clone(),
+                attempts: record.attempts,
+                can_save_again,
+            }),
+            platform_held: false,
+        });
+    }
+    Ok(blockers)
 }
 
 /// Attach the money a reason sentence names, so the renderer can write that
@@ -548,7 +822,7 @@ fn order_blocker_row_select() -> String {
             SELECT SUM(COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER)))
             FROM order_payments op
             WHERE op.order_id = o.id
-              AND op.status = 'completed'
+              AND $COUNTED_OP
         ), 0),
         LOWER(TRIM(COALESCE(o.payment_status, 'pending'))),
         COALESCE((
@@ -559,58 +833,60 @@ fn order_blocker_row_select() -> String {
             END
             FROM order_payments op
             WHERE op.order_id = o.id
-              AND op.status = 'completed'
+              AND $COUNTED_OP
               AND TRIM(COALESCE(op.method, '')) != ''
         ), 'pending'),
         COALESCE((
             SELECT COUNT(*)
             FROM order_payments op
             WHERE op.order_id = o.id
-              AND op.status = 'completed'
+              AND $COUNTED_OP
         ), 0),
         COALESCE((
             SELECT COUNT(*)
             FROM order_payments op
             WHERE op.order_id = o.id
-              AND op.status = 'completed'
+              AND $COUNTED_OP
               AND LOWER(TRIM(COALESCE(op.method, ''))) NOT IN ('cash', 'card')
               -- THE-437 platform settlements are method='other' BY DESIGN:
               -- bank money the platform remits, never drawer cash and never
               -- the card terminal. They must not read as 'unsupported' — the
               -- first live settlements (01/09/2026, Το Μικρό Παρίσι) blocked
               -- the shift checkout of a fully settled day. Recognized by the
-              -- same canonical markers the Z classifier keys on.
-              AND NOT (
-                LOWER(TRIM(COALESCE(op.method, ''))) = 'other'
-                AND COALESCE(op.transaction_ref, '') LIKE 'platform_settlement:%'
-              )
+              -- one settlement classifier both apps share (round 3 review,
+              -- R1: `payments::platform_settlement_row_sql`).
+              AND NOT $PLATFORM_SETTLEMENT_OP
         ), 0),
         -- 8: tips on completed rows. Part of the overpayment ceiling.
         COALESCE((
             SELECT SUM(COALESCE(op.tip_amount_cents, CAST(ROUND(op.tip_amount * 100) AS INTEGER), 0))
             FROM order_payments op
             WHERE op.order_id = o.id
-              AND op.status = 'completed'
+              AND $COUNTED_OP
         ), 0),
         -- 9: completed money NET of refund adjustments. Only this may be
         -- tested for overpayment; the gross sum at column 3 double-counts a
-        -- refund-then-recollect cycle.
+        -- refund-then-recollect cycle. A gift card row nets the larger of its
+        -- refunds and its proven return floor, never both.
         COALESCE((
             SELECT SUM(
                 MAX(
                     COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0)
-                    - COALESCE((
-                        SELECT SUM(COALESCE(pa.amount_cents, CAST(ROUND(pa.amount * 100) AS INTEGER), 0))
-                        FROM payment_adjustments pa
-                        WHERE pa.payment_id = op.id
-                          AND pa.adjustment_type = 'refund'
-                    ), 0),
+                    - MAX(
+                        COALESCE((
+                            SELECT SUM(COALESCE(pa.amount_cents, CAST(ROUND(pa.amount * 100) AS INTEGER), 0))
+                            FROM payment_adjustments pa
+                            WHERE pa.payment_id = op.id
+                              AND pa.adjustment_type = 'refund'
+                        ), 0),
+                        $GIFT_RETURN_FLOOR
+                    ),
                     0
                 )
             )
             FROM order_payments op
             WHERE op.order_id = o.id
-              AND op.status = 'completed'
+              AND $COUNTED_OP
         ), 0),
         -- 10: completed rows sharing one non-empty transaction_ref. A single
         -- real transaction cannot settle twice, so any group of 2+ is a replay.
@@ -619,7 +895,7 @@ fn order_blocker_row_select() -> String {
                 SELECT 1
                 FROM order_payments op
                 WHERE op.order_id = o.id
-                  AND op.status = 'completed'
+                  AND $COUNTED_OP
                   AND TRIM(COALESCE(op.transaction_ref, '')) <> ''
                 GROUP BY TRIM(op.transaction_ref)
                 HAVING COUNT(*) > 1
@@ -632,7 +908,7 @@ fn order_blocker_row_select() -> String {
                 SELECT 1
                 FROM order_payments op
                 WHERE op.order_id = o.id
-                  AND op.status = 'completed'
+                  AND $COUNTED_OP
                   AND COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0) > 0
                 GROUP BY LOWER(TRIM(COALESCE(op.method, ''))),
                          COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0)
@@ -664,20 +940,22 @@ fn order_blocker_row_select() -> String {
                 THEN 2
             ELSE 0
         END,
-        -- 13: completed platform-settlement money (bank money the platform remits).
+        -- 13: completed platform-settlement money (bank money the platform
+        -- remits), by the shared classifier (R1): never a cash or card row.
         COALESCE((
             SELECT SUM(COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0))
             FROM order_payments op
             WHERE op.order_id = o.id
-              AND op.status = 'completed'
-              AND COALESCE(op.transaction_ref, '') LIKE 'platform_settlement:%'
+              AND $COUNTED_OP
+              AND $PLATFORM_SETTLEMENT_OP
         ), 0),
         -- 14: completed cash/card money (what really passed through the till).
+        -- A cash or card row is till money whatever its reference says (R1).
         COALESCE((
             SELECT SUM(COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0))
             FROM order_payments op
             WHERE op.order_id = o.id
-              AND op.status = 'completed'
+              AND $COUNTED_OP
               AND LOWER(TRIM(COALESCE(op.method, ''))) IN ('cash', 'card')
         ), 0),
         -- 15: does this order come from a marketplace we can NAME? `plugin =
@@ -691,14 +969,39 @@ fn order_blocker_row_select() -> String {
                  AND json_extract(o.ghost_metadata, '$.food_delivery') IS NOT NULL
                 THEN 1
             ELSE 0
+        END,
+        -- 17: was a till payment on it refused as platform-held money (R4)?
+        CASE
+            WHEN EXISTS (
+                SELECT 1 FROM order_payments ph
+                WHERE ph.order_id = o.id
+                  AND json_valid(COALESCE(ph.metadata, ''))
+                  AND json_extract(ph.metadata, '$.duplicate_review.reason') = 'platform_held'
+            ) THEN 1
+            ELSE 0
         END"
         .replace(
             "$EXTERNAL_PLATFORM_PREDICATE",
             &crate::platforms::external_marketplace_sql_predicate("o.plugin"),
         )
+        .replace(
+            "$GIFT_RETURN_FLOOR",
+            crate::commands::gift_card_returns::PROVEN_RETURN_FLOOR_SQL,
+        )
+        // A 1.4.119 placeholder row (`payments::placeholder_payment_sql`) is
+        // no record of money: never coverage, never drawer tender. An order
+        // that has only one is named `missing_local_payment_row`.
+        .replace(
+            "$COUNTED_OP",
+            &crate::payments::counted_completed_payment_sql("op"),
+        )
+        .replace(
+            "$PLATFORM_SETTLEMENT_OP",
+            &crate::payments::platform_settlement_row_sql("op"),
+        )
 }
 
-/// Reads the 17 columns of [`order_blocker_row_select`] into a [`RawBlockerRow`].
+/// Reads the 18 columns of [`order_blocker_row_select`] into a [`RawBlockerRow`].
 fn read_blocker_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawBlockerRow> {
     Ok(RawBlockerRow {
         order_id: row.get(0)?,
@@ -719,10 +1022,12 @@ fn read_blocker_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawBlockerRow> 
         drawer_tender_amount: Cents::new(row.get::<_, i64>(14)?),
         is_external_platform: row.get::<_, i64>(15)? == 1,
         platform_disposition_known: row.get::<_, i64>(16)? == 1,
+        platform_held_set_aside: row.get::<_, i64>(17)? == 1,
     })
 }
 
 fn map_blocker_rows<F>(
+    conn: &Connection,
     rows: rusqlite::MappedRows<'_, F>,
 ) -> Result<Vec<UnsettledPaymentBlocker>, String>
 where
@@ -731,9 +1036,18 @@ where
     let mut blockers = Vec::new();
     for row in rows {
         let mut raw = row.map_err(|e| format!("collect payment blocker row: {e}"))?;
+        // Column 9's SQL floor skips a gift return proof it cannot bind. The
+        // shared checked reader validates each read order's proofs, so a
+        // corrupt or foreign proof fails the loader instead of reading as 0.
+        crate::commands::gift_card_returns::check_order_return_proofs(conn, &raw.order_id)?;
         raw.payment_status = normalize_payment_status(raw.payment_status.as_str());
         raw.payment_method = normalize_payment_method(raw.payment_method.as_str());
-        if let Some(blocker) = classify_blocker_row(raw) {
+        // R4: the platform holds this order's money; no till tender is offered.
+        let platform_held = raw.platform_held_set_aside
+            || raw.expected_platform_settlement.is_platform_held()
+            || raw.platform_settled_amount > Cents::ZERO;
+        if let Some(mut blocker) = classify_blocker_row(raw) {
+            blocker.platform_held = platform_held;
             blockers.push(blocker);
         }
     }
@@ -748,6 +1062,7 @@ pub fn load_order_payment_blockers(
         "{} FROM orders o
          WHERE o.id = ?1
            AND COALESCE(o.is_ghost, 0) = 0
+           AND COALESCE(o.folio_charged, 0) = 0
            AND o.status NOT IN ('cancelled', 'canceled', 'refunded')",
         order_blocker_row_select()
     );
@@ -758,7 +1073,7 @@ pub fn load_order_payment_blockers(
         .query_map(params![order_id], read_blocker_row)
         .map_err(|e| format!("query order payment blocker lookup: {e}"))?;
 
-    map_blocker_rows(rows)
+    map_blocker_rows(conn, rows)
 }
 
 pub fn load_branch_window_payment_blockers(
@@ -791,6 +1106,10 @@ pub fn load_branch_window_payment_blockers(
     // neither `orderTurnover` nor `paymentCoverage`. Test data is not money, so
     // dropping it cannot hide a real gap.
     //
+    // A hotel folio charge (`folio_charged`, shared rule R6) is excluded, as
+    // Android excludes `payment_method = 'room_charge'`: the guest folio is
+    // its record, and the till holds no payment row for it by design.
+    //
     // `order_context = 'repair_settlement'` is deliberately NOT excluded. Those
     // orders are outside the Z's SALES aggregates (the repairs workspace
     // recognises them, see `load_server_repair_projection`), but they carry
@@ -805,6 +1124,7 @@ pub fn load_branch_window_payment_blockers(
            AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
            AND COALESCE(o.is_ghost, 0) = 0
            AND COALESCE(o.is_test, 0) = 0
+           AND COALESCE(o.folio_charged, 0) = 0
            AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
            AND NOT {open_table_tab_expr}
            AND NOT {swept_by_last_z_expr}
@@ -821,7 +1141,102 @@ pub fn load_branch_window_payment_blockers(
         )
         .map_err(|e| format!("query branch payment blocker lookup: {e}"))?;
 
-    map_blocker_rows(rows)
+    map_blocker_rows(conn, rows)
+}
+
+/// Reason code of the non-blocking Z finding for a cancelled order that still
+/// claims money (item D7, round 2; Android `ZReportFindingKey`
+/// `cancelled_order_claims_payment`, same name and wording).
+pub const CANCELLED_ORDER_CLAIMS_PAYMENT_REASON_CODE: &str = "cancelled_order_claims_payment";
+
+/// `cancelled_order_claims_payment`: cancelled orders of the Z period whose
+/// label still claims money (`paid`, `completed`, `partially_paid`,
+/// `partial`, any case) while this till holds no counted completed payment
+/// row for them. A WARNING, never blocking: no till action can resolve a
+/// cancel with no money, and they are not in the Z's totals. The action is
+/// the ledger restore (a payment the server holds is copied here; the sync's
+/// mirror sweep picks them up); otherwise the owner decides the label.
+///
+/// The cancel refusal (`ORDER_PAYMENT_NOT_RECORDED`) stops this till from
+/// making one; server-pulled cancellations and older orders can still arrive,
+/// and the Z used to skip them with every other cancelled order. A platform
+/// order whose money the platform holds is not listed (Android parity: its
+/// settlement is the platform's).
+pub fn load_cancelled_order_claims_payment_findings(
+    conn: &Connection,
+    branch_id: &str,
+    period_start_at: &str,
+    cutoff_at: Option<&str>,
+    lower_bound_inclusive: bool,
+) -> Result<Vec<UnsettledPaymentBlocker>, String> {
+    let operator = if lower_bound_inclusive { ">=" } else { ">" };
+    let order_financial_expr = business_day::order_financial_timestamp_expr("o");
+    let sql = format!(
+        "SELECT o.id,
+                COALESCE(NULLIF(TRIM(o.order_number), ''), o.id),
+                COALESCE(o.total_amount_cents, CAST(ROUND(o.total_amount * 100) AS INTEGER), 0),
+                LOWER(TRIM(COALESCE(o.payment_status, '')))
+         FROM orders o
+         WHERE {order_financial_expr} {operator} ?1
+           AND (?2 IS NULL OR {order_financial_expr} <= ?2)
+           AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
+           AND COALESCE(o.is_ghost, 0) = 0
+           AND COALESCE(o.is_test, 0) = 0
+           AND COALESCE(o.folio_charged, 0) = 0
+           AND COALESCE(o.order_context, '') <> 'repair_settlement'
+           AND LOWER(TRIM(COALESCE(o.status, ''))) IN ('cancelled', 'canceled')
+           AND LOWER(TRIM(COALESCE(o.payment_status, '')))
+                 IN ('paid', 'completed', 'partially_paid', 'partial')
+           AND COALESCE(o.total_amount_cents, CAST(ROUND(o.total_amount * 100) AS INTEGER), 0) > 0
+           AND NOT EXISTS (
+               SELECT 1 FROM order_payments op
+                WHERE op.order_id = o.id AND {counted}
+           )
+         ORDER BY COALESCE(o.updated_at, o.created_at) ASC, o.id ASC",
+        counted = crate::payments::counted_completed_payment_sql("op"),
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("prepare cancelled orders claiming a payment: {e}"))?;
+    let rows = stmt
+        .query_map(params![period_start_at, cutoff_at, branch_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|e| format!("query cancelled orders claiming a payment: {e}"))?;
+    let mut findings = Vec::new();
+    for row in rows {
+        let (order_id, order_number, total_cents, payment_status) =
+            row.map_err(|e| format!("read cancelled order claiming a payment: {e}"))?;
+        if crate::payments::platform_settlement_kind(conn, &order_id).is_some() {
+            continue;
+        }
+        findings.push(UnsettledPaymentBlocker {
+            order_id,
+            order_number,
+            total_amount: Cents::new(total_cents),
+            settled_amount: Cents::ZERO,
+            payment_status: normalize_payment_status(&payment_status),
+            payment_method: "pending".to_string(),
+            reason_code: CANCELLED_ORDER_CLAIMS_PAYMENT_REASON_CODE.to_string(),
+            reason_text: "This order is cancelled but still marked paid, and this till has no payment record for it. It is not in this Z-Report. This does not hold the day.".to_string(),
+            suggested_fix: "Restore from server (Sync Now): a payment the server holds is copied here. If there is none, the owner decides what the order should say.".to_string(),
+            severity: IntegritySeverity::Warning.as_str().to_string(),
+            // Not in the Z's totals on either side: it names a decision, never
+            // money the day is short or over.
+            difference_cents: 0,
+            reason_amounts: BTreeMap::new(),
+            reason_variant: None,
+            review_payment: None,
+            unsaved_payment: None,
+            platform_held: false,
+        });
+    }
+    Ok(findings)
 }
 
 pub fn build_unsettled_payment_blocker_message(
@@ -1433,6 +1848,74 @@ mod tests {
             .expect("order blockers")
             .first()
             .map(|blocker| blocker.reason_code.clone())
+    }
+
+    /// Founder's rule, 30/09/2026: no order is registered as paid without a
+    /// payment record. The Z refuses every order that claims money its
+    /// completed rows do not cover, and lets through only money that is not
+    /// there to count: a zero total (a comp), and platform-held money with its
+    /// settlement row. A row set aside for review covers nothing.
+    #[test]
+    fn the_z_refuses_a_paid_claim_its_payment_rows_do_not_cover() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        const PREPAID: &str = r#"{"food_delivery":{"prepaid":true,"payment_method":"online"}}"#;
+
+        seed_order(&conn, "bare", 1000, "paid", None, None);
+        seed_order(&conn, "short", 1000, "paid", None, None);
+        seed_payment(&conn, "pay-short", "short", "cash", 400, None);
+        seed_order(&conn, "partial-bare", 1000, "partially_paid", None, None);
+        seed_order(&conn, "set-aside", 1000, "paid", None, None);
+        seed_payment(&conn, "pay-set-aside", "set-aside", "card", 1000, None);
+        conn.execute(
+            "UPDATE order_payments SET status = 'duplicate_review' WHERE id = 'pay-set-aside'",
+            [],
+        )
+        .unwrap();
+        seed_order(&conn, "covered", 1000, "paid", None, None);
+        seed_payment(&conn, "pay-covered", "covered", "card", 1000, None);
+        seed_order(&conn, "comp", 0, "paid", None, None);
+        seed_order(
+            &conn,
+            "platform",
+            1210,
+            "paid",
+            Some("efood"),
+            Some(PREPAID),
+        );
+        seed_payment(
+            &conn,
+            "pay-platform",
+            "platform",
+            "other",
+            1210,
+            Some("platform_settlement:online:platform"),
+        );
+        seed_order(
+            &conn,
+            "platform-unsettled",
+            1210,
+            "paid",
+            Some("efood"),
+            Some(PREPAID),
+        );
+
+        for (order_id, expected) in [
+            ("bare", Some("missing_local_payment_row")),
+            ("short", Some("partial_cash_payment")),
+            ("partial-bare", Some("no_persisted_payment")),
+            ("set-aside", Some("missing_local_payment_row")),
+            ("platform-unsettled", Some("platform_settlement_missing")),
+            ("covered", None),
+            ("comp", None),
+            ("platform", None),
+        ] {
+            assert_eq!(
+                order_reason(&conn, order_id).as_deref(),
+                expected,
+                "{order_id}"
+            );
+        }
     }
 
     #[test]

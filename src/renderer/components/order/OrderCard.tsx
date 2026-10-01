@@ -25,6 +25,8 @@ import {
   type StoreMapOrigin,
 } from '../../utils/delivery-routing';
 import { getBridge } from '../../../lib';
+import type { LocalPreparationPhase } from '../../services/KdsLocalPhaseStore';
+import { KitchenStageBadge } from './KitchenStageBadge';
 import './OrderCard.css';
 
 interface OrderCardProps {
@@ -38,6 +40,8 @@ interface OrderCardProps {
   showQuickActions?: boolean;
   orderIndex?: number; // Deprecated - order number now comes from order.order_number
   storeMapOrigin?: StoreMapOrigin | null;
+  /** Local kitchen handoff stage from this terminal's KDS. Display only: never the canonical status. */
+  kitchenStage?: LocalPreparationPhase;
 }
 
 const KIOSK_ORDER_NUMBER_PATTERN = /^#?[A-Za-z]+-[A-Za-z0-9]{1,16}-\d{8}-\d{6}-\d+$/;
@@ -82,6 +86,7 @@ export const OrderCard = memo<OrderCardProps>(({
   onConvertToPickup,
   showQuickActions = false,
   storeMapOrigin = null,
+  kitchenStage,
   // orderIndex is deprecated, using order.order_number instead
 }) => {
   const bridge = getBridge();
@@ -343,6 +348,22 @@ export const OrderCard = memo<OrderCardProps>(({
   };
   const requestedRef = useRef(false);
   const totalNormalized = resolveOrderTotalAmount(order);
+  // Founder rule (30/09 and 01/10/2026): order → payment → grid. An order
+  // whose stored label is not settled shows that first, never the chosen
+  // tender's icon as if it were paid. Android parity (paymentBadgeShowsTender,
+  // orders.paymentBadge.payPending): every unsettled label, a partly paid one
+  // included, reads PAY PENDING.
+  const paymentStatusNormalized = String(order.payment_status ?? order.paymentStatus ?? '')
+    .trim()
+    .toLowerCase();
+  const orderStatusForPayment = String(order.status ?? '').trim().toLowerCase();
+  const paymentSettled =
+    paymentStatusNormalized === 'paid' || paymentStatusNormalized === 'completed';
+  const showPaymentPending =
+    !paymentSettled &&
+    paymentStatusNormalized !== 'refunded' &&
+    !['cancelled', 'canceled', 'refunded'].includes(orderStatusForPayment) &&
+    totalNormalized > 0;
 
   // Normalize plugin field (could be plugin/order_plugin or legacy platform)
   const orderPlugin = order.plugin || order.order_plugin || order.platform || order.order_platform || '';
@@ -382,7 +403,9 @@ export const OrderCard = memo<OrderCardProps>(({
   // Terminal (history) rows: completed / delivered / cancelled. These must NOT show the live age-based
   // elapsed-minute urgency timer or the age-based red/amber left edge -- only a calm timestamp.
   const isTerminalOrder = isDeliveredOrCompleted || isCancelledTerminal;
-  const deliveryOlderThan40 = orderTypeNormalized === 'delivery' && isRedGlow && !isDeliveredOrCompleted && !isCancelledTerminal;
+  // Kitchen marks outlive their orders: a closed row never shows a kitchen stage.
+  const visibleKitchenStage = isTerminalOrder ? undefined : kitchenStage;
+  const deliveryOlderThan40 =orderTypeNormalized === 'delivery' && isRedGlow && !isDeliveredOrCompleted && !isCancelledTerminal;
 
   // Left edge: age-based urgency only for active orders. Terminal rows use a neutral edge, except cancelled
   // keeps a calm semantic red (status-based, never age-based).
@@ -593,6 +616,8 @@ export const OrderCard = memo<OrderCardProps>(({
                 )}
               </>
             )}
+            {/* Local kitchen handoff stage (this terminal's KDS), shown beside the canonical status, never replacing it */}
+            {visibleKitchenStage && <KitchenStageBadge phase={visibleKitchenStage} className="mt-0.5" />}
           </div>
         </div>
 
@@ -604,12 +629,23 @@ export const OrderCard = memo<OrderCardProps>(({
           </span>
           <div className="flex items-center gap-2">
             <OrderTypeIcon orderType={orderTypeNormalized} />
-            <PaymentMethodIcon method={paymentMethodPresentation} />
+            {!showPaymentPending && <PaymentMethodIcon method={paymentMethodPresentation} />}
           </div>
-          {paymentMethodPresentation === 'split' && (
-            <span className="text-[10px] sm:text-xs font-semibold tracking-[0.25em] text-purple-400">
-              {t('modals.payment.splitSimple', 'SPLIT')}
+          {showPaymentPending ? (
+            <span
+              data-testid="order-card-payment-pending"
+              role="status"
+              aria-label={t('orderCard.paymentPendingA11y', { defaultValue: 'Payment pending' })}
+              className={`text-[10px] sm:text-xs font-semibold tracking-wide whitespace-nowrap rounded px-1.5 py-0.5 border border-amber-500/40 bg-amber-500/10 ${resolvedTheme === 'light' ? 'text-amber-700' : 'text-amber-400'}`}
+            >
+              {t('orderCard.paymentPending', { defaultValue: 'PAY PENDING' })}
             </span>
+          ) : (
+            paymentMethodPresentation === 'split' && (
+              <span className="text-[10px] sm:text-xs font-semibold tracking-[0.25em] text-purple-400">
+                {t('modals.payment.splitSimple', 'SPLIT')}
+              </span>
+            )
           )}
         </div>
       </div>

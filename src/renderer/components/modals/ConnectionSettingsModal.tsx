@@ -60,7 +60,7 @@ const DB_DANGER_BTN_MD = `${DB_ACTION_GEOMETRY} border-2 border-red-500 bg-red-6
 interface Props {
   isOpen: boolean
   onClose: () => void
-  initialSection?: 'recovery' | null
+  initialSection?: 'recovery' | 'printing' | null
   onCheckForUpdates?: () => void
 }
 
@@ -385,6 +385,9 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
     if (!isOpen) return
     if (initialSection === 'recovery') {
       setActiveSettingsSection('database')
+    } else if (initialSection === 'printing') {
+      // Health > "Check the printer": the printer settings and the print queue.
+      setActiveSettingsSection('printing')
     }
   }, [initialSection, isOpen])
 

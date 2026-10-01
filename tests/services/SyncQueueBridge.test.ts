@@ -247,3 +247,23 @@ test('SyncQueueBridge list and retry helpers call parity IPC commands', async ()
     },
   ]);
 });
+
+test('SyncQueueBridge makeDue and itemsById call the Health Sync now commands', async () => {
+  // Review 30/09/2026: Health "Sync now" makes its rows due (retry time
+  // only, audited) and reads them back by id to judge only rows it tried.
+  const stub = createInvokeStub({
+    sync_queue_make_due: [{ madeDue: [{ id: 'queue-1', nextRetryAt: '2026-09-30T10:12:00Z' }], auditId: 'audit-1' }],
+    sync_queue_items_by_id: [[]],
+  });
+  const bridge = new SyncQueueBridge(stub.invoke);
+
+  const made = await bridge.makeDue(['queue-1', 'queue-2'], 'sync_stuck');
+  const items = await bridge.itemsById(['queue-1']);
+
+  assert.deepEqual(made, { madeDue: [{ id: 'queue-1', nextRetryAt: '2026-09-30T10:12:00Z' }], auditId: 'audit-1' });
+  assert.deepEqual(items, []);
+  assert.deepEqual(stub.calls, [
+    { command: 'sync_queue_make_due', payload: { itemIds: ['queue-1', 'queue-2'], issueCode: 'sync_stuck' } },
+    { command: 'sync_queue_items_by_id', payload: { itemIds: ['queue-1'] } },
+  ]);
+});

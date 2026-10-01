@@ -663,7 +663,59 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         );
     }
 
-    let now = Utc::now().to_rfc3339();
+    // A gift-bound close carries its explicitly approved preparation; the
+    // ordinary close input is unchanged.
+    let gift_preparation = match parse_gift_closing_preparation(payload, closing_cash) {
+        Ok(preparation) => preparation,
+        Err(message) => {
+            return Ok(gift_closing_refusal(
+                "INVALID_GIFT_CLOSING_PREPARATION",
+                &message,
+            ))
+        }
+    };
+    let clock = Utc::now();
+    // The gift closing journal pins one millisecond `Z` closing instant.
+    let now = if gift_preparation.is_some() {
+        clock.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    } else {
+        clock.to_rfc3339()
+    };
+
+    // A gift-bound shift resolves its retained original before the
+    // active-only query: a retry returns it unchanged, never recaptures it.
+    let gift_opening_key = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let opening_key = gift_opening_key_for_shift(&conn, &shift_id)?;
+        if let Some(opening_key) = opening_key.as_deref() {
+            if let Some(original) =
+                crate::gift_financial_closing::load_original_for_opening(&conn, opening_key)?
+            {
+                return Ok(retained_gift_close(
+                    &conn,
+                    &shift_id,
+                    &original,
+                    gift_preparation.as_ref(),
+                ));
+            }
+        }
+        opening_key
+    };
+    match (&gift_opening_key, &gift_preparation) {
+        (Some(_), None) => {
+            return Ok(gift_closing_refusal(
+                "GIFT_CLOSING_PREPARATION_REQUIRED",
+                "This shift has a financial opening; its close needs an approved gift preparation",
+            ))
+        }
+        (None, Some(_)) => {
+            return Ok(gift_closing_refusal(
+                "GIFT_CLOSING_NOT_APPLICABLE",
+                "This shift has no financial opening; close it without a gift preparation",
+            ))
+        }
+        _ => {}
+    }
 
     // Fetch the active shift (include branch_id/terminal_id for driver return + transfer logic)
     let (
@@ -778,6 +830,22 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
     conn.execute_batch("BEGIN IMMEDIATE")
         .map_err(|e| format!("begin transaction: {e}"))?;
 
+    // The gift-bound admission rereads the confirmed opening, its open
+    // mirrors, current hosted fingerprint and unresolved funding under this
+    // write lock; an error or blocker rolls back, with no hosted read.
+    let gift_admission = match (gift_opening_key.as_deref(), gift_preparation.as_ref()) {
+        (Some(opening_key), Some(preparation)) => {
+            match admit_gift_close(&conn, opening_key, preparation, &shift_id, &role_type) {
+                Ok(admission) => Some(admission),
+                Err((code, message)) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    return Ok(gift_closing_refusal(code, message));
+                }
+            }
+        }
+        _ => None,
+    };
+
     order_ownership::repair_historical_pickup_financial_attribution(&conn, &shift_branch_id, &now)
         .inspect_err(|_| {
             let _ = conn.execute_batch("ROLLBACK");
@@ -803,7 +871,7 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         }
     }
 
-    let result = (|| -> Result<(f64, f64), String> {
+    let result = (|| -> Result<(f64, f64, Option<crate::gift_financial_closing::ClosingOriginal>), String> {
         #[allow(clippy::needless_late_init)]
         let expected: f64;
         let mut returned_cash_target: Option<(String, String, f64)> = None;
@@ -906,7 +974,7 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                  LEFT JOIN order_payments op ON op.order_id = o.id
                  WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
                    AND op.method = 'cash'
-                   AND op.status IN ('completed', 'refunded')
+                   AND (op.status IN ('completed', 'refunded') AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id, '')) = ''))
                    AND COALESCE(o.is_ghost, 0) = 0
                    AND COALESCE(o.is_test, 0) = 0
                    AND LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'canceled')
@@ -925,7 +993,7 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                  LEFT JOIN order_payments op ON op.order_id = o.id
                  WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
                    AND op.method = 'card'
-                   AND op.status IN ('completed', 'refunded')
+                   AND (op.status IN ('completed', 'refunded') AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id, '')) = ''))
                    AND COALESCE(o.is_ghost, 0) = 0
                    AND COALESCE(o.is_test, 0) = 0
                    AND LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'canceled')
@@ -942,8 +1010,13 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
             // shift's order (the live 0,09: cashier drawer refunding a
             // driver-attributed order) was missed entirely, because the old
             // WHERE keyed only on the order's shift attribution.
-            // - `refund_method` NULL (pre-v37 rows) keeps legacy cash
-            //   semantics; only an explicit 'card' is excluded.
+            // - A refund that names no tender is the payment's own tender
+            //   (shared rule R5, round 3): never cash for an `other` or gift
+            //   row; pre-v37 rows on a cash row keep the cash reading.
+            // - Only the drawer's refunds lower it (shared rule R2): a
+            //   `driver_shift` refund, or one naming no handler on an order a
+            //   courier earning carries, is the courier's cash, once, never
+            //   both (`refunds::refund_paid_by_drawer_sql`).
             // - Handler-tagged rows anchor on pa.created_at: the drawer pays
             //   when the refund HAPPENS, not when the order was earned.
             // - Known limit: two concurrently open cashier drawers would both
@@ -957,6 +1030,8 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
             //   drawer refund for ANOTHER shift's cancelled order still
             //   counts — that drawer never held the collection, the payout
             //   is a real cash-out.
+            let refund_is_cash = crate::refunds::refund_counts_as_cash_sql("pa", "op");
+            let refund_paid_by_drawer = crate::refunds::refund_paid_by_drawer_sql("pa", "o");
             let reconciled_refunds: f64 = conn
                 .query_row(
                     &format!(
@@ -965,10 +1040,11 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                  JOIN payment_adjustments pa ON pa.order_id = o.id
                  LEFT JOIN order_payments op ON op.id = pa.payment_id
                  WHERE pa.adjustment_type = 'refund'
-                   AND COALESCE(pa.refund_method, 'cash') = 'cash'
+                   AND {refund_is_cash}
                    AND COALESCE(o.is_ghost, 0) = 0
                    AND (
                         (COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
+                         AND {refund_paid_by_drawer}
                          AND LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'canceled')
                          AND {order_financial_expr} >= ?2
                          AND {order_financial_expr} <= ?3)
@@ -1159,10 +1235,37 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
             };
         }
 
+        // A gift-bound close keeps the ordinary reconciliation, which must
+        // still equal its approved local ordinary cents (drift rolls back and
+        // needs renewed approval). The drawer then expects that ordinary cash
+        // plus the confirmed gift cash, against the exact counted cents.
+        let gift_terms = gift_preparation.as_ref().filter(|_| gift_admission.is_some());
+        let (expected, closing_cash_to_persist) = match gift_terms {
+            Some(preparation) => {
+                if Cents::round_half_even(expected).as_i64()
+                    != preparation.approved_ordinary_expected_cents
+                {
+                    return Err(GIFT_TERMS_CHANGED.to_string());
+                }
+                (
+                    Cents::new(preparation.local_preview().expected_cents).to_f64_dp2(),
+                    Cents::new(preparation.counted_cents).to_f64_dp2(),
+                )
+            }
+            None => (expected, closing_cash_to_persist),
+        };
+
         let variance = if is_non_financial_role {
             0.0
         } else {
             closing_cash_to_persist - expected
+        };
+        let variance = match gift_terms {
+            Some(preparation) => Cents::new(
+                preparation.counted_cents - preparation.local_preview().expected_cents,
+            )
+            .to_f64_dp2(),
+            None => variance,
         };
 
         // Update cash drawer session (if cashier/manager) and persist the
@@ -1172,6 +1275,97 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
             Cents::round_half_even(closing_cash_to_persist).as_i64();
         let expected_cents = Cents::round_half_even(expected).as_i64();
         let variance_cents = Cents::round_half_even(variance).as_i64();
+
+        // The shift-close sync payload, shared by the ordinary close and the
+        // prospective gift-bound original.
+        let close_sync_payload = |totals: (i64, f64, f64, f64), cash_drawer: Option<Value>| {
+            let (order_count, shift_cash_sales, shift_card_sales, total_sales) = totals;
+            let mut sync_payload = serde_json::json!({
+                "shiftId": shift_id,
+                "staffId": staff_id,
+                "staffName": staff_name,
+                "branchId": shift_branch_id,
+                "terminalId": shift_terminal_id,
+                "roleType": role_type,
+                "openingCash": opening_cash,
+                "checkInTime": shift_check_in_time,
+                "checkOutTime": now,
+                "reportDate": shift_business_day.report_date.as_str(),
+                "periodStartAt": shift_business_day.period_start_at.as_str(),
+                "calculationVersion": calc_version,
+                "totalOrdersCount": order_count,
+                "totalSalesAmount": total_sales,
+                "totalCashSales": shift_cash_sales,
+                "totalCardSales": shift_card_sales,
+                "closingCash": closing_cash_to_persist,
+                "expectedCash": expected,
+                "variance": variance,
+                "closedBy": closed_by,
+                "paymentAmount": persisted_payment_amount,
+            });
+            if let Some(drawer_snapshot) = cash_drawer {
+                sync_payload["cashDrawer"] = drawer_snapshot;
+            }
+            sync_payload
+        };
+
+        // The gift-bound original is captured while both mirrors are still
+        // open: the prospective closed payload under a new closing key,
+        // queued once for its actual parity queue item and journaled exactly.
+        // The mirrors close below in this same transaction.
+        let gift_original = match (gift_admission.as_ref(), gift_terms) {
+            (Some(admission), Some(preparation)) => {
+                let totals = compute_shift_close_totals(
+                    &conn,
+                    &shift_id,
+                    &role_type,
+                    &shift_check_in_time,
+                    &now,
+                )?;
+                let mut drawer = load_cash_drawer_snapshot_for_shift(&conn, &shift_id)?
+                    .ok_or("The gift-bound close requires its original cash drawer")?;
+                for (key, value) in [
+                    (
+                        "closingAmount",
+                        serde_json::json!(Cents::new(closing_cash_to_persist_cents).to_f64_dp2()),
+                    ),
+                    ("closing_amount_cents", serde_json::json!(closing_cash_to_persist_cents)),
+                    ("expectedAmount", serde_json::json!(Cents::new(expected_cents).to_f64_dp2())),
+                    ("expected_amount_cents", serde_json::json!(expected_cents)),
+                    ("varianceAmount", serde_json::json!(Cents::new(variance_cents).to_f64_dp2())),
+                    ("variance_amount_cents", serde_json::json!(variance_cents)),
+                    ("closedAt", serde_json::json!(now)),
+                    ("reconciled", Value::Bool(true)),
+                    ("reconciledAt", serde_json::json!(now)),
+                    ("reconciledBy", serde_json::json!(closed_by)),
+                ] {
+                    drawer[key] = value;
+                }
+                let mut body = close_sync_payload(totals, Some(drawer));
+                let closing_key = Uuid::new_v4().to_string();
+                body["idempotencyKey"] = Value::String(closing_key.clone());
+                let queue_item_id = sync_queue::enqueue_payload_item(
+                    &conn,
+                    "staff_shifts",
+                    &shift_id,
+                    "UPDATE",
+                    &body,
+                    Some(1),
+                    Some("shifts"),
+                    Some("manual"),
+                    Some(1),
+                )
+                .map_err(|e| format!("enqueue shift close sync: {e}"))?;
+                let capture =
+                    gift_closing_capture(admission, preparation, closing_key, queue_item_id, &now, body);
+                let (original, _) =
+                    crate::gift_financial_closing::capture_original(&conn, &capture, clock)
+                        .map_err(|e| e.to_string())?;
+                Some(original)
+            }
+            _ => None,
+        };
+
         if role_type == "cashier" || role_type == "manager" {
             conn.execute(
                 "UPDATE cash_drawer_sessions SET
@@ -1307,32 +1501,10 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         // Wave 5 Session 6: shift-close row now flows through parity queue.
         // Same module_type="shifts" routing as shift-open above.
         let cash_drawer_snapshot = load_cash_drawer_snapshot_for_shift(&conn, &shift_id)?;
-        let mut sync_payload = serde_json::json!({
-            "shiftId": shift_id,
-            "staffId": staff_id,
-            "staffName": staff_name,
-            "branchId": shift_branch_id,
-            "terminalId": shift_terminal_id,
-            "roleType": role_type,
-            "openingCash": opening_cash,
-            "checkInTime": shift_check_in_time,
-            "checkOutTime": now,
-            "reportDate": shift_business_day.report_date.as_str(),
-            "periodStartAt": shift_business_day.period_start_at.as_str(),
-            "calculationVersion": calc_version,
-            "totalOrdersCount": order_count,
-            "totalSalesAmount": total_sales,
-            "totalCashSales": shift_cash_sales,
-            "totalCardSales": shift_card_sales,
-            "closingCash": closing_cash_to_persist,
-            "expectedCash": expected,
-            "variance": variance,
-            "closedBy": closed_by,
-            "paymentAmount": persisted_payment_amount,
-        });
-        if let Some(drawer_snapshot) = cash_drawer_snapshot {
-            sync_payload["cashDrawer"] = drawer_snapshot;
-        }
+        let mut sync_payload = close_sync_payload(
+            (order_count, shift_cash_sales, shift_card_sales, total_sales),
+            cash_drawer_snapshot,
+        );
         if let Some((cashier_shift_id, drawer_id, returned_amount)) = returned_cash_target {
             sync_payload["returnedCashTargetCashierShiftId"] =
                 Value::String(cashier_shift_id.clone());
@@ -1342,18 +1514,33 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
             sync_payload["resolvedCashierDrawerId"] = Value::String(drawer_id);
         }
 
-        sync_queue::enqueue_payload_item(
-            &conn,
-            "staff_shifts",
-            &shift_id,
-            "UPDATE",
-            &sync_payload,
-            Some(1),
-            Some("shifts"),
-            Some("manual"),
-            Some(1),
-        )
-        .map_err(|e| format!("enqueue shift close sync: {e}"))?;
+        if let Some(original) = gift_original.as_ref() {
+            // The gift-bound original was queued once before the mirrors
+            // closed; the closed rows must reproduce it exactly.
+            let mut captured: Value = serde_json::from_str(&original.request_body_json)
+                .map_err(|e| format!("read captured gift close: {e}"))?;
+            if let Some(body) = captured.as_object_mut() {
+                body.remove("idempotencyKey");
+            }
+            if captured != sync_payload {
+                return Err(
+                    "The closed shift differs from its captured gift-bound original".to_string(),
+                );
+            }
+        } else {
+            sync_queue::enqueue_payload_item(
+                &conn,
+                "staff_shifts",
+                &shift_id,
+                "UPDATE",
+                &sync_payload,
+                Some(1),
+                Some("shifts"),
+                Some("manual"),
+                Some(1),
+            )
+            .map_err(|e| format!("enqueue shift close sync: {e}"))?;
+        }
 
         let remaining_active_shifts: i64 = conn
             .query_row(
@@ -1374,13 +1561,27 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
             )?;
         }
 
-        Ok((expected, variance))
+        Ok((expected, variance, gift_original))
     })();
 
     match result {
-        Ok((expected, variance)) => {
-            conn.execute_batch("COMMIT")
-                .map_err(|e| format!("commit: {e}"))?;
+        Ok((expected, variance, gift_original)) => {
+            if let Err(e) = conn.execute_batch("COMMIT") {
+                // A failed gift-bound commit must not leave its capture open.
+                if gift_original.is_some() {
+                    let _ = conn.execute_batch("ROLLBACK");
+                }
+                return Err(format!("commit: {e}"));
+            }
+
+            if let Some(original) = gift_original {
+                info!(
+                    shift_id = %shift_id,
+                    closing_key = %original.closing_key,
+                    "Gift-bound shift closed locally; pending financial confirmation"
+                );
+                return Ok(gift_close_response(&conn, &shift_id, &original, false));
+            }
 
             info!(shift_id = %shift_id, variance = %variance, "Shift closed");
 
@@ -1395,9 +1596,423 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         }
         Err(e) => {
             let _ = conn.execute_batch("ROLLBACK");
+            if e == GIFT_TERMS_CHANGED {
+                return Ok(gift_closing_refusal(
+                    GIFT_TERMS_CHANGED,
+                    "The reconciled ordinary cash differs from its approved local terms; renew the approval",
+                ));
+            }
             Err(e)
         }
     }
+}
+
+/// Refusal code of a gift-bound close whose reconciled ordinary cash drifted
+/// from its approved local terms.
+const GIFT_TERMS_CHANGED: &str = "GIFT_CLOSING_TERMS_CHANGED";
+
+/// Largest integer a JSON number carries exactly (2^53 - 1).
+const MAX_SAFE_CENTS: i64 = 9_007_199_254_740_991;
+
+const GIFT_STORE_FAILED: (&str, &str) = (
+    "LOCAL_STORE_FAILED",
+    "The local financial journal could not be read",
+);
+
+/// The explicitly approved preparation of a gift-bound close
+/// (`giftClosing`): the exact counted cents, the complete current hosted
+/// drawer fingerprint and the separately approved local ordinary cents.
+struct GiftClosingPreparation {
+    counted_cents: i64,
+    confirmed_drawer: crate::gift_financial_opening::DrawerState,
+    approved_ordinary_expected_cents: i64,
+}
+
+impl GiftClosingPreparation {
+    /// The local approved preview the journal stores: the confirmed version,
+    /// ACK and gift cash with the approved ordinary cash and their sum.
+    fn local_preview(&self) -> crate::gift_financial_opening::DrawerState {
+        crate::gift_financial_opening::DrawerState {
+            ordinary_expected_cents: self.approved_ordinary_expected_cents,
+            expected_cents: self.approved_ordinary_expected_cents
+                + self.confirmed_drawer.gift_cash_cents,
+            ..self.confirmed_drawer.clone()
+        }
+    }
+}
+
+/// The trusted scope and confirmed opening a gift-bound close was admitted
+/// on, reread under its write lock.
+struct GiftCloseAdmission {
+    scope: crate::gift_financial_opening::OpeningScope,
+    intent: crate::gift_financial_opening::OpeningIntent,
+}
+
+fn gift_closing_refusal(code: &str, message: &str) -> Value {
+    serde_json::json!({ "success": false, "code": code, "error": message })
+}
+
+fn exact_object<'a>(
+    value: &'a Value,
+    keys: &[&str],
+    name: &str,
+) -> Result<&'a serde_json::Map<String, Value>, String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("{name} must be an object"))?;
+    if object.len() != keys.len() || !keys.iter().all(|key| object.contains_key(*key)) {
+        return Err(format!("{name} must carry exactly {}", keys.join(", ")));
+    }
+    Ok(object)
+}
+
+fn safe_integer(
+    object: &serde_json::Map<String, Value>,
+    key: &str,
+    min: i64,
+) -> Result<i64, String> {
+    object
+        .get(key)
+        .and_then(Value::as_i64)
+        .filter(|value| (min..=MAX_SAFE_CENTS).contains(value))
+        .ok_or_else(|| format!("{key} must be a safe integer"))
+}
+
+/// Parses the strict `giftClosing` preparation. `closingCash` stays the
+/// ordinary input and must state the same exact count.
+fn parse_gift_closing_preparation(
+    payload: &Value,
+    closing_cash: f64,
+) -> Result<Option<GiftClosingPreparation>, String> {
+    let raw = match payload.get("giftClosing") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(raw) => raw,
+    };
+    let preparation = exact_object(
+        raw,
+        &["countedCents", "drawer", "approvedOrdinaryExpectedCents"],
+        "giftClosing",
+    )?;
+    let drawer = exact_object(
+        &preparation["drawer"],
+        &[
+            "version",
+            "acknowledgementId",
+            "giftCashCents",
+            "ordinaryExpectedCents",
+            "expectedCents",
+        ],
+        "giftClosing.drawer",
+    )?;
+    let acknowledgement_id = match &drawer["acknowledgementId"] {
+        Value::Null => None,
+        Value::String(ack) if !ack.trim().is_empty() => Some(ack.clone()),
+        _ => return Err("acknowledgementId must be a nonblank string or null".to_string()),
+    };
+    let prepared = GiftClosingPreparation {
+        counted_cents: safe_integer(preparation, "countedCents", 0)?,
+        confirmed_drawer: crate::gift_financial_opening::DrawerState {
+            version: safe_integer(drawer, "version", 0)?,
+            acknowledgement_id,
+            gift_cash_cents: safe_integer(drawer, "giftCashCents", 0)?,
+            ordinary_expected_cents: safe_integer(
+                drawer,
+                "ordinaryExpectedCents",
+                -MAX_SAFE_CENTS,
+            )?,
+            expected_cents: safe_integer(drawer, "expectedCents", -MAX_SAFE_CENTS)?,
+        },
+        approved_ordinary_expected_cents: safe_integer(
+            preparation,
+            "approvedOrdinaryExpectedCents",
+            -MAX_SAFE_CENTS,
+        )?,
+    };
+    let preview = prepared.local_preview().expected_cents;
+    let safe = |cents: i64| (-MAX_SAFE_CENTS..=MAX_SAFE_CENTS).contains(&cents);
+    if !safe(preview) || !safe(prepared.counted_cents - preview) {
+        return Err("the approved preview and its variance must be safe integer cents".to_string());
+    }
+    if (closing_cash * 100.0 - prepared.counted_cents as f64).abs() > 1e-6 {
+        return Err("closingCash must state countedCents exactly".to_string());
+    }
+    Ok(Some(prepared))
+}
+
+pub(crate) fn gift_opening_key_for_shift(
+    conn: &Connection,
+    shift_id: &str,
+) -> Result<Option<String>, String> {
+    conn.query_row(
+        "SELECT opening_key FROM gift_financial_openings WHERE lower(shift_id) = lower(?1)",
+        params![shift_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(|e| format!("load shift financial opening: {e}"))
+}
+
+/// Closed-shift recompute, snapshot replacement and unfinished shift-row
+/// clearing refuse a shift bound to a persisted gift financial opening: its
+/// first count, closing key and canonical projection stay authoritative,
+/// pending or confirmed. A failed opening read refuses too.
+const GIFT_BOUND_SHIFT_REWRITE_REFUSED: &str = "GIFT_BOUND_SHIFT_REWRITE_REFUSED";
+
+fn refuse_gift_bound_shift_rewrite(conn: &Connection, shift_id: &str) -> Result<(), String> {
+    if gift_opening_key_for_shift(conn, shift_id)?.is_some() {
+        return Err(format!(
+            "{GIFT_BOUND_SHIFT_REWRITE_REFUSED}: shift {shift_id} is bound to a gift financial opening; its closing original cannot be recomputed or replaced"
+        ));
+    }
+    Ok(())
+}
+
+/// Rereads, under the close's write lock, the trusted scope, the confirmed
+/// usable opening with its proof pins and complete hosted fingerprint, the
+/// absence of a closing original, both open mirrors and unresolved funding.
+fn admit_gift_close(
+    conn: &Connection,
+    opening_key: &str,
+    preparation: &GiftClosingPreparation,
+    shift_id: &str,
+    role_type: &str,
+) -> Result<GiftCloseAdmission, (&'static str, &'static str)> {
+    use crate::gift_financial_opening::{self as opening, OpeningState};
+    if role_type != "cashier" {
+        return Err((
+            "GIFT_CLOSING_CASHIER_REQUIRED",
+            "Only the cashier shift of a financial opening closes through it",
+        ));
+    }
+    let scope = opening::trusted_scope(conn).ok_or((
+        "TERMINAL_SCOPE_UNAVAILABLE",
+        "Terminal organization, branch and terminal identity are required",
+    ))?;
+    let intent = opening::load_intent(conn, opening_key)
+        .map_err(|_| GIFT_STORE_FAILED)?
+        .ok_or((
+            "FINANCIAL_OPENING_REQUIRED",
+            "The financial opening of this shift was not found",
+        ))?;
+    match intent.state {
+        OpeningState::ConfirmedUsable => {}
+        OpeningState::Pending => {
+            return Err((
+                "FINANCIAL_OPENING_PENDING",
+                "The financial opening is not confirmed yet",
+            ))
+        }
+        _ => return Err(("OPENING_UNUSABLE", "The financial opening is not usable")),
+    }
+    if intent.organization_id != scope.organization_id
+        || intent.branch_id != scope.branch_id
+        || intent.terminal_id != scope.terminal_id
+        || !intent.shift_id.eq_ignore_ascii_case(shift_id)
+    {
+        return Err((
+            "GIFT_CLOSING_SCOPE_MISMATCH",
+            "The terminal scope differs from the financial opening",
+        ));
+    }
+    if intent.owner_terminal_db_id.is_none() || intent.source_terminal_db_id.is_none() {
+        return Err((
+            "OPENING_PROOF_INCOMPLETE",
+            "The financial opening lacks its terminal proof",
+        ));
+    }
+    if intent.drawer.as_ref() != Some(&preparation.confirmed_drawer) {
+        return Err((
+            "GIFT_CLOSING_DRAWER_CHANGED",
+            "The hosted drawer changed since the approval; prepare the close again",
+        ));
+    }
+    if crate::gift_financial_closing::load_original_for_opening(conn, opening_key)
+        .map_err(|_| GIFT_STORE_FAILED)?
+        .is_some()
+    {
+        return Err((
+            "GIFT_CLOSING_ORIGINAL_EXISTS",
+            "This shift already has a closing original; retry the close",
+        ));
+    }
+    let mirror_open: bool = conn
+        .query_row(
+            "SELECT EXISTS (
+                SELECT 1 FROM staff_shifts s
+                JOIN cash_drawer_sessions d ON d.id = ?2 AND d.staff_shift_id = s.id
+                WHERE s.id = ?1 AND s.status = 'active' AND s.role_type = 'cashier'
+                  AND lower(s.staff_id) = lower(?3) AND d.closed_at IS NULL)",
+            params![intent.shift_id, intent.drawer_id, intent.staff_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| GIFT_STORE_FAILED)?;
+    if !mirror_open {
+        return Err((
+            "ORIGINAL_DRAWER_CLOSED",
+            "The original shift or drawer is no longer open",
+        ));
+    }
+    match crate::commands::gift_card_funding::unresolved_funding(
+        conn,
+        Some(intent.shift_id.as_str()),
+    ) {
+        Ok(unresolved) if unresolved.is_empty() => Ok(GiftCloseAdmission { scope, intent }),
+        Ok(_) => Err((
+            "GIFT_FUNDING_UNRESOLVED",
+            "Gift card funding of this shift is still unresolved",
+        )),
+        Err(_) => Err((
+            "FUNDING_BLOCKER_UNAVAILABLE",
+            "Gift card funding blockers could not be read",
+        )),
+    }
+}
+
+/// The capture input: scope from the trusted terminal, actor, pins and
+/// currency from the stored opening, never renderer identity.
+fn gift_closing_capture(
+    admission: &GiftCloseAdmission,
+    preparation: &GiftClosingPreparation,
+    closing_key: String,
+    queue_item_id: String,
+    closed_at: &str,
+    request_body: Value,
+) -> crate::gift_financial_closing::ClosingCapture {
+    let intent = &admission.intent;
+    crate::gift_financial_closing::ClosingCapture {
+        closing_key,
+        opening_key: intent.opening_key.clone(),
+        queue_item_id,
+        organization_id: admission.scope.organization_id.clone(),
+        branch_id: admission.scope.branch_id.clone(),
+        terminal_id: admission.scope.terminal_id.clone(),
+        staff_id: intent.staff_id.clone(),
+        shift_id: intent.shift_id.clone(),
+        drawer_id: intent.drawer_id.clone(),
+        owner_terminal_db_id: intent.owner_terminal_db_id.clone().unwrap_or_default(),
+        source_terminal_db_id: intent.source_terminal_db_id.clone().unwrap_or_default(),
+        currency: intent.currency.clone(),
+        counted_cents: preparation.counted_cents,
+        closed_at: closed_at.to_string(),
+        confirmed_drawer: preparation.confirmed_drawer.clone(),
+        drawer: preparation.local_preview(),
+        request_body,
+    }
+}
+
+/// A retained original answers a retry unchanged; a conflicting count,
+/// approval or scope is refused and never recaptured.
+fn retained_gift_close(
+    conn: &Connection,
+    shift_id: &str,
+    original: &crate::gift_financial_closing::ClosingOriginal,
+    preparation: Option<&GiftClosingPreparation>,
+) -> Value {
+    let Some(preparation) = preparation else {
+        return gift_closing_refusal(
+            "GIFT_CLOSING_PREPARATION_REQUIRED",
+            "This shift has a financial opening; its close needs an approved gift preparation",
+        );
+    };
+    let Some(scope) = crate::gift_financial_opening::trusted_scope(conn) else {
+        return gift_closing_refusal(
+            "TERMINAL_SCOPE_UNAVAILABLE",
+            "Terminal organization, branch and terminal identity are required",
+        );
+    };
+    if scope.organization_id != original.organization_id
+        || scope.branch_id != original.branch_id
+        || scope.terminal_id != original.terminal_id
+    {
+        return gift_closing_refusal(
+            "GIFT_CLOSING_SCOPE_MISMATCH",
+            "The terminal scope differs from the closing original",
+        );
+    }
+    if preparation.counted_cents != original.counted_cents
+        || preparation.local_preview() != original.drawer
+    {
+        return gift_closing_refusal(
+            "GIFT_CLOSING_ORIGINAL_CONFLICT",
+            "This shift was closed with a different count or approval; it is not recaptured",
+        );
+    }
+    gift_close_response(conn, shift_id, original, true)
+}
+
+/// Pending closes display their local preview. Confirmed replays display only
+/// the frozen canonical proof, while retaining the original capture separately.
+fn gift_close_response(
+    conn: &Connection,
+    shift_id: &str,
+    original: &crate::gift_financial_closing::ClosingOriginal,
+    replayed: bool,
+) -> Value {
+    let confirmed = matches!(
+        original.state,
+        crate::gift_financial_closing::ClosingState::Confirmed
+    );
+    let (drawer, variance_cents, closed_at) = if confirmed {
+        match crate::gift_financial_closing::load_adopted(conn, &original.closing_key) {
+            Ok(Some(adopted)) if adopted.original == *original => {
+                let canonical = &adopted.proof.drawer;
+                (
+                    crate::gift_financial_opening::DrawerState {
+                        version: canonical.version,
+                        acknowledgement_id: canonical.acknowledgement_id.clone(),
+                        gift_cash_cents: canonical.gift_cash_cents,
+                        ordinary_expected_cents: canonical.ordinary_expected_cents,
+                        expected_cents: canonical.expected_cents,
+                    },
+                    adopted.variance_cents(),
+                    adopted.canonical_closed_at,
+                )
+            }
+            _ => return gift_closing_refusal(
+                "GIFT_CLOSING_PROOF_UNAVAILABLE",
+                "The confirmed closing proof could not be verified; retain the original for recovery",
+            ),
+        }
+    } else {
+        (
+            original.drawer.clone(),
+            original.variance_cents,
+            original.closed_at.clone(),
+        )
+    };
+    serde_json::json!({
+        "success": true,
+        "shiftId": shift_id,
+        "variance": Cents::new(variance_cents).to_f64_dp2(),
+        "expected": Cents::new(drawer.expected_cents).to_f64_dp2(),
+        "closing": Cents::new(original.counted_cents).to_f64_dp2(),
+        "message": if confirmed {
+            "Shift closed; financial closing confirmed"
+        } else {
+            "Shift closed locally; pending financial confirmation"
+        },
+        "giftFinancialClosing": {
+            "state": if confirmed { "confirmed" } else { "pending_financial_confirmation" },
+            "pendingFinancialConfirmation": !confirmed,
+            "closingKey": original.closing_key,
+            "openingKey": original.opening_key,
+            "queueItemId": original.queue_item_id,
+            "requestBody": serde_json::from_str::<Value>(&original.request_body_json)
+                .unwrap_or(Value::Null),
+            "countedCents": original.counted_cents,
+            "closedAt": closed_at,
+            "capturedAt": original.closed_at,
+            "drawer": {
+                "version": drawer.version,
+                "acknowledgementId": drawer.acknowledgement_id,
+                "giftCashCents": drawer.gift_cash_cents,
+                "ordinaryExpectedCents": drawer.ordinary_expected_cents,
+                "expectedCents": drawer.expected_cents,
+            },
+            "varianceCents": variance_cents,
+            "replayed": replayed,
+        },
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1757,7 +2372,7 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
          FROM order_payments op
          JOIN orders o ON o.id = op.order_id
          WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
-           AND op.status IN ('completed', 'refunded')
+           AND (op.status IN ('completed', 'refunded') AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id, '')) = ''))
            AND COALESCE(o.is_ghost, 0) = 0
            AND o.status NOT IN ('cancelled', 'canceled')
            {}
@@ -1888,6 +2503,9 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
     });
 
     // --- 5. Cash refunds ---
+    // The drawer's cash refunds only (shared rules R2 and R5, round 3).
+    let refund_is_cash = crate::refunds::refund_counts_as_cash_sql("pa", "op");
+    let refund_paid_by_drawer = crate::refunds::refund_paid_by_drawer_sql("pa", "o");
     // W4b-ii: cents-with-real-fallback shim (removed in 4e).
     let cash_refunds: f64 = conn
         .query_row(
@@ -1898,11 +2516,8 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
              JOIN orders o ON o.id = op.order_id
              WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
                AND pa.adjustment_type = 'refund'
-               AND (
-                    (COALESCE(pa.refund_method, '') = 'cash'
-                     AND COALESCE(pa.cash_handler, 'cashier_drawer') = 'cashier_drawer')
-                    OR (COALESCE(pa.refund_method, '') = '' AND op.method = 'cash')
-               )
+               AND {refund_is_cash}
+               AND {refund_paid_by_drawer}
                AND COALESCE(o.is_ghost, 0) = 0
                AND {order_financial_expr} >= ?2
                AND (?3 IS NULL OR {order_financial_expr} <= ?3)"
@@ -1960,7 +2575,7 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
          FROM order_payments op
          JOIN orders o ON o.id = op.order_id
          WHERE op.tip_recipient_staff_shift_id = ?1
-           AND op.status = 'completed'
+           AND (op.status = 'completed' AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id, '')) = ''))
            AND COALESCE(o.is_ghost, 0) = 0
            AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
            AND {order_financial_expr} >= ?2
@@ -2055,9 +2670,9 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
                 .filter_map(|r| r.ok())
                 .collect();
 
-            for (oid, total, del_fee, tip, bid) in &backfill_rows {
+            for (oid, _total, del_fee, tip, bid) in &backfill_rows {
                 let (_, cash, card, _total_paid) =
-                    compute_shift_payment_totals_for_order(&conn, oid, *total, "cash")?;
+                    compute_shift_payment_totals_for_order(&conn, oid)?;
                 let payment_method = if cash > 0.0 && card > 0.0 {
                     "mixed".to_string()
                 } else if card > 0.0 {
@@ -2191,8 +2806,21 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
     let resolved_tips_received = if tips_received > 0.0 || role_type != "driver" {
         tips_received
     } else {
+        // Founder's rule (30/09/2026): the courier's settlement comes only
+        // from payment rows. A delivery tip leaves the drawer only when the
+        // courier holds that delivery's cash, the same test the shift close
+        // applies (`compute_driver_shift_tip_total_in_window`): a delivery
+        // whose money was never recorded, was set aside or was given back
+        // holds none.
         driver_deliveries
             .iter()
+            .filter(|delivery| {
+                delivery
+                    .get("cash_collected")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0)
+                    > 0.0
+            })
             .filter(|delivery| {
                 !matches!(
                     delivery
@@ -2680,6 +3308,9 @@ fn clear_unfinished_sync_queue_rows(
     parity_table_name: &str,
     entity_id: &str,
 ) -> Result<(), String> {
+    if legacy_entity_type == "shift" {
+        refuse_gift_bound_shift_rewrite(conn, entity_id)?;
+    }
     conn.execute(
         "DELETE FROM sync_queue
          WHERE entity_type = ?1
@@ -2731,6 +3362,7 @@ pub(crate) fn recompute_closed_cashier_shift_financial_snapshot(
     shift_id: &str,
     written_at: &str,
 ) -> Result<(f64, f64), String> {
+    refuse_gift_bound_shift_rewrite(conn, shift_id)?;
     let (
         role_type,
         opening_cash,
@@ -2789,6 +3421,8 @@ pub(crate) fn recompute_closed_cashier_shift_financial_snapshot(
     )?;
 
     // W4b-ii: cents-with-real-fallback shim (removed in 4e).
+    let refund_is_cash = crate::refunds::refund_counts_as_cash_sql("pa", "op");
+    let refund_paid_by_drawer = crate::refunds::refund_paid_by_drawer_sql("pa", "o");
     let reconciled_refunds: f64 = conn
                 .query_row(
                     &format!(
@@ -2797,10 +3431,11 @@ pub(crate) fn recompute_closed_cashier_shift_financial_snapshot(
                  JOIN payment_adjustments pa ON pa.order_id = o.id
                  LEFT JOIN order_payments op ON op.id = pa.payment_id
                  WHERE pa.adjustment_type = 'refund'
-                   AND COALESCE(pa.refund_method, 'cash') = 'cash'
+                   AND {refund_is_cash}
                    AND COALESCE(o.is_ghost, 0) = 0
                    AND (
                         (COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
+                         AND {refund_paid_by_drawer}
                          AND LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'canceled')
                          AND {order_financial_expr} >= ?2
                          AND {order_financial_expr} <= ?3)
@@ -3100,6 +3735,7 @@ pub(crate) fn replace_unfinished_shift_sync_rows_with_current_snapshot(
     shift_id: &str,
     _written_at: &str,
 ) -> Result<(), String> {
+    refuse_gift_bound_shift_rewrite(conn, shift_id)?;
     clear_unfinished_sync_queue_rows(conn, "shift", "staff_shifts", shift_id)?;
 
     // Wave 5 Session 6: corrected-snapshot shift UPDATE flows through the
@@ -3734,12 +4370,16 @@ pub(crate) fn calculate_driver_return(
 // case: Τάσος returned 19,00 of a 20,00 float against a 1,00 tip paid by
 // card), yet the old query deducted it. Gate: the payment-attributed tip
 // sum takes only cash payments, and the order-level tip fallbacks count
-// only when the delivery was cash-handled — signalled by
-// driver_earnings.payment_method = 'cash' (the COD path records cash there
-// without any order_payments row) or by a completed cash payment on the
+// only when the delivery was cash-handled: a completed cash payment on the
 // order. A mixed cash+card order still attributes its order-level tip as
 // cash — the simple shapes dominate and the payment-attributed path is
 // exact.
+//
+// Founder's rule (30/09/2026): a courier's settlement comes only from payment
+// rows. The earning's own `payment_method = 'cash'` used to count as well,
+// for the COD path that recorded cash without any payment row; that path is
+// gone, and an order whose money was set aside, given back or never recorded
+// no longer hands its tip to the courier out of the drawer.
 fn compute_driver_shift_tip_total_in_window(
     conn: &rusqlite::Connection,
     shift_id: &str,
@@ -3749,16 +4389,16 @@ fn compute_driver_shift_tip_total_in_window(
     let financial_expr = business_day::order_financial_timestamp_expr("o");
     let sql = format!(
         "SELECT COALESCE(SUM(MAX(
-                    CASE WHEN COALESCE(de.payment_method, '') = 'cash' OR EXISTS (
+                    CASE WHEN EXISTS (
                         SELECT 1 FROM order_payments opc
                         WHERE opc.order_id = o.id
-                          AND opc.status = 'completed'
+                          AND (opc.status = 'completed' AND NOT (COALESCE(opc.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(opc.remote_payment_id, '')) = ''))
                           AND opc.method = 'cash'
                     ) THEN COALESCE(o.tip_amount_cents, CAST(ROUND(o.tip_amount * 100) AS INTEGER), 0) ELSE 0 END,
-                    CASE WHEN COALESCE(de.payment_method, '') = 'cash' OR EXISTS (
+                    CASE WHEN EXISTS (
                         SELECT 1 FROM order_payments opc
                         WHERE opc.order_id = o.id
-                          AND opc.status = 'completed'
+                          AND (opc.status = 'completed' AND NOT (COALESCE(opc.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(opc.remote_payment_id, '')) = ''))
                           AND opc.method = 'cash'
                     ) THEN COALESCE(de.tip_amount_cents, CAST(ROUND(de.tip_amount * 100) AS INTEGER), 0) ELSE 0 END,
                     COALESCE((
@@ -3770,7 +4410,7 @@ fn compute_driver_shift_tip_total_in_window(
                         FROM order_payments op
                         WHERE op.order_id = o.id
                           AND op.tip_recipient_staff_shift_id = ?1
-                          AND op.status = 'completed'
+                          AND (op.status = 'completed' AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id, '')) = ''))
                           AND op.method = 'cash'
                     ), 0)
                 )), 0)
@@ -3822,7 +4462,7 @@ fn compute_shift_close_totals(
                  SUM(CASE WHEN op.method = 'cash' THEN COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0) ELSE 0 END) AS cash,
                  SUM(CASE WHEN op.method = 'card' THEN COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0) ELSE 0 END) AS card
              FROM orders o
-             LEFT JOIN order_payments op ON op.order_id = o.id AND op.status IN ('completed', 'refunded')
+             LEFT JOIN order_payments op ON op.order_id = o.id AND (op.status IN ('completed', 'refunded') AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id, '')) = ''))
              WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
                  AND COALESCE(o.is_ghost, 0) = 0 AND COALESCE(o.is_test, 0) = 0
                  AND o.status NOT IN ('cancelled', 'canceled')
@@ -3851,14 +4491,17 @@ fn compute_shift_payment_totals_in_window(
     window_end: Option<&str>,
 ) -> Result<(i64, f64, f64, f64), String> {
     let financial_expr = business_day::order_financial_timestamp_expr("o");
+    // A payment set aside as a possible duplicate is money nowhere: it never
+    // adds the order to the count of the shift that took it (30/09/2026).
+    let set_aside = crate::payment_review::set_aside_payment_sql("op");
     let sql = format!(
         "SELECT
             COUNT(DISTINCT o.id),
-            COALESCE(SUM(CASE WHEN op.status = 'completed' AND op.method = 'cash' THEN COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0) ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN op.status = 'completed' AND op.method = 'card' THEN COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0) ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN op.status = 'completed' THEN COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0) ELSE 0 END), 0)
+            COALESCE(SUM(CASE WHEN (op.status = 'completed' AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id, '')) = '')) AND op.method = 'cash' THEN COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0) ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN (op.status = 'completed' AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id, '')) = '')) AND op.method = 'card' THEN COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0) ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN (op.status = 'completed' AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id, '')) = '')) THEN COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0) ELSE 0 END), 0)
          FROM orders o
-         LEFT JOIN order_payments op ON op.order_id = o.id
+         LEFT JOIN order_payments op ON op.order_id = o.id AND NOT {set_aside}
          WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
            AND COALESCE(o.is_ghost, 0) = 0
            AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
@@ -3906,36 +4549,26 @@ fn compute_driver_shift_earning_totals(
     .map_err(|e| format!("query driver earning totals: {e}"))
 }
 
+/// The completed cash and card money of one order, for a courier earning.
+/// Founder's rule (30/09/2026): only payment rows count. An order with no row
+/// used to be taken as its whole total in cash; it now carries nothing.
 fn compute_shift_payment_totals_for_order(
     conn: &rusqlite::Connection,
     order_id: &str,
-    fallback_total: f64,
-    fallback_method: &str,
 ) -> Result<(i64, f64, f64, f64), String> {
-    let totals = conn
+    // The same courier money as assignment (`get_order_payment_totals`):
+    // only a refund the courier handed back lowers the courier's cash, a
+    // placeholder row is no money, and platform-held money is never the
+    // courier's (item D9, round 2).
+    let (_, cash, card, total) = crate::order_ownership::get_order_payment_totals(conn, order_id)?;
+    let count: i64 = conn
         .query_row(
-            "SELECT
-                COUNT(*),
-                COALESCE(SUM(CASE WHEN status = 'completed' AND method = 'cash' THEN amount ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN status = 'completed' AND method = 'card' THEN amount ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN status = 'completed' THEN amount ELSE 0 END), 0)
-             FROM order_payments
-             WHERE order_id = ?1",
+            "SELECT COUNT(*) FROM order_payments WHERE order_id = ?1",
             params![order_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| row.get(0),
         )
         .map_err(|e| format!("query order payment totals: {e}"))?;
-
-    if totals.0 > 0 {
-        Ok(totals)
-    } else {
-        let (cash, card) = match fallback_method {
-            "card" => (0.0, fallback_total),
-            "mixed" => (fallback_total, fallback_total),
-            _ => (fallback_total, 0.0),
-        };
-        Ok((0, cash, card, fallback_total))
-    }
+    Ok((count, cash, card, total))
 }
 
 fn compute_shift_cash_collected(
@@ -4411,14 +5044,14 @@ fn build_cashier_order_history(
                     SELECT SUM(COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER)))
                     FROM order_payments op
                     WHERE op.order_id = o.id
-                      AND op.status = 'completed'
+                      AND (op.status = 'completed' AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id, '')) = ''))
                       AND op.method = 'cash'
                 ), 0),
                 COALESCE((
                     SELECT SUM(COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER)))
                     FROM order_payments op
                     WHERE op.order_id = o.id
-                      AND op.status = 'completed'
+                      AND (op.status = 'completed' AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id, '')) = ''))
                       AND op.method = 'card'
                 ), 0)
          FROM orders o
@@ -4676,14 +5309,14 @@ fn build_waiter_tables(conn: &rusqlite::Connection, shift_id: &str) -> Result<Ve
                         SELECT SUM(COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER)))
                         FROM order_payments op
                         WHERE op.order_id = o.id
-                          AND op.status = 'completed'
+                          AND (op.status = 'completed' AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id, '')) = ''))
                           AND op.method = 'cash'
                     ), 0) AS cash_amount,
                     COALESCE((
                         SELECT SUM(COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER)))
                         FROM order_payments op
                         WHERE op.order_id = o.id
-                          AND op.status = 'completed'
+                          AND (op.status = 'completed' AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id, '')) = ''))
                           AND op.method = 'card'
                     ), 0) AS card_amount
              FROM orders o
@@ -4883,6 +5516,76 @@ mod tests {
             runtime.block_on(async { block_on_shift_close_repair_future(async { 42usize }) });
 
         assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn ordinary_cashier_and_driver_closes_stay_outside_the_gift_close() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        let open = |staff: &str, role: &str, cash: f64| -> String {
+            open_shift(&db, &serde_json::json!({
+                "staffId": staff, "branchId": "control-branch", "terminalId": "control-terminal",
+                "roleType": role, "openingCash": cash,
+            }))
+            .unwrap()["shiftId"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let queued_closes = |shift_id: &str| -> Vec<Value> {
+            let conn = db.conn.lock().unwrap();
+            let mut stmt = conn.prepare("SELECT data FROM parity_sync_queue").unwrap();
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0)).unwrap();
+            rows.map(|data| serde_json::from_str::<Value>(&data.unwrap()).unwrap())
+                .filter(|body| body["shiftId"] == shift_id && body["checkOutTime"].is_string())
+                .collect()
+        };
+        let cashier = open("control-cashier", "cashier", 100.0);
+        let driver = open("control-driver", "driver", 20.0);
+
+        // A gift preparation without a financial opening is refused unwritten.
+        let refused = close_shift(
+            &db,
+            &serde_json::json!({
+                "shiftId": cashier,
+                "closingCash": 100.0,
+                "giftClosing": {
+                    "countedCents": 10_000,
+                    "drawer": {
+                        "version": 0, "acknowledgementId": null, "giftCashCents": 0,
+                        "ordinaryExpectedCents": 10_000, "expectedCents": 10_000,
+                    },
+                    "approvedOrdinaryExpectedCents": 10_000,
+                },
+            }),
+        )
+        .unwrap();
+        assert_eq!(refused["code"], "GIFT_CLOSING_NOT_APPLICABLE");
+        assert!(queued_closes(&cashier).is_empty());
+
+        // The ordinary input closes both roles as before: no gift result and
+        // no closing key in the queued close.
+        for (shift_id, closing_cash) in [(&driver, 20.0), (&cashier, 100.0)] {
+            let result = close_shift(
+                &db,
+                &serde_json::json!({ "shiftId": shift_id, "closingCash": closing_cash }),
+            )
+            .unwrap();
+            assert_eq!(result["success"], true, "{result}");
+            assert!(result.get("giftFinancialClosing").is_none());
+            let queued = queued_closes(shift_id.as_str());
+            assert!(!queued.is_empty());
+            assert!(queued
+                .iter()
+                .all(|body| body.get("idempotencyKey").is_none()));
+        }
+        let conn = db.conn.lock().unwrap();
+        let originals: i64 = conn
+            .query_row("SELECT COUNT(*) FROM gift_financial_closings", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(originals, 0);
     }
 
     fn test_db() -> DbState {
@@ -5133,6 +5836,17 @@ mod tests {
                     created_at, updated_at)
                  VALUES ('de-1', 'driver-1', 'driver-shift', 'ord-d1', 'branch-1',
                     1.5, 150, 1.5, 150, 'cash', 30.0, 3000, datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            // The cash the driver collected, as its payment row (founder's
+            // rule, 30/09/2026: a courier's settlement comes only from
+            // payment rows; the tip is the driver's because this cash is).
+            conn.execute(
+                "INSERT INTO order_payments (id, order_id, method, amount, amount_cents,
+                    status, staff_shift_id, created_at, updated_at)
+                 VALUES ('pay-d1', 'ord-d1', 'cash', 30.0, 3000, 'completed', 'driver-shift',
+                    datetime('now'), datetime('now'))",
                 [],
             )
             .unwrap();
@@ -5435,6 +6149,117 @@ mod tests {
             (149.91, 0.0),
             "staff payout correction must preserve card-refund and paying-drawer scope"
         );
+    }
+
+    /// Shared rules R2 and R5 (round 3, 01/10/2026) at the cashier's close:
+    /// the drawer counts only the refunds it paid. A refund naming no tender
+    /// on an `other` row is no drawer cash (it was read as cash), and a refund
+    /// naming no handler on an order a courier earning carries is the
+    /// courier's (the drawer counted it too, on an order attributed to the
+    /// cashier's shift). A cash refund naming no handler on a counter order
+    /// stays the drawer's.
+    #[test]
+    fn test_the_drawer_counts_only_the_refunds_it_paid() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        let open = serde_json::json!({
+            "staffId": "staff-r3", "branchId": "b-r3", "terminalId": "t-r3",
+            "roleType": "cashier", "openingCash": 100.0,
+        });
+        let shift_id = open_shift(&db, &open).unwrap()["shiftId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        {
+            let conn = db.conn.lock().unwrap();
+            for (order_id, order_type, payment_id, method) in [
+                ("ord-r3-counter", "pickup", "pay-r3-counter", "cash"),
+                ("ord-r3-other", "pickup", "pay-r3-other", "other"),
+                ("ord-r3-courier", "delivery", "pay-r3-courier", "cash"),
+            ] {
+                conn.execute(
+                    "INSERT INTO orders (id, items, order_type, total_amount, total_amount_cents,
+                        status, payment_status, staff_shift_id, sync_status, created_at, updated_at)
+                     VALUES (?1, '[]', ?2, 20.0, 2000, 'completed', 'paid', ?3, 'pending',
+                        strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                    params![order_id, order_type, shift_id],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO order_payments (id, order_id, method, amount, amount_cents,
+                        staff_shift_id, status, sync_status, sync_state, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, 20.0, 2000, ?4, 'completed', 'pending', 'pending',
+                        strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                    params![payment_id, order_id, method, shift_id],
+                )
+                .unwrap();
+                // A legacy refund: no tender, no handler.
+                conn.execute(
+                    "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type,
+                        amount, amount_cents, reason, sync_state, created_at, updated_at,
+                        refund_method, cash_handler, adjustment_context)
+                     VALUES (?1, ?2, ?3, 'refund', 3.0, 300, 'legacy refund', 'pending',
+                        strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+                        NULL, NULL, 'manual')",
+                    params![format!("adj-{payment_id}"), payment_id, order_id],
+                )
+                .unwrap();
+            }
+            // The `other` tender is a delivery platform's settlement of a
+            // prepaid platform order (bank money, never drawer cash). The
+            // till no longer refunds one (R1, round 3 review); this legacy
+            // refund stands for one an earlier build wrote.
+            conn.execute(
+                "UPDATE orders SET plugin = 'efood', external_plugin_order_id = 'efood-r3',
+                    ghost_metadata = '{\"food_delivery\":{\"prepaid\":true,\"payment_method\":\"online\"}}'
+                 WHERE id = 'ord-r3-other'",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE order_payments SET transaction_ref = 'platform_settlement:online:ord-r3-other'
+                 WHERE id = 'pay-r3-other'",
+                [],
+            )
+            .unwrap();
+            // The courier's order carries a courier earning.
+            conn.execute(
+                "INSERT INTO driver_earnings (id, driver_id, staff_shift_id, order_id, branch_id,
+                    delivery_fee, tip_amount, total_earning, payment_method, cash_collected,
+                    card_amount, cash_to_return, settled, created_at, updated_at)
+                 VALUES ('earning-r3', 'driver-r3', NULL, 'ord-r3-courier', 'b-r3',
+                    0, 0, 0, 'cash', 17.0, 0, 17.0, 0,
+                    strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                [],
+            )
+            .unwrap();
+            let check_in: String = conn
+                .query_row(
+                    "SELECT check_in_time FROM staff_shifts WHERE id = ?1",
+                    params![shift_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            for sql in [
+                "UPDATE orders SET created_at = ?1, updated_at = ?1 WHERE id LIKE 'ord-r3-%'",
+                "UPDATE order_payments SET created_at = ?1, updated_at = ?1 WHERE id LIKE 'pay-r3-%'",
+                "UPDATE payment_adjustments SET created_at = ?1, updated_at = ?1 WHERE id LIKE 'adj-pay-r3-%'",
+            ] {
+                conn.execute(sql, params![check_in]).unwrap();
+            }
+        }
+
+        // Expected = 100 opening + 40 cash sales (the counter and the
+        // courier's order; the `other` row is no cash) − 3,00 (the counter
+        // refund the drawer paid). The `other` refund is no cash, and the
+        // courier handed the courier's order's 3,00 back.
+        let summary = get_shift_summary(&db, &shift_id).unwrap();
+        assert_eq!(summary["cashRefunds"], 3.0, "{summary}");
+        let close = serde_json::json!({ "shiftId": shift_id, "closingCash": 137.0 });
+        let result = close_shift(&db, &close).unwrap();
+        assert_eq!(result["success"], true, "{result}");
+        assert_eq!(result["expected"], 137.0, "{result}");
+        assert_eq!(result["variance"], 0.0);
     }
 
     /// Z-17/08 forensics defect 4: on clean nights the closing count carries
@@ -8030,6 +8855,232 @@ mod tests {
         );
     }
 
+    const GIFT_SHIFT: &str = "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c01";
+    const GIFT_PAYMENT: &str = "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0c";
+
+    /// A captured gift close in its journal shape: the confirmed usable
+    /// opening, the closed shift and drawer, one staff payment, the closing
+    /// original (`closing_state`) bound to its one `parity_sync_queue` row,
+    /// and a leftover legacy shift row.
+    fn seed_gift_closed_shift(conn: &Connection, closing_state: &str) {
+        const DRAWER: &str = "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c02";
+        const OPENING_KEY: &str = "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c03";
+        const CLOSING_KEY: &str = "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c04";
+        const ORG: &str = "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c05";
+        const BRANCH: &str = "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c06";
+        const TERMINAL: &str = "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c07";
+        const STAFF: &str = "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c08";
+        const OWNER_DB: &str = "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c09";
+        const SOURCE_DB: &str = "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0a";
+        const OPENING_QUEUE: &str = "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0b";
+        const OPENED_AT: &str = "2026-09-30T08:00:00.000Z";
+        const CLOSED_AT: &str = "2026-09-30T18:00:00.000Z";
+
+        conn.execute(
+            "INSERT INTO gift_financial_openings (
+                opening_key, organization_id, branch_id, terminal_id, staff_id, staff_name,
+                shift_id, drawer_id, opening_cents, currency, checked_in_at, business_date,
+                period_start_at, is_day_start, calculation_version, queue_item_id, state,
+                owner_terminal_db_id, source_terminal_db_id, server_usable, drawer_version,
+                drawer_acknowledgement_id, drawer_gift_cash_cents, drawer_ordinary_expected_cents,
+                drawer_expected_cents, confirmation_json, confirmed_at, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, 'Maria', ?6, ?7, 10000, 'EUR', ?8, '2026-09-30', ?8, 1, 2,
+                      ?9, 'confirmed_usable', ?10, ?11, 1, 3, NULL, 2000, 5300, 7300,
+                      '{\"fixture\":\"stored opening proof\"}', ?8, ?8, ?8)",
+            params![
+                OPENING_KEY,
+                ORG,
+                BRANCH,
+                TERMINAL,
+                STAFF,
+                GIFT_SHIFT,
+                DRAWER,
+                OPENED_AT,
+                OPENING_QUEUE,
+                OWNER_DB,
+                SOURCE_DB
+            ],
+        )
+        .expect("seed the confirmed opening");
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, role_type, branch_id, terminal_id, check_in_time, check_out_time,
+                opening_cash_amount, opening_cash_amount_cents,
+                closing_cash_amount, closing_cash_amount_cents,
+                expected_cash_amount, expected_cash_amount_cents,
+                cash_variance, cash_variance_cents,
+                status, calculation_version, sync_status, created_at, updated_at
+            ) VALUES (?1, ?2, 'cashier', ?3, ?4, ?5, ?6, 100.0, 10000, 74.5, 7450, 73.0, 7300,
+                      1.5, 150, 'closed', 2, 'pending', ?5, ?6)",
+            params![GIFT_SHIFT, STAFF, BRANCH, TERMINAL, OPENED_AT, CLOSED_AT],
+        )
+        .expect("seed the closed gift shift");
+        conn.execute(
+            "INSERT INTO cash_drawer_sessions (
+                id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                opening_amount, opening_amount_cents, closing_amount, closing_amount_cents,
+                expected_amount, expected_amount_cents, variance_amount, variance_amount_cents,
+                total_staff_payments, total_staff_payments_cents,
+                opened_at, closed_at, reconciled, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, 100.0, 10000, 74.5, 7450, 73.0, 7300, 1.5, 150,
+                      20.0, 2000, ?6, ?7, 1, ?6, ?7)",
+            params![DRAWER, GIFT_SHIFT, STAFF, BRANCH, TERMINAL, OPENED_AT, CLOSED_AT],
+        )
+        .expect("seed the closed gift drawer");
+        conn.execute(
+            "INSERT INTO staff_payments (
+                id, cashier_shift_id, paid_to_staff_id, amount, payment_type, notes,
+                created_at, updated_at
+            ) VALUES (?1, ?2, 'staff-1', 20.0, 'wage', NULL, ?3, ?3)",
+            params![GIFT_PAYMENT, GIFT_SHIFT, OPENED_AT],
+        )
+        .expect("seed the staff payment");
+
+        let body = serde_json::json!({
+            "shiftId": GIFT_SHIFT,
+            "closingCash": 74.5,
+            "expectedCash": 73.0,
+            "variance": 1.5,
+            "idempotencyKey": CLOSING_KEY,
+        });
+        sync_queue::enqueue_payload_item(
+            conn,
+            "staff_shifts",
+            GIFT_SHIFT,
+            "UPDATE",
+            &body,
+            Some(1),
+            Some("shifts"),
+            Some("manual"),
+            Some(1),
+        )
+        .expect("enqueue the closing original");
+        let queue_item_id: String = conn
+            .query_row(
+                "SELECT id FROM parity_sync_queue WHERE record_id = ?1",
+                params![GIFT_SHIFT],
+                |row| row.get(0),
+            )
+            .expect("load the original queue id");
+        let confirmed = closing_state == "confirmed";
+        conn.execute(
+            "INSERT INTO gift_financial_closings (
+                closing_key, opening_key, queue_item_id, organization_id, branch_id, terminal_id,
+                staff_id, shift_id, drawer_id, owner_terminal_db_id, source_terminal_db_id,
+                currency, counted_cents, closed_at, drawer_version, drawer_acknowledgement_id,
+                drawer_gift_cash_cents, drawer_ordinary_expected_cents, drawer_expected_cents,
+                variance_cents, request_body_json, state, confirmation_json,
+                canonical_closed_at, confirmed_at, adopted_at, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'EUR', 7450, ?12, 3, NULL,
+                      2000, 5300, 7300, 150, ?13, ?14, ?15, ?16, ?16, ?16, ?12, ?12)",
+            params![
+                CLOSING_KEY,
+                OPENING_KEY,
+                queue_item_id,
+                ORG,
+                BRANCH,
+                TERMINAL,
+                STAFF,
+                GIFT_SHIFT,
+                DRAWER,
+                OWNER_DB,
+                SOURCE_DB,
+                CLOSED_AT,
+                body.to_string(),
+                closing_state,
+                confirmed.then_some("{\"fixture\":\"canonical closing proof\"}"),
+                confirmed.then_some(CLOSED_AT),
+            ],
+        )
+        .expect("seed the closing original");
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key, status
+            ) VALUES ('shift', ?1, 'update', '{}', 'shift:gift-close:legacy', 'pending')",
+            params![GIFT_SHIFT],
+        )
+        .expect("seed the leftover legacy shift row");
+    }
+
+    /// Staff payments, both mirrors, the closing journal and both queues.
+    fn gift_closed_shift_fingerprint(conn: &Connection) -> String {
+        conn.query_row(
+            "SELECT json_array(
+                (SELECT json_group_array(json_array(id, amount, paid_to_staff_id, updated_at))
+                 FROM staff_payments),
+                (SELECT json_array(expected_cash_amount, expected_cash_amount_cents,
+                                   cash_variance, cash_variance_cents,
+                                   closing_cash_amount_cents, sync_status, updated_at)
+                 FROM staff_shifts WHERE id = ?1),
+                (SELECT json_array(expected_amount, variance_amount, total_staff_payments,
+                                   total_staff_payments_cents, updated_at)
+                 FROM cash_drawer_sessions WHERE staff_shift_id = ?1),
+                (SELECT json_group_array(json_array(id, table_name, record_id, operation, status))
+                 FROM parity_sync_queue),
+                (SELECT json_group_array(json_array(id, entity_id, status, payload, idempotency_key))
+                 FROM sync_queue),
+                (SELECT json_group_array(json_array(closing_key, state, counted_cents,
+                                                    variance_cents, request_body_json,
+                                                    queue_item_id))
+                 FROM gift_financial_closings)
+            )",
+            params![GIFT_SHIFT],
+            |row| row.get(0),
+        )
+        .expect("fingerprint the gift close")
+    }
+
+    #[test]
+    fn gift_bound_closed_shift_staff_payment_corrections_roll_back() {
+        for closing_state in ["pending", "confirmed"] {
+            let db = test_db();
+            let conn = db.conn.lock().unwrap();
+            ensure_staff_payments_table(&conn).unwrap();
+            seed_gift_closed_shift(&conn, closing_state);
+            let before = gift_closed_shift_fingerprint(&conn);
+            drop(conn);
+
+            let payment = |amount: f64| {
+                serde_json::json!({
+                    "paymentId": GIFT_PAYMENT,
+                    "cashierShiftId": GIFT_SHIFT,
+                    "paidToStaffId": "staff-1",
+                    "amount": amount,
+                    "paymentType": "wage",
+                })
+            };
+            for refusal in [
+                record_staff_payment(&db, &payment(5.0)),
+                update_staff_payment(&db, &payment(12.0)),
+                delete_staff_payment(&db, &payment(20.0)),
+            ] {
+                let error = refusal.expect_err("a closed gift original refuses corrections");
+                assert!(
+                    error.starts_with(GIFT_BOUND_SHIFT_REWRITE_REFUSED),
+                    "{closing_state}: {error}"
+                );
+            }
+
+            let conn = db.conn.lock().unwrap();
+            let written_at = "2026-09-30T19:00:00Z";
+            assert!(recompute_closed_cashier_shift_financial_snapshot(
+                &conn, GIFT_SHIFT, written_at
+            )
+            .unwrap_err()
+            .starts_with(GIFT_BOUND_SHIFT_REWRITE_REFUSED));
+            assert!(replace_unfinished_shift_sync_rows_with_current_snapshot(
+                &conn, GIFT_SHIFT, written_at
+            )
+            .unwrap_err()
+            .starts_with(GIFT_BOUND_SHIFT_REWRITE_REFUSED));
+            assert_eq!(
+                gift_closed_shift_fingerprint(&conn),
+                before,
+                "{closing_state}: payment, mirrors, journal and queues stay unchanged"
+            );
+        }
+    }
+
     #[test]
     fn test_update_staff_payment_recomputes_closed_shift_expected_and_variance() {
         let db = test_db();
@@ -8677,5 +9728,52 @@ mod tests {
             .unwrap();
         assert_eq!(branch, "branch-renderer");
         assert_eq!(terminal, "terminal-renderer");
+    }
+
+    /// A card set aside on shift B (the order was already paid on shift A)
+    /// is money nowhere: shift B's close totals neither count the order nor
+    /// its money (fix review 30/09/2026).
+    #[test]
+    fn a_set_aside_payment_never_adds_the_order_to_the_shift_that_took_it() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents,
+                status, order_type, payment_status, staff_shift_id, sync_status,
+                created_at, updated_at)
+             VALUES ('ord-sa', 'A-0042', '[]', 13.0, 1300, 'completed', 'takeaway', 'paid',
+                     'shift-a', 'synced', '2026-09-30T10:00:00Z', '2026-09-30T10:00:00Z')",
+            [],
+        )
+        .unwrap();
+        for (id, shift, created_at) in [
+            ("pay-card", "shift-a", "2026-09-30T10:01:00Z"),
+            ("pay-dup", "shift-b", "2026-09-30T10:05:00Z"),
+        ] {
+            conn.execute(
+                "INSERT INTO order_payments (id, order_id, method, amount, amount_cents,
+                    status, staff_shift_id, sync_status, created_at, updated_at)
+                 VALUES (?1, 'ord-sa', 'card', 13.0, 1300, 'completed', ?2, 'synced', ?3, ?3)",
+                params![id, shift, created_at],
+            )
+            .unwrap();
+        }
+        crate::payment_review::set_aside_already_paid_payment(
+            &conn,
+            "pay-dup",
+            Some("srv-card"),
+            "2026-09-30T10:06:00Z",
+        )
+        .unwrap();
+
+        assert_eq!(
+            compute_shift_payment_totals(&conn, "shift-b", "cashier").unwrap(),
+            (0, 0.0, 0.0, 0.0),
+            "shift B took money that is set aside, not a sale"
+        );
+        assert_eq!(
+            compute_shift_payment_totals(&conn, "shift-a", "cashier").unwrap(),
+            (1, 0.0, 13.0, 13.0)
+        );
     }
 }

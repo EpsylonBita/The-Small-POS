@@ -10,12 +10,21 @@
 //! persisted, so the cashier moves on.
 //!
 //! Decision tree:
-//!   1. Consult [`active_cache`] — if `Inactive`, skip silently.
-//!   2. Build payload via [`payload_builder`].
-//!   3. Try `POST /api/plugins/fiscal/submit`.
-//!   4. On HTTP 2xx → done, mirror server outcome.
-//!   5. On network error / non-2xx → enqueue onto `parity_sync_queue`
+//!   1. Build payload via [`payload_builder`].
+//!   2. Try `POST /api/plugins/fiscal/submit`.
+//!   3. On HTTP 2xx → done, mirror server outcome.
+//!   4. On network error / non-2xx → enqueue onto `parity_sync_queue`
 //!      with `module_type='fiscal'`, replayed later by [`replay`].
+//!
+//! A receipt is queued whatever the fiscal-active verdict says (review of the
+//! 29/09/2026 fixes, decided for both POS apps). The verdict used to skip the
+//! enqueue when it read "inactive"; one `active:false` answer (a plugin being
+//! reconnected, a branch config saved a minute late) then dropped every
+//! receipt of a store WITH a fiscal plugin until the next refresh, silently
+//! and for good. A queued row of a branch without a plugin costs one request:
+//! the server answers `200 skipped` and the row drains. The verdict only
+//! decides whether queued rows hold the Z (see [`super::close_day_guard`] and
+//! the drain's closeout exemption in `sync_queue`).
 //!
 //! Per Req 12, every branch in this function ends in `Ok(_)` from the
 //! caller's perspective — even configuration gaps, network failures, and
@@ -28,7 +37,6 @@ use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use super::active_cache::{self, CacheVerdict};
 use super::payload_builder;
 
 const SUBMIT_PATH: &str = "/api/plugins/fiscal/submit";
@@ -54,8 +62,6 @@ pub struct DispatchOutcome {
 pub enum LocalOutcome {
     /// Server accepted (status='submitted' / 'queued' / 'skipped').
     Server(DispatchOutcome),
-    /// Active-cache said inactive — no payload built, no request sent.
-    SkippedInactiveCached,
     /// Protected repair settlements use the trusted server repair worker.
     SkippedProtectedRepair,
     /// Tried POST but network or 5xx failed; row enqueued for retry.
@@ -90,16 +96,10 @@ pub async fn submit_for_order(
             return LocalOutcome::SkippedProtectedRepair;
         }
     }
-    // Step 1: short-circuit on cached inactive verdict (Req 4.10)
-    if let CacheVerdict::Inactive = active_cache::verdict(&branch_id) {
-        info!(
-            "[fiscal.dispatcher] skipping enqueue for order {order_id} — \
-             cached fiscal_active=false for branch {branch_id}"
-        );
-        return LocalOutcome::SkippedInactiveCached;
-    }
+    // No fiscal-active short-circuit: the server decides (`skipped` for a
+    // branch without a plugin), see the module docs.
 
-    // Step 2: build payload
+    // Step 1: build payload
     let payload = {
         let db = match conn.lock() {
             Ok(g) => g,
@@ -119,7 +119,7 @@ pub async fn submit_for_order(
 
     let idempotency_key = format!("fiscal:{order_id}:{branch_id}");
 
-    // Step 3: try POST
+    // Step 2: try POST
     let post_outcome = try_post(&admin_base_url, &api_key, &terminal_id, &payload).await;
 
     match post_outcome {
@@ -130,7 +130,7 @@ pub async fn submit_for_order(
                  {post_err}. Enqueueing onto parity_sync_queue."
             );
 
-            // Step 4: enqueue onto parity_sync_queue with module_type='fiscal'
+            // Step 3: enqueue onto parity_sync_queue with module_type='fiscal'
             let enqueue_result = {
                 let db = match conn.lock() {
                     Ok(g) => g,
@@ -211,9 +211,10 @@ pub(crate) async fn try_post(
 /// propagate this error to the order command. Currently consulted as a
 /// fire-and-forget log-on-error from `commands::orders::order_create`.
 ///
-/// If [`active_cache`] verdict is `Inactive`, returns Ok(()) without
-/// enqueueing — the offline outbox would otherwise fill with payloads
-/// that always resolve to `status='skipped'` once replayed.
+/// The receipt is queued whatever the fiscal-active verdict says: a store
+/// with a fiscal plugin must never lose a receipt to one `active:false`
+/// answer, and a branch without a plugin drains its row as `skipped`. A
+/// FRESH inactive verdict only keeps the queued row from holding the Z.
 pub fn enqueue_for_order(conn: &Connection, order_id: &str) -> Result<(), String> {
     if is_protected_repair_order(conn, order_id)? {
         info!("[fiscal.dispatcher] skipping generic fiscal queue for protected repair settlement {order_id}");
@@ -231,14 +232,6 @@ pub fn enqueue_for_order(conn: &Connection, order_id: &str) -> Result<(), String
         return Err(format!(
             "order {order_id} has no branch_id; cannot enqueue fiscal row"
         ));
-    }
-
-    if let CacheVerdict::Inactive = active_cache::verdict(&branch_id) {
-        info!(
-            "[fiscal.dispatcher] skipping fiscal enqueue for order {order_id} — \
-             cached fiscal_active=false for branch {branch_id}"
-        );
-        return Ok(());
     }
 
     let payload = super::payload_builder::build_fiscal_receipt_input(conn, order_id, &branch_id)?;
@@ -314,4 +307,140 @@ fn enqueue_fiscal_row(
 
     let _ = branch_id; // branch_id lives in the payload; sync_queue worker reads it from there
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fiscal::active_cache;
+    use crate::fiscal::close_day_guard::{self, FiscalCloseScope};
+    use rusqlite::params;
+
+    fn migrated_conn() -> Connection {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        crate::db::run_migrations_for_test(&conn);
+        conn
+    }
+
+    fn seed_paid_order(conn: &Connection, order_id: &str, branch_id: &str) {
+        conn.execute(
+            "INSERT INTO orders (id, supabase_id, organization_id, items, subtotal, subtotal_cents,
+                                 total_amount, total_amount_cents, status, payment_status,
+                                 sync_status, branch_id, created_at, updated_at)
+             VALUES (?1, ?2, 'org-1', '[]', 10.0, 1000, 10.0, 1000, 'completed', 'paid',
+                     'synced', ?3, '2026-09-29T11:05:13Z', '2026-09-29T11:05:13Z')",
+            params![order_id, format!("remote-{order_id}"), branch_id],
+        )
+        .expect("seed order");
+    }
+
+    fn queued_fiscal_rows(conn: &Connection, order_id: &str) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM parity_sync_queue
+             WHERE module_type = 'fiscal' AND record_id = ?1",
+            [order_id],
+            |row| row.get(0),
+        )
+        .expect("count queued fiscal rows")
+    }
+
+    fn whole_branch(branch_id: &str) -> FiscalCloseScope {
+        FiscalCloseScope {
+            branch_id: branch_id.to_string(),
+            report_date: "2026-09-30".to_string(),
+            period_start_at: "0001-01-01T00:00:00Z".to_string(),
+            cutoff_at: None,
+            lower_bound_inclusive: true,
+        }
+    }
+
+    /// Review of the 29/09/2026 fixes (decided for both POS apps): a store
+    /// WITH a fiscal plugin lost every receipt after one `active:false`
+    /// answer, because the dispatcher skipped the enqueue under an inactive
+    /// verdict. The receipt is always queued; a FRESH inactive verdict only
+    /// keeps it from holding the Z, and an unknown or active one holds it.
+    #[test]
+    #[serial_test::serial]
+    fn a_receipt_is_queued_even_when_the_branch_reads_fiscally_inactive() {
+        active_cache::reset_for_tests();
+        let conn = migrated_conn();
+        seed_paid_order(&conn, "o-fiscal", "branch-1");
+        active_cache::update("branch-1", false);
+
+        enqueue_for_order(&conn, "o-fiscal").expect("the receipt is queued");
+        assert_eq!(
+            queued_fiscal_rows(&conn, "o-fiscal"),
+            1,
+            "an inactive verdict must never drop a receipt"
+        );
+
+        // Fresh inactive: the row neither holds the Z nor counts in the
+        // closeout drain's failure accounting.
+        assert!(close_day_guard::ensure_no_queued_fiscal_for_window(
+            &conn,
+            &whole_branch("branch-1")
+        )
+        .is_ok());
+        conn.execute(
+            "UPDATE parity_sync_queue SET status = 'failed' WHERE module_type = 'fiscal'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            crate::sync_queue::get_closeout_blocking_status(&conn)
+                .expect("closeout status")
+                .failed,
+            0
+        );
+
+        // Active (or unknown once the verdict expires): the same row holds.
+        active_cache::update("branch-1", true);
+        assert!(close_day_guard::ensure_no_queued_fiscal_for_window(
+            &conn,
+            &whole_branch("branch-1")
+        )
+        .is_err());
+        assert_eq!(
+            crate::sync_queue::get_closeout_blocking_status(&conn)
+                .expect("closeout status")
+                .failed,
+            1
+        );
+        active_cache::reset_for_tests();
+        assert!(
+            close_day_guard::ensure_no_queued_fiscal_for_window(&conn, &whole_branch("branch-1"))
+                .is_err(),
+            "an unknown verdict fails closed"
+        );
+    }
+
+    /// The online entry point follows the same rule: under an inactive
+    /// verdict it still tries the server and, when that fails, queues.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn the_online_submit_does_not_skip_an_inactive_branch_either() {
+        active_cache::reset_for_tests();
+        let conn = migrated_conn();
+        seed_paid_order(&conn, "o-online", "branch-2");
+        active_cache::update("branch-2", false);
+        let conn = Arc::new(Mutex::new(conn));
+
+        // Not a URL: the request fails before any network I/O.
+        let outcome = submit_for_order(
+            Arc::clone(&conn),
+            "o-online".to_string(),
+            "not a url".to_string(),
+            "api-key".to_string(),
+            "terminal-1".to_string(),
+            "branch-2".to_string(),
+        )
+        .await;
+
+        assert!(
+            matches!(outcome, LocalOutcome::EnqueuedForRetry { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(queued_fiscal_rows(&conn.lock().unwrap(), "o-online"), 1);
+        active_cache::reset_for_tests();
+    }
 }

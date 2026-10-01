@@ -209,11 +209,13 @@ test('Plugin setup modals keep light-theme text and controls readable', () => {
 // src/renderer/pages/__tests__/IntegrationsPage.box-admin-setup.test.tsx (vitest); this
 // guard pins the source-level contract so the fallback set and the flag cannot drift.
 test('BOX is Admin-Dashboard-managed on the till (no credential form, data-driven flag)', () => {
-  // Local fallback set includes box next to efood. The set went multi-line when
+  // Local fallback set includes box and wolt next to efood. The set went multi-line when
   // customer_messaging joined it, so pin membership rather than the literal's shape.
+  // Wolt (#210) is OAuth-onboarded through Connect Wolt in the Admin Dashboard; its
+  // rendering is pinned in IntegrationsPage.wolt-admin-setup.test.tsx (vitest).
   const fallbackSet = source.match(/const ADMIN_DASHBOARD_SETUP_PLUGIN_IDS = new Set\(\[([\s\S]*?)\]\);/);
   assert.ok(fallbackSet, 'Admin-Dashboard-managed fallback set present');
-  for (const id of ['caller_id', 'efood', 'box']) {
+  for (const id of ['caller_id', 'efood', 'box', 'wolt']) {
     assert.match(fallbackSet[1], new RegExp(`'${id}'`), `${id} is in the Admin-Dashboard-managed fallback set`);
   }
 
@@ -233,6 +235,10 @@ test('BOX is Admin-Dashboard-managed on the till (no credential form, data-drive
   // Every routing decision (card, toggle, configure) consults the per-integration flag.
   assert.match(source, /usesAdminDashboardSetup\(integration\.id, integration\.readOnlyAdminSetup\)/);
   assert.doesNotMatch(source, /usesAdminDashboardSetup\(integration\.id\)/);
+
+  // Wolt has no API key or secret: its form config mirrors the server's required
+  // credentials (webhook_secret + merchant_id), never api_key/api_secret.
+  assert.match(source, /^\s+wolt: \{ requiredFields: \['webhook_secret', 'merchant_id'\],/m);
 
   // The catalog entry is branded BOX and no longer carries the stale partner-credential lock.
   const boxEntry = source.match(/\{\s*id: 'box',[\s\S]*?\n  \},/);

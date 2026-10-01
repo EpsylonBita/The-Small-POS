@@ -14,7 +14,7 @@ fn active_payment_records() -> &'static Mutex<HashSet<String>> {
 }
 
 #[derive(Debug)]
-struct PaymentRecordReservation(String);
+pub(crate) struct PaymentRecordReservation(String);
 
 impl Drop for PaymentRecordReservation {
     fn drop(&mut self) {
@@ -24,7 +24,7 @@ impl Drop for PaymentRecordReservation {
     }
 }
 
-fn reserve_payment_record(order_id: &str) -> Result<PaymentRecordReservation, String> {
+pub(crate) fn reserve_payment_record(order_id: &str) -> Result<PaymentRecordReservation, String> {
     let mut active = active_payment_records()
         .lock()
         .map_err(|error| format!("lock active payment collections: {error}"))?;
@@ -236,7 +236,7 @@ fn parse_payment_id_payload(arg0: Option<serde_json::Value>) -> Result<String, S
         .ok_or("Missing paymentId".into())
 }
 
-fn payment_payload_has_terminal_approval(payload: &serde_json::Value) -> bool {
+pub(crate) fn payment_payload_has_terminal_approval(payload: &serde_json::Value) -> bool {
     payload
         .get("terminalApproved")
         .or_else(|| payload.get("terminal_approved"))
@@ -443,40 +443,26 @@ fn load_order_settlement_read_transaction(
     }
 }
 
-#[tauri::command]
-pub async fn payment_update_payment_status(
-    arg0: Option<serde_json::Value>,
-    arg1: Option<String>,
-    arg2: Option<String>,
-    db: tauri::State<'_, db::DbState>,
-    app: tauri::AppHandle,
-) -> Result<serde_json::Value, String> {
-    let payload = parse_payment_update_status_payload(arg0, arg1, arg2)?;
-    let order_id_raw = payload.order_id;
-    let payment_status = payload.payment_status;
-    let payment_method = payload.payment_method;
-    let now = Utc::now().to_rfc3339();
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let order_id = resolve_order_id(&conn, &order_id_raw).ok_or("Order not found")?;
-
-    // Wave 6 H15: the SELECT of `current_payment_status` +
-    // `completed_payment_rows` followed by the UPDATE used to run on the
-    // same connection but without an explicit `BEGIN IMMEDIATE`. A
-    // concurrent `void_payment` between the SELECT and the UPDATE could
-    // remove the last completed payment row, and we would still stamp
-    // the order `paid` with 0 completed payments. Wrapping both in a
-    // single IMMEDIATE transaction closes that window.
-    //
-    // Wave 6 C8: the UPDATE no longer writes `payment_method` — the
-    // derived value is reconstructed on read via
-    // `payments::derive_payment_method`. Removing the stored column
-    // write is the first step toward dropping the column entirely in
-    // a later migration.
-    //
-    // Wave 6 M3: the sync-queue idempotency key is anchored on
-    // `(order_id, payment_status)` so a double-submission of the same
-    // status change produces the same key. Previously the
-    // `Uuid::new_v4()` suffix rotated the key on every invocation.
+/// Persist a reconciliation payment label on one order.
+///
+/// Founder's rule (30/09/2026): a payment record is never missing, and no
+/// order is registered as paid without one. `paid` and `partially_paid` are
+/// written only when the order's completed payment rows back the claim
+/// (`paid`: the whole total; `partially_paid`: some money; a zero total, a
+/// comp, needs none). The check used to be "at least one completed row", so
+/// 5.00 in the ledger was enough to mark a 20.00 order `paid` and push that.
+/// Money itself is only ever recorded through `payment_record`.
+///
+/// Wave 6 H15: the reads and the UPDATE run in one IMMEDIATE transaction,
+/// so a concurrent void cannot remove the covering rows in between.
+/// Wave 6 C8: `payment_method` is never written; it is derived on read via
+/// `payments::derive_payment_method`.
+fn set_order_payment_status_in_connection(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+    payment_status: &str,
+    now: &str,
+) -> Result<(), String> {
     conn.execute_batch("BEGIN IMMEDIATE")
         .map_err(|e| format!("begin payment-status transaction: {e}"))?;
 
@@ -496,12 +482,16 @@ pub async fn payment_update_payment_status(
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .map_err(|e| format!("load payment reconciliation context: {e}"))?;
+        if matches!(payment_status, "paid" | "partially_paid")
+            && !payments::ledger_backs_claimed_status(conn, order_id, payment_status)?
+        {
+            return Err(format!(
+                "Cannot mark this order {payment_status}: its completed payments do not cover it; use payment_record instead"
+            ));
+        }
         if completed_payment_rows == 0
             && current_payment_status != payment_status
-            && matches!(
-                payment_status.as_str(),
-                "paid" | "partially_paid" | "refunded"
-            )
+            && payment_status == "refunded"
         {
             return Err(
                 "Cannot promote payment status without completed payment rows; use payment_record instead"
@@ -523,18 +513,40 @@ pub async fn payment_update_payment_status(
     match result {
         Ok(()) => conn
             .execute_batch("COMMIT")
-            .map_err(|e| format!("commit payment-status transaction: {e}"))?,
+            .map_err(|e| format!("commit payment-status transaction: {e}")),
         Err(e) => {
             let _ = conn.execute_batch("ROLLBACK");
-            return Err(e);
+            Err(e)
         }
     }
+}
+
+#[tauri::command]
+pub async fn payment_update_payment_status(
+    arg0: Option<serde_json::Value>,
+    arg1: Option<String>,
+    arg2: Option<String>,
+    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    let payload = parse_payment_update_status_payload(arg0, arg1, arg2)?;
+    let order_id_raw = payload.order_id;
+    let payment_status = payload.payment_status;
+    let payment_method = payload.payment_method;
+    let now = Utc::now().to_rfc3339();
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let order_id = resolve_order_id(&conn, &order_id_raw).ok_or("Order not found")?;
+
+    set_order_payment_status_in_connection(&conn, &order_id, &payment_status, &now)?;
 
     let event_payload = serde_json::json!({
         "orderId": order_id,
         "paymentStatus": payment_status,
         "paymentMethod": payment_method
     });
+    // Wave 6 M3: the sync-queue idempotency key is anchored on
+    // `(order_id, payment_status)`, so a double submission of the same
+    // status change produces the same key.
     let idem = format!("order:status:{}:{}", order_id, payment_status);
     let _ = conn.execute(
         "INSERT OR IGNORE INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
@@ -584,7 +596,13 @@ pub async fn payment_record(
     let terminal_approved = payment_payload_has_terminal_approval(&payload);
     let order_id = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        resolve_order_id(&conn, &requested_input.order_id).ok_or("Order not found")?
+        let order_id =
+            resolve_order_id(&conn, &requested_input.order_id).ok_or("Order not found")?;
+        if let Some(refusal) = refuse_new_tender_while_unsaved(&conn, &order_id, terminal_approved)?
+        {
+            return Ok(refusal);
+        }
+        order_id
     };
     // Keep two renderer invocations for the same order from reaching fiscal
     // hardware concurrently. The reservation is process-local and releases on
@@ -620,6 +638,53 @@ pub async fn payment_record(
         payments::prepare_outstanding_collection_payload(&mut payload, balance)?;
     }
     let input = payments::build_payment_record_input(&payload)?;
+    let direct_sale_refusal = {
+        let conn = db.conn.lock().map_err(|error| error.to_string())?;
+        crate::commands::ecr::direct_sale_admission(
+            &conn,
+            &order_id,
+            if terminal_approved {
+                Some(&input)
+            } else {
+                None
+            },
+        )
+        .err()
+    };
+    if let Some(error) = direct_sale_refusal {
+        // A card the terminal already approved is money that moved: never
+        // refused and never lost (founder rule, 30/09/2026). While an earlier
+        // direct SALE of the order is unresolved it cannot be booked, so it is
+        // held as a charged payment not saved: a durable record that holds
+        // the Z, saved again (the same write, no new charge) once the SALE is
+        // reconciled, or given back by a manager. Anything else moved nothing
+        // and is refused before any fiscal dispatch or write.
+        if terminal_approved && input.method == "card" {
+            if let Some(entry) = crate::unsaved_payments::UnsavedChargedPayment::for_payment(
+                &order_id,
+                &payload,
+                None,
+                &Utc::now().to_rfc3339(),
+            ) {
+                return Ok(crate::unsaved_payments::save_charged_payment(
+                    &db,
+                    entry,
+                    &crate::unsaved_payments::MOVED_MONEY_SAVE_DELAYS_MS,
+                    Some(serde_json::json!({ "directSaleReconciliationRequired": true })),
+                    crate::unsaved_payments::write_recorded_payment,
+                )
+                .await);
+            }
+        }
+        return Ok(serde_json::json!({
+            "success": false,
+            "errorCode": "DIRECT_SALE_RECONCILIATION_REQUIRED",
+            "paymentApproved": false,
+            "paymentPersisted": false,
+            "requiresReconciliation": true,
+            "error": error,
+        }));
+    }
     let mut committed_fiscal_checkout = None;
 
     // A normal pay-later order with one full-balance cash/card collection must
@@ -745,6 +810,34 @@ pub async fn payment_record(
         }
     }
 
+    // Card money that already moved (the terminal or the fiscal device
+    // approved it) is saved with its durable record and bounded retries, and
+    // is never answered with a generic failure that invites a second charge
+    // (fix review 30/09/2026, Android 1.0.13 parity). Cash is unchanged.
+    let card_money_moved = input.method == "card"
+        && (payment_payload_has_terminal_approval(&payload) || committed_fiscal_checkout.is_some());
+    if card_money_moved {
+        let captured_at = Utc::now().to_rfc3339();
+        if let Some(entry) = crate::unsaved_payments::UnsavedChargedPayment::for_payment(
+            &order_id,
+            &payload,
+            collect_outstanding.then_some(&balance),
+            &captured_at,
+        ) {
+            let extra = committed_fiscal_checkout
+                .as_ref()
+                .map(|checkout| serde_json::json!({ "fiscalCheckout": checkout }));
+            return Ok(crate::unsaved_payments::save_charged_payment(
+                &db,
+                entry,
+                &crate::unsaved_payments::MOVED_MONEY_SAVE_DELAYS_MS,
+                extra,
+                crate::unsaved_payments::write_recorded_payment,
+            )
+            .await);
+        }
+    }
+
     if collect_outstanding {
         match payments::record_payment_with_expected_balance(&db, &payload, Some(balance)) {
             Ok(result) => Ok(result),
@@ -767,6 +860,330 @@ pub async fn payment_record(
     } else {
         payments::record_payment(&db, &payload)
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResolveSetAsidePaymentPayload {
+    #[serde(alias = "payment_id")]
+    payment_id: String,
+    #[serde(default)]
+    outcome: Option<String>,
+    #[serde(default, alias = "resolved_by")]
+    resolved_by: Option<String>,
+}
+
+/// "Money given back to the customer" for a payment set aside as a possible
+/// duplicate (`payments_need_review`). A money decision, so it needs the
+/// desktop's manager approval for money actions: an active cashier or
+/// manager shift on this terminal and a fresh PIN confirmation
+/// (`CashDrawerControl`). Local only: the server never recorded the payment,
+/// so nothing is queued. Idempotent. Answers with the remaining unresolved
+/// set-aside payments, read fresh after the write.
+pub(crate) fn resolve_set_aside_payment_guarded(
+    db: &db::DbState,
+    auth_state: &crate::auth::AuthState,
+    arg0: Option<serde_json::Value>,
+) -> Result<serde_json::Value, crate::auth::GuardedCommandError> {
+    let payload: ResolveSetAsidePaymentPayload =
+        serde_json::from_value(arg0.ok_or("Missing set-aside payment payload")?)
+            .map_err(|error| format!("Invalid set-aside payment payload: {error}"))?;
+    let payment_id = payload.payment_id.trim().to_string();
+    if payment_id.is_empty() {
+        return Err("Missing paymentId".into());
+    }
+    if let Some(outcome) = payload.outcome.as_deref().map(str::trim) {
+        if !outcome.is_empty() && outcome != crate::payment_review::RETURNED_TO_CUSTOMER_OUTCOME {
+            return Err(format!("Unsupported set-aside payment outcome: {outcome}").into());
+        }
+    }
+
+    // With nobody on shift at this terminal (the Z needs everyone checked
+    // out), a manager approves with their own PIN and is the one named
+    // (fix review 30/09/2026).
+    let approver = crate::auth::authorize_money_action(
+        crate::auth::MoneyApproval::VoidPayments,
+        db,
+        auth_state,
+    )?;
+
+    let session = crate::auth::get_session_json(auth_state);
+    let resolved_by = approver.manager_staff_id.clone().or_else(|| {
+        payload
+            .resolved_by
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+            .or_else(|| {
+                ["databaseStaffId", "staffId"].iter().find_map(|key| {
+                    session
+                        .get(*key)
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(ToString::to_string)
+                })
+            })
+    });
+
+    let now = Utc::now().to_rfc3339();
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let outcome = crate::payment_review::resolve_set_aside_payment_in_connection(
+        &conn,
+        &payment_id,
+        resolved_by.as_deref(),
+        &now,
+    )?;
+    let (order_id, already_resolved) = match &outcome {
+        crate::payment_review::ResolveOutcome::Resolved { order_id, .. } => {
+            (order_id.clone(), false)
+        }
+        crate::payment_review::ResolveOutcome::AlreadyResolved { order_id } => {
+            (order_id.clone(), true)
+        }
+    };
+    let branch_id = crate::storage::get_credential("branch_id").unwrap_or_default();
+    let remaining =
+        crate::payment_review::load_unresolved_set_aside_payments(&conn, &branch_id, None)?.len();
+    Ok(serde_json::json!({
+        "success": true,
+        "paymentId": payment_id,
+        "orderId": order_id,
+        "outcome": crate::payment_review::RETURNED_TO_CUSTOMER_OUTCOME,
+        "alreadyResolved": already_resolved,
+        "resolvedAt": now,
+        "remainingSetAsidePayments": remaining,
+    }))
+}
+
+#[tauri::command]
+pub async fn payment_resolve_set_aside(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+    auth_state: tauri::State<'_, crate::auth::AuthState>,
+) -> Result<serde_json::Value, crate::auth::GuardedCommandError> {
+    resolve_set_aside_payment_guarded(&db, &auth_state, arg0)
+}
+
+/// A charged payment of this order is not saved yet (fix review 30/09/2026):
+/// no new tender starts, so nothing is charged and nothing is written (cash,
+/// a manual card, a room charge, a fiscal-device checkout). A card the
+/// terminal already approved is money that moved: it is never refused here,
+/// it is saved like any other.
+pub(crate) fn refuse_new_tender_while_unsaved(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+    terminal_approved: bool,
+) -> Result<Option<serde_json::Value>, String> {
+    if terminal_approved {
+        return Ok(None);
+    }
+    let pending = crate::unsaved_payments::list(conn, Some(order_id))?;
+    Ok((!pending.is_empty())
+        .then(|| crate::unsaved_payments::pending_refusal_response(order_id, &pending)))
+}
+
+/// The order and/or record a "charged, not saved" call names.
+fn parse_unsaved_payment_target(
+    arg0: Option<serde_json::Value>,
+) -> (Option<String>, Option<String>) {
+    let text = |value: Option<&serde_json::Value>| {
+        value
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+    };
+    match arg0 {
+        Some(serde_json::Value::String(order_id)) => (
+            Some(order_id.trim().to_string()).filter(|value| !value.is_empty()),
+            None,
+        ),
+        Some(payload) => (
+            text(payload.get("orderId").or_else(|| payload.get("order_id"))),
+            text(
+                payload
+                    .get("idempotencyKey")
+                    .or_else(|| payload.get("idempotency_key")),
+            ),
+        ),
+        None => (None, None),
+    }
+}
+
+/// Charged payments this till could not save yet (for one order, or all):
+/// the payment surfaces' banner and their check before any new charge.
+pub(crate) fn list_unsaved_payments(
+    db: &db::DbState,
+    arg0: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let (order_id, idempotency_key) = parse_unsaved_payment_target(arg0);
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let order_id = order_id.map(|id| resolve_order_id(&conn, &id).unwrap_or(id));
+    let payments = crate::unsaved_payments::list(&conn, order_id.as_deref())?
+        .iter()
+        .filter(|entry| {
+            idempotency_key
+                .as_deref()
+                .map_or(true, |key| entry.idempotency_key == key)
+        })
+        .map(crate::unsaved_payments::summary_json)
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({ "success": true, "payments": payments }))
+}
+
+#[tauri::command]
+pub async fn payment_list_unsaved(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+) -> Result<serde_json::Value, String> {
+    list_unsaved_payments(&db, arg0)
+}
+
+/// "Save payment again": replays the same writes with the same keys (no new
+/// charge) for one order, or for the one record named. Held under the same
+/// per-order reservation as a collection.
+pub(crate) async fn save_unsaved_payments_with_delays(
+    db: &db::DbState,
+    arg0: Option<serde_json::Value>,
+    delays_ms: &[u64],
+    invalidator: &dyn crate::print::PrintQueueInvalidator,
+) -> Result<serde_json::Value, String> {
+    let (order_id, idempotency_key) = parse_unsaved_payment_target(arg0);
+    let order_id = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        match (order_id, idempotency_key.as_deref()) {
+            (Some(order_id), _) => resolve_order_id(&conn, &order_id).unwrap_or(order_id),
+            (None, Some(key)) => crate::unsaved_payments::load(&conn, key)?
+                .map(|entry| entry.order_id)
+                .ok_or("No charged payment waits to be saved under that key")?,
+            (None, None) => return Err("Missing orderId or idempotencyKey".to_string()),
+        }
+    };
+    let _reservation = reserve_payment_record(&order_id)?;
+    crate::unsaved_payments::save_unsaved_payments(
+        db,
+        Some(&order_id),
+        idempotency_key.as_deref(),
+        delays_ms,
+        invalidator,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn payment_save_unsaved(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    save_unsaved_payments_with_delays(
+        &db,
+        arg0,
+        &crate::unsaved_payments::MOVED_MONEY_SAVE_DELAYS_MS,
+        &app,
+    )
+    .await
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResolveUnsavedPaymentPayload {
+    #[serde(alias = "idempotency_key")]
+    idempotency_key: String,
+    #[serde(default)]
+    outcome: Option<String>,
+    #[serde(default, alias = "resolved_by")]
+    resolved_by: Option<String>,
+}
+
+/// "Money given back to the customer" for a charged payment this till could
+/// not save (`payments_not_saved`). Authorized like the set-aside decision:
+/// the desktop's approval for money actions (a cashier or manager shift on
+/// this terminal and a fresh PIN, `CashDrawerControl`). Local only: the audit
+/// entry is written before the record goes; the order is left as it is.
+/// Idempotent. Answers with the records left, read after the write.
+pub(crate) fn resolve_unsaved_payment_guarded(
+    db: &db::DbState,
+    auth_state: &crate::auth::AuthState,
+    arg0: Option<serde_json::Value>,
+) -> Result<serde_json::Value, crate::auth::GuardedCommandError> {
+    let payload: ResolveUnsavedPaymentPayload =
+        serde_json::from_value(arg0.ok_or("Missing charged payment payload")?)
+            .map_err(|error| format!("Invalid charged payment payload: {error}"))?;
+    let idempotency_key = payload.idempotency_key.trim().to_string();
+    if idempotency_key.is_empty() {
+        return Err("Missing idempotencyKey".into());
+    }
+    if let Some(outcome) = payload.outcome.as_deref().map(str::trim) {
+        if !outcome.is_empty() && outcome != crate::unsaved_payments::RETURNED_TO_CUSTOMER_OUTCOME {
+            return Err(format!("Unsupported charged payment outcome: {outcome}").into());
+        }
+    }
+
+    // With nobody on shift at this terminal (the Z needs everyone checked
+    // out), a manager approves with their own PIN and is the one named
+    // (fix review 30/09/2026).
+    let approver = crate::auth::authorize_money_action(
+        crate::auth::MoneyApproval::VoidPayments,
+        db,
+        auth_state,
+    )?;
+
+    let session = crate::auth::get_session_json(auth_state);
+    let resolved_by = approver.manager_staff_id.clone().or_else(|| {
+        payload
+            .resolved_by
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+            .or_else(|| {
+                ["databaseStaffId", "staffId"].iter().find_map(|key| {
+                    session
+                        .get(*key)
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(ToString::to_string)
+                })
+            })
+    });
+
+    let now = Utc::now().to_rfc3339();
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let outcome = crate::unsaved_payments::resolve_in_connection(
+        &conn,
+        &idempotency_key,
+        resolved_by.as_deref(),
+        &now,
+    )?;
+    let order_id = match &outcome {
+        crate::unsaved_payments::ResolveOutcome::Resolved { order_id, .. } => {
+            Some(order_id.clone())
+        }
+        _ => None,
+    };
+    let remaining = crate::unsaved_payments::count(&conn)?;
+    Ok(serde_json::json!({
+        "success": !matches!(outcome, crate::unsaved_payments::ResolveOutcome::NotFound),
+        "idempotencyKey": idempotency_key,
+        "orderId": order_id,
+        "outcome": crate::unsaved_payments::RETURNED_TO_CUSTOMER_OUTCOME,
+        "result": outcome.as_str(),
+        "resolvedAt": now,
+        "remainingUnsavedPayments": remaining,
+    }))
+}
+
+#[tauri::command]
+pub async fn payment_resolve_unsaved(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+    auth_state: tauri::State<'_, crate::auth::AuthState>,
+) -> Result<serde_json::Value, crate::auth::GuardedCommandError> {
+    resolve_unsaved_payment_guarded(&db, &auth_state, arg0)
 }
 
 #[tauri::command]
@@ -799,7 +1216,37 @@ pub async fn payment_get_settlement_snapshot(
     db: tauri::State<'_, db::DbState>,
 ) -> Result<serde_json::Value, String> {
     let order_id = parse_order_id_payload(arg0)?;
-    payments::get_order_settlement_snapshot(&db, &order_id)
+    let mut snapshot = payments::get_order_settlement_snapshot(&db, &order_id)?;
+    let actual_order_id = snapshot
+        .get("orderId")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("Settlement snapshot has no order identity")?
+        .to_string();
+    let actual_order_id = actual_order_id.as_str();
+    let conn = db.conn.lock().map_err(|error| error.to_string())?;
+    let sale = crate::commands::ecr::direct_sale_projection(&conn, actual_order_id)?;
+    snapshot["unresolvedDirectSale"] = sale;
+    // Why a cancel of this order would be refused (founder rule 30/09 and
+    // 01/10/2026), so the cashier is told before any reason or PIN; the
+    // cancel itself refuses again. Null when it may be cancelled (a
+    // platform order's settlement row included, which `netPaid` still
+    // counts); absent when the ledger could not be read (the cancel then
+    // decides, and the renderer falls back to `netPaid`).
+    match crate::commands::orders::cancel_refusal_code(&conn, actual_order_id) {
+        Ok(code) => {
+            snapshot["cancelRefusal"] = code
+                .map(|code| serde_json::Value::String(code.to_string()))
+                .unwrap_or(serde_json::Value::Null);
+        }
+        Err(error) => {
+            tracing::warn!(
+                order_id = %actual_order_id,
+                error = %error,
+                "Cancel refusal could not be read for the settlement snapshot"
+            );
+        }
+    }
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -1340,5 +1787,367 @@ mod dto_tests {
             response["fiscalCheckout"]["transaction"]["transactionId"],
             "fiscal-approved-before-db-failure"
         );
+    }
+
+    const STATUS_NOW: &str = "2026-09-30T12:00:00Z";
+
+    fn payment_status_test_conn(total_cents: i64, payment_status: &str) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .expect("pragmas");
+        db::run_migrations_for_test(&conn);
+        conn.execute(
+            "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents, status,
+                payment_status, sync_status, branch_id, created_at, updated_at)
+             VALUES ('ord-ps', 'A-0100', '[]', ?1, ?2, 'completed', ?3, 'synced',
+                     'branch-ps', '2026-09-30T10:00:00Z', '2026-09-30T10:00:00Z')",
+            rusqlite::params![total_cents as f64 / 100.0, total_cents, payment_status],
+        )
+        .unwrap();
+        conn
+    }
+
+    fn add_payment_row(conn: &rusqlite::Connection, id: &str, cents: i64, status: &str) {
+        conn.execute(
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status,
+                sync_status, sync_state, created_at, updated_at)
+             VALUES (?1, 'ord-ps', 'cash', ?2, ?3, ?4, 'synced', 'applied',
+                     '2026-09-30T10:05:00Z', '2026-09-30T10:05:00Z')",
+            rusqlite::params![id, cents as f64 / 100.0, cents, status],
+        )
+        .unwrap();
+    }
+
+    fn stored_payment_status(conn: &rusqlite::Connection) -> String {
+        conn.query_row(
+            "SELECT payment_status FROM orders WHERE id = 'ord-ps'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    /// Founder's rule, 30/09/2026: no order is registered as paid without the
+    /// payment rows that cover it. The reconciliation label used to need only
+    /// one completed row, so 5.00 in the ledger marked a 20.00 order paid.
+    #[test]
+    fn a_reconciliation_label_never_marks_an_order_paid_beyond_its_payment_rows() {
+        let conn = payment_status_test_conn(2000, "partially_paid");
+        add_payment_row(&conn, "pay-ps-cash", 500, "completed");
+        // A payment set aside for review is not money this order holds.
+        add_payment_row(&conn, "pay-ps-dup", 1500, "duplicate_review");
+
+        let refused = set_order_payment_status_in_connection(&conn, "ord-ps", "paid", STATUS_NOW)
+            .expect_err("5.00 of 20.00 is not paid");
+        assert!(refused.contains("do not cover"), "{refused}");
+        assert_eq!(stored_payment_status(&conn), "partially_paid");
+
+        set_order_payment_status_in_connection(&conn, "ord-ps", "partially_paid", STATUS_NOW)
+            .expect("5.00 does back partially paid");
+
+        add_payment_row(&conn, "pay-ps-card", 1500, "completed");
+        set_order_payment_status_in_connection(&conn, "ord-ps", "paid", STATUS_NOW)
+            .expect("the rows now cover the order");
+        assert_eq!(stored_payment_status(&conn), "paid");
+    }
+
+    #[test]
+    fn a_paid_label_without_payment_rows_is_never_written_even_when_already_there() {
+        // An order that already reads `paid` with no rows (a mirror waiting
+        // for its rows): writing `paid` again would queue that claim for the
+        // server.
+        let conn = payment_status_test_conn(1300, "paid");
+        for status in ["paid", "partially_paid"] {
+            let refused =
+                set_order_payment_status_in_connection(&conn, "ord-ps", status, STATUS_NOW)
+                    .expect_err("no rows back the claim");
+            assert!(refused.contains("do not cover"), "{status}: {refused}");
+        }
+        let queued_status_writes: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM orders WHERE id = 'ord-ps' AND sync_status = 'pending'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(queued_status_writes, 0, "nothing was marked for a push");
+
+        // A comp (zero total) has no money to record.
+        let comp = payment_status_test_conn(0, "pending");
+        set_order_payment_status_in_connection(&comp, "ord-ps", "paid", STATUS_NOW)
+            .expect("a zero total is settled without rows");
+        assert_eq!(stored_payment_status(&comp), "paid");
+    }
+
+    fn set_aside_test_db() -> db::DbState {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .expect("pragmas");
+        db::run_migrations_for_test(&conn);
+        conn.execute(
+            "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents, status,
+                payment_status, sync_status, branch_id, created_at, updated_at)
+             VALUES ('ord-sa', 'A-0042', '[]', 13.0, 1300, 'completed', 'paid', 'synced',
+                     'branch-sa', '2026-09-30T10:00:00Z', '2026-09-30T10:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status,
+                sync_status, sync_state, created_at, updated_at)
+             VALUES ('pay-sa', 'ord-sa', 'cash', 13.0, 1300, 'completed', 'pending', 'syncing',
+                     '2026-09-30T10:05:00Z', '2026-09-30T10:05:00Z')",
+            [],
+        )
+        .unwrap();
+        crate::payment_review::set_aside_already_paid_payment(
+            &conn,
+            "pay-sa",
+            Some("srv-card"),
+            "2026-09-30T10:06:00Z",
+        )
+        .unwrap();
+        db::DbState {
+            conn: std::sync::Mutex::new(conn),
+            db_path: std::path::PathBuf::from(":memory:"),
+        }
+    }
+
+    fn set_aside_status(db: &db::DbState) -> String {
+        db.conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT status FROM order_payments WHERE id = 'pay-sa'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    /// "Money given back to the customer" is a money decision: it needs the
+    /// desktop's approval for money actions (a cashier or manager shift on
+    /// this terminal and a fresh PIN), and nothing changes without it.
+    #[test]
+    fn resolving_a_set_aside_payment_needs_the_money_action_approval() {
+        let _keyring = crate::tests::fake_keyring::install_seeded([
+            ("terminal_id", "term-sa"),
+            ("branch_id", "branch-sa"),
+        ]);
+        let db = set_aside_test_db();
+        let auth = crate::auth::AuthState::new();
+
+        let refused = resolve_set_aside_payment_guarded(
+            &db,
+            &auth,
+            Some(serde_json::json!({ "paymentId": "pay-sa" })),
+        )
+        .expect_err("no session, no decision");
+        assert!(matches!(
+            refused,
+            crate::auth::GuardedCommandError::Structured(ref error) if error.code == "UNAUTHORIZED"
+        ));
+        assert_eq!(set_aside_status(&db), "duplicate_review");
+
+        {
+            let conn = db.conn.lock().unwrap();
+            let hash = bcrypt::hash("4321", 4).unwrap();
+            db::set_setting(&conn, "staff", "staff_pin_hash", &hash).unwrap();
+            db::set_setting(&conn, "terminal", "terminal_id", "term-sa").unwrap();
+            conn.execute(
+                "INSERT INTO staff_shifts (id, staff_id, staff_name, branch_id, terminal_id,
+                    role_type, check_in_time, status, created_at, updated_at)
+                 VALUES ('shift-sa', 'staff-cashier', 'Cashier', 'branch-sa', 'term-sa',
+                         'cashier', '2026-09-30T09:00:00Z', 'active',
+                         '2026-09-30T09:00:00Z', '2026-09-30T09:00:00Z')",
+                [],
+            )
+            .unwrap();
+        }
+        crate::auth::login(Some(serde_json::json!({ "pin": "4321" })), &db, &auth)
+            .expect("staff login");
+        let stale = resolve_set_aside_payment_guarded(
+            &db,
+            &auth,
+            Some(serde_json::json!({ "paymentId": "pay-sa" })),
+        )
+        .expect_err("a session alone is not the approval");
+        assert!(matches!(
+            stale,
+            crate::auth::GuardedCommandError::Structured(ref error) if error.code == "REAUTH_REQUIRED"
+        ));
+        assert_eq!(set_aside_status(&db), "duplicate_review");
+
+        crate::auth::confirm_privileged_action(
+            Some(serde_json::json!({ "pin": "4321", "scope": "cash_drawer_control" })),
+            &db,
+            &auth,
+        )
+        .expect("PIN confirmation");
+        let resolved = resolve_set_aside_payment_guarded(
+            &db,
+            &auth,
+            Some(serde_json::json!({
+                "paymentId": "pay-sa",
+                "outcome": "returned_to_customer",
+                "resolvedBy": "staff-cashier",
+            })),
+        )
+        .expect("resolved");
+        assert_eq!(resolved["success"], true);
+        assert_eq!(resolved["alreadyResolved"], false);
+        assert_eq!(resolved["remainingSetAsidePayments"], 0);
+        assert_eq!(set_aside_status(&db), "voided");
+        let resolved_by: String = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT json_extract(metadata, '$.duplicate_review.resolution.resolved_by')
+                 FROM order_payments WHERE id = 'pay-sa'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(resolved_by, "staff-cashier");
+
+        let again = resolve_set_aside_payment_guarded(
+            &db,
+            &auth,
+            Some(serde_json::json!({ "paymentId": "pay-sa" })),
+        )
+        .expect("a second tap changes nothing");
+        assert_eq!(again["alreadyResolved"], true);
+
+        let unsupported = resolve_set_aside_payment_guarded(
+            &db,
+            &auth,
+            Some(serde_json::json!({ "paymentId": "pay-sa", "outcome": "kept" })),
+        )
+        .expect_err("only one outcome exists");
+        assert!(unsupported.to_string().contains("Unsupported"));
+    }
+
+    /// "Money given back to the customer" for a card charged but not saved is
+    /// a money decision like the set-aside one: nothing changes without the
+    /// desktop's approval for money actions, the audit comes first, a second
+    /// tap changes nothing, and the Z is released.
+    #[test]
+    fn resolving_a_charged_payment_not_saved_needs_the_money_action_approval() {
+        let _keyring = crate::tests::fake_keyring::install_seeded([
+            ("terminal_id", "term-sa"),
+            ("branch_id", "branch-sa"),
+        ]);
+        let db = set_aside_test_db();
+        let key = "terminal-card:txn-not-saved";
+        {
+            let conn = db.conn.lock().unwrap();
+            let entry = crate::unsaved_payments::UnsavedChargedPayment::for_payment(
+                "ord-sa",
+                &serde_json::json!({
+                    "orderId": "ord-sa",
+                    "method": "card",
+                    "amount": 13.0,
+                    "transactionRef": "txn-not-saved",
+                    "terminalApproved": true,
+                }),
+                None,
+                "2026-09-30T10:07:00Z",
+            )
+            .unwrap();
+            crate::unsaved_payments::record(&conn, &entry).unwrap();
+        }
+        let remaining =
+            |db: &db::DbState| crate::unsaved_payments::count(&db.conn.lock().unwrap()).unwrap();
+        let auth = crate::auth::AuthState::new();
+
+        let refused = resolve_unsaved_payment_guarded(
+            &db,
+            &auth,
+            Some(serde_json::json!({ "idempotencyKey": key })),
+        )
+        .expect_err("no session, no decision");
+        assert!(matches!(
+            refused,
+            crate::auth::GuardedCommandError::Structured(ref error) if error.code == "UNAUTHORIZED"
+        ));
+        assert_eq!(remaining(&db), 1);
+
+        {
+            let conn = db.conn.lock().unwrap();
+            let hash = bcrypt::hash("4321", 4).unwrap();
+            db::set_setting(&conn, "staff", "staff_pin_hash", &hash).unwrap();
+            db::set_setting(&conn, "terminal", "terminal_id", "term-sa").unwrap();
+            conn.execute(
+                "INSERT INTO staff_shifts (id, staff_id, staff_name, branch_id, terminal_id,
+                    role_type, check_in_time, status, created_at, updated_at)
+                 VALUES ('shift-sa', 'staff-cashier', 'Cashier', 'branch-sa', 'term-sa',
+                         'cashier', '2026-09-30T09:00:00Z', 'active',
+                         '2026-09-30T09:00:00Z', '2026-09-30T09:00:00Z')",
+                [],
+            )
+            .unwrap();
+        }
+        crate::auth::login(Some(serde_json::json!({ "pin": "4321" })), &db, &auth)
+            .expect("staff login");
+        let stale = resolve_unsaved_payment_guarded(
+            &db,
+            &auth,
+            Some(serde_json::json!({ "idempotencyKey": key })),
+        )
+        .expect_err("a session alone is not the approval");
+        assert!(matches!(
+            stale,
+            crate::auth::GuardedCommandError::Structured(ref error) if error.code == "REAUTH_REQUIRED"
+        ));
+        assert_eq!(remaining(&db), 1);
+
+        crate::auth::confirm_privileged_action(
+            Some(serde_json::json!({ "pin": "4321", "scope": "cash_drawer_control" })),
+            &db,
+            &auth,
+        )
+        .expect("PIN confirmation");
+        let resolved = resolve_unsaved_payment_guarded(
+            &db,
+            &auth,
+            Some(serde_json::json!({
+                "idempotencyKey": key,
+                "outcome": "returned_to_customer",
+            })),
+        )
+        .expect("resolved");
+        assert_eq!(resolved["result"], "resolved");
+        assert_eq!(resolved["orderId"], "ord-sa");
+        assert_eq!(resolved["remainingUnsavedPayments"], 0, "the Z is released");
+        let resolved_by: String = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT actor_staff_id FROM recovery_action_log
+                 WHERE action_id = 'payment_not_saved_resolved'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let session = crate::auth::get_session_json(&auth);
+        let session_staff = ["databaseStaffId", "staffId"]
+            .iter()
+            .find_map(|key| session.get(*key).and_then(serde_json::Value::as_str))
+            .expect("the session names its staff member")
+            .to_string();
+        assert_eq!(
+            resolved_by, session_staff,
+            "who confirmed it, from the session"
+        );
+
+        let again = resolve_unsaved_payment_guarded(
+            &db,
+            &auth,
+            Some(serde_json::json!({ "idempotencyKey": key })),
+        )
+        .expect("a second tap changes nothing");
+        assert_eq!(again["result"], "already_resolved");
     }
 }

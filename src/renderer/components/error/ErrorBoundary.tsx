@@ -8,6 +8,13 @@ interface ErrorBoundaryProps {
   fallback?: (error: POSError, resetError: () => void) => ReactNode;
   onError?: (error: POSError, errorInfo: ErrorInfo) => void;
   showDetails?: boolean;
+  /**
+   * A crashed boundary resets (renders its children again) when this changes,
+   * e.g. the route's pathname: navigating away from a crashed page gives the
+   * next page a fresh try. A healthy boundary ignores it, so its children are
+   * never remounted by it.
+   */
+  resetKey?: unknown;
 }
 
 interface ErrorBoundaryState {
@@ -42,8 +49,19 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
   }
 
   static getDerivedStateFromError(error: Error): Partial<ErrorBoundaryState> {
-    // Update state so the next render will show the fallback UI
-    return { hasError: true };
+    // Update state so the next render shows the fallback UI. The fallback
+    // needs `error` in this same render: with `hasError` alone the retry
+    // rendered the children again, they threw again and the error escaped
+    // the boundary (a page crash took the whole register, and the
+    // incoming-order alert beside the page, down with it). componentDidCatch
+    // below replaces this with the fuller record (component stack).
+    return {
+      hasError: true,
+      error: ErrorFactory.system(error?.message || 'An unexpected error occurred', {
+        stack: error?.stack,
+        name: error?.name,
+      }),
+    };
   }
 
   componentDidCatch(error: Error, errorInfo: ErrorInfo): void {
@@ -70,6 +88,12 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
     // Call optional error callback
     if (this.props.onError) {
       this.props.onError(posError, errorInfo);
+    }
+  }
+
+  componentDidUpdate(previousProps: ErrorBoundaryProps): void {
+    if (this.state.hasError && previousProps.resetKey !== this.props.resetKey) {
+      this.resetError();
     }
   }
 

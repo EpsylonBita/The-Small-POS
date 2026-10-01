@@ -1,4 +1,4 @@
-import { memo, useState, useCallback, useEffect, useRef } from 'react';
+import { memo, useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { LiquidGlassModal } from './ui/pos-glass-components';
 import { MenuModal } from './modals/MenuModal';
 import { ProductCatalogModal } from './modals/ProductCatalogModal';
@@ -10,16 +10,35 @@ import {
   OutstandingPaymentMethodModal,
   type OutstandingPaymentSelection,
 } from './modals/OutstandingPaymentMethodModal';
+import type { PaymentModalExistingOrder } from './modals/PaymentModal';
 import { ZoneValidationAlert } from './delivery/ZoneValidationAlert';
 import { FloatingActionButton } from './ui/FloatingActionButton';
 import { TableSelector, TableActionModal, ReservationForm } from './tables';
 import type { CreateReservationDto } from './tables';
 import {
-  buildChangedReservationUpdate,
   reservationsService,
   type Reservation,
 } from '../services/ReservationsService';
-import { useOrderStore } from '../hooks/useOrderStore';
+import {
+  adoptGiftCardPaymentIds,
+  claimOrdinaryCollectionOwner,
+  classifyOrdinaryWrite,
+  isSetAsideOrdinaryWrite,
+  ledgerHasOriginalOrdinaryPayment,
+  noteOrdinaryWriteFacts,
+  probeOrdinaryOwner,
+  readOrdinaryWriteReply,
+  releaseOrdinaryOwnerBeforeSend,
+  retainedOrdinaryOwner,
+  runOrdinaryCollection,
+  useOrderStore,
+  type OrdinaryCollectionFacts,
+  type OrdinaryCollectionOwner,
+  type OrdinaryCollectionRun,
+  type OrdinaryCollectionVerdict,
+} from '../hooks/useOrderStore';
+import { giftCardsApiService, type GiftCardScope } from '../services/GiftCardsApiService';
+import type { GiftCardTenderEvent } from '../services/GiftCardCheckoutService';
 import { useShift } from '../contexts/shift-context';
 import { useI18n } from '../contexts/i18n-context';
 import { MODULE_IDS, useAcquiredModules } from '../hooks/useAcquiredModules';
@@ -31,7 +50,7 @@ import { useDeliveryValidation } from '../hooks/useDeliveryValidation';
 import type { DeliveryBoundaryValidationResponse } from '../../shared/types/delivery-validation';
 import type { RestaurantTable } from '../types/tables';
 import { ActivityTracker } from '../services/ActivityTracker';
-import { toLocalDateString } from '../utils/date';
+import { submitTableReservation } from '../utils/table-reservation-submit';
 import { formatTableDisplayNumber } from '../utils/table-display';
 import { useTerminalSettings } from '../hooks/useTerminalSettings';
 import { useResolvedPosIdentity } from '../hooks/useResolvedPosIdentity';
@@ -46,13 +65,26 @@ import {
   refreshTerminalCredentialCache,
 } from '../services/terminal-credentials';
 import { getBridge, offEvent, onEvent } from '../../lib';
+import {
+  announceUnsavedCheckoutChanged,
+  notifyPaymentNotSaved,
+} from '../utils/unsavedPayments';
+import {
+  notifyMoneySettingsUnavailable,
+  resolveCheckoutTaxRate,
+} from '../utils/checkoutMoneySettings';
+import { PAYMENT_SET_ASIDE_TOAST_MS } from '../utils/paymentSetAside';
+import { formatSetAsidePaymentMessage } from '../../lib/payment-integrity';
 import { buildSplitPaymentItems } from '../utils/splitPaymentItems';
 import type { SplitPaymentItem } from '../utils/splitPaymentItems';
 import { resolvePersistedCustomerId } from '../utils/persisted-customer-id';
 import { resolveOrderCompletionOutcome } from '../utils/orderCompletionOutcome';
+import { useCheckoutRequestId } from '../hooks/useCheckoutRequestId';
+import { isCheckoutOutcomeUnknown, notifyCheckoutOutcomeUnknown } from '../utils/checkoutOutcome';
 import {
   loadPersistedSplitDismissal,
   reconcileOutstandingPaymentAttempt,
+  type PersistedSplitDismissalResolution,
 } from '../utils/splitCheckoutRecovery';
 import { resolveActiveCashierShift } from '../utils/active-cashier';
 import { parseSpecialAddressInput } from '../utils/specialAddress';
@@ -198,14 +230,15 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   const [deliveryZoneInfo, setDeliveryZoneInfo] = useState<DeliveryBoundaryValidationResponse | null>(null);
   const [isTransitioning, setIsTransitioning] = useState(false);
   const [isProcessingOrder, setIsProcessingOrder] = useState(false);
-  const [taxRatePercentage, setTaxRatePercentage] = useState<number>(24); // Default Greek VAT
+  // The store's tax rate, or null while it cannot be read (item H).
+  const [taxRatePercentage, setTaxRatePercentage] = useState<number | null>(null);
 
   // Zone validation alert states
   const [showZoneAlert, setShowZoneAlert] = useState(false);
   const [overrideApproved, setOverrideApproved] = useState(false);
 
   // Order store for managing orders
-  const { createOrder, silentRefresh } = useOrderStore();
+  const { createOrder, silentRefresh, orders } = useOrderStore();
 
   // Shift context for linking orders to shifts
   const { staff, activeShift, isShiftActive } = useShift();
@@ -214,12 +247,14 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   // Module-based feature flags
   const { hasDeliveryModule, hasTablesModule, hasModule } = useAcquiredModules();
   const hasLoyaltyModule = hasModule(MODULE_IDS.LOYALTY);
+  const hasReservationsModule = hasModule(MODULE_IDS.RESERVATIONS);
 
   // Get organizationId and businessType from module context (with credential cache fallback)
   const { organizationId: moduleOrgId, businessType } = useModules();
   const {
     branchId: resolvedIdentityBranchId,
     organizationId: resolvedIdentityOrganizationId,
+    terminalId: resolvedIdentityTerminalId,
   } = useResolvedPosIdentity('branch+organization');
 
   // Check if this is a retail vertical (uses product catalog instead of menu)
@@ -270,6 +305,92 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   const organizationId = resolvedIdentityOrganizationId || moduleOrgId || localOrgId;
   const effectiveBranchId = resolvedIdentityBranchId || branchId || staff?.branchId || null;
 
+  // Ordinary cash/card collection and the gift tender share one scope: the
+  // resolved organization and this terminal's public id. A missing value fails
+  // closed in the shared collection controller.
+  const collectionScope = useMemo<GiftCardScope>(() => ({
+    organizationId: resolvedIdentityOrganizationId ?? null,
+    terminalId: resolvedIdentityTerminalId ?? null,
+  }), [resolvedIdentityOrganizationId, resolvedIdentityTerminalId]);
+
+  // Browser and native connectivity, as the gift card surfaces read it.
+  const [browserOnline, setBrowserOnline] = useState(
+    () => typeof navigator === 'undefined' || navigator.onLine !== false,
+  );
+  const [nativeOnline, setNativeOnline] = useState(true);
+  useEffect(() => {
+    let disposed = false;
+    const goOnline = () => setBrowserOnline(true);
+    const goOffline = () => setBrowserOnline(false);
+    const applyNativeStatus = (status: unknown) => {
+      const flag = status && typeof status === 'object'
+        ? (status as { isOnline?: unknown }).isOnline
+        : undefined;
+      if (!disposed && typeof flag === 'boolean') setNativeOnline(flag);
+    };
+    window.addEventListener('online', goOnline);
+    window.addEventListener('offline', goOffline);
+    onEvent('network:status', applyNativeStatus);
+    void Promise.resolve()
+      .then(() => getBridge().sync.getNetworkStatus())
+      .then(applyNativeStatus)
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      window.removeEventListener('online', goOnline);
+      window.removeEventListener('offline', goOffline);
+      offEvent('network:status', applyNativeStatus);
+    };
+  }, []);
+
+  // Epoch of the outstanding-payment target: bumped when its order or the
+  // collection scope changes and on unmount, so a late continuation never
+  // touches a newer target's UI.
+  const outstandingEpochRef = useRef(0);
+  const outstandingTargetOrderId = outstandingPaymentData?.orderId ?? null;
+  const [outstandingGiftCurrency, setOutstandingGiftCurrency] = useState<{
+    orderId: string;
+    currency: string | null;
+  } | null>(null);
+  const [giftSettledOrderId, setGiftSettledOrderId] = useState<string | null>(null);
+  const giftEventQueueRef = useRef<Promise<void>>(Promise.resolve());
+  // Gift-paid orders whose receipt may still need the Tender's finalize,
+  // reconcile or recheck after the payment modal closed: nonsecret order
+  // context only, in memory. After a restart the native journal governs.
+  const [giftReceiptRecoveries, setGiftReceiptRecoveries] = useState<
+    Array<NonNullable<typeof outstandingPaymentData>>
+  >([]);
+  const [giftReceiptReentryOrderId, setGiftReceiptReentryOrderId] = useState<string | null>(null);
+  const giftFiscalNextRef = useRef<{ orderId: string; nextAction: string } | null>(null);
+
+  useEffect(() => {
+    const epoch = outstandingEpochRef.current;
+    setOutstandingGiftCurrency(null);
+    setGiftSettledOrderId(null);
+    // A new target or scope never inherits an older target's processing state.
+    setIsProcessingOutstandingPayment(false);
+    if (outstandingTargetOrderId) {
+      // Read fresh for every opened target; a failed read leaves no currency.
+      void giftCardsApiService.getStatus()
+        .then((status) => (status.ok ? status.data.currency : null))
+        .catch(() => null)
+        .then((currency) => {
+          if (outstandingEpochRef.current !== epoch) return;
+          setOutstandingGiftCurrency({ orderId: outstandingTargetOrderId, currency });
+        });
+    }
+    return () => {
+      outstandingEpochRef.current += 1;
+    };
+  }, [collectionScope, outstandingTargetOrderId]);
+
+  const outstandingOrderSynced = useMemo(() => {
+    if (!outstandingTargetOrderId) return false;
+    const order = orders.find((candidate) => candidate.id === outstandingTargetOrderId);
+    const remoteId = String(order?.supabase_id ?? order?.supabaseId ?? '').trim();
+    return Boolean(remoteId) && (order?.sync_status ?? order?.syncStatus) === 'synced';
+  }, [orders, outstandingTargetOrderId]);
+
   // Fetch tables for table orders - use actual IDs
   // Only enable fetching when both IDs are available
   const { tables, refetch: refetchTables, updateTableStatus } = useTables({
@@ -286,20 +407,29 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   const [editingReservation, setEditingReservation] = useState<Reservation | null>(null);
   const [tableNumber, setTableNumber] = useState('');
 
-  // Fetch tax rate from terminal settings; auto-updates on settings change
-  const { getSetting } = useTerminalSettings();
+  // Fetch tax rate from terminal settings; auto-updates on settings change.
+  // Item H (fix review 30/09/2026): a stored rate, today's 24% when none is
+  // stored, and null (checkout paused) when the settings could not be read or
+  // the stored value is not a rate. Never an assumed 24% on a read error.
+  const {
+    getSetting,
+    loaded: terminalSettingsLoaded,
+    reload: reloadTerminalSettings,
+  } = useTerminalSettings();
   useEffect(() => {
-    const rawRate = getSetting<number | string>('tax', 'tax_rate_percentage', 24);
-    const rate = Number(rawRate);
-    if (Number.isFinite(rate) && rate >= 0 && rate <= 100) {
-      setTaxRatePercentage(rate);
-    } else {
-      setTaxRatePercentage(24);
-    }
-  }, [getSetting]);
+    const resolved = resolveCheckoutTaxRate({ loaded: terminalSettingsLoaded, getSetting });
+    setTaxRatePercentage(resolved.available ? resolved.rate : null);
+  }, [getSetting, terminalSettingsLoaded]);
+
+  // Fix review 30/09/2026: one checkout id per cart, reused by every press
+  // of Pay until the checkout ends, so a slow card terminal is never paid
+  // twice.
+  const { take: takeCheckoutRequestId, reset: resetCheckoutRequestId } =
+    useCheckoutRequestId();
 
   // Reset all flow states
   const resetFlow = useCallback(() => {
+    resetCheckoutRequestId();
     setIsOrderTypeModalOpen(false);
     setIsCustomerSearchModalOpen(false);
     setIsAddCustomerModalOpen(false);
@@ -313,7 +443,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     setIsTransitioning(false);
     setShowZoneAlert(false);
     setOverrideApproved(false);
-  }, []);
+  }, [resetCheckoutRequestId]);
 
   const handleStartNewOrder = useCallback(() => {
     resetFlow();
@@ -663,6 +793,154 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     }
   }, [bridge, resetFlow, silentRefresh, splitPaymentData, t]);
 
+  const ordinaryRefusalText = useCallback((code: string) => (
+    code === 'GIFT_CARD_TERMINAL_SCOPE_REQUIRED'
+      ? t('giftCardCheckout.refusal.scope', 'This terminal has no confirmed organization or terminal identity. Pair the POS again.')
+      : t('giftCardCheckout.refusal.admission', 'Earlier gift card attempts must be checked first.')
+  ), [t]);
+  // Order whose ordinary write landed before its ledger could be read.
+  const ordinaryLandedRef = useRef<string | null>(null);
+  const outstandingPaymentDataRef = useRef(outstandingPaymentData);
+  outstandingPaymentDataRef.current = outstandingPaymentData;
+
+  // The Tender's receipt steps that keep a gift-paid order's receipt open;
+  // any other native answer ends it.
+  const giftReceiptPending = (nextAction: string): boolean =>
+    nextAction === 'finalize' || nextAction === 'reconcile' || nextAction === 'recheck';
+
+  // Original receipt context of orders the Tender reported fully paid by gift
+  // card, kept per order and independent of the current UI target. Memory
+  // only: after a restart the native journal governs.
+  const giftBookedReceiptsRef = useRef(new Map<string, NonNullable<typeof outstandingPaymentData>>());
+
+  // Gift adoption for the outstanding order. The Tender already booked the
+  // money natively; the host only rereads the canonical ledger once per new
+  // payment and never records, completes or prints anything for it.
+  const handleOutstandingGiftEvent = useCallback((event: GiftCardTenderEvent) => {
+    if (event.type === 'fiscal') {
+      // The Tender's own receipt progress: a finished receipt ends its retained reentry.
+      giftFiscalNextRef.current = { orderId: event.orderId, nextAction: event.fiscal.nextAction };
+      if (!giftReceiptPending(event.fiscal.nextAction)) {
+        setGiftReceiptRecoveries((current) => current.filter((entry) => entry.orderId !== event.orderId));
+      }
+      return;
+    }
+    if (event.type !== 'financial') return;
+    const pendingPayment = outstandingPaymentDataRef.current;
+    if (!pendingPayment || event.orderId !== pendingPayment.orderId) return;
+    const { orderId, orderTotal } = pendingPayment;
+    const epoch = outstandingEpochRef.current;
+    const freshPaymentIds = adoptGiftCardPaymentIds(
+      collectionScope,
+      orderId,
+      event.adopted.map((payment) => payment.localPaymentId),
+    );
+    const { coverage } = event;
+    // The Tender's trusted full-gift event proves this order's money is booked:
+    // keep its original receipt context before any await, so a Close while the
+    // ledger reread is pending, failed or stale still reaches that receipt.
+    if (event.adopted.length > 0 && coverage !== null && coverage.fullyCovered && coverage.outstandingCents === 0) {
+      giftBookedReceiptsRef.current.set(orderId, pendingPayment);
+    }
+    giftEventQueueRef.current = giftEventQueueRef.current
+      .then(async () => {
+        if (freshPaymentIds.length > 0) await silentRefresh().catch(() => {});
+        const settlement = await loadPersistedSplitDismissal(bridge, orderId, orderTotal);
+        if (epoch !== outstandingEpochRef.current) return;
+        if (settlement.kind === 'settled' && coverage !== null && coverage.fullyCovered && coverage.outstandingCents === 0) {
+          // Keep the Tender mounted so its pending receipt action stays reachable.
+          setGiftSettledOrderId(orderId);
+          return;
+        }
+        const settlementGeneration = settlement.settlementGeneration;
+        if (!settlementGeneration) return;
+        setOutstandingPaymentData((current) => (current && current.orderId === orderId
+          ? {
+              ...current,
+              orderTotal: settlement.orderTotal,
+              outstandingAmount: settlement.outstandingAmount,
+              existingPayments: settlement.completedPayments,
+              settlementGeneration,
+            }
+          : current));
+      })
+      .catch(() => undefined);
+  }, [bridge, collectionScope, silentRefresh]);
+
+  const outstandingExistingOrder = useMemo<PaymentModalExistingOrder | undefined>(() => {
+    const orderId = outstandingPaymentData?.orderId;
+    if (!orderId) return undefined;
+    return {
+      orderId,
+      orderSynced: outstandingOrderSynced,
+      currency: outstandingGiftCurrency?.orderId === orderId ? outstandingGiftCurrency.currency : null,
+      scope: collectionScope,
+      online: browserOnline && nativeOnline,
+      outstandingCents: Math.round((outstandingPaymentData?.outstandingAmount ?? 0) * 100),
+      giftEnabled: true,
+      giftReceiptRecovery: giftReceiptReentryOrderId === orderId,
+      onGiftEvent: handleOutstandingGiftEvent,
+    };
+  }, [
+    browserOnline,
+    collectionScope,
+    giftReceiptReentryOrderId,
+    handleOutstandingGiftEvent,
+    nativeOnline,
+    outstandingGiftCurrency,
+    outstandingOrderSynced,
+    outstandingPaymentData?.orderId,
+    outstandingPaymentData?.outstandingAmount,
+  ]);
+
+  // Reopens a gift-paid order's own Tender, which reads native receipt state
+  // and offers only the step native allows; nothing here collects money.
+  const reenterGiftReceipt = useCallback((orderId: string) => {
+    if (outstandingPaymentDataRef.current) return;
+    const retained = giftReceiptRecoveries.find((entry) => entry.orderId === orderId);
+    if (!retained) return;
+    setGiftReceiptReentryOrderId(orderId);
+    setOutstandingPaymentData({ ...retained, outstandingAmount: 0 });
+  }, [giftReceiptRecoveries]);
+
+  const handleOutstandingClose = useCallback(() => {
+    const pendingPayment = outstandingPaymentDataRef.current;
+    if (!pendingPayment) return;
+    setOutstandingPaymentData(null);
+    const reentry = giftReceiptReentryOrderId === pendingPayment.orderId;
+    setGiftReceiptReentryOrderId(null);
+    // Retained from the Tender's event before the ledger reread settled the UI.
+    const booked = giftBookedReceiptsRef.current.get(pendingPayment.orderId);
+    if (giftSettledOrderId === pendingPayment.orderId || reentry || booked) {
+      // Paid by gift card: the Tender owns its receipt, nothing is left to split.
+      // A receipt it has not finished keeps a reentry to that same Tender.
+      const fiscal = giftFiscalNextRef.current;
+      const receiptPending =
+        !fiscal || fiscal.orderId !== pendingPayment.orderId || giftReceiptPending(fiscal.nextAction);
+      const original = booked ?? pendingPayment;
+      setGiftReceiptRecoveries((current) => {
+        const others = current.filter((entry) => entry.orderId !== pendingPayment.orderId);
+        return receiptPending ? [...others, original] : others;
+      });
+      if (!reentry) resetFlow();
+      return;
+    }
+    setSplitPaymentData({
+      orderId: pendingPayment.orderId,
+      orderTotal: pendingPayment.orderTotal,
+      items: pendingPayment.items,
+      isGhostOrder: pendingPayment.isGhostOrder,
+      orderNumber: pendingPayment.orderNumber,
+      orderType: pendingPayment.orderType,
+      existingPayments: pendingPayment.existingPayments,
+      tipAmount: pendingPayment.tipAmount,
+      tipRecipientRole: pendingPayment.tipRecipientRole,
+      tipRecipientStaffId: pendingPayment.tipRecipientStaffId,
+      tipRecipientStaffShiftId: pendingPayment.tipRecipientStaffShiftId,
+      recoverySession: (pendingPayment.recoverySession ?? 0) + 1,
+    });
+  }, [giftReceiptReentryOrderId, giftSettledOrderId, resetFlow]);
+
   const handleOutstandingPaymentSelect = useCallback(async (
     selection: OutstandingPaymentSelection,
   ): Promise<boolean | 'reconciliation-pending'> => {
@@ -689,43 +967,148 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
       return true;
     }
     const paymentMethod = selection.method;
+    const orderId = pendingPayment.orderId;
+    // Existing-order guard. A reconciliation only continues the retained
+    // original collection and never writes; a collection sends under the
+    // order's ordinary claim, taken here (or by the modal) before any await.
+    const probeOwner = selection.reconciliationOnly
+      ? selection.ordinaryOwner ?? retainedOrdinaryOwner(collectionScope, orderId)
+      : null;
+    let sendOwner: OrdinaryCollectionOwner | null = null;
+    let claimedHere = false;
+    if (!selection.reconciliationOnly) {
+      if (selection.ordinaryOwner) {
+        sendOwner = selection.ordinaryOwner;
+      } else {
+        const claim = claimOrdinaryCollectionOwner(collectionScope, orderId);
+        if (!claim.claimed) {
+          toast.error(ordinaryRefusalText(claim.code));
+          return claim.retained ? 'reconciliation-pending' : false;
+        }
+        sendOwner = claim.owner;
+        claimedHere = true;
+      }
+    }
+    const epoch = outstandingEpochRef.current;
 
     setIsProcessingOutstandingPayment(true);
     try {
       const askBeforePrint = await shouldAskPaymentPrint();
-      const paymentAttempt = await reconcileOutstandingPaymentAttempt({
-        recordPayment: () => bridge.payments.recordPayment({
-          orderId: pendingPayment.orderId,
+      let latestResolution: PersistedSplitDismissalResolution;
+      let collectedHere: boolean;
+      if (!sendOwner) {
+        // Snapshot-only: the canonical ledger may settle the original; nothing is resent.
+        const probe = probeOwner
+          ? await probeOrdinaryOwner(probeOwner, async () => {
+              const settlement = await loadPersistedSplitDismissal(bridge, orderId, pendingPayment.orderTotal);
+              return { completedPayments: settlement.completedPayments, value: settlement };
+            })
+          : null;
+        if (probe?.status === 'unknown') return 'reconciliation-pending';
+        const snapshot = probe?.status === 'completed' && probe.value
+          ? probe.value
+          : await loadPersistedSplitDismissal(bridge, orderId, pendingPayment.orderTotal).catch(() => null);
+        if (!snapshot) return 'reconciliation-pending';
+        latestResolution = snapshot;
+        collectedHere = probe?.status === 'completed' || ordinaryLandedRef.current === orderId;
+      } else {
+        const owner = sendOwner;
+        const run = await runOrdinaryCollection(owner, {
           method: paymentMethod,
           amount: pendingPayment.outstandingAmount,
-          cashReceived: paymentMethod === 'cash' ? selection.cashReceived : undefined,
-          changeGiven: paymentMethod === 'cash' ? selection.change : undefined,
-          transactionRef: selection.transactionId,
-          idempotencyKey: selection.transactionId,
-          collectOutstandingBalance: true,
-          expectedSettlementGeneration: pendingPayment.settlementGeneration,
-          staffId: pendingPayment.orderType === 'delivery' ? undefined : staff?.staffId,
-          staffShiftId: pendingPayment.orderType === 'delivery' ? undefined : activeShift?.id,
-          tipAmount: pendingPayment.tipAmount,
-          tipRecipientRole: pendingPayment.tipRecipientRole,
-          tipRecipientStaffId: pendingPayment.tipRecipientStaffId,
-          tipRecipientStaffShiftId: pendingPayment.tipRecipientStaffShiftId,
-        }),
-        snapshotOnly: selection.reconciliationOnly,
-        bridge,
-        orderId: pendingPayment.orderId,
-        fallbackOrderTotal: pendingPayment.orderTotal,
-      });
-      if (paymentAttempt.kind === 'unknown') {
-        if (!selection.reconciliationOnly) {
-          toast.error(t('orderDashboard.collectPaymentFailed', {
-            defaultValue: 'Failed to collect payment',
-          }));
+          transactionRef: selection.transactionId ?? null,
+          idempotencyKey: selection.transactionId ?? null,
+          settlementGeneration: pendingPayment.settlementGeneration,
+          terminalTransactionId: null,
+        }, async () => {
+          const attempt = await reconcileOutstandingPaymentAttempt({
+            recordPayment: () => bridge.payments.recordPayment({
+              orderId,
+              method: paymentMethod,
+              amount: pendingPayment.outstandingAmount,
+              cashReceived: paymentMethod === 'cash' ? selection.cashReceived : undefined,
+              changeGiven: paymentMethod === 'cash' ? selection.change : undefined,
+              transactionRef: selection.transactionId,
+              idempotencyKey: selection.transactionId,
+              collectOutstandingBalance: true,
+              expectedSettlementGeneration: pendingPayment.settlementGeneration,
+              staffId: pendingPayment.orderType === 'delivery' ? undefined : staff?.staffId,
+              staffShiftId: pendingPayment.orderType === 'delivery' ? undefined : activeShift?.id,
+              tipAmount: pendingPayment.tipAmount,
+              tipRecipientRole: pendingPayment.tipRecipientRole,
+              tipRecipientStaffId: pendingPayment.tipRecipientStaffId,
+              tipRecipientStaffShiftId: pendingPayment.tipRecipientStaffShiftId,
+            }),
+            bridge,
+            orderId,
+            fallbackOrderTotal: pendingPayment.orderTotal,
+          });
+          const facts: OrdinaryCollectionFacts = {
+            replyLost: attempt.attempt.replyLost,
+            success: attempt.attempt.success,
+            paymentApproved: attempt.attempt.paymentApproved,
+            paymentPersisted: attempt.attempt.paymentPersisted,
+            requiresReconciliation: attempt.attempt.requiresReconciliation,
+            paymentId: attempt.attempt.paymentId,
+            code: attempt.attempt.code,
+          };
+          noteOrdinaryWriteFacts(owner, facts);
+          let verdict: OrdinaryCollectionVerdict = classifyOrdinaryWrite(facts);
+          // Only the original's own row in the canonical ledger proves a lost reply booked.
+          if (verdict === 'unknown' && 'settlement' in attempt
+            && ledgerHasOriginalOrdinaryPayment(owner, attempt.settlement.completedPayments)) {
+            verdict = 'completed';
+          }
+          return { verdict, value: attempt, code: facts.code };
+        });
+        if (run.status === 'refused') {
+          toast.error(ordinaryRefusalText(run.code));
+          return false;
         }
-        return 'reconciliation-pending';
+        const attempt = run.value;
+        if (attempt?.kind === 'not_saved') {
+          // The card was charged but its payment is not saved on this till (or
+          // the tender was refused because one is not): never "Failed to
+          // collect payment" and never a new try with a new key. Its record
+          // holds the Z and Save payment again replays it (30/09/2026). The
+          // charged one keeps this order's ordinary claim until its own row
+          // lands; a refused tender moved nothing and released it.
+          if (epoch === outstandingEpochRef.current) {
+            notifyPaymentNotSaved(attempt.result, t);
+            setOutstandingPaymentData(null);
+            void silentRefresh().catch(() => {});
+          }
+          return false;
+        }
+        if (attempt && isSetAsideOrdinaryWrite(attempt.attempt)) {
+          // Money that moved found the order already covered: recorded set
+          // aside for a manager to give back, never a collection and never
+          // offered as still due (30/09/2026).
+          if (epoch === outstandingEpochRef.current) {
+            const setAsideMessage = formatSetAsidePaymentMessage(attempt.attempt.setAsideAnswer, t);
+            if (setAsideMessage) toast.error(setAsideMessage, { duration: PAYMENT_SET_ASIDE_TOAST_MS });
+            setOutstandingPaymentData(null);
+            void silentRefresh().catch(() => {});
+          }
+          return false;
+        }
+        if (run.status === 'unknown' || !attempt || attempt.kind === 'unknown') {
+          if (run.status === 'completed') ordinaryLandedRef.current = orderId;
+          if (epoch === outstandingEpochRef.current) {
+            toast.error(t('orderDashboard.collectPaymentFailed', {
+              defaultValue: 'Failed to collect payment',
+            }));
+          }
+          return 'reconciliation-pending';
+        }
+        latestResolution = attempt.settlement;
+        collectedHere = run.status === 'completed';
       }
-      const latestResolution = paymentAttempt.settlement;
+      // A late result settles the original claim but never a newer screen,
+      // checked again after the refresh: its target or scope may have changed.
+      if (epoch !== outstandingEpochRef.current) return false;
       await silentRefresh().catch(() => {});
+      if (epoch !== outstandingEpochRef.current) return false;
 
       if (latestResolution.kind === 'partial') {
         setOutstandingPaymentData(null);
@@ -765,26 +1148,36 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
       }
 
       setOutstandingPaymentData(null);
-      void finalizeCreatedOrderPayment(pendingPayment.orderId, pendingPayment.isGhostOrder, {
-        askBeforePrint,
-        autoPrintSuppressed: askBeforePrint,
-        amount: pendingPayment.outstandingAmount,
-        orderNumber: pendingPayment.orderNumber || null,
-      }).catch((error) => {
-        console.warn('[OrderFlow] Recovered payment print failed:', error);
-      });
+      // Only this ordinary collection's own money gets its receipt here; a
+      // gift-settled order's receipt belongs to the gift card Tender.
+      if (collectedHere && giftSettledOrderId !== orderId) {
+        void finalizeCreatedOrderPayment(pendingPayment.orderId, pendingPayment.isGhostOrder, {
+          askBeforePrint,
+          autoPrintSuppressed: askBeforePrint,
+          amount: pendingPayment.outstandingAmount,
+          orderNumber: pendingPayment.orderNumber || null,
+        }).catch((error) => {
+          console.warn('[OrderFlow] Recovered payment print failed:', error);
+        });
+      }
+      if (ordinaryLandedRef.current === orderId) ordinaryLandedRef.current = null;
       resetFlow();
       return true;
     } catch {
       console.error('[OrderFlow] Failed to collect recovered payment');
-      toast.error(t('orderDashboard.collectPaymentFailed', {
-        defaultValue: 'Failed to collect payment',
-      }));
+      if (epoch === outstandingEpochRef.current) {
+        toast.error(t('orderDashboard.collectPaymentFailed', {
+          defaultValue: 'Failed to collect payment',
+        }));
+      }
       return false;
     } finally {
-      setIsProcessingOutstandingPayment(false);
+      // Ends a claim taken here only while nothing was sent under it; the
+      // processing flag belongs to this target and scope only.
+      if (claimedHere && sendOwner) releaseOrdinaryOwnerBeforeSend(sendOwner);
+      if (epoch === outstandingEpochRef.current) setIsProcessingOutstandingPayment(false);
     }
-  }, [activeShift?.id, bridge, finalizeCreatedOrderPayment, outstandingPaymentData, resetFlow, shouldAskPaymentPrint, silentRefresh, staff?.staffId, t]);
+  }, [activeShift?.id, bridge, collectionScope, finalizeCreatedOrderPayment, giftSettledOrderId, ordinaryRefusalText, outstandingPaymentData, resetFlow, shouldAskPaymentPrint, silentRefresh, staff?.staffId, t]);
 
   const handleSplitComplete = useCallback(async (result: SplitPaymentResult) => {
     splitPaymentCompletedRef.current = result;
@@ -864,7 +1257,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   const handleTableEditReservation = useCallback(async () => {
     const reservationBranchId = effectiveBranchId || branchId;
     if (!selectedTable || !reservationBranchId || !organizationId) {
-      toast.error(t('orderFlow.missingContext') || 'Missing branch or organization context');
+      toast.error(t('reservationForm.toasts.missingContext', { defaultValue: 'Missing branch or organization context' }));
       return;
     }
 
@@ -888,7 +1281,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   const handleTableNoShowReservation = useCallback(async () => {
     const reservationBranchId = effectiveBranchId || branchId;
     if (!selectedTable || !reservationBranchId || !organizationId) {
-      toast.error(t('orderFlow.missingContext') || 'Missing branch or organization context');
+      toast.error(t('reservationForm.toasts.missingContext', { defaultValue: 'Missing branch or organization context' }));
       return;
     }
 
@@ -915,7 +1308,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   const handleTableCancelReservation = useCallback(async () => {
     const reservationBranchId = effectiveBranchId || branchId;
     if (!selectedTable || !reservationBranchId || !organizationId) {
-      toast.error(t('orderFlow.missingContext') || 'Missing branch or organization context');
+      toast.error(t('reservationForm.toasts.missingContext', { defaultValue: 'Missing branch or organization context' }));
       return;
     }
 
@@ -957,62 +1350,31 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     toast.error(t('tableActionModal.setAvailableFailed', { defaultValue: 'Failed to mark table available' }));
   }, [selectedTable, t, updateTableStatus]);
 
-  // Handle reservation form submission
+  // Handle reservation form submission, through the helper the other table screens share.
   const handleReservationSubmit = useCallback(async (data: CreateReservationDto) => {
-    const reservationBranchId = effectiveBranchId || branchId;
-    if (!reservationBranchId || !organizationId) {
-      toast.error(t('orderFlow.missingContext') || 'Missing branch or organization context');
-      return;
-    }
-    
     try {
-      // Set context for the service with actual IDs
-      reservationsService.setContext(reservationBranchId, organizationId);
-      
-      // Format date and time from the Date object
-      const reservationDate = toLocalDateString(data.reservationTime);
-      const reservationTime = data.reservationTime.toTimeString().slice(0, 5);
-
-      if (editingReservation) {
-        const updatePayload = buildChangedReservationUpdate(editingReservation, {
-          customerName: data.customerName,
-          customerPhone: data.customerPhone,
-          partySize: data.partySize,
-          reservationDate,
-          reservationTime,
-          tableId: data.tableId,
-          specialRequests: data.specialRequests,
-        });
-
-        if (Object.keys(updatePayload).length > 0) {
-          await reservationsService.updateReservationDetails(editingReservation.id, updatePayload);
-        }
-
-        toast.success(t('orderFlow.reservationUpdated', { defaultValue: 'Reservation updated successfully' }));
-        setShowReservationForm(false);
-        setEditingReservation(null);
-        setSelectedTable(null);
-        await refetchTables();
+      const result = await submitTableReservation({
+        data,
+        editingReservation,
+        branchId: effectiveBranchId || branchId,
+        organizationId,
+      });
+      if (result === 'missing-context') {
+        toast.error(t('reservationForm.toasts.missingContext', { defaultValue: 'Missing branch or organization context' }));
         return;
       }
-      
-      // Create the reservation with table status update
-      await reservationsService.createReservationWithTableUpdate({
-        customerName: data.customerName,
-        customerPhone: data.customerPhone,
-        partySize: data.partySize,
-        reservationDate,
-        reservationTime,
-        tableId: data.tableId,
-        specialRequests: data.specialRequests,
-      });
-      
-      toast.success(t('orderFlow.reservationCreated') || 'Reservation created successfully');
+
+      toast.success(
+        result === 'updated'
+          ? t('reservationForm.toasts.updated', { defaultValue: 'Reservation updated successfully' })
+          : t('reservationForm.toasts.created', { defaultValue: 'Reservation created successfully' }),
+      );
       setShowReservationForm(false);
+      setEditingReservation(null);
       setSelectedTable(null);
       await refetchTables();
     } catch (error) {
-      console.error('Failed to create reservation:', error);
+      console.error('Failed to save reservation:', error);
       const reservationUpdateError = error instanceof Error && error.message.trim()
         ? error.message
         : typeof error === 'string' && error.trim()
@@ -1021,10 +1383,10 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
       toast.error(
         editingReservation
           ? reservationUpdateError ||
-            t('orderFlow.reservationUpdateFailed', {
+            t('reservationForm.toasts.updateFailed', {
               defaultValue: 'Failed to update reservation',
             })
-          : t('orderFlow.reservationFailed', {
+          : t('reservationForm.toasts.createFailed', {
               defaultValue: 'Failed to create reservation',
             }),
       );
@@ -1041,6 +1403,13 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   // Handle order completion from menu. Resolves false on failure so
   // MenuModal/PaymentModal keep the cart and skip their success toasts.
   const handleOrderComplete = useCallback(async (orderData: any): Promise<boolean> => {
+    // Item H (fix review 30/09/2026): the store's tax rate could not be read.
+    // Checkout is paused with "Try again": no order is priced or its tax split
+    // on an assumed rate.
+    if (taxRatePercentage === null) {
+      notifyMoneySettingsUnavailable(t, reloadTerminalSettings);
+      return false;
+    }
     setIsProcessingOrder(true);
     let orderPersisted = false;
     const isSplitPayment = orderData.paymentData?.method === 'pending';
@@ -1197,23 +1566,69 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
 
       const existingOrderId = orderData.paymentData?.existingOrderId;
       if (existingOrderId && (paymentMethod === 'cash' || paymentMethod === 'card')) {
-        const askBeforeFallbackPrint = await shouldAskPaymentPrint();
-        const paymentResult: any = await bridge.payments.recordPayment({
-          orderId: existingOrderId,
-          method: paymentMethod,
-          amount: total_amount,
-          cashReceived: paymentMethod === 'cash' ? orderData.paymentData.cashReceived : undefined,
-          changeGiven: paymentMethod === 'cash' ? orderData.paymentData.change : undefined,
-          transactionRef: orderData.paymentData.transactionId,
-          staffId: selectedOrderType === 'delivery' ? undefined : staff?.staffId,
-          staffShiftId: selectedOrderType === 'delivery' ? undefined : activeShift?.id,
-          tipAmount,
-          tipRecipientRole,
-          tipRecipientStaffId,
-          tipRecipientStaffShiftId,
-        });
-        if (paymentResult?.success === false) {
-          throw new Error(paymentResult.error || 'Failed to record payment');
+        // Existing-order guard: continue the modal's claim or take the order's
+        // ordinary claim before the first await of this write.
+        const givenOwner: OrdinaryCollectionOwner | null = orderData.paymentData?.ordinaryOwner ?? null;
+        const fallbackClaim = givenOwner ? null : claimOrdinaryCollectionOwner(collectionScope, existingOrderId);
+        if (fallbackClaim && !fallbackClaim.claimed) {
+          toast.error(ordinaryRefusalText(fallbackClaim.code));
+          setIsProcessingOrder(false);
+          return false;
+        }
+        const fallbackOwner = givenOwner ?? (fallbackClaim?.claimed ? fallbackClaim.owner : null);
+        if (!fallbackOwner) {
+          setIsProcessingOrder(false);
+          return false;
+        }
+        let askBeforeFallbackPrint = false;
+        let fallbackRun: OrdinaryCollectionRun<any>;
+        try {
+          askBeforeFallbackPrint = await shouldAskPaymentPrint();
+          fallbackRun = await runOrdinaryCollection<any>(fallbackOwner, {
+            method: paymentMethod,
+            amount: total_amount,
+            transactionRef: orderData.paymentData.transactionId ?? null,
+            idempotencyKey: null,
+            settlementGeneration: null,
+            terminalTransactionId: null,
+          }, async () => {
+            let raw: unknown;
+            let threw = false;
+            try {
+              raw = await bridge.payments.recordPayment({
+                orderId: existingOrderId,
+                method: paymentMethod,
+                amount: total_amount,
+                cashReceived: paymentMethod === 'cash' ? orderData.paymentData.cashReceived : undefined,
+                changeGiven: paymentMethod === 'cash' ? orderData.paymentData.change : undefined,
+                transactionRef: orderData.paymentData.transactionId,
+                staffId: selectedOrderType === 'delivery' ? undefined : staff?.staffId,
+                staffShiftId: selectedOrderType === 'delivery' ? undefined : activeShift?.id,
+                tipAmount,
+                tipRecipientRole,
+                tipRecipientStaffId,
+                tipRecipientStaffShiftId,
+              });
+            } catch {
+              threw = true;
+            }
+            const facts = readOrdinaryWriteReply(raw, threw);
+            noteOrdinaryWriteFacts(fallbackOwner, facts);
+            return { verdict: classifyOrdinaryWrite(facts), value: raw, code: facts.code };
+          });
+        } finally {
+          // Ends a claim taken here only while nothing was sent under it.
+          if (!givenOwner) releaseOrdinaryOwnerBeforeSend(fallbackOwner);
+        }
+        if (fallbackRun.status === 'refused') {
+          throw new Error(ordinaryRefusalText(fallbackRun.code));
+        }
+        const paymentResult: any = fallbackRun.value;
+        if (fallbackRun.status === 'unknown') {
+          throw new Error(t('orderDashboard.collectPaymentFailed', { defaultValue: 'Failed to collect payment' }));
+        }
+        if (fallbackRun.status !== 'completed') {
+          throw new Error(paymentResult?.error || 'Failed to record payment');
         }
         await silentRefresh().catch(() => {});
         void finalizeCreatedOrderPayment(existingOrderId, isGhostOrder, {
@@ -1236,9 +1651,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         return true;
       }
 
-      const clientRequestId =
-        globalThis.crypto?.randomUUID?.() ??
-        `order-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const clientRequestId = takeCheckoutRequestId();
       const askBeforeReceiptPrint =
         !isSplitPayment && (Boolean(initialPayment) || isGhostOrder)
           ? await shouldAskPaymentPrint()
@@ -1350,6 +1763,8 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
 
       if (result.success) {
         orderPersisted = true;
+        // The order exists: the next checkout is a new one.
+        resetCheckoutRequestId();
         const displayOrderNumber = result.orderNumber || result.orderId || '';
 
         const roomCharge = (result as any).roomCharge;
@@ -1472,6 +1887,27 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
 
         resetFlow();
         return true;
+      } else if (result.paymentNotSaved) {
+        // Item E: the card was charged and the order could not be saved
+        // yet. The till holds the order and its payment; the checkout ends
+        // here (a retry from this cart would be a new checkout and a second
+        // charge) and the dashboard banner offers "Save payment again".
+        notifyPaymentNotSaved(result, t);
+        announceUnsavedCheckoutChanged();
+        const outcome = resolveOrderCompletionOutcome({
+          succeeded: false,
+          orderPersisted,
+          chargedNotSaved: true,
+        });
+        if (outcome.resetOrderUiState) {
+          resetFlow();
+        }
+        return outcome.completionResult;
+      } else if (isCheckoutOutcomeUnknown(result)) {
+        // The payment has no answer yet (fix review 30/09/2026): the cart
+        // and its checkout id stay, so Pay again checks the same payment.
+        notifyCheckoutOutcomeUnknown(result, t);
+        return false;
       } else {
         toast.error(t('orderFlow.orderFailed'));
         if ('error' in result) {
@@ -1489,7 +1925,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     } finally {
       setIsProcessingOrder(false);
     }
-  }, [selectedCustomer, selectedOrderType, selectedAddress, deliveryZoneInfo, createOrder, resetFlow, activeShift, isShiftActive, staff, taxRatePercentage, effectiveBranchId, organizationId, hasLoyaltyModule, t, silentRefresh, finalizeCreatedOrderPayment, shouldAskPaymentPrint]);
+  }, [selectedCustomer, selectedOrderType, selectedAddress, deliveryZoneInfo, createOrder, resetFlow, activeShift, isShiftActive, staff, taxRatePercentage, reloadTerminalSettings, effectiveBranchId, organizationId, hasLoyaltyModule, t, silentRefresh, finalizeCreatedOrderPayment, shouldAskPaymentPrint, collectionScope, ordinaryRefusalText, takeCheckoutRequestId, resetCheckoutRequestId]);
 
   // Order-type chooser ergonomics aligned with the main OrderDashboard modal (Round 346): modal width + grid
   // scale to the number of visible cards (pickup always present; delivery/tables optional), and each card
@@ -1697,6 +2133,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
           table={selectedTable}
           onNewOrder={handleTableNewOrder}
           onNewReservation={handleTableNewReservation}
+          canCreateReservation={hasReservationsModule}
           onSetAvailable={handleTableSetAvailable}
           onEditReservation={handleTableEditReservation}
           onNoShowReservation={handleTableNoShowReservation}
@@ -1763,34 +2200,34 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
           isGhostOrder={splitPaymentData.isGhostOrder}
           isReconciliationPending={isReconcilingSplitClose}
           onSplitComplete={handleSplitComplete}
+          collectionScope={collectionScope}
         />
       )}
       {outstandingPaymentData && (
         <OutstandingPaymentMethodModal
           isOpen={true}
-          onClose={() => {
-            const pendingPayment = outstandingPaymentData;
-            setOutstandingPaymentData(null);
-            setSplitPaymentData({
-              orderId: pendingPayment.orderId,
-              orderTotal: pendingPayment.orderTotal,
-              items: pendingPayment.items,
-              isGhostOrder: pendingPayment.isGhostOrder,
-              orderNumber: pendingPayment.orderNumber,
-              orderType: pendingPayment.orderType,
-              existingPayments: pendingPayment.existingPayments,
-              tipAmount: pendingPayment.tipAmount,
-              tipRecipientRole: pendingPayment.tipRecipientRole,
-              tipRecipientStaffId: pendingPayment.tipRecipientStaffId,
-              tipRecipientStaffShiftId: pendingPayment.tipRecipientStaffShiftId,
-              recoverySession: (pendingPayment.recoverySession ?? 0) + 1,
-            });
-          }}
+          onClose={handleOutstandingClose}
           amount={outstandingPaymentData.outstandingAmount}
           orderType={outstandingPaymentData.orderType}
           isProcessing={isProcessingOutstandingPayment}
           onSelect={handleOutstandingPaymentSelect}
+          existingOrder={outstandingExistingOrder}
         />
+      )}
+      {!outstandingPaymentData && giftReceiptRecoveries.length > 0 && (
+        <div className="fixed bottom-4 right-4 z-40 space-y-2" data-testid="gift-receipt-recovery">
+          {giftReceiptRecoveries.map((entry) => (
+            <div key={entry.orderId} role="status" className="liquid-glass-modal-card flex items-center gap-3 rounded-2xl px-4 py-3 text-sm">
+              <span className="liquid-glass-modal-text">
+                {entry.orderNumber ? `#${entry.orderNumber} · ` : ''}
+                {t('giftCardCheckout.refusal.fiscalPending', 'A receipt for this order is still pending. Check the receipt first.')}
+              </span>
+              <button type="button" className="liquid-glass-modal-button" onClick={() => reenterGiftReceipt(entry.orderId)}>
+                {t('giftCardCheckout.checkAgain', 'Check again')}
+              </button>
+            </div>
+          ))}
+        </div>
       )}
       {paymentPrintPromptModal}
     </div>

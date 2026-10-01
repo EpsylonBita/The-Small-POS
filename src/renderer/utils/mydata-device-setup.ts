@@ -12,6 +12,8 @@ export interface MyDataCapSettings {
   cardPaymentCode: number;
   eftPosIndex: number;
   probeDeviceTcp: boolean;
+  /** Optional CAP voucher (gift) payment code; blank until a technician sets it. */
+  voucherPaymentCode?: number;
 }
 export const DEFAULT_MYDATA_CAP_SETTINGS: MyDataCapSettings = {
   capturePath: 'C:\\Capture', outputPath: 'C:\\Capture\\Output',
@@ -33,6 +35,19 @@ export function myDataConnectionTypeFromSaved(value: unknown): MyDataConnectionT
   return type === 'usb_serial' || type === 'bluetooth' ? type : 'network';
 }
 
+const isBlankVoucherCode = (value: unknown): boolean => value === undefined || value === null || value === '';
+
+/**
+ * The optional CAP voucher (gift) payment code has no default. A set code must
+ * be an integer 2–20 and differ from the configured cash and card codes; code 1
+ * is always refused.
+ */
+export function myDataVoucherCodeIssue(voucher: unknown, cashPaymentCode: unknown, cardPaymentCode: unknown): 'invalid' | 'collision' | null {
+  if (isBlankVoucherCode(voucher)) return null;
+  if (typeof voucher !== 'number' || !Number.isInteger(voucher) || voucher < 2 || voucher > 20) return 'invalid';
+  return voucher === cashPaymentCode || voucher === cardPaymentCode ? 'collision' : null;
+}
+
 export function readMyDataCapSettings(value: unknown): MyDataCapSettings {
   const source = record(value);
   const result = { ...DEFAULT_MYDATA_CAP_SETTINGS };
@@ -43,6 +58,9 @@ export function readMyDataCapSettings(value: unknown): MyDataCapSettings {
     // silently replace a technician's setup with a working-looking default.
     if (saved !== undefined) Object.assign(result, { [key]: saved });
   }
+  // The voucher code has no default; keep a technician's value exactly.
+  const voucher = source.voucherPaymentCode ?? source.voucher_payment_code;
+  if (!isBlankVoucherCode(voucher)) Object.assign(result, { voucherPaymentCode: voucher });
   const encoding = String(result.fileEncoding).trim().toLowerCase();
   if (['utf-8', 'utf8'].includes(encoding)) result.fileEncoding = 'utf-8';
   if (['windows-1253', 'cp1253', 'windows1253', 'ansi', 'ansi-1253', '1253', 'greek'].includes(encoding)) result.fileEncoding = 'windows-1253';
@@ -58,7 +76,8 @@ export function validateMyDataCapSettings(settings: MyDataCapSettings): boolean 
     && typeof settings.probeDeviceTcp === 'boolean'
     && Number.isInteger(settings.transactionTimeoutMs) && settings.transactionTimeoutMs >= 5000 && settings.transactionTimeoutMs <= 300000
     && [settings.cashPaymentCode, settings.cardPaymentCode].every(value => Number.isInteger(value) && value >= 1 && value <= 20)
-    && Number.isInteger(settings.eftPosIndex) && settings.eftPosIndex >= 1 && settings.eftPosIndex <= 99;
+    && Number.isInteger(settings.eftPosIndex) && settings.eftPosIndex >= 1 && settings.eftPosIndex <= 99
+    && myDataVoucherCodeIssue(settings.voucherPaymentCode, settings.cashPaymentCode, settings.cardPaymentCode) === null;
 }
 
 // Only local device options are carried forward; credential-like fields never
@@ -76,11 +95,17 @@ export function buildMyDataDeviceSettings(protocol: string, model: string, exist
   const device = record(existing);
   const compatible = typeof device.protocol === 'string' && normalizeMyDataProtocol(device.protocol) === normalizeMyDataProtocol(protocol);
   if (protocol === 'cap_driver' && !validateMyDataCapSettings(cap)) throw new Error('Invalid CAP Driver settings');
-  return {
+  const settings: Record<string, unknown> = {
     ...(compatible ? nonSecretSettings(device.settings) : {}),
     mydataManaged: true, model, protocolProfile: protocol,
     ...(protocol === 'cap_driver' ? { ...cap, requireService: true, require_service: true } : {}),
   };
+  if (protocol === 'cap_driver') {
+    // One voucher key only, and a cleared code must not survive from the old device settings.
+    delete settings.voucher_payment_code;
+    if (isBlankVoucherCode(cap.voucherPaymentCode)) delete settings.voucherPaymentCode;
+  }
+  return settings;
 }
 
 type EcrSetupBridge = Pick<ReturnType<typeof getBridge>['ecr'], 'addDevice' | 'updateDevice' | 'connectDevice' | 'testConnection'>;

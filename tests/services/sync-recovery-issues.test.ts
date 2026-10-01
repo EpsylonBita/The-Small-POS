@@ -517,3 +517,34 @@ test('the customer cards read naturally for one change and for several, in every
     }
   }
 });
+
+// Shared rule R4 (round 3, 01/10/2026): an order whose money the delivery
+// platform holds (the server refused the till's payment on it and it was set
+// aside) is never sent to the payment screen to record cash or card: the
+// money is restored from the server. Its blocker comes `platformHeld`.
+const platformHeldNoPaymentHealth = () => baseSystemHealth({
+  checkoutPaymentBlockers: {
+    count: 1,
+    sourceWindow: 'active_shift',
+    details: [{
+      orderId: 'ord-platform-held', orderNumber: 'A-0404',
+      totalAmount: 13, settledAmount: 0,
+      paymentStatus: 'pending', paymentMethod: 'pending',
+      reasonCode: 'no_persisted_payment',
+      reasonText: 'Order was completed without a persisted cash/card payment.',
+      suggestedFix: 'Record the missing cash or card payment.',
+      severity: 'blocking' as const, differenceCents: 1300,
+      platformHeld: true,
+    }],
+  },
+} as any);
+
+test('a platform-held order is offered the server restore, never the payment screen', () => {
+  const issue = buildSyncRecoveryIssues({ systemHealth: platformHeldNoPaymentHealth() })
+    .issues.find(item => item.code === 'no_persisted_payment');
+
+  assert.ok(issue);
+  assert.equal(issue.actions.some(action => action.id === 'openOrderPaymentFix'), false);
+  assert.ok(issue.actions.length > 0, 'the issue still says what to do');
+  assert.equal(issue.knownSolution, undefined, 'no payment recipe is suggested');
+});

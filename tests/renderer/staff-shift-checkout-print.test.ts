@@ -387,7 +387,8 @@ test('Greek staff-shift/staff-payment closeout copy uses Greek, not the English 
 // and the print + complete action rail below the fold, forcing a long scroll to reach the footer. The footer is
 // now FLOATS -- it lives OUTSIDE the scrollable reconciliation body and overlays the cards while they continue
 // behind it. This guards the layout (relative shell + shrinkable padded scroll body + absolute sibling footer) and proves
-// the checkout logic / disabled conditions are untouched. Touch-first: no hover, no native title on the footer.
+// the footer placement stays intact. Payment-state behavior is covered by the mounted checkout tests.
+// Touch-first: no hover, no native title on the footer.
 test('Round 338: the checkout action footer floats over the scrollable reconciliation body', () => {
   const modal = source(staffShiftModalPath);
 
@@ -441,14 +442,9 @@ test('Round 338: the checkout action footer floats over the scrollable reconcili
     'the checkout footer must be a sibling rendered immediately after the scroll body closes (outside the scroller)',
   );
 
-  // The footer hosts the expected-amount summary + the print/complete action rail, and the checkout logic and
-  // disabled conditions are preserved exactly (layout change only -- no calc/print/submit/data changes).
+  // Keep this layout test independent of payment-state expressions. The mounted financial-opening and
+  // gift-close suites exercise ordinary checkout, pending proof, confirmation and asynchronous print guards.
   assert.match(modal, /<StaffShiftCheckoutFooterActions/);
-  assert.match(modal, /isCheckoutDisabled=\{loading \|\| isCheckoutAmountMissing\}/);
-  assert.match(modal, /isPrintDisabled=\{loading \|\| isPrintCheckoutLoading \|\| !canPrintCheckoutSnapshot\}/);
-  assert.match(modal, /isCheckoutLoading=\{loading\}/);
-  assert.match(modal, /onCheckout=\{[\s\S]*?handleCheckOut\(\)/);
-  assert.match(modal, /onPrint=\{[\s\S]*?handlePrintCheckout\(\)/);
 });
 
 test('Round 338: the checkout footer action rail stays touch-first (no hover, no native title)', () => {

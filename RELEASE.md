@@ -66,6 +66,18 @@ Required shape:
 `notes` may contain Markdown. The POS update dialog renders Markdown release notes
 before install so operators can review changes before accepting the update.
 
+From 1.4.120 a `docs/CHANGELOG.md` version section carries one block per app
+language (el, en, de, fr, it, sq), each opened by the fixed `###` heading in
+`RELEASE_NOTES_LANGUAGE_HEADINGS` (`src/renderer/utils/release-notes.ts`). The
+extract script keeps the whole section, so `notes` and the GitHub release body
+hold all six blocks; the update dialog shows only the block in the till's
+language, then English, then Greek, and shows text without two known blocks
+(older Greek-only sections, the `--fallback` line) unchanged. A till still on
+1.4.119 or older predates this and shows all six blocks with their headings when
+it offers 1.4.120 — accepted for that one transition.
+`tests/renderer/release-notes-changelog.test.ts` fails a version bump whose
+section lacks a language block or whose blocks carry different numbers of points.
+
 ## Automatic Public Release Flow
 
 Public `pos-tauri` releases start automatically when a matching `pos-tauri/**`,

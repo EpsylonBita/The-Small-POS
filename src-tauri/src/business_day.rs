@@ -309,7 +309,7 @@ pub(crate) fn paid_order_swept_by_last_z_expr(order_alias: &str, anchor_param: &
           AND NOT EXISTS (
               SELECT 1 FROM order_payments op_swept
               WHERE op_swept.order_id = {order_alias}.id
-                AND op_swept.status = 'completed'
+                AND (op_swept.status = 'completed' AND NOT (COALESCE(op_swept.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(op_swept.remote_payment_id, '')) = ''))
           ))"
     )
 }

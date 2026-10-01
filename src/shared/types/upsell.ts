@@ -211,6 +211,8 @@ export interface UpsellPurchaseRequest {
 export interface PurchaseUrlParams {
   /** Module ID to pre-select */
   moduleId: string;
+  /** Organization hint, verified again by the browser before purchase. */
+  organizationId?: string;
   /** Billing cycle preference */
   billingCycle?: BillingCycle;
   /** Source for analytics */
@@ -293,4 +295,3 @@ export interface FeatureComparisonData {
     savings_percentage: number;
   };
 }
-

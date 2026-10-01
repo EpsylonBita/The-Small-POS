@@ -42,6 +42,7 @@ export const MODULE_IDS = {
   RETAIL: 'retail',
   PRODUCT_CATALOG: 'product_catalog', // Module ID for retail product catalog
   REPAIRS: 'repairs',
+  GIFT_CARDS: 'gift_cards',
 } as const;
 
 export type ModuleIdType = typeof MODULE_IDS[keyof typeof MODULE_IDS];

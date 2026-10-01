@@ -309,12 +309,25 @@ export function buildShiftCheckoutPrintSnapshot(
   };
 }
 
+export const GIFT_CLOSE_PRINT_PENDING_CODE = 'GIFT_CLOSING_PENDING_FINANCIAL_CONFIRMATION';
+
 export async function queueShiftCheckoutPrint(params: {
   bridge: ShiftCheckoutPrintBridge;
   shiftId: string;
   roleType?: string;
   snapshot?: ShiftCheckoutPrintSnapshot;
+  /**
+   * Gift-bound cashier close. A pending original never prints. A confirmed one
+   * prints from native persisted proof, so no renderer money or time is sent.
+   */
+  giftClose?: 'pending' | 'confirmed';
+  /** The originating open/actor/terminal intent must still be current when queued. */
+  isCurrent?: () => boolean;
 }) {
+  if (params.giftClose === 'pending') {
+    return { success: false, skipped: true, code: GIFT_CLOSE_PRINT_PENDING_CODE };
+  }
+
   let terminalName: string | undefined;
 
   try {
@@ -326,10 +339,13 @@ export async function queueShiftCheckoutPrint(params: {
     terminalName = undefined;
   }
 
+  if (params.isCurrent && !params.isCurrent()) {
+    return { success: false, skipped: true, code: 'GIFT_CLOSING_SCOPE_CHANGED' };
+  }
   return params.bridge.shifts.printCheckout({
     shiftId: params.shiftId,
     roleType: params.roleType,
     terminalName,
-    ...params.snapshot,
+    ...(params.giftClose === 'confirmed' ? {} : params.snapshot),
   });
 }

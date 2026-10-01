@@ -15,14 +15,23 @@ import {
   getPosModuleCachePrefixes,
   getPosModuleWarmPaths,
 } from '../../src/renderer/services/pos-module-cache-registry';
+import { getOptionalWarmupModules } from '../../src/renderer/services/pos-module-warmup-access';
 import { setSyncQueueBridgeInstanceForTests } from '../../src/renderer/services/SyncQueueBridge';
 import {
   clearTerminalCredentialCache,
   updateTerminalCredentialCache,
 } from '../../src/renderer/services/terminal-credentials';
 
+function moduleCache(ids: string[]) {
+  return { success: true, isValid: true, identityMatch: true, modules: {
+    success: true, organization_id: 'org-1', terminal_id: 'terminal-1',
+    modules: ids.map(module_id => ({ module_id, is_purchased: true, pos_enabled: true })),
+  } };
+}
+
 function createMockBridge(overrides?: {
   syncFromAdmin?: () => Promise<unknown>;
+  getCachedModules?: () => Promise<unknown>;
   getFullConfig?: () => Promise<Record<string, unknown>>;
   getSetting?: (category: string, key: string) => Promise<unknown>;
   getSyncStatus?: () => Promise<Record<string, unknown>>;
@@ -58,6 +67,7 @@ function createMockBridge(overrides?: {
   };
 
   const bridge = {
+    modules: { getCached: async () => overrides?.getCachedModules ? overrides.getCachedModules() : moduleCache([...POS_MODULE_CACHE_ENTRIES.map(entry => entry.moduleId), 'loyalty']) },
     terminalConfig: {
       syncFromAdmin: async () => {
         calls.syncFromAdmin += 1;
@@ -255,87 +265,12 @@ test('runParitySyncCycle drives config sync, parity queue sync, and renderer eve
     assert.deepEqual(calls.adminFetches, [
       '/api/pos/settings/terminal-1',
       '/api/pos/settings/terminal-1?category=menu',
-      '/api/pos/integrations',
-      '/api/pos/mydata/config',
-      '/api/pos/customer-display?limit=200',
-      '/api/pos/kiosk/status',
-      '/api/pos/kiosk/orders?limit=10',
-      '/api/pos/analytics?time_range=today',
-      '/api/pos/analytics?time_range=week',
-      '/api/pos/analytics?time_range=month',
-      '/api/pos/delivery-zones',
-      '/api/pos/map-analytics?time_range=30d',
-      '/api/pos/sync/inventory_items?limit=2000',
-      '/api/pos/suppliers',
-      '/api/pos/coupons',
-      '/api/pos/appointments?include_services=true',
-      '/api/pos/services?is_active=true',
-      '/api/pos/service-categories?is_active=true',
-      '/api/pos/resources?is_active=true',
-      '/api/pos/rooms',
-      '/api/pos/housekeeping?status=all',
-      '/api/pos/guest-billing?status=all',
-      // Warm-path fetch: populates the Rust admin-GET cache so the purchase
-      // orders tab renders offline (pos-module-cache-registry 'suppliers').
-      '/api/pos/purchase-orders',
-      '/api/pos/products?is_active=true&limit=500&offset=0',
-      '/api/pos/product-categories',
-      '/api/pos/products/low-stock',
-      '/api/pos/sync/appointments?limit=2000',
-      '/api/pos/sync/appointment_services?limit=2000',
-      '/api/pos/sync/appointment_resources?limit=2000',
-      '/api/pos/sync/services?limit=2000',
-      '/api/pos/sync/service_categories?limit=2000',
-      '/api/pos/sync/resources?limit=2000',
-      '/api/pos/sync/rooms?limit=2000',
-      '/api/pos/sync/housekeeping_tasks?limit=2000',
-      '/api/pos/sync/guest_folios?limit=2000',
-      '/api/pos/sync/folio_charges?limit=2000',
-      '/api/pos/sync/retail_products?limit=2000',
-      '/api/pos/sync/retail_product_variants?limit=2000',
-      '/api/pos/sync/retail_product_categories?limit=2000',
-      // Snapshot pull: persists the purchase-order list to localStorage for the
-      // offline PO tab. Distinct consumer from the warm-path fetch above, so the
-      // same URL is legitimately requested twice per cycle.
+      ...getPosModuleWarmPaths(new Set(POS_MODULE_CACHE_ENTRIES.map(e => e.moduleId).filter(id => id !== 'inventory' && id !== 'product_catalog'))),
       '/api/pos/purchase-orders',
     ]);
-    assert.deepEqual(calls.invoke, [
-      {
-        channel: 'api:list-cached-paths',
-        payload: {
-          prefixes: [
-            '/api/pos/reservations',
-            '/api/pos/appointments',
-            '/api/pos/drive-through',
-            '/api/pos/rooms',
-            '/api/pos/housekeeping',
-            '/api/pos/guest-billing',
-            '/api/pos/products',
-            '/api/pos/product-categories',
-            '/api/pos/services',
-            '/api/pos/service-categories',
-            '/api/pos/resources',
-            '/api/pos/products/low-stock',
-            '/api/pos/sync/appointments',
-            '/api/pos/sync/appointment_services',
-            '/api/pos/sync/appointment_resources',
-            '/api/pos/sync/services',
-            '/api/pos/sync/service_categories',
-            '/api/pos/sync/resources',
-            '/api/pos/sync/rooms',
-            '/api/pos/sync/housekeeping_tasks',
-            '/api/pos/sync/guest_folios',
-            '/api/pos/sync/folio_charges',
-            '/api/pos/sync/retail_products',
-            '/api/pos/sync/retail_product_variants',
-            '/api/pos/sync/retail_product_categories',
-            // Cache prefix for the offline purchase-orders tab
-            // (pos-module-cache-registry 'suppliers').
-            '/api/pos/purchase-orders',
-          ],
-        },
-      },
-    ]);
+    assert.equal(calls.adminFetches.filter(path => path === '/api/pos/purchase-orders').length, 1);
+    assert.ok(!calls.adminFetches.some(path => path.startsWith('/api/pos/map-analytics')));
+    assert.deepEqual(calls.invoke, [{ channel: 'api:list-cached-paths', payload: { prefixes: getPosModuleCachePrefixes(new Set(POS_MODULE_CACHE_ENTRIES.map(e => e.moduleId).filter(id => id !== 'inventory' && id !== 'product_catalog'))) } }]);
     assert.equal(calls.staffSchedule.length, 1);
     assert.equal(calls.loyaltySyncSettings, 1);
     assert.equal(calls.loyaltySyncCustomers, 1);
@@ -396,7 +331,7 @@ test('POS module cache registry covers every scoped parity vertical', () => {
     'rooms',
     'housekeeping',
     'guest_billing',
-    'retail_products',
+    'product_catalog',
   ]) {
     assert.ok(modules.has(expected), `missing cache entry for ${expected}`);
   }
@@ -461,8 +396,8 @@ test('runParitySyncCycle deduplicates concurrent sync requests', async () => {
   });
 
   try {
-    const first = runParitySyncCycle();
-    const second = runParitySyncCycle();
+    const first = runParitySyncCycle({ trigger: 'startup' });
+    const second = runParitySyncCycle({ trigger: 'scheduled_retry' });
 
     releaseSyncFromAdmin();
     const [firstResult, secondResult] = await Promise.all([first, second]);
@@ -470,10 +405,86 @@ test('runParitySyncCycle deduplicates concurrent sync requests', async () => {
     assert.deepEqual(firstResult, secondResult);
     assert.equal(calls.syncFromAdmin, 1);
     assert.equal(calls.forceSync, 1);
+    assert.equal(calls.adminFetches.length, new Set(calls.adminFetches).size);
+    assert.equal(calls.staffSchedule.length, 1);
     assert.equal(queueProcessCount, 1);
   } finally {
     setSyncQueueBridgeInstanceForTests(null);
     clearTerminalCredentialCache();
     resetBridge();
   }
+});
+
+
+test('warmup excludes unacquired/disabled optional paths and stale cached paths while keeping free staff', async () => {
+  const cache = moduleCache(['rooms', 'loyalty', 'analytics', 'inventory']);
+  cache.modules.modules[2].pos_enabled = false;
+  cache.modules.modules[3].is_purchased = false;
+  const { bridge, calls } = createMockBridge({
+    getCachedModules: async () => cache,
+    invoke: async () => ({ success: true, paths: [
+      '/api/pos/rooms?floor=2', '/api/pos/rooms?floor=2',
+      '/api/pos/appointments?date=2026-09-28', '/api/pos/sync/inventory_items?limit=3000',
+      '/api/pos/analytics?time_range=today', '/api/pos/rooms-admin',
+      '/api/pos/map-analytics?time_range=30d', '/api/pos/purchase-orders',
+      'https://elsewhere.example/api/pos/rooms',
+    ] }),
+  });
+  setBridge(bridge);
+  setSyncQueueBridgeInstanceForTests({
+    getStatus: async () => ({ total: 0 }),
+    processQueue: async () => ({ processed: 0, failed: 0, conflicts: 0 }),
+  } as any);
+  try {
+    await runParitySyncCycle({ trigger: 'startup' });
+    assert.deepEqual(calls.adminFetches, [
+      '/api/pos/settings/terminal-1', '/api/pos/settings/terminal-1?category=menu',
+      '/api/pos/rooms', '/api/pos/sync/rooms?limit=2000', '/api/pos/rooms?floor=2',
+    ]);
+    assert.equal(calls.staffSchedule.length, 1);
+    assert.equal(calls.loyaltySyncSettings, 1);
+    assert.equal(calls.loyaltySyncCustomers, 1);
+  } finally { setSyncQueueBridgeInstanceForTests(null); resetBridge(); }
+});
+
+test('unknown, stale or wrong-identity module inventory cannot authorize optional network warmup', async () => {
+  const valid = moduleCache(['rooms', 'loyalty', 'suppliers']);
+  const cases = [
+    null, { ...valid, isValid: false }, { ...valid, identityMatch: false }, { ...valid, stale: true },
+    { ...valid, modules: { ...valid.modules, terminal_id: 'other-terminal' } },
+    { ...valid, modules: { ...valid.modules, organization_id: 'other-org' } },
+  ];
+  for (const cached of cases) {
+    const { bridge, calls } = createMockBridge({
+      getCachedModules: async () => cached,
+      getFullConfig: async () => ({ terminal_id: 'terminal-1', organization_id: 'org-1', admin_url: 'https://admin.example' }),
+      invoke: async () => ({ success: true, paths: ['/api/pos/rooms?stale=true'] }),
+    });
+    setBridge(bridge);
+    setSyncQueueBridgeInstanceForTests({
+      getStatus: async () => ({ total: 0 }),
+      processQueue: async () => ({ processed: 0, failed: 0, conflicts: 0 }),
+    } as any);
+    try {
+      await runParitySyncCycle({ trigger: 'startup' });
+      assert.deepEqual(calls.adminFetches, ['/api/pos/settings/terminal-1', '/api/pos/settings/terminal-1?category=menu']);
+      assert.equal(calls.staffSchedule.length, 1);
+      assert.equal(calls.loyaltySyncSettings, 0);
+      assert.equal(calls.loyaltySyncCustomers, 0);
+    } finally { setSyncQueueBridgeInstanceForTests(null); resetBridge(); }
+  }
+});
+
+test('optional access follows the filtered native module contract, not a page-cache or core flag', async () => {
+  const { bridge } = createMockBridge({ getCachedModules: async () => ({
+    ...moduleCache([]), modules: { ...moduleCache([]).modules, modules: [
+      { module_id: 'rooms', is_purchased: true, pos_enabled: true },
+      { module_id: 'inventory', is_core: true, pos_enabled: true },
+      { module_id: 'coupons', is_purchased: true, pos_enabled: true, is_locked: true },
+      { module_id: 'analytics', is_purchased: true, pos_enabled: true, is_enabled: false },
+    ] },
+  }) });
+  setBridge(bridge);
+  try { assert.deepEqual([...await getOptionalWarmupModules({ terminal_id: 'terminal-1' })], ['rooms']); }
+  finally { resetBridge(); }
 });

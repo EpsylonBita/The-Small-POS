@@ -143,7 +143,7 @@ fn legacy_loyalty_customers_from_local_cache(
             .unwrap_or(0)
             .cmp(&value_i64(a, &["points_balance"]).unwrap_or(0))
     });
-    rows.truncate(100);
+
     Ok(rows)
 }
 
@@ -399,28 +399,70 @@ pub async fn loyalty_sync_settings(db: tauri::State<'_, db::DbState>) -> Result<
     Ok(serde_json::json!({ "settings": row }))
 }
 
-/// Fetch loyalty customers from admin API and upsert into local cache.
-#[tauri::command]
-pub async fn loyalty_sync_customers(db: tauri::State<'_, db::DbState>) -> Result<Value, String> {
-    let org_id =
-        get_organization_id(&db).ok_or_else(|| "Organization not configured".to_string())?;
+const CUSTOMER_SNAPSHOT_KEY: &str = "loyalty_customers_snapshot_v1";
+static CUSTOMER_SNAPSHOT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-    let resp = crate::admin_fetch(Some(&db), "/api/pos/loyalty/customers", "GET", None).await?;
+fn loyalty_snapshot_scope(db: &db::DbState) -> Value {
+    let identity = |key| {
+        storage::get_credential(key).or_else(|| crate::read_local_setting(db, "terminal", key))
+    };
+    serde_json::json!([
+        identity("organization_id"),
+        identity("branch_id"),
+        identity("terminal_id")
+    ])
+}
 
-    let customers = resp
-        .get("customers")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
+async fn loyalty_snapshot_version(db: &db::DbState) -> Result<Option<String>, String> {
+    match crate::admin_fetch_detailed(
+        Some(db),
+        "/api/pos/sync-version?module=loyalty",
+        "GET",
+        None,
+    )
+    .await
+    {
+        Ok(value) => Ok(value
+            .get("version")
+            .and_then(Value::as_str)
+            .map(str::to_string)),
+        Err(error) if matches!(error.status(), Some(401 | 403)) => {
+            crate::write_local_json(db, CUSTOMER_SNAPSHOT_KEY, &Value::Null)?;
+            Err(error.to_string())
+        }
+        Err(_) => Ok(None), // Migration absent/offline: never treat as unchanged.
+    }
+}
 
+fn has_pending_loyalty(conn: &rusqlite::Connection, org: &str) -> Result<bool, String> {
+    conn.query_row("SELECT EXISTS(SELECT 1 FROM loyalty_transactions WHERE organization_id = ?1 AND sync_state NOT IN ('applied', 'synced'))", params![org], |row| row.get(0)).map_err(|e| e.to_string())
+}
+
+fn loyalty_snapshot_revision_confirmed(before: &Option<String>, after: &Option<String>) -> bool {
+    // Unversioned legacy fallback is allowed only when the initial check was unavailable.
+    before.is_none() || before == after
+}
+
+fn replace_loyalty_snapshot(
+    connection: &mut rusqlite::Connection,
+    org_id: &str,
+    customers: &[Value],
+) -> Result<usize, String> {
     let now = Utc::now().to_rfc3339();
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-
+    let conn = connection.transaction().map_err(|e| e.to_string())?;
+    if has_pending_loyalty(&conn, &org_id)? {
+        return Err("Loyalty changes pending during snapshot".into());
+    }
+    conn.execute(
+        "DELETE FROM loyalty_customers WHERE organization_id = ?1",
+        params![org_id],
+    )
+    .map_err(|e| e.to_string())?;
     let mut count = 0usize;
-    for c in &customers {
+    for c in customers {
         let id = c.get("id").and_then(|v| v.as_str()).unwrap_or_default();
         if id.is_empty() {
-            continue;
+            return Err("Invalid customer in loyalty snapshot".into());
         }
         let customer_id = c
             .get("customer_id")
@@ -464,6 +506,104 @@ pub async fn loyalty_sync_customers(db: tauri::State<'_, db::DbState>) -> Result
         count += 1;
     }
 
+    conn.commit().map_err(|e| e.to_string())?;
+    Ok(count)
+}
+
+/// Pull all pages before replacing the local snapshot, never overwriting pending points.
+#[tauri::command]
+pub async fn loyalty_sync_customers(
+    arg0: Option<Value>,
+    db: tauri::State<'_, db::DbState>,
+) -> Result<Value, String> {
+    let _guard = CUSTOMER_SNAPSHOT_LOCK.lock().await;
+    let org_id =
+        get_organization_id(&db).ok_or_else(|| "Organization not configured".to_string())?;
+    let scope = loyalty_snapshot_scope(&db);
+    let access = super::modules::modules_get_cached(db.clone()).await?;
+    let entitled = access.get("identityMatch").and_then(Value::as_bool) == Some(true)
+        && access
+            .pointer("/modules/modules")
+            .and_then(Value::as_array)
+            .is_some_and(|modules| {
+                modules.iter().any(|module| {
+                    module.get("module_id").and_then(Value::as_str) == Some("loyalty")
+                        && module.get("is_purchased").and_then(Value::as_bool) == Some(true)
+                        && module.get("pos_enabled").and_then(Value::as_bool) == Some(true)
+                        && module.get("is_enabled").and_then(Value::as_bool) != Some(false)
+                        && module.get("is_locked").and_then(Value::as_bool) != Some(true)
+                })
+            });
+    if !entitled {
+        crate::write_local_json(&db, CUSTOMER_SNAPSHOT_KEY, &Value::Null)?;
+        return Err("Loyalty unavailable for current terminal".into());
+    }
+    let version = loyalty_snapshot_version(&db).await?;
+    let marker = crate::read_local_json(&db, CUSTOMER_SNAPSHOT_KEY)?;
+    let force = arg0
+        .as_ref()
+        .and_then(|v| v.get("force"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        if has_pending_loyalty(&conn, &org_id)? {
+            drop(conn);
+            crate::write_local_json(&db, CUSTOMER_SNAPSHOT_KEY, &Value::Null)?;
+            return Ok(serde_json::json!({"success": true, "pendingLocalChanges": true}));
+        }
+    }
+    if !force
+        && version.is_some()
+        && marker.get("scope") == Some(&scope)
+        && marker.get("version").and_then(Value::as_str) == version.as_deref()
+    {
+        return Ok(serde_json::json!({"success": true, "unchanged": true}));
+    }
+    let mut customers = Vec::new();
+    let mut offset = 0u64;
+    loop {
+        let path = format!("/api/pos/loyalty/customers?limit=200&offset={offset}");
+        let response = crate::admin_fetch(Some(&db), &path, "GET", None).await?;
+        let page = response
+            .get("customers")
+            .and_then(Value::as_array)
+            .ok_or("Incomplete loyalty snapshot")?;
+        let more = response
+            .pointer("/pagination/hasMore")
+            .and_then(Value::as_bool)
+            .ok_or("Missing loyalty pagination")?;
+        customers.extend(page.iter().cloned());
+        if !more {
+            break;
+        }
+        let next = response
+            .pointer("/pagination/nextOffset")
+            .and_then(Value::as_u64)
+            .ok_or("Missing loyalty cursor")?;
+        if page.is_empty() || next <= offset {
+            return Err("Invalid loyalty cursor".into());
+        }
+        offset = next;
+    }
+    let after = loyalty_snapshot_version(&db).await?;
+    if scope != loyalty_snapshot_scope(&db) {
+        return Err("Loyalty snapshot identity changed".into());
+    }
+    if !loyalty_snapshot_revision_confirmed(&version, &after) {
+        return Err("Loyalty revision could not be confirmed after snapshot".into());
+    }
+    let count = {
+        let mut connection = db.conn.lock().map_err(|e| e.to_string())?;
+        replace_loyalty_snapshot(&mut connection, &org_id, &customers)?
+    };
+    crate::write_local_json(
+        &db,
+        CUSTOMER_SNAPSHOT_KEY,
+        &serde_json::json!({
+            "scope": scope, "version": if version == after { after } else { None }, "complete": true
+        }),
+    )?;
     info!(count = count, org_id = %org_id, "Synced loyalty customers from admin");
     Ok(serde_json::json!({ "success": true, "count": count }))
 }
@@ -490,7 +630,7 @@ pub async fn loyalty_get_customers(
         let sql = format!(
             "{} WHERE organization_id = ?1
              ORDER BY points_balance DESC
-             LIMIT 100",
+",
             loyalty_customer_select_clause()
         );
         let mut stmt = conn
@@ -509,7 +649,7 @@ pub async fn loyalty_get_customers(
             "{} WHERE organization_id = ?1
                AND (customer_name LIKE ?2 OR customer_email LIKE ?2 OR customer_phone LIKE ?2)
              ORDER BY points_balance DESC
-             LIMIT 100",
+",
             loyalty_customer_select_clause()
         );
         let mut stmt = conn
@@ -524,7 +664,13 @@ pub async fn loyalty_get_customers(
         rows
     };
 
-    if customers.is_empty() {
+    let complete = crate::db::get_setting(&conn, "local", CUSTOMER_SNAPSHOT_KEY)
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .is_some_and(|marker| {
+            marker.pointer("/scope/0").and_then(Value::as_str) == Some(org_id.as_str())
+                && marker.get("complete") == Some(&Value::Bool(true))
+        });
+    if customers.is_empty() && !complete {
         let legacy_customers = legacy_loyalty_customers_from_local_cache(&db, &org_id, &search)?;
         if !legacy_customers.is_empty() {
             return Ok(serde_json::json!({ "customers": legacy_customers }));
@@ -1053,6 +1199,18 @@ mod tests {
     use super::*;
     use rusqlite::Connection;
 
+    #[test]
+    fn snapshot_known_revision_requires_post_fetch_confirmation() {
+        let known = Some("1".to_string());
+        assert!(loyalty_snapshot_revision_confirmed(&known, &known));
+        assert!(!loyalty_snapshot_revision_confirmed(&known, &None));
+        assert!(!loyalty_snapshot_revision_confirmed(
+            &known,
+            &Some("2".to_string())
+        ));
+        assert!(loyalty_snapshot_revision_confirmed(&None, &None));
+    }
+
     fn setup_loyalty_customers_table(conn: &Connection) {
         conn.execute_batch(
             "
@@ -1076,6 +1234,68 @@ mod tests {
             ",
         )
         .unwrap();
+    }
+
+    #[test]
+    fn snapshot_replacement_is_atomic_and_preserves_pending_points() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        setup_loyalty_customers_table(&conn);
+        conn.execute_batch(
+            "CREATE TABLE loyalty_transactions (organization_id TEXT, sync_state TEXT);",
+        )
+        .unwrap();
+        let old = serde_json::json!({"id":"old", "points_balance":42});
+        replace_loyalty_snapshot(&mut conn, "org", &[old]).unwrap();
+        let broken = vec![serde_json::json!({"id":"new"}), serde_json::json!({})];
+        assert!(replace_loyalty_snapshot(&mut conn, "org", &broken).is_err());
+        assert_eq!(
+            conn.query_row(
+                "SELECT points_balance FROM loyalty_customers WHERE id='old'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            42
+        );
+        conn.execute(
+            "INSERT INTO loyalty_transactions VALUES ('org','pending')",
+            [],
+        )
+        .unwrap();
+        assert!(replace_loyalty_snapshot(&mut conn, "org", &[]).is_err());
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM loyalty_customers", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        conn.execute("UPDATE loyalty_transactions SET sync_state='applied'", [])
+            .unwrap();
+        let customers: Vec<Value> = (0..401)
+            .map(|n| serde_json::json!({"id": format!("customer-{n}")}))
+            .collect();
+        assert_eq!(
+            replace_loyalty_snapshot(&mut conn, "org", &customers).unwrap(),
+            401
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM loyalty_customers WHERE id='old'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        replace_loyalty_snapshot(&mut conn, "other-org", &[serde_json::json!({"id":"other"})])
+            .unwrap();
+        replace_loyalty_snapshot(&mut conn, "org", &[]).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM loyalty_customers", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
     }
 
     #[test]

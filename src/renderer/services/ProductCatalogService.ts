@@ -10,6 +10,7 @@
 import { supabase, isSupabaseConfigured } from '../../shared/supabase';
 import { posApiGet, posApiPatch } from '../utils/api-helpers';
 import { getBridge, isBrowser } from '../../lib';
+import { readModuleSnapshot } from './module-snapshots';
 import { offlineUpdateProductQuantity } from './offline-mutations';
 
 // Types
@@ -272,7 +273,7 @@ class ProductCatalogService {
    * Fetch products with optional filters
    * Uses retail_products table for retail vertical
    */
-  async fetchProducts(filters?: ProductFilters): Promise<Product[]> {
+  async fetchProducts(filters?: ProductFilters, force = false): Promise<Product[]> {
     // Validate context before making query
     if (!this.organizationId) {
       console.warn('ProductCatalogService: Missing organizationId, returning empty products');
@@ -281,7 +282,7 @@ class ProductCatalogService {
 
     try {
       if (this.useApiPrimary) {
-        const apiProducts = await this.fetchProductsFromApi(filters);
+        const apiProducts = await this.fetchProductsFromApi(filters, force);
         if (apiProducts !== null) {
           return apiProducts;
         }
@@ -474,36 +475,14 @@ class ProductCatalogService {
   // API FETCH METHODS
   // ===========================================================================
 
-  private async fetchProductsFromApi(filters?: ProductFilters): Promise<Product[] | null> {
-    try {
-      const params = new URLSearchParams();
-      if (filters?.categoryFilter && filters.categoryFilter !== 'all') {
-        params.set('category_id', filters.categoryFilter);
-      }
-      if (filters?.searchTerm) {
-        params.set('search', filters.searchTerm);
-      }
-      if (filters?.activeOnly !== false) {
-        params.set('is_active', 'true');
-      }
-      if (filters?.lowStockOnly) {
-        params.set('low_stock_only', 'true');
-      }
-
-      const endpoint = `/api/pos/products${params.toString() ? `?${params.toString()}` : ''}`;
-      const result = isBrowser()
-        ? await posApiGet<{ success: boolean; products: any[] }>(endpoint)
-        : await getBridge().adminApi.fetchFromAdmin(endpoint, { method: 'GET' });
-
-      if (!result.success || !result.data?.success) {
-        return null;
-      }
-
-      return (result.data.products || []).map(transformProductFromAPI);
-    } catch (error) {
-      console.error('ProductCatalogService: API fetchProducts error:', error);
-      return null;
-    }
+  private async fetchProductsFromApi(filters?: ProductFilters, force = false): Promise<Product[] | null> {
+    const snapshot = await readModuleSnapshot('product_catalog', force);
+    const search = filters?.searchTerm?.toLowerCase();
+    return snapshot.rows.map(transformProductFromAPI).filter(product =>
+      (filters?.activeOnly === false || product.isActive) &&
+      (!filters?.categoryFilter || filters.categoryFilter === 'all' || product.categoryId === filters.categoryFilter) &&
+      (!search || [product.name, product.sku, product.barcode].some(value => value?.toLowerCase().includes(search))) &&
+      (!filters?.lowStockOnly || product.quantity <= product.lowStockThreshold));
   }
 
   private async fetchProductByBarcodeFromApi(barcode: string): Promise<Product | null> {
@@ -590,14 +569,8 @@ class ProductCatalogService {
 
   private async fetchCategoriesFromApi(): Promise<ProductCategory[] | null> {
     try {
-      const result = isBrowser()
-        ? await posApiGet<{ success: boolean; categories: any[] }>('/api/pos/product-categories')
-        : await getBridge().adminApi.fetchFromAdmin('/api/pos/product-categories', { method: 'GET' });
-      if (!result.success || !result.data?.success) {
-        return null;
-      }
-
-      return (result.data.categories || []).map((c: any) => ({
+      const snapshot = await readModuleSnapshot('product_catalog');
+      return (snapshot.categories).map((c: any) => ({
         id: c.id,
         name: c.name,
         isActive: c.is_active ?? true,

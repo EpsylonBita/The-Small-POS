@@ -74,7 +74,9 @@ function parseEventMap() {
 
 function parseRustRegisteredCommands() {
   const lib = readFile('src-tauri/src/lib.rs');
-  const match = lib.match(/generate_handler!\[([\s\S]*?)\]\)/m);
+  // The macro can be assigned inside the local-display permission wrapper,
+  // rather than passed directly to invoke_handler. Its delimiter is still ].
+  const match = lib.match(/generate_handler!\s*\[([\s\S]*?)\]/m);
   if (!match) throw new Error('Failed to parse generate_handler! from src-tauri/src/lib.rs');
   const cleaned = match[1]
     .replace(/\/\/.*$/gm, ' ')

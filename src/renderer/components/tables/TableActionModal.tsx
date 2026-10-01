@@ -33,6 +33,12 @@ interface TableActionModalProps {
   onCancelReservation?: () => void | Promise<void>;
   onClose: () => void;
   isOpen: boolean;
+  /**
+   * The store owns the Reservations module, so this table can be booked.
+   * Managing a reservation that already exists (edit, no-show, cancel) stays
+   * available without it, as on the Android POS.
+   */
+  canCreateReservation?: boolean;
 }
 
 /**
@@ -50,7 +56,8 @@ export const TableActionModal: React.FC<TableActionModalProps> = memo(({
   onNoShowReservation,
   onCancelReservation,
   onClose,
-  isOpen
+  isOpen,
+  canCreateReservation = true,
 }) => {
   const { t } = useI18n();
   const { resolvedTheme } = useTheme();
@@ -478,8 +485,8 @@ export const TableActionModal: React.FC<TableActionModalProps> = memo(({
                 </div>
               )}
 
-              {/* New Reservation Button - Requirements 3.2, 3.4 */}
-              {!isReservedTable && (
+              {/* New Reservation Button - Requirements 3.2, 3.4; only with the Reservations module */}
+              {!isReservedTable && canCreateReservation && (
                 <button
                   onClick={handleNewReservation}
                   disabled={isMaintenanceTable || isUnavailableTable}

@@ -1,10 +1,10 @@
-import React, { memo, useCallback, useEffect } from 'react';
+import React, { memo, useEffect } from 'react';
 import { useOrderStore } from '../../hooks/useOrderStore';
 import { OrderDashboard } from '../OrderDashboard';
 import OrderFlow from '../OrderFlow';
 import { OrderConflictBanner } from '../OrderConflictBanner';
-import type { Order } from '../../types/orders';
 import { getBridge } from '../../../lib';
+import { foodOrderFilter } from './dashboardOrderScope';
 
 /**
  * Food Business Category Dashboard
@@ -22,25 +22,6 @@ interface FoodDashboardProps {
 export const FoodDashboard = memo<FoodDashboardProps>(({ className = '' }) => {
   const bridge = getBridge();
   const { initializeOrders, conflicts } = useOrderStore();
-
-  const foodOrderFilter = useCallback((order: Order): boolean => {
-    const items = Array.isArray(order.items) ? order.items : [];
-
-    if (items.length === 0) {
-      return true;
-    }
-
-    return !items.some((item) => {
-      const candidate = item as any;
-      return Boolean(
-        candidate.product_id ||
-        candidate.productId ||
-        candidate.retail_product_id ||
-        candidate.product_name ||
-        candidate.productName
-      );
-    });
-  }, []);
 
   // Initialize orders when dashboard loads
   useEffect(() => {
@@ -72,7 +53,8 @@ export const FoodDashboard = memo<FoodDashboardProps>(({ className = '' }) => {
         />
       )}
 
-      {/* Main Order Dashboard */}
+      {/* Main Order Dashboard. The same food scope decides which pending
+          platform orders the app-shell alert rings for (dashboardOrderScope). */}
       <OrderDashboard className="flex-1" orderFilter={foodOrderFilter} />
 
       {/* Reuse order-flow modals/state here, but let OrderDashboard own the visible FAB */}

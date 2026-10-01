@@ -2,9 +2,12 @@ import { environment } from '../../config/environment';
 import { emitCompatEvent, getBridge } from '../../lib';
 import { getSyncQueueBridge } from './SyncQueueBridge';
 import {
+  canWarmPosModulePath,
   getPosModuleCachePrefixes,
   getPosModuleWarmPaths,
 } from './pos-module-cache-registry';
+import { getOptionalWarmupModules } from './pos-module-warmup-access';
+import { readModuleSnapshot } from './module-snapshots';
 import { syncPurchaseOrderSnapshot } from './purchase-order-snapshot';
 import type {
   QueueStatus,
@@ -100,7 +103,7 @@ function describeCaughtError(error: unknown, fallback: string): string {
   return fallback;
 }
 
-function getAdvisoryCachePaths(config: RuntimeConfigLike): string[] {
+function getAdvisoryCachePaths(config: RuntimeConfigLike, enabledModules: ReadonlySet<string>): string[] {
   const terminalId = readString(config, 'terminal_id', 'terminalId');
   const dynamicPaths = terminalId
     ? [
@@ -111,25 +114,8 @@ function getAdvisoryCachePaths(config: RuntimeConfigLike): string[] {
 
   return [
     ...dynamicPaths,
-    '/api/pos/integrations',
-    '/api/pos/mydata/config',
-    '/api/pos/customer-display?limit=200',
-    '/api/pos/kiosk/status',
-    '/api/pos/kiosk/orders?limit=10',
-    '/api/pos/analytics?time_range=today',
-    '/api/pos/analytics?time_range=week',
-    '/api/pos/analytics?time_range=month',
-    '/api/pos/delivery-zones',
-    '/api/pos/map-analytics?time_range=30d',
-    '/api/pos/sync/inventory_items?limit=2000',
-    '/api/pos/suppliers',
-    '/api/pos/coupons',
-    ...getPosModuleWarmPaths(),
+    ...getPosModuleWarmPaths(enabledModules),
   ];
-}
-
-function getVerticalCachePrefixes(): string[] {
-  return getPosModuleCachePrefixes();
 }
 
 function currentWeekRange(): { start_date: string; end_date: string } {
@@ -148,26 +134,35 @@ function currentWeekRange(): { start_date: string; end_date: string } {
   }
 }
 
-async function warmAdvisoryPageCaches(config: RuntimeConfigLike): Promise<void> {
+async function warmAdvisoryPageCaches(config: RuntimeConfigLike, enabledModules: ReadonlySet<string>): Promise<void> {
   const bridge = getBridge();
-  const cachePaths = getAdvisoryCachePaths(config);
+  const genericModules = new Set([...enabledModules].filter(id => id !== 'inventory' && id !== 'product_catalog'));
+  const cachePaths = getAdvisoryCachePaths(config, genericModules);
+  await Promise.allSettled([
+    ...(enabledModules.has('inventory') ? [readModuleSnapshot('inventory')] : []),
+    ...(enabledModules.has('product_catalog') ? [readModuleSnapshot('product_catalog')] : []),
+  ]);
 
   await Promise.allSettled(
     cachePaths.map((path) => bridge.adminApi.fetchFromAdmin(path, { method: 'GET' })),
   );
 
-  await Promise.allSettled([
-    bridge.loyalty?.syncSettings?.(),
-    bridge.loyalty?.syncCustomers?.(),
-  ]);
+  if (enabledModules.has('loyalty')) {
+    await Promise.allSettled([
+      bridge.loyalty?.syncSettings?.(),
+      bridge.loyalty?.syncCustomers?.(),
+    ]);
+  }
 
-  const cachedPathResult = await bridge
-    .invoke('api:list-cached-paths', { prefixes: getVerticalCachePrefixes() })
-    .catch(() => null) as { success?: boolean; paths?: string[] } | null
+  const prefixes = getPosModuleCachePrefixes(genericModules);
+  const cachedPathResult = (prefixes.length > 0
+    ? await bridge.invoke('api:list-cached-paths', { prefixes }).catch(() => null)
+    : null) as { success?: boolean; paths?: string[] } | null
   const cachedVerticalPaths = Array.isArray(cachedPathResult?.paths) ? cachedPathResult?.paths : []
   if (cachedVerticalPaths.length > 0) {
     await Promise.allSettled(
-      [...new Set(cachedVerticalPaths)].filter((path) => !cachePaths.includes(path))
+      [...new Set(cachedVerticalPaths)].filter((path) =>
+        typeof path === 'string' && !cachePaths.includes(path) && canWarmPosModulePath(path, genericModules))
         .map((path) => bridge.adminApi.fetchFromAdmin(path, { method: 'GET' })),
     )
   }
@@ -340,9 +335,12 @@ export async function runParitySyncCycle(options?: {
         console.warn('[ParitySyncCoordinator] Parity queue sync skipped:', paritySyncReason);
       }
 
+      const optionalWarmupModules = credentialState.hasAdminUrl && credentialState.hasApiKey &&
+        (refreshSnapshots || (paritySyncResult?.processed ?? 0) > 0)
+        ? await getOptionalWarmupModules(config) : new Set<string>();
       try {
         if (refreshSnapshots && credentialState.hasAdminUrl && credentialState.hasApiKey) {
-          await warmAdvisoryPageCaches(config);
+          await warmAdvisoryPageCaches(config, optionalWarmupModules);
         }
       } catch (error) {
         console.warn('[ParitySyncCoordinator] Advisory cache warmup failed:', error);
@@ -353,7 +351,7 @@ export async function runParitySyncCycle(options?: {
       // processQueue so queued receipts replay before the snapshot
       // refresh, clearing their pending overlays into fresh server state.
       try {
-        if (refreshSnapshots || (paritySyncResult?.processed ?? 0) > 0) {
+        if (optionalWarmupModules.has('suppliers') && (refreshSnapshots || (paritySyncResult?.processed ?? 0) > 0)) {
           await syncPurchaseOrderSnapshot();
         }
       } catch (error) {

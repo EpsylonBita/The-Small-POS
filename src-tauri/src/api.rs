@@ -22,6 +22,23 @@ pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const POS_CLIENT_VERSION_HEADER: &str = "x-pos-client-version";
 const POS_CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Capabilities this terminal declares on `POST /api/pos/payments`, as a
+/// comma-separated list so later tokens can join it.
+///
+/// `platform-held-refusal-v1` (item D, founder decision 30/09/2026): the
+/// server may refuse a new cash/card row on money the delivery platform holds
+/// with `409 PLATFORM_HELD_ORDER`, and this terminal sets such a payment aside
+/// for review instead of parking it as a sync conflict. A client that does
+/// not declare it still gets a `200` and a non-counting server row.
+pub(crate) const POS_CAPABILITIES_HEADER: &str = "x-pos-capabilities";
+pub(crate) const POS_CAPABILITIES: &str = "platform-held-refusal-v1";
+
+/// The capabilities to declare on one request, if it is one that reads them.
+pub(crate) fn pos_capabilities_for(method: &str, path: &str) -> Option<&'static str> {
+    let path = path.split('?').next().unwrap_or(path).trim_end_matches('/');
+    (method.eq_ignore_ascii_case("POST") && path == "/api/pos/payments").then_some(POS_CAPABILITIES)
+}
+
 /// Shared reqwest::Client — holds a connection pool, TLS session cache,
 /// and DNS cache. Previously a fresh Client was built on every call to
 /// `fetch_from_admin` and `test_connectivity`, which defeated keep-alive,
@@ -769,6 +786,9 @@ pub async fn fetch_from_admin_detailed_with_staff_session(
     if let Some(staff_session_id) = staff_session_id {
         req = req.header("x-staff-session-id", staff_session_id);
     }
+    if let Some(capabilities) = pos_capabilities_for(method, path) {
+        req = req.header(POS_CAPABILITIES_HEADER, capabilities);
+    }
 
     if let Some(b) = body {
         // If the JavaScript frontend pre-serialized the body via JSON.stringify(),
@@ -794,6 +814,68 @@ pub async fn fetch_from_admin_detailed_with_staff_session(
     }
 
     read_success_json(resp).await
+}
+
+/// Status and parsed body of one staff-session JSON POST at any HTTP status.
+/// `body` is `None` when the reply is not JSON; `code` is the reply's own
+/// error code on a non-2xx status. Nothing is derived from error text.
+pub(crate) struct AdminJsonReply {
+    pub status: u16,
+    pub body: Option<Value>,
+    pub code: Option<String>,
+}
+
+/// Narrow variant of [`fetch_from_admin_detailed_with_staff_session`] for a
+/// caller that must judge a proof carried by a non-2xx reply: the same origin,
+/// API key, terminal and staff-session headers, but a non-2xx reply returns
+/// its status and capped parsed body instead of an error. Only transport and
+/// local failures are errors.
+pub(crate) async fn post_admin_json_with_staff_session_reply(
+    admin_url: &str,
+    api_key: &str,
+    path: &str,
+    body: &Value,
+    staff_session_id: &str,
+    timeout: Duration,
+) -> Result<AdminJsonReply, AdminFetchError> {
+    let base = resolve_admin_base(admin_url)?;
+    let resolved_api_key =
+        extract_api_key_from_connection_string(api_key).unwrap_or_else(|| api_key.to_string());
+    let full_url = format!("{base}{path}");
+    let client = shared_client()?;
+    let terminal_id = resolve_terminal_id(api_key)?;
+
+    let mut resp = pos_request(client, Method::POST, &full_url)
+        .timeout(timeout)
+        .header("X-POS-API-Key", resolved_api_key)
+        .header("x-terminal-id", &terminal_id)
+        .header("Content-Type", "application/json")
+        .header("x-staff-session-id", staff_session_id)
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| AdminFetchError::transport(friendly_error(&base, &e)))?;
+    let status = resp.status();
+
+    if status.is_success() {
+        let body = match read_success_json(resp).await {
+            Ok(body) => Some(body),
+            Err(error) if error.is_transport_failure() => return Err(error),
+            Err(_) => None,
+        };
+        return Ok(AdminJsonReply {
+            status: status.as_u16(),
+            body,
+            code: None,
+        });
+    }
+
+    let body_text = read_capped_error_body(&mut resp).await;
+    Ok(AdminJsonReply {
+        status: status.as_u16(),
+        body: serde_json::from_str::<Value>(&body_text).ok(),
+        code: admin_http_error_from_body(status, &body_text).code,
+    })
 }
 
 /// Header names [`fetch_raw_from_admin_detailed`] owns outright.
@@ -991,6 +1073,31 @@ mod tests {
             1,
             "invalid candidate requests must not reach HTTP"
         );
+    }
+
+    /// Item D (30/09/2026): every payment post declares that this terminal
+    /// takes a `409 PLATFORM_HELD_ORDER`; nothing else carries the header.
+    #[test]
+    fn payment_posts_declare_the_platform_held_refusal_capability() {
+        assert_eq!(POS_CAPABILITIES_HEADER, "x-pos-capabilities");
+        for (method, path) in [
+            ("POST", "/api/pos/payments"),
+            ("post", "/api/pos/payments/"),
+            ("POST", "/api/pos/payments?source=queue"),
+        ] {
+            assert_eq!(
+                pos_capabilities_for(method, path),
+                Some("platform-held-refusal-v1"),
+                "{method} {path}"
+            );
+        }
+        for (method, path) in [
+            ("GET", "/api/pos/payments"),
+            ("POST", "/api/pos/payments/adjustments"),
+            ("PATCH", "/api/pos/orders"),
+        ] {
+            assert_eq!(pos_capabilities_for(method, path), None, "{method} {path}");
+        }
     }
 
     #[test]

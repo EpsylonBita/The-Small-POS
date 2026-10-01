@@ -1,11 +1,47 @@
 {
+  "displayPurchase": {
+    "beforePurchase": "Before you buy",
+    "operation": "How it works",
+    "equipment": "Required equipment",
+    "compatibility": "Check compatibility",
+    "videoOutput": "Use a compatible independent video output: HDMI or USB-C video with a suitable cable, adapter or dock, or supported operating-system wireless display such as Miracast with a compatible receiver. Sharing a Wi-Fi network alone does not create a display output.",
+    "shopHardware": "Screens, touchscreens, cables, USB touch connections, adapters, docks and wireless receivers are provided by the shop and are not included in the module subscription.",
+    "hardwareCheck": "USB-C must support video output; not every Android POS has it. Check the actual device, operating system, graphics, ports, firmware and receiver before purchase. Support for two wireless displays is not guaranteed.",
+    "twoScreens": "Using KDS and Customer Display together requires the main POS screen plus two different, independently addressable external screens. The hardware must support both outputs. A basic HDMI splitter repeats the same image.",
+    "localOnly": "These are local connected screens, without browser or Smart TV cloud links, pairing URLs or a dedicated display cloud service. Normal POS order synchronization and licensing remain separate.",
+    "kitchen_display": {
+      "summary": "A separate kitchen view of the POS's local orders while the main POS stays available to take orders.",
+      "requirements": "For an external interactive screen, check compatible HDMI/USB-C or operating-system wireless video and touch/input return. Hardware is shop-provided and is not included. Using both display modules needs two separate external outputs.",
+      "features": {
+        "local": "Local kitchen view",
+        "workflow": "Cashier keeps taking orders",
+        "status": "Ready and Collected kitchen actions"
+      },
+      "operation": "Open KDS inside the Windows or Android POS. It reads local orders and presents a separate kitchen view while the primary POS can take orders. Keep the app running; page navigation does not stop an active projection.",
+      "collection": "Kitchen Ready and Collected actions update the Dashboard and active orders, and a purchased Customer Display. Collected means kitchen pickup only; the sale and payment remain active until their normal workflow completes.",
+      "input": "Kitchen interaction requires compatible touch or input return: for example HDMI video plus USB touch, mapped correctly by the device and operating system, or a wireless receiver with input return. HDMI video alone does not provide touch."
+    },
+    "customer_display": {
+      "summary": "A separate purchased module: a local Preparing/Ready board on another connected screen that hides Collected orders while the main POS stays available.",
+      "requirements": "Needs a separate screen and compatible independent video output; the passive board needs no touchscreen. Hardware is shop-provided and is not included. Using both display modules needs two separate external outputs.",
+      "features": {
+        "local": "Local customer-facing board",
+        "workflow": "Separate purchased module",
+        "status": "Preparing/Ready; Collected rows hidden"
+      },
+      "operation": "Customer Display runs locally on another connected screen. It shows Preparing and Ready orders and hides Collected rows while the main POS stays available for order entry. This is a separate purchased module.",
+      "input": "A passive Customer Display board does not require a touchscreen."
+    }
+  },
   "primaryActions": {
     "trigger": "New",
     "newSale": "New sale",
     "newRepair": "New repair",
     "quickService": "Quick service",
     "newAppointment": "New appointment",
-    "status": { "comingSoon": "Coming soon in the Repairs beta workflow" }
+    "status": {
+      "comingSoon": "Coming soon in the Repairs beta workflow"
+    }
   },
   "repairs": {
     "title": "Repairs",
@@ -15,22 +51,248 @@
     "refresh": "Refresh repairs",
     "searchLabel": "Search repairs",
     "searchPlaceholder": "Repair number, offline alias or safe device label",
-    "filters": { "status": "Status", "priority": "Priority", "due": "Due", "sync": "Sync", "all": "All", "overdue": "Overdue" },
-    "tabs": { "overview": "Overview", "diagnosis": "Diagnosis", "partsLabour": "Parts & labour", "estimateApproval": "Estimate & approval", "timeline": "Timeline", "photos": "Photos", "payments": "Payments", "communication": "Communication" },
-    "status": { "received": "Received", "diagnosing": "Diagnosing", "waiting_customer_approval": "Waiting for customer approval", "approved": "Approved", "waiting_parts": "Waiting for parts", "repairing": "Repairing", "quality_check": "Quality check", "ready": "Ready", "delivered": "Delivered", "cancelled": "Cancelled", "unrepairable": "Unrepairable" },
-    "priority": { "low": "Low", "normal": "Normal", "high": "High", "urgent": "Urgent" },
-    "intake": { "standard": "Standard repair", "quickService": "Quick service", "anonymous": "Anonymous quick service", "linked": "Link customer", "mode": "Quick Service customer mode", "customerDevice": "Customer and device", "customerSearch": "Customer search", "searchCustomers": "Search customers", "customerResults": "Customer results", "deviceResults": "Customer devices", "newDevice": "New device", "deviceType": "Device type", "deviceLabel": "Device label", "manufacturer": "Manufacturer", "model": "Model", "saveDevice": "Save device", "title": "Repair title", "customerRequired": "Select a customer and device for a standard repair.", "quickCustomerRequired": "Select a customer for linked Quick Service.", "anonymousHelp": "Anonymous quick service has no customer history or automated messages." },
-    "sync": { "synced": "Synced", "pending": "Queued for sync", "conflict": "Needs review", "needs_refetch": "Refresh required", "local": "Local" },
-    "list": { "loading": "Loading repairs…", "empty": "No repairs match these filters.", "select": "Select a repair to open its workspace.", "overdue": "Overdue", "due": "Due {{date}}", "aliases": "Also known as {{aliases}}" },
-    "pagination": { "label": "Repair pages", "previous": "Previous", "next": "Next", "summary": "{{start}}–{{end}} of {{total}}" },
-    "timeline": { "created": "Repair created", "status_changed": "Status changed", "note_added": "Note added", "assignment_changed": "Assignment changed", "diagnosis_updated": "Diagnosis updated", "line_changed": "Repair line changed", "part_consumed": "Part consumed", "part_reversed": "Part consumption reversed", "estimate_created": "Estimate created", "approval_recorded": "Approval recorded", "attachment_added": "Attachment added", "attachment_retention_changed": "Attachment retention changed", "settlement_linked": "Settlement linked", "branch_transferred": "Branch transferred", "reopened": "Repair reopened", "unknown": "Repair activity" },
-    "fields": { "customer": "Customer", "device": "Device", "assignedTo": "Assigned to", "assigned": "Assigned", "dueAt": "Due date", "intakeNotes": "Intake notes", "diagnosis": "Diagnosis", "anonymous": "Anonymous customer", "unassigned": "Unassigned", "notRecorded": "Not recorded" },
-    "actions": {"create": "Create repair", "operations": "Repair actions", "changeStatus": "Change status", "transitionReason": "Audited reason", "remainConsumed": "Keep consumed parts consumed", "addNote": "Add note", "assign": "Assign", "assignToMe": "Assign to me", "unassign": "Unassign", "updateDiagnosis": "Save diagnosis draft", "finalizeDiagnosis": "Save final diagnosis", "planLine": "Add planned line", "consumePart": "Consume part", "reversePart": "Reverse consumption", "reversalReason": "Reversal reason", "lineType": "Line type", "part": "Part", "labour": "Labour", "charge": "Charge", "lineName": "Line name", "sku": "SKU", "quantity": "Quantity", "unitPrice": "Unit price", "vatRate": "VAT rate", "discount": "Discount", "validUntil": "Valid until", "estimateNote": "Estimate note", "createEstimate": "Create estimate", "recordApproval": "Record in-person approval", "stagePhoto": "Add photo", "openAttachment": "Open attachment", "acceptServer": "Use server version", "rebase": "Rebase my changes", "close": "Close", "catalogSearch": "Catalog search", "printIntake": "Print intake", "printLabel": "Print label", "searchCatalog": "Search catalog"},
-    "panels": { "partsEmpty": "No planned parts, labour or charges yet.", "estimateEmpty": "No estimate has been issued yet.", "timelineEmpty": "No timeline events yet.", "photosEmpty": "No attachment metadata is available.", "conflictsTitle": "Sync conflicts", "conflictsEmpty": "No repair conflicts need review." },
-    "messages": {"readyQueued": "Ready status is queued for sync.", "noNotificationSent": "No customer notification has been sent yet.", "offline": "Offline changes stay queued until this terminal reconnects.", "onlineActionRequired": "This action requires an online server check.", "activeShiftRequired": "Start a staff shift to load repair data and actions.", "selectorOnline": "Customer and device lookup requires an online native connection. A previously selected canonical customer and device can still be submitted offline.", "createUnavailable": "Creating repairs requires an active shift and repair-create permission.", "conflictResolutionUnavailable": "Conflict resolution requires an active shift, an online native connection and repair-update permission.", "submitInProgress": "The repair is being saved. Closing is temporarily disabled.", "finalDiagnosisOnline": "Final diagnosis requires an online server check; drafts can be queued offline.", "estimateOnline": "Estimates and approvals require an online server check.", "estimateNeedsLines": "Add at least one planned line before creating an estimate.", "photoOneShot": "The selected photo is read once and handed to encrypted native staging; the renderer does not persist it.", "photoUnavailable": "Photo staging requires loaded attachment settings, repair permission, a known connection state and an active shift.", "attachmentTypeInvalid": "This file type is not allowed by repair settings.", "attachmentTooLarge": "This photo is larger than the repair attachment limit.", "attachmentInvalid": "Select a non-empty photo allowed by repair settings.", "attachmentStageFailed": "The photo could not be staged.", "attachmentOpenFailed": "The attachment could not be opened securely.", "loadFailed": "Repairs could not be loaded.", "commandFailed": "The repair change could not be saved.", "assignmentUnavailable": "Self-assignment requires a canonical staff identity and repair-assignment permission.", "settingsUnavailable": "Repair intake stays disabled until authoritative or cached settings are available.", "invalidIntake": "Check the intake details and try again.", "customerSearchFailed": "Customer search could not be completed.", "deviceLoadFailed": "Customer devices could not be loaded.", "deviceCreateFailed": "The device could not be saved.", "secureIdUnavailable": "Secure device identifiers are unavailable. Restart the application before creating a repair.", "catalogNoMatch": "No safe catalog match was found.", "catalogUnavailable": "Catalog lookup is unavailable.", "printFailed": "The repair document could not be queued securely."},
-    "locked": { "communication": "Customer Messaging is not enabled in this private-beta build.", "money": "Repair payments, refunds, fiscalization and delivery remain locked until the typed native money transport is available.", "approvalTransition": "Approved status is reached only through the audited approval action in Estimate & approval.", "assignment": "Assignment changes remain locked until a scoped, repair-safe staff projection is available.", "stockReversal": "Stock reversal remains locked because the native workspace does not expose the original movement reference.", "catalog": "Product and service catalog lookup remains locked until a repair-safe read-only native projection is available.", "attachmentOpen": "Opening existing attachments remains locked until signed native retrieval is available.", "printing": "Repair printing remains locked until the typed native print queue is available." },
-    "money": {"readiness": {"loading": "Checking fiscal readiness…", "retry": "Retry", "nonFiscalInfo": "myDATA is optional. Repair payments can be recorded without the plugin.", "setupRequired": "Fiscal setup for this branch is incomplete.", "countryRequired": "A branch country is required before this action.", "providerRequired": "A fiscal provider is required for fiscal actions.", "certificationRequired": "Fiscal certification is required for fiscal actions.", "transportUnavailable": "Fiscal document submission is not available for this integration.", "statusUnavailable": "Fiscal readiness could not be determined."}, "title": "Repair payments", "onlineRequired": "Payments require an online connection.", "activeShiftRequired": "Open a shift to perform repair money actions.", "loading": "Loading settlement…", "total": "Total", "paid": "Paid", "balance": "Balance", "createSettlement": "Create settlement", "fiscalize": "Issue fiscal document", "collect": "Collect payment", "refund": "Refund payment", "refundPayment": "Payment to refund", "deliver": "Deliver repair", "delivery": "Delivery", "deliveryReason": "Delivery override reason", "paymentAmount": "Payment amount", "paymentMethod": "Payment method", "refundAmount": "Refund amount", "refundMethod": "Refund method", "refundReason": "Refund reason", "providerReference": "Provider reference", "depositUnsupported": "Partial repair deposits are not supported by this fiscal profile."},
-    "a11y": { "resultsUpdated": "{{count}} repair results available.", "currentRepair": "Current repair: {{number}}", "tabHint": "Use the left and right arrow keys to change tabs.", "statusLabel": "Repair status: {{status}}" }
+    "filters": {
+      "status": "Status",
+      "priority": "Priority",
+      "due": "Due",
+      "sync": "Sync",
+      "all": "All",
+      "overdue": "Overdue"
+    },
+    "tabs": {
+      "overview": "Overview",
+      "diagnosis": "Diagnosis",
+      "partsLabour": "Parts & labour",
+      "estimateApproval": "Estimate & approval",
+      "timeline": "Timeline",
+      "photos": "Photos",
+      "payments": "Payments",
+      "communication": "Communication"
+    },
+    "status": {
+      "received": "Received",
+      "diagnosing": "Diagnosing",
+      "waiting_customer_approval": "Waiting for customer approval",
+      "approved": "Approved",
+      "waiting_parts": "Waiting for parts",
+      "repairing": "Repairing",
+      "quality_check": "Quality check",
+      "ready": "Ready",
+      "delivered": "Delivered",
+      "cancelled": "Cancelled",
+      "unrepairable": "Unrepairable"
+    },
+    "priority": {
+      "low": "Low",
+      "normal": "Normal",
+      "high": "High",
+      "urgent": "Urgent"
+    },
+    "intake": {
+      "standard": "Standard repair",
+      "quickService": "Quick service",
+      "anonymous": "Anonymous quick service",
+      "linked": "Link customer",
+      "mode": "Quick Service customer mode",
+      "customerDevice": "Customer and device",
+      "customerSearch": "Customer search",
+      "searchCustomers": "Search customers",
+      "customerResults": "Customer results",
+      "deviceResults": "Customer devices",
+      "newDevice": "New device",
+      "deviceType": "Device type",
+      "deviceLabel": "Device label",
+      "manufacturer": "Manufacturer",
+      "model": "Model",
+      "saveDevice": "Save device",
+      "title": "Repair title",
+      "customerRequired": "Select a customer and device for a standard repair.",
+      "quickCustomerRequired": "Select a customer for linked Quick Service.",
+      "anonymousHelp": "Anonymous quick service has no customer history or automated messages."
+    },
+    "sync": {
+      "synced": "Synced",
+      "pending": "Queued for sync",
+      "conflict": "Needs review",
+      "needs_refetch": "Refresh required",
+      "local": "Local"
+    },
+    "list": {
+      "loading": "Loading repairs…",
+      "empty": "No repairs match these filters.",
+      "select": "Select a repair to open its workspace.",
+      "overdue": "Overdue",
+      "due": "Due {{date}}",
+      "aliases": "Also known as {{aliases}}"
+    },
+    "pagination": {
+      "label": "Repair pages",
+      "previous": "Previous",
+      "next": "Next",
+      "summary": "{{start}}–{{end}} of {{total}}"
+    },
+    "timeline": {
+      "created": "Repair created",
+      "status_changed": "Status changed",
+      "note_added": "Note added",
+      "assignment_changed": "Assignment changed",
+      "diagnosis_updated": "Diagnosis updated",
+      "line_changed": "Repair line changed",
+      "part_consumed": "Part consumed",
+      "part_reversed": "Part consumption reversed",
+      "estimate_created": "Estimate created",
+      "approval_recorded": "Approval recorded",
+      "attachment_added": "Attachment added",
+      "attachment_retention_changed": "Attachment retention changed",
+      "settlement_linked": "Settlement linked",
+      "branch_transferred": "Branch transferred",
+      "reopened": "Repair reopened",
+      "unknown": "Repair activity"
+    },
+    "fields": {
+      "customer": "Customer",
+      "device": "Device",
+      "assignedTo": "Assigned to",
+      "assigned": "Assigned",
+      "dueAt": "Due date",
+      "intakeNotes": "Intake notes",
+      "diagnosis": "Diagnosis",
+      "anonymous": "Anonymous customer",
+      "unassigned": "Unassigned",
+      "notRecorded": "Not recorded"
+    },
+    "actions": {
+      "create": "Create repair",
+      "operations": "Repair actions",
+      "changeStatus": "Change status",
+      "transitionReason": "Audited reason",
+      "remainConsumed": "Keep consumed parts consumed",
+      "addNote": "Add note",
+      "assign": "Assign",
+      "assignToMe": "Assign to me",
+      "unassign": "Unassign",
+      "updateDiagnosis": "Save diagnosis draft",
+      "finalizeDiagnosis": "Save final diagnosis",
+      "planLine": "Add planned line",
+      "consumePart": "Consume part",
+      "reversePart": "Reverse consumption",
+      "reversalReason": "Reversal reason",
+      "lineType": "Line type",
+      "part": "Part",
+      "labour": "Labour",
+      "charge": "Charge",
+      "lineName": "Line name",
+      "sku": "SKU",
+      "quantity": "Quantity",
+      "unitPrice": "Unit price",
+      "vatRate": "VAT rate",
+      "discount": "Discount",
+      "validUntil": "Valid until",
+      "estimateNote": "Estimate note",
+      "createEstimate": "Create estimate",
+      "recordApproval": "Record in-person approval",
+      "stagePhoto": "Add photo",
+      "openAttachment": "Open attachment",
+      "acceptServer": "Use server version",
+      "rebase": "Rebase my changes",
+      "close": "Close",
+      "catalogSearch": "Catalog search",
+      "printIntake": "Print intake",
+      "printLabel": "Print label",
+      "searchCatalog": "Search catalog"
+    },
+    "panels": {
+      "partsEmpty": "No planned parts, labour or charges yet.",
+      "estimateEmpty": "No estimate has been issued yet.",
+      "timelineEmpty": "No timeline events yet.",
+      "photosEmpty": "No attachment metadata is available.",
+      "conflictsTitle": "Sync conflicts",
+      "conflictsEmpty": "No repair conflicts need review."
+    },
+    "messages": {
+      "readyQueued": "Ready status is queued for sync.",
+      "noNotificationSent": "No customer notification has been sent yet.",
+      "offline": "Offline changes stay queued until this terminal reconnects.",
+      "onlineActionRequired": "This action requires an online server check.",
+      "activeShiftRequired": "Start a staff shift to load repair data and actions.",
+      "selectorOnline": "Customer and device lookup requires an online native connection. A previously selected canonical customer and device can still be submitted offline.",
+      "createUnavailable": "Creating repairs requires an active shift and repair-create permission.",
+      "conflictResolutionUnavailable": "Conflict resolution requires an active shift, an online native connection and repair-update permission.",
+      "submitInProgress": "The repair is being saved. Closing is temporarily disabled.",
+      "finalDiagnosisOnline": "Final diagnosis requires an online server check; drafts can be queued offline.",
+      "estimateOnline": "Estimates and approvals require an online server check.",
+      "estimateNeedsLines": "Add at least one planned line before creating an estimate.",
+      "photoOneShot": "The selected photo is read once and handed to encrypted native staging; the renderer does not persist it.",
+      "photoUnavailable": "Photo staging requires loaded attachment settings, repair permission, a known connection state and an active shift.",
+      "attachmentTypeInvalid": "This file type is not allowed by repair settings.",
+      "attachmentTooLarge": "This photo is larger than the repair attachment limit.",
+      "attachmentInvalid": "Select a non-empty photo allowed by repair settings.",
+      "attachmentStageFailed": "The photo could not be staged.",
+      "attachmentOpenFailed": "The attachment could not be opened securely.",
+      "loadFailed": "Repairs could not be loaded.",
+      "commandFailed": "The repair change could not be saved.",
+      "assignmentUnavailable": "Self-assignment requires a canonical staff identity and repair-assignment permission.",
+      "settingsUnavailable": "Repair intake stays disabled until authoritative or cached settings are available.",
+      "invalidIntake": "Check the intake details and try again.",
+      "customerSearchFailed": "Customer search could not be completed.",
+      "deviceLoadFailed": "Customer devices could not be loaded.",
+      "deviceCreateFailed": "The device could not be saved.",
+      "secureIdUnavailable": "Secure device identifiers are unavailable. Restart the application before creating a repair.",
+      "catalogNoMatch": "No safe catalog match was found.",
+      "catalogUnavailable": "Catalog lookup is unavailable.",
+      "printFailed": "The repair document could not be queued securely."
+    },
+    "locked": {
+      "communication": "Customer Messaging is not enabled in this private-beta build.",
+      "money": "Repair payments, refunds, fiscalization and delivery remain locked until the typed native money transport is available.",
+      "approvalTransition": "Approved status is reached only through the audited approval action in Estimate & approval.",
+      "assignment": "Assignment changes remain locked until a scoped, repair-safe staff projection is available.",
+      "stockReversal": "Stock reversal remains locked because the native workspace does not expose the original movement reference.",
+      "catalog": "Product and service catalog lookup remains locked until a repair-safe read-only native projection is available.",
+      "attachmentOpen": "Opening existing attachments remains locked until signed native retrieval is available.",
+      "printing": "Repair printing remains locked until the typed native print queue is available."
+    },
+    "money": {
+      "readiness": {
+        "loading": "Checking fiscal readiness…",
+        "retry": "Retry",
+        "nonFiscalInfo": "myDATA is optional. Repair payments can be recorded without the plugin.",
+        "setupRequired": "Fiscal setup for this branch is incomplete.",
+        "countryRequired": "A branch country is required before this action.",
+        "providerRequired": "A fiscal provider is required for fiscal actions.",
+        "certificationRequired": "Fiscal certification is required for fiscal actions.",
+        "transportUnavailable": "Fiscal document submission is not available for this integration.",
+        "statusUnavailable": "Fiscal readiness could not be determined."
+      },
+      "title": "Repair payments",
+      "onlineRequired": "Payments require an online connection.",
+      "activeShiftRequired": "Open a shift to perform repair money actions.",
+      "loading": "Loading settlement…",
+      "total": "Total",
+      "paid": "Paid",
+      "balance": "Balance",
+      "createSettlement": "Create settlement",
+      "fiscalize": "Issue fiscal document",
+      "collect": "Collect payment",
+      "refund": "Refund payment",
+      "refundPayment": "Payment to refund",
+      "deliver": "Deliver repair",
+      "delivery": "Delivery",
+      "deliveryReason": "Delivery override reason",
+      "paymentAmount": "Payment amount",
+      "paymentMethod": "Payment method",
+      "refundAmount": "Refund amount",
+      "refundMethod": "Refund method",
+      "refundReason": "Refund reason",
+      "providerReference": "Provider reference",
+      "depositUnsupported": "Partial repair deposits are not supported by this fiscal profile."
+    },
+    "a11y": {
+      "resultsUpdated": "{{count}} repair results available.",
+      "currentRepair": "Current repair: {{number}}",
+      "tabHint": "Use the left and right arrow keys to change tabs.",
+      "statusLabel": "Repair status: {{status}}"
+    }
   },
   "common": {
     "requiresOnline": "This action requires an online connection.",
@@ -313,6 +575,9 @@
     }
   },
   "auth": {
+    "managerApproval": {
+      "subtitle": "Nobody is checked in on this till. A manager with the right to approve it enters their own PIN. Nothing is charged."
+    },
     "login": {
       "title": "Staff Login",
       "subtitle": "Enter your PIN to continue",
@@ -431,6 +696,11 @@
       "rejected": "Rejected",
       "inProgress": "In Progress",
       "delivered": "Delivered"
+    },
+    "kitchenStage": {
+      "preparing": "Kitchen: preparing",
+      "ready": "Kitchen: ready for pickup",
+      "collected": "Collected from kitchen"
     },
     "type": {
       "dineIn": "Dine In",
@@ -1393,6 +1663,29 @@
       "amount": "Tip Amount",
       "total": "Total with Tip",
       "thankYou": "Thank you for your generosity!"
+    },
+    "setAside": {
+      "message": "This order was already paid. The {{amount}} just taken is recorded for a manager to give back and is not counted. Do not charge it again.",
+      "exceedsMessage": "Only {{due}} was still due on this order. The {{amount}} just taken is recorded for a manager to give back and is not counted. Collect only what is due."
+    },
+    "notSaved": {
+      "title": "Charged, not saved yet",
+      "newOrder": "New order, not saved yet",
+      "message": "The card was charged {{amount}}. The payment could not be saved on this till yet. Do NOT charge again: save the payment again.",
+      "pendingMessage": "A card payment of {{amount}} on this order was charged but is not saved on this till yet. Save it again before taking another payment. Do NOT charge again.",
+      "chargedAt": "charged {{time}}",
+      "saveAgain": "Save payment again",
+      "saving": "Saving…",
+      "saved": "Payment saved",
+      "stillNotSaved": "The {{amount}} charged is still not saved on this till. Do NOT charge again. Try Save payment again; if it cannot be saved, give the money back and a manager confirms it on the Z-report.",
+      "cannotSave": "The {{amount}} charged cannot be saved on this till. Do NOT charge again. Give the money back to the customer, then a manager confirms it on the Z-report."
+    },
+    "checkoutOutcomeUnknown": "The card terminal has not answered yet. Do not start a new payment: wait, then press Pay again. It checks the same payment and never charges twice.",
+    "checkoutInProgress": "This payment is still in progress on the card terminal. Wait for it to finish, then press Pay again: it checks the same payment and never charges twice.",
+    "moneySettings": {
+      "unavailableTitle": "Checkout paused",
+      "unavailableMessage": "The store's tax rate and discount limit could not be read, so nothing is priced on a guess. Try again; if it keeps failing, restart the app.",
+      "retry": "Try again"
     }
   },
   "paymentPrintPrompt": {
@@ -2884,6 +3177,9 @@
         "capEftIndex": "Paired EFT POS number",
         "capCashCode": "Cash code",
         "capCardCode": "Card code",
+        "capVoucherCode": "Voucher code (optional)",
+        "capVoucherCodeHelp": "Blank until your technician assigns one",
+        "capVoucherCodeInvalid": "The voucher code must be 2–20 and differ from the cash and card codes",
         "capDepartmentRequired": "Enter the cashier department (1–99) for every VAT rate",
         "capFoldersRequired": "CAP Driver capture and output folders are required",
         "capCodesInvalid": "CAP payment codes must be 1–20 and the EFT POS number must be 1–99",
@@ -3239,6 +3535,7 @@
     },
     "system": {
       "syncBacklog": "Sync Backlog",
+      "backlogUnavailable": "The sync backlog couldn't be read. Check again; if it keeps failing, export diagnostics for support.",
       "invalidOrders": "Invalid Orders",
       "invalidOrdersDesc": "Orders have menu items not in local cache",
       "removeInvalidOrders": "Remove Invalid Orders",
@@ -3353,7 +3650,24 @@
         "printerNotConfigured": "No printer is configured for this POS. Orders remain saved, but receipts cannot print until a printer is set up.",
         "syncWaiting": "Some data is waiting to sync. The POS saved it locally and will retry automatically.",
         "ready": "The order, sync, internet, and printer checks all passed.",
-        "shiftInactive": "No staff shift is active. Start a shift before taking orders."
+        "shiftInactive": "No staff shift is active. Start a shift before taking orders.",
+        "terminalNotAuthorized": "This terminal can't sign in to your store's system. Sales are saved on this device, but nothing syncs until it is connected again.",
+        "closeoutBlocked": "Something needs fixing before the day can close (Z).",
+        "closeoutOverdue": "An earlier business day hasn't been closed (Z) yet.",
+        "closeoutWaitingSync": "Payments or cash records haven't reached the server yet, so the day can't close (Z).",
+        "liveUpdatesDown": "Live updates are disconnected. Orders still sync, but other devices may see changes late.",
+        "syncStuck": {
+          "one": "1 queued record hasn't synced for {{duration}}.",
+          "other": "{{count}} queued records haven't synced for {{duration}}."
+        },
+        "fiscalNotSent": {
+          "one": "1 fiscal record hasn't been sent for {{duration}}.",
+          "other": "{{count}} fiscal records haven't been sent for {{duration}}."
+        },
+        "printingStalled": {
+          "one": "Receipts are waiting and not printing: 1 print job has been waiting for {{duration}}.",
+          "other": "Receipts are waiting and not printing: {{count}} print jobs are waiting, the oldest for {{duration}}."
+        }
       },
       "recommendations": {
         "doNotClearData": "Do not clear any data.",
@@ -3366,14 +3680,16 @@
         "useNormally": "Keep using the POS normally.",
         "keepTakingOrders": "Keep taking orders.",
         "startShift": "Start a shift before taking orders.",
-        "configurePrinter": "Set up a printer for this POS."
+        "configurePrinter": "Set up a printer for this POS.",
+        "checkPrinter": "Check that the printer is on, has paper and is connected."
       },
       "services": {
         "orders": "Orders",
         "internet": "Internet",
         "sync": "Sync",
         "printer": "Printer",
-        "support": "Support"
+        "support": "Support",
+        "closeout": "Day close (Z)"
       },
       "status": {
         "working": "Working",
@@ -3404,7 +3720,9 @@
         "applied": "Applied",
         "completed": "Completed",
         "error": "Error",
-        "unavailable": "Unavailable"
+        "unavailable": "Unavailable",
+        "stuck": "Stuck",
+        "viaMainTerminal": "Via main terminal"
       },
       "support": {
         "sentToast": "Diagnostic report sent to support.",
@@ -3476,6 +3794,150 @@
         "update": "Update",
         "delete": "Delete",
         "unknown": "Sync action"
+      },
+      "impact": {
+        "dayCloseBlockedUntilSent": "The day close (Z) can't finish until they are sent.",
+        "dayCloseBlocked": "The day close (Z) can't finish until this is fixed.",
+        "dayCloseOverdue": "Close the earlier day (Z) first.",
+        "receiptsMayNotPrint": "Receipts may not print.",
+        "otherDevicesNotUpdated": "Other devices and the management system may not see the latest changes yet.",
+        "printingStopped": "Receipts and kitchen tickets aren't coming out of the printer. Orders are still saved."
+      },
+      "primaryAction": {
+        "syncNow": {
+          "label": "Sync now",
+          "detail": "Send the waiting records to the server now.",
+          "verification": "The POS then checks again to confirm they were sent."
+        },
+        "exportDiagnostics": {
+          "label": "Export diagnostics",
+          "detail": "Syncing didn't clear this. Export the diagnostics file and send it to support.",
+          "verification": "The file helps support find the cause. It doesn't fix the problem by itself."
+        },
+        "openRecovery": {
+          "label": "Review the issue",
+          "detail": "See which records are affected and the safe next step for each.",
+          "verification": "Every fix is checked again before it is marked as solved."
+        },
+        "reconnect": {
+          "label": "Reconnect live updates",
+          "detail": "Orders keep syncing while live updates are down.",
+          "verification": "The POS checks the connection again after reconnecting."
+        },
+        "openConnectionSettings": {
+          "label": "Open terminal settings",
+          "detail": "Connect this terminal to your store again from the terminal settings. Ask the store owner or support if you don't have the details.",
+          "verification": "Syncing starts again as soon as the terminal is connected."
+        },
+        "waitForConnection": {
+          "label": "Waiting for the connection",
+          "detail": "Keep selling. Everything saved here syncs by itself when the internet is back.",
+          "verification": "The POS keeps checking the connection."
+        },
+        "startShift": {
+          "label": "Start shift",
+          "detail": "Start a shift before taking orders.",
+          "verification": "Orders open as soon as the shift starts."
+        },
+        "configurePrinter": {
+          "label": "Printer settings",
+          "detail": "Check that the printer is on and set up for this POS.",
+          "verification": "Print a test receipt to confirm."
+        },
+        "openZReport": {
+          "label": "Open day close (Z)",
+          "detail": "The Z screen lists what is left and how to fix it.",
+          "verification": "The Z checks everything again before it closes the day."
+        },
+        "refresh": {
+          "label": "Check again",
+          "detail": "The status couldn't be read. Check again; if it keeps failing, export diagnostics for support.",
+          "verification": "Meanwhile the POS keeps working locally."
+        },
+        "none": {
+          "label": "Nothing to do",
+          "detail": "Keep using the POS normally.",
+          "verification": "The POS keeps checking in the background."
+        },
+        "checkPrinting": {
+          "label": "Check the printer",
+          "detail": "Open the printer settings and make sure the printer is on, has paper and is connected. If the receipts still don't print, contact support.",
+          "verification": "The POS checks the print queue again. This warning clears once the waiting receipts have printed."
+        }
+      },
+      "outcome": {
+        "pending": "Requested. Not confirmed yet — the POS is checking again.",
+        "failed": "That didn't work. Your saved work is kept.",
+        "unknown": "Done, but nothing confirms a fix yet. The issue stays until a fresh check shows it gone.",
+        "resolved": "Fixed: a fresh check confirms it."
+      },
+      "closeout": {
+        "title": "Day close (Z)",
+        "affects": "You can keep selling. The day close (Z) can't finish until these clear.",
+        "status": {
+          "ready": "Ready",
+          "open": "Day open",
+          "blocked": "Blocked",
+          "overdue": "Earlier day open",
+          "submitted": "Sent",
+          "unavailable": "Unavailable",
+          "notChecked": "Checked on the Z screen",
+          "notApplicable": "On main terminal"
+        },
+        "summary": {
+          "ready": "Nothing is stopping the day close.",
+          "open": "Left before the day can close:",
+          "blocked": "Fix these before the day can close:",
+          "overdue": "An earlier business day is still open. Close it (Z) first.",
+          "submitted": "The Z was sent and is waiting for the server to confirm it.",
+          "unavailable": "Couldn't check whether the day can close (Z).",
+          "notChecked": "This screen can't see every day close check. The Z screen checks everything before it closes the day.",
+          "notApplicable": "The day close (Z) is done on the main terminal."
+        },
+        "blockers": {
+          "transferred_drivers": "Driver shifts with transferred cash: {{count}}",
+          "active_shifts": "Open shifts: {{count}}",
+          "unreconciled_drawers": "Cash drawers not reconciled: {{count}}",
+          "pending_orders": "Orders not finished: {{count}}",
+          "unpaid_finalized_orders": "Completed orders not paid: {{count}}",
+          "unsynced_financial_rows": "Payments or cash records not synced: {{count}}",
+          "payments_need_review": "Payments set aside as possible duplicates: {{count}}",
+          "payments_not_saved": "Charged payments not saved: {{count}}",
+          "paid_orders_without_payment": "Paid orders without a payment record: {{count}}",
+          "fiscal_queue_not_empty": "Fiscal receipts not sent: {{count}}",
+          "other": "Other checks: {{count}}"
+        },
+        "links": {
+          "openShifts": "Shifts",
+          "openOrders": "Orders",
+          "openOrder": "Open order",
+          "syncNow": "Sync now",
+          "openZReport": "Open Z"
+        }
+      },
+      "duration": {
+        "lessThanMinute": "less than a minute",
+        "minutes": {
+          "one": "{{count}} minute",
+          "other": "{{count}} minutes"
+        },
+        "hours": {
+          "one": "{{count}} hour",
+          "other": "{{count}} hours"
+        },
+        "days": {
+          "one": "{{count}} day",
+          "other": "{{count}} days"
+        }
+      },
+      "queue": {
+        "state": {
+          "waiting": "Waiting",
+          "retrying": "Retrying",
+          "stuck": "Stuck",
+          "failed": "Failed",
+          "conflict": "Conflict"
+        }
       }
     },
     "blocker": {
@@ -3978,6 +4440,72 @@
       "countedCashRequired": "Enter the counted cash before checkout.",
       "actualCashReturnedRequired": "Enter the cash actually handed to the cashier before checkout.",
       "invalidOpeningCash": "Please enter a valid opening cash amount (0 or greater)",
+      "financialOpeningChecking": "Checking opening…",
+      "financialOpeningResume": "Check original opening",
+      "financialOpeningPending": "Opening confirmation is pending. Keep this original opening and check again.",
+      "financialOpeningUnknown": "The opening result is unknown. Check this original opening again; do not start another.",
+      "financialOpeningReauthorize": "Enter the same cashier’s PIN to continue the original opening.",
+      "financialOpeningUnusable": "This original opening is closed or unusable and cannot be adopted.",
+      "financialOpeningUnavailable": "Financial opening is unavailable. Check the terminal scope and configured currency.",
+      "giftClose": {
+        "title": "Gift card cash close",
+        "loadingStatus": "Reading the retained close…",
+        "pendingTitle": "Awaiting financial confirmation",
+        "pendingBody": "The shift is closed on this terminal. Its gift card cash close is waiting for financial confirmation and will not be closed again.",
+        "confirmedTitle": "Financial close confirmed",
+        "blockedStateTitle": "Close confirmation is blocked",
+        "retainedCount": "Retained count",
+        "localPreview": "Local preview, not confirmed",
+        "ordinaryExpected": "Ordinary cash expected",
+        "giftCash": "Gift card cash",
+        "expectedTotal": "Expected in drawer",
+        "counted": "Counted cash",
+        "variance": "Variance",
+        "canonical": "Confirmed terms",
+        "closedAt": "Closed at",
+        "confirmedAt": "Confirmed at",
+        "canonicalDiffers": "The confirmed terms differ from the preview shown at close.",
+        "authRequired": "The original cashier must enter their PIN to renew the close authorization.",
+        "pinLabel": "Original cashier PIN",
+        "pinInvalid": "Enter the original cashier's PIN.",
+        "authorize": "Renew authorization and retry",
+        "queued": "Confirmation retry queued. Check the status again shortly.",
+        "checkStatus": "Check status",
+        "retry": "Retry confirmation",
+        "print": "Print checkout",
+        "printQueued": "Checkout print queued.",
+        "printFailed": "The checkout print failed. Try printing again.",
+        "done": "Done",
+        "pendingListTitle": "Pending gift card closes",
+        "pendingListHelper": "Select a retained close to check or retry it. A new close is never created from here.",
+        "pendingListFailed": "Pending gift card closes for this cashier could not be checked.",
+        "pendingListTruncated": "More retained closes exist than are shown here.",
+        "shiftLabel": "Shift {{id}}",
+        "open": "Open",
+        "checkAgain": "Check again",
+        "blockedUnresolved": "Unresolved gift card cash attempts ({{count}}) must be resolved before closing.",
+        "blockedAttemptsUnknown": "Gift card cash attempts could not be checked. The close stays blocked.",
+        "blockedSummary": "The ordinary shift summary could not be read. The close stays blocked.",
+        "drawerUnavailable": "The gift card cash terms could not be read. Nothing is assumed to be zero.",
+        "termsChanged": "The close terms changed. Review the refreshed terms, count again and approve again.",
+        "originalExists": "A retained close already exists for this shift. Open it instead of closing again.",
+        "originalMissing": "The retained close original is missing. It cannot be retried from this terminal.",
+        "proofUnavailable": "The close proof is unavailable. Check the status again later.",
+        "openingNotReady": "The gift card shift opening is not confirmed yet, so the close stays blocked.",
+        "localUnavailable": "This terminal could not read the retained close. Try again.",
+        "refused": "The gift card close was refused ({{code}}).",
+        "checking": "Checking whether this shift closes with gift card cash…",
+        "preparing": "Preparing the gift card close terms…",
+        "countLabel": "Counted cash in drawer",
+        "countInvalid": "Enter the counted cash with at most two decimals.",
+        "countChanged": "The count changed after review. Review it again.",
+        "approveTitle": "Approve the gift card close",
+        "approveBody": "Close this shift with the terms and count shown above?",
+        "approve": "Approve and close",
+        "cancel": "Cancel",
+        "footerNote": "Review the expected cash above.",
+        "printPending": "The checkout prints only after financial confirmation."
+      },
       "invalidStartingAmount": "Please enter a valid starting amount (0 or greater)",
       "zeroCashConfirmTitle": "Confirm Zero Opening Cash",
       "zeroCashConfirmMessage": "You are starting your shift with $0 in the cash drawer. Are you sure you want to continue?",
@@ -4293,7 +4821,10 @@
         "overpaid_order": "Overpayment",
         "duplicate_payment": "Duplicate payment",
         "platform_settlement_mismatch": "Platform settlement in the wrong tender",
-        "platform_settlement_missing": "Missing platform settlement"
+        "platform_settlement_missing": "Missing platform settlement",
+        "payments_need_review": "Payment set aside for review",
+        "payments_not_saved": "Card charged, payment not saved",
+        "cancelled_order_claims_payment": "Cancelled order still claims a payment"
       },
       "revenueSplitHint": "Cash + Card + Platforms = Actual earned",
       "liveShiftBreakdown": "Live Shift Breakdown",
@@ -4467,12 +4998,84 @@
       "submitFailed": "Failed: {{error}}",
       "resolveBlockerCash": "Record Cash Payment",
       "resolveBlockerCard": "Record Card Payment",
+      "recordConfirmTitle": "Record this payment?",
+      "recordConfirmMessage": "Record {{amount}} ({{method}}) for order {{order}} only if the customer already paid it. Nothing is charged, and the record keeps your name.",
+      "recordConfirmAction": "Record it",
+      "recordApprovalTitle": "Approve recording the payment",
+      "recordApprovalSubtitle": "Enter the cashier or manager PIN. Nothing is charged.",
+      "recordAlreadyRecorded": "This {{method}} payment for {{orderNumber}} was already recorded. Nothing was added.",
       "resolvingPayment": "Recording payment…",
       "resolveBlockerSuccess": "Recorded {{method}} payment for {{orderNumber}}. Review the refreshed report and submit the Z-report again.",
       "resolveBlockerFailed": "Failed to resolve {{orderNumber}}: {{error}}",
       "unknownError": "Unknown error",
       "submissionFailed": "Submission failed",
-      "close": "Close"
+      "close": "Close",
+      "finalPrintUnavailable": "Final printing is available after the Z-report has been saved.",
+      "giftClose": {
+        "title": "Gift card cash",
+        "outsideSales": "Shown separately from sales and tax. Included once in expected cash.",
+        "ordinaryExpected": "Ordinary expected cash",
+        "ordinaryAdjustment": "Other cash adjustment",
+        "giftLiabilityCash": "Gift card cash",
+        "expected": "Expected cash",
+        "counted": "Counted cash",
+        "variance": "Variance",
+        "currency": "Currency",
+        "confirmedAt": "Confirmed at",
+        "proofFinal": "Closing confirmed",
+        "proofNotFinal": "Not final: a gift card close is not confirmed",
+        "proofUnreadable": "Closing confirmation is unavailable",
+        "checklistFinal": "Gift card cash {{amount}} is confirmed and kept outside sales.",
+        "blocked": "Final print and submit stay disabled until every gift card close is confirmed.",
+        "recovery": {
+          "GIFT_CLOSE_PROOF_PENDING": "The gift card close for {{staff}} is waiting for confirmation. Keep this terminal online, then press Refresh.",
+          "GIFT_CLOSE_PROOF_UNAVAILABLE": "The confirmed gift card close for {{staff}} cannot be read. Press Refresh; if it stays, contact support before closing the day.",
+          "GIFT_CLOSE_PROOF_MISMATCH": "The gift card close for {{staff}} no longer matches its drawer. Do not close the day; contact support.",
+          "GIFT_CLOSE_JOURNAL_MISSING": "No confirmed gift card close was recorded for {{staff}}. Contact support before closing the day.",
+          "GIFT_OPENING_UNCONFIRMED": "The gift card opening for {{staff}} is not confirmed yet. Connect this terminal, then press Refresh.",
+          "unknown": "The gift card close for {{staff}} is not confirmed. Press Refresh; if it stays, contact support.",
+          "unreadable": "The gift card close in this report cannot be read. Press Refresh; if it stays, contact support before closing the day."
+        },
+        "errors": {
+          "proofRequired": "The day cannot close yet: a gift card drawer close is not confirmed. Keep this terminal online, press Refresh and follow the gift card notice.",
+          "snapshotStale": "This stored Z-report was saved before a gift card close was confirmed, so it cannot be reused. Contact support; the stored report was not changed."
+        }
+      },
+      "fiscalCloseBlocked": "The day cannot be closed yet: {{count}} fiscal submission(s) of {{date}} have not been sent. You can keep selling; keep the terminal online and send them again from this report.",
+      "fiscalCloseBlockedNoDate": "The day cannot be closed yet: {{count}} fiscal submission(s) have not been sent. You can keep selling; keep the terminal online and send them again from this report.",
+      "fiscalCloseCheckFailed": "The day cannot be closed yet: the fiscal submissions of {{date}} could not be checked. You can keep selling; try again in a moment, and if it keeps failing, export diagnostics for support.",
+      "fiscalCloseCheckFailedNoDate": "The day cannot be closed yet: the fiscal submissions could not be checked. You can keep selling; try again in a moment, and if it keeps failing, export diagnostics for support.",
+      "fiscalQueue": {
+        "label": "Fiscal submissions",
+        "pending": "{{count}} fiscal submission(s) of {{date}} have not reached the fiscal service yet. You can keep selling; the day closes once they are sent.",
+        "pendingNoDate": "{{count}} fiscal submission(s) have not reached the fiscal service yet. You can keep selling; the day closes once they are sent.",
+        "retryAction": "Send again",
+        "retryRequested": "Sending the fiscal submissions again. The list updates once they are accepted.",
+        "retryFailed": "Could not send the fiscal submissions again: {{error}}",
+        "listTitle": "Fiscal submissions waiting ({{count}})",
+        "attempts": "Attempts {{attempts}}/{{max}}"
+      },
+      "setAsideConfirmTitle": "Money given back?",
+      "setAsideConfirmMessage": "Confirm that {{amount}} ({{method}}) for order {{order}} was given back to the customer. It stays out of the totals.",
+      "setAsideConfirmAction": "Confirm",
+      "setAsideApprovalTitle": "Confirm the money was given back",
+      "setAsideApprovalSubtitle": "Enter the cashier or manager PIN to confirm it.",
+      "setAsideResolved": "Recorded as given back to the customer. It stays out of the totals.",
+      "setAsideAlreadyResolved": "This payment was already recorded as given back.",
+      "setAsideResolveFailed": "Could not record it: {{error}}",
+      "setAsideShiftRequired": "A cashier or manager has to be checked in on this terminal to confirm it.",
+      "unsavedConfirmTitle": "Money given back?",
+      "unsavedConfirmMessage": "Confirm that the {{amount}} charged for order {{order}} was given back to the customer. The payment will not be saved, and the order stays as it is.",
+      "unsavedConfirmMessageNewOrder": "Confirm that the {{amount}} charged for a new order this till never saved was given back to the customer. The order and its payment will not be saved.",
+      "unsavedConfirmAction": "Confirm",
+      "unsavedApprovalTitle": "Confirm the money was given back",
+      "unsavedApprovalSubtitle": "Enter the cashier or manager PIN to confirm it.",
+      "unsavedResolved": "Recorded as given back to the customer. The payment will not be saved.",
+      "unsavedAlreadyResolved": "This payment was already recorded as given back.",
+      "unsavedSavedAfterAll": "This payment was saved after all: there is nothing to give back.",
+      "unsavedResolveFailed": "Could not record it: {{error}}",
+      "unsavedSaved": "Payment saved.",
+      "unsavedStillNotSaved": "Still not saved on this till. Do not charge again. Try again, or give the money back to the customer and confirm it here."
     },
     "expense": {
       "title": "Drawer Outflows",
@@ -4981,7 +5584,104 @@
       "refundSuccess": "Refund recorded successfully",
       "refundFailed": "Refund failed",
       "voidSuccess": "Payment voided successfully",
-      "voidFailed": "Void failed"
+      "voidFailed": "Void failed",
+      "gift": {
+        "title": "Return to the original gift card",
+        "destination": "Money goes back only to the gift card that paid this row.",
+        "action": "Return to gift card",
+        "methodLabel": "Gift card",
+        "historyLabel": "Returned to the original gift card",
+        "close": "Close gift card return",
+        "noStaff": "Sign in as a staff member to return a gift card payment.",
+        "authorizeTitle": "{{name}}: enter your PIN to return this gift card payment",
+        "pinLabel": "PIN",
+        "pinRequired": "Enter your PIN.",
+        "authorize": "Authorize",
+        "authorizing": "Checking…",
+        "authRefused": "Authorization refused: {{error}}",
+        "authUnavailable": "the terminal could not check the PIN",
+        "authExpired": "Your authorization expired. Enter your PIN again.",
+        "authRequired": "{{name}} must enter their PIN again. The return is kept as it was.",
+        "contextChanged": "The terminal configuration changed. Enter your PIN again.",
+        "loading": "Reading the gift card payment…",
+        "unavailable": "The gift card return status could not be read. No new return can start until it is read.",
+        "moneyUnavailable": "The gift card amounts could not be confirmed. No new return can start.",
+        "retry": "Try again",
+        "gross": "Paid",
+        "returned": "Returned",
+        "remaining": "Returnable",
+        "actionLabel": "Return type",
+        "actionRefund": "Partial refund",
+        "actionVoid": "Void",
+        "amountLabel": "Amount to return ({{currency}})",
+        "amountHint": "Up to {{amount}}",
+        "invalidAmount": "Enter an amount such as 4 or 4.00, with at most two decimals.",
+        "exceedsRemaining": "The amount is more than the returnable {{amount}}.",
+        "voidNote": "A void returns everything still returnable. You do not enter an amount.",
+        "reasonLabel": "Reason",
+        "reasonPlaceholder": "Why is this gift card payment returned?",
+        "reasonRequired": "A reason is required.",
+        "review": "Review return",
+        "reviewTitle": "Check before returning",
+        "reviewPayment": "Gift card payment",
+        "reviewDestination": "Goes to",
+        "destinationValue": "The original gift card",
+        "reviewAction": "Type",
+        "reviewAmount": "Amount",
+        "voidNoAmount": "Everything still returnable",
+        "reviewCurrency": "Currency",
+        "reviewReason": "Reason",
+        "confirm": "Return to gift card",
+        "back": "Back",
+        "sending": "Returning to the gift card…",
+        "completed": "{{amount}} returned to the gift card. Still returnable: {{remaining}}.",
+        "rereading": "Reading the order payments again…",
+        "rereadFailed": "The return completed, but the order payments could not be read again. No new return can start until they are read.",
+        "orderRefreshFailed": "The gift card return is confirmed, but this order could not be read again. Other actions stay unavailable until it is read.",
+        "checkProof": "Check this return",
+        "proofConfirmed": "Confirmed: {{amount}} went back to the gift card.",
+        "refused": "The return was refused ({{code}}): {{error}}",
+        "rejected": "The return was not accepted ({{code}}): {{error}}",
+        "pendingTitle": "Return in progress",
+        "foundTitle": "Return found",
+        "pendingBody": "This return was sent but its result is not confirmed. Closing this window does not cancel it. Recover it to finish exactly this return.",
+        "priorUnreconciled": "An earlier return on this card is not recorded on this terminal yet. This return stays pending; no retry is needed.",
+        "recover": "Recover this return",
+        "unknownTitle": "Result not confirmed",
+        "unknownBody": "The terminal did not get a clear answer. Nothing was counted as returned. Check the status before anything else.",
+        "checkStatus": "Check status",
+        "otherPending": "Another return for this gift card payment is in progress. Only the staff member who started it can finish it.",
+        "notEligible": "This gift card payment cannot be returned ({{code}}).",
+        "nothingRemaining": "Nothing is left to return on this gift card payment.",
+        "attemptsTitle": "Your returns for this payment",
+        "statePending": "Pending",
+        "stateCompleted": "Completed",
+        "stateRefused": "Refused",
+        "netCoverage": "Net paid {{paid}} · Outstanding {{outstanding}}",
+        "netCoverageLoading": "Reading net paid…",
+        "netCoverageUnavailable": "Net paid could not be read.",
+        "noCapture": "The last request left no return on the gift card: nothing was returned. You can start it again."
+      },
+      "statusSetAside": "Set aside for review",
+      "placeholderNotMoney": "This payment row records no money (the till guessed it from the order's label): it cannot be refunded or voided. Restore the order's payments from the server with Sync Now.",
+      "otherRefund": "Same tender (other)",
+      "tenderRequired": "Choose how the refund was paid back",
+      "platformSettlementLocked": "The delivery platform's settlement: it is never voided or refunded at the till. The server decides what becomes of it.",
+      "refundRoute": "Refund Route",
+      "cashRefund": "Cash Refund",
+      "cashReturnedBy": "Cash Returned By",
+      "amount": "Amount",
+      "editAllocationRequired": "Refund allocation must match the overpaid amount exactly",
+      "editSettlementHint": "Choose exactly how the refunded amount was settled before the order edit can finish.",
+      "editSettlementOverpaidRequired": "This edit leaves the order overpaid and requires a recorded refund",
+      "editSettlementReducedRequired": "This edit reduces a paid order and requires a recorded refund",
+      "editSettlementTitle": "Settle Edit Refund",
+      "enterAmountFirst": "Enter a refund amount to choose how this payment was settled.",
+      "netPaidAfterRefunds": "Paid after previous refunds: €{{amount}}",
+      "originalVsNext": "Order total changed from €{{from}} to €{{to}}",
+      "requiredAmount": "Required refund",
+      "selectAllocation": "Allocate the refund to at least one payment",
+      "useRemaining": "Use Remaining"
     }
   },
   "errors": {
@@ -5280,7 +5980,11 @@
     "roomGuestCustomer": "Room {{room}} — {{guest}}",
     "roomCustomer": "Room {{room}}",
     "tableCustomer": "Table {{table}}",
-    "reservationComingSoon": "Reservation feature coming soon"
+    "reservationComingSoon": "Reservation feature coming soon",
+    "addressUpdated": "Address updated",
+    "invalidCartItems": "Order cannot be created because some cart items are not synced menu items. Sync menu and try again.",
+    "missingContext": "Missing branch or organization context",
+    "noAddressForDelivery": "This customer has no saved address. Add an address to continue with a delivery order."
   },
   "orderDashboard": {
     "delivery": "Delivery",
@@ -5307,13 +6011,15 @@
     "orderCreated": "Order created successfully!",
     "markDeliveredFailed": "Failed to mark order {{orderNumber}} as delivered",
     "pickupDelivered": "{{count}} pickup order(s) marked as delivered",
-    "platformReadySent": "Platform notified — rider is on the way",
+    "platformReadySent": "Marked ready",
     "platformReadyFailed": "Failed to notify the platform for {{orderNumber}}",
     "deliveriesCompleted": "Completed {{count}} delivery order(s)",
     "dispatchDeliveryBeforeComplete": "Assign a driver or convert delivery orders to pickup before completing them.",
     "noOrdersForCancel": "No orders selected for cancellation",
     "noOrdersForEdit": "No orders selected for editing",
     "cancelOrderFailed": "Failed to cancel order {{orderNumber}}",
+    "cancelRefusedPaid": "Order {{orderNumber}} was not cancelled: money was taken on it. Void or refund the payment from the order first, or collect the rest.",
+    "cancelRefusedNotRecorded": "Order {{orderNumber}} was not cancelled: it is marked paid, but its payment is not recorded on this till. Restore it from the server with Sync Now, or record the payment from the Z Report, then cancel.",
     "ordersCancelled": "{{count}} order(s) cancelled successfully",
     "cancelFailed": "Failed to cancel orders",
     "customerInfoUpdated": "Customer information updated for {{count}} order(s)",
@@ -5352,7 +6058,40 @@
       "route_split_launches": "Google Maps opens up to {{maxStops}} stops at a time — the route opened in {{launchCount}} parts.",
       "route_matrix_stop_cap_fallback": "Optimization is limited to {{maxStops}} stops — a simpler ordering was used.",
       "generic": "The route was opened with adjustments."
-    }
+    },
+    "bulkPaidEditUnsupported": "Paid or partially paid orders with settlement changes must be edited one at a time.",
+    "cardPaymentRecorded": "Card payment recorded.",
+    "cashPaymentRecorded": "Cash payment recorded.",
+    "changeOrderTypeSingleOnly": "Change order type is only available for one order at a time.",
+    "collectCardNow": "Collect card payment",
+    "collectCashNow": "Collect cash payment",
+    "collectSinglePaymentDescription": "This order is blocked because the expected payment was not saved.",
+    "collectSinglePaymentTitle": "Collect the missing payment to continue",
+    "convertToDeliveryFailed": "Failed to convert order to delivery.",
+    "convertedToDelivery": "Order {{orderNumber}} converted to delivery.",
+    "deliveryOverrideDenied": "Manager approval is required to convert this order to delivery.",
+    "deliveryValidationFailed": "The selected address cannot be used for delivery.",
+    "editSettlementRefundReason": "Edit settlement refund",
+    "noCompletedOrdersSelected": "No completed orders selected",
+    "noPickupOrderSelected": "Select a single pickup order to convert to delivery.",
+    "order": "Order",
+    "orderEditPartialPaymentSaved": "Order changes were saved. The remaining balance is still pending payment.",
+    "orderNotFound": "The selected order could not be found.",
+    "orderSavedToTable": "Order saved to table",
+    "orderStatusUpdated": "Order status updated.",
+    "outstandingAmount": "Outstanding",
+    "paymentMethod": "Payment Method",
+    "paymentMethodSyncRetried": "Payment sync retry queued",
+    "paymentProgress": "Recorded {{settled}} of {{total}}. The remaining amount will be collected now.",
+    "paymentRequired": "Payment Required",
+    "pickupToDeliveryOverrideReason": "Pickup order {{orderNumber}} converted to delivery",
+    "platformHeldNotCollected": "The delivery platform holds this order's money. Restore it from the server (Sync Now); it is never collected at the till.",
+    "receiptPreview": "Receipt Preview",
+    "receiptQueued": "Receipt print queued",
+    "refundNoEligiblePayment": "No completed payment with enough remaining balance to refund against.",
+    "tableOrderNotLoaded": "This table check is open, but the linked order is not loaded locally yet. Refresh orders and try again.",
+    "tableSessionQueued": "Table saved locally; session sync queued.",
+    "tableSessionSyncFailed": "Order saved, but table-session sync needs retry."
   },
   "bulkActions": {
     "driver": "Driver",
@@ -5378,12 +6117,29 @@
     "openInMaps": "Open in Google Maps",
     "addressNotAvailable": "Address not available",
     "loadingAddress": "Loading address...",
-    "customer": "Customer"
+    "customer": "Customer",
+    "paymentPending": "PAY PENDING",
+    "paymentPendingA11y": "Payment pending"
+  },
+  "incomingOrderAlert": {
+    "title": "New {{platform}} order",
+    "titleCustomer": "New order to accept",
+    "explain": "Open it to accept or decline.",
+    "waitingOver": "Waiting over {{seconds}} seconds without an answer",
+    "moreWaiting_one": "+{{count}} more order waiting",
+    "moreWaiting_other": "+{{count}} more orders waiting",
+    "open": "Open the order",
+    "later": "Later"
   },
   "orderApprovalPanel": {
     "selectTime": "Please select estimated time",
     "approved": "Order approved",
     "approveFailed": "Failed to approve order",
+    "preparationShortened": "{{platform}} takes at most {{max}} min for this order, so {{sent}} min was sent instead of {{requested}} min. If you need longer, change it in the {{platform}} app.",
+    "pickupWindow": "{{platform}}: {{estimate}}′ · up to {{max}}′",
+    "pickupWindowNoEstimate": "{{platform}}: up to {{max}}′",
+    "pickupWindowPassed": "{{platform}}'s latest pickup time has passed: {{min}}′ will be sent.",
+    "maxChoice": "max",
     "reasonRequired": "Please provide a reason for declining",
     "declined": "Order declined",
     "declineFailed": "Failed to decline order",
@@ -6778,7 +7534,9 @@
     },
     "external": {
       "monitors": "Connected monitors and TVs",
-      "help": "Cable displays and OS-level wireless displays appear here. For Smart TVs without monitor mode, copy the TV link."
+      "running": "Showing customer display",
+      "inUse": "In use",
+      "help": "Cable displays and OS-level wireless displays appear here. Select one to show the customer display."
     },
     "status": {
       "connected": "Connected",
@@ -6803,6 +7561,7 @@
     "pollingFallback": "Polling fallback",
     "pending": "Pending",
     "preparing": "Preparing",
+    "ready": "Ready",
     "total": "Total",
     "avgTime": "Avg Time",
     "min": "min",
@@ -6810,9 +7569,11 @@
     "justNow": "Just now",
     "startPreparing": "Start Preparing",
     "markReady": "Mark Ready",
+    "markCollected": "Mark Collected",
     "orderBumped": "Order updated",
     "bumpError": "Failed to update order",
     "loadError": "Unable to load orders",
+    "staleState": "Showing the last saved kitchen state. Latest changes could not be read.",
     "noOrders": "No Active Orders",
     "noOrdersDesc": "New orders will appear here automatically",
     "view": {
@@ -6828,17 +7589,16 @@
       "resume": "Resume live refresh"
     },
     "externalDisplay": {
-      "copyTvLink": "Copy TV link",
       "open": "Open on connected display",
       "stop": "Stop external display",
       "connectedDisplays": "Connected monitors and TVs",
-      "help": "Cable displays and OS-level wireless displays appear here. For Smart TVs without monitor mode, copy the TV link.",
+      "help": "Connect an HDMI display or an OS-level wireless display, then select it here.",
       "running": "Kitchen display is running on the selected monitor or TV.",
+      "runningHere": "Showing kitchen display",
+      "inUse": "In use",
       "stopped": "External kitchen display stopped.",
       "openFailed": "Failed to open kitchen display",
-      "closeFailed": "Failed to close kitchen display",
-      "tvLinkCopied": "KDS TV link copied. Open it in a Smart TV browser or wireless receiver.",
-      "tvLinkFailed": "Failed to create KDS TV link"
+      "closeFailed": "Failed to close kitchen display"
     },
     "liveDraft": {
       "badge": "Live Draft",
@@ -6966,6 +7726,292 @@
     "toast": {
       "readyToDownload": "Version {{version}} is ready to download",
       "clickToView": "Click to view details"
+    }
+  },
+  "giftCardCheckout": {
+    "title": "Gift card",
+    "due": "Due {{amount}}",
+    "checkingAttempts": "Checking earlier gift card attempts…",
+    "checkingService": "Checking the gift card service…",
+    "uncertain": "The gift card result is not confirmed. Do not collect again; check again first.",
+    "checkAgain": "Check again",
+    "applied": "Gift card payment recorded: {{amount}}",
+    "cardNumber": "Gift card number",
+    "cardNumberPlaceholder": "Scan or type the card number",
+    "check": "Check card",
+    "card": "Card {{masked}} · balance {{balance}}",
+    "amount": "Amount to charge",
+    "pay": "Charge gift card",
+    "refusal": {
+      "scope": "This terminal has no confirmed organization or terminal identity. Pair the POS again.",
+      "order": "Create the order before taking a gift card.",
+      "unsynced": "Wait until the order is synced, then try again.",
+      "module": "The Gift Cards module is not active for this store.",
+      "offline": "Gift cards need a connection. Reconnect and try again.",
+      "unavailable": "The gift card service is unavailable. Try again shortly.",
+      "cardNumber": "Check the card number and try again.",
+      "notFound": "No gift card matches this number.",
+      "amount": "Enter an amount above zero with at most two decimals.",
+      "currency": "The card currency does not match the order currency.",
+      "balance": "The card balance is too low for this amount.",
+      "expired": "This gift card has expired.",
+      "inactive": "This gift card is not active.",
+      "exceedsOutstanding": "The amount is more than the order still owes.",
+      "nothingDue": "Nothing is outstanding on this order.",
+      "itemSplit": "Gift cards can pay an amount split only. Switch to an amount split or use another tender.",
+      "split": "This split portion is invalid. Reopen the split and try again.",
+      "coverageUnavailable": "The order balance could not be read. Try again.",
+      "admission": "Earlier gift card attempts must be checked first.",
+      "fiscalPending": "A receipt for this order is still pending. Check the receipt first.",
+      "staff": "A signed-in staff session is required. Sign in again and retry.",
+      "readiness": "The fiscal receipt route is not ready for gift cards.",
+      "rejected": "The gift card payment was refused."
+    },
+    "fiscal": {
+      "ready": "Receipt ready to issue",
+      "partial": "Collect the rest with cash or card; the receipt follows that payment",
+      "pending": "Receipt pending confirmation",
+      "approved": "Receipt approved",
+      "notRequired": "No fiscal receipt required",
+      "unsupported": "This receipt route does not support gift cards",
+      "unavailable": "Fiscal register unavailable",
+      "error": "Receipt failed",
+      "unknown": "Receipt state unknown",
+      "uncertified": "Register support not certified",
+      "issue": "Issue receipt",
+      "check": "Check receipt"
+    }
+  },
+  "giftCards": {
+    "title": "Gift Cards",
+    "description": "Look up gift cards, issue new ones, reload them and adjust balances.",
+    "refresh": "Refresh",
+    "status": {
+      "label": "Gift card service",
+      "checking": "Checking the gift card service…",
+      "unavailable": "The gift card service is unavailable right now. Try again shortly.",
+      "notInstalled": "Gift cards are not set up on the server yet.",
+      "notConfigured": "Gift card security is not configured on the server yet.",
+      "notEnabled": "Gift cards are not enabled for this terminal.",
+      "moduleRequired": "The Gift Cards module is not active for this business.",
+      "offline": "This terminal is offline. Gift card lookups and balance changes need a live connection."
+    },
+    "badge": {
+      "checking": "Checking",
+      "unavailable": "Unavailable",
+      "enabled": "Enabled",
+      "disabled": "Disabled",
+      "offline": "Offline"
+    },
+    "errors": {
+      "numberRequired": "Enter a gift card number.",
+      "numberInvalid": "A card number has 8 to 64 letters or digits.",
+      "lookupFailed": "Could not look up this gift card.",
+      "notFound": "No gift card matches this number.",
+      "issueAmount": "Enter an amount above zero with no more than 2 decimals.",
+      "issueFailed": "Could not issue the gift card.",
+      "selectCard": "Look up a gift card first.",
+      "reloadAmount": "Enter a reload amount above zero with no more than 2 decimals.",
+      "reloadFailed": "Could not reload the gift card.",
+      "redeemAmount": "Enter an adjustment amount above zero with no more than 2 decimals.",
+      "redeemFailed": "Could not adjust the gift card balance.",
+      "historyFailed": "Could not load the transaction history.",
+      "unknownOutcome": "The server did not confirm this change. Check the connection and retry with the same values; the change will not be applied twice.",
+      "currencyMissing": "No POS currency is configured, so a new card cannot be issued.",
+      "terminalMissing": "This terminal's identity is not available. Start a shift and try again.",
+      "details": "Code: {{code}}"
+    },
+    "messages": {
+      "balanceLoaded": "Balance loaded.",
+      "issued": "Gift card issued.",
+      "issuedWithNumber": "Gift card issued: {{number}}",
+      "reloaded": "Gift card reloaded.",
+      "redeemed": "Balance adjusted."
+    },
+    "lookup": {
+      "title": "Look up a card",
+      "placeholder": "Card number",
+      "action": "Look up"
+    },
+    "balance": {
+      "current": "Current balance",
+      "card": "Card",
+      "currency": "Currency",
+      "status": "Card status",
+      "expires": "Expires {{date}}"
+    },
+    "cardStatus": {
+      "active": "Active",
+      "expired": "Expired",
+      "disabled": "Disabled"
+    },
+    "issue": {
+      "title": "Issue a new card",
+      "numberPlaceholder": "Card number (leave empty to generate one)",
+      "amountPlaceholder": "Initial amount",
+      "currency": "Currency: {{currency}}",
+      "busy": "Issuing…",
+      "action": "Issue card",
+      "deliverTitle": "New card number",
+      "deliverHint": "The full number is shown only now. Give it to the customer before you close this panel.",
+      "dismiss": "Number delivered"
+    },
+    "amountPlaceholder": "Amount",
+    "reload": {
+      "title": "Reload",
+      "action": "Reload",
+      "busy": "Reloading…"
+    },
+    "redeem": {
+      "title": "Balance adjustment",
+      "hint": "Deducts value from the card outside of any order. To pay for an order with a gift card, use checkout.",
+      "action": "Deduct from balance",
+      "busy": "Adjusting…",
+      "confirmTitle": "Confirm balance adjustment",
+      "confirmBody": "Deduct {{amount}} from card {{card}}? This is a manual balance adjustment, not a payment for an order.",
+      "confirm": "Confirm adjustment",
+      "cancel": "Cancel"
+    },
+    "history": {
+      "title": "Transaction history",
+      "empty": "No transactions yet.",
+      "balanceAfter": "Balance after: {{amount}}",
+      "types": {
+        "issue": "Issued",
+        "reload": "Reload",
+        "redeem": "Redeemed",
+        "refund": "Refund",
+        "adjustment": "Adjustment"
+      }
+    },
+    "note": {
+      "title": "Note",
+      "placeholder": "Optional note for this change"
+    },
+    "funding": {
+      "description": "Look up cards and add funded value. Paying an order with a gift card happens at checkout.",
+      "title": "Add value",
+      "hint": "Every issue or reload is covered by a recorded payment or a manager grant.",
+      "cashier": "Cashier: {{name}}",
+      "checking": "Checking funding availability…",
+      "retry": "Check again",
+      "readFailed": "Funding availability could not be read. Money actions stay disabled.",
+      "journalFailed": "Unfinished funding could not be read. Money actions stay disabled until it can be checked.",
+      "unavailable": "Gift card funding is not available on this terminal right now.",
+      "noCurrency": "No store currency is configured, so funding is unavailable.",
+      "noShift": "Select a staff member with an active shift to fund gift cards.",
+      "currency": "Store currency: {{currency}}",
+      "operatorNotReady": "Your POS authorization is not ready, so cash and card funding are disabled.",
+      "operation": {
+        "label": "Operation",
+        "issue": "Issue a new card",
+        "reload": "Reload the selected card",
+        "reloadNeedsCard": "Look up a card to reload it.",
+        "currencyMismatch": "This card's currency is not the store currency, so it cannot be reloaded here."
+      },
+      "mode": {
+        "label": "Funded by",
+        "cash_confirmed": "Cash",
+        "external_card_recorded": "External card terminal",
+        "manager_grant": "Manager grant",
+        "unavailable": "Unavailable",
+        "reason": "Reason: {{reason}}",
+        "cashUnavailable": "Cash funding is unavailable on this terminal.",
+        "cashDrawer": "Cash needs your confirmed drawer for this shift in {{currency}}.",
+        "externalHint": "You record the card terminal's references yourself. This is not a verified payment or a fiscal receipt.",
+        "grantHint": "A manager adds value without payment using their own PIN. The manager may be you."
+      },
+      "amount": "Amount",
+      "reason": "Reason",
+      "reasonPlaceholder": "Why is value being added?",
+      "prepare": "Prepare funding",
+      "pendingBlocks": "An unfinished funding of this kind exists. Check or finish it below before starting a new one.",
+      "collect": {
+        "title": "Collect {{amount}}",
+        "cash": "Take {{amount}} in cash, then confirm it.",
+        "cashConfirm": "I collected {{amount}} in cash",
+        "external": "Charge {{amount}} on the external card terminal, then record its references.",
+        "externalConfirm": "Record card payment",
+        "recordedNotice": "Recorded by you. It is not a verified payment or a fiscal receipt."
+      },
+      "evidence": {
+        "provider": "Card provider",
+        "merchantId": "Merchant ID",
+        "terminalReference": "Terminal reference",
+        "transactionReference": "Transaction reference",
+        "incomplete": "Enter all four card terminal references."
+      },
+      "pending": {
+        "title": "Pending and recent funding",
+        "empty": "No pending or recent funding.",
+        "states": {
+          "prepare_pending": "Preparing",
+          "prepared": "Prepared, nothing collected",
+          "collection_pending": "Starting collection",
+          "collection_started": "Collection started",
+          "complete_pending": "Completing",
+          "cancel_pending": "Canceling",
+          "completed": "Completed",
+          "canceled": "Canceled",
+          "refused": "Refused",
+          "abandoned": "Abandoned"
+        },
+        "noCollectAgain": "Do not collect this payment again. Check its status instead.",
+        "begin": "Begin collection",
+        "check": "Check status",
+        "cancel": "Cancel (nothing collected)",
+        "cancelReason": "Cancellation reason",
+        "cancelConfirm": "Confirm cancellation",
+        "back": "Back",
+        "recordCollected": "Record payment already collected",
+        "recordCollectedWarning": "Only if this payment was already collected. Do not collect it again."
+      },
+      "manager": {
+        "title": "Manager authorization",
+        "select": "Manager",
+        "selectPlaceholder": "Select a manager",
+        "pin": "Manager PIN",
+        "authorize": "Authorize manager",
+        "authorized": "Authorized for grants: {{name}}",
+        "notReady": "This manager cannot grant value right now.",
+        "expired": "The manager authorization expired. Authorize again.",
+        "review": "Review grant",
+        "confirmTitle": "Confirm manager grant",
+        "confirmBody": "{{manager}} adds {{amount}} without payment ({{operation}}).",
+        "confirm": "Confirm grant",
+        "back": "Back",
+        "pendingTitle": "Unfinished grants by {{name}}"
+      },
+      "renew": {
+        "title": "Renew your POS authorization",
+        "required": "Your authorization for this shift expired or is missing. Enter your PIN to renew it. No new shift or drawer is opened.",
+        "optional": "If your authorization expired, enter your PIN to renew it for this shift.",
+        "pin": "Your PIN",
+        "action": "Renew authorization",
+        "done": "Authorization renewed.",
+        "noOpening": "No confirmed opening was found for this shift on this terminal, so authorization cannot be renewed here."
+      },
+      "messages": {
+        "prepared": "Funding prepared. Begin collection when the customer is ready to pay.",
+        "collect": "Collection may start now.",
+        "completed": "Funding completed. New balance: {{balance}}.",
+        "canceled": "Funding canceled. Nothing was collected.",
+        "refused": "This step was refused.",
+        "final": "The server did not add this value.",
+        "pendingOutcome": "The outcome is not confirmed yet. Do not collect again; check its status.",
+        "unknownOutcome": "The outcome is unknown. Do not collect again; check its status with the same attempt.",
+        "notPermitted": "Collection was not permitted. Do not collect; check its status.",
+        "managerAuthorized": "Manager authorized."
+      },
+      "errors": {
+        "amount": "Enter an amount above zero with no more than 2 decimals.",
+        "reason": "Enter a reason.",
+        "pin": "Enter the PIN.",
+        "managerRequired": "Select a manager.",
+        "managerFailed": "Manager authorization failed.",
+        "renewFailed": "Authorization was not renewed.",
+        "noReply": "The terminal did not confirm an answer. Nothing is assumed."
+      }
     }
   },
   "coupons": {
@@ -7532,6 +8578,9 @@
         "transactionTimeoutMs": "Timeout (ms)",
         "cashPaymentCode": "Cash payment code",
         "cardPaymentCode": "Card payment code",
+        "voucherPaymentCode": "Voucher payment code (optional)",
+        "voucherPaymentCodeHelp": "Leave blank until your technician assigns the voucher code.",
+        "voucherPaymentCodeInvalid": "Use 2–20 and a code different from the cash and card codes.",
         "eftPosIndex": "EFT POS index"
       },
       "capSetup": {
@@ -7576,7 +8625,10 @@
     "routingTarget": "Target terminal",
     "routingAll": "All terminals",
     "routingLoading": "Loading terminals...",
-    "routingEmpty": "No terminals found for this branch."
+    "routingEmpty": "No terminals found for this branch.",
+    "wolt": {
+      "adminManagedSetup": "Wolt is connected in the Admin Dashboard with your Wolt account; there's no API key to enter on the POS. This screen only shows its status."
+    }
   },
   "errorBoundary": {
     "whatCanYouDo": "What can you do?",
@@ -7634,7 +8686,8 @@
     "portionPaid": "{{person}} paid successfully",
     "priorPayments": "Prior Payments",
     "terminalApproved": "Terminal",
-    "waitingForApproval": "Waiting for card approval on the payment terminal..."
+    "waitingForApproval": "Waiting for card approval on the payment terminal...",
+    "portionNotSaved": "Card charged, payment not saved yet. Do not charge again."
   },
   "recovery": {
     "common": {
@@ -7683,6 +8736,9 @@
       },
       "auto_retry": {
         "label": "Automatic retry"
+      },
+      "print_orphan_attempt_closed": {
+        "label": "Stuck print closed automatically"
       },
       "retryParityItem": {
         "label": "Retry this update"
@@ -7793,7 +8849,31 @@
         "label": "Contact Dev"
       },
       "confirmTitle": "Confirm recovery action",
-      "confirmMessage": "This action changes local recovery data for the selected issue."
+      "confirmMessage": "This action changes local recovery data for the selected issue.",
+      "syncNow": {
+        "label": "Sync now"
+      },
+      "retryItem": {
+        "label": "Retry"
+      },
+      "reviewDetails": {
+        "label": "Open details"
+      },
+      "reconnect": {
+        "label": "Reconnect"
+      },
+      "configurePrinter": {
+        "label": "Printer settings"
+      },
+      "openZReport": {
+        "label": "Open Z"
+      },
+      "openShifts": {
+        "label": "Shifts"
+      },
+      "openOrders": {
+        "label": "Orders"
+      }
     },
     "context": {
       "terminalId": "Terminal ID",
@@ -8044,6 +9124,81 @@
         "summary_one": "One customer change saved on this register could not be sent. It does not stop the end of day, and orders keep the customer’s name and phone.",
         "summary_other": "{{count}} customer changes saved on this register could not be sent. They do not stop the end of day, and orders keep the customer’s name and phone.",
         "guidance": "Try the change once more. If it fails again, open support details; you can still close the day."
+      },
+      "terminalNotAuthorized": {
+        "title": "Terminal not connected to the store",
+        "summary": "The server refused this terminal's credentials, so nothing can sync.",
+        "guidance": "Connect the terminal again from the terminal settings. Sales stay saved on this device meanwhile."
+      },
+      "offline": {
+        "title": "No internet connection",
+        "summary": "The POS can't reach the server right now.",
+        "guidance": "Keep selling. Everything saved here syncs when the connection is back."
+      },
+      "syncWaiting": {
+        "title": "Records waiting to sync: {{count}}",
+        "summary": "They are saved on this device and will be sent automatically.",
+        "guidance": "Nothing to fix. Use Sync now if you want them sent right away."
+      },
+      "syncRetrying": {
+        "title": "Records being retried: {{count}}",
+        "summary": "The server hasn't accepted them yet; the POS tries again automatically.",
+        "guidance": "Keep the POS open and online. Use Sync now to try again right away."
+      },
+      "syncStuck": {
+        "title": "Records stuck in the queue: {{count}}",
+        "summary": "The oldest has been waiting for {{duration}}.",
+        "guidance": "Use Sync now. If they are still stuck afterwards, export diagnostics and send the file to support. Don't clear any data."
+      },
+      "syncFailed": {
+        "title": "Records that failed to sync: {{count}}",
+        "summary": "The automatic retries ran out. The records are still saved here.",
+        "guidance": "Open the details to retry them one by one. If they fail again, contact support."
+      },
+      "syncConflict": {
+        "title": "Records in conflict: {{count}}",
+        "summary": "The server has a different version of these records.",
+        "guidance": "Open the details to choose which version to keep. If you're not sure, ask support first."
+      },
+      "fiscalQueueNotEmpty": {
+        "title": "Fiscal records not sent: {{count}}",
+        "summary": "Receipts from this business day haven't reached the fiscal service. The day close (Z) waits for them.",
+        "guidance": "Keep the POS online and use Sync now. If they still aren't sent, export diagnostics and contact support."
+      },
+      "closeoutBlocked": {
+        "title": "Day close (Z) is blocked",
+        "summary": "Some checks must pass before the day can close.",
+        "guidance": "Open the Z to see each blocker and how to fix it."
+      },
+      "closeoutOverdue": {
+        "title": "An earlier day is still open",
+        "summary": "The business day of {{reportDate}} hasn't been closed (Z).",
+        "guidance": "Close that day first: open the Z."
+      },
+      "printerUnavailable": {
+        "title": "Printer not responding",
+        "summary": "Orders are saved, but receipts may not print.",
+        "guidance": "Check that the printer is on, has paper and is connected, then print a test receipt."
+      },
+      "printerNotConfigured": {
+        "title": "No printer set up",
+        "summary": "Receipts can't print on this POS.",
+        "guidance": "Add the printer in the printer settings."
+      },
+      "realtimeDisconnected": {
+        "title": "Live updates disconnected",
+        "summary": "Orders still sync, but changes from other devices may show up late.",
+        "guidance": "Reconnect live updates. It is safe to try at any time."
+      },
+      "telemetryStale": {
+        "title": "Sync status is out of date",
+        "summary": "The sync engine hasn't reported for a while although work is waiting.",
+        "guidance": "Use Sync now. If nothing changes, export diagnostics for support."
+      },
+      "printingStalled": {
+        "title": "Receipts not printing: {{count}}",
+        "summary": "The oldest has been waiting for {{duration}}. Orders are still saved.",
+        "guidance": "Check that the printer is on, has paper and is connected, then print a test receipt from the printer settings. If the receipts still don't print, contact support. Don't clear any data."
       }
     }
   },
@@ -8481,7 +9636,36 @@
       "unavailable": "Unavailable"
     }
   },
+  "tableRelease": {
+    "owedTitle": "Table {{table}} still owes {{amount}}",
+    "owedMessage": "Releasing the table does not settle or cancel its order. Choose what happens to the {{amount}} it owes.",
+    "collect": "Collect the payment",
+    "keepOpenTab": "Keep as an open tab",
+    "keepOpenTabHint": "The table is freed; the order stays open and unpaid until it is collected or cancelled.",
+    "cancelOrder": "Cancel the order",
+    "cancelReasonLabel": "Why is the order cancelled?",
+    "cancelReasonPlaceholder": "For example: the customer left without ordering",
+    "cancelApprovalHint": "A cashier or manager PIN approves the cancellation. Nothing is charged.",
+    "confirmCancel": "Cancel the order",
+    "cancelApprovalTitle": "Approve cancelling the order",
+    "cancelApprovalSubtitle": "Enter the cashier or manager PIN. Nothing is charged.",
+    "orderCancelled": "Order cancelled and table released.",
+    "shiftRequired": "A cashier or manager has to be checked in on this terminal to approve it.",
+    "cancelFailed": "The order could not be cancelled. The table was not released.",
+    "cancelRefusedPaid": "Money was taken on this order. Void or refund it from the order first, or collect the rest.",
+    "cancelRefusedNotRecorded": "This order is marked paid, but its payment is not recorded on this till. Restore it from the server with Sync Now, or record the payment from the Z Report, then cancel.",
+    "notRecordedTitle": "Table {{table}}: its payment is not recorded",
+    "notRecordedMessage": "Its order is marked paid, but its payment is not recorded on this till. Do not charge it again: restore it from the server with Sync Now, or record the payment from the Z Report.",
+    "keepOpenNotRecordedHint": "The table is freed; the order stays as it is until its payment is restored or recorded."
+  },
   "reservationForm": {
+    "toasts": {
+      "created": "Reservation created successfully",
+      "updated": "Reservation updated successfully",
+      "createFailed": "Failed to create reservation",
+      "updateFailed": "Failed to update reservation",
+      "missingContext": "Missing branch or organization context"
+    },
     "title": "New Reservation",
     "editTitle": "Edit Reservation",
     "subtitle": "Table {{tableNumber}} • Capacity: {{capacity}} {{guests}}",
@@ -8526,15 +9710,45 @@
     "guestCount": "{{count}} guests"
   },
   "customerMessaging": {
-    "title": "Customer messages", "customerRequired": "Link a customer to use messaging.", "onlineOnly": "Messaging actions require an online connection.",
-    "unavailable": "Message history is temporarily unavailable.", "sessionRequired": "A live staff session is required.", "readOnly": "History remains available, but linking, sending and retrying are locked.",
-    "optedOut": "This customer opted out of transactional messages.", "noPreference": "No communication preference is recorded; sending is blocked.",
-    "preferenceTitle": "Transactional updates", "preferenceDescription": "Record the customer’s explicit choice. No channel is assumed.",
-    "preferenceNoPreference": "No automated updates", "preferenceDeny": "Do not send", "preferenceSms": "SMS", "preferenceWhatsApp": "WhatsApp", "preferenceFailed": "The communication preference was not saved.",
-    "sendReady": "Send ready-for-collection message", "retry": "Retry", "link": "Link {{provider}}", "linkingUnavailable": "{{provider}} customer linking is unavailable.", "queued": "Message queued.",
-    "sendFailed": "Message could not be queued.", "retryFailed": "Retry was not queued.", "linkOpened": "Secure provider link opened.", "linkFailed": "The secure provider link could not be opened.",
-    "attemptCount": "{{count}} attempt(s)", "attempt": "Attempt {{number}}",
-    "status": { "queued": "Queued", "delayed": "Delayed", "sending": "Sending", "accepted": "Accepted", "sent": "Sent", "delivered": "Delivered", "read": "Read", "failed": "Failed", "skipped": "Skipped", "dead_lettered": "Retry limit reached", "unknown": "Outcome unknown" }
+    "title": "Customer messages",
+    "customerRequired": "Link a customer to use messaging.",
+    "onlineOnly": "Messaging actions require an online connection.",
+    "unavailable": "Message history is temporarily unavailable.",
+    "sessionRequired": "A live staff session is required.",
+    "readOnly": "History remains available, but linking, sending and retrying are locked.",
+    "optedOut": "This customer opted out of transactional messages.",
+    "noPreference": "No communication preference is recorded; sending is blocked.",
+    "preferenceTitle": "Transactional updates",
+    "preferenceDescription": "Record the customer’s explicit choice. No channel is assumed.",
+    "preferenceNoPreference": "No automated updates",
+    "preferenceDeny": "Do not send",
+    "preferenceSms": "SMS",
+    "preferenceWhatsApp": "WhatsApp",
+    "preferenceFailed": "The communication preference was not saved.",
+    "sendReady": "Send ready-for-collection message",
+    "retry": "Retry",
+    "link": "Link {{provider}}",
+    "linkingUnavailable": "{{provider}} customer linking is unavailable.",
+    "queued": "Message queued.",
+    "sendFailed": "Message could not be queued.",
+    "retryFailed": "Retry was not queued.",
+    "linkOpened": "Secure provider link opened.",
+    "linkFailed": "The secure provider link could not be opened.",
+    "attemptCount": "{{count}} attempt(s)",
+    "attempt": "Attempt {{number}}",
+    "status": {
+      "queued": "Queued",
+      "delayed": "Delayed",
+      "sending": "Sending",
+      "accepted": "Accepted",
+      "sent": "Sent",
+      "delivered": "Delivered",
+      "read": "Read",
+      "failed": "Failed",
+      "skipped": "Skipped",
+      "dead_lettered": "Retry limit reached",
+      "unknown": "Outcome unknown"
+    }
   },
   "driveThru": {
     "selectBranch": "Please select a branch to view drive-through",
@@ -8573,6 +9787,23 @@
       "title": "Kiosk Management",
       "todayOrders": "Today's Orders",
       "toggleError": "Failed to update kiosk status"
+    },
+    "launchPurchase": {
+      "title": "Module purchase",
+      "cycle": "Billing cycle",
+      "monthly": "Month",
+      "annual": "Year",
+      "includes": "Includes: {{features}}",
+      "alsoIncluded": "Also included with: {{offers}}",
+      "resources": "Includes {{branches}} branch(es) and {{terminals}} terminal(s).",
+      "staffIncluded": "Staff included without a per-person fee.",
+      "staffLimit": "Includes up to {{count}} staff.",
+      "confirmInBrowser": "Review your store’s quote and confirm the purchase in the admin dashboard.",
+      "open": "View purchase",
+      "unavailable": "Prices are unavailable. Reconnect and retry.",
+      "loading": "Loading current prices…",
+      "openFailed": "Could not open the purchase page. Try again.",
+      "retry": "Retry"
     }
   },
   "reservationInfoPanel": {
@@ -8591,5 +9822,38 @@
     "seatError": "Failed to seat guest",
     "cancelReservation": "Cancel Reservation",
     "lateWarning": "{{minutes}} minutes late"
+  },
+  "paymentIntegrity": {
+    "statuses": {
+      "duplicate_review": "Set aside for review",
+      "not_saved": "Not saved"
+    },
+    "reasonCodes": {
+      "payments_need_review": "A payment of {{paymentAmount}} ({{paymentMethod}}) was taken on order {{orderNumber}} after it was already paid. It is set aside and not counted: the customer may have paid twice.",
+      "payments_need_review__platform_held": "A payment of {{paymentAmount}} ({{paymentMethod}}) was taken on order {{orderNumber}}, but the delivery platform already holds this order's money. It is set aside and not counted: the customer may have paid twice.",
+      "payments_not_saved": "A card payment of {{paymentAmount}} was charged on order {{orderNumber}} but is not saved on this till yet. The customer was charged: do not charge again.",
+      "payments_not_saved__new_order": "A card payment of {{paymentAmount}} was charged for a new order that is not saved on this till yet: the order and its payment are held until they are saved. The customer was charged: do not charge again.",
+      "payments_not_saved__new_order_cannot_save": "A card payment of {{paymentAmount}} was charged for a new order that is not saved on this till yet: the order and its payment are held until they are saved. The customer was charged: do not charge again.",
+      "cancelled_order_claims_payment": "This order is cancelled but still marked paid, and this till has no payment record for it. It is not in this Z-Report. This does not hold the day."
+    },
+    "fixCodes": {
+      "payments_need_review": "Give the money back to the customer, then confirm it here. If the payment on the server is the wrong one, contact support before closing the day.",
+      "payments_need_review__platform_held": "Give the money back to the customer, then confirm it here. The platform pays this order to the store through its own settlement.",
+      "payments_not_saved": "Save the payment again. If it cannot be saved, give the money back to the customer and confirm it here.",
+      "payments_not_saved__cannot_save": "This payment cannot be saved on this till. Give the money back to the customer, then confirm it here.",
+      "payments_not_saved__new_order": "Save the payment again: it saves the order and its payment, with no new charge. If it cannot be saved, give the money back to the customer and confirm it here.",
+      "payments_not_saved__new_order_cannot_save": "This order and its payment cannot be saved on this till. Give the money back to the customer, then confirm it here.",
+      "cancelled_order_claims_payment": "Restore from server (Sync Now): a payment the server holds is copied here. If there is none, the owner decides what the order should say."
+    },
+    "setAsidePaymentLabel": "Set-aside payment",
+    "takenAtLabel": "Taken at",
+    "setAsideReturnedAction": "Money given back to the customer",
+    "setAsideResolving": "Recording...",
+    "unsavedPaymentLabel": "Charged, not saved",
+    "chargedAtLabel": "Charged at",
+    "unsavedSaveAgainAction": "Save payment again",
+    "unsavedReturnedAction": "Money given back to the customer",
+    "unsavedSaving": "Saving...",
+    "unsavedResolving": "Recording..."
   }
 }

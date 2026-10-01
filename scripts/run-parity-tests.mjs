@@ -145,6 +145,9 @@ const entryPoints = [
   path.join(testsRoot, 'renderer', 'payment-blocker-localization.test.ts'),
   path.join(testsRoot, 'renderer', 'z-report-day-orders-list.test.ts'),
   path.join(testsRoot, 'renderer', 'z-report-action-rail-scroll.test.ts'),
+  // 29/09/2026: the fiscal close-day refusal is typed and localized in every
+  // store language, and the Z modal holds the commit for queued receipts.
+  path.join(testsRoot, 'renderer', 'z-report-fiscal-close-blocked.test.ts'),
   path.join(testsRoot, 'renderer', 'display-pages-ui.test.ts'),
   path.join(testsRoot, 'renderer', 'order-number-utils.test.ts'),
   path.join(testsRoot, 'renderer', 'table-order-flow.test.ts'),
@@ -163,6 +166,8 @@ const entryPoints = [
   path.join(testsRoot, 'renderer', 'tables-page-status-modal-portal.test.ts'),
   path.join(testsRoot, 'renderer', 'table-grid-scroll-reset.test.ts'),
   path.join(testsRoot, 'renderer', 'tables-page-new-order-terminal-gate.test.ts'),
+  path.join(testsRoot, 'renderer', 'table-reservation-module-gate.test.ts'),
+  path.join(testsRoot, 'renderer', 'table-reservation-submit-shared.test.ts'),
   path.join(testsRoot, 'renderer', 'staff-shift-checkout-print.test.ts'),
   path.join(testsRoot, 'renderer', 'staff-shift-closeout-inline-forms.test.ts'),
   path.join(testsRoot, 'renderer', 'kds-live-draft-sync.test.ts'),

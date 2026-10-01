@@ -743,14 +743,32 @@ fn load_unsettled_payment_blockers_for_window(
     branch_id: &str,
     window: &EffectiveZReportWindow,
 ) -> Result<Vec<UnsettledPaymentBlocker>, String> {
-    payment_integrity::load_branch_window_payment_blockers(
+    let mut blockers = payment_integrity::load_branch_window_payment_blockers(
         conn,
         branch_id,
         window.period_start_at.as_str(),
         window.cutoff_at.as_deref(),
         window.lower_bound_mode == LowerBoundMode::Inclusive,
     )
-    .map_err(|e| format!("load unsettled z-report payment blockers: {e}"))
+    .map_err(|e| format!("load unsettled z-report payment blockers: {e}"))?;
+    // Payments set aside as possible duplicates hold the day's close until a
+    // manager decides (`payments_need_review`, Android 1.0.13 parity).
+    blockers.extend(
+        payment_integrity::load_payments_need_review_blockers(
+            conn,
+            branch_id,
+            window.cutoff_at.as_deref(),
+        )
+        .map_err(|e| format!("load z-report payments needing review: {e}"))?,
+    );
+    // A card charged on this till whose payment could not be saved holds
+    // every Z until it is saved or a manager records the money given back
+    // (`payments_not_saved`, Android 1.0.13 parity).
+    blockers.extend(
+        payment_integrity::load_payments_not_saved_blockers(conn, branch_id)
+            .map_err(|e| format!("load z-report charged payments not saved: {e}"))?,
+    );
+    Ok(blockers)
 }
 
 fn unsettled_payment_blocker_message(blockers: &[UnsettledPaymentBlocker]) -> Option<String> {
@@ -814,21 +832,159 @@ fn load_active_staff_closeout_blockers(
     Ok(rows.filter_map(Result::ok).collect())
 }
 
+// ---------------------------------------------------------------------------
+// Fiscal close-day scope and the last closeout attempt (29/09/2026)
+// ---------------------------------------------------------------------------
+
+/// The branch a closeout call is about: the payload's, else this terminal's.
+pub(crate) fn resolve_closeout_branch_id(payload: &Value) -> String {
+    str_field(payload, "branchId")
+        .or_else(|| str_field(payload, "branch_id"))
+        .unwrap_or_else(|| storage::get_credential("branch_id").unwrap_or_default())
+}
+
+/// The window the fiscal close-day guard checks: exactly the window the next
+/// Z submission closes (`resolve_current_z_report_window`, live or frozen),
+/// never a date the picker chose and never today's UTC date.
+pub(crate) fn current_fiscal_close_scope(
+    conn: &Connection,
+    branch_id: &str,
+) -> crate::fiscal::close_day_guard::FiscalCloseScope {
+    let window = resolve_current_z_report_window(conn, branch_id);
+    crate::fiscal::close_day_guard::FiscalCloseScope {
+        branch_id: branch_id.to_string(),
+        report_date: window.report_date,
+        period_start_at: window.period_start_at,
+        cutoff_at: window.cutoff_at,
+        lower_bound_inclusive: window.lower_bound_mode == LowerBoundMode::Inclusive,
+    }
+}
+
+/// The queued fiscal receipts of the window the next Z closes, and whether
+/// they hold it (shown by the Z preview before the cashier confirms).
+pub(crate) fn fiscal_queue_blockers_for_closeout(
+    db: &DbState,
+    payload: &Value,
+) -> Result<crate::fiscal::close_day_guard::FiscalQueueBlockers, String> {
+    let branch_id = resolve_closeout_branch_id(payload);
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let scope = current_fiscal_close_scope(&conn, &branch_id);
+    crate::fiscal::close_day_guard::collect_fiscal_queue_blockers(&conn, &scope)
+}
+
+/// The typed refusal of a Z submission while the window's fiscal receipts
+/// are still queued under an active (or unknown) plugin; `None` lets the
+/// close continue.
+pub(crate) fn fiscal_close_blocked_response(
+    db: &DbState,
+    payload: &Value,
+) -> Result<Option<Value>, String> {
+    let branch_id = resolve_closeout_branch_id(payload);
+    if branch_id.trim().is_empty() {
+        // Rows are matched by branch; without one there is nothing to hold.
+        warn!("Z-report fiscal guard skipped: no branch for this terminal");
+        return Ok(None);
+    }
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let scope = current_fiscal_close_scope(&conn, &branch_id);
+    match crate::fiscal::close_day_guard::ensure_no_queued_fiscal_for_window(&conn, &scope) {
+        Ok(()) => Ok(None),
+        Err(blocked) => Ok(Some(blocked.to_response())),
+    }
+}
+
+const LAST_CLOSEOUT_ATTEMPT_CATEGORY: &str = "diagnostics";
+const LAST_CLOSEOUT_ATTEMPT_KEY: &str = "last_closeout_attempt";
+
+/// How the last Z submission on this terminal ended, for support
+/// (`closeout_readiness.json` → `lastCloseoutAttempt`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CloseoutAttempt {
+    /// When the attempt ended (RFC 3339).
+    pub at: String,
+    /// The step it reached: `pre_z_sync`, `sync_blocked`,
+    /// `payment_blockers`, `fiscal_guard`, `prepare`, `post_submission_sync`,
+    /// `finalize` or `submitted`.
+    pub stage: String,
+    /// `SUBMITTED`, the refusal's `errorCode`, or `ERROR`.
+    pub code: String,
+    /// Bounded, sanitized operational text; never customer data.
+    pub message: Option<String>,
+}
+
+pub(crate) fn record_last_closeout_attempt(
+    conn: &Connection,
+    attempt: &CloseoutAttempt,
+) -> Result<(), String> {
+    let encoded = serde_json::to_string(attempt)
+        .map_err(|e| format!("serialize last closeout attempt: {e}"))?;
+    db::set_setting(
+        conn,
+        LAST_CLOSEOUT_ATTEMPT_CATEGORY,
+        LAST_CLOSEOUT_ATTEMPT_KEY,
+        &encoded,
+    )
+}
+
+pub(crate) fn load_last_closeout_attempt(conn: &Connection) -> Option<CloseoutAttempt> {
+    let raw = db::get_setting(
+        conn,
+        LAST_CLOSEOUT_ATTEMPT_CATEGORY,
+        LAST_CLOSEOUT_ATTEMPT_KEY,
+    )?;
+    serde_json::from_str(&raw).ok()
+}
+
+/// Map a Z submission's result onto the attempt record: a typed refusal
+/// keeps its `errorCode`, success is `SUBMITTED`, an error is `ERROR`.
+pub(crate) fn closeout_attempt_from_result(
+    stage: &str,
+    result: &Result<Value, String>,
+    at: &str,
+) -> CloseoutAttempt {
+    let bounded = |text: Option<String>| crate::print::safe_operational_error(text, 512);
+    let (code, message) = match result {
+        Ok(value) if value.get("success").and_then(Value::as_bool) == Some(false) => (
+            value
+                .get("errorCode")
+                .and_then(Value::as_str)
+                .filter(|code| !code.trim().is_empty())
+                .unwrap_or("BLOCKED")
+                .to_string(),
+            bounded(
+                value
+                    .get("message")
+                    .or_else(|| value.get("error"))
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string),
+            ),
+        ),
+        Ok(_) => ("SUBMITTED".to_string(), None),
+        Err(error) => ("ERROR".to_string(), bounded(Some(error.clone()))),
+    };
+    CloseoutAttempt {
+        at: at.to_string(),
+        stage: stage.to_string(),
+        code,
+        message,
+    }
+}
+
 pub(crate) fn get_closeout_readiness_snapshot(
     db: &DbState,
     payload: &Value,
 ) -> Result<Value, String> {
-    let branch_id = str_field(payload, "branchId")
-        .or_else(|| str_field(payload, "branch_id"))
-        .unwrap_or_else(|| storage::get_credential("branch_id").unwrap_or_default());
+    let branch_id = resolve_closeout_branch_id(payload);
 
-    let (window, active_staff_blockers, payment_blockers, last_z_report) = {
+    let (window, active_staff_blockers, payment_blockers, gift_close, last_z_report) = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         let window = resolve_effective_z_report_window(&conn, &branch_id, payload);
         let active_staff_blockers =
             load_active_staff_closeout_blockers(&conn, &branch_id, window.cutoff_at.as_deref())?;
         let payment_blockers =
             load_unsettled_payment_blockers_for_window(&conn, &branch_id, &window)?;
+        let gift_close = load_gift_close_report_for_effective_window(&conn, &branch_id, &window)?;
         let last_z_report = conn
             .query_row(
                 // W4b-iii: cents-with-real-fallback shim (removed in 4e).
@@ -857,6 +1013,7 @@ pub(crate) fn get_closeout_readiness_snapshot(
             window,
             active_staff_blockers,
             payment_blockers,
+            gift_close,
             last_z_report,
         )
     };
@@ -867,6 +1024,36 @@ pub(crate) fn get_closeout_readiness_snapshot(
         LowerBoundMode::Exclusive => "exclusive",
     };
     let payment_blocker_message = unsettled_payment_blocker_message(&payment_blockers);
+
+    // The fiscal close-day guard's evidence (29/09/2026: a Z refused over
+    // fiscal rows while the support bundle said nothing about them), and how
+    // the last Z attempt ended. A read that fails says so; it never reads as
+    // "nothing queued".
+    let (fiscal_queue_blockers, last_closeout_attempt) = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let fiscal = if branch_id.trim().is_empty() {
+            serde_json::json!({ "status": "not_collected", "reason": "branch unknown" })
+        } else {
+            let scope = current_fiscal_close_scope(&conn, &branch_id);
+            crate::fiscal::close_day_guard::fiscal_queue_evidence(&conn, &scope).unwrap_or_else(
+                |error| {
+                    serde_json::json!({
+                        "status": "unavailable",
+                        "error": crate::print::safe_operational_error(Some(error), 512),
+                    })
+                },
+            )
+        };
+        let last_attempt = load_last_closeout_attempt(&conn)
+            .and_then(|attempt| serde_json::to_value(attempt).ok())
+            .unwrap_or_else(|| {
+                serde_json::json!({
+                    "status": "not_collected",
+                    "reason": "no closeout attempt recorded on this terminal",
+                })
+            });
+        (fiscal, last_attempt)
+    };
 
     Ok(serde_json::json!({
         "branchId": if branch_id.trim().is_empty() { Value::Null } else { Value::String(branch_id) },
@@ -890,8 +1077,581 @@ pub(crate) fn get_closeout_readiness_snapshot(
             "blockersSummary": sync_snapshot.blockers_summary,
             "details": sync_snapshot.blocker_details,
         },
+        "fiscalQueueBlockers": fiscal_queue_blockers,
+        // Gift-bound drawer closes: adopted canonical proof, independent of the
+        // generic queue count above. An adopted original's queue item is
+        // consumed with its adoption; unrelated ordinary work stays counted.
+        "giftCloseProof": gift_close.readiness_value(),
         "lastZReport": last_z_report,
+        "lastCloseoutAttempt": last_closeout_attempt,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Gift-bound drawer close: frozen report projection and finalization gate
+// ---------------------------------------------------------------------------
+//
+// A cashier drawer opened through a persisted `gift_financial_openings` row is
+// a gift-bound original (module entitlement is never consulted). Once closed,
+// its only reportable figures are the adopted `gift_closing_v1` proof read
+// through `gift_financial_closing::load_adopted`: canonical ordinary expected +
+// gift liability cash = expected, the original count and the canonical
+// variance. The journal's own `drawer` is the local preview and is not read.
+// Gift liability cash is a drawer movement, never sales, tender, tax or fiscal
+// revenue. A report is persisted, submitted or rolled over only when every
+// closed original in its window and scope carries that proof; the projection
+// is then frozen into the stored `report_json` once and never recomputed.
+
+const GIFT_CLOSE_REPORT_KEY: &str = "giftFinancialClose";
+const GIFT_CLOSE_REPORT_CONTRACT: &str = "gift_close_report_v1";
+const GIFT_CLOSE_PROOF_REQUIRED: &str = "GIFT_CLOSE_PROOF_REQUIRED";
+const GIFT_CLOSE_PROOF_PENDING: &str = "GIFT_CLOSE_PROOF_PENDING";
+const GIFT_CLOSE_PROOF_UNAVAILABLE: &str = "GIFT_CLOSE_PROOF_UNAVAILABLE";
+const GIFT_CLOSE_PROOF_MISMATCH: &str = "GIFT_CLOSE_PROOF_MISMATCH";
+const GIFT_CLOSE_JOURNAL_MISSING: &str = "GIFT_CLOSE_JOURNAL_MISSING";
+const GIFT_OPENING_UNCONFIRMED: &str = "GIFT_OPENING_UNCONFIRMED";
+const GIFT_CLOSE_SNAPSHOT_STALE: &str = "GIFT_CLOSE_SNAPSHOT_STALE";
+
+/// One closed gift-bound original with its adopted canonical close.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GiftCloseReportRow {
+    shift_id: String,
+    drawer_id: String,
+    staff_id: String,
+    staff_name: Option<String>,
+    terminal_id: String,
+    currency: String,
+    ordinary_expected_cents: i64,
+    gift_cash_cents: i64,
+    expected_cents: i64,
+    counted_cents: i64,
+    variance_cents: i64,
+    /// Canonical ordinary expected minus the drawer's own local ordinary
+    /// components (normally 0), so a listed drawer equation still sums to the
+    /// canonical expected.
+    ordinary_adjustment_cents: i64,
+    drawer_version: i64,
+    local_closed_at: String,
+    canonical_closed_at: String,
+    confirmed_at: String,
+    adopted_at: String,
+}
+
+/// A closed gift-bound original without usable confirmed proof. It blocks
+/// final persistence, submission and rollover.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GiftCloseBlocker {
+    code: &'static str,
+    shift_id: String,
+    drawer_id: String,
+    staff_id: String,
+    staff_name: Option<String>,
+    pending_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct GiftCloseReport {
+    originals: Vec<GiftCloseReportRow>,
+    blockers: Vec<GiftCloseBlocker>,
+}
+
+fn gift_cents_value(cents: i64) -> Value {
+    serde_json::json!(Cents::new(cents).to_f64_dp2())
+}
+
+impl GiftCloseReportRow {
+    fn to_value(&self) -> Value {
+        serde_json::json!({
+            "shiftId": self.shift_id,
+            "drawerId": self.drawer_id,
+            "staffId": self.staff_id,
+            "staffName": self.staff_name,
+            "terminalId": self.terminal_id,
+            "currency": self.currency,
+            "ordinaryExpected": gift_cents_value(self.ordinary_expected_cents),
+            "ordinaryExpected_cents": self.ordinary_expected_cents,
+            "giftLiabilityCash": gift_cents_value(self.gift_cash_cents),
+            "giftLiabilityCash_cents": self.gift_cash_cents,
+            "expected": gift_cents_value(self.expected_cents),
+            "expected_cents": self.expected_cents,
+            "counted": gift_cents_value(self.counted_cents),
+            "counted_cents": self.counted_cents,
+            "variance": gift_cents_value(self.variance_cents),
+            "variance_cents": self.variance_cents,
+            "ordinaryAdjustment_cents": self.ordinary_adjustment_cents,
+            "drawerVersion": self.drawer_version,
+            "provenance": {
+                "contract": crate::gift_financial_closing::GIFT_CARD_CLOSING_CONTRACT,
+                "status": "confirmed",
+                "localClosedAt": self.local_closed_at,
+                "canonicalClosedAt": self.canonical_closed_at,
+                "confirmedAt": self.confirmed_at,
+                "adoptedAt": self.adopted_at,
+            },
+        })
+    }
+}
+
+impl GiftCloseBlocker {
+    fn to_value(&self) -> Value {
+        serde_json::json!({
+            "code": self.code,
+            "shiftId": self.shift_id,
+            "drawerId": self.drawer_id,
+            "staffId": self.staff_id,
+            "staffName": self.staff_name,
+            "pendingReason": self.pending_reason,
+        })
+    }
+}
+
+impl GiftCloseReport {
+    fn is_empty(&self) -> bool {
+        self.originals.is_empty() && self.blockers.is_empty()
+    }
+
+    fn is_ready(&self) -> bool {
+        self.blockers.is_empty()
+    }
+
+    fn gift_cash_cents(&self) -> i64 {
+        self.originals.iter().map(|row| row.gift_cash_cents).sum()
+    }
+
+    fn ordinary_adjustment_cents(&self) -> i64 {
+        self.originals
+            .iter()
+            .map(|row| row.ordinary_adjustment_cents)
+            .sum()
+    }
+
+    fn blocker_message(&self) -> Option<String> {
+        if self.blockers.is_empty() {
+            return None;
+        }
+        let details = self
+            .blockers
+            .iter()
+            .map(|blocker| {
+                format!(
+                    "{} ({} for shift {})",
+                    blocker
+                        .staff_name
+                        .as_deref()
+                        .unwrap_or(blocker.staff_id.as_str()),
+                    blocker.code,
+                    blocker.shift_id
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        Some(format!(
+            "{GIFT_CLOSE_PROOF_REQUIRED}: Cannot generate Z-report: {} gift-bound drawer close(s) lack confirmed canonical proof: {details}",
+            self.blockers.len()
+        ))
+    }
+
+    /// Nonsecret readiness block for the closeout checklist and previews.
+    fn readiness_value(&self) -> Value {
+        serde_json::json!({
+            "ready": self.is_ready(),
+            "count": self.blockers.len(),
+            "confirmedCount": self.originals.len(),
+            "message": self.blocker_message(),
+            "details": self.blockers.iter().map(GiftCloseBlocker::to_value).collect::<Vec<_>>(),
+        })
+    }
+
+    /// The frozen `report_json` block, stored once with the report.
+    fn projection_value(&self) -> Value {
+        let gift = self.gift_cash_cents();
+        let adjustment = self.ordinary_adjustment_cents();
+        serde_json::json!({
+            "contract": GIFT_CLOSE_REPORT_CONTRACT,
+            "ready": self.is_ready(),
+            "giftLiabilityCash": gift_cents_value(gift),
+            "giftLiabilityCash_cents": gift,
+            "ordinaryAdjustment": gift_cents_value(adjustment),
+            "ordinaryAdjustment_cents": adjustment,
+            "originals": self.originals.iter().map(GiftCloseReportRow::to_value).collect::<Vec<_>>(),
+            "blockers": self.blockers.iter().map(GiftCloseBlocker::to_value).collect::<Vec<_>>(),
+        })
+    }
+
+    /// Adds the separate gift liability row to a drawer equation whose
+    /// `expected` already carries the canonical total.
+    fn annotate_drawer(&self, drawer: &mut Value, expected_cents: i64) {
+        let Some(obj) = drawer.as_object_mut() else {
+            return;
+        };
+        let gift = self.gift_cash_cents();
+        for (key, cents) in [
+            ("ordinaryExpected", expected_cents - gift),
+            ("giftLiabilityCash", gift),
+            ("ordinaryAdjustment", self.ordinary_adjustment_cents()),
+        ] {
+            obj.insert(key.to_string(), gift_cents_value(cents));
+            obj.insert(format!("{key}_cents"), serde_json::json!(cents));
+        }
+    }
+}
+
+/// The drawer's own ordinary cash equation in cents (never its stored
+/// expected), the same components the date aggregate sums.
+fn drawer_ordinary_components_cents_expr(alias: &str) -> String {
+    let money = |column: &str| drawer_money_cents_expr(Some(alias), column);
+    format!(
+        "({} + {} - {} - {} - {} - {} - {} + {})",
+        money("opening_amount"),
+        money("total_cash_sales"),
+        money("total_refunds"),
+        money("total_expenses"),
+        money("total_staff_payments"),
+        money("cash_drops"),
+        money("driver_cash_given"),
+        money("driver_cash_returned"),
+    )
+}
+
+struct GiftOpeningCandidate {
+    opening_key: String,
+    opening_state: String,
+    organization_id: String,
+    branch_id: String,
+    terminal_id: String,
+    staff_id: String,
+    staff_name: Option<String>,
+    shift_id: String,
+    drawer_id: String,
+    shift_status: Option<String>,
+    drawer_present: bool,
+    drawer_closed_at: Option<String>,
+    drawer_closing_cents: Option<i64>,
+    drawer_expected_cents: Option<i64>,
+    drawer_ordinary_cents: Option<i64>,
+    drawer_branch_id: Option<String>,
+}
+
+fn load_gift_opening_candidates(
+    conn: &Connection,
+    scope_sql: &str,
+    scope_params: &[&dyn rusqlite::ToSql],
+) -> Result<Vec<GiftOpeningCandidate>, String> {
+    let ordinary_expr = drawer_ordinary_components_cents_expr("cds");
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT o.opening_key, o.state, o.organization_id, o.branch_id,
+                    o.terminal_id, o.staff_id,
+                    COALESCE(NULLIF(TRIM(ss.staff_name), ''), NULLIF(TRIM(o.staff_name), '')),
+                    o.shift_id, o.drawer_id, ss.status, cds.id IS NOT NULL, cds.closed_at,
+                    COALESCE(cds.closing_amount_cents, CAST(ROUND(cds.closing_amount * 100) AS INTEGER)),
+                    COALESCE(cds.expected_amount_cents, CAST(ROUND(cds.expected_amount * 100) AS INTEGER)),
+                    CASE WHEN cds.id IS NULL THEN NULL ELSE {ordinary_expr} END,
+                    cds.branch_id
+               FROM gift_financial_openings o
+               LEFT JOIN staff_shifts ss ON ss.id = o.shift_id
+               LEFT JOIN cash_drawer_sessions cds ON cds.id = o.drawer_id
+              WHERE {scope_sql}
+              ORDER BY COALESCE(cds.opened_at, ss.check_in_time, o.checked_in_at) ASC,
+                       o.opening_key ASC"
+        ))
+        .map_err(|e| format!("prepare gift close report candidates: {e}"))?;
+    let rows = stmt
+        .query_map(scope_params, |row| {
+            Ok(GiftOpeningCandidate {
+                opening_key: row.get(0)?,
+                opening_state: row.get(1)?,
+                organization_id: row.get(2)?,
+                branch_id: row.get(3)?,
+                terminal_id: row.get(4)?,
+                staff_id: row.get(5)?,
+                staff_name: row.get(6)?,
+                shift_id: row.get(7)?,
+                drawer_id: row.get(8)?,
+                shift_status: row.get(9)?,
+                drawer_present: row.get::<_, i64>(10)? != 0,
+                drawer_closed_at: row.get(11)?,
+                drawer_closing_cents: row.get(12)?,
+                drawer_expected_cents: row.get(13)?,
+                drawer_ordinary_cents: row.get(14)?,
+                drawer_branch_id: row.get(15)?,
+            })
+        })
+        .map_err(|e| format!("query gift close report candidates: {e}"))?;
+    // A gate must never silently drop an unreadable original.
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("read gift close report candidates: {e}"))
+}
+
+/// Gift-bound originals whose drawer (else shift, else opening) falls in the
+/// report window and branch scope, with the same bounds as the drawer rows.
+fn load_gift_close_report_for_window(
+    conn: &Connection,
+    branch_id: &str,
+    period_start: &str,
+    cutoff_at: Option<&str>,
+    lower_bound_mode: LowerBoundMode,
+) -> Result<GiftCloseReport, String> {
+    let anchor = "COALESCE(cds.opened_at, ss.check_in_time, o.checked_in_at)";
+    let scope_sql = format!(
+        "{} AND (?2 IS NULL OR {anchor} <= ?2)
+         AND (?3 = '' OR lower(o.branch_id) = lower(?3) OR lower(cds.branch_id) = lower(?3))",
+        lower_bound_mode.sql_predicate(anchor, "?1")
+    );
+    let candidates = load_gift_opening_candidates(
+        conn,
+        &scope_sql,
+        params![period_start, cutoff_at, branch_id],
+    )?;
+    classify_gift_close_candidates(conn, candidates, branch_id)
+}
+
+fn load_gift_close_report_for_effective_window(
+    conn: &Connection,
+    branch_id: &str,
+    window: &EffectiveZReportWindow,
+) -> Result<GiftCloseReport, String> {
+    load_gift_close_report_for_window(
+        conn,
+        branch_id,
+        window.period_start_at.as_str(),
+        window.cutoff_at.as_deref(),
+        window.lower_bound_mode,
+    )
+}
+
+fn load_gift_close_report_for_shift(
+    conn: &Connection,
+    shift_id: &str,
+) -> Result<GiftCloseReport, String> {
+    let candidates = load_gift_opening_candidates(conn, "o.shift_id = ?1", params![shift_id])?;
+    classify_gift_close_candidates(conn, candidates, "")
+}
+
+fn same_gift_id(left: &str, right: &str) -> bool {
+    left.eq_ignore_ascii_case(right)
+}
+
+/// Every closed original needs its matching confirmed canonical close; the
+/// sync queue is never evidence (a missing journal or an already consumed
+/// queue item still blocks). Open drawers stay the active-staff gate's concern.
+fn classify_gift_close_candidates(
+    conn: &Connection,
+    candidates: Vec<GiftOpeningCandidate>,
+    scope_branch_id: &str,
+) -> Result<GiftCloseReport, String> {
+    use crate::gift_financial_closing::{self as closing, ClosingState};
+
+    let mut report = GiftCloseReport::default();
+    for candidate in candidates {
+        let closed = candidate
+            .shift_status
+            .as_deref()
+            .is_some_and(|status| status != "active")
+            || candidate
+                .drawer_closed_at
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            || (candidate.shift_status.is_none() && !candidate.drawer_present);
+        if !closed {
+            continue;
+        }
+        let blocker = |code: &'static str, pending_reason: Option<String>| GiftCloseBlocker {
+            code,
+            shift_id: candidate.shift_id.clone(),
+            drawer_id: candidate.drawer_id.clone(),
+            staff_id: candidate.staff_id.clone(),
+            staff_name: candidate.staff_name.clone(),
+            pending_reason,
+        };
+
+        let Ok(original) = closing::load_original_for_opening(conn, &candidate.opening_key) else {
+            report
+                .blockers
+                .push(blocker(GIFT_CLOSE_PROOF_UNAVAILABLE, None));
+            continue;
+        };
+        let Some(original) = original else {
+            let other_journals: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM gift_financial_closings
+                      WHERE shift_id = ?1 OR drawer_id = ?2",
+                    params![candidate.shift_id, candidate.drawer_id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| format!("read gift close journal scope: {e}"))?;
+            let code = if other_journals > 0 {
+                Some(GIFT_CLOSE_PROOF_MISMATCH)
+            } else {
+                match candidate.opening_state.as_str() {
+                    "pending" => Some(GIFT_OPENING_UNCONFIRMED),
+                    // Persisted opening identity also governs native close capture.
+                    // Zero or unreadable gift cash cannot prove an ordinary close.
+                    "confirmed_usable" | "confirmed_unusable" => Some(GIFT_CLOSE_JOURNAL_MISSING),
+                    _ => Some(GIFT_CLOSE_PROOF_UNAVAILABLE),
+                }
+            };
+            if let Some(code) = code {
+                report.blockers.push(blocker(code, None));
+            }
+            continue;
+        };
+
+        let journal_in_scope = original.shift_id == candidate.shift_id
+            && original.drawer_id == candidate.drawer_id
+            && original.terminal_id == candidate.terminal_id
+            && same_gift_id(&original.organization_id, &candidate.organization_id)
+            && same_gift_id(&original.staff_id, &candidate.staff_id)
+            && same_gift_id(&original.branch_id, &candidate.branch_id)
+            && (scope_branch_id.is_empty() || same_gift_id(&original.branch_id, scope_branch_id));
+        if !journal_in_scope {
+            report
+                .blockers
+                .push(blocker(GIFT_CLOSE_PROOF_MISMATCH, None));
+            continue;
+        }
+        if original.state == ClosingState::Pending {
+            report.blockers.push(blocker(
+                GIFT_CLOSE_PROOF_PENDING,
+                original.pending_reason.clone(),
+            ));
+            continue;
+        }
+        let adopted = match closing::load_adopted(conn, &original.closing_key) {
+            Ok(Some(adopted)) => adopted,
+            Ok(None) | Err(_) => {
+                report
+                    .blockers
+                    .push(blocker(GIFT_CLOSE_PROOF_UNAVAILABLE, None));
+                continue;
+            }
+        };
+        let proof = &adopted.proof;
+        let proof_in_scope = same_gift_id(&proof.shift_id, &candidate.shift_id)
+            && same_gift_id(&proof.drawer_id, &candidate.drawer_id)
+            && same_gift_id(&proof.branch_id, &candidate.branch_id);
+        // The adopted mirror must still hold the proof: an ordinary repair or
+        // auto-close must never replace the gift original's count or expected.
+        let mirror_holds_proof = candidate.drawer_closing_cents == Some(adopted.counted_cents())
+            && candidate.drawer_expected_cents == Some(adopted.expected_cents())
+            && candidate
+                .drawer_branch_id
+                .as_deref()
+                .map_or(true, |branch| same_gift_id(branch, &candidate.branch_id));
+        let Some(local_ordinary_cents) = candidate
+            .drawer_ordinary_cents
+            .filter(|_| proof_in_scope && mirror_holds_proof)
+        else {
+            report
+                .blockers
+                .push(blocker(GIFT_CLOSE_PROOF_MISMATCH, None));
+            continue;
+        };
+        report.originals.push(GiftCloseReportRow {
+            shift_id: candidate.shift_id.clone(),
+            drawer_id: candidate.drawer_id.clone(),
+            staff_id: candidate.staff_id.clone(),
+            staff_name: candidate.staff_name.clone(),
+            terminal_id: proof.terminal_id.clone(),
+            currency: proof.currency.clone(),
+            ordinary_expected_cents: proof.drawer.ordinary_expected_cents,
+            gift_cash_cents: proof.drawer.gift_cash_cents,
+            expected_cents: adopted.expected_cents(),
+            counted_cents: adopted.counted_cents(),
+            variance_cents: adopted.variance_cents(),
+            ordinary_adjustment_cents: proof.drawer.ordinary_expected_cents - local_ordinary_cents,
+            drawer_version: proof.drawer.version,
+            local_closed_at: adopted.original.closed_at.clone(),
+            canonical_closed_at: adopted.canonical_closed_at.clone(),
+            confirmed_at: adopted.confirmed_at.clone(),
+            adopted_at: adopted.adopted_at.clone(),
+        });
+    }
+    Ok(report)
+}
+
+/// Refuses to reuse a stored report persisted before a gift-bound close in its
+/// window was adopted; the stored report itself is never rewritten.
+fn ensure_gift_close_snapshot_current(
+    conn: &Connection,
+    z_report_id: &str,
+    current: &GiftCloseReport,
+) -> Result<(), String> {
+    if current.originals.is_empty() {
+        return Ok(());
+    }
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT report_json FROM z_reports WHERE id = ?1",
+            params![z_report_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(|e| format!("load stored z-report gift close snapshot: {e}"))?
+        .flatten();
+    let frozen = stored
+        .and_then(|json| serde_json::from_str::<Value>(&json).ok())
+        .and_then(|json| json.get(GIFT_CLOSE_REPORT_KEY).cloned())
+        .filter(|projection| {
+            projection.get("contract").and_then(Value::as_str) == Some(GIFT_CLOSE_REPORT_CONTRACT)
+                && projection.get("ready").and_then(Value::as_bool) == Some(true)
+                && projection
+                    .get("blockers")
+                    .and_then(Value::as_array)
+                    .is_some_and(Vec::is_empty)
+        });
+    let frozen_rows = frozen
+        .as_ref()
+        .and_then(|projection| projection.get("originals"))
+        .and_then(Value::as_array);
+    // Presence of a drawer ID alone does not establish a final snapshot. Compare
+    // immutable proof fields; staff names and the current ordinary-component
+    // adjustment may change later without rewriting valid frozen history.
+    const PROOF_FIELDS: &[&str] = &[
+        "shiftId",
+        "drawerId",
+        "staffId",
+        "terminalId",
+        "currency",
+        "drawerVersion",
+        "ordinaryExpected",
+        "ordinaryExpected_cents",
+        "giftLiabilityCash",
+        "giftLiabilityCash_cents",
+        "expected",
+        "expected_cents",
+        "counted",
+        "counted_cents",
+        "variance",
+        "variance_cents",
+        "provenance",
+    ];
+    let missing = current
+        .originals
+        .iter()
+        .filter(|row| {
+            let expected = row.to_value();
+            let Some(rows) = frozen_rows else { return true };
+            let mut matching = rows.iter().filter(|stored| {
+                stored.get("drawerId").and_then(Value::as_str) == Some(row.drawer_id.as_str())
+            });
+            let Some(stored) = matching.next() else {
+                return true;
+            };
+            matching.next().is_some()
+                || !PROOF_FIELDS
+                    .iter()
+                    .all(|key| stored.get(*key) == expected.get(*key))
+        })
+        .map(|row| row.shift_id.as_str())
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "{GIFT_CLOSE_SNAPSHOT_STALE}: Cannot reuse Z-report {z_report_id}: it was stored before the confirmed gift-bound close of shift(s) {} was adopted",
+        missing.join(", ")
+    ))
 }
 
 fn extract_z_report_id(result: &Value) -> Option<String> {
@@ -1256,6 +2016,7 @@ fn preview_response_from_built_date_z_report(
             "reportJson": report.report_json,
             "syncState": if preview_only { "preview" } else { "pending" },
         },
+        "giftCloseReadiness": report.gift_close.readiness_value(),
     })
 }
 
@@ -1274,6 +2035,10 @@ fn build_staff_cash_breakdown_row(
     role_type: &str,
     opening_amount: f64,
 ) -> Result<Value, String> {
+    // Whether the courier's money came from their earnings, which already
+    // carry every cash refund the courier handed back (the write lowers the
+    // earning, the recount reads it net: `order_ownership::courier_order_tender_cents`).
+    let mut driver_totals_from_earnings = false;
     let (cash_collected, card_amount): (f64, f64) = if role_type == "driver" {
         // W4b-iii: cents-with-real-fallback shim (removed in 4e).
         let driver_totals = conn
@@ -1297,12 +2062,13 @@ fn build_staff_cash_breakdown_row(
             .map_err(|e| format!("query driver cash breakdown totals: {e}"))?;
 
         if driver_totals.0 > 0.0 || driver_totals.1 > 0.0 {
+            driver_totals_from_earnings = true;
             driver_totals
         } else {
             // W4b-iii: cents-with-real-fallback shim (removed in 4e).
             let sql = "SELECT
-                    COALESCE(SUM(CASE WHEN op.status = 'completed' AND op.method = 'cash' THEN COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER)) ELSE 0 END), 0),
-                    COALESCE(SUM(CASE WHEN op.status = 'completed' AND op.method = 'card' THEN COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER)) ELSE 0 END), 0)
+                    COALESCE(SUM(CASE WHEN (op.status = 'completed' AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id, '')) = '')) AND op.method = 'cash' THEN COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER)) ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN (op.status = 'completed' AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id, '')) = '')) AND op.method = 'card' THEN COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER)) ELSE 0 END), 0)
                  FROM orders o
                  LEFT JOIN order_payments op ON op.order_id = o.id
                  WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
@@ -1323,8 +2089,8 @@ fn build_staff_cash_breakdown_row(
     } else {
         let sql = format!(
             "SELECT
-                COALESCE(SUM(CASE WHEN op.status = 'completed' AND op.method = 'cash' THEN op.amount ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN op.status = 'completed' AND op.method = 'card' THEN op.amount ELSE 0 END), 0)
+                COALESCE(SUM(CASE WHEN (op.status = 'completed' AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id, '')) = '')) AND op.method = 'cash' THEN op.amount ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN (op.status = 'completed' AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id, '')) = '')) AND op.method = 'card' THEN op.amount ELSE 0 END), 0)
              FROM orders o
              LEFT JOIN order_payments op ON op.order_id = o.id
              WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
@@ -1359,17 +2125,44 @@ fn build_staff_cash_breakdown_row(
     // refund had cashToReturn overstated by EUR 20 — the shift would
     // appear short by exactly the refund amount during reconciliation.
     // W4b-iii: cents-with-real-fallback shim (removed in 4e).
-    let cash_refunds: f64 = conn
-        .query_row(
-            "SELECT COALESCE(SUM(COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER))), 0)
-             FROM payment_adjustments
-             WHERE staff_shift_id = ?1
-               AND adjustment_type = 'refund'
-               AND refund_method = 'cash'",
+    //
+    // Shared rule R2 (round 3, 01/10/2026): each cash refund is counted once,
+    // by whoever handed it back. A drawer row (cashier, manager, server)
+    // takes only the drawer's refunds (`refunds::refund_paid_by_drawer_sql`);
+    // a courier row never takes one the drawer paid.
+    let refund_is_cash = crate::refunds::refund_counts_as_cash_sql("pa", "op");
+    let refund_paid_by_drawer = crate::refunds::refund_paid_by_drawer_sql("pa", "o");
+    let handler_filter = if role_type == "driver" {
+        format!("NOT {refund_paid_by_drawer}")
+    } else {
+        refund_paid_by_drawer
+    };
+    //
+    // A courier row read from the courier's earnings takes none: the
+    // earnings are already net of the refunds the courier handed back, so a
+    // `driver_shift` refund booked under the driver's own shift came off
+    // twice (round 3 review, 01/10/2026). The driver's own checkout
+    // (`shifts::get_shift_summary` `amountToReturn`) reads the earnings the
+    // same way and subtracts no refund either.
+    let cash_refunds: f64 = if driver_totals_from_earnings {
+        0.0
+    } else {
+        conn.query_row(
+            &format!(
+                "SELECT COALESCE(SUM(COALESCE(pa.amount_cents, CAST(ROUND(pa.amount * 100) AS INTEGER))), 0)
+                 FROM payment_adjustments pa
+                 LEFT JOIN order_payments op ON op.id = pa.payment_id
+                 LEFT JOIN orders o ON o.id = pa.order_id
+                 WHERE pa.staff_shift_id = ?1
+                   AND pa.adjustment_type = 'refund'
+                   AND {refund_is_cash}
+                   AND {handler_filter}"
+            ),
             params![staff_shift_id],
             |row| row.get::<_, i64>(0).map(|c| Cents::new(c).to_f64_dp2()),
         )
-        .unwrap_or(0.0);
+        .unwrap_or(0.0)
+    };
 
     Ok(serde_json::json!({
         "roleType": role_type,
@@ -1440,6 +2233,7 @@ struct BuiltDateZReport {
     total_expected: f64,
     payments_breakdown: Value,
     report_json: Value,
+    gift_close: GiftCloseReport,
 }
 
 fn normalize_order_type(value: &str) -> String {
@@ -1847,7 +2641,7 @@ fn load_sales_by_type_for_period(
          WHERE {financial_predicate}
            AND (?2 IS NULL OR {financial_expr} <= ?2)
            AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
-           AND op.status = 'completed'
+           AND (op.status = 'completed' AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id, '')) = ''))
            AND COALESCE(o.is_ghost, 0) = 0
            AND COALESCE(o.is_test, 0) = 0
            AND COALESCE(o.order_context, '') <> 'repair_settlement'
@@ -1912,7 +2706,7 @@ fn load_sales_by_type_for_shift(conn: &Connection, shift_id: &str) -> Result<Val
              FROM order_payments op
              JOIN orders o ON o.id = op.order_id
              WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
-               AND op.status = 'completed'
+               AND (op.status = 'completed' AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id, '')) = ''))
                AND COALESCE(o.is_ghost, 0) = 0
                AND COALESCE(o.is_test, 0) = 0
                AND COALESCE(o.order_context, '') <> 'repair_settlement'
@@ -1973,13 +2767,17 @@ fn load_non_driver_order_totals(
     // aggregates — a live never-settled tab's money was not collected on
     // this shift and must not appear in the staff section either.
     let staff_open_tab = business_day::open_unsettled_table_tab_expr("o");
+    // A payment set aside as a possible duplicate is money nowhere, so it
+    // never puts an order in the section of the shift that took it (fix
+    // review 30/09/2026): the order is attributed as if it did not exist.
+    let set_aside = crate::payment_review::set_aside_payment_sql("op");
     // W4b-iii: cents-with-real-fallback shim (removed in 4e).
     let order_scope_sql = format!(
         "SELECT COUNT(*), COALESCE(SUM(order_total_cents), 0)
          FROM (
             SELECT o.id, MAX(COALESCE(o.total_amount_cents, CAST(ROUND(o.total_amount * 100) AS INTEGER), 0)) AS order_total_cents
             FROM orders o
-            LEFT JOIN order_payments op ON op.order_id = o.id
+            LEFT JOIN order_payments op ON op.order_id = o.id AND NOT {set_aside}
             WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
               AND {financial_expr} >= ?2
               AND (?3 IS NULL OR {financial_expr} <= ?3)
@@ -2012,8 +2810,8 @@ fn load_non_driver_order_totals(
     // W4b-iii: cents-with-real-fallback shim (removed in 4e).
     let payment_sql = format!(
         "SELECT
-            COALESCE(SUM(CASE WHEN op.status = 'completed' AND op.method = 'cash' THEN COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER)) ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN op.status = 'completed' AND op.method = 'card' THEN COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER)) ELSE 0 END), 0)
+            COALESCE(SUM(CASE WHEN (op.status = 'completed' AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id, '')) = '')) AND op.method = 'cash' THEN COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER)) ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN (op.status = 'completed' AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id, '')) = '')) AND op.method = 'card' THEN COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER)) ELSE 0 END), 0)
          FROM orders o
          LEFT JOIN order_payments op ON op.order_id = o.id
          WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
@@ -2142,6 +2940,8 @@ fn load_non_driver_order_details(
     // a subquery (not a Rust post-process) because this query already
     // joins across order and payment tables and we want to keep the
     // classification deterministic per SELECT pass.
+    // A set-aside payment never lists the order under the shift that took it.
+    let set_aside = crate::payment_review::set_aside_payment_sql("op");
     let detail_sql = format!(
         "SELECT o.id,
                 COALESCE(NULLIF(TRIM(o.order_number), ''), o.id),
@@ -2167,7 +2967,7 @@ fn load_non_driver_order_details(
          WHERE o.id IN (
             SELECT DISTINCT o2.id
             FROM orders o2
-            LEFT JOIN order_payments op ON op.order_id = o2.id
+            LEFT JOIN order_payments op ON op.order_id = o2.id AND NOT {set_aside}
             WHERE COALESCE(op.staff_shift_id, o2.staff_shift_id) = ?1
               AND {financial_expr} >= ?2
               AND (?3 IS NULL OR {financial_expr} <= ?3)
@@ -2806,12 +3606,81 @@ fn load_server_repair_projection(
 ///
 /// **Idempotent:** If a z_report already exists for this shift, returns the
 /// existing one without creating a duplicate.
+/// Per order type, the part of each gift card row's proven return cumulative
+/// that no local refund adjustment records: an earlier original-card return
+/// another terminal made, which settlement coverage already counts through
+/// `payments::effective_reversed_cents`. Each row goes through the shared
+/// checked reader, so an unreadable or foreign proof fails the report instead
+/// of reading as 0; a shift without gift card rows reads no journal. Rows with
+/// a void adjustment are excluded because order-type NET never subtracts voids.
+fn shift_unrecorded_gift_returns_by_order_type(
+    conn: &Connection,
+    shift_id: &str,
+    open_tab_expr: &str,
+) -> Result<HashMap<String, i64>, String> {
+    let sql = format!(
+        // W4b-iii: cents-with-real-fallback shim (removed in 4e).
+        "SELECT COALESCE(o.order_type, 'dine-in'), op.id, op.order_id,
+                COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0),
+                COALESCE((
+                    SELECT SUM(COALESCE(pa.amount_cents, CAST(ROUND(pa.amount * 100) AS INTEGER)))
+                    FROM payment_adjustments pa
+                    WHERE pa.payment_id = op.id AND pa.adjustment_type = 'refund'
+                ), 0)
+         FROM orders o
+         JOIN order_payments op ON op.order_id = o.id AND op.method = 'gift_card'
+         WHERE o.staff_shift_id = ?1
+           AND COALESCE(o.is_ghost, 0) = 0
+           AND COALESCE(o.is_test, 0) = 0
+           AND COALESCE(o.order_context, '') <> 'repair_settlement'
+           AND o.status NOT IN ('cancelled', 'canceled')
+           AND NOT {open_tab_expr}
+           AND NOT EXISTS (
+               SELECT 1 FROM payment_adjustments pv
+               WHERE pv.payment_id = op.id AND pv.adjustment_type = 'void'
+           )"
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("prepare gift return floor query: {e}"))?;
+    let rows = stmt
+        .query_map(params![shift_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })
+        .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
+        .map_err(|e| format!("query gift return floor: {e}"))?;
+    let mut unrecorded = HashMap::new();
+    for (order_type, payment_id, order_id, gross_cents, refunded_cents) in rows {
+        let floor = crate::commands::gift_card_returns::proven_return_floor_cents(
+            conn,
+            &payment_id,
+            &order_id,
+            gross_cents,
+        )?;
+        *unrecorded.entry(order_type).or_insert(0) += (floor - refunded_cents).max(0);
+    }
+    Ok(unrecorded)
+}
+
 pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
     let shift_id = str_field(payload, "shiftId")
         .or_else(|| str_field(payload, "shift_id"))
         .ok_or("Missing shiftId")?;
+
+    // A gift-bound original reports only its adopted canonical close, and an
+    // earlier stored report must already carry it.
+    let gift_close = load_gift_close_report_for_shift(&conn, &shift_id)?;
+    if let Some(message) = gift_close.blocker_message() {
+        return Err(message);
+    }
 
     // Check for existing z_report (idempotent)
     let existing: Option<String> = conn
@@ -2823,6 +3692,7 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
         .ok();
 
     if let Some(existing_id) = existing {
+        ensure_gift_close_snapshot_current(&conn, &existing_id, &gift_close)?;
         // Return the existing report
         return get_z_report_by_id(&conn, &existing_id).map(|mut report| {
             if let Some(obj) = report.as_object_mut() {
@@ -3024,7 +3894,7 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
              FROM order_payments op
              JOIN orders o ON o.id = op.order_id
              WHERE op.staff_shift_id = ?1
-               AND op.status = 'completed'
+               AND (op.status = 'completed' AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id, '')) = ''))
                AND COALESCE(o.is_ghost, 0) = 0
                AND COALESCE(o.is_test, 0) = 0
                AND COALESCE(o.order_context, '') <> 'repair_settlement'
@@ -3328,6 +4198,12 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
            AND NOT {shift_ot_open_tab}
          GROUP BY COALESCE(o.order_type, 'dine-in')"
     );
+    // Order-type NET is per-order coverage: a gift card row's proven return
+    // cumulative counts once, as in settlement coverage, so only the part no
+    // refund adjustment records here is subtracted. Refund, void and cash
+    // movement totals stay bound to the recorded adjustments.
+    let unrecorded_gift_returns =
+        shift_unrecorded_gift_returns_by_order_type(&conn, &shift_id, &shift_ot_open_tab)?;
     let mut ot_stmt = conn
         .prepare(&shift_ot_sql)
         .map_err(|e| format!("prepare order_type query: {e}"))?;
@@ -3344,13 +4220,15 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)?,
-                Cents::new(row.get::<_, i64>(2)?).to_f64_dp2(),
+                row.get::<_, i64>(2)?,
             ))
         })
         .map_err(|e| format!("query order_type: {e}"))?;
 
     for row in ot_rows.flatten() {
-        let (otype, count, total) = row;
+        let (otype, count, net_cents) = row;
+        let unrecorded = unrecorded_gift_returns.get(&otype).copied().unwrap_or(0);
+        let total = Cents::new(net_cents - unrecorded).to_f64_dp2();
         match otype.as_str() {
             "dine-in" | "dine_in" => {
                 dine_in_orders += count;
@@ -3476,6 +4354,17 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
     let total_sales = gross_sales - discounts_total;
     let day_total =
         cash_sales + card_sales + other_sales + platform_online_sales + platform_cod_sales;
+    if !gift_close.is_empty() {
+        if let Some(drawer) = drawer.as_mut() {
+            // The adopted mirror's expected is already the canonical total.
+            let expected_cents = drawer
+                .get("expected")
+                .and_then(Value::as_f64)
+                .map(|value| Cents::round_half_even(value).as_i64())
+                .unwrap_or_default();
+            gift_close.annotate_drawer(drawer, expected_cents);
+        }
+    }
     let mut report_json = serde_json::json!({
         "date": report_date,
         "shifts": shift_counts,
@@ -3549,6 +4438,14 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
         },
         "staffReports": staff_reports,
     });
+    if !gift_close.is_empty() {
+        if let Some(obj) = report_json.as_object_mut() {
+            obj.insert(
+                GIFT_CLOSE_REPORT_KEY.to_string(),
+                gift_close.projection_value(),
+            );
+        }
+    }
     canonicalize_report_json_period(&mut report_json, period_start, period_end);
 
     // --- Persist in transaction ---
@@ -3582,6 +4479,7 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
         // ROLLBACK is semantically identical (no writes to undo) and
         // keeps the journal clean.
         let _ = conn.execute_batch("ROLLBACK");
+        ensure_gift_close_snapshot_current(&conn, &existing_id, &gift_close)?;
         return get_z_report_by_id(&conn, &existing_id).map(|report| {
             serde_json::json!({
                 "success": true,
@@ -4466,7 +5364,7 @@ fn build_z_report_for_date(
          WHERE {payment_scope_predicate}
            AND (?2 IS NULL OR {payment_scope_expr} <= ?2)
            AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
-           AND op.status = 'completed'
+           AND (op.status = 'completed' AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id, '')) = ''))
            AND COALESCE(o.is_ghost, 0) = 0
            AND COALESCE(o.is_test, 0) = 0
            AND COALESCE(o.order_context, '') <> 'repair_settlement'
@@ -4624,7 +5522,7 @@ fn build_z_report_for_date(
              WHERE {platform_scope_predicate}
                AND (?2 IS NULL OR {platform_scope_expr} <= ?2)
                AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
-               AND op.status = 'completed'
+               AND (op.status = 'completed' AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id, '')) = ''))
                AND op.method IN ('cash', 'card')
                AND COALESCE(o.is_ghost, 0) = 0
                AND COALESCE(o.is_test, 0) = 0
@@ -5031,6 +5929,36 @@ fn build_z_report_for_date(
         lower_bound_mode,
         branch_id.as_str(),
     )?;
+    let gift_close = {
+        let mut gift_close = load_gift_close_report_for_window(
+            &conn,
+            branch_id.as_str(),
+            period_start.as_str(),
+            cutoff_param,
+            lower_bound_mode,
+        )?;
+        // A confirmed original reports only inside this report's own drawer
+        // population; anything else is a scope mismatch, never a silent skip.
+        let report_drawer_ids = drawer_rows
+            .iter()
+            .filter_map(|row| row.get("id").and_then(Value::as_str))
+            .collect::<std::collections::HashSet<_>>();
+        let (in_report, outside): (Vec<_>, Vec<_>) = std::mem::take(&mut gift_close.originals)
+            .into_iter()
+            .partition(|row| report_drawer_ids.contains(row.drawer_id.as_str()));
+        gift_close.originals = in_report;
+        gift_close
+            .blockers
+            .extend(outside.into_iter().map(|row| GiftCloseBlocker {
+                code: GIFT_CLOSE_PROOF_MISMATCH,
+                shift_id: row.shift_id,
+                drawer_id: row.drawer_id,
+                staff_id: row.staff_id,
+                staff_name: row.staff_name,
+                pending_reason: None,
+            }));
+        gift_close
+    };
     let mut money_in_drawer = if drawer_rows.is_empty() {
         if include_active_shifts {
             total_expected + total_variance
@@ -5059,7 +5987,11 @@ fn build_z_report_for_date(
             - Cents::round_half_even(drawer_number("staffPaymentsTotal")).as_i64()
             - Cents::round_half_even(drawer_number("totalCashDrops")).as_i64()
             - Cents::round_half_even(drawer_number("driverCashGiven")).as_i64()
-            + Cents::round_half_even(drawer_number("driverCashReturned")).as_i64();
+            + Cents::round_half_even(drawer_number("driverCashReturned")).as_i64()
+            // Adopted gift-bound closes: the canonical gift liability cash and
+            // canonical ordinary correction, each added exactly once.
+            + gift_close.gift_cash_cents()
+            + gift_close.ordinary_adjustment_cents();
         let closing_cents = Cents::round_half_even(total_closing).as_i64();
         total_expected = Cents::new(expected_cents).to_f64_dp2();
         total_variance = Cents::new(closing_cents - expected_cents).to_f64_dp2();
@@ -5085,6 +6017,11 @@ fn build_z_report_for_date(
                     serde_json::json!(Cents::round_half_even(value).as_i64()),
                 );
             }
+        }
+    }
+    if !gift_close.is_empty() {
+        if let Some(ref mut drawer) = drawer_agg {
+            gift_close.annotate_drawer(drawer, Cents::round_half_even(total_expected).as_i64());
         }
     }
     let cash_breakdown_lookup = driver_cash_breakdown
@@ -5132,7 +6069,7 @@ fn build_z_report_for_date(
     // totals above. `sales.totalSales` is the order side, `daySummary.total`
     // the ledger side; when they disagree, `integrity.findings` names every
     // order responsible and `prepare_z_report_submission` refuses to close.
-    let integrity_blockers = payment_integrity::load_branch_window_payment_blockers(
+    let mut integrity_blockers = payment_integrity::load_branch_window_payment_blockers(
         &conn,
         branch_id.as_str(),
         period_start.as_str(),
@@ -5140,6 +6077,37 @@ fn build_z_report_for_date(
         lower_bound_mode == LowerBoundMode::Inclusive,
     )
     .map_err(|e| format!("load z-report integrity findings: {e}"))?;
+    // The same `payments_need_review` findings the submission refuses on, so
+    // the preview lists them (with their resolve action) before anyone
+    // presses close. They carry no difference: the payments are counted
+    // nowhere.
+    integrity_blockers.extend(
+        payment_integrity::load_payments_need_review_blockers(
+            &conn,
+            branch_id.as_str(),
+            cutoff_param,
+        )
+        .map_err(|e| format!("load z-report payments needing review: {e}"))?,
+    );
+    // And the charged payments not saved, with their Save and resolve actions.
+    integrity_blockers.extend(
+        payment_integrity::load_payments_not_saved_blockers(&conn, branch_id.as_str())
+            .map_err(|e| format!("load z-report charged payments not saved: {e}"))?,
+    );
+    // Cancelled orders of the period that still claim money with no payment
+    // record (item D7, round 2): listed as WARNINGS, never blocking (no till
+    // action resolves a cancel with no money). The submission gate
+    // (`load_unsettled_payment_blockers_for_window`) does not read them.
+    integrity_blockers.extend(
+        payment_integrity::load_cancelled_order_claims_payment_findings(
+            &conn,
+            branch_id.as_str(),
+            period_start.as_str(),
+            cutoff_param,
+            lower_bound_mode == LowerBoundMode::Inclusive,
+        )
+        .map_err(|e| format!("load z-report cancelled orders claiming a payment: {e}"))?,
+    );
     let unclassified_platforms = load_unclassified_platform_sources(
         &conn,
         branch_id.as_str(),
@@ -5250,6 +6218,14 @@ fn build_z_report_for_date(
         // refuses to close when the proof fails.
         "integrity": integrity,
     });
+    if !gift_close.is_empty() {
+        if let Some(obj) = report_json.as_object_mut() {
+            obj.insert(
+                GIFT_CLOSE_REPORT_KEY.to_string(),
+                gift_close.projection_value(),
+            );
+        }
+    }
     canonicalize_report_json_period(&mut report_json, period_start.as_str(), period_end.as_str());
 
     Ok(BuiltDateZReport {
@@ -5276,6 +6252,7 @@ fn build_z_report_for_date(
         total_expected,
         payments_breakdown,
         report_json,
+        gift_close,
     })
 }
 
@@ -5296,6 +6273,9 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
     if built.shift_count == 0 {
         info!("No closed shifts in period — returning preview-only Z-report");
         return Ok(preview_response_from_built_date_z_report(&built, true));
+    }
+    if let Some(message) = built.gift_close.blocker_message() {
+        return Err(message);
     }
 
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -5321,6 +6301,7 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
 
     if let Some(existing_id) = matching_ids.first() {
         let existing_id = existing_id.clone();
+        ensure_gift_close_snapshot_current(&conn, &existing_id, &built.gift_close)?;
         ensure_z_report_sync_queue_row(&conn, &existing_id, &sync_payload, &built.generated_at)?;
         let _ = prune_duplicate_local_z_reports_for_window(
             &conn,
@@ -5379,6 +6360,7 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
         // ROLLBACK is semantically identical (no writes to undo) and
         // keeps the journal clean.
         let _ = conn.execute_batch("ROLLBACK");
+        ensure_gift_close_snapshot_current(&conn, &existing_id, &built.gift_close)?;
         return get_z_report_by_id(&conn, &existing_id).map(|report| {
             serde_json::json!({
                 "success": true,
@@ -5627,6 +6609,16 @@ pub(crate) fn prepare_z_report_submission(
         }
     }
 
+    // --- Pre-condition: every closed gift-bound drawer is canonically closed ---
+    // Adopted proof is the evidence, never generic sync-queue emptiness.
+    {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let gift_close = load_gift_close_report_for_effective_window(&conn, &branch_id, &window)?;
+        if let Some(message) = gift_close.blocker_message() {
+            return Err(message);
+        }
+    }
+
     // Step 1: Generate the report (multi-shift or single-shift)
     let has_shift_id = str_field(payload, "shiftId")
         .or_else(|| str_field(payload, "shift_id"))
@@ -5810,6 +6802,29 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
 
     stage_rollover_protection(conn, &rollover_protection)?;
 
+    // The cleanup below deletes the window's payment rows. A payment set
+    // aside as a possible duplicate is the only record of that money on this
+    // terminal: it goes only once someone resolved it. The Z already refuses
+    // on `payments_need_review`; a payment a sync pass set aside after that
+    // check stops the close here (Android: `finalizeEndOfDay`).
+    let set_aside =
+        crate::payment_review::count_unresolved_set_aside_payments_for_cleanup(conn, cutoff_at)?;
+    if set_aside > 0 {
+        return Err(format!(
+            "Cannot close the day: {set_aside} payment(s) set aside as possible duplicates must be resolved first ({})",
+            crate::payment_review::PAYMENTS_NEED_REVIEW_REASON_CODE
+        ));
+    }
+    // Nor while a card charged on this till is not saved: the record is the
+    // only trace of money the customer paid (fix review 30/09/2026).
+    let not_saved = crate::unsaved_payments::count(conn)?;
+    if not_saved > 0 {
+        return Err(format!(
+            "Cannot close the day: {not_saved} charged payment(s) are not saved on this till yet ({})",
+            crate::unsaved_payments::PAYMENTS_NOT_SAVED_REASON_CODE
+        ));
+    }
+
     let mut cleared = serde_json::Map::new();
 
     // 1. payment_adjustments linked to orders inside the closed business window.
@@ -5875,15 +6890,19 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
     )?;
     cleared.insert("staff_payments".into(), serde_json::json!(c));
 
-    // 7. print_jobs (standalone operational artifacts).
-    let c = safe_delete(
-        conn,
-        "print_jobs",
-        "DELETE FROM print_jobs
-         WHERE datetime(created_at) <= datetime(?1)",
-        Some(cutoff_at),
-    )?;
-    cleared.insert("print_jobs".into(), serde_json::json!(c));
+    // 7. print_jobs of the closed day (finished or pending), with their
+    // attempts. Jobs that are printing or hold a printer stay: see
+    // `clear_closed_day_print_jobs`.
+    let print_cleanup = clear_closed_day_print_jobs(conn, cutoff_at)?;
+    cleared.insert("print_jobs".into(), serde_json::json!(print_cleanup.jobs));
+    cleared.insert(
+        "print_job_attempts".into(),
+        serde_json::json!(print_cleanup.attempts),
+    );
+    cleared.insert(
+        "print_jobs_kept_live".into(),
+        serde_json::json!(print_cleanup.kept),
+    );
 
     // 8. cash_drawer_sessions by close/open timestamp.
     let c = safe_delete(
@@ -6022,6 +7041,209 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
     .map_err(|e| format!("cleanup temp tables: {e}"))?;
 
     Ok(Value::Object(cleared))
+}
+
+/// Row counts of the day close's print-queue step.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct PrintJobCleanup {
+    /// `print_jobs` rows deleted: finished jobs, and pending jobs that hold no
+    /// printer.
+    jobs: i64,
+    /// `print_job_attempts` rows deleted: those of the deleted jobs, plus
+    /// finished attempts an older day close had already cut off their job.
+    attempts: i64,
+    /// Jobs from before the cutoff that stay: printing, holding a printer, or
+    /// the source of a reprint that stays.
+    kept: i64,
+}
+
+/// The day close's print-queue step: delete the print jobs of the closed day,
+/// together with their attempts, and never one that holds a printer.
+///
+/// Incident (Tomikro Parisi, desktop 1.4.119, 30/09/2026): from the closing Z
+/// at 03:25 every print stayed "pending" with transport "not started", while
+/// Health said the printer was ready, and restarts did not help. This step
+/// used to be `DELETE FROM print_jobs WHERE created_at <= cutoff`. It ran
+/// while another print was being sent, so it deleted that job, and the
+/// rollover runs with `PRAGMA foreign_keys = OFF`, so the `ON DELETE CASCADE`
+/// to `print_job_attempts` did not fire. The attempt stayed in `submitting`
+/// with no job above it: a durable printer blocker nothing could close.
+/// Hydration retained the printer lane on every tick, the lane sweep refused
+/// to release a lane with a blocker, every later job was deferred with no
+/// attempt and no error, and staff had nothing to cancel because the queue
+/// lists jobs, not attempts. The dispatcher now closes such legacy orphans
+/// (`DispatchManager::sweep_orphaned_lanes`); this step no longer makes them.
+///
+/// A job goes only when all of these hold:
+/// - it was created before the cutoff;
+/// - its status is `pending` or final (`printed`, `dispatched`, `failed`,
+///   `cancelled`), never `printing`;
+/// - none of its attempts matches the dispatcher's printer-blocker predicate
+///   (`print_dispatch::shared_attempt_blocker_predicate_sql`);
+/// - no reprint that stays points at it (a reprint deleted in this same step
+///   does not hold its source back).
+///
+/// Pending jobs go, as they did before 1.4.120: this same rollover deletes
+/// the closed day's orders and shifts they would print, so a pending job kept
+/// past the Z could no longer render. It would fail later, three such
+/// failures raise a false `printer.critical_failure` incident
+/// (`incident_reporting`), and a job left pending raises
+/// `printer.jobs_not_printing`. Deleting one cannot orphan a send: the worker
+/// moves a job from `pending` to `printing` in the transaction that creates
+/// its attempt (`print_dispatch::prepare_managed_attempt`), so a pending job
+/// has no attempt in flight, and a worker that selected a job this step
+/// deletes finds no row to claim and creates no attempt. Its earlier,
+/// finished attempts are deleted with it.
+///
+/// Foreign keys are off here, so the attempts of exactly those jobs are
+/// deleted explicitly in the same transaction. Finished attempts whose job an
+/// older version's day close had already deleted go too; a blocking orphan is
+/// left to the lane sweep, which closes it under the printer lane lock.
+///
+/// Without `print_job_attempts` (a partial repair schema; a real POS database
+/// always has it) nothing can hold a printer, so the jobs go by the status
+/// and cutoff rules alone. Without `print_jobs` there is nothing to delete.
+fn clear_closed_day_print_jobs(
+    conn: &Connection,
+    cutoff_at: &str,
+) -> Result<PrintJobCleanup, String> {
+    let table_present = |table: &str| -> Result<bool, String> {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+            params![table],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|e| format!("cleanup inspect {table}: {e}"))
+    };
+    if !table_present("print_jobs")? {
+        // Repair fixtures may carry a partial schema without the spooler
+        // (see db::migrate_v73); a real POS database always has this table.
+        warn!("Cleanup: print queue tables are absent");
+        return Ok(PrintJobCleanup::default());
+    }
+    let attempts_present = table_present("print_job_attempts")?;
+    if !attempts_present {
+        warn!("Cleanup: print_job_attempts is absent; print jobs are cleared by status alone");
+    }
+    let reprints_tracked = db::column_exists(conn, "print_jobs", "reprint_of_job_id")?;
+
+    let no_blocking_attempt = if attempts_present {
+        format!(
+            "AND NOT EXISTS (
+                 SELECT 1 FROM print_job_attempts attempt
+                 WHERE attempt.print_job_id = job.id
+                   AND {}
+             )",
+            crate::print_dispatch::shared_attempt_blocker_predicate_sql("attempt")
+        )
+    } else {
+        String::new()
+    };
+    let no_kept_reprint = if reprints_tracked {
+        "AND NOT EXISTS (
+             SELECT 1 FROM print_jobs child
+             WHERE child.reprint_of_job_id = job.id
+               AND child.id NOT IN (SELECT id FROM temp_z_report_print_job_ids)
+         )"
+    } else {
+        ""
+    };
+    let stage_jobs_sql = format!(
+        "INSERT INTO temp_z_report_print_job_ids (id)
+         SELECT job.id
+         FROM print_jobs job
+         WHERE datetime(job.created_at) <= datetime(?1)
+           AND job.status IN ('pending', 'printed', 'dispatched', 'failed', 'cancelled')
+           AND job.id NOT IN (SELECT id FROM temp_z_report_print_job_ids)
+           {no_blocking_attempt}
+           {no_kept_reprint}"
+    );
+
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS temp_z_report_print_job_ids;
+         CREATE TEMP TABLE temp_z_report_print_job_ids (
+             id TEXT PRIMARY KEY
+         );",
+    )
+    .map_err(|e| format!("prepare print cleanup temp table: {e}"))?;
+
+    // Leaves first: a reprint's source becomes deletable once the reprint is
+    // staged. Every pass stages at least one new row or ends the loop.
+    loop {
+        let staged = conn
+            .execute(&stage_jobs_sql, params![cutoff_at])
+            .map_err(|e| format!("stage print jobs for day close: {e}"))?;
+        if staged == 0 {
+            break;
+        }
+    }
+
+    let mut attempts = 0;
+    if attempts_present {
+        attempts += conn
+            .execute(
+                "DELETE FROM print_job_attempts
+                 WHERE print_job_id IN (SELECT id FROM temp_z_report_print_job_ids)",
+                [],
+            )
+            .map_err(|e| format!("cleanup delete print_job_attempts: {e}"))?;
+    }
+    let jobs = conn
+        .execute(
+            "DELETE FROM print_jobs
+             WHERE id IN (SELECT id FROM temp_z_report_print_job_ids)",
+            [],
+        )
+        .map_err(|e| format!("cleanup delete print_jobs: {e}"))?;
+    let mut finished_orphan_attempts = 0;
+    if attempts_present {
+        finished_orphan_attempts = conn
+            .execute(
+                &format!(
+                    "DELETE FROM print_job_attempts
+                     WHERE NOT EXISTS (
+                         SELECT 1 FROM print_jobs job
+                         WHERE job.id = print_job_attempts.print_job_id
+                     )
+                       AND NOT {}",
+                    crate::print_dispatch::shared_attempt_blocker_predicate_sql(
+                        "print_job_attempts"
+                    )
+                ),
+                [],
+            )
+            .map_err(|e| format!("cleanup delete orphaned print_job_attempts: {e}"))?;
+        attempts += finished_orphan_attempts;
+    }
+    let kept: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM print_jobs WHERE datetime(created_at) <= datetime(?1)",
+            params![cutoff_at],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("count print jobs kept at day close: {e}"))?;
+
+    conn.execute_batch("DROP TABLE IF EXISTS temp_z_report_print_job_ids;")
+        .map_err(|e| format!("cleanup print temp table: {e}"))?;
+
+    if kept > 0 {
+        info!(
+            kept,
+            "Z-report: kept print jobs that are printing, hold a printer, or are the source of a kept reprint"
+        );
+    }
+    if finished_orphan_attempts > 0 {
+        warn!(
+            count = finished_orphan_attempts,
+            "Z-report: deleted finished print attempts whose print job was already gone"
+        );
+    }
+
+    Ok(PrintJobCleanup {
+        jobs: jobs as i64,
+        attempts: attempts as i64,
+        kept,
+    })
 }
 
 fn apply_local_day_rollover(
@@ -6398,6 +7620,706 @@ mod tests {
     impl CountingPrintQueueInvalidator {
         fn count(&self) -> usize {
             self.0.load(std::sync::atomic::Ordering::Acquire)
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Gift-bound drawer close: frozen report projection and finalization gates
+    // -----------------------------------------------------------------------
+
+    const GC_ORG: &str = "6da1cebf-7a5f-4b62-9e4f-5a6b7c8d9eaf";
+    const GC_BRANCH: &str = "7eb2dfc0-8b6a-4c73-8f5a-6b7c8d9eafb0";
+    const GC_OTHER_BRANCH: &str = "9fc3e0d1-9c7b-4d84-8a6b-7c8d9eafb0c1";
+    const GC_TERMINAL: &str = "terminal-main-01";
+    const GC_STAFF: &str = "5c90bdae-6f4e-4a51-8d3e-4f5a6b7c8d9e";
+    const GC_OWNER_DB: &str = "a1b2c3d4-e5f6-4789-8abc-def012345678";
+    const GC_SOURCE_DB: &str = "b2c3d4e5-f6a7-4890-9bcd-ef0123456789";
+    const GC_OPENING_KEY: &str = "1f2e3d4c-5b6a-4789-8abc-0123456789ab";
+    const GC_OPENING_QUEUE_ID: &str = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+    const GC_SHIFT: &str = "2a3b4c5d-6e7f-4a8b-9c0d-1e2f3a4b5c6d";
+    const GC_DRAWER: &str = "3b4c5d6e-7f8a-4b9c-8d0e-2f3a4b5c6d7e";
+    const GC_ACK: &str = "4c5d6e7f-8a9b-4c0d-9e1f-3a4b5c6d7e8f";
+    const GC_CLOSING_KEY: &str = "5d6e7f8a-9b0c-4d1e-8f2a-4b5c6d7e8f9a";
+    const GC_QUEUE_ID: &str = "6e7f8a9b-0c1d-4e2f-9a3b-5c6d7e8f9a0b";
+    const GC_OPENED_AT: &str = "2026-09-30T08:00:00.000Z";
+    const GC_CLOSED_AT: &str = "2026-09-30T18:00:00.000Z";
+    const GC_CANONICAL_AT: &str = "2026-09-30T18:00:07.250Z";
+    const GC_ADOPTED_AT: &str = "2026-09-30T18:02:00.000Z";
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum GiftCloseStage {
+        /// Persisted opening refused as unusable, without a closing proof.
+        RefusedUnusable,
+        /// Opening confirmed usable, mirror closed locally, no closing journal.
+        JournalMissing,
+        /// Closing original captured; the hosted proof is not adopted.
+        Pending,
+        /// Canonical proof adopted onto both mirrors.
+        Adopted,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum GiftCloseTamper {
+        Untouched,
+        MirrorCount,
+        MirrorBranch,
+        OpeningOrganization,
+    }
+
+    fn gc_instant(value: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(value)
+            .expect("fixture instant")
+            .with_timezone(&Utc)
+    }
+
+    fn gc_payload() -> Value {
+        serde_json::json!({ "branchId": GC_BRANCH, "date": "2026-09-30" })
+    }
+
+    fn gc_execute(db: &DbState, sql: &str, values: &[&dyn rusqlite::ToSql]) {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(sql, values).expect(sql);
+    }
+
+    fn gc_count(db: &DbState, sql: &str) -> i64 {
+        let conn = db.conn.lock().unwrap();
+        conn.query_row(sql, [], |row| row.get(0)).expect(sql)
+    }
+
+    fn gc_stored_report_text(db: &DbState, z_report_id: &str) -> String {
+        let conn = db.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT report_json FROM z_reports WHERE id = ?1",
+            params![z_report_id],
+            |row| row.get(0),
+        )
+        .expect("stored report_json")
+    }
+
+    fn gc_only_z_report_id(db: &DbState) -> String {
+        let conn = db.conn.lock().unwrap();
+        conn.query_row("SELECT id FROM z_reports", [], |row| row.get(0))
+            .expect("one stored z-report")
+    }
+
+    /// Local approved preview the count is taken against: v3/ACK, 10000 + 2000.
+    fn gc_preview_drawer() -> crate::gift_financial_opening::DrawerState {
+        crate::gift_financial_opening::DrawerState {
+            version: 3,
+            acknowledgement_id: Some(GC_ACK.to_string()),
+            gift_cash_cents: 2_000,
+            ordinary_expected_cents: 10_000,
+            expected_cents: 12_000,
+        }
+    }
+
+    /// A cashier drawer opened through a persisted financial opening and taken
+    /// through the accepted journal APIs up to `stage`: float 10000, ordinary
+    /// cash sales 2345, the 14000 count closed locally against the preview and,
+    /// when adopted, the hosted proof ordinary 12345 + gift 2000 = 14345.
+    fn seed_gift_close(db: &DbState, stage: GiftCloseStage) {
+        use crate::gift_financial_closing as closing;
+        let conn = db.conn.lock().unwrap();
+        let usable = stage != GiftCloseStage::RefusedUnusable;
+        let drawer = if usable {
+            gc_preview_drawer()
+        } else {
+            crate::gift_financial_opening::DrawerState {
+                version: 0,
+                acknowledgement_id: None,
+                gift_cash_cents: 0,
+                ordinary_expected_cents: 10_000,
+                expected_cents: 10_000,
+            }
+        };
+        let state = if usable {
+            "confirmed_usable"
+        } else {
+            "confirmed_unusable"
+        };
+        conn.execute(
+            "INSERT INTO gift_financial_openings (
+                opening_key, organization_id, branch_id, terminal_id, staff_id, staff_name,
+                shift_id, drawer_id, opening_cents, currency, checked_in_at, business_date,
+                period_start_at, is_day_start, calculation_version, queue_item_id, state,
+                owner_terminal_db_id, source_terminal_db_id, server_usable, drawer_version,
+                drawer_acknowledgement_id, drawer_gift_cash_cents, drawer_ordinary_expected_cents,
+                drawer_expected_cents, confirmation_json, confirmed_at, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, 'Maria', ?6, ?7, 10000, 'EUR', ?8, '2026-09-30', ?8, 1, 2,
+                      ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?8, ?8, ?8)",
+            params![
+                GC_OPENING_KEY,
+                GC_ORG,
+                GC_BRANCH,
+                GC_TERMINAL,
+                GC_STAFF,
+                GC_SHIFT,
+                GC_DRAWER,
+                GC_OPENED_AT,
+                GC_OPENING_QUEUE_ID,
+                state,
+                GC_OWNER_DB,
+                GC_SOURCE_DB,
+                i64::from(usable),
+                drawer.version,
+                drawer.acknowledgement_id,
+                drawer.gift_cash_cents,
+                drawer.ordinary_expected_cents,
+                drawer.expected_cents,
+                r#"{"fixture":"stored opening proof"}"#,
+            ],
+        )
+        .expect("seed the financial opening");
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                check_in_time, report_date, period_start_at,
+                opening_cash_amount, opening_cash_amount_cents,
+                status, calculation_version, transferred_to_cashier_shift_id,
+                sync_status, created_at, updated_at, is_day_start
+            ) VALUES (?1, ?2, 'Maria', ?3, ?4, 'cashier', ?5, '2026-09-30', ?5, 100, 10000,
+                      'active', 2, NULL, 'pending', ?5, ?5, 1)",
+            params![GC_SHIFT, GC_STAFF, GC_BRANCH, GC_TERMINAL, GC_OPENED_AT],
+        )
+        .expect("seed the cashier shift");
+        conn.execute(
+            "INSERT INTO cash_drawer_sessions (
+                id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                opening_amount, opening_amount_cents, opened_at, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, 100, 10000, ?6, ?6, ?6)",
+            params![
+                GC_DRAWER,
+                GC_SHIFT,
+                GC_STAFF,
+                GC_BRANCH,
+                GC_TERMINAL,
+                GC_OPENED_AT
+            ],
+        )
+        .expect("seed the drawer");
+
+        if matches!(stage, GiftCloseStage::Pending | GiftCloseStage::Adopted) {
+            let tx = conn.unchecked_transaction().expect("begin the capture");
+            closing::capture_original(
+                &tx,
+                &closing::ClosingCapture {
+                    closing_key: GC_CLOSING_KEY.to_string(),
+                    opening_key: GC_OPENING_KEY.to_string(),
+                    queue_item_id: GC_QUEUE_ID.to_string(),
+                    organization_id: GC_ORG.to_string(),
+                    branch_id: GC_BRANCH.to_string(),
+                    terminal_id: GC_TERMINAL.to_string(),
+                    staff_id: GC_STAFF.to_string(),
+                    shift_id: GC_SHIFT.to_string(),
+                    drawer_id: GC_DRAWER.to_string(),
+                    owner_terminal_db_id: GC_OWNER_DB.to_string(),
+                    source_terminal_db_id: GC_SOURCE_DB.to_string(),
+                    currency: "EUR".to_string(),
+                    counted_cents: 14_000,
+                    closed_at: GC_CLOSED_AT.to_string(),
+                    confirmed_drawer: drawer.clone(),
+                    drawer: drawer.clone(),
+                    request_body: serde_json::json!({
+                        "event": "shift_close",
+                        "shift_id": GC_SHIFT,
+                        "drawer_id": GC_DRAWER,
+                        "closing_key": GC_CLOSING_KEY,
+                        "closing_cash_cents": 14_000,
+                        "closed_at": GC_CLOSED_AT
+                    }),
+                },
+                gc_instant("2026-09-30T18:00:01.000Z"),
+            )
+            .expect("capture the closing original");
+            tx.commit().expect("commit the capture");
+        }
+
+        let expected = drawer.expected_cents;
+        let variance = 14_000 - expected;
+        conn.execute(
+            "UPDATE cash_drawer_sessions SET
+                closing_amount = 140.0, closing_amount_cents = 14000,
+                expected_amount = ?1, expected_amount_cents = ?2,
+                variance_amount = ?3, variance_amount_cents = ?4,
+                total_cash_sales = 23.45, total_cash_sales_cents = 2345,
+                reconciled = 1, closed_at = ?5, reconciled_at = ?5, updated_at = ?5
+             WHERE id = ?6",
+            params![
+                expected as f64 / 100.0,
+                expected,
+                variance as f64 / 100.0,
+                variance,
+                GC_CLOSED_AT,
+                GC_DRAWER
+            ],
+        )
+        .expect("close the drawer locally");
+        conn.execute(
+            "UPDATE staff_shifts SET
+                closing_cash_amount = 140.0, closing_cash_amount_cents = 14000,
+                expected_cash_amount = ?1, expected_cash_amount_cents = ?2,
+                cash_variance = ?3, cash_variance_cents = ?4,
+                check_out_time = ?5, status = 'closed', sync_status = 'pending', updated_at = ?5
+             WHERE id = ?6",
+            params![
+                expected as f64 / 100.0,
+                expected,
+                variance as f64 / 100.0,
+                variance,
+                GC_CLOSED_AT,
+                GC_SHIFT
+            ],
+        )
+        .expect("close the shift locally");
+
+        if stage == GiftCloseStage::Adopted {
+            let proof = serde_json::json!({
+                "contract": "gift_closing_v1",
+                "state": "closed",
+                "organization_id": GC_ORG,
+                "branch_id": GC_BRANCH,
+                "terminal_id": GC_TERMINAL,
+                "source_terminal_id": GC_SOURCE_DB,
+                "owner_terminal_id": GC_OWNER_DB,
+                "shift_id": GC_SHIFT,
+                "drawer_id": GC_DRAWER,
+                "staff_id": GC_STAFF,
+                "currency": "EUR",
+                "counted_cents": 14_000,
+                "variance_cents": -345,
+                "closed_at": GC_CANONICAL_AT,
+                "drawer": {
+                    "contract": "gift_funding_v1",
+                    "drawer_id": GC_DRAWER,
+                    "shift_id": GC_SHIFT,
+                    "owner_terminal_id": GC_OWNER_DB,
+                    "currency": "EUR",
+                    "gift_cash_cents": 2_000,
+                    "ordinary_expected_cents": 12_345,
+                    "expected_cents": 14_345,
+                    "version": 3,
+                    "acknowledgement_id": GC_ACK
+                }
+            });
+            let reply = serde_json::json!({
+                "success": true,
+                "results": [{ "shift_id": GC_SHIFT, "status": "ok", "financial_closing": proof }]
+            });
+            let tx = conn.unchecked_transaction().expect("begin the adoption");
+            match closing::adopt_closing_response(
+                &tx,
+                GC_CLOSING_KEY,
+                Some(&reply),
+                None,
+                gc_instant(GC_ADOPTED_AT),
+            )
+            .expect("adopt the canonical close")
+            {
+                closing::ClosingAdoption::Adopted {
+                    replayed: false, ..
+                } => {}
+                _ => panic!("expected the first adoption of the canonical close"),
+            }
+            tx.commit().expect("commit the adoption");
+        }
+    }
+
+    #[test]
+    fn gift_close_report_freezes_canonical_ordinary_plus_gift_and_replays_unchanged() {
+        let db = test_db();
+        seed_gift_close(&db, GiftCloseStage::Adopted);
+
+        let built = build_z_report_for_date(&db, &gc_payload(), false).expect("build");
+        assert_eq!(built.shift_count, 1);
+        assert_eq!(
+            Cents::round_half_even(built.total_expected).as_i64(),
+            14_345
+        );
+        assert_eq!(Cents::round_half_even(built.total_variance).as_i64(), -345);
+        // Gift liability cash is a drawer movement: no sale, tender or revenue.
+        assert_eq!(built.cash_sales, 0.0);
+        assert_eq!(built.gross_sales, 0.0);
+        assert!(built.gift_close.is_ready());
+        assert_eq!(built.gift_close.originals.len(), 1);
+
+        let generated = generate_z_report_for_date(&db, &gc_payload()).expect("generate");
+        assert_eq!(generated["existing"], false);
+        let z_report_id = generated["zReportId"]
+            .as_str()
+            .expect("zReportId")
+            .to_string();
+        let stored = gc_stored_report_text(&db, &z_report_id);
+        let report_json: Value = serde_json::from_str(&stored).expect("stored report_json");
+
+        let drawer = &report_json["cashDrawer"];
+        assert_eq!(drawer["expected_cents"], 14_345);
+        assert_eq!(drawer["totalVariance_cents"], -345);
+        assert_eq!(drawer["ordinaryExpected_cents"], 12_345);
+        assert_eq!(drawer["giftLiabilityCash_cents"], 2_000);
+        assert_eq!(drawer["ordinaryAdjustment_cents"], 0);
+
+        let gift = &report_json[GIFT_CLOSE_REPORT_KEY];
+        assert_eq!(gift["contract"], GIFT_CLOSE_REPORT_CONTRACT);
+        assert_eq!(gift["ready"], true);
+        assert_eq!(gift["giftLiabilityCash_cents"], 2_000);
+        assert_eq!(gift["blockers"], serde_json::json!([]));
+        assert_eq!(gift["originals"].as_array().map(Vec::len), Some(1));
+        let original = &gift["originals"][0];
+        assert_eq!(original["shiftId"], GC_SHIFT);
+        assert_eq!(original["drawerId"], GC_DRAWER);
+        assert_eq!(original["terminalId"], GC_TERMINAL);
+        assert_eq!(original["currency"], "EUR");
+        assert_eq!(original["ordinaryExpected_cents"], 12_345);
+        assert_eq!(original["giftLiabilityCash_cents"], 2_000);
+        assert_eq!(original["expected_cents"], 14_345);
+        assert_eq!(original["counted_cents"], 14_000);
+        assert_eq!(original["variance_cents"], -345);
+        assert_eq!(original["ordinaryAdjustment_cents"], 0);
+        assert_eq!(original["drawerVersion"], 3);
+        assert_eq!(original["provenance"]["contract"], "gift_closing_v1");
+        assert_eq!(original["provenance"]["localClosedAt"], GC_CLOSED_AT);
+        assert_eq!(original["provenance"]["canonicalClosedAt"], GC_CANONICAL_AT);
+        assert!(original["provenance"]["adoptedAt"].is_string());
+        // Nonsecret: neither the acknowledgement nor the request body.
+        assert!(!gift.to_string().contains(GC_ACK));
+        assert!(!gift.to_string().contains("closing_cash_cents"));
+
+        // A later local drawer edit never reaches the frozen report: replay
+        // returns the stored row and nothing is added twice or duplicated.
+        gc_execute(
+            &db,
+            "UPDATE cash_drawer_sessions SET total_cash_sales = 99.99, total_cash_sales_cents = 9999
+              WHERE id = ?1",
+            params![GC_DRAWER],
+        );
+        let replay = generate_z_report_for_date(&db, &gc_payload()).expect("replay");
+        assert_eq!(replay["existing"], true);
+        assert_eq!(
+            extract_z_report_id(&replay).as_deref(),
+            Some(z_report_id.as_str())
+        );
+        // A same-day preview rebuilds the live window and never persists.
+        preview_z_report_for_date(&db, &gc_payload()).expect("live preview");
+        assert_eq!(gc_count(&db, "SELECT COUNT(*) FROM z_reports"), 1);
+        assert_eq!(gc_stored_report_text(&db, &z_report_id), stored);
+    }
+
+    #[test]
+    fn gift_close_shift_report_freezes_the_adopted_close_once() {
+        let db = test_db();
+        seed_gift_close(&db, GiftCloseStage::Adopted);
+
+        generate_z_report(&db, &serde_json::json!({ "shiftId": GC_SHIFT })).expect("shift report");
+        let z_report_id = gc_only_z_report_id(&db);
+        let stored = gc_stored_report_text(&db, &z_report_id);
+        let report_json: Value = serde_json::from_str(&stored).expect("stored report_json");
+        assert_eq!(report_json["cashDrawer"]["giftLiabilityCash_cents"], 2_000);
+        assert_eq!(report_json["cashDrawer"]["ordinaryExpected_cents"], 12_345);
+        assert_eq!(report_json["cashDrawer"]["ordinaryAdjustment_cents"], 0);
+        let original = &report_json[GIFT_CLOSE_REPORT_KEY]["originals"][0];
+        assert_eq!(original["expected_cents"], 14_345);
+        assert_eq!(original["counted_cents"], 14_000);
+        assert_eq!(original["variance_cents"], -345);
+
+        let replay =
+            generate_z_report(&db, &serde_json::json!({ "shiftId": GC_SHIFT })).expect("replay");
+        assert_eq!(replay["existing"], true);
+        assert_eq!(gc_count(&db, "SELECT COUNT(*) FROM z_reports"), 1);
+        assert_eq!(gc_stored_report_text(&db, &z_report_id), stored);
+    }
+
+    #[test]
+    fn gift_close_pending_missing_or_mismatched_proof_blocks_finalization_with_an_empty_queue() {
+        for (stage, tamper, code) in [
+            (
+                GiftCloseStage::Pending,
+                GiftCloseTamper::Untouched,
+                GIFT_CLOSE_PROOF_PENDING,
+            ),
+            (
+                GiftCloseStage::JournalMissing,
+                GiftCloseTamper::Untouched,
+                GIFT_CLOSE_JOURNAL_MISSING,
+            ),
+            (
+                GiftCloseStage::Adopted,
+                GiftCloseTamper::MirrorCount,
+                GIFT_CLOSE_PROOF_MISMATCH,
+            ),
+            (
+                GiftCloseStage::Adopted,
+                GiftCloseTamper::MirrorBranch,
+                GIFT_CLOSE_PROOF_MISMATCH,
+            ),
+            (
+                GiftCloseStage::Adopted,
+                GiftCloseTamper::OpeningOrganization,
+                GIFT_CLOSE_PROOF_MISMATCH,
+            ),
+        ] {
+            let case = format!("{stage:?}/{tamper:?}");
+            let db = test_db();
+            seed_gift_close(&db, stage);
+            match tamper {
+                GiftCloseTamper::Untouched => {}
+                // An ordinary repair replaced the adopted count: never evidence.
+                GiftCloseTamper::MirrorCount => gc_execute(
+                    &db,
+                    "UPDATE cash_drawer_sessions SET closing_amount = 120.0, closing_amount_cents = 12000
+                      WHERE id = ?1",
+                    params![GC_DRAWER],
+                ),
+                // The adopted drawer no longer sits in its original's branch.
+                GiftCloseTamper::MirrorBranch => gc_execute(
+                    &db,
+                    "UPDATE cash_drawer_sessions SET branch_id = ?1 WHERE id = ?2",
+                    params![GC_OTHER_BRANCH, GC_DRAWER],
+                ),
+                GiftCloseTamper::OpeningOrganization => gc_execute(
+                    &db,
+                    "UPDATE gift_financial_openings SET organization_id = ?1 WHERE opening_key = ?2",
+                    params![GC_OTHER_BRANCH, GC_OPENING_KEY],
+                ),
+            }
+            {
+                // An already consumed queue: emptiness is never proof.
+                let conn = db.conn.lock().unwrap();
+                let _ = conn.execute("DELETE FROM sync_queue", []);
+                let _ = conn.execute("DELETE FROM parity_sync_queue", []);
+            }
+
+            let readiness =
+                get_closeout_readiness_snapshot(&db, &serde_json::json!({ "branchId": GC_BRANCH }))
+                    .expect("readiness");
+            assert_eq!(readiness["unsyncedSyncQueue"]["count"], 0, "{case}");
+            let gift = &readiness["giftCloseProof"];
+            assert_eq!(gift["ready"], false, "{case}");
+            assert_eq!(gift["count"], 1, "{case}");
+            assert_eq!(gift["confirmedCount"], 0, "{case}");
+            assert_eq!(gift["details"][0]["code"], code, "{case}");
+            assert_eq!(gift["details"][0]["shiftId"], GC_SHIFT, "{case}");
+
+            let preview = preview_z_report_for_date(&db, &gc_payload()).expect("preview");
+            assert_eq!(preview["giftCloseReadiness"]["ready"], false, "{case}");
+            assert_eq!(
+                preview["giftCloseReadiness"]["details"][0]["code"], code,
+                "{case}"
+            );
+
+            for (seam, outcome) in [
+                (
+                    "prepare",
+                    prepare_z_report_submission(&db, &gc_payload()).map(|_| ()),
+                ),
+                ("submit", submit_z_report(&db, &gc_payload()).map(|_| ())),
+                (
+                    "date",
+                    generate_z_report_for_date(&db, &gc_payload()).map(|_| ()),
+                ),
+                (
+                    "shift",
+                    generate_z_report(&db, &serde_json::json!({ "shiftId": GC_SHIFT })).map(|_| ()),
+                ),
+            ] {
+                let error = outcome.expect_err(&format!("{case}: {seam} must be blocked"));
+                assert!(
+                    error.starts_with(GIFT_CLOSE_PROOF_REQUIRED),
+                    "{case} {seam}: {error}"
+                );
+                assert!(error.contains(code), "{case} {seam}: {error}");
+            }
+            assert_eq!(gc_count(&db, "SELECT COUNT(*) FROM z_reports"), 0, "{case}");
+            assert_eq!(
+                gc_count(&db, "SELECT COUNT(*) FROM staff_shifts"),
+                1,
+                "{case}"
+            );
+            assert_eq!(
+                gc_count(&db, "SELECT COUNT(*) FROM cash_drawer_sessions"),
+                1,
+                "{case}"
+            );
+
+            if matches!(tamper, GiftCloseTamper::Untouched) {
+                // Scope control: another branch's closeout is not held by it.
+                let other = get_closeout_readiness_snapshot(
+                    &db,
+                    &serde_json::json!({ "branchId": GC_OTHER_BRANCH }),
+                )
+                .expect("other branch readiness");
+                assert_eq!(other["giftCloseProof"]["ready"], true, "{case}");
+                assert_eq!(other["giftCloseProof"]["count"], 0, "{case}");
+
+                // Window control: only windows covering the drawer hold it.
+                let conn = db.conn.lock().unwrap();
+                let held = |start: &str, cutoff: Option<&str>| {
+                    load_gift_close_report_for_window(
+                        &conn,
+                        GC_BRANCH,
+                        start,
+                        cutoff,
+                        LowerBoundMode::Inclusive,
+                    )
+                    .expect("window gift report")
+                    .blockers
+                    .len()
+                };
+                assert_eq!(held("2026-09-30T00:00:00.000Z", None), 1, "{case}");
+                assert_eq!(
+                    held(GC_OPENED_AT, Some("2026-09-30T23:59:59.000Z")),
+                    1,
+                    "{case}"
+                );
+                assert_eq!(held("2026-09-30T08:00:00.001Z", None), 0, "{case}");
+                assert_eq!(
+                    held("2026-09-29T00:00:00.000Z", Some("2026-09-30T07:59:59.999Z")),
+                    0,
+                    "{case}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gift_close_stale_pre_proof_snapshot_cannot_finalize_or_be_rewritten() {
+        let db = test_db();
+        seed_gift_close(&db, GiftCloseStage::Adopted);
+        let generated = generate_z_report_for_date(&db, &gc_payload()).expect("generate");
+        let z_report_id = generated["zReportId"]
+            .as_str()
+            .expect("zReportId")
+            .to_string();
+        // Stand in for a report stored before the canonical close was adopted.
+        gc_execute(
+            &db,
+            "UPDATE z_reports SET report_json = json_remove(report_json, '$.giftFinancialClose')
+              WHERE id = ?1",
+            params![z_report_id],
+        );
+        let stale = gc_stored_report_text(&db, &z_report_id);
+        assert!(!stale.contains(GIFT_CLOSE_REPORT_KEY));
+
+        for (seam, outcome) in [
+            (
+                "prepare",
+                prepare_z_report_submission(&db, &gc_payload()).map(|_| ()),
+            ),
+            ("submit", submit_z_report(&db, &gc_payload()).map(|_| ())),
+            (
+                "date",
+                generate_z_report_for_date(&db, &gc_payload()).map(|_| ()),
+            ),
+        ] {
+            let error = outcome.expect_err(&format!("{seam} must refuse the stale snapshot"));
+            assert!(
+                error.starts_with(GIFT_CLOSE_SNAPSHOT_STALE),
+                "{seam}: {error}"
+            );
+            assert!(error.contains(&z_report_id), "{seam}: {error}");
+        }
+        // Nothing was rewritten, discarded or rolled over.
+        assert_eq!(gc_stored_report_text(&db, &z_report_id), stale);
+        assert_eq!(gc_count(&db, "SELECT COUNT(*) FROM z_reports"), 1);
+        assert_eq!(gc_count(&db, "SELECT COUNT(*) FROM staff_shifts"), 1);
+        assert_eq!(
+            gc_count(&db, "SELECT COUNT(*) FROM cash_drawer_sessions"),
+            1
+        );
+    }
+
+    #[test]
+    fn gift_close_snapshot_with_same_drawer_requires_matching_confirmed_values() {
+        for tamper in ["amount", "currency", "provenance", "pending", "duplicate"] {
+            let db = test_db();
+            seed_gift_close(&db, GiftCloseStage::Adopted);
+            let generated = generate_z_report_for_date(&db, &gc_payload()).expect("generate");
+            let id = generated["zReportId"].as_str().unwrap().to_string();
+            let mut stored: Value = serde_json::from_str(&gc_stored_report_text(&db, &id)).unwrap();
+            let projection = &mut stored[GIFT_CLOSE_REPORT_KEY];
+            match tamper {
+                "amount" => projection["originals"][0]["expected_cents"] = serde_json::json!(12000),
+                "currency" => projection["originals"][0]["currency"] = serde_json::json!("USD"),
+                "provenance" => {
+                    projection["originals"][0]["provenance"]["status"] =
+                        serde_json::json!("pending")
+                }
+                "pending" => projection["ready"] = serde_json::json!(false),
+                "duplicate" => {
+                    let duplicate = projection["originals"][0].clone();
+                    projection["originals"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(duplicate);
+                }
+                _ => unreachable!(),
+            }
+            let frozen = serde_json::to_string(&stored).unwrap();
+            gc_execute(
+                &db,
+                "UPDATE z_reports SET report_json = ?1 WHERE id = ?2",
+                params![frozen, id],
+            );
+            for result in [
+                prepare_z_report_submission(&db, &gc_payload()).map(|_| ()),
+                generate_z_report_for_date(&db, &gc_payload()).map(|_| ()),
+            ] {
+                let error = result.expect_err(tamper);
+                assert!(
+                    error.starts_with(GIFT_CLOSE_SNAPSHOT_STALE),
+                    "{tamper}: {error}"
+                );
+            }
+            assert_eq!(gc_stored_report_text(&db, &id), frozen, "{tamper}");
+        }
+    }
+
+    #[test]
+    fn gift_close_ordinary_is_unchanged_but_refused_opening_still_requires_proof() {
+        // Ordinary control: no financial opening, no gift block.
+        let db = test_db();
+        seed_closed_shift(&db);
+        let readiness =
+            get_closeout_readiness_snapshot(&db, &serde_json::json!({ "branchId": "branch-1" }))
+                .expect("readiness");
+        assert_eq!(readiness["giftCloseProof"]["ready"], true);
+        assert_eq!(readiness["giftCloseProof"]["count"], 0);
+        assert_eq!(readiness["giftCloseProof"]["confirmedCount"], 0);
+        let generated = generate_z_report_for_date(
+            &db,
+            &serde_json::json!({ "branchId": "branch-1", "date": "2026-02-16" }),
+        )
+        .expect("ordinary report");
+        let id = generated["zReportId"]
+            .as_str()
+            .expect("zReportId")
+            .to_string();
+        let report_json: Value =
+            serde_json::from_str(&gc_stored_report_text(&db, &id)).expect("stored report_json");
+        assert!(report_json.get(GIFT_CLOSE_REPORT_KEY).is_none());
+        assert!(report_json["cashDrawer"]
+            .get("giftLiabilityCash_cents")
+            .is_none());
+
+        // Same persisted identity rule as native close capture. Neither zero
+        // nor missing funding totals prove a successful ordinary closure.
+        let db = test_db();
+        seed_gift_close(&db, GiftCloseStage::RefusedUnusable);
+        for cash in [Some(0_i64), None] {
+            gc_execute(
+                &db,
+                "UPDATE gift_financial_openings SET drawer_gift_cash_cents = ?1",
+                params![cash],
+            );
+            let built = build_z_report_for_date(&db, &gc_payload(), false).expect("build");
+            assert!(!built.gift_close.is_ready());
+            assert_eq!(
+                built.gift_close.blockers[0].code,
+                GIFT_CLOSE_JOURNAL_MISSING
+            );
+            let error =
+                generate_z_report_for_date(&db, &gc_payload()).expect_err("missing original");
+            assert!(error.starts_with(GIFT_CLOSE_PROOF_REQUIRED));
+            assert_eq!(gc_count(&db, "SELECT COUNT(*) FROM z_reports"), 0);
         }
     }
 
@@ -7135,6 +9057,82 @@ mod tests {
             params![created_at],
         )
         .expect("insert paid order missing local payment rows");
+    }
+
+    /// 1.4.119 placeholder rows (guessed from a pulled order's own label and
+    /// total, no server id) are no drawer money: the Z's sales by tender,
+    /// for the period and for the shift, count only real rows. Before, the
+    /// 7.00 guess counted as cash the drawer never held.
+    #[test]
+    fn z_sales_never_count_a_placeholder_payment_row() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        for (order_id, cents) in [("ord-real-cash", 1000_i64), ("ord-guessed-cash", 700)] {
+            conn.execute(
+                "INSERT INTO orders (
+                    id, order_number, items, total_amount, total_amount_cents, status,
+                    order_type, payment_status, staff_shift_id, branch_id, sync_status,
+                    created_at, updated_at
+                 ) VALUES (?1, ?1, '[]', ?2, ?3, 'completed', 'pickup', 'paid',
+                           'shift-placeholder', 'branch-1', 'synced',
+                           '2026-09-30T10:00:00Z', '2026-09-30T10:00:00Z')",
+                params![order_id, cents as f64 / 100.0, cents],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, amount_cents, status, payment_origin,
+                staff_shift_id, sync_status, sync_state, created_at, updated_at
+             ) VALUES
+                ('pay-real', 'ord-real-cash', 'cash', 10.0, 1000, 'completed', 'manual',
+                 'shift-placeholder', 'synced', 'applied',
+                 '2026-09-30T10:01:00Z', '2026-09-30T10:01:00Z'),
+                ('pay-guess', 'ord-guessed-cash', 'cash', 7.0, 700, 'completed',
+                 'sync_reconstructed', 'shift-placeholder', 'synced', 'applied',
+                 '2026-09-30T10:01:00Z', '2026-09-30T10:01:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let period = load_sales_by_type_for_period(
+            &conn,
+            "branch-1",
+            "2026-09-30T00:00:00Z",
+            None,
+            LowerBoundMode::Inclusive,
+        )
+        .unwrap();
+        assert_eq!(
+            period["instore"]["cash"]["total"],
+            serde_json::json!(10.0),
+            "{period}"
+        );
+        assert_eq!(
+            period["instore"]["cash"]["count"],
+            serde_json::json!(1),
+            "{period}"
+        );
+        let shift = load_sales_by_type_for_shift(&conn, "shift-placeholder").unwrap();
+        assert_eq!(
+            shift["instore"]["cash"]["total"],
+            serde_json::json!(10.0),
+            "{shift}"
+        );
+
+        // The server's real payment adopts the placeholder (it gets the
+        // server's id): from then on it is money like any other row.
+        conn.execute(
+            "UPDATE order_payments SET remote_payment_id = 'remote-pay-guess' WHERE id = 'pay-guess'",
+            [],
+        )
+        .unwrap();
+        let adopted = load_sales_by_type_for_shift(&conn, "shift-placeholder").unwrap();
+        assert_eq!(
+            adopted["instore"]["cash"]["total"],
+            serde_json::json!(17.0),
+            "{adopted}"
+        );
     }
 
     fn seed_cashier_driver_zreport_day(db: &DbState) {
@@ -8841,6 +10839,357 @@ mod tests {
         assert_eq!(pending, 1, "pending sync_queue entry should be preserved");
     }
 
+    fn seed_print_job(
+        conn: &Connection,
+        id: &str,
+        status: &str,
+        created_at: &str,
+        reprint_of: Option<&str>,
+    ) {
+        conn.execute(
+            "INSERT INTO print_jobs
+             (id, entity_type, entity_id, status, created_at, updated_at, reprint_of_job_id)
+             VALUES (?1, 'order_receipt', ?1, ?2, ?3, ?3, ?4)",
+            params![id, status, created_at, reprint_of],
+        )
+        .expect("insert print job");
+    }
+
+    fn seed_print_attempt(conn: &Connection, attempt_id: &str, job_id: &str, state: &str) {
+        conn.execute(
+            "INSERT INTO print_job_attempts
+             (id, print_job_id, attempt_number, transport, resolved_target, document_name,
+              state, bytes_requested, bytes_written, started_at, last_seen_at)
+             VALUES (?1, ?2,
+                     (SELECT COALESCE(MAX(attempt_number), 0) + 1
+                      FROM print_job_attempts WHERE print_job_id = ?2),
+                     'raw_tcp', 'host:12:192.168.1.19:9100', 'receipt', ?3,
+                     100, 0, '2026-02-16T20:00:00.000Z', '2026-02-16T20:00:00.000Z')",
+            params![attempt_id, job_id, state],
+        )
+        .expect("insert print attempt");
+    }
+
+    fn print_job_ids(conn: &Connection) -> Vec<String> {
+        let mut statement = conn
+            .prepare("SELECT id FROM print_jobs ORDER BY id")
+            .unwrap();
+        let ids = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        ids
+    }
+
+    fn print_attempt_ids(conn: &Connection) -> Vec<String> {
+        let mut statement = conn
+            .prepare("SELECT id FROM print_job_attempts ORDER BY id")
+            .unwrap();
+        let ids = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        ids
+    }
+
+    fn orphaned_print_attempts(conn: &Connection) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM print_job_attempts a
+             WHERE NOT EXISTS (SELECT 1 FROM print_jobs j WHERE j.id = a.print_job_id)",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    /// Tomikro Parisi, 30/09/2026 (desktop 1.4.119): the closing Z deleted
+    /// every print job created before the cutoff, including one whose raw_tcp
+    /// attempt was still `submitting`. Foreign keys are off during the
+    /// rollover, so that attempt survived with no job above it and blocked
+    /// the printer until a manual repair. The day close now keeps every job
+    /// that is printing or holds a printer, and deletes the rest of the
+    /// closed day's jobs (finished or pending) always together with their
+    /// attempts. Pending jobs go because the same rollover deletes the orders
+    /// and shifts they would print: kept, they would fail later and could
+    /// raise a false `printer.critical_failure`.
+    #[test]
+    fn test_local_day_rollover_clears_the_days_print_jobs_but_never_one_holding_a_printer() {
+        let db = test_db();
+        let before = "2026-02-16T20:00:00Z";
+        {
+            let conn = db.conn.lock().unwrap();
+            // Stay: printing, or an attempt still holds the printer.
+            seed_print_job(&conn, "pj-printing", "printing", before, None);
+            seed_print_attempt(&conn, "pa-printing", "pj-printing", "submitting");
+            seed_print_job(&conn, "pj-printing-no-attempt", "printing", before, None);
+            seed_print_job(&conn, "pj-pending-blocked", "pending", before, None);
+            seed_print_attempt(&conn, "pa-pending-blocked", "pj-pending-blocked", "unknown");
+            seed_print_job(&conn, "pj-failed-unresolved", "failed", before, None);
+            seed_print_attempt(
+                &conn,
+                "pa-failed-unknown",
+                "pj-failed-unresolved",
+                "unknown",
+            );
+            // Go: pending with nothing holding a printer, with their finished
+            // attempts.
+            seed_print_job(&conn, "pj-pending", "pending", before, None);
+            seed_print_job(&conn, "pj-pending-retry", "pending", before, None);
+            seed_print_attempt(
+                &conn,
+                "pa-pending-retry",
+                "pj-pending-retry",
+                "transport_error",
+            );
+            // Go: finished, with the attempts that must leave with them.
+            seed_print_job(&conn, "pj-dispatched", "dispatched", before, None);
+            seed_print_attempt(&conn, "pa-dispatched", "pj-dispatched", "sent");
+            seed_print_job(&conn, "pj-failed", "failed", before, None);
+            seed_print_attempt(&conn, "pa-failed-1", "pj-failed", "transport_error");
+            seed_print_attempt(&conn, "pa-failed-2", "pj-failed", "transport_error");
+            seed_print_job(&conn, "pj-cancelled", "cancelled", before, None);
+            seed_print_attempt(&conn, "pa-cancelled", "pj-cancelled", "cancelled");
+            // A reprint that stays keeps its source; one that goes does not.
+            seed_print_job(&conn, "pj-source-kept", "printed", before, None);
+            seed_print_job(
+                &conn,
+                "pj-reprint-printing",
+                "printing",
+                before,
+                Some("pj-source-kept"),
+            );
+            seed_print_job(&conn, "pj-source-cleared", "printed", before, None);
+            seed_print_job(
+                &conn,
+                "pj-reprint-cleared",
+                "dispatched",
+                before,
+                Some("pj-source-cleared"),
+            );
+            seed_print_job(&conn, "pj-source-of-pending", "printed", before, None);
+            seed_print_job(
+                &conn,
+                "pj-reprint-pending",
+                "pending",
+                before,
+                Some("pj-source-of-pending"),
+            );
+            // After the cutoff: the next day's work.
+            seed_print_job(
+                &conn,
+                "pj-next-day",
+                "dispatched",
+                "2026-02-17T08:00:00Z",
+                None,
+            );
+            seed_print_attempt(&conn, "pa-next-day", "pj-next-day", "sent");
+            seed_print_job(
+                &conn,
+                "pj-next-day-pending",
+                "pending",
+                "2026-02-17T08:00:00Z",
+                None,
+            );
+        }
+
+        let result = apply_local_day_rollover(&db, "2026-02-16", "2026-02-16T23:59:59Z")
+            .expect("rollover should succeed");
+
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            print_job_ids(&conn),
+            vec![
+                "pj-failed-unresolved",
+                "pj-next-day",
+                "pj-next-day-pending",
+                "pj-pending-blocked",
+                "pj-printing",
+                "pj-printing-no-attempt",
+                "pj-reprint-printing",
+                "pj-source-kept",
+            ],
+            "only jobs that are printing, hold a printer, or are the source of a kept reprint outlive the day"
+        );
+        assert_eq!(
+            print_attempt_ids(&conn),
+            vec![
+                "pa-failed-unknown",
+                "pa-next-day",
+                "pa-pending-blocked",
+                "pa-printing"
+            ],
+            "the attempts of deleted jobs leave with them"
+        );
+        assert_eq!(
+            orphaned_print_attempts(&conn),
+            0,
+            "no attempt without a job"
+        );
+        assert_eq!(result["print_jobs"], 9);
+        assert_eq!(result["print_job_attempts"], 5);
+        assert_eq!(result["print_jobs_kept_live"], 6);
+        let foreign_keys: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(foreign_keys, 1, "the rollover restores foreign keys");
+    }
+
+    /// A partial repair schema without `print_job_attempts`: nothing can hold
+    /// a printer, so the closed day's pending and finished jobs go by status
+    /// alone, as before 1.4.120, and a printing job stays.
+    #[test]
+    fn test_local_day_rollover_clears_print_jobs_by_status_without_the_attempt_table() {
+        let db = test_db();
+        let before = "2026-02-16T20:00:00Z";
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute_batch("DROP TABLE print_job_attempts").unwrap();
+            seed_print_job(&conn, "pj-pending", "pending", before, None);
+            seed_print_job(&conn, "pj-printed", "printed", before, None);
+            seed_print_job(&conn, "pj-failed", "failed", before, None);
+            seed_print_job(&conn, "pj-printing", "printing", before, None);
+            seed_print_job(
+                &conn,
+                "pj-next-day",
+                "pending",
+                "2026-02-17T08:00:00Z",
+                None,
+            );
+        }
+
+        let result = apply_local_day_rollover(&db, "2026-02-16", "2026-02-16T23:59:59Z")
+            .expect("rollover should succeed without the attempt table");
+
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(print_job_ids(&conn), vec!["pj-next-day", "pj-printing"]);
+        assert_eq!(result["print_jobs"], 3);
+        assert_eq!(result["print_job_attempts"], 0);
+        assert_eq!(result["print_jobs_kept_live"], 1);
+    }
+
+    /// Databases that closed a day on 1.4.119 or earlier may already hold
+    /// orphans. A finished one is deleted here. A blocking one is left to the
+    /// dispatcher's lane sweep, which closes it under the printer lane lock
+    /// (`print_dispatch::DispatchManager::sweep_orphaned_lanes`); the next
+    /// day close then deletes it.
+    #[test]
+    fn test_local_day_rollover_clears_finished_legacy_orphans_and_leaves_blocking_ones() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute_batch("PRAGMA foreign_keys = OFF").unwrap();
+            seed_print_attempt(&conn, "pa-legacy-sent", "pj-long-gone", "sent");
+            seed_print_attempt(&conn, "pa-legacy-cancelled", "pj-repaired", "cancelled");
+            seed_print_attempt(&conn, "pa-legacy-submitting", "pj-tomikro", "submitting");
+            conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+        }
+
+        let result = apply_local_day_rollover(&db, "2026-02-16", "2026-02-16T23:59:59Z")
+            .expect("rollover should succeed");
+
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(print_attempt_ids(&conn), vec!["pa-legacy-submitting"]);
+        assert_eq!(result["print_job_attempts"], 2);
+    }
+
+    /// Every `recovery_action_log` row, as one JSON array per row.
+    fn recovery_log_rows(conn: &Connection) -> Vec<String> {
+        let mut statement = conn
+            .prepare(
+                "SELECT json_array(id, action_id, issue_code, recipe_id, recipe_version,
+                                   entity_type, entity_id, success, message, payload_json,
+                                   created_at)
+                 FROM recovery_action_log
+                 ORDER BY rowid",
+            )
+            .unwrap();
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        rows
+    }
+
+    /// The lane sweep closes a legacy orphan and audits the close. The next
+    /// day close deletes the closed attempt (now a finished orphan), so the
+    /// audit row is the only trail left: it must survive that day close
+    /// unchanged, with the attempt's ids and previous state.
+    #[test]
+    fn test_orphan_close_audit_row_survives_the_next_day_close() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute_batch("PRAGMA foreign_keys = OFF").unwrap();
+            seed_print_attempt(&conn, "pa-tomikro", "pj-deleted-at-z", "submitting");
+            conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+
+            let manager =
+                crate::print_dispatch::DispatchManager::hydrate_isolated_for_test(&conn).unwrap();
+            // Real order of events: the sweep closes the orphan during the day,
+            // BEFORE the next Z's cutoff. Dating the audit row before the cutoff
+            // makes this test catch a day close that ever starts deleting audit
+            // rows by date (a row dated after the cutoff would survive that).
+            let swept_at = chrono::DateTime::parse_from_rfc3339("2026-02-16T21:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc);
+            let released = manager.sweep_orphaned_lanes(&conn, swept_at).unwrap();
+            assert_eq!(released.len(), 1, "the sweep releases the orphan's printer");
+        }
+        let audit = {
+            let conn = db.conn.lock().unwrap();
+            let rows = recovery_log_rows(&conn);
+            assert_eq!(rows.len(), 1, "one audit row for the one closed orphan");
+            let before_cutoff: bool = conn
+                .query_row(
+                    "SELECT julianday(created_at) < julianday('2026-02-16T23:59:59Z')
+                     FROM recovery_action_log",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(
+                before_cutoff,
+                "the audit row is dated before the next day close's cutoff"
+            );
+            let (action_id, entity_id, payload): (String, String, String) = conn
+                .query_row(
+                    "SELECT action_id, entity_id, payload_json FROM recovery_action_log",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(action_id, "print_orphan_attempt_closed");
+            assert_eq!(entity_id, "pa-tomikro");
+            let payload: Value = serde_json::from_str(&payload).unwrap();
+            assert_eq!(payload["attemptId"], "pa-tomikro");
+            assert_eq!(payload["printJobId"], "pj-deleted-at-z");
+            assert_eq!(payload["previousState"], "submitting");
+            assert_eq!(payload["transport"], "raw_tcp");
+            assert_eq!(payload["target"], "host:12:192.168.1.19:9100");
+            assert_eq!(payload["bytesWritten"], 0);
+            assert_eq!(payload["previousLastError"], Value::Null);
+            assert_eq!(payload["outcome"], "resolved");
+            rows
+        };
+
+        apply_local_day_rollover(&db, "2026-02-16", "2026-02-16T23:59:59Z")
+            .expect("rollover should succeed");
+
+        let conn = db.conn.lock().unwrap();
+        assert!(
+            print_attempt_ids(&conn).is_empty(),
+            "the day close deletes the closed orphan"
+        );
+        assert_eq!(
+            recovery_log_rows(&conn),
+            audit,
+            "the audit row outlives the attempt it describes"
+        );
+    }
+
     #[test]
     fn test_active_staff_blockers_are_visible_when_branch_id_is_unresolved() {
         // Regression: the gate filtered `(branch_id = ?1 OR branch_id IS NULL)`
@@ -9705,6 +12054,78 @@ mod tests {
         assert_eq!(result["localDayClosed"], true);
     }
 
+    /// Item D7 (round 2, founder rule 30/09 and 01/10/2026): a cancelled
+    /// order of the period still labelled paid with no payment record used to
+    /// vanish from the Z (every Z query skips cancelled orders). It is now a
+    /// WARNING finding `cancelled_order_claims_payment` (Android: the same
+    /// name and wording): listed, never blocking the close, and never in the
+    /// totals. A cancelled pending order and a platform-held one are not.
+    #[test]
+    fn z_lists_a_cancelled_order_still_claiming_a_payment_as_a_warning() {
+        let db = test_db();
+        seed_closed_shift(&db);
+        {
+            let conn = db.conn.lock().unwrap();
+            for (id, label, metadata) in [
+                ("ord-cancelled-paid", "paid", None),
+                ("ord-cancelled-partial", "Partially_Paid", None),
+                ("ord-cancelled-pending", "pending", None),
+                (
+                    "ord-cancelled-efood",
+                    "paid",
+                    Some(
+                        r#"{"food_delivery":{"prepaid":true,"payment_method":"online","delivery_provider":"platform_delivery"}}"#,
+                    ),
+                ),
+            ] {
+                conn.execute(
+                    "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents,
+                        status, order_type, payment_status, branch_id, ghost_metadata,
+                        sync_status, created_at, updated_at)
+                     VALUES (?1, ?1, '[]', 8.0, 800, 'cancelled', 'pickup', ?2, 'branch-1', ?3,
+                             'synced', '2026-02-16T13:00:00Z', '2026-02-16T13:30:00Z')",
+                    params![id, label, metadata],
+                )
+                .unwrap();
+            }
+        }
+
+        let payload = serde_json::json!({ "branchId": "branch-1", "date": "2026-02-16" });
+        let result = generate_z_report_for_date(&db, &payload).expect("generate");
+        let integrity = &result["report"]["reportJson"]["integrity"];
+        let findings: Vec<(String, String, String)> = integrity["findings"]
+            .as_array()
+            .expect("findings")
+            .iter()
+            .filter(|finding| finding["reasonCode"] == "cancelled_order_claims_payment")
+            .map(|finding| {
+                (
+                    finding["orderId"].as_str().unwrap_or("").to_string(),
+                    finding["severity"].as_str().unwrap_or("").to_string(),
+                    finding["reasonText"].as_str().unwrap_or("").to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            findings.iter().map(|f| f.0.as_str()).collect::<Vec<_>>(),
+            vec!["ord-cancelled-paid", "ord-cancelled-partial"],
+            "{integrity}"
+        );
+        assert!(findings.iter().all(|finding| finding.1 == "warning"));
+        assert!(findings[0].2.contains("This does not hold the day."));
+        assert_eq!(integrity["warningFindings"], 2, "{integrity}");
+        assert_eq!(integrity["blockingFindings"], 0, "{integrity}");
+        assert_eq!(integrity["reconciled"], true, "never in the totals");
+
+        // The close is never held by it.
+        let gate = unsettled_payment_blockers(&db, &payload).expect("gate");
+        assert!(
+            gate.iter()
+                .all(|blocker| blocker.reason_code != "cancelled_order_claims_payment"),
+            "{gate:?}"
+        );
+    }
+
     #[test]
     fn test_unsettled_payment_blockers_treat_paid_split_order_without_local_rows_as_missing() {
         let db = test_db();
@@ -9883,6 +12304,77 @@ mod tests {
         assert_eq!(row["cashCollected"].as_f64(), Some(50.0));
         assert_eq!(row["expenses"].as_f64(), Some(5.0));
         assert_eq!(row["startingAmount"].as_f64(), Some(100.0));
+    }
+
+    /// Round 3 review (01/10/2026, shared rule R2): a courier row read from
+    /// the courier's earnings took the refunds the courier handed back off
+    /// AGAIN when they were booked under the driver's own shift: the earning
+    /// is already net of them (the refund lowers it, every recount reads it
+    /// net). The driver's own checkout subtracts none.
+    #[test]
+    fn a_courier_row_takes_the_cash_the_courier_handed_back_off_once() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let now = "2026-10-01T18:00:00Z";
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                opening_cash_amount, opening_cash_amount_cents,
+                check_in_time, status, calculation_version,
+                sync_status, created_at, updated_at
+             ) VALUES (
+                'shift-courier-z', 'driver-z', 'Nikos', 'branch-1', 'term-1', 'driver',
+                20.0, 2000, '2026-10-01T09:00:00Z', 'active', 2, 'pending', ?1, ?1
+             )",
+            params![now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, order_number, items, total_amount, total_amount_cents, status, order_type,
+                payment_status, staff_shift_id, driver_id, sync_status, created_at, updated_at
+             ) VALUES ('ord-courier-z', '#7', '[]', 13.0, 1300, 'delivered', 'delivery',
+                'paid', 'shift-courier-z', 'driver-z', 'pending', ?1, ?1)",
+            params![now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, amount_cents, status, staff_shift_id,
+                currency, created_at, updated_at
+             ) VALUES ('pay-courier-z', 'ord-courier-z', 'cash', 13.0, 1300, 'completed',
+                'shift-courier-z', 'EUR', ?1, ?1)",
+            params![now],
+        )
+        .unwrap();
+        // The earning after the courier handed 5.00 back: 13.00 - 5.00.
+        conn.execute(
+            "INSERT INTO driver_earnings (
+                id, driver_id, staff_shift_id, order_id, branch_id, delivery_fee, tip_amount,
+                total_earning, payment_method, cash_collected, cash_collected_cents,
+                card_amount, card_amount_cents, cash_to_return, cash_to_return_cents,
+                settled, created_at, updated_at
+             ) VALUES ('earning-courier-z', 'driver-z', 'shift-courier-z', 'ord-courier-z',
+                'branch-1', 0, 0, 0, 'cash', 8.0, 800, 0, 0, 8.0, 800, 0, ?1, ?1)",
+            params![now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO payment_adjustments (
+                id, payment_id, order_id, adjustment_type, amount, amount_cents, reason,
+                staff_shift_id, refund_method, cash_handler, sync_state, created_at, updated_at
+             ) VALUES ('adj-courier-z', 'pay-courier-z', 'ord-courier-z', 'refund', 5.0, 500,
+                'Synthetic', 'shift-courier-z', 'cash', 'driver_shift', 'pending', ?1, ?1)",
+            params![now],
+        )
+        .unwrap();
+
+        let row =
+            build_staff_cash_breakdown_row(&conn, "shift-courier-z", Some("Nikos"), "driver", 20.0)
+                .expect("courier row");
+        assert_eq!(row["cashCollected"].as_f64(), Some(8.0));
+        assert_eq!(row["cashRefunds"].as_f64(), Some(0.0), "{row}");
+        assert_eq!(row["cashToReturn"].as_f64(), Some(28.0), "{row}");
     }
 
     #[test]
@@ -10606,5 +13098,503 @@ mod tests {
                 .any(|order| order["id"] == "ord-yesterday"),
             "a closed day's order must not be listed in the open day"
         );
+    }
+    /// A 20.00 cash order paid once, plus a second 20.00 card taken on it
+    /// after it was already paid and set aside (B1, fix review 30/09/2026).
+    fn seed_order_with_set_aside_payment(db: &DbState, shift_id: &str) {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents,
+                status, order_type, payment_status, staff_shift_id, plugin, sync_status,
+                created_at, updated_at)
+             VALUES ('ord-dup', 'D-1', '[]', 20.0, 2000, 'completed', 'takeaway', 'paid', ?1,
+                     'pos', 'pending', '2026-02-16T12:00:00Z', '2026-02-16T12:00:00Z')",
+            params![shift_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status,
+                staff_shift_id, sync_status, created_at, updated_at)
+             VALUES ('pay-dup-cash', 'ord-dup', 'cash', 20.0, 2000, 'completed', ?1, 'pending',
+                     '2026-02-16T12:05:00Z', '2026-02-16T12:05:00Z')",
+            params![shift_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status,
+                staff_shift_id, sync_status, created_at, updated_at)
+             VALUES ('pay-dup-card', 'ord-dup', 'card', 20.0, 2000, 'completed', ?1, 'pending',
+                     '2026-02-16T12:06:00Z', '2026-02-16T12:06:00Z')",
+            params![shift_id],
+        )
+        .unwrap();
+        crate::payment_review::set_aside_already_paid_payment(
+            &conn,
+            "pay-dup-card",
+            Some("srv-cash"),
+            "2026-02-16T12:07:00Z",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn the_z_lists_a_set_aside_payment_with_no_difference_and_counts_it_nowhere() {
+        let db = test_db();
+        let shift_id = seed_closed_shift(&db);
+        seed_order_with_set_aside_payment(&db, &shift_id);
+
+        let payload = serde_json::json!({ "branchId": "branch-1", "date": "2026-02-16" });
+        let result = generate_z_report_for_date(&db, &payload).expect("generate");
+        let report = &result["report"]["reportJson"];
+        let integrity = &report["integrity"];
+
+        // The shared fixture's 100.00 plus the 20.00 order, paid once.
+        assert_eq!(integrity["orderTurnover"], 120.0);
+        assert_eq!(
+            integrity["paymentCoverage"], 120.0,
+            "the set-aside card is not money"
+        );
+        assert_eq!(report["daySummary"]["total"], 120.0);
+        assert_eq!(
+            integrity["excessAmount"], 0.0,
+            "and not an overpayment either"
+        );
+        assert_eq!(integrity["reconciled"], false, "the day needs a decision");
+        let findings = integrity["findings"].as_array().expect("findings");
+        let review: Vec<&serde_json::Value> = findings
+            .iter()
+            .filter(|finding| finding["reasonCode"] == "payments_need_review")
+            .collect();
+        assert_eq!(review.len(), 1);
+        assert_eq!(review[0]["differenceCents"], 0);
+        assert_eq!(review[0]["orderNumber"], "D-1");
+        assert_eq!(review[0]["reviewPayment"]["paymentId"], "pay-dup-card");
+        assert_eq!(review[0]["reviewPayment"]["method"], "card");
+        assert_eq!(
+            review[0]["reviewPayment"]["takenAt"],
+            "2026-02-16T12:06:00Z"
+        );
+    }
+
+    #[test]
+    fn the_day_rollover_refuses_while_a_set_aside_payment_is_unresolved() {
+        let db = test_db();
+        let shift_id = seed_closed_shift(&db);
+        seed_order_with_set_aside_payment(&db, &shift_id);
+
+        let refused = apply_local_day_rollover(&db, "2026-02-16", "2026-02-16T23:59:59Z")
+            .expect_err("the cleanup never deletes the only record of money to give back");
+        assert!(refused.contains("payments_need_review"), "{refused}");
+        {
+            let conn = db.conn.lock().unwrap();
+            let kept: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM order_payments WHERE id = 'pay-dup-card'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(kept, 1, "rolled back whole");
+            assert!(
+                crate::business_day::stored_period_start(&conn).is_none(),
+                "the day did not close"
+            );
+            crate::payment_review::resolve_set_aside_payment_in_connection(
+                &conn,
+                "pay-dup-card",
+                Some("staff-1"),
+                "2026-02-16T22:00:00Z",
+            )
+            .unwrap();
+        }
+
+        let cleared = apply_local_day_rollover(&db, "2026-02-16", "2026-02-16T23:59:59Z")
+            .expect("once resolved, the day closes");
+        assert_eq!(cleared["order_payments"], 5);
+    }
+
+    /// A card charged on this till whose payment could not be saved holds the
+    /// day close: the cleanup never deletes the order its record replays onto
+    /// (fix review 30/09/2026, Android `finalizeEndOfDay`).
+    #[test]
+    fn the_day_rollover_refuses_while_a_charged_payment_is_not_saved() {
+        let db = test_db();
+        let shift_id = seed_closed_shift(&db);
+        seed_order_with_set_aside_payment(&db, &shift_id);
+        {
+            let conn = db.conn.lock().unwrap();
+            crate::payment_review::resolve_set_aside_payment_in_connection(
+                &conn,
+                "pay-dup-card",
+                Some("staff-1"),
+                "2026-02-16T22:00:00Z",
+            )
+            .unwrap();
+            let entry = crate::unsaved_payments::UnsavedChargedPayment::for_payment(
+                "ord-dup",
+                &serde_json::json!({
+                    "orderId": "ord-dup",
+                    "method": "card",
+                    "amount": 4.0,
+                    "transactionRef": "txn-not-saved",
+                    "terminalApproved": true,
+                }),
+                None,
+                "2026-02-16T12:30:00Z",
+            )
+            .unwrap();
+            crate::unsaved_payments::record(&conn, &entry).unwrap();
+        }
+
+        let refused = apply_local_day_rollover(&db, "2026-02-16", "2026-02-16T23:59:59Z")
+            .expect_err("the record is the only trace of money the customer paid");
+        assert!(refused.contains("payments_not_saved"), "{refused}");
+        {
+            let conn = db.conn.lock().unwrap();
+            let orders: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM orders WHERE id = 'ord-dup'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(orders, 1, "rolled back whole");
+            assert_eq!(
+                crate::unsaved_payments::resolve_in_connection(
+                    &conn,
+                    "terminal-card:txn-not-saved",
+                    Some("staff-1"),
+                    "2026-02-16T22:30:00Z",
+                )
+                .unwrap()
+                .as_str(),
+                "resolved"
+            );
+        }
+
+        apply_local_day_rollover(&db, "2026-02-16", "2026-02-16T23:59:59Z")
+            .expect("once resolved, the day closes");
+    }
+
+    /// The card was set aside on another cashier's shift. It is money
+    /// nowhere, so that shift's section neither lists the order nor counts
+    /// its total: the order stays with the shift that sold it.
+    #[test]
+    fn a_set_aside_payment_never_puts_the_order_in_the_section_of_the_shift_that_took_it() {
+        let db = test_db();
+        let shift_id = seed_closed_shift(&db);
+        seed_order_with_set_aside_payment(&db, &shift_id);
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO staff_shifts (
+                    id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                    opening_cash_amount, opening_cash_amount_cents,
+                    check_in_time, check_out_time, status, calculation_version,
+                    sync_status, created_at, updated_at
+                 ) VALUES (
+                    'shift-zr-2', 'staff-2', 'Second cashier', 'branch-1', 'term-1', 'cashier',
+                    0.0, 0,
+                    '2026-02-16T10:00:00Z', '2026-02-16T17:00:00Z', 'closed', 2,
+                    'pending', '2026-02-16T17:00:00Z', '2026-02-16T17:00:00Z'
+                 )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE order_payments SET staff_shift_id = 'shift-zr-2' WHERE id = 'pay-dup-card'",
+                [],
+            )
+            .unwrap();
+        }
+
+        let payload = serde_json::json!({ "branchId": "branch-1", "date": "2026-02-16" });
+        let result = generate_z_report_for_date(&db, &payload).expect("generate");
+        let staff_reports = result["report"]["reportJson"]["staffReports"]
+            .as_array()
+            .expect("staffReports");
+        let section = |shift: &str| {
+            staff_reports
+                .iter()
+                .find(|report| report["staffShiftId"] == shift)
+                .unwrap_or_else(|| panic!("a section for {shift}: {staff_reports:?}"))
+        };
+        let second = section("shift-zr-2");
+        assert_eq!(second["orders"]["count"], 0, "{second}");
+        assert_eq!(second["orders"]["totalAmount"], 0.0);
+        assert_eq!(second["ordersDetails"].as_array().map(Vec::len), Some(0));
+        let first = section(&shift_id);
+        assert_eq!(
+            first["orders"]["count"], 4,
+            "the order stays with the shift that sold it"
+        );
+    }
+}
+
+/// Field incident 29/09/2026 (Le Petit Paris): the Z was held by fiscal rows
+/// of a store with no fiscal plugin, through a guard that checked today's
+/// UTC date and answered in English. On the desktop that guard only ran in a
+/// command the renderer never calls. These pin the window the guard checks,
+/// the inactive bypass, the typed refusal and the support evidence.
+#[cfg(test)]
+mod fiscal_closeout_tests {
+    use super::*;
+    use crate::fiscal::active_cache;
+    use rusqlite::Connection;
+
+    fn test_db() -> DbState {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             PRAGMA busy_timeout = 5000;
+             PRAGMA synchronous = NORMAL;",
+        )
+        .expect("set pragmas");
+        db::run_migrations_for_test(&conn);
+        DbState {
+            conn: std::sync::Mutex::new(conn),
+            db_path: std::path::PathBuf::from(":memory:"),
+        }
+    }
+
+    fn seed_fiscal(conn: &Connection, id: &str, branch_id: &str, created_at: &str, status: &str) {
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id, created_at,
+                 attempts, status, error_message, module_type, conflict_strategy
+             ) VALUES (?1, 'fiscal_submission', ?2, 'INSERT', ?3, 'org-1', ?4,
+                 3, ?5, 'HTTP_400_CLIENT_ERROR: Invalid FiscalReceiptInput', 'fiscal', 'last-write-wins')",
+            params![
+                id,
+                format!("order-{id}"),
+                serde_json::json!({
+                    "branchId": branch_id,
+                    "orderId": format!("order-{id}"),
+                    "receiptNumber": format!("R-{id}"),
+                })
+                .to_string(),
+                created_at,
+                status
+            ],
+        )
+        .expect("seed fiscal row");
+    }
+
+    /// The previous Z closed the 28/09 business day at 29/09 05:00Z.
+    fn close_previous_day(conn: &Connection) {
+        db::set_setting(
+            conn,
+            "system",
+            "last_z_report_timestamp",
+            "2026-09-29T05:00:00+00:00",
+        )
+        .expect("store previous cutoff");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn the_z_submission_is_held_by_its_own_windows_fiscal_receipts_only() {
+        active_cache::reset_for_tests();
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            close_previous_day(&conn);
+            // The day's own receipts (one after midnight UTC).
+            seed_fiscal(
+                &conn,
+                "in-1",
+                "branch-lpp",
+                "2026-09-29T11:50:03.140276+00:00",
+                "pending",
+            );
+            seed_fiscal(
+                &conn,
+                "in-2",
+                "branch-lpp",
+                "2026-09-30T01:15:00Z",
+                "failed",
+            );
+            // Receipts of the day the previous Z already closed, and another
+            // branch's receipt: neither belongs to this Z.
+            seed_fiscal(
+                &conn,
+                "before",
+                "branch-lpp",
+                "2026-09-28T20:00:00Z",
+                "pending",
+            );
+            seed_fiscal(
+                &conn,
+                "other",
+                "branch-other",
+                "2026-09-29T12:00:00Z",
+                "pending",
+            );
+        }
+        let payload = serde_json::json!({ "branchId": "branch-lpp" });
+
+        let response = fiscal_close_blocked_response(&db, &payload)
+            .expect("guard runs")
+            .expect("the window's receipts hold the Z");
+        assert_eq!(response["errorCode"], "FISCAL_CLOSE_BLOCKED");
+        assert_eq!(response["count"], 2);
+        assert_eq!(response["periodStartAt"], "2026-09-29T05:00:00+00:00");
+        assert_eq!(response["activeVerdict"], "unknown", "unknown fails closed");
+        assert_eq!(response["fiscalRows"].as_array().map(Vec::len), Some(2));
+        assert!(
+            response["businessDay"]
+                .as_str()
+                .is_some_and(|day| day.len() == 10),
+            "the refusal names the report's business day: {response}"
+        );
+
+        // The preview shows the same blocker before the cashier confirms.
+        let preview = fiscal_queue_blockers_for_closeout(&db, &payload).expect("preview blockers");
+        assert!(preview.blocking);
+        assert_eq!(preview.count, 2);
+
+        // A branch the server reports as fiscally inactive closes; the rows
+        // stay queued (nothing deleted client-side).
+        active_cache::update("branch-lpp", false);
+        assert_eq!(fiscal_close_blocked_response(&db, &payload).unwrap(), None);
+        let preview = fiscal_queue_blockers_for_closeout(&db, &payload).expect("preview blockers");
+        assert!(!preview.blocking);
+        assert_eq!(preview.count, 2, "the evidence is still reported");
+        let queued: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE module_type = 'fiscal'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(queued, 4);
+        active_cache::reset_for_tests();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn a_terminal_without_a_branch_is_not_held_by_rows_it_cannot_match() {
+        active_cache::reset_for_tests();
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            seed_fiscal(
+                &conn,
+                "orphan",
+                "branch-lpp",
+                "2026-09-29T11:50:00Z",
+                "pending",
+            );
+        }
+        // No branch in the payload and no terminal credential in tests.
+        let payload = serde_json::json!({ "branchId": "" });
+        if resolve_closeout_branch_id(&payload).trim().is_empty() {
+            assert_eq!(fiscal_close_blocked_response(&db, &payload).unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn the_last_closeout_attempt_keeps_the_typed_code_and_bounded_text() {
+        let at = "2026-09-29T16:38:14Z";
+        let blocked = zreport_attempt(
+            "fiscal_guard",
+            Ok(serde_json::json!({
+                "success": false,
+                "errorCode": "FISCAL_CLOSE_BLOCKED",
+                "message": "Cannot close day: 2 fiscal receipt(s) of 2026-09-29 have not been sent to the tax authority yet.",
+            })),
+            at,
+        );
+        assert_eq!(blocked.code, "FISCAL_CLOSE_BLOCKED");
+        assert_eq!(blocked.stage, "fiscal_guard");
+        assert!(blocked
+            .message
+            .as_deref()
+            .is_some_and(|m| m.contains("2026-09-29")));
+
+        let submitted = zreport_attempt(
+            "submitted",
+            Ok(serde_json::json!({ "success": true, "localDayClosed": true })),
+            at,
+        );
+        assert_eq!(
+            (submitted.code.as_str(), submitted.message),
+            ("SUBMITTED", None)
+        );
+
+        let failed = zreport_attempt(
+            "pre_z_sync",
+            Err("Cannot close day: pre-Z-report sync failed: PARITY_SYNC_PARTIAL".to_string()),
+            at,
+        );
+        assert_eq!(failed.code, "ERROR");
+        assert_eq!(failed.stage, "pre_z_sync");
+
+        let unlabelled = zreport_attempt(
+            "sync_blocked",
+            Ok(serde_json::json!({ "success": false })),
+            at,
+        );
+        assert_eq!(unlabelled.code, "BLOCKED");
+    }
+
+    fn zreport_attempt(stage: &str, result: Result<Value, String>, at: &str) -> CloseoutAttempt {
+        closeout_attempt_from_result(stage, &result, at)
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn closeout_readiness_carries_the_fiscal_evidence_and_the_last_attempt() {
+        active_cache::reset_for_tests();
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            close_previous_day(&conn);
+            seed_fiscal(
+                &conn,
+                "in-1",
+                "branch-lpp",
+                "2026-09-29T11:50:03Z",
+                "pending",
+            );
+            seed_fiscal(&conn, "old", "branch-lpp", "2026-09-27T11:00:00Z", "failed");
+        }
+        let payload = serde_json::json!({ "branchId": "branch-lpp" });
+
+        let before = get_closeout_readiness_snapshot(&db, &payload).expect("readiness");
+        assert_eq!(before["lastCloseoutAttempt"]["status"], "not_collected");
+        let fiscal = &before["fiscalQueueBlockers"];
+        assert_eq!(fiscal["count"], 2, "every queued fiscal row of the branch");
+        assert_eq!(fiscal["forReportDate"], 1, "the rows the guard counts");
+        assert_eq!(fiscal["activeVerdict"], "unknown");
+        assert_eq!(fiscal["wouldBlockClose"], true);
+        assert_eq!(fiscal["rows"][0]["attempts"], 3);
+        assert_eq!(
+            fiscal["rows"][0]["maxRetries"],
+            crate::sync_queue::MAX_RETRY_ATTEMPTS
+        );
+        assert!(fiscal["rows"][0].get("data").is_none(), "never the payload");
+
+        {
+            let conn = db.conn.lock().unwrap();
+            record_last_closeout_attempt(
+                &conn,
+                &CloseoutAttempt {
+                    at: "2026-09-29T16:38:14Z".to_string(),
+                    stage: "fiscal_guard".to_string(),
+                    code: "FISCAL_CLOSE_BLOCKED".to_string(),
+                    message: Some("Cannot close day: 1 fiscal receipt(s)".to_string()),
+                },
+            )
+            .expect("record attempt");
+        }
+        let after = get_closeout_readiness_snapshot(&db, &payload).expect("readiness");
+        assert_eq!(after["lastCloseoutAttempt"]["code"], "FISCAL_CLOSE_BLOCKED");
+        assert_eq!(after["lastCloseoutAttempt"]["stage"], "fiscal_guard");
+        assert_eq!(after["lastCloseoutAttempt"]["at"], "2026-09-29T16:38:14Z");
+        active_cache::reset_for_tests();
     }
 }

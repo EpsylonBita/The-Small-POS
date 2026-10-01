@@ -48,6 +48,8 @@ mod drawer;
 mod ecr;
 mod escpos;
 pub mod fiscal; // pub so integration tests (tests/*.rs) can exercise enqueue_for_order, active_cache, etc.
+mod gift_financial_closing;
+mod gift_financial_opening;
 mod hardware_manager;
 mod idempotency;
 mod incident_reporting;
@@ -58,6 +60,7 @@ mod money;
 mod order_ownership;
 mod panic_hook;
 mod payment_integrity;
+mod payment_review;
 mod payments;
 mod platforms;
 mod print;
@@ -81,6 +84,7 @@ mod storage;
 mod sync;
 pub mod sync_queue; // pub so integration tests can call create_tables / enqueue_payload_item
 mod terminal_helpers;
+mod unsaved_payments;
 mod windows_spooler;
 mod zreport;
 
@@ -1292,7 +1296,14 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             info!("Database, auth, sync, and print worker registered");
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler(|invoke| {
+            if !commands::system_ui::display_receiver_command_allowed(
+                invoke.message.webview_ref().label(), invoke.message.command(),
+            ) {
+                invoke.resolver.reject("Command unavailable to connected display receiver");
+                return true;
+            }
+            let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
             // App lifecycle
             memory_trim::memory_trim_webview,
             commands::runtime::app_shutdown,
@@ -1373,6 +1384,7 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             commands::orders::order_approve,
             commands::orders::order_decline,
             commands::orders::order_assign_driver,
+            commands::orders::order_cancel_with_approval,
             commands::orders::order_reset_to_active,
             commands::orders::order_delete,
             commands::orders::order_save_from_remote,
@@ -1427,6 +1439,8 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             commands::sync_queue::sync_queue_status,
             commands::sync_queue::sync_queue_list_items,
             commands::sync_queue::sync_queue_retry_item,
+            commands::sync_queue::sync_queue_make_due,
+            commands::sync_queue::sync_queue_items_by_id,
             commands::sync_queue::sync_queue_retry_module,
             commands::sync_queue::sync_queue_list_conflicts,
             commands::sync_queue::sync_queue_process,
@@ -1449,6 +1463,7 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             commands::offline_mutations::offline_housekeeping_update_status,
             commands::offline_mutations::offline_housekeeping_assign_staff,
             commands::offline_mutations::offline_product_update_quantity,
+            commands::offline_mutations::inventory_snapshot_overlays,
             // Menu
             commands::menu::menu_get_categories,
             commands::menu::menu_get_subcategories,
@@ -1463,6 +1478,14 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             commands::menu::menu_trigger_check_for_updates,
             // Shifts
             commands::shifts::shift_open,
+            commands::shifts::shift_financial_opening_begin,
+            commands::shifts::shift_financial_opening_authorize,
+            commands::shifts::shift_financial_opening_status,
+            commands::shifts::shift_financial_opening_clear_authorization,
+            commands::shifts::shift_financial_closing_authorize,
+            commands::shifts::shift_financial_closing_list_pending,
+            commands::shifts::shift_financial_closing_status,
+            commands::shifts::shift_financial_closing_retry,
             commands::shifts::shift_close,
             commands::shifts::shift_get_active,
             commands::shifts::shift_get_active_for_branch,
@@ -1488,9 +1511,36 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             commands::shifts::shift_get_today_scheduled_shifts,
             commands::shifts::shift_backfill_driver_earnings,
             commands::shifts::shift_print_checkout,
+            // Gift cards (atomic_v1 order redemption; card number stays in memory)
+            commands::gift_cards::gift_card_redeem_for_order,
+            commands::gift_cards::gift_card_reconcile_order,
+            // Settled gift card fiscal receipt (readiness, finalize, reconcile)
+            commands::gift_card_fiscal::gift_card_fiscal_readiness,
+            commands::gift_card_fiscal::gift_card_fiscal_finalize,
+            commands::gift_card_fiscal::gift_card_fiscal_reconcile,
+            // Funded gift cards (gift_funding_v1): stored value, never an order or fiscal receipt
+            commands::gift_card_funding::gift_funding_prepare,
+            commands::gift_card_funding::gift_funding_begin_collection,
+            commands::gift_card_funding::gift_funding_complete,
+            commands::gift_card_funding::gift_funding_cancel,
+            commands::gift_card_funding::gift_funding_recover,
+            commands::gift_card_funding::gift_funding_authorize_manager,
+            commands::gift_card_funding::gift_funding_grant,
+            commands::gift_card_funding::gift_funding_status,
+            commands::gift_card_funding::gift_funding_refresh_drawer,
+            commands::gift_card_funding::gift_funding_close_blocker,
+            commands::gift_card_funding::gift_funding_availability,
+            commands::gift_card_returns::gift_return_authorize,
+            commands::gift_card_returns::gift_return_begin,
+            commands::gift_card_returns::gift_return_recover,
+            commands::gift_card_returns::gift_return_status,
             // Payments
             commands::payments::payment_record,
             commands::payments::payment_void,
+            commands::payments::payment_resolve_set_aside,
+            commands::payments::payment_list_unsaved,
+            commands::payments::payment_save_unsaved,
+            commands::payments::payment_resolve_unsaved,
             commands::payments::payment_update_payment_status,
             commands::payments::payment_update_payment_method,
             commands::payments::payment_get_order_payments,
@@ -1719,6 +1769,11 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             commands::system_ui::display_list_monitors,
             commands::system_ui::display_open_window,
             commands::system_ui::display_close_window,
+            commands::system_ui::kds_display_publish,
+            commands::system_ui::customer_display_publish,
+            commands::system_ui::customer_display_snapshot,
+            commands::system_ui::kds_display_snapshot,
+            commands::system_ui::kds_display_intent,
             // efood Partner (Live Orders) hosted in the POS window
             commands::efood_partner::efood_partner_ensure,
             commands::efood_partner::efood_partner_show,
@@ -1796,7 +1851,9 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             commands::capture_documents::capture_confirm_commit,
             commands::capture_documents::capture_remove_page,
             commands::capture_documents::capture_reorder_pages,
-        ])
+            ];
+            handler(invoke)
+        })
         .build(context)
         .expect("error while building The Small POS")
         .run(|app, event| {

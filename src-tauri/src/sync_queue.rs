@@ -314,9 +314,61 @@ const CLOSEOUT_EXEMPT_ROW_PREDICATE: &str = "(table_name IN ('customers', 'custo
 /// Row-level twin of [`CLOSEOUT_EXEMPT_ROW_PREDICATE`]. Every other table —
 /// orders, payments, adjustments, z_reports, shifts, drawers, expenses, staff
 /// payments, driver earnings, fiscal, loyalty and anything unknown — stays
-/// fail-closed for the Z.
+/// fail-closed for the Z (fiscal rows of a fiscally inactive branch are the
+/// one addition, see [`fiscal_row_is_closeout_exempt`]).
 pub(crate) fn is_closeout_exempt_row(table_name: &str, module_type: &str) -> bool {
     matches!(table_name, "customers" | "customer_addresses") && module_type == "customers"
+}
+
+/// Fiscal rows of a branch the server reports as fiscally inactive
+/// (`GET /api/pos/fiscal/status` → `active: false`) never block the Z: the
+/// server only ever answers them `skipped`, and the fiscal close-day guard
+/// already lets that branch close (29/09/2026, Le Petit Paris: a store with
+/// no fiscal plugin could not close its day over two fiscal rows). They stay
+/// queued and visible in Sync health; nothing deletes them client-side. An
+/// unknown or active verdict keeps them fail-closed.
+pub(crate) fn fiscal_row_is_closeout_exempt(module_type: &str, data: &str) -> bool {
+    if module_type != "fiscal" {
+        return false;
+    }
+    serde_json::from_str::<Value>(data)
+        .ok()
+        .and_then(|payload| {
+            payload
+                .get("branchId")
+                .and_then(Value::as_str)
+                .map(|branch_id| branch_id.trim().to_string())
+        })
+        .filter(|branch_id| !branch_id.is_empty())
+        .is_some_and(|branch_id| {
+            crate::fiscal::active_cache::verdict(&branch_id)
+                == crate::fiscal::active_cache::CacheVerdict::Inactive
+        })
+}
+
+/// [`CLOSEOUT_EXEMPT_ROW_PREDICATE`] plus the fiscal rows of branches whose
+/// fresh fiscal verdict is inactive (the SQL twin of
+/// [`fiscal_row_is_closeout_exempt`]). Branch ids come from
+/// `active_cache::inactive_branch_ids`, which only returns `[A-Za-z0-9_-]`
+/// ids, so embedding them as literals is safe.
+fn closeout_exempt_row_predicate() -> String {
+    let inactive_branches = crate::fiscal::active_cache::inactive_branch_ids();
+    if inactive_branches.is_empty() {
+        return CLOSEOUT_EXEMPT_ROW_PREDICATE.to_string();
+    }
+    let literals = inactive_branches
+        .iter()
+        .map(|branch_id| format!("'{branch_id}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    // COALESCE(..., 0): a fiscal row whose payload names no branch (or is not
+    // JSON) must evaluate to FALSE, not NULL — `NOT NULL` would silently drop
+    // it from the blocking count too.
+    format!(
+        "({CLOSEOUT_EXEMPT_ROW_PREDICATE} OR (COALESCE(module_type, '') = 'fiscal' \
+         AND COALESCE((CASE WHEN json_valid(data) THEN json_extract(data, '$.branchId') END) \
+         IN ({literals}), 0)))"
+    )
 }
 
 /// Per-batch failure counts attributed to closeout-exempt rows.
@@ -671,6 +723,50 @@ fn reserved_repair_lookalike_predicate(alias: &str) -> String {
 
 fn renderer_generic_owner_predicate(alias: &str) -> String {
     format!("NOT ({})", semantic_reserved_repair_owner_predicate(alias))
+}
+
+/// Renderer IPC scope: generic rows minus the native-only original financial
+/// openings, which only the native loop may claim, retry or clear. Native
+/// claiming and stale-lease recovery keep using the generic predicate.
+fn renderer_visible_owner_predicate(alias: &str) -> String {
+    format!(
+        "({} AND COALESCE({alias}.table_name, '') <> '{}' AND NOT {})",
+        renderer_generic_owner_predicate(alias),
+        crate::gift_financial_opening::OPENING_QUEUE_TABLE,
+        gift_close_bound_predicate(alias)
+    )
+}
+
+/// Rows the native gift-card financial close dispatcher owns: the row an
+/// original closing names by queue id, and every row the generic path would
+/// send as a `shift_close` (see `shift_event_type`) for a shift opened by a
+/// gift financial opening, so a missing or mismatched original can never
+/// reach the generic close. INSERT and transfer shift rows stay generic.
+fn gift_close_bound_predicate(alias: &str) -> String {
+    let table = semantic_sql_value(&format!("{alias}.table_name"));
+    let payload = format!("(CASE WHEN json_valid({alias}.data) THEN {alias}.data END)");
+    let no_transfer_key = [
+        "isTransferPending",
+        "is_transfer_pending",
+        "transferredToCashierShiftId",
+        "transferred_to_cashier_shift_id",
+    ]
+    .iter()
+    .map(|key| format!("json_type({payload}, '$.{key}') IS NULL"))
+    .collect::<Vec<_>>()
+    .join(" AND ");
+    format!(
+        "(EXISTS (SELECT 1 FROM gift_financial_closings gift_close
+                   WHERE gift_close.queue_item_id = {alias}.id)
+          OR ({table} = 'staff_shifts'
+              AND COALESCE({alias}.operation, '') <> 'INSERT'
+              AND {no_transfer_key}
+              AND EXISTS (SELECT 1 FROM gift_financial_openings gift_open
+                           WHERE lower(gift_open.shift_id) IN (
+                               lower(trim({alias}.record_id)),
+                               lower(trim(json_extract({payload}, '$.shiftId'))),
+                               lower(trim(json_extract({payload}, '$.shift_id')))))))"
+    )
 }
 
 fn semantic_repair_financial_queue_owner_predicate(alias: &str) -> String {
@@ -2024,6 +2120,75 @@ fn normalize_order_type_for_insert(raw_type: Option<&str>) -> String {
     }
 }
 
+/// Does this terminal's own ledger back a claim of money for the order? `paid`
+/// needs completed rows covering the total, `partially_paid` some money; a
+/// zero total (a comp) needs none. Unreadable counts as unbacked.
+fn local_ledger_backs_payment_claim(conn: &Connection, order_id: &str, claim: &str) -> bool {
+    match claim {
+        "paid" | "partially_paid" => {
+            crate::payments::ledger_backs_claimed_status(conn, order_id, claim).unwrap_or(false)
+        }
+        _ => true,
+    }
+}
+
+/// Does the money the SERVER already holds for the order back this claim?
+/// `paid` needs the server-held completed rows (net of refunds) to cover the
+/// total, `partially_paid` some of them; a zero total or a room charge needs
+/// none ([`crate::payments::server_ledger_backs_claimed_status`]). Unreadable
+/// counts as unbacked.
+fn server_ledger_backs_payment_claim(conn: &Connection, order_id: &str, claim: &str) -> bool {
+    match claim {
+        "paid" | "partially_paid" => {
+            crate::payments::server_ledger_backs_claimed_status(conn, order_id, claim)
+                .unwrap_or(false)
+        }
+        _ => true,
+    }
+}
+
+/// The payment label an order UPDATE carries to `PATCH /api/pos/orders`.
+///
+/// - The legacy `completed` label goes as `paid`, and the legacy `partial` as
+///   `partially_paid`: the PATCH schema answers 400 to either, and the whole
+///   edit would be refused with it. Both are money claims and pass the same
+///   gate (Android parity: `paymentClaim.isMoneyClaimStatus`).
+/// - A claim of money is sent only when the SERVER already holds the rows
+///   that back it (founder's rule, 30/09/2026: the sequence is order →
+///   payment → grid, and no order is registered as paid without its payment
+///   record). This till's rows that are not sent yet do not count: the
+///   payment waits for this update (parent first), and its own POST moves
+///   the server's order. Leaving the field out keeps whatever the server
+///   holds; sending `pending` instead would lower a paid order. Android
+///   parity: `paymentClaim.paymentStatusForServerWrite`.
+///
+/// Also applied by the legacy `sync_queue` PATCH sender
+/// (`sync::build_legacy_order_update_patch_body`), which forwarded the queued
+/// claim unchecked.
+pub(crate) fn settle_order_update_payment_claim(
+    conn: &Connection,
+    order_id: &str,
+    body: &mut Map<String, Value>,
+) {
+    let Some(claim) = body
+        .get("payment_status")
+        .and_then(Value::as_str)
+        .map(|status| status.trim().to_ascii_lowercase())
+    else {
+        return;
+    };
+    let claim = match claim.as_str() {
+        "completed" => "paid".to_string(),
+        "partial" => "partially_paid".to_string(),
+        _ => claim,
+    };
+    if server_ledger_backs_payment_claim(conn, order_id, &claim) {
+        body.insert("payment_status".to_string(), Value::String(claim));
+    } else {
+        body.remove("payment_status");
+    }
+}
+
 fn normalize_payment_status_for_insert(raw_status: Option<&str>) -> String {
     match raw_status
         .map(|candidate| candidate.trim().to_ascii_lowercase())
@@ -2031,7 +2196,9 @@ fn normalize_payment_status_for_insert(raw_status: Option<&str>) -> String {
         .as_str()
     {
         "completed" | "paid" => "paid".to_string(),
-        "partially_paid" => "partially_paid".to_string(),
+        // Shared rule R3 (round 3): the legacy `partial` is sent as
+        // `partially_paid`, and passes the same claim gate below.
+        "partially_paid" | "partial" => "partially_paid".to_string(),
         "refunded" => "refunded".to_string(),
         "failed" => "failed".to_string(),
         _ => "pending".to_string(),
@@ -2735,6 +2902,15 @@ fn build_order_insert_body(
     let payment_status = normalize_payment_status_for_insert(
         string_field_from_sources(&sources, &["payment_status", "paymentStatus"]).as_deref(),
     );
+    // No order is registered as paid without a payment record (founder's
+    // rule, 30/09/2026): a create names money only when this terminal's own
+    // ledger holds it by the time the create is sent. The payment rows follow
+    // on their own queue and move the server's status themselves.
+    let payment_status = if local_ledger_backs_payment_claim(conn, record_id, &payment_status) {
+        payment_status
+    } else {
+        "pending".to_string()
+    };
     let order_type = normalize_order_type_for_insert(
         string_field_from_sources(&sources, &["order_type", "orderType"]).as_deref(),
     );
@@ -4129,11 +4305,13 @@ pub fn clear_unsynced_items(
     record_id: &str,
 ) -> Result<usize, String> {
     let generic_owner = semantic_generic_nonfinancial_owner_predicate("parity_sync_queue");
+    let gift_close_bound = gift_close_bound_predicate("parity_sync_queue");
     let sql = format!(
         "DELETE FROM parity_sync_queue
          WHERE table_name = ?1
            AND record_id = ?2
            AND {generic_owner}
+           AND NOT {gift_close_bound}
            AND status IN ('pending', 'failed', 'conflict')"
     );
     conn.execute(&sql, params![table_name, record_id])
@@ -4337,8 +4515,8 @@ fn claim_next_internal_item(conn: &Connection) -> Result<Option<SyncQueueItem>, 
 /// queue priority.
 pub(crate) fn renderer_dequeue(conn: &Connection) -> Result<Option<SyncQueueItem>, String> {
     let now = Utc::now().to_rfc3339();
-    let candidate_generic = renderer_generic_owner_predicate("candidate");
-    let claim_generic = renderer_generic_owner_predicate("parity_sync_queue");
+    let candidate_generic = renderer_visible_owner_predicate("candidate");
+    let claim_generic = renderer_visible_owner_predicate("parity_sync_queue");
     let candidate_exclusion = renderer_non_repair_owned_predicate("candidate");
     let claim_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
     let sql = format!(
@@ -4429,7 +4607,7 @@ fn renderer_retry_and_dequeue_exact(
         }
 
         let now = Utc::now().to_rfc3339();
-        let generic_owner = renderer_generic_owner_predicate("parity_sync_queue");
+        let generic_owner = renderer_visible_owner_predicate("parity_sync_queue");
         let sql = format!(
             "UPDATE parity_sync_queue
                 SET status = 'processing', attempts = 0, error_message = NULL,
@@ -4867,7 +5045,7 @@ pub fn peek(conn: &Connection) -> Result<Option<SyncQueueItem>, String> {
 }
 
 pub(crate) fn renderer_peek(conn: &Connection) -> Result<Option<SyncQueueItem>, String> {
-    let generic_owner = renderer_generic_owner_predicate("parity_sync_queue");
+    let generic_owner = renderer_visible_owner_predicate("parity_sync_queue");
     let ownership_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
     let sql = format!(
         "SELECT id, table_name, record_id, operation, data, organization_id,
@@ -4922,7 +5100,7 @@ pub fn clear(conn: &Connection) -> Result<(), String> {
 }
 
 pub(crate) fn renderer_clear(conn: &Connection) -> Result<(), String> {
-    let generic_owner = renderer_generic_owner_predicate("parity_sync_queue");
+    let generic_owner = renderer_visible_owner_predicate("parity_sync_queue");
     let ownership_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
     let sql = format!(
         "DELETE FROM parity_sync_queue
@@ -5054,7 +5232,7 @@ pub fn get_status(conn: &Connection) -> Result<QueueStatus, String> {
 /// which never block the Z. Background sync, Sync health and every other
 /// reader keep using the queue-wide [`get_status`].
 pub(crate) fn get_closeout_blocking_status(conn: &Connection) -> Result<QueueStatus, String> {
-    let predicate = format!("NOT {CLOSEOUT_EXEMPT_ROW_PREDICATE}");
+    let predicate = format!("NOT {}", closeout_exempt_row_predicate());
     let count = |status_filter: &str| -> Result<i64, String> {
         let sql = format!(
             "SELECT COUNT(*) FROM parity_sync_queue
@@ -5133,11 +5311,10 @@ pub(crate) fn list_closeout_exempt_queue_items(
     conn: &Connection,
     limit: i64,
 ) -> Result<(i64, Vec<CloseoutExemptQueueItem>), String> {
+    let exempt_predicate = closeout_exempt_row_predicate();
     let total: i64 = conn
         .query_row(
-            &format!(
-                "SELECT COUNT(*) FROM parity_sync_queue WHERE {CLOSEOUT_EXEMPT_ROW_PREDICATE}"
-            ),
+            &format!("SELECT COUNT(*) FROM parity_sync_queue WHERE {exempt_predicate}"),
             [],
             |row| row.get(0),
         )
@@ -5146,7 +5323,7 @@ pub(crate) fn list_closeout_exempt_queue_items(
         .prepare(&format!(
             "SELECT id, table_name, operation, status, attempts, error_message
                FROM parity_sync_queue
-              WHERE {CLOSEOUT_EXEMPT_ROW_PREDICATE}
+              WHERE {exempt_predicate}
               ORDER BY created_at ASC, id ASC
               LIMIT ?1"
         ))
@@ -5564,7 +5741,7 @@ pub fn retry_item(conn: &Connection, item_id: &str) -> Result<(), String> {
 pub(crate) fn renderer_retry_item(conn: &Connection, item_id: &str) -> Result<(), String> {
     retry_transaction(conn, |conn| {
         let semantic_reserved = semantic_reserved_repair_owner_predicate("parity_sync_queue");
-        let generic_owner = renderer_generic_owner_predicate("parity_sync_queue");
+        let generic_owner = renderer_visible_owner_predicate("parity_sync_queue");
         let ownership_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
         let ownership_sql = format!(
             "SELECT
@@ -5599,6 +5776,203 @@ pub(crate) fn renderer_retry_item(conn: &Connection, item_id: &str) -> Result<()
         .map_err(|e| format!("sync_queue renderer retry_item: {e}"))?;
         Ok(())
     })
+}
+
+/// Rows one Health "Sync now" may make due, so its audit entry stays bounded
+/// (Android records at most as many: MAX_ATTEMPT_ROW_IDS).
+pub(crate) const MAX_MAKE_DUE_ROWS: usize = 20;
+/// Rows a Health action reads back by id.
+pub(crate) const MAX_ITEMS_BY_ID: usize = 100;
+
+/// A row a Health "Sync now" made due, with the retry time it had.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MadeDueRow {
+    pub id: String,
+    pub next_retry_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MakeDueResult {
+    pub made_due: Vec<MadeDueRow>,
+    /// The recovery_action_log entry holding the retry times; None when no row changed.
+    pub audit_id: Option<String>,
+}
+
+/// Health "Sync now" (review 30/09/2026): make these renderer-visible
+/// pending rows due now. The replay cycle takes only due rows, so a row
+/// waiting out its retry delay was never tried, yet the Health view judged
+/// the attempt on it. Only the retry time changes (next_retry_at becomes
+/// NULL): attempts, errors, payloads and the retry delay stay, so the retry
+/// budget is never reset. In one IMMEDIATE transaction the previous retry
+/// times are written to recovery_action_log (the scheduling-only exception
+/// of the health-recovery rule), then the rows change, each only while it
+/// still has that time. Repair-owned rows, rows routed to repair settlement,
+/// rows not pending and rows already due are left alone.
+pub(crate) fn renderer_make_items_due(
+    conn: &Connection,
+    item_ids: &[String],
+    issue_code: &str,
+) -> Result<MakeDueResult, String> {
+    let issue_code = match issue_code.trim() {
+        code if !code.is_empty()
+            && code.len() <= 64
+            && code
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.')) =>
+        {
+            code
+        }
+        _ => "sync",
+    };
+    retry_transaction(conn, |conn| {
+        let generic_owner = renderer_generic_owner_predicate("parity_sync_queue");
+        let ownership_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
+        let waiting_sql = format!(
+            "SELECT next_retry_at FROM parity_sync_queue
+              WHERE id = ?1
+                AND status = 'pending'
+                AND next_retry_at IS NOT NULL
+                AND julianday(next_retry_at) > julianday('now')
+                AND {generic_owner}
+                AND {ownership_exclusion}"
+        );
+        let mut seen = std::collections::HashSet::new();
+        let mut made_due = Vec::new();
+        for id in item_ids
+            .iter()
+            .map(|id| id.trim())
+            .filter(|id| !id.is_empty())
+        {
+            if made_due.len() >= MAX_MAKE_DUE_ROWS {
+                break;
+            }
+            if !seen.insert(id.to_string()) {
+                continue;
+            }
+            let retry_at: Option<String> = conn
+                .query_row(&waiting_sql, [id], |row| row.get(0))
+                .optional()
+                .map_err(|e| format!("sync_queue make due read: {e}"))?;
+            if let Some(retry_at) = retry_at {
+                made_due.push(MadeDueRow {
+                    id: id.to_string(),
+                    next_retry_at: Some(retry_at),
+                });
+            }
+        }
+        if made_due.is_empty() {
+            return Ok(MakeDueResult {
+                made_due,
+                audit_id: None,
+            });
+        }
+
+        let audit_id = Uuid::new_v4().to_string();
+        let payload = serde_json::json!({
+            "actionId": "syncNow",
+            "issueCode": issue_code,
+            "outcome": "pending",
+            "snapshotKind": "retry_schedule",
+            "madeDue": made_due,
+        });
+        conn.execute(
+            "INSERT INTO recovery_action_log
+                (id, action_id, issue_code, entity_type, success, message, payload_json)
+             VALUES (?1, 'syncNow', ?2, 'parity_sync_queue', 0, ?3, ?4)",
+            params![
+                audit_id,
+                issue_code,
+                format!("{} row(s) made due", made_due.len()),
+                payload.to_string()
+            ],
+        )
+        .map_err(|e| format!("sync_queue make due audit: {e}"))?;
+
+        let update_sql = format!(
+            "UPDATE parity_sync_queue SET next_retry_at = NULL
+              WHERE id = ?1
+                AND status = 'pending'
+                AND next_retry_at = ?2
+                AND {generic_owner}
+                AND {ownership_exclusion}"
+        );
+        for row in &made_due {
+            conn.execute(&update_sql, params![row.id, row.next_retry_at])
+                .map_err(|e| format!("sync_queue make due: {e}"))?;
+        }
+        Ok(MakeDueResult {
+            made_due,
+            audit_id: Some(audit_id),
+        })
+    })
+}
+
+/// Renderer-visible parity rows by id: a Health action reads the rows it
+/// works on before and after, and a row not returned is gone. The list the
+/// Health view shows is capped and sorted by status, so a row could leave it
+/// without being sent.
+pub(crate) fn renderer_items_by_id(
+    conn: &Connection,
+    item_ids: &[String],
+) -> Result<Vec<SyncQueueItem>, String> {
+    let mut seen = std::collections::HashSet::new();
+    let ids: Vec<&str> = item_ids
+        .iter()
+        .map(|id| id.trim())
+        .filter(|id| !id.is_empty() && seen.insert(id.to_string()))
+        .take(MAX_ITEMS_BY_ID)
+        .collect();
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let generic_owner = renderer_generic_owner_predicate("parity_sync_queue");
+    let ownership_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
+    let placeholders = (1..=ids.len())
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT id, table_name, record_id, operation, data, organization_id,
+                created_at, attempts, last_attempt, error_message, next_retry_at,
+                retry_delay_ms, priority, COALESCE(module_type, 'orders'), conflict_strategy, version,
+                claim_generation, status
+           FROM parity_sync_queue
+          WHERE id IN ({placeholders})
+            AND {generic_owner}
+            AND {ownership_exclusion}
+          ORDER BY created_at ASC"
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("sync_queue items by id prepare: {e}"))?;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(ids.iter()), |row| {
+            Ok(SyncQueueItem {
+                id: row.get(0)?,
+                table_name: row.get(1)?,
+                record_id: row.get(2)?,
+                operation: row.get(3)?,
+                data: row.get(4)?,
+                organization_id: row.get(5)?,
+                created_at: row.get(6)?,
+                attempts: row.get(7)?,
+                last_attempt: row.get(8)?,
+                error_message: row.get(9)?,
+                next_retry_at: row.get(10)?,
+                retry_delay_ms: row.get(11)?,
+                priority: row.get(12)?,
+                module_type: row.get(13)?,
+                conflict_strategy: row.get(14)?,
+                version: row.get(15)?,
+                claim_generation: row.get(16)?,
+                status: row.get(17)?,
+            })
+        })
+        .map_err(|e| format!("sync_queue items by id query: {e}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("sync_queue items by id row: {e}"))
 }
 
 pub fn retry_items_by_module(
@@ -5676,7 +6050,7 @@ pub(crate) fn renderer_retry_items_by_module(
     if module_type.trim().eq_ignore_ascii_case("repairs") {
         return Err("REPAIR_TYPED_CONFLICT_REQUIRED".to_string());
     }
-    let generic_owner = renderer_generic_owner_predicate("parity_sync_queue");
+    let generic_owner = renderer_visible_owner_predicate("parity_sync_queue");
     let ownership_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
     let sql = format!(
         "UPDATE parity_sync_queue
@@ -5707,7 +6081,7 @@ pub(crate) fn renderer_retryable_item_ids_by_module(
     if module_type.eq_ignore_ascii_case("repairs") {
         return Err("REPAIR_TYPED_CONFLICT_REQUIRED".to_string());
     }
-    let generic_owner = renderer_generic_owner_predicate("parity_sync_queue");
+    let generic_owner = renderer_visible_owner_predicate("parity_sync_queue");
     let ownership_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
     let sql = format!(
         "SELECT id
@@ -6809,6 +7183,80 @@ pub fn mark_deferred(
     Ok(())
 }
 
+/// Why a table-session close waits (item D1): its table's payment is still on
+/// this till.
+pub(crate) const TABLE_SESSION_CLOSE_LOCAL_PAYMENT_WAIT_REASON: &str =
+    "Waiting for this table's payment to reach the server";
+
+/// How long a close waiting on its table's local payment waits between tries.
+const TABLE_SESSION_CLOSE_LOCAL_PAYMENT_RETRY_SECS: i64 = 30;
+
+/// Whether a completed payment of this table session (or of its order) has
+/// not reached the server yet: the server's "outstanding balance" refusal of
+/// the close is then only that payment still on its way. A payment set aside
+/// for review is not money the session holds.
+pub(crate) fn table_session_payment_in_flight(
+    conn: &Connection,
+    session_record_id: &str,
+) -> Result<bool, String> {
+    let local_order_id = local_table_session_order_id(session_record_id).unwrap_or("");
+    let not_set_aside = format!("NOT {}", crate::payment_review::set_aside_payment_sql("op"));
+    conn.query_row(
+        &format!(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM order_payments op
+                 WHERE LOWER(TRIM(COALESCE(op.status, ''))) = 'completed'
+                   AND LOWER(TRIM(COALESCE(op.sync_state, ''))) <> 'applied'
+                   AND {not_set_aside}
+                   AND (op.table_session_id = ?1
+                        OR op.order_id IN (SELECT id FROM orders WHERE table_session_id = ?1)
+                        OR (?2 <> '' AND op.order_id = ?2))
+             )"
+        ),
+        params![session_record_id, local_order_id],
+        |row| row.get(0),
+    )
+    .map_err(|e| format!("sync_queue table-session payment in flight: {e}"))
+}
+
+/// Park a table-session close whose table's payment is still on this till
+/// (item D1). Like [`mark_module_required`], this does NOT consume
+/// `attempts`: 50 deferrals at 5s used to escalate the close to `conflict`
+/// (a Z blocker) while the real problem was the payment row it waits for.
+pub fn mark_waiting_on_local_payment(
+    conn: &Connection,
+    item_id: &str,
+    reason: &str,
+    expected_generation: i64,
+) -> Result<(), String> {
+    let next_retry =
+        Utc::now() + ChronoDuration::seconds(TABLE_SESSION_CLOSE_LOCAL_PAYMENT_RETRY_SECS);
+    let rows_affected = conn
+        .execute(
+            "UPDATE parity_sync_queue
+             SET status = 'pending',
+                 error_message = ?1,
+                 next_retry_at = ?2
+             WHERE id = ?3 AND claim_generation = ?4",
+            params![
+                reason,
+                next_retry.to_rfc3339(),
+                item_id,
+                expected_generation
+            ],
+        )
+        .map_err(|e| format!("sync_queue mark_waiting_on_local_payment: {e}"))?;
+    if rows_affected == 0 {
+        debug!(
+            item_id = %item_id,
+            expected_generation,
+            "mark_waiting_on_local_payment no-op: claim_generation mismatch"
+        );
+    }
+    Ok(())
+}
+
 /// Park a module-denied item (THE-306 gating sweep item 3).
 ///
 /// The admin API answered `403 {"error":"MODULE_REQUIRED",...}`: the
@@ -6849,6 +7297,571 @@ pub fn mark_module_required(
         );
     }
     Ok(())
+}
+
+/// Retry cadence of a retained gift-card financial opening item.
+const FINANCIAL_OPENING_RETRY_SECS: i64 = 30;
+
+/// Retain a gift-card financial opening item: the original row returns to
+/// `pending` under its claim fence without consuming `attempts`, carrying
+/// only a nonsecret code. It is never escalated, dead-lettered or released by
+/// age; only its exact persisted confirmation consumes it.
+pub(crate) fn retain_financial_opening_item(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    code: &str,
+) -> Result<bool, String> {
+    if !crate::gift_financial_opening::is_financial_opening_item(item) {
+        return Err(
+            "sync_queue retain_financial_opening_item: not a financial opening".to_string(),
+        );
+    }
+    let next_retry = Utc::now() + ChronoDuration::seconds(FINANCIAL_OPENING_RETRY_SECS);
+    let rows_affected = conn
+        .execute(
+            "UPDATE parity_sync_queue
+             SET status = 'pending',
+                 error_message = ?1,
+                 next_retry_at = ?2
+             WHERE id = ?3 AND table_name = ?4
+               AND status = 'processing' AND claim_generation = ?5",
+            params![
+                code,
+                next_retry.to_rfc3339(),
+                item.id,
+                item.table_name,
+                item.claim_generation,
+            ],
+        )
+        .map_err(|e| format!("sync_queue retain_financial_opening_item: {e}"))?;
+    Ok(rows_affected > 0)
+}
+
+/// Claim-fenced consumption of a financial opening item. The row goes only
+/// while this claimant still owns it and its original is already persisted
+/// as confirmed; a pending original can never be consumed.
+pub(crate) fn consume_financial_opening_item(
+    conn: &Connection,
+    item: &SyncQueueItem,
+) -> Result<bool, String> {
+    if !crate::gift_financial_opening::is_financial_opening_item(item) {
+        return Err(
+            "sync_queue consume_financial_opening_item: not a financial opening".to_string(),
+        );
+    }
+    let rows_affected = conn
+        .execute(
+            "DELETE FROM parity_sync_queue
+             WHERE id = ?1 AND table_name = ?2
+               AND status = 'processing' AND claim_generation = ?3
+               AND EXISTS (
+                   SELECT 1 FROM gift_financial_openings opening
+                    WHERE opening.queue_item_id = parity_sync_queue.id
+                      AND opening.state IN ('confirmed_usable', 'confirmed_unusable')
+               )",
+            params![item.id, item.table_name, item.claim_generation],
+        )
+        .map_err(|e| format!("sync_queue consume_financial_opening_item: {e}"))?;
+    Ok(rows_affected > 0)
+}
+
+use crate::gift_financial_closing as gift_closing;
+
+/// Retry cadence of a retained gift-card financial close item.
+const GIFT_CLOSE_RETRY_SECS: i64 = 30;
+/// A close original is always its frozen raw `staff_shifts` UPDATE payload,
+/// carrying `idempotencyKey = closing_key`.
+const GIFT_CLOSE_TABLE: &str = "staff_shifts";
+const GIFT_CLOSE_OPERATION: &str = "UPDATE";
+const GIFT_CLOSE_SYNC_PATH: &str = "/api/pos/shifts/sync";
+const GIFT_CLOSE_HTTP_TIMEOUT: Duration = Duration::from_secs(20);
+const GIFT_CLOSE_TRANSPORT_UNCONFIRMED: &str = "TRANSPORT_UNCONFIRMED";
+const GIFT_CLOSE_REPLY_UNPROVEN: &str = "GIFT_CLOSING_REPLY_UNPROVEN";
+const GIFT_CLOSE_LOCAL_FAILED: &str = "GIFT_CLOSING_LOCAL_FAILED";
+const GIFT_CLOSE_CONSUME_FAILED: &str = "GIFT_CLOSING_CONSUME_FAILED";
+
+/// Outcome of one gift-card financial close dispatch: `consumed` only when the
+/// claimed row was deleted in the transaction that adopted its original's
+/// proof; otherwise the retained row's safe code, or neither when a newer
+/// claim owns the row.
+pub(crate) struct GiftCloseDispatchOutcome {
+    pub consumed: bool,
+    pub code: Option<String>,
+}
+
+impl GiftCloseDispatchOutcome {
+    fn consumed() -> Self {
+        Self {
+            consumed: true,
+            code: None,
+        }
+    }
+
+    fn retained(code: &str) -> Self {
+        Self {
+            consumed: false,
+            code: Some(code.to_string()),
+        }
+    }
+
+    fn stale() -> Self {
+        Self {
+            consumed: false,
+            code: None,
+        }
+    }
+}
+
+/// The one hosted request of a retained original close: its frozen payload
+/// wrapped once, and the original cashier's private staff-session header
+/// value, which is never persisted, logged or returned to the renderer.
+pub(crate) struct GiftCloseRequest {
+    pub body: Value,
+    pub staff_session_id: String,
+}
+
+enum GiftClosePlan {
+    Send {
+        original: gift_closing::ClosingOriginal,
+        request: GiftCloseRequest,
+    },
+    Done(GiftCloseDispatchOutcome),
+}
+
+enum GiftCloseResolution {
+    Original(gift_closing::ClosingOriginal),
+    Refused(&'static str),
+}
+
+/// True when the queued row belongs to the native gift-card financial close
+/// dispatcher ([`gift_close_bound_predicate`]).
+pub(crate) fn is_gift_close_bound_item(conn: &Connection, item_id: &str) -> Result<bool, String> {
+    let bound = gift_close_bound_predicate("parity_sync_queue");
+    conn.query_row(
+        &format!("SELECT EXISTS (SELECT 1 FROM parity_sync_queue WHERE id = ?1 AND {bound})"),
+        params![item_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|bound| bound != 0)
+    .map_err(|e| format!("sync_queue is_gift_close_bound_item: {e}"))
+}
+
+/// True while this claimant still holds `item` exactly as it was claimed.
+fn gift_close_claim_is_live(conn: &Connection, item: &SyncQueueItem) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM parity_sync_queue
+          WHERE id = ?1 AND status = 'processing' AND claim_generation = ?2
+            AND table_name = ?3 AND record_id = ?4 AND operation = ?5
+            AND organization_id = ?6 AND data = ?7",
+        params![
+            item.id,
+            item.claim_generation,
+            item.table_name,
+            item.record_id,
+            item.operation,
+            item.organization_id,
+            item.data,
+        ],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|count| count == 1)
+    .map_err(|e| format!("sync_queue gift close claim: {e}"))
+}
+
+/// The original close naming `item` by queue id, when the claimed row is its
+/// exact frozen raw `staff_shifts` UPDATE: same shift and organization, and a
+/// payload structurally equal to the stored one whose `idempotencyKey` is the
+/// closing key. Anything else is a coded refusal.
+fn resolve_gift_close_original(
+    conn: &Connection,
+    item: &SyncQueueItem,
+) -> Result<GiftCloseResolution, String> {
+    let closing_key = conn
+        .query_row(
+            "SELECT closing_key FROM gift_financial_closings WHERE queue_item_id = ?1",
+            params![item.id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| format!("sync_queue gift close original: {e}"))?;
+    let Some(closing_key) = closing_key else {
+        let other_original: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM gift_financial_closings WHERE lower(shift_id) = lower(trim(?1))",
+                params![item.record_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("sync_queue gift close original: {e}"))?;
+        return Ok(GiftCloseResolution::Refused(if other_original > 0 {
+            "GIFT_CLOSING_QUEUE_MISMATCH"
+        } else {
+            "GIFT_CLOSING_ORIGINAL_MISSING"
+        }));
+    };
+    let Some(original) = gift_closing::load_original(conn, &closing_key)? else {
+        return Ok(GiftCloseResolution::Refused(
+            "GIFT_CLOSING_ORIGINAL_MISSING",
+        ));
+    };
+    if original.queue_item_id != item.id
+        || item.table_name != GIFT_CLOSE_TABLE
+        || item.operation != GIFT_CLOSE_OPERATION
+        || !item.record_id.eq_ignore_ascii_case(&original.shift_id)
+        || !item
+            .organization_id
+            .eq_ignore_ascii_case(&original.organization_id)
+    {
+        return Ok(GiftCloseResolution::Refused("GIFT_CLOSING_QUEUE_MISMATCH"));
+    }
+    let stored = serde_json::from_str::<Value>(&original.request_body_json).ok();
+    let queued = serde_json::from_str::<Value>(&item.data).ok();
+    let frozen = match (stored, queued) {
+        (Some(stored), Some(queued)) => {
+            stored.is_object()
+                && stored == queued
+                && stored.get("idempotencyKey").and_then(Value::as_str)
+                    == Some(original.closing_key.as_str())
+        }
+        _ => false,
+    };
+    if !frozen {
+        return Ok(GiftCloseResolution::Refused(
+            "GIFT_CLOSING_PAYLOAD_MISMATCH",
+        ));
+    }
+    Ok(GiftCloseResolution::Original(original))
+}
+
+/// The current trusted terminal scope is still the original's.
+fn gift_close_scope_matches(conn: &Connection, original: &gift_closing::ClosingOriginal) -> bool {
+    crate::gift_financial_opening::trusted_scope(conn).is_some_and(|scope| {
+        scope
+            .organization_id
+            .eq_ignore_ascii_case(&original.organization_id)
+            && scope.branch_id.eq_ignore_ascii_case(&original.branch_id)
+            && scope.terminal_id == original.terminal_id
+    })
+}
+
+/// Every immutable field of the original is unchanged; only its state,
+/// pending reason and update time may move.
+fn same_frozen_gift_close(
+    current: &gift_closing::ClosingOriginal,
+    planned: &gift_closing::ClosingOriginal,
+) -> bool {
+    let mut current = current.clone();
+    current.state = planned.state.clone();
+    current.pending_reason = planned.pending_reason.clone();
+    current.updated_at = planned.updated_at.clone();
+    current == *planned
+}
+
+/// `candidate` when it is a safe nonsecret code (`[A-Z][A-Z0-9_]{0,99}`),
+/// otherwise `fallback`.
+fn safe_gift_close_code<'a>(candidate: &'a str, fallback: &'a str) -> &'a str {
+    let safe = (1..=100).contains(&candidate.len())
+        && candidate.starts_with(|c: char| c.is_ascii_uppercase())
+        && candidate
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_');
+    if safe {
+        candidate
+    } else {
+        fallback
+    }
+}
+
+/// Claim-fenced consumption of a gift close item: exactly the claimed row,
+/// still holding its frozen tuple and payload, once its original is
+/// `confirmed`. Anything but one deleted row is an error, so the caller's
+/// rollback also undoes the adoption.
+fn consume_gift_close_item(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    original: &gift_closing::ClosingOriginal,
+) -> Result<(), String> {
+    let deleted = conn
+        .execute(
+            "DELETE FROM parity_sync_queue
+              WHERE id = ?1 AND table_name = ?2 AND operation = ?3
+                AND organization_id = ?4 AND record_id = ?5 AND data = ?6
+                AND status = 'processing' AND claim_generation = ?7
+                AND EXISTS (
+                    SELECT 1 FROM gift_financial_closings gift_close
+                     WHERE gift_close.queue_item_id = parity_sync_queue.id
+                       AND gift_close.closing_key = ?8
+                       AND gift_close.state = 'confirmed'
+                )",
+            params![
+                item.id,
+                GIFT_CLOSE_TABLE,
+                GIFT_CLOSE_OPERATION,
+                item.organization_id,
+                item.record_id,
+                item.data,
+                item.claim_generation,
+                original.closing_key,
+            ],
+        )
+        .map_err(|e| format!("{GIFT_CLOSE_CONSUME_FAILED}: {e}"))?;
+    if deleted == 1 {
+        Ok(())
+    } else {
+        Err(format!(
+            "{GIFT_CLOSE_CONSUME_FAILED}: {deleted} rows deleted"
+        ))
+    }
+}
+
+/// Retain a gift close item: the same row returns to `pending` under its
+/// claim fence with a later retry and a safe code, keeping `attempts`, its raw
+/// payload and key. It is never escalated or released by age; only its
+/// adopted proof consumes it.
+fn retain_gift_close_item(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    code: &str,
+) -> Result<bool, String> {
+    let next_retry = Utc::now() + ChronoDuration::seconds(GIFT_CLOSE_RETRY_SECS);
+    conn.execute(
+        "UPDATE parity_sync_queue
+         SET status = 'pending',
+             error_message = ?1,
+             next_retry_at = ?2
+         WHERE id = ?3 AND table_name = ?4
+           AND status = 'processing' AND claim_generation = ?5",
+        params![
+            code,
+            next_retry.to_rfc3339(),
+            item.id,
+            item.table_name,
+            item.claim_generation,
+        ],
+    )
+    .map(|rows_affected| rows_affected > 0)
+    .map_err(|e| format!("sync_queue retain_gift_close_item: {e}"))
+}
+
+fn retained_gift_close(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    code: &str,
+) -> Result<GiftCloseDispatchOutcome, String> {
+    Ok(if retain_gift_close_item(conn, item, code)? {
+        GiftCloseDispatchOutcome::retained(code)
+    } else {
+        GiftCloseDispatchOutcome::stale()
+    })
+}
+
+/// After a rolled-back local failure, retain the claimed row with the safe
+/// leading code of the error.
+fn retain_gift_close_after_failure(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    error: &str,
+) -> Result<GiftCloseDispatchOutcome, String> {
+    let code = safe_gift_close_code(
+        error.split(':').next().unwrap_or_default(),
+        GIFT_CLOSE_LOCAL_FAILED,
+    );
+    warn!(queue_id = %item.id, code, "gift financial close retained after a local failure");
+    retained_gift_close(conn, item, code)
+}
+
+/// Under the live claim, in one writer transaction and with no network:
+/// resolve the exact original, consume an already adopted original's leftover
+/// row without resending, or take the original cashier's live session and
+/// wrap the frozen payload once.
+fn plan_gift_close(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    now: chrono::DateTime<Utc>,
+) -> Result<GiftClosePlan, String> {
+    retry_transaction(conn, |conn| {
+        if !gift_close_claim_is_live(conn, item)? {
+            return Ok(GiftClosePlan::Done(GiftCloseDispatchOutcome::stale()));
+        }
+        let original = match resolve_gift_close_original(conn, item)? {
+            GiftCloseResolution::Original(original) => original,
+            GiftCloseResolution::Refused(code) => {
+                return retained_gift_close(conn, item, code).map(GiftClosePlan::Done);
+            }
+        };
+        if original.state == gift_closing::ClosingState::Confirmed {
+            if !matches!(
+                gift_closing::load_adopted(conn, &original.closing_key),
+                Ok(Some(_))
+            ) {
+                return retained_gift_close(conn, item, "GIFT_CLOSING_PROOF_UNAVAILABLE")
+                    .map(GiftClosePlan::Done);
+            }
+            if !gift_close_scope_matches(conn, &original) {
+                return retained_gift_close(conn, item, "CLOSING_SCOPE_CHANGED")
+                    .map(GiftClosePlan::Done);
+            }
+            consume_gift_close_item(conn, item, &original)?;
+            return Ok(GiftClosePlan::Done(GiftCloseDispatchOutcome::consumed()));
+        }
+        let cashier = match crate::gift_financial_opening::closing_hosted_cashier(
+            conn,
+            &original.closing_key,
+            &item.id,
+            now,
+        ) {
+            Ok(cashier) => cashier,
+            Err(error) => {
+                return retained_gift_close(conn, item, error.code()).map(GiftClosePlan::Done)
+            }
+        };
+        let stored: Value = serde_json::from_str(&original.request_body_json)
+            .map_err(|e| format!("GIFT_CLOSING_PAYLOAD_MISMATCH: {e}"))?;
+        let body = serde_json::json!({
+            "terminal_id": original.terminal_id,
+            "branch_id": original.branch_id,
+            "events": [{
+                "event_type": "shift_close",
+                "shift_id": original.shift_id,
+                "idempotency_key": original.closing_key,
+                "data": stored,
+            }],
+        });
+        let request = GiftCloseRequest {
+            body,
+            staff_session_id: cashier.staff_session_header().to_string(),
+        };
+        Ok(GiftClosePlan::Send { original, request })
+    })
+}
+
+/// After the reply, in one writer transaction: the live claim, the unchanged
+/// row and original and the current trusted scope, then the adoption and the
+/// consumption of exactly the claimed row. A reply without its proof retains
+/// the row; an adoption or consumption error rolls back every write. The
+/// flag asks the caller to drop a session the server rejected.
+fn settle_gift_close(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    planned: &gift_closing::ClosingOriginal,
+    data: Option<&Value>,
+    error: Option<&str>,
+    now: chrono::DateTime<Utc>,
+) -> Result<(GiftCloseDispatchOutcome, bool), String> {
+    retry_transaction(conn, |conn| {
+        if !gift_close_claim_is_live(conn, item)? {
+            return Ok((GiftCloseDispatchOutcome::stale(), false));
+        }
+        let unchanged = gift_closing::load_original(conn, &planned.closing_key)?
+            .is_some_and(|current| same_frozen_gift_close(&current, planned));
+        if !unchanged {
+            return retained_gift_close(conn, item, "GIFT_CLOSING_ORIGINAL_CHANGED")
+                .map(|outcome| (outcome, false));
+        }
+        if !gift_close_scope_matches(conn, planned) {
+            return retained_gift_close(conn, item, "CLOSING_SCOPE_CHANGED")
+                .map(|outcome| (outcome, false));
+        }
+        let adoption =
+            gift_closing::adopt_closing_response(conn, &planned.closing_key, data, error, now)
+                .map_err(|e| format!("{}: {}", e.code, e.message))?;
+        match adoption {
+            gift_closing::ClosingAdoption::Adopted { .. } => {
+                consume_gift_close_item(conn, item, planned)?;
+                Ok((GiftCloseDispatchOutcome::consumed(), false))
+            }
+            gift_closing::ClosingAdoption::Retained(retained) => {
+                let auth_required = retained.status == gift_closing::RetainStatus::AuthRequired;
+                let code = safe_gift_close_code(&retained.code, GIFT_CLOSE_REPLY_UNPROVEN);
+                retained_gift_close(conn, item, code).map(|outcome| (outcome, auth_required))
+            }
+        }
+    })
+}
+
+/// Native dispatch of one claimed gift-card financial close row; it never
+/// takes the generic prepare/send path.
+pub(crate) async fn process_gift_close_item(
+    conn: &std::sync::Mutex<Connection>,
+    item: &SyncQueueItem,
+    api_base_url: &str,
+    api_key: &str,
+) -> Result<GiftCloseDispatchOutcome, String> {
+    process_gift_close_item_with(conn, item, |request| async move {
+        crate::api::post_admin_json_with_staff_session_reply(
+            api_base_url,
+            api_key,
+            GIFT_CLOSE_SYNC_PATH,
+            &request.body,
+            &request.staff_session_id,
+            GIFT_CLOSE_HTTP_TIMEOUT,
+        )
+        .await
+    })
+    .await
+}
+
+/// [`process_gift_close_item`] with the HTTP send supplied by the caller.
+async fn process_gift_close_item_with<F, Fut>(
+    conn: &std::sync::Mutex<Connection>,
+    item: &SyncQueueItem,
+    send: F,
+) -> Result<GiftCloseDispatchOutcome, String>
+where
+    F: FnOnce(GiftCloseRequest) -> Fut,
+    Fut: std::future::Future<
+        Output = Result<crate::api::AdminJsonReply, crate::api::AdminFetchError>,
+    >,
+{
+    let plan = {
+        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+        match plan_gift_close(&db, item, Utc::now()) {
+            Ok(plan) => plan,
+            Err(error) => return retain_gift_close_after_failure(&db, item, &error),
+        }
+    };
+    let (original, request) = match plan {
+        GiftClosePlan::Send { original, request } => (original, request),
+        GiftClosePlan::Done(outcome) => return Ok(outcome),
+    };
+    let sent_session = request.staff_session_id.clone();
+    // No lock or transaction is held across the request.
+    let (data, error) = match send(request).await {
+        Ok(reply) if (200..300).contains(&reply.status) => (reply.body, None),
+        Ok(reply) => {
+            let code = reply
+                .code
+                .unwrap_or_else(|| format!("HTTP_{}", reply.status));
+            (reply.body, Some(code))
+        }
+        Err(_) => (None, Some(GIFT_CLOSE_TRANSPORT_UNCONFIRMED.to_string())),
+    };
+    let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+    match settle_gift_close(
+        &db,
+        item,
+        &original,
+        data.as_ref(),
+        error.as_deref(),
+        Utc::now(),
+    ) {
+        Ok((outcome, auth_required)) => {
+            if auth_required {
+                // Drop the rejected session unless a renewal already replaced it.
+                let still_installed = crate::gift_financial_opening::closing_hosted_cashier(
+                    &db,
+                    &original.closing_key,
+                    &item.id,
+                    Utc::now(),
+                )
+                .is_ok_and(|cashier| cashier.staff_session_header() == sent_session);
+                if still_installed {
+                    crate::gift_financial_opening::invalidate_hosted_cashier(&original.opening_key);
+                }
+            }
+            Ok(outcome)
+        }
+        Err(error) => retain_gift_close_after_failure(&db, item, &error),
+    }
 }
 
 /// Park a repair row that needs a fresh staff sign-in or a later cache hook.
@@ -6978,7 +7991,9 @@ fn normalize_conflict_reason(reason: &str) -> String {
         return CONFLICT_REASON_UNSPECIFIED.to_string();
     }
     if collapsed.chars().count() > 400 {
-        return collapsed.chars().take(400).collect();
+        // The stored reason is exported: the cut never keeps part of an
+        // email or a phone number (review 30/09/2026).
+        return crate::diagnostics::scrub_and_bound_text(&collapsed, 400);
     }
     collapsed
 }
@@ -8412,6 +9427,10 @@ fn prepare_order_request(
         false,
     );
     if !body.contains_key("payment_status") {
+        // A write that does not name a payment status (items, customer,
+        // delivery fields) carries the local one only when it records money
+        // the ledger holds. Pushing the local default `pending` overwrote a
+        // ledger-backed `paid` on 29/09/2026; the server may know better.
         copy_source_field(
             &mut body,
             &sources,
@@ -8419,7 +9438,21 @@ fn prepare_order_request(
             "payment_status",
             false,
         );
+        let records_money = body
+            .get("payment_status")
+            .and_then(Value::as_str)
+            .map(|status| {
+                matches!(
+                    status.trim().to_ascii_lowercase().as_str(),
+                    "paid" | "completed" | "partially_paid" | "refunded"
+                )
+            })
+            .unwrap_or(false);
+        if !records_money {
+            body.remove("payment_status");
+        }
     }
+    settle_order_update_payment_claim(conn, item.record_id.as_str(), &mut body);
     for source in &sources {
         if let Some(value) = source
             .get("paymentMethod")
@@ -8494,6 +9527,14 @@ fn prepare_payment_request(
     payload: &Value,
     terminal_id: &str,
 ) -> Result<RequestPreparation, String> {
+    // A payment set aside for review is never sent: the server already has
+    // the order paid by other money and refused it once (`already_paid`).
+    if crate::payment_review::payment_is_set_aside(conn, item.record_id.as_str())? {
+        return Ok(RequestPreparation::Consumed {
+            reason: "Payment set aside for review; it is never sent".to_string(),
+        });
+    }
+
     let local_order_id = string_field(payload, &["orderId", "order_id"]).unwrap_or_default();
     if local_order_id.is_empty() {
         return Ok(RequestPreparation::Failed {
@@ -9786,12 +10827,36 @@ fn apply_success(
         "payments" => {
             let remote_payment_id =
                 extract_response_string(response, &["payment_id", "id", "data.id"]);
-            sync::mark_local_payment_applied(
-                conn,
-                item.record_id.as_str(),
-                now.as_str(),
-                remote_payment_id.as_deref(),
-            )?;
+            if crate::payment_review::response_reports_already_paid(response) {
+                // The server did NOT record this payment: the order was
+                // already fully paid by other money, and `payment_id` names
+                // THAT payment. Linking our row to it made one server payment
+                // two local rows (B1, fix review 30/09/2026). The row is set
+                // aside for review instead; the next sync pass mirrors the
+                // order's server payments (`restore_ledgers_after_set_aside`).
+                let outcome = crate::payment_review::set_aside_already_paid_payment(
+                    conn,
+                    item.record_id.as_str(),
+                    remote_payment_id.as_deref(),
+                    now.as_str(),
+                )?;
+                if let crate::payment_review::SetAsideOutcome::StatusUnavailable { .. } = outcome {
+                    // Never linked, never counted as synced: held failed so
+                    // the closeout gate names it for support.
+                    crate::payment_review::hold_payment_unlinked(
+                        conn,
+                        item.record_id.as_str(),
+                        now.as_str(),
+                    )?;
+                }
+            } else {
+                sync::mark_local_payment_applied(
+                    conn,
+                    item.record_id.as_str(),
+                    now.as_str(),
+                    remote_payment_id.as_deref(),
+                )?;
+            }
         }
         "payment_adjustments" => {
             conn.execute(
@@ -10837,6 +11902,44 @@ where
         };
         telemetry.record_attempt();
 
+        if crate::gift_financial_opening::is_financial_opening_item(&item) {
+            // A gift-card financial opening never takes the generic path: its
+            // Shared18 result is parsed, persisted and adopted natively before
+            // the claim-fenced consumption; anything else retains the original.
+            let outcome = crate::gift_financial_opening::process_queue_item(
+                conn,
+                &item,
+                api_base_url,
+                api_key,
+            )
+            .await?;
+            if outcome.consumed {
+                processed += 1;
+                telemetry.record_success(&item);
+            } else if let Some(code) = outcome.code.as_deref() {
+                telemetry.record_deferred(&item, code);
+            }
+            continue;
+        }
+
+        let gift_close_bound = {
+            let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+            is_gift_close_bound_item(&db, &item.id)?
+        };
+        if gift_close_bound {
+            // A gift-card financial close never takes the generic path: its
+            // frozen original is sent once, its proof adopted natively and
+            // only then its claim consumed; anything else retains the row.
+            let outcome = process_gift_close_item(conn, &item, api_base_url, api_key).await?;
+            if outcome.consumed {
+                processed += 1;
+                telemetry.record_success(&item);
+            } else if let Some(code) = outcome.code.as_deref() {
+                telemetry.record_deferred(&item, code);
+            }
+            continue;
+        }
+
         if item.table_name == "repairs" {
             let outcome = process_repair_command_item(
                 conn,
@@ -10943,7 +12046,8 @@ where
         // the pre-Z closeout drain can leave them out (they never block the
         // Z). A 429 is not tallied: it stops the whole batch, so rows after
         // it were never attempted and the Z must not proceed on that pass.
-        let closeout_exempt_row = is_closeout_exempt_row(&item.table_name, &item.module_type);
+        let closeout_exempt_row = is_closeout_exempt_row(&item.table_name, &item.module_type)
+            || fiscal_row_is_closeout_exempt(&item.module_type, &item.data);
 
         let request_spec = {
             let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
@@ -11055,6 +12159,11 @@ where
             .header("x-pos-api-key", api_key)
             .header("x-terminal-id", request_spec.terminal_id.as_str())
             .header("Content-Type", "application/json");
+        if let Some(capabilities) =
+            crate::api::pos_capabilities_for(request_spec.method.as_str(), &request_spec.endpoint)
+        {
+            request = request.header(crate::api::POS_CAPABILITIES_HEADER, capabilities);
+        }
 
         // Entity-keyed replay headers: po_receipts sends its stored
         // capture-time key as `Idempotency-Key` so retries are exactly-once
@@ -11168,6 +12277,46 @@ where
                         telemetry.record_error(&item, "failed", error_code, Some(status));
                         errors.push(safe_sync_error(&item, error_code, Some(status)));
                     }
+                } else if item.table_name == "payments"
+                    && crate::payment_review::response_reports_platform_held_refusal(
+                        status,
+                        &response_body,
+                    )
+                {
+                    // Item D (founder decision 30/09/2026): the server refuses
+                    // cash/card on money the delivery platform holds. The
+                    // money already moved at the till, so the row is never
+                    // parked as a conflict (that held the pre-Z sync as
+                    // PARITY_SYNC_PARTIAL): it is set aside for review like an
+                    // `already_paid` answer, its queue rows closed in the same
+                    // step, and the next sync pass mirrors the order's server
+                    // payments (`restore_ledgers_after_set_aside`).
+                    let applied = {
+                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        with_live_generic_claim(&db, &item, |db| {
+                            let now = Utc::now().to_rfc3339();
+                            let outcome = crate::payment_review::set_aside_platform_held_payment(
+                                db,
+                                item.record_id.as_str(),
+                                &now,
+                            )?;
+                            if let crate::payment_review::SetAsideOutcome::StatusUnavailable {
+                                ..
+                            } = outcome
+                            {
+                                crate::payment_review::hold_payment_unlinked(
+                                    db,
+                                    item.record_id.as_str(),
+                                    &now,
+                                )?;
+                            }
+                            mark_success(db, &item.id, item.claim_generation)
+                        })?
+                    };
+                    if applied.is_some() {
+                        processed += 1;
+                        telemetry.record_outcome(&item, "processed", "platform_held_set_aside");
+                    }
                 } else if is_parent_order_wait_response(status, &response_body) {
                     let reason = "Waiting for parent order sync";
                     let marked = {
@@ -11184,11 +12333,43 @@ where
                     &response_body,
                     &item,
                 ) {
-                    let reason = "Waiting for table payment sync";
+                    // Item D1 (fix review 30/09/2026): while the table's own
+                    // payment is still on this till, the close waits on it
+                    // without spending its deferral budget; that payment's
+                    // own sync state is what the operator sees. Only a close
+                    // with nothing of its own in flight escalates as before.
+                    let waiting_on_local_payment = {
+                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        // Unreadable: the close keeps today's deferral path.
+                        table_session_payment_in_flight(&db, &item.record_id).unwrap_or_else(
+                            |error| {
+                                warn!(
+                                    item_id = %item.id,
+                                    error = %error,
+                                    "table-session close: reading its table's payment failed"
+                                );
+                                false
+                            },
+                        )
+                    };
+                    let reason = if waiting_on_local_payment {
+                        TABLE_SESSION_CLOSE_LOCAL_PAYMENT_WAIT_REASON
+                    } else {
+                        "Waiting for table payment sync"
+                    };
                     let marked = {
                         let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
                         with_live_generic_claim(&db, &item, |db| {
-                            mark_deferred(db, &item.id, reason, item.claim_generation)
+                            if waiting_on_local_payment {
+                                mark_waiting_on_local_payment(
+                                    db,
+                                    &item.id,
+                                    reason,
+                                    item.claim_generation,
+                                )
+                            } else {
+                                mark_deferred(db, &item.id, reason, item.claim_generation)
+                            }
                         })?
                     };
                     if marked.is_some() {
@@ -11588,11 +12769,9 @@ where
 /// Longest server machine code kept on a failed customer-directory row.
 const PARITY_CLIENT_ERROR_CODE_MAX_LEN: usize = 64;
 
-/// The admin application's bounded machine `code` from a JSON error body
-/// (`INVALID_PHONE`, `NOT_FOUND`, ...). Display text is never kept.
-fn parity_server_machine_code(response_body: &str) -> Option<String> {
-    let parsed = serde_json::from_str::<Value>(response_body).ok()?;
-    let code = parsed.get("code")?.as_str()?.trim();
+/// A server machine code (`[A-Za-z0-9_]`, bounded), upper-cased, or `None`.
+fn bounded_parity_machine_code(code: &str) -> Option<String> {
+    let code = code.trim();
     if code.is_empty()
         || code.len() > PARITY_CLIENT_ERROR_CODE_MAX_LEN
         || !code
@@ -11604,18 +12783,48 @@ fn parity_server_machine_code(response_body: &str) -> Option<String> {
     Some(code.to_ascii_uppercase())
 }
 
+/// The admin application's bounded machine `code` from a JSON error body
+/// (`INVALID_PHONE`, `NOT_FOUND`, ...). Display text is never kept.
+fn parity_server_machine_code(response_body: &str) -> Option<String> {
+    let parsed = serde_json::from_str::<Value>(response_body).ok()?;
+    bounded_parity_machine_code(parsed.get("code")?.as_str()?)
+}
+
+/// The fiscal dispatcher's refusal code from a submit answer
+/// (`422 { status: 'failed', error: { code: 'currency_unsupported', ... } }`),
+/// bounded like [`parity_server_machine_code`]. Display text is never kept.
+fn parity_fiscal_refusal_code(response_body: &str) -> Option<String> {
+    let parsed = serde_json::from_str::<Value>(response_body).ok()?;
+    let code = [
+        parsed.pointer("/error/code"),
+        parsed.get("code"),
+        parsed.get("reason"),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(Value::as_str)
+    .find_map(bounded_parity_machine_code);
+    code
+}
+
 /// Stored `error_message` for a non-retriable 4xx replay. Customer-directory
 /// rows keep the server's machine code (`HTTP_400_CLIENT_ERROR:INVALID_PHONE`)
 /// so Sync health can say *why* the row stopped; the 2026-09-28 incident
-/// could only be diagnosed from edge logs because the body was dropped. Every
-/// other table keeps the exact `HTTP_{status}_CLIENT_ERROR` code that payment
+/// could only be diagnosed from edge logs because the body was dropped.
+/// Fiscal submissions keep the adapter's refusal code
+/// (`HTTP_422_CLIENT_ERROR:CURRENCY_UNSUPPORTED`): the refused receipt holds
+/// the Z, and the Z blocker and the diagnostics bundle must say why (the
+/// store-currency release-safety check, see `fiscal::currency`). Every other
+/// table keeps the exact `HTTP_{status}_CLIENT_ERROR` code that payment
 /// recovery and diagnostics already match.
 fn parity_client_error_code(table_name: &str, status: u16, response_body: &str) -> String {
     let base = format!("HTTP_{status}_CLIENT_ERROR");
-    if !matches!(table_name, "customers" | "customer_addresses") {
-        return base;
-    }
-    match parity_server_machine_code(response_body) {
+    let code = match table_name {
+        "customers" | "customer_addresses" => parity_server_machine_code(response_body),
+        "fiscal_submission" => parity_fiscal_refusal_code(response_body),
+        _ => None,
+    };
+    match code {
         Some(code) => format!("{base}:{code}"),
         None => base,
     }
@@ -14085,6 +15294,242 @@ mod tests {
         assert_eq!(address_id, Some("addr-remote-1"));
     }
 
+    /// Server change fd3f6665c (founder's rule, 30/09/2026): with no payment
+    /// record on the server yet, an order write that named money answers 200
+    /// with `ledger_authoritative` and `ignored_client_fields`. That means
+    /// "no payment record on the server yet", not a failure: the order write
+    /// is done, the label this till's own rows back stays, and the payment
+    /// keeps its own queue row. The till never reads the answer's status.
+    #[test]
+    fn an_order_write_answered_with_its_payment_claim_ignored_is_done() {
+        let conn = test_connection();
+        conn.execute(
+            "INSERT INTO orders (
+                 id, items, total_amount, total_amount_cents, status, payment_status,
+                 sync_status, created_at, updated_at
+             ) VALUES ('order-claim-ignored', '[]', 9.0, 900, 'completed', 'paid',
+                       'pending', datetime('now'), datetime('now'))",
+            [],
+        )
+        .expect("seed order");
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, amount_cents, status,
+                 sync_status, sync_state, created_at, updated_at
+             ) VALUES ('pay-claim-ignored', 'order-claim-ignored', 'card', 9.0, 900,
+                       'completed', 'pending', 'waiting_parent', datetime('now'), datetime('now'))",
+            [],
+        )
+        .expect("seed payment");
+        enqueue_payload_item(
+            &conn,
+            "payments",
+            "pay-claim-ignored",
+            "INSERT",
+            &json!({ "paymentId": "pay-claim-ignored", "orderId": "order-claim-ignored" }),
+            Some(1),
+            Some("payment"),
+            Some("manual"),
+            Some(1),
+        )
+        .expect("queue the payment");
+
+        let answer = json!({
+            "success": true,
+            "data": { "id": "remote-claim-ignored", "payment_status": "pending" },
+            "ledger_authoritative": true,
+            "ignored_client_fields": ["payment_status"],
+        });
+        for operation in ["INSERT", "UPDATE"] {
+            let item = queue_item(
+                "orders",
+                operation,
+                "order-claim-ignored",
+                json!({ "orderId": "order-claim-ignored", "paymentStatus": "paid" }),
+            );
+            apply_success(&conn, &item, Some(&answer)).expect("an order write that is done");
+        }
+
+        let (payment_status, sync_status, remote_id): (String, String, Option<String>) = conn
+            .query_row(
+                "SELECT payment_status, sync_status, supabase_id FROM orders
+                 WHERE id = 'order-claim-ignored'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(payment_status, "paid", "the label its own rows back stays");
+        assert_eq!(sync_status, "synced");
+        assert_eq!(remote_id.as_deref(), Some("remote-claim-ignored"));
+        let payment_queue: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue
+                 WHERE table_name = 'payments' AND record_id = 'pay-claim-ignored'
+                   AND status = 'pending'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            payment_queue, 1,
+            "the payment still goes out on its own row"
+        );
+    }
+
+    const PLATFORM_HELD_REFUSAL: &str = r#"{"success":false,"code":"PLATFORM_HELD_ORDER","error":"PLATFORM_HELD_ORDER: the delivery platform already holds this order's money"}"#;
+
+    /// A synced delivery order with one completed 13.00 card payment queued.
+    fn seed_queued_platform_payment(conn: &Connection, payment_id: &str) -> String {
+        seed_terminal_context(conn);
+        conn.execute(
+            "INSERT INTO orders (
+                 id, supabase_id, items, total_amount, total_amount_cents, status,
+                 payment_status, sync_status, created_at, updated_at
+             ) VALUES ('order-platform-held', 'remote-order-platform-held', '[]', 13.0, 1300,
+                       'delivered', 'paid', 'synced', datetime('now'), datetime('now'))",
+            [],
+        )
+        .expect("seed order");
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, amount_cents, currency, status,
+                 sync_status, sync_state, created_at, updated_at
+             ) VALUES (?1, 'order-platform-held', 'card', 13.0, 1300, 'EUR', 'completed',
+                       'pending', 'pending', datetime('now'), datetime('now'))",
+            params![payment_id],
+        )
+        .expect("seed payment");
+        enqueue_test_item(
+            conn,
+            "payments",
+            "INSERT",
+            payment_id,
+            json!({
+                "paymentId": payment_id,
+                "orderId": "order-platform-held",
+                "method": "card",
+                "amount": 13.0
+            }),
+        )
+    }
+
+    /// Item D (founder decision 30/09/2026): the server refuses cash/card on
+    /// money the delivery platform holds with `409 PLATFORM_HELD_ORDER`, only
+    /// to a terminal that declares it can take that answer. The money already
+    /// moved at the till: the payment is set aside for review (never a
+    /// conflict row, which held the pre-Z sync as PARITY_SYNC_PARTIAL), its
+    /// queue rows close, its order waits for the ledger restore, and the Z
+    /// asks for the money to be given back, saying why.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_platform_held_refusal_sets_the_payment_aside_instead_of_parking_it() {
+        clear_terminal_identity();
+        let conn = test_connection();
+        let queue_id = seed_queued_platform_payment(&conn, "pay-platform-held");
+        let conn = std::sync::Mutex::new(conn);
+        let (base_url, mut requests, server) =
+            spawn_mock_http_server(vec![MockResponse::json(409, PLATFORM_HELD_REFUSAL)]).await;
+
+        let result = process_queue(&conn, &base_url, "api-key")
+            .await
+            .expect("process queue");
+        assert_eq!(
+            (result.processed, result.failed, result.conflicts),
+            (1, 0, 0)
+        );
+
+        let request = requests.recv().await.expect("captured payment post");
+        assert_eq!(request.request_line, "POST /api/pos/payments HTTP/1.1");
+        assert_eq!(
+            request
+                .headers
+                .get("x-pos-capabilities")
+                .map(String::as_str),
+            Some("platform-held-refusal-v1"),
+            "the terminal declares it can take the refusal"
+        );
+
+        {
+            let conn = conn.lock().expect("lock db");
+            let (status, reason): (String, Option<String>) = conn
+                .query_row(
+                    "SELECT status, json_extract(metadata, '$.duplicate_review.reason')
+                 FROM order_payments WHERE id = 'pay-platform-held'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(status, "duplicate_review");
+            assert_eq!(reason.as_deref(), Some("platform_held"));
+            let queued: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM parity_sync_queue
+                 WHERE id = ?1 OR record_id = 'pay-platform-held'",
+                    params![queue_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(queued, 0, "its queue rows are closed");
+            assert_eq!(
+                crate::payment_review::orders_awaiting_ledger_restore(&conn, 25).unwrap(),
+                vec!["order-platform-held".to_string()],
+                "the next sync pass mirrors the order's server payments"
+            );
+            let blockers =
+                crate::payment_integrity::load_payments_need_review_blockers(&conn, "", None)
+                    .unwrap();
+            assert_eq!(blockers.len(), 1);
+            assert_eq!(blockers[0].reason_variant.as_deref(), Some("platform_held"));
+        }
+
+        clear_terminal_identity();
+        server.await.expect("mock server task");
+    }
+
+    /// Any other 409 on a payment keeps today's handling: a conflict row for
+    /// review, the payment untouched.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn another_payment_409_keeps_the_conflict_handling() {
+        clear_terminal_identity();
+        let conn = test_connection();
+        let queue_id = seed_queued_platform_payment(&conn, "pay-other-409");
+        let conn = std::sync::Mutex::new(conn);
+        let (base_url, _requests, server) = spawn_mock_http_server(vec![MockResponse::json(
+            409,
+            r#"{"success":false,"code":"PAYMENT_CONFLICT","error":"Payment conflicts with the server"}"#,
+        )])
+        .await;
+
+        let result = process_queue(&conn, &base_url, "api-key")
+            .await
+            .expect("process queue");
+        assert_eq!(result.conflicts, 1);
+
+        {
+            let conn = conn.lock().expect("lock db");
+            let queue_status: String = conn
+                .query_row(
+                    "SELECT status FROM parity_sync_queue WHERE id = ?1",
+                    params![queue_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(queue_status, "conflict");
+            let status: String = conn
+                .query_row(
+                    "SELECT status FROM order_payments WHERE id = 'pay-other-409'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(status, "completed");
+        }
+
+        clear_terminal_identity();
+        server.await.expect("mock server task");
+    }
+
     #[test]
     fn apply_success_marks_z_report_applied() {
         let conn = test_connection();
@@ -14684,9 +16129,11 @@ mod tests {
             body.get("payment_method").and_then(Value::as_str),
             Some("digital_wallet")
         );
+        // No payment row on this terminal backs the legacy `paid`: the create
+        // names no money (founder's rule, 30/09/2026).
         assert_eq!(
             body.get("payment_status").and_then(Value::as_str),
-            Some("paid")
+            Some("pending")
         );
         assert_eq!(
             body.get("total_amount").and_then(Value::as_f64),
@@ -15078,6 +16525,479 @@ mod tests {
         );
     }
 
+    /// 29/09/2026: an item edit of a card-paid order whose local payment row
+    /// was missing pushed the local `pending`; the server copied it over its
+    /// own ledger-backed `paid`. A write that does not name a payment status
+    /// now carries the local one only when it records money.
+    #[test]
+    fn prepare_order_update_never_pushes_the_local_default_pending() {
+        let conn = test_connection();
+        for (order_id, payment_status) in [
+            ("order-local-pending", "pending"),
+            ("order-local-paid", "paid"),
+            ("order-local-partial", "partially_paid"),
+        ] {
+            conn.execute(
+                "INSERT INTO orders (
+                     id, supabase_id, items, total_amount, total_amount_cents, status,
+                     payment_status, sync_status, created_at, updated_at
+                 ) VALUES (
+                     ?1, ?2, '[]', 7.0, 700, 'completed', ?3, 'synced', datetime('now'), datetime('now')
+                 )",
+                params![order_id, format!("remote-{order_id}"), payment_status],
+            )
+            .expect("seed synced order");
+        }
+        // The labels are backed by this terminal's own ledger.
+        for (payment_id, order_id, cents) in [
+            ("pay-local-paid", "order-local-paid", 700_i64),
+            ("pay-local-partial", "order-local-partial", 300),
+        ] {
+            conn.execute(
+                "INSERT INTO order_payments (
+                     id, order_id, method, amount, amount_cents, status,
+                     sync_status, sync_state, created_at, updated_at
+                 ) VALUES (?1, ?2, 'cash', ?3, ?4, 'completed', 'synced', 'applied',
+                           datetime('now'), datetime('now'))",
+                params![payment_id, order_id, cents as f64 / 100.0, cents],
+            )
+            .expect("seed completed payment");
+        }
+
+        let body_for = |order_id: &str, payload: Value| -> Value {
+            let item = queue_item("orders", "UPDATE", order_id, payload);
+            let payload = serde_json::from_str::<Value>(&item.data).expect("parse payload");
+            let request = match prepare_order_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+                .expect("prepare request")
+            {
+                RequestPreparation::Ready(spec) => spec,
+                other => panic!("expected ready request, got {other:?}"),
+            };
+            serde_json::from_str(request.body.as_deref().expect("request body"))
+                .expect("parse request body")
+        };
+        // An item edit names no payment status: the hydration fallback reads
+        // the local row.
+        let items_only = |order_id: &str| {
+            json!({
+                "orderId": order_id,
+                "status": "completed",
+                "items": [{ "name": "Crepe", "quantity": 1, "unit_price": 7.0, "total_price": 7.0 }],
+                "orderNotes": "no sugar",
+            })
+        };
+
+        let pending = body_for("order-local-pending", items_only("order-local-pending"));
+        assert!(
+            pending.get("payment_status").is_none(),
+            "the local default must not overwrite the server's ledger: {pending}"
+        );
+        let paid = body_for("order-local-paid", items_only("order-local-paid"));
+        assert_eq!(
+            paid.get("payment_status").and_then(Value::as_str),
+            Some("paid")
+        );
+        let partial = body_for("order-local-partial", items_only("order-local-partial"));
+        assert_eq!(
+            partial.get("payment_status").and_then(Value::as_str),
+            Some("partially_paid")
+        );
+
+        // A write that names the status explicitly (an explicit void) still
+        // carries it, `pending` included.
+        let mut explicit = items_only("order-local-pending");
+        explicit["paymentStatus"] = json!("pending");
+        let explicit = body_for("order-local-pending", explicit);
+        assert_eq!(
+            explicit.get("payment_status").and_then(Value::as_str),
+            Some("pending")
+        );
+    }
+
+    /// Founder's rule, 30/09/2026 (the server side is fd3f6665c): no order is
+    /// registered as paid without a payment record. An order write never
+    /// names money this terminal's own ledger does not hold, and the legacy
+    /// `completed` label goes as `paid`: the PATCH schema answers 400 to it.
+    #[test]
+    fn order_writes_never_claim_money_the_local_ledger_does_not_hold() {
+        let conn = test_connection();
+        for (order_id, total_cents, payment_status) in [
+            ("order-bare-paid", 900_i64, "paid"),
+            ("order-bare-partial", 900, "partially_paid"),
+            ("order-held-completed", 900, "completed"),
+            ("order-comp", 0, "paid"),
+        ] {
+            conn.execute(
+                "INSERT INTO orders (
+                     id, supabase_id, items, total_amount, total_amount_cents, status,
+                     payment_status, sync_status, created_at, updated_at
+                 ) VALUES (
+                     ?1, ?2, '[]', ?3, ?4, 'completed', ?5, 'synced', datetime('now'), datetime('now')
+                 )",
+                params![
+                    order_id,
+                    format!("remote-{order_id}"),
+                    total_cents as f64 / 100.0,
+                    total_cents,
+                    payment_status
+                ],
+            )
+            .expect("seed synced order");
+        }
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, amount_cents, status,
+                 sync_status, sync_state, created_at, updated_at
+             ) VALUES ('pay-held-completed', 'order-held-completed', 'cash', 9.0, 900,
+                       'completed', 'synced', 'applied', datetime('now'), datetime('now'))",
+            [],
+        )
+        .expect("seed the payment behind the completed label");
+
+        let prepare = |operation: &str, order_id: &str, payload: Value| -> Value {
+            let item = queue_item("orders", operation, order_id, payload);
+            let payload = serde_json::from_str::<Value>(&item.data).expect("parse payload");
+            let request = match prepare_order_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+                .expect("prepare request")
+            {
+                RequestPreparation::Ready(spec) => spec,
+                other => panic!("expected ready request, got {other:?}"),
+            };
+            serde_json::from_str(request.body.as_deref().expect("request body"))
+                .expect("parse request body")
+        };
+        let edit = |order_id: &str, payment_status: Option<&str>| {
+            let mut payload = json!({
+                "orderId": order_id,
+                "status": "completed",
+                "items": [{ "name": "Crepe", "quantity": 1, "unit_price": 9.0, "total_price": 9.0 }],
+            });
+            if let Some(payment_status) = payment_status {
+                payload["paymentStatus"] = json!(payment_status);
+            }
+            payload
+        };
+
+        for (order_id, named) in [
+            ("order-bare-paid", None),
+            ("order-bare-paid", Some("paid")),
+            ("order-bare-partial", None),
+            ("order-bare-partial", Some("partially_paid")),
+        ] {
+            let body = prepare("UPDATE", order_id, edit(order_id, named));
+            assert!(
+                body.get("payment_status").is_none(),
+                "{order_id} ({named:?}) holds no payment row: {body}"
+            );
+        }
+        let completed = prepare(
+            "UPDATE",
+            "order-held-completed",
+            edit("order-held-completed", Some("completed")),
+        );
+        assert_eq!(completed["payment_status"], "paid", "{completed}");
+        let hydrated = prepare(
+            "UPDATE",
+            "order-held-completed",
+            edit("order-held-completed", None),
+        );
+        assert_eq!(hydrated["payment_status"], "paid", "{hydrated}");
+        let comp = prepare("UPDATE", "order-comp", edit("order-comp", Some("paid")));
+        assert_eq!(comp["payment_status"], "paid", "nothing to collect: {comp}");
+
+        let create = prepare(
+            "INSERT",
+            "order-create-claim",
+            json!({
+                "clientOrderId": "order-create-claim",
+                "branchId": TEST_BRANCH_ID,
+                "orderType": "pickup",
+                "paymentStatus": "completed",
+                "total": 9.0,
+                "items": [{
+                    "menuItemId": TEST_MENU_ITEM_ID,
+                    "quantity": 1,
+                    "price": 9.0,
+                    "name": "Crepe"
+                }]
+            }),
+        );
+        assert_eq!(create["payment_status"], "pending", "{create}");
+    }
+
+    /// Tomikro 7c2f75dd (30/09/2026 22:08, desktop 1.4.119): an edit raised a
+    /// paid order from 10.20 to 15.20 and recorded the 5.00 difference. The
+    /// order update went first (payments wait for their parent order update)
+    /// and said `paid`, because this till's rows covered 15.20; the server
+    /// labelled the order paid for 10 s with only 10.20 recorded. If the 5.00
+    /// POST had been lost, the gap would have stayed. Founder rule
+    /// (30/09/2026, 01/10/2026): order → payment → grid; an order update
+    /// names money only when the SERVER already holds the rows behind it.
+    #[test]
+    fn order_update_withholds_paid_until_server_holds_the_difference() {
+        let conn = test_connection();
+        conn.execute(
+            "INSERT INTO orders (
+                 id, supabase_id, items, total_amount, total_amount_cents, status,
+                 payment_status, sync_status, created_at, updated_at
+             ) VALUES ('order-7c2f', 'remote-order-7c2f', '[]', 15.2, 1520, 'completed',
+                       'paid', 'pending', datetime('now'), datetime('now'))",
+            [],
+        )
+        .expect("seed the edited order");
+        for (payment_id, amount_cents, sync_state, remote_id) in [
+            (
+                "pay-held-1020",
+                1020_i64,
+                "applied",
+                Some("remote-pay-1020"),
+            ),
+            ("pay-difference-500", 500, "pending", None),
+        ] {
+            conn.execute(
+                "INSERT INTO order_payments (
+                     id, order_id, method, amount, amount_cents, status,
+                     sync_status, sync_state, remote_payment_id, created_at, updated_at
+                 ) VALUES (?1, 'order-7c2f', 'cash', ?2, ?3, 'completed',
+                           ?4, ?5, ?6, datetime('now'), datetime('now'))",
+                params![
+                    payment_id,
+                    amount_cents as f64 / 100.0,
+                    amount_cents,
+                    if sync_state == "applied" {
+                        "synced"
+                    } else {
+                        "pending"
+                    },
+                    sync_state,
+                    remote_id
+                ],
+            )
+            .expect("seed payment");
+        }
+
+        let prepare = |payment_status: &str| -> Value {
+            let item = queue_item(
+                "orders",
+                "UPDATE",
+                "order-7c2f",
+                json!({
+                    "orderId": "order-7c2f",
+                    "status": "completed",
+                    "paymentStatus": payment_status,
+                    "totalAmount": 15.2,
+                    "items": [
+                        { "name": "Crepe", "quantity": 1, "unit_price": 10.2, "total_price": 10.2 },
+                        { "name": "Juice", "quantity": 1, "unit_price": 5.0, "total_price": 5.0 }
+                    ],
+                }),
+            );
+            let payload = serde_json::from_str::<Value>(&item.data).expect("parse payload");
+            let request = match prepare_order_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+                .expect("prepare request")
+            {
+                RequestPreparation::Ready(spec) => spec,
+                other => panic!("expected ready request, got {other:?}"),
+            };
+            serde_json::from_str(request.body.as_deref().expect("request body"))
+                .expect("parse request body")
+        };
+
+        let before = prepare("paid");
+        assert!(
+            before.get("payment_status").is_none(),
+            "the server holds 10.20 of 15.20: no paid claim before the 5.00 lands: {before}"
+        );
+        assert_eq!(
+            before["total_amount"],
+            json!(15.2),
+            "the edit itself still goes: {before}"
+        );
+        let partial = prepare("partially_paid");
+        assert_eq!(
+            partial["payment_status"], "partially_paid",
+            "10.20 the server holds backs a partial claim: {partial}"
+        );
+        // The legacy `partial` is the same claim (round 2 review, Android
+        // isMoneyClaimStatus): sent as the schema's `partially_paid`.
+        let legacy_partial = prepare("PARTIAL");
+        assert_eq!(
+            legacy_partial["payment_status"], "partially_paid",
+            "{legacy_partial}"
+        );
+
+        // The 5.00 lands on the server (its POST answered with its id).
+        conn.execute(
+            "UPDATE order_payments
+             SET sync_status = 'synced', sync_state = 'applied',
+                 remote_payment_id = 'remote-pay-500'
+             WHERE id = 'pay-difference-500'",
+            [],
+        )
+        .expect("the difference syncs");
+        let after = prepare("paid");
+        assert_eq!(after["payment_status"], "paid", "{after}");
+
+        // Money given back is no backing, synced or not: a refund of the
+        // 10.20 leaves 5.00 held of 15.20.
+        conn.execute(
+            "INSERT INTO payment_adjustments (
+                 id, payment_id, order_id, adjustment_type, amount, amount_cents,
+                 reason, sync_state, created_at, updated_at
+             ) VALUES ('refund-1020', 'pay-held-1020', 'order-7c2f', 'refund', 10.2, 1020,
+                       'test', 'pending', datetime('now'), datetime('now'))",
+            [],
+        )
+        .expect("seed the refund");
+        let refunded = prepare("paid");
+        assert!(refunded.get("payment_status").is_none(), "{refunded}");
+    }
+
+    /// A 1.4.119 placeholder row (guessed from the order's own label, no
+    /// server id) is no record of money: it never backs a claim, though it
+    /// says `applied`.
+    #[test]
+    fn order_update_never_claims_money_on_a_placeholder_row() {
+        let conn = test_connection();
+        conn.execute(
+            "INSERT INTO orders (
+                 id, supabase_id, items, total_amount, total_amount_cents, status,
+                 payment_status, sync_status, created_at, updated_at
+             ) VALUES ('order-placeholder', 'remote-order-placeholder', '[]', 9.0, 900,
+                       'completed', 'paid', 'synced', datetime('now'), datetime('now'))",
+            [],
+        )
+        .expect("seed order");
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, amount_cents, status, payment_origin,
+                 sync_status, sync_state, created_at, updated_at
+             ) VALUES ('placeholder-9', 'order-placeholder', 'cash', 9.0, 900, 'completed',
+                       'sync_reconstructed', 'synced', 'applied',
+                       datetime('now'), datetime('now'))",
+            [],
+        )
+        .expect("seed the placeholder");
+        let item = queue_item(
+            "orders",
+            "UPDATE",
+            "order-placeholder",
+            json!({ "orderId": "order-placeholder", "status": "completed", "paymentStatus": "paid" }),
+        );
+        let payload = serde_json::from_str::<Value>(&item.data).expect("parse payload");
+        let request = match prepare_order_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+            .expect("prepare request")
+        {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+        let body: Value =
+            serde_json::from_str(request.body.as_deref().expect("request body")).unwrap();
+        assert!(body.get("payment_status").is_none(), "{body}");
+    }
+
+    /// Round 2 review (01/10/2026): the legacy `partial` label is a money
+    /// claim too (Android `paymentClaim.isMoneyClaimStatus`). It was
+    /// forwarded unchecked: with no row the server holds, it is left out like
+    /// any other unbacked claim.
+    #[test]
+    fn order_update_withholds_an_unbacked_legacy_partial_claim() {
+        let conn = test_connection();
+        conn.execute(
+            "INSERT INTO orders (
+                 id, supabase_id, items, total_amount, total_amount_cents, status,
+                 payment_status, sync_status, created_at, updated_at
+             ) VALUES ('order-partial', 'remote-order-partial', '[]', 12.0, 1200,
+                       'preparing', 'partial', 'pending', datetime('now'), datetime('now'))",
+            [],
+        )
+        .expect("seed order");
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, amount_cents, status,
+                 sync_status, sync_state, created_at, updated_at
+             ) VALUES ('pay-unsent-4', 'order-partial', 'cash', 4.0, 400, 'completed',
+                       'pending', 'pending', datetime('now'), datetime('now'))",
+            [],
+        )
+        .expect("seed an unsent payment");
+        let item = queue_item(
+            "orders",
+            "UPDATE",
+            "order-partial",
+            json!({ "orderId": "order-partial", "status": "preparing", "paymentStatus": "partial" }),
+        );
+        let payload = serde_json::from_str::<Value>(&item.data).expect("parse payload");
+        let request = match prepare_order_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+            .expect("prepare request")
+        {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+        let body: Value =
+            serde_json::from_str(request.body.as_deref().expect("request body")).unwrap();
+        assert!(
+            body.get("payment_status").is_none(),
+            "the server holds none of it: no partial claim ahead of the payment: {body}"
+        );
+    }
+
+    /// Shared rule R3 (round 3, 01/10/2026): an order create's legacy
+    /// `partial` label is `partially_paid`, gated like it. It read as no claim
+    /// at all (`pending`), so a create backed by this till's own rows named
+    /// nothing while the same label on an update named `partially_paid`.
+    #[test]
+    fn order_insert_sends_a_backed_partial_claim_as_partially_paid() {
+        let conn = test_connection();
+        conn.execute(
+            "INSERT INTO orders (
+                 id, items, total_amount, total_amount_cents, status,
+                 payment_status, sync_status, created_at, updated_at
+             ) VALUES ('order-partial-insert', '[]', 15.0, 1500, 'pending', 'partial',
+                       'pending', datetime('now'), datetime('now'))",
+            [],
+        )
+        .expect("seed order");
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, amount_cents, status,
+                 sync_status, sync_state, created_at, updated_at
+             ) VALUES ('pay-partial-insert', 'order-partial-insert', 'cash', 5.0, 500,
+                       'completed', 'pending', 'pending', datetime('now'), datetime('now'))",
+            [],
+        )
+        .expect("seed the till's payment");
+        let item = queue_item(
+            "orders",
+            "INSERT",
+            "order-partial-insert",
+            json!({
+                "clientOrderId": "client-order-partial",
+                "branchId": TEST_BRANCH_ID,
+                "orderType": "pickup",
+                "paymentStatus": "partial",
+                "paymentMethod": "cash",
+                "total": 15.0,
+                "items": [{
+                    "menuItemId": TEST_MENU_ITEM_ID,
+                    "quantity": 2,
+                    "price": 7.5,
+                    "name": "Club Sandwich"
+                }]
+            }),
+        );
+        let payload = serde_json::from_str::<Value>(&item.data).expect("parse payload");
+        let request = match prepare_order_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+            .expect("prepare request")
+        {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+        let body: Value =
+            serde_json::from_str(request.body.as_deref().expect("request body")).unwrap();
+        assert_eq!(body["payment_status"], json!("partially_paid"), "{body}");
+    }
+
     #[test]
     fn prepare_order_update_omits_manual_items_for_legacy_admin_patch() {
         let conn = test_connection();
@@ -15255,6 +17175,16 @@ mod tests {
             [],
         )
         .expect("seed synced table order with legacy zero subtotal");
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, amount_cents, status,
+                 sync_status, sync_state, created_at, updated_at
+             ) VALUES ('pay-repaired-payment-update', 'order-repaired-payment-update',
+                       'card', 29.4, 2940, 'completed', 'synced', 'applied',
+                       datetime('now'), datetime('now'))",
+            [],
+        )
+        .expect("seed the payment behind the paid label");
         let item = queue_item(
             "orders",
             "UPDATE",
@@ -18182,6 +20112,129 @@ mod tests {
         }
     }
 
+    /// Item D1 (fix review 30/09/2026): a queued table close sent without
+    /// `force` gets the server's 409 "outstanding balance" while the table's
+    /// own payment is still on this till. It used to spend a deferral each
+    /// round and escalate to `conflict` (a Z blocker) at 50 when that payment
+    /// row was stuck. Now it waits on the payment without spending its
+    /// budget; a close with nothing of its own in flight escalates as before.
+    fn seed_owing_table_close(conn: &Connection, payment_sync_state: &str) -> String {
+        let session_id = "5d6e7f80-9a1b-4c2d-8e3f-405162738495";
+        conn.execute(
+            "INSERT INTO orders (id, items, total_amount, status, sync_status, payment_status,
+                 table_session_id, branch_id, created_at, updated_at)
+             VALUES ('order-owing-close', '[]', 13.0, 'completed', 'synced', 'paid', ?1, ?2,
+                     datetime('now'), datetime('now'))",
+            params![session_id, TEST_BRANCH_ID],
+        )
+        .expect("seed the table order");
+        conn.execute(
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status,
+                 table_session_id, sync_status, sync_state, created_at, updated_at)
+             VALUES ('pay-owing-close', 'order-owing-close', 'cash', 13.0, 1300, 'completed',
+                     ?1, 'pending', ?2, datetime('now'), datetime('now'))",
+            params![session_id, payment_sync_state],
+        )
+        .expect("seed the table's payment");
+        let queue_id = enqueue(
+            conn,
+            &EnqueueInput {
+                table_name: "restaurant_table_sessions".to_string(),
+                record_id: session_id.to_string(),
+                operation: "UPDATE".to_string(),
+                data: json!({
+                    "action": "close",
+                    "status": "closed",
+                    "release_status": "cleaning",
+                    "branch_id": TEST_BRANCH_ID
+                })
+                .to_string(),
+                organization_id: "org-1".to_string(),
+                priority: Some(0),
+                module_type: Some("table_service".to_string()),
+                conflict_strategy: Some("server-wins".to_string()),
+                version: Some(1),
+            },
+        )
+        .expect("enqueue the close");
+        // One deferral short of the cap.
+        conn.execute(
+            "UPDATE parity_sync_queue SET attempts = ?2 WHERE id = ?1",
+            params![queue_id, MAX_DEFERRAL_CYCLES - 1],
+        )
+        .expect("age the close");
+        queue_id
+    }
+
+    const OUTSTANDING_CLOSE_REFUSAL: &str =
+        r#"{"success":false,"error":"Cannot close a table session with an outstanding balance"}"#;
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_close_waiting_on_its_tables_local_payment_never_escalates() {
+        clear_terminal_identity();
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        let queue_id = seed_owing_table_close(&conn, "pending");
+        let conn = std::sync::Mutex::new(conn);
+        let (base_url, _requests, server) =
+            spawn_mock_http_server(vec![MockResponse::json(409, OUTSTANDING_CLOSE_REFUSAL)]).await;
+
+        process_queue(&conn, &base_url, "api-key")
+            .await
+            .expect("process queue");
+
+        let (status, attempts, error): (String, i64, Option<String>) = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT status, attempts, error_message FROM parity_sync_queue WHERE id = ?1",
+                params![queue_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("the close row");
+        assert_eq!(
+            status, "pending",
+            "never a conflict while its payment is on the way"
+        );
+        assert_eq!(attempts, MAX_DEFERRAL_CYCLES - 1, "no deferral spent");
+        assert_eq!(
+            error.as_deref(),
+            Some(TABLE_SESSION_CLOSE_LOCAL_PAYMENT_WAIT_REASON)
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_close_with_nothing_of_its_own_in_flight_still_escalates() {
+        clear_terminal_identity();
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        // The table's payment already reached the server: the refusal is a
+        // real balance on the server.
+        let queue_id = seed_owing_table_close(&conn, "applied");
+        let conn = std::sync::Mutex::new(conn);
+        let (base_url, _requests, server) =
+            spawn_mock_http_server(vec![MockResponse::json(409, OUTSTANDING_CLOSE_REFUSAL)]).await;
+
+        process_queue(&conn, &base_url, "api-key")
+            .await
+            .expect("process queue");
+
+        let status: String = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT status FROM parity_sync_queue WHERE id = ?1",
+                params![queue_id],
+                |row| row.get(0),
+            )
+            .expect("the close row");
+        assert_eq!(status, "conflict");
+        server.abort();
+    }
+
     #[tokio::test]
     #[serial_test::serial]
     async fn process_queue_drains_obsolete_paid_table_session_close_without_http() {
@@ -18306,6 +20359,50 @@ mod tests {
                 .and_then(Value::as_str),
             Some("local-table-session:order-metadata-guard")
         );
+    }
+
+    /// B1 (fix review 30/09/2026): a payment set aside for review is never
+    /// sent again, whatever queue row still names it.
+    #[test]
+    fn prepare_request_consumes_a_set_aside_payment_without_sending_it() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        conn.execute_batch(
+            "INSERT INTO orders (id, supabase_id, items, total_amount, total_amount_cents, status,
+                 payment_status, sync_status, created_at, updated_at)
+             VALUES ('order-set-aside', 'remote-order-set-aside', '[]', 13.0, 1300, 'completed',
+                     'paid', 'synced', datetime('now'), datetime('now'));
+             INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status,
+                 sync_status, sync_state, created_at, updated_at)
+             VALUES ('pay-set-aside', 'order-set-aside', 'cash', 13.0, 1300, 'completed',
+                     'pending', 'syncing', datetime('now'), datetime('now'));",
+        )
+        .expect("seed");
+        crate::payment_review::set_aside_already_paid_payment(
+            &conn,
+            "pay-set-aside",
+            Some("srv-card"),
+            "2026-09-30T10:06:00Z",
+        )
+        .expect("set aside");
+
+        let item = queue_item(
+            "payments",
+            "INSERT",
+            "pay-set-aside",
+            json!({
+                "paymentId": "pay-set-aside",
+                "orderId": "order-set-aside",
+                "amount": 13.0,
+                "method": "cash"
+            }),
+        );
+        match prepare_request(&conn, &item).expect("prepare") {
+            RequestPreparation::Consumed { reason } => {
+                assert!(reason.contains("set aside"), "{reason}")
+            }
+            other => panic!("a set-aside payment must never be sent, got {other:?}"),
+        }
     }
 
     #[test]
@@ -21136,6 +23233,16 @@ mod tests {
             [],
         )
         .expect("seed discounted order");
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, amount_cents, status,
+                 sync_status, sync_state, created_at, updated_at
+             ) VALUES ('pay-discounted-order-minimal', 'local-discounted-order-minimal',
+                       'cash', 29.4, 2940, 'completed', 'synced', 'applied',
+                       datetime('now'), datetime('now'))",
+            [],
+        )
+        .expect("seed the payment behind the paid label");
 
         let queue_id = enqueue_test_item(
             &conn,
@@ -25883,6 +27990,90 @@ mod tests {
         assert_eq!(everything.conflicts, 2);
     }
 
+    /// 29/09/2026 (Le Petit Paris): a store without a fiscal plugin could not
+    /// close its day over queued fiscal rows. Once the server says the branch
+    /// is fiscally inactive, its fiscal rows leave the closeout drain's
+    /// failure accounting; an unknown or active verdict keeps them blocking,
+    /// other branches' rows are untouched, and Sync health still sees them.
+    #[test]
+    #[serial_test::serial]
+    fn fiscal_rows_of_an_inactive_branch_never_block_the_closeout_drain() {
+        crate::fiscal::active_cache::reset_for_tests();
+        let conn = test_connection();
+        let seed_fiscal = |id: &str, branch_id: &str, status: &str| {
+            conn.execute(
+                "INSERT INTO parity_sync_queue (
+                    id, table_name, record_id, operation, data, organization_id,
+                    created_at, attempts, status, error_message, module_type, conflict_strategy
+                 ) VALUES (?1, 'fiscal_submission', ?2, 'INSERT', ?3, 'org-1',
+                    datetime('now'), 16, ?4, 'HTTP_400_CLIENT_ERROR', 'fiscal', 'last-write-wins')",
+                params![
+                    id,
+                    format!("order-{id}"),
+                    json!({ "branchId": branch_id, "orderId": format!("order-{id}") }).to_string(),
+                    status
+                ],
+            )
+            .expect("seed fiscal row");
+        };
+        seed_fiscal("fiscal-lpp-1", "branch-lpp", "failed");
+        seed_fiscal("fiscal-lpp-2", "branch-lpp", "pending");
+        seed_fiscal("fiscal-other", "branch-other", "failed");
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                id, table_name, record_id, operation, data, organization_id,
+                created_at, attempts, status, module_type, conflict_strategy
+             ) VALUES ('fiscal-garbled', 'fiscal_submission', 'order-garbled', 'INSERT',
+                'not json', 'org-1', datetime('now'), 1, 'failed', 'fiscal', 'last-write-wins')",
+            [],
+        )
+        .expect("seed garbled fiscal row");
+
+        // Unknown verdict: fail closed, every fiscal row blocks.
+        let unknown = get_closeout_blocking_status(&conn).expect("closeout status");
+        assert_eq!((unknown.total, unknown.failed), (4, 3));
+        assert!(!fiscal_row_is_closeout_exempt(
+            "fiscal",
+            r#"{"branchId":"branch-lpp"}"#
+        ));
+
+        crate::fiscal::active_cache::update("branch-lpp", false);
+        let inactive = get_closeout_blocking_status(&conn).expect("closeout status");
+        assert_eq!(
+            (inactive.total, inactive.pending, inactive.failed),
+            (2, 0, 2),
+            "only the inactive branch's fiscal rows leave the Z accounting"
+        );
+        assert!(fiscal_row_is_closeout_exempt(
+            "fiscal",
+            r#"{"branchId":"branch-lpp"}"#
+        ));
+        assert!(!fiscal_row_is_closeout_exempt(
+            "orders",
+            r#"{"branchId":"branch-lpp"}"#
+        ));
+        assert!(!fiscal_row_is_closeout_exempt("fiscal", "not json"));
+        let (exempt_total, exempt_items) =
+            list_closeout_exempt_queue_items(&conn, 10).expect("list exempt rows");
+        assert_eq!(
+            exempt_total, 2,
+            "the exempt rows are still listed for support"
+        );
+        assert!(exempt_items
+            .iter()
+            .all(|item| item.table_name == "fiscal_submission"));
+        assert_eq!(
+            get_status(&conn).expect("queue-wide status").total,
+            4,
+            "nothing is deleted client-side"
+        );
+
+        crate::fiscal::active_cache::update("branch-lpp", true);
+        let active = get_closeout_blocking_status(&conn).expect("closeout status");
+        assert_eq!((active.total, active.failed), (4, 3));
+        crate::fiscal::active_cache::reset_for_tests();
+    }
+
     #[test]
     fn closeout_exempt_listing_carries_bounded_codes_only() {
         let conn = test_connection();
@@ -25983,6 +28174,36 @@ mod tests {
         );
     }
 
+    /// Release-safety check for the store-currency fix: a receipt the tax
+    /// plugin refuses (a Greek plugin accepts EUR only) keeps the adapter's
+    /// code, so the Z blocker and the diagnostics bundle say why it is stuck.
+    #[test]
+    fn a_refused_fiscal_submission_keeps_the_adapters_code() {
+        let refused = r#"{"status":"failed","outboxRowId":"row-1","pluginId":"fiscalization_gr",
+            "error":{"code":"currency_unsupported","message":"unsupported currency: CHF"}}"#;
+        assert_eq!(
+            parity_client_error_code("fiscal_submission", 422, refused),
+            "HTTP_422_CLIENT_ERROR:CURRENCY_UNSUPPORTED"
+        );
+        assert_eq!(
+            parity_client_error_code(
+                "fiscal_submission",
+                400,
+                r#"{"success":false,"error":"Invalid FiscalReceiptInput"}"#
+            ),
+            "HTTP_400_CLIENT_ERROR",
+            "no code, no suffix; display text is never kept"
+        );
+        assert_eq!(
+            parity_client_error_code(
+                "fiscal_submission",
+                422,
+                r#"{"status":"failed","error":{"code":"unsupported currency: CHF!"}}"#
+            ),
+            "HTTP_422_CLIENT_ERROR"
+        );
+    }
+
     #[tokio::test]
     async fn rejected_customer_replay_stores_the_server_code_and_counts_as_closeout_exempt() {
         clear_terminal_identity();
@@ -26080,5 +28301,1131 @@ mod tests {
 
         assert_eq!(result.failed, 1);
         assert_eq!(result.closeout_exempt, CloseoutExemptCounts::default());
+    }
+
+    /// Protected native dispatch of a gift-card financial close original,
+    /// through the real claim, adoption and consumption SQLite boundaries
+    /// with a controlled reply in place of the hosted send.
+    mod gift_close_dispatch {
+        use super::*;
+        use crate::api::{AdminFetchError, AdminJsonReply};
+        use crate::gift_financial_closing::{
+            self as closing, CanonicalClosing, CanonicalDrawer, ClosingCapture,
+        };
+        use crate::gift_financial_opening::{self as opening, DrawerState};
+        use chrono::Utc;
+        use rusqlite::params;
+        use serde_json::{json, Value};
+        use std::cell::RefCell;
+        use std::sync::Mutex;
+
+        const ORG: &str = "6da1cebf-7a5f-4b62-9e4f-5a6b7c8d9eaf";
+        const BRANCH: &str = "7eb2dfc0-8b6a-4c73-8f5a-6b7c8d9eafb0";
+        const TERMINAL: &str = "terminal-main-01";
+        const STAFF: &str = "5c90bdae-6f4e-4a51-8d3e-4f5a6b7c8d9e";
+        const OTHER_STAFF: &str = "8e0c1d2f-3a4b-4c5d-9e6f-7a8b9c0d1e2f";
+        const OWNER_DB: &str = "a1b2c3d4-e5f6-4789-8abc-def012345678";
+        const SOURCE_DB: &str = "b2c3d4e5-f6a7-4890-9bcd-ef0123456789";
+        const OPENING_KEY: &str = "1f2e3d4c-5b6a-4789-8abc-0123456789ab";
+        const OPENING_QUEUE_ID: &str = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+        const SHIFT: &str = "2a3b4c5d-6e7f-4a8b-9c0d-1e2f3a4b5c6d";
+        const ORDINARY_SHIFT: &str = "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d";
+        const DRAWER: &str = "3b4c5d6e-7f8a-4b9c-8d0e-2f3a4b5c6d7e";
+        const ACK: &str = "4c5d6e7f-8a9b-4c0d-9e1f-3a4b5c6d7e8f";
+        const CLOSING_KEY: &str = "5d6e7f8a-9b0c-4d1e-8f2a-4b5c6d7e8f9a";
+        const QUEUE_ID: &str = "6e7f8a9b-0c1d-4e2f-9a3b-5c6d7e8f9a0b";
+        const OTHER_QUEUE_ID: &str = "7f8a9b0c-1d2e-4f3a-8b4c-6d7e8f9a0b1d";
+        const OPENED_AT: &str = "2026-09-29T08:00:00.000Z";
+        const CLOSED_AT: &str = "2026-09-29T18:00:00.000Z";
+        const CAPTURED_AT: &str = "2026-09-29T18:00:01.000Z";
+        /// The original count; the local preview expected 12000 (10000 + 2000).
+        const COUNTED: i64 = 14_000;
+        /// The hosted ordinary term; the canonical expected is 14345.
+        const CANONICAL_ORDINARY: i64 = 12_345;
+
+        type Reply = Result<AdminJsonReply, AdminFetchError>;
+        /// status, attempts, error_message, data, claim_generation
+        type Row = (String, i64, Option<String>, String, i64);
+
+        fn hosted_drawer() -> DrawerState {
+            DrawerState {
+                version: 3,
+                acknowledgement_id: Some(ACK.to_string()),
+                gift_cash_cents: 2_000,
+                ordinary_expected_cents: 10_000,
+                expected_cents: 12_000,
+            }
+        }
+
+        /// The raw `staff_shifts` UPDATE the capture freezes and queues.
+        fn frozen_payload() -> Value {
+            json!({
+                "id": SHIFT,
+                "staffId": STAFF,
+                "branchId": BRANCH,
+                "status": "closed",
+                "checkOutTime": CLOSED_AT,
+                "closingCashAmount": 140,
+                "closingCashAmountCents": COUNTED,
+                "idempotencyKey": CLOSING_KEY,
+                "efoodDayStartEligible": false
+            })
+        }
+
+        fn capture() -> ClosingCapture {
+            ClosingCapture {
+                closing_key: CLOSING_KEY.to_string(),
+                opening_key: OPENING_KEY.to_string(),
+                queue_item_id: QUEUE_ID.to_string(),
+                organization_id: ORG.to_string(),
+                branch_id: BRANCH.to_string(),
+                terminal_id: TERMINAL.to_string(),
+                staff_id: STAFF.to_string(),
+                shift_id: SHIFT.to_string(),
+                drawer_id: DRAWER.to_string(),
+                owner_terminal_db_id: OWNER_DB.to_string(),
+                source_terminal_db_id: SOURCE_DB.to_string(),
+                currency: "EUR".to_string(),
+                counted_cents: COUNTED,
+                closed_at: CLOSED_AT.to_string(),
+                confirmed_drawer: hosted_drawer(),
+                drawer: hosted_drawer(),
+                request_body: frozen_payload(),
+            }
+        }
+
+        fn instant(value: &str) -> chrono::DateTime<Utc> {
+            chrono::DateTime::parse_from_rfc3339(value)
+                .expect("fixture instant")
+                .with_timezone(&Utc)
+        }
+
+        /// Trusted scope and the confirmed gift opening with its open mirror.
+        fn opened_connection() -> Connection {
+            let conn = test_connection();
+            for (key, value) in [
+                ("organization_id", ORG),
+                ("branch_id", BRANCH),
+                ("terminal_id", TERMINAL),
+            ] {
+                crate::db::set_setting(&conn, "terminal", key, value)
+                    .expect("store the trusted scope");
+            }
+            let drawer = hosted_drawer();
+            conn.execute(
+                "INSERT INTO gift_financial_openings (
+                    opening_key, organization_id, branch_id, terminal_id, staff_id, staff_name,
+                    shift_id, drawer_id, opening_cents, currency, checked_in_at, business_date,
+                    period_start_at, is_day_start, calculation_version, queue_item_id, state,
+                    owner_terminal_db_id, source_terminal_db_id, server_usable, drawer_version,
+                    drawer_acknowledgement_id, drawer_gift_cash_cents, drawer_ordinary_expected_cents,
+                    drawer_expected_cents, confirmation_json, confirmed_at, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, 'Maria', ?6, ?7, 10000, 'EUR', ?8, '2026-09-29', ?8, 1, 2,
+                          ?9, 'confirmed_usable', ?10, ?11, 1, ?12, ?13, ?14, ?15, ?16, ?17, ?8, ?8, ?8)",
+                params![
+                    OPENING_KEY,
+                    ORG,
+                    BRANCH,
+                    TERMINAL,
+                    STAFF,
+                    SHIFT,
+                    DRAWER,
+                    OPENED_AT,
+                    OPENING_QUEUE_ID,
+                    OWNER_DB,
+                    SOURCE_DB,
+                    drawer.version,
+                    drawer.acknowledgement_id,
+                    drawer.gift_cash_cents,
+                    drawer.ordinary_expected_cents,
+                    drawer.expected_cents,
+                    r#"{"fixture":"stored opening proof"}"#,
+                ],
+            )
+            .expect("seed the confirmed opening");
+            conn.execute(
+                "INSERT INTO staff_shifts (
+                    id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                    check_in_time, report_date, period_start_at,
+                    opening_cash_amount, opening_cash_amount_cents,
+                    status, calculation_version, transferred_to_cashier_shift_id,
+                    sync_status, created_at, updated_at, is_day_start
+                ) VALUES (?1, ?2, 'Maria', ?3, ?4, 'cashier', ?5, '2026-09-29', ?5, 100, 10000,
+                          'active', 2, NULL, 'pending', ?5, ?5, 1)",
+                params![SHIFT, STAFF, BRANCH, TERMINAL, OPENED_AT],
+            )
+            .expect("seed the original shift");
+            conn.execute(
+                "INSERT INTO cash_drawer_sessions (
+                    id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                    opening_amount, opening_amount_cents, opened_at, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, 100, 10000, ?6, ?6, ?6)",
+                params![DRAWER, SHIFT, STAFF, BRANCH, TERMINAL, OPENED_AT],
+            )
+            .expect("seed the original drawer");
+            conn
+        }
+
+        fn queue_shift_row(conn: &Connection, id: &str, record_id: &str, payload: &Value) {
+            conn.execute(
+                "INSERT INTO parity_sync_queue
+                    (id, table_name, record_id, operation, data, organization_id,
+                     created_at, attempts, retry_delay_ms, priority, module_type,
+                     conflict_strategy, version, status)
+                 VALUES (?1, 'staff_shifts', ?2, 'UPDATE', ?3, ?4, ?5, 0, 1000, 0,
+                         'shifts', 'server-wins', 1, 'pending')",
+                params![id, record_id, payload.to_string(), ORG, CLOSED_AT],
+            )
+            .expect("queue a shift row");
+        }
+
+        /// [`opened_connection`] plus the frozen close queued and captured in
+        /// one transaction with the local close of both mirrors at the count.
+        fn captured_connection() -> Connection {
+            let conn = opened_connection();
+            let tx = conn
+                .unchecked_transaction()
+                .expect("begin the capture transaction");
+            queue_shift_row(&tx, QUEUE_ID, SHIFT, &frozen_payload());
+            closing::capture_original(&tx, &capture(), instant(CAPTURED_AT))
+                .unwrap_or_else(|error| panic!("capture the original: {error}"));
+            let expected = hosted_drawer().expected_cents;
+            let variance = COUNTED - expected;
+            tx.execute(
+                "UPDATE cash_drawer_sessions SET
+                    closing_amount = ?1, closing_amount_cents = ?2,
+                    expected_amount = ?3, expected_amount_cents = ?4,
+                    variance_amount = ?5, variance_amount_cents = ?6,
+                    reconciled = 1, closed_at = ?7, reconciled_at = ?7, updated_at = ?7
+                 WHERE id = ?8",
+                params![
+                    COUNTED as f64 / 100.0,
+                    COUNTED,
+                    expected as f64 / 100.0,
+                    expected,
+                    variance as f64 / 100.0,
+                    variance,
+                    CLOSED_AT,
+                    DRAWER
+                ],
+            )
+            .expect("close the drawer locally");
+            tx.execute(
+                "UPDATE staff_shifts SET
+                    closing_cash_amount = ?1, closing_cash_amount_cents = ?2,
+                    expected_cash_amount = ?3, expected_cash_amount_cents = ?4,
+                    cash_variance = ?5, cash_variance_cents = ?6,
+                    check_out_time = ?7, status = 'closed', sync_status = 'pending', updated_at = ?7
+                 WHERE id = ?8",
+                params![
+                    COUNTED as f64 / 100.0,
+                    COUNTED,
+                    expected as f64 / 100.0,
+                    expected,
+                    variance as f64 / 100.0,
+                    variance,
+                    CLOSED_AT,
+                    SHIFT
+                ],
+            )
+            .expect("close the shift locally");
+            tx.commit().expect("commit the capture");
+            conn
+        }
+
+        /// Installs the original cashier's live session; returns its header.
+        fn install_session(conn: &Connection) -> String {
+            let intent = opening::load_intent(conn, OPENING_KEY)
+                .expect("read the opening")
+                .expect("the opening");
+            opening::install_hosted_cashier_for_test(&intent, 3_600);
+            opening::closing_hosted_cashier(conn, CLOSING_KEY, QUEUE_ID, Utc::now())
+                .map(|cashier| cashier.staff_session_header().to_string())
+                .unwrap_or_else(|error| panic!("closing session: {}", error.code()))
+        }
+
+        fn proof(counted: i64) -> Value {
+            let expected = CANONICAL_ORDINARY + 2_000;
+            CanonicalClosing {
+                organization_id: ORG.to_string(),
+                branch_id: BRANCH.to_string(),
+                terminal_id: TERMINAL.to_string(),
+                source_terminal_id: SOURCE_DB.to_string(),
+                owner_terminal_id: OWNER_DB.to_string(),
+                shift_id: SHIFT.to_string(),
+                drawer_id: DRAWER.to_string(),
+                staff_id: STAFF.to_string(),
+                currency: "EUR".to_string(),
+                counted_cents: counted,
+                variance_cents: counted - expected,
+                closed_at: CLOSED_AT.to_string(),
+                drawer: CanonicalDrawer {
+                    drawer_id: DRAWER.to_string(),
+                    shift_id: SHIFT.to_string(),
+                    owner_terminal_id: OWNER_DB.to_string(),
+                    gift_cash_cents: 2_000,
+                    ordinary_expected_cents: CANONICAL_ORDINARY,
+                    expected_cents: expected,
+                    version: 3,
+                    acknowledgement_id: Some(ACK.to_string()),
+                },
+            }
+            .to_value()
+        }
+
+        fn reply_with(results: Value) -> Value {
+            json!({ "success": true, "results": results })
+        }
+
+        fn proven() -> Value {
+            reply_with(
+                json!([{ "shift_id": SHIFT, "status": "ok", "financial_closing": proof(COUNTED) }]),
+            )
+        }
+
+        fn ok(body: Value) -> Reply {
+            Ok(AdminJsonReply {
+                status: 200,
+                body: Some(body),
+                code: None,
+            })
+        }
+
+        fn claim(db: &Mutex<Connection>) -> SyncQueueItem {
+            dequeue(&db.lock().unwrap())
+                .expect("claim")
+                .expect("a claimable row")
+        }
+
+        fn make_due(db: &Mutex<Connection>) {
+            db.lock()
+                .unwrap()
+                .execute("UPDATE parity_sync_queue SET next_retry_at = NULL", [])
+                .expect("make the retained row due");
+        }
+
+        fn row(db: &Mutex<Connection>, id: &str) -> Option<Row> {
+            db.lock()
+                .unwrap()
+                .query_row(
+                    "SELECT status, attempts, error_message, data, claim_generation
+                       FROM parity_sync_queue WHERE id = ?1",
+                    params![id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                )
+                .optional()
+                .expect("read the queue row")
+        }
+
+        fn text(db: &Mutex<Connection>, sql: &str) -> String {
+            db.lock()
+                .unwrap()
+                .query_row(sql, [], |r| r.get(0))
+                .expect(sql)
+        }
+
+        fn journal_state(db: &Mutex<Connection>) -> String {
+            text(db, "SELECT state FROM gift_financial_closings")
+        }
+
+        fn opening_state(db: &Mutex<Connection>) -> String {
+            text(db, "SELECT state FROM gift_financial_openings")
+        }
+
+        /// Shift expected/variance and drawer expected/variance cents.
+        fn mirrors(db: &Mutex<Connection>) -> (i64, i64, i64, i64) {
+            db.lock()
+                .unwrap()
+                .query_row(
+                    "SELECT s.expected_cash_amount_cents, s.cash_variance_cents,
+                            d.expected_amount_cents, d.variance_amount_cents
+                       FROM staff_shifts s JOIN cash_drawer_sessions d ON d.staff_shift_id = s.id
+                      WHERE s.id = ?1",
+                    params![SHIFT],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .expect("read the mirrors")
+        }
+
+        /// One dispatch whose send records its request and returns `reply`.
+        async fn dispatch(
+            db: &Mutex<Connection>,
+            item: &SyncQueueItem,
+            reply: Reply,
+        ) -> (GiftCloseDispatchOutcome, Option<GiftCloseRequest>) {
+            let sent = RefCell::new(None);
+            let outcome = process_gift_close_item_with(db, item, |request| {
+                *sent.borrow_mut() = Some(request);
+                async move { reply }
+            })
+            .await
+            .expect("dispatch");
+            (outcome, sent.into_inner())
+        }
+
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn exact_proof_adopts_the_canonical_close_and_consumes_exactly_the_claimed_row() {
+            let _auth = opening::hosted_auth_test_serial();
+            opening::clear_authorizations();
+            let conn = captured_connection();
+            let session = install_session(&conn);
+            let db = Mutex::new(conn);
+            let item = claim(&db);
+            assert_eq!(item.id, QUEUE_ID);
+            assert!(is_gift_close_bound_item(&db.lock().unwrap(), QUEUE_ID).unwrap());
+            let unrelated = enqueue_test_item(
+                &db.lock().unwrap(),
+                "customers",
+                "UPDATE",
+                "customer-1",
+                json!({ "name": "Kept" }),
+            );
+            assert_eq!(mirrors(&db), (12_000, 2_000, 12_000, 2_000));
+
+            let (outcome, sent) = dispatch(&db, &item, ok(proven())).await;
+
+            assert!(outcome.consumed && outcome.code.is_none());
+            let request = sent.expect("one hosted send");
+            assert_eq!(request.staff_session_id, session);
+            assert_eq!(
+                request.body,
+                json!({
+                    "terminal_id": TERMINAL,
+                    "branch_id": BRANCH,
+                    "events": [{
+                        "event_type": "shift_close",
+                        "shift_id": SHIFT,
+                        "idempotency_key": CLOSING_KEY,
+                        "data": frozen_payload()
+                    }]
+                }),
+                "the frozen payload is wrapped once, without a rebuild or new key"
+            );
+            assert!(
+                !request.body.to_string().contains(&session),
+                "the session never rides in the body"
+            );
+            assert!(row(&db, QUEUE_ID).is_none(), "the claimed row is consumed");
+            assert!(
+                row(&db, &unrelated).is_some(),
+                "only the claimed row is consumed"
+            );
+            assert_eq!(journal_state(&db), "confirmed");
+            assert_eq!(opening_state(&db), "confirmed_unusable");
+            assert_eq!(
+                mirrors(&db),
+                (14_345, -345, 14_345, -345),
+                "canonical cents on both mirrors"
+            );
+            let leaked: i64 = db
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM gift_financial_closings
+                      WHERE instr(request_body_json || COALESCE(confirmation_json, ''), ?1) > 0",
+                    params![session],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(leaked, 0, "no session in the journal");
+        }
+
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn a_non_2xx_reply_carrying_the_exact_proof_is_adopted() {
+            let _auth = opening::hosted_auth_test_serial();
+            opening::clear_authorizations();
+            let conn = captured_connection();
+            install_session(&conn);
+            let db = Mutex::new(conn);
+            let item = claim(&db);
+            let reply = Ok(AdminJsonReply {
+                status: 409,
+                body: Some(proven()),
+                code: Some("SHIFT_ALREADY_CLOSED".to_string()),
+            });
+
+            let (outcome, _) = dispatch(&db, &item, reply).await;
+
+            assert!(outcome.consumed);
+            assert_eq!(journal_state(&db), "confirmed");
+            assert!(row(&db, QUEUE_ID).is_none());
+        }
+
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn a_failed_consumption_rolls_back_the_adoption_and_retains_the_row() {
+            let _auth = opening::hosted_auth_test_serial();
+            opening::clear_authorizations();
+            let conn = captured_connection();
+            install_session(&conn);
+            conn.execute_batch(
+                "CREATE TEMP TRIGGER gift_close_consume_fault BEFORE DELETE ON parity_sync_queue
+                 BEGIN SELECT RAISE(ABORT, 'injected consume failure'); END;",
+            )
+            .expect("inject a consume failure");
+            let db = Mutex::new(conn);
+            let item = claim(&db);
+
+            let (outcome, sent) = dispatch(&db, &item, ok(proven())).await;
+
+            assert!(sent.is_some());
+            assert!(!outcome.consumed);
+            assert_eq!(outcome.code.as_deref(), Some("GIFT_CLOSING_CONSUME_FAILED"));
+            let (status, attempts, code, data, _) =
+                row(&db, QUEUE_ID).expect("the row is retained");
+            assert_eq!(
+                (status.as_str(), attempts, code.as_deref()),
+                ("pending", 0, Some("GIFT_CLOSING_CONSUME_FAILED"))
+            );
+            assert_eq!(data, frozen_payload().to_string());
+            assert_eq!(journal_state(&db), "pending", "the adoption is rolled back");
+            assert_eq!(opening_state(&db), "confirmed_usable");
+            assert_eq!(mirrors(&db), (12_000, 2_000, 12_000, 2_000));
+
+            db.lock()
+                .unwrap()
+                .execute_batch("DROP TRIGGER gift_close_consume_fault")
+                .expect("remove the fault");
+            make_due(&db);
+            let item = claim(&db);
+            let (outcome, sent) = dispatch(&db, &item, ok(proven())).await;
+            assert!(outcome.consumed && sent.is_some());
+            assert_eq!(journal_state(&db), "confirmed");
+            assert!(row(&db, QUEUE_ID).is_none());
+        }
+
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn a_late_reply_after_lease_recovery_imports_nothing_and_the_new_claim_resends_the_original(
+        ) {
+            let _auth = opening::hosted_auth_test_serial();
+            opening::clear_authorizations();
+            let conn = captured_connection();
+            install_session(&conn);
+            let db = Mutex::new(conn);
+            let stale = claim(&db);
+            let first = RefCell::new(None);
+
+            let outcome = process_gift_close_item_with(&db, &stale, |request| {
+                *first.borrow_mut() = Some(request.body.clone());
+                let guard = db.lock().unwrap();
+                guard
+                    .execute(
+                        "UPDATE parity_sync_queue SET last_attempt = '2000-01-01T00:00:00Z' WHERE id = ?1",
+                        params![QUEUE_ID],
+                    )
+                    .unwrap();
+                recover_stale_processing_items(&guard).expect("recover the lease");
+                drop(guard);
+                async { ok(proven()) }
+            })
+            .await
+            .expect("late dispatch");
+
+            assert!(
+                !outcome.consumed && outcome.code.is_none(),
+                "the reclaimed lease makes the reply stale"
+            );
+            assert_eq!(journal_state(&db), "pending");
+            assert_eq!(opening_state(&db), "confirmed_usable");
+            assert_eq!(mirrors(&db), (12_000, 2_000, 12_000, 2_000));
+            let (status, _, _, data, generation) = row(&db, QUEUE_ID).expect("the row is kept");
+            assert_eq!(status, "pending");
+            assert_eq!(data, frozen_payload().to_string());
+            assert!(generation > stale.claim_generation);
+
+            let fresh = claim(&db);
+            let (outcome, sent) = dispatch(&db, &fresh, ok(proven())).await;
+            assert!(outcome.consumed);
+            assert_eq!(
+                Some(sent.expect("resent").body),
+                first.into_inner(),
+                "the new claimant resends the same frozen body and key"
+            );
+        }
+
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn mismatched_body_queue_org_actor_or_terminal_is_refused_before_any_send() {
+            let _auth = opening::hosted_auth_test_serial();
+            let cases: [(&str, fn(&Connection), &[&str]); 5] = [
+                (
+                    "changed body",
+                    |conn: &Connection| {
+                        let mut payload = frozen_payload();
+                        payload["closingCashAmountCents"] = json!(13_000);
+                        conn.execute(
+                            "UPDATE parity_sync_queue SET data = ?1 WHERE id = ?2",
+                            params![payload.to_string(), QUEUE_ID],
+                        )
+                        .unwrap();
+                    },
+                    &["GIFT_CLOSING_PAYLOAD_MISMATCH"],
+                ),
+                (
+                    "other queue row",
+                    |conn: &Connection| {
+                        conn.execute(
+                            "DELETE FROM parity_sync_queue WHERE id = ?1",
+                            params![QUEUE_ID],
+                        )
+                        .unwrap();
+                        queue_shift_row(conn, OTHER_QUEUE_ID, SHIFT, &frozen_payload());
+                    },
+                    &["GIFT_CLOSING_QUEUE_MISMATCH"],
+                ),
+                (
+                    "other organization",
+                    |conn: &Connection| {
+                        conn.execute(
+                            "UPDATE parity_sync_queue SET organization_id = 'org-foreign' WHERE id = ?1",
+                            params![QUEUE_ID],
+                        )
+                        .unwrap();
+                    },
+                    &["GIFT_CLOSING_QUEUE_MISMATCH"],
+                ),
+                (
+                    "other actor",
+                    |conn: &Connection| {
+                        conn.execute(
+                            "UPDATE staff_shifts SET staff_id = ?1 WHERE id = ?2",
+                            params![OTHER_STAFF, SHIFT],
+                        )
+                        .unwrap();
+                    },
+                    &["CLOSING_MIRROR_MISMATCH", "CLOSING_OPENING_MISMATCH"],
+                ),
+                (
+                    "other terminal",
+                    |conn: &Connection| {
+                        crate::db::set_setting(conn, "terminal", "terminal_id", "terminal-foreign")
+                            .unwrap();
+                    },
+                    &["CLOSING_SCOPE_CHANGED"],
+                ),
+            ];
+            for (label, mutate, expected) in cases {
+                opening::clear_authorizations();
+                let conn = captured_connection();
+                install_session(&conn);
+                mutate(&conn);
+                let db = Mutex::new(conn);
+                let item = claim(&db);
+
+                let (outcome, sent) = dispatch(&db, &item, ok(proven())).await;
+
+                assert!(sent.is_none(), "{label}: refused before any send");
+                assert!(!outcome.consumed, "{label}");
+                let code = outcome.code.unwrap_or_default();
+                assert!(
+                    expected.contains(&code.as_str()),
+                    "{label}: unexpected code {code}"
+                );
+                let (status, attempts, stored, _, _) = row(&db, &item.id).expect("the row is kept");
+                assert_eq!(
+                    (status.as_str(), attempts, stored.as_deref()),
+                    ("pending", 0, Some(code.as_str())),
+                    "{label}"
+                );
+                assert_eq!(journal_state(&db), "pending", "{label}");
+            }
+        }
+
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn unproven_replies_keep_the_same_row_pending_without_using_an_attempt() {
+            let _auth = opening::hosted_auth_test_serial();
+            opening::clear_authorizations();
+            let conn = captured_connection();
+            install_session(&conn);
+            let db = Mutex::new(conn);
+            let bare_ok = reply_with(json!([{ "shift_id": SHIFT, "status": "ok" }]));
+            let replies: Vec<(&str, Reply)> = vec![
+                ("no results", ok(json!({ "success": true }))),
+                ("bare ok", ok(bare_ok.clone())),
+                (
+                    "207 ok",
+                    Ok(AdminJsonReply {
+                        status: 207,
+                        body: Some(bare_ok),
+                        code: None,
+                    }),
+                ),
+                (
+                    "skipped",
+                    ok(reply_with(
+                        json!([{ "shift_id": SHIFT, "status": "skipped" }]),
+                    )),
+                ),
+                (
+                    "two results",
+                    ok(reply_with(json!([
+                        { "shift_id": SHIFT, "status": "ok", "financial_closing": proof(COUNTED) },
+                        { "shift_id": SHIFT, "status": "ok", "financial_closing": proof(COUNTED) }
+                    ]))),
+                ),
+                (
+                    "other count",
+                    ok(reply_with(
+                        json!([{ "shift_id": SHIFT, "status": "ok", "financial_closing": proof(13_000) }]),
+                    )),
+                ),
+                (
+                    "500 without json",
+                    Ok(AdminJsonReply {
+                        status: 500,
+                        body: None,
+                        code: None,
+                    }),
+                ),
+                (
+                    "transport",
+                    Err(AdminFetchError::from("connection reset".to_string())),
+                ),
+            ];
+            for (label, reply) in replies {
+                make_due(&db);
+                let item = claim(&db);
+
+                let (outcome, sent) = dispatch(&db, &item, reply).await;
+
+                assert!(sent.is_some(), "{label}: sent once");
+                assert!(!outcome.consumed, "{label}");
+                let (status, attempts, code, data, _) =
+                    row(&db, QUEUE_ID).expect("the row is kept");
+                assert_eq!((status.as_str(), attempts), ("pending", 0), "{label}");
+                assert!(code.is_some() && code == outcome.code, "{label}: {code:?}");
+                assert_eq!(data, frozen_payload().to_string(), "{label}");
+                assert_eq!(journal_state(&db), "pending", "{label}");
+                assert_eq!(opening_state(&db), "confirmed_usable", "{label}");
+                assert_eq!(mirrors(&db), (12_000, 2_000, 12_000, 2_000), "{label}");
+            }
+            assert_eq!(
+                row(&db, QUEUE_ID).and_then(|row| row.2).as_deref(),
+                Some("TRANSPORT_UNCONFIRMED")
+            );
+        }
+
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn reauthorization_resends_the_same_original_and_expiry_after_send_still_adopts() {
+            let _auth = opening::hosted_auth_test_serial();
+            opening::clear_authorizations();
+            let db = Mutex::new(captured_connection());
+            let item = claim(&db);
+
+            let (outcome, sent) = dispatch(&db, &item, ok(proven())).await;
+
+            assert!(
+                sent.is_none(),
+                "no send without the original cashier's session"
+            );
+            assert_eq!(outcome.code.as_deref(), Some("HOSTED_REAUTH_REQUIRED"));
+            assert_eq!(
+                row(&db, QUEUE_ID).map(|row| (row.0, row.1)),
+                Some(("pending".to_string(), 0))
+            );
+
+            let session = install_session(&db.lock().unwrap());
+            make_due(&db);
+            let item = claim(&db);
+            let sent = RefCell::new(None);
+            let outcome = process_gift_close_item_with(&db, &item, |request| {
+                *sent.borrow_mut() = Some(request);
+                // The authorization ends while the request is in flight.
+                opening::clear_authorizations();
+                async { ok(proven()) }
+            })
+            .await
+            .expect("dispatch");
+
+            assert!(
+                outcome.consumed,
+                "a returned proof stays authoritative after the session ends"
+            );
+            let request = sent.into_inner().expect("sent");
+            assert_eq!(request.staff_session_id, session);
+            assert_eq!(request.body["events"][0]["idempotency_key"], CLOSING_KEY);
+            assert_eq!(request.body["events"][0]["data"], frozen_payload());
+            assert_eq!(journal_state(&db), "confirmed");
+        }
+
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn an_adopted_original_consumes_its_leftover_row_without_resending() {
+            let _auth = opening::hosted_auth_test_serial();
+            opening::clear_authorizations();
+            let conn = captured_connection();
+            {
+                let tx = conn.unchecked_transaction().expect("begin");
+                let adoption = closing::adopt_closing_response(
+                    &tx,
+                    CLOSING_KEY,
+                    Some(&proven()),
+                    None,
+                    Utc::now(),
+                )
+                .unwrap_or_else(|error| panic!("adopt: {error}"));
+                assert!(matches!(adoption, closing::ClosingAdoption::Adopted { .. }));
+                tx.commit().expect("commit the adoption");
+            }
+            let db = Mutex::new(conn);
+            let item = claim(&db);
+
+            let (outcome, sent) = dispatch(&db, &item, ok(json!({}))).await;
+
+            assert!(sent.is_none(), "no resend of an adopted original");
+            assert!(outcome.consumed);
+            assert!(row(&db, QUEUE_ID).is_none());
+        }
+
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn a_gift_shift_close_without_its_original_never_reaches_the_generic_path() {
+            let _auth = opening::hosted_auth_test_serial();
+            opening::clear_authorizations();
+            let conn = opened_connection();
+            queue_shift_row(&conn, QUEUE_ID, SHIFT, &frozen_payload());
+            let (base_url, mut requests, server) = spawn_mock_http_server(Vec::new()).await;
+            let db = Mutex::new(conn);
+
+            let result = process_queue(&db, &base_url, "api-key")
+                .await
+                .expect("process the queue");
+
+            assert_eq!(result.processed, 0);
+            let (status, attempts, code, data, _) = row(&db, QUEUE_ID).expect("the row is kept");
+            assert_eq!(
+                (status.as_str(), attempts, code.as_deref()),
+                ("pending", 0, Some("GIFT_CLOSING_ORIGINAL_MISSING"))
+            );
+            assert_eq!(data, frozen_payload().to_string());
+            server.await.expect("mock server");
+            assert!(
+                requests.try_recv().is_err(),
+                "no request reached any endpoint"
+            );
+        }
+
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn an_ordinary_shift_close_still_takes_the_generic_sync() {
+            let conn = opened_connection();
+            queue_shift_row(
+                &conn,
+                "ordinary-close",
+                ORDINARY_SHIFT,
+                &json!({ "id": ORDINARY_SHIFT, "staffId": OTHER_STAFF, "branchId": BRANCH, "status": "closed" }),
+            );
+            assert!(!is_gift_close_bound_item(&conn, "ordinary-close").unwrap());
+            let (base_url, mut requests, server) = spawn_mock_http_server(vec![MockResponse::json(
+                200,
+                json!({ "success": true, "results": [{ "shift_id": ORDINARY_SHIFT, "status": "ok" }] }).to_string(),
+            )])
+            .await;
+            let db = Mutex::new(conn);
+
+            let _ = process_queue(&db, &base_url, "api-key").await;
+
+            let captured = tokio::time::timeout(Duration::from_secs(10), requests.recv())
+                .await
+                .expect("the generic send arrives")
+                .expect("a captured request");
+            server.abort();
+            assert!(
+                captured
+                    .request_line
+                    .starts_with("POST /api/pos/shifts/sync"),
+                "{}",
+                captured.request_line
+            );
+            assert!(!captured.headers.contains_key("x-staff-session-id"));
+            let body: Value = serde_json::from_str(&captured.body).expect("a JSON body");
+            assert_eq!(body["events"][0]["event_type"], "shift_close");
+            assert_eq!(body["events"][0]["shift_id"], ORDINARY_SHIFT);
+        }
+
+        #[test]
+        #[serial_test::serial]
+        fn renderer_and_cleanup_paths_cannot_touch_a_protected_close_row() {
+            let conn = captured_connection();
+            let snapshot =
+                |conn: &Connection| -> (String, i64, Option<String>, Option<String>, i64, String) {
+                    conn.query_row(
+                    "SELECT status, attempts, error_message, next_retry_at, claim_generation, data
+                       FROM parity_sync_queue WHERE id = ?1",
+                    params![QUEUE_ID],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+                )
+                .expect("the protected row")
+                };
+            let pending = snapshot(&conn);
+            assert!(renderer_peek(&conn).unwrap().is_none());
+            assert!(renderer_dequeue(&conn).unwrap().is_none());
+            let _ = renderer_retry_and_dequeue_exact(&conn, QUEUE_ID);
+            renderer_clear(&conn).unwrap();
+            assert_eq!(
+                clear_unsynced_items(&conn, "staff_shifts", SHIFT).unwrap(),
+                0
+            );
+            assert_eq!(snapshot(&conn), pending);
+
+            conn.execute(
+                "UPDATE parity_sync_queue SET status = 'failed', error_message = 'HTTP_500' WHERE id = ?1",
+                params![QUEUE_ID],
+            )
+            .unwrap();
+            let failed = snapshot(&conn);
+            let _ = renderer_retry_item(&conn, QUEUE_ID);
+            let _ = renderer_retry_items_by_module(&conn, "shifts");
+            assert!(renderer_retryable_item_ids_by_module(&conn, "shifts", 10)
+                .unwrap()
+                .is_empty());
+            let _ = renderer_retry_and_dequeue_exact(&conn, QUEUE_ID);
+            renderer_clear(&conn).unwrap();
+            assert_eq!(
+                clear_unsynced_items(&conn, "staff_shifts", SHIFT).unwrap(),
+                0
+            );
+            assert_eq!(snapshot(&conn), failed);
+
+            // Ordinary shift rows, and a gift shift's INSERT or transfer rows,
+            // stay renderer-visible and generic.
+            queue_shift_row(
+                &conn,
+                "ordinary-close",
+                ORDINARY_SHIFT,
+                &json!({ "id": ORDINARY_SHIFT, "status": "closed" }),
+            );
+            queue_shift_row(
+                &conn,
+                "gift-transfer",
+                SHIFT,
+                &json!({ "id": SHIFT, "transferredToCashierShiftId": ORDINARY_SHIFT }),
+            );
+            queue_shift_row(
+                &conn,
+                "gift-open",
+                SHIFT,
+                &json!({ "id": SHIFT, "status": "active" }),
+            );
+            conn.execute(
+                "UPDATE parity_sync_queue SET operation = 'INSERT' WHERE id = 'gift-open'",
+                [],
+            )
+            .unwrap();
+            for id in ["ordinary-close", "gift-transfer", "gift-open"] {
+                assert!(
+                    !is_gift_close_bound_item(&conn, id).unwrap(),
+                    "{id} stays generic"
+                );
+            }
+            assert_eq!(
+                clear_unsynced_items(&conn, "staff_shifts", ORDINARY_SHIFT).unwrap(),
+                1
+            );
+            renderer_clear(&conn).unwrap();
+            let ids: Vec<String> = conn
+                .prepare("SELECT id FROM parity_sync_queue ORDER BY id")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            assert_eq!(
+                ids,
+                vec![QUEUE_ID.to_string()],
+                "only the protected close survives the renderer clear"
+            );
+        }
+    }
+}
+
+/// A conflict reason is stored and exported: bounded without ever keeping
+/// part of a number or email (review 30/09/2026).
+#[cfg(test)]
+mod conflict_reason_bound_tests {
+    use super::*;
+
+    #[test]
+    fn a_long_conflict_reason_never_keeps_part_of_a_number() {
+        for offset in 360..410 {
+            let reason = format!(
+                "{} Key (phone)=(+41 79 123 45 67) already exists for maria.papadopoulou@example.com",
+                "detail ".repeat(offset / 7) + &"d".repeat(offset % 7)
+            );
+            let stored = normalize_conflict_reason(&reason);
+            assert!(stored.chars().count() <= 400, "{offset}");
+            assert!(
+                !stored.contains("79 1") && !stored.contains("maria"),
+                "{offset}: {stored}"
+            );
+        }
+        // A short reason is stored as it came.
+        assert_eq!(
+            normalize_conflict_reason("  Order   already  paid "),
+            "Order already paid"
+        );
+    }
+}
+
+/// Health "Sync now" on the desktop parity queue (review 30/09/2026).
+#[cfg(test)]
+mod health_make_due_tests {
+    use super::*;
+
+    fn connection() -> Connection {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        crate::db::run_migrations_for_test(&conn);
+        create_tables(&conn).expect("create sync queue tables");
+        crate::db::set_setting(&conn, "terminal", "__ignore_keyring", "1")
+            .expect("disable keyring reads");
+        conn
+    }
+
+    fn seed(conn: &Connection, id: &str, status: &str, next_retry_at: Option<&str>) {
+        conn.execute(
+            "INSERT INTO parity_sync_queue
+                (id, table_name, record_id, operation, data, organization_id, attempts,
+                 last_attempt, error_message, next_retry_at, retry_delay_ms, status)
+             VALUES (?1, 'orders', ?1, 'UPDATE', '{}', 'org-1', 2,
+                 '2026-09-30T10:00:00Z', 'HTTP 503', ?2, 4000, ?3)",
+            params![id, next_retry_at, status],
+        )
+        .expect("seed parity row");
+    }
+
+    fn row(conn: &Connection, id: &str) -> (i64, Option<String>, Option<String>, i64) {
+        conn.query_row(
+            "SELECT attempts, next_retry_at, error_message, retry_delay_ms
+               FROM parity_sync_queue WHERE id = ?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("read parity row")
+    }
+
+    #[test]
+    fn makes_only_waiting_pending_rows_due_and_records_their_retry_times_first() {
+        let conn = connection();
+        let later = (Utc::now() + ChronoDuration::minutes(12)).to_rfc3339();
+        let earlier = (Utc::now() - ChronoDuration::minutes(1)).to_rfc3339();
+        seed(&conn, "a-waiting", "pending", Some(&later));
+        seed(&conn, "b-due", "pending", Some(&earlier));
+        seed(&conn, "c-never-tried", "pending", None);
+        seed(&conn, "d-failed", "failed", Some(&later));
+        seed(&conn, "e-conflict", "conflict", Some(&later));
+        seed(&conn, "f-processing", "processing", Some(&later));
+
+        let ids: Vec<String> = [
+            "a-waiting",
+            "b-due",
+            "c-never-tried",
+            "d-failed",
+            "e-conflict",
+            "f-processing",
+            "a-waiting",
+            "missing",
+        ]
+        .iter()
+        .map(|id| id.to_string())
+        .collect();
+        let result =
+            renderer_make_items_due(&conn, &ids, "fiscal_queue_not_empty").expect("make due");
+
+        assert_eq!(
+            result.made_due,
+            vec![MadeDueRow {
+                id: "a-waiting".to_string(),
+                next_retry_at: Some(later.clone()),
+            }]
+        );
+        // Only the retry time changed: attempts, error and delay stay.
+        assert_eq!(
+            row(&conn, "a-waiting"),
+            (2, None, Some("HTTP 503".to_string()), 4000)
+        );
+        for (id, retry_at) in [
+            ("b-due", Some(earlier.clone())),
+            ("c-never-tried", None),
+            ("d-failed", Some(later.clone())),
+            ("e-conflict", Some(later.clone())),
+            ("f-processing", Some(later.clone())),
+        ] {
+            assert_eq!(row(&conn, id).1, retry_at, "{id}");
+        }
+        // The retry time is in the audit log, as pending (scheduling is not healing).
+        let audit_id = result.audit_id.expect("audit id");
+        let (action_id, issue_code, success, payload): (String, String, i64, String) = conn
+            .query_row(
+                "SELECT action_id, issue_code, success, payload_json
+                   FROM recovery_action_log WHERE id = ?1",
+                [&audit_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("audit row");
+        assert_eq!(
+            (action_id.as_str(), issue_code.as_str(), success),
+            ("syncNow", "fiscal_queue_not_empty", 0)
+        );
+        let payload: Value = serde_json::from_str(&payload).expect("payload json");
+        assert_eq!(payload["outcome"], "pending");
+        assert_eq!(
+            payload["madeDue"],
+            serde_json::json!([{ "id": "a-waiting", "nextRetryAt": later }])
+        );
+    }
+
+    #[test]
+    fn writes_nothing_when_no_row_waits_and_caps_the_rows() {
+        let conn = connection();
+        seed(&conn, "due", "pending", None);
+        let nothing =
+            renderer_make_items_due(&conn, &["due".to_string()], "sync_stuck").expect("make due");
+        assert_eq!(
+            nothing,
+            MakeDueResult {
+                made_due: vec![],
+                audit_id: None
+            }
+        );
+        let audits: i64 = conn
+            .query_row("SELECT COUNT(*) FROM recovery_action_log", [], |row| {
+                row.get(0)
+            })
+            .expect("count audits");
+        assert_eq!(audits, 0);
+
+        let later = (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339();
+        let ids: Vec<String> = (0..30).map(|index| format!("row-{index:02}")).collect();
+        for id in &ids {
+            seed(&conn, id, "pending", Some(&later));
+        }
+        let capped = renderer_make_items_due(&conn, &ids, "sync_stuck").expect("make due");
+        assert_eq!(capped.made_due.len(), MAX_MAKE_DUE_ROWS);
+    }
+
+    #[test]
+    fn reads_renderer_visible_rows_by_id() {
+        let conn = connection();
+        seed(&conn, "a", "pending", None);
+        seed(&conn, "b", "failed", None);
+        let items = renderer_items_by_id(
+            &conn,
+            &[
+                "b".to_string(),
+                "a".to_string(),
+                "gone".to_string(),
+                " ".to_string(),
+            ],
+        )
+        .expect("items by id");
+        let mut ids: Vec<&str> = items.iter().map(|item| item.id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["a", "b"]);
+        assert!(renderer_items_by_id(&conn, &[]).expect("empty").is_empty());
     }
 }

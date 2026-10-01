@@ -97,6 +97,11 @@ struct ResolvePaymentBlockerPayload {
     staff_shift_id: Option<String>,
     #[serde(default, alias = "staffId", alias = "staff_id")]
     staff_id: Option<String>,
+    /// The outstanding amount the operator saw and confirmed, in cents: the
+    /// record is refused when the balance changed since, and it keys the
+    /// payment (`z-record:<order>:<cents>`).
+    #[serde(default, alias = "amountCents", alias = "amount_cents")]
+    amount_cents: Option<i64>,
 }
 
 fn normalize_payload_with_branch(arg0: Option<serde_json::Value>) -> serde_json::Value {
@@ -159,11 +164,15 @@ fn parse_resolve_payment_blocker_payload(
     if parsed.method != "cash" && parsed.method != "card" {
         return Err("Method must be cash or card".into());
     }
+    if parsed.amount_cents.is_some_and(|cents| cents <= 0) {
+        return Err("The amount to record must be positive".into());
+    }
     Ok(serde_json::json!({
         "orderId": parsed.order_id,
         "method": parsed.method,
         "staffShiftId": parsed.staff_shift_id,
         "staffId": parsed.staff_id,
+        "amountCents": parsed.amount_cents,
     }))
 }
 
@@ -812,6 +821,25 @@ fn flatten_generated_z_report_data(generated: &serde_json::Value) -> serde_json:
     let Some(obj) = report_data.as_object_mut() else {
         return report_data;
     };
+
+    // This command previews new reports; the single-shift path also discards its
+    // temporary generated row. Only an existing stored response owns a print ID.
+    obj.remove("zReportId");
+    obj.remove("z_report_id");
+    if generated
+        .get("existing")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        if let Some(id) = extract_z_report_id_from_payload(generated)
+            .or_else(|| extract_z_report_id_from_payload(report))
+        {
+            obj.insert("zReportId".to_string(), serde_json::Value::String(id));
+        }
+    }
+    if let Some(readiness) = generated.get("giftCloseReadiness") {
+        obj.insert("giftCloseReadiness".to_string(), readiness.clone());
+    }
 
     for (key, value) in [
         ("shiftId", value_str(report, &["shiftId", "shift_id"])),
@@ -1686,7 +1714,23 @@ pub async fn report_generate_z_report(
 
     // Frontend expects report_json fields (sales, cashDrawer, etc.) directly
     // under "data". Extract reportJson from the nested response.
-    let report_data = flatten_generated_z_report_data(&generated);
+    let mut report_data = flatten_generated_z_report_data(&generated);
+
+    // The fiscal receipts still queued for the window the next Z closes, so
+    // the cashier sees the blocker before confirming (Android shows the same
+    // `fiscal_queue_not_empty` blocker in its readiness). The verdict is
+    // refreshed behind the background throttle; the submit refreshes it again.
+    let _ = crate::fiscal::status::refresh_if_due_from_stored_credentials().await;
+    let fiscal_queue = match zreport::fiscal_queue_blockers_for_closeout(&db, &payload) {
+        Ok(blockers) => blockers.to_json(),
+        Err(error) => {
+            warn!(error = %error, "Failed to read the fiscal queue for the Z preview");
+            serde_json::json!({ "status": "unavailable" })
+        }
+    };
+    if let Some(data) = report_data.as_object_mut() {
+        data.insert("fiscalQueue".to_string(), fiscal_queue);
+    }
 
     Ok(serde_json::json!({ "success": true, "data": report_data }))
 }
@@ -1708,7 +1752,40 @@ pub async fn report_submit_z_report(
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let payload = arg0.unwrap_or(serde_json::json!({}));
-    let pre_closeout_drain = crate::sync::force_sync_until_closeout_stable(&db, &sync_state, &app)
+    let mut stage = "pre_z_sync";
+    let result = submit_z_report_through_stages(&payload, &db, &sync_state, &app, &mut stage).await;
+
+    // How this attempt ended, for support (`closeout_readiness.json` →
+    // `lastCloseoutAttempt`). Recording never changes the answer.
+    let attempt = zreport::closeout_attempt_from_result(stage, &result, &Utc::now().to_rfc3339());
+    match db.conn.lock() {
+        Ok(conn) => {
+            if let Err(error) = zreport::record_last_closeout_attempt(&conn, &attempt) {
+                warn!(error = %error, "Failed to record the last closeout attempt");
+            }
+        }
+        Err(error) => warn!(error = %error, "Failed to record the last closeout attempt"),
+    }
+    result
+}
+
+/// The Z submission itself. `stage` names the step reached, for the attempt
+/// record.
+async fn submit_z_report_through_stages(
+    payload: &serde_json::Value,
+    db: &db::DbState,
+    sync_state: &crate::sync::SyncState,
+    app: &tauri::AppHandle,
+    stage: &mut &'static str,
+) -> Result<serde_json::Value, String> {
+    // Is fiscalization active for this branch? Asked before the drain and
+    // the checks (bounded), so a store without a fiscal plugin is neither
+    // held by the fiscal guard nor by its fiscal rows in the drain, while an
+    // unreachable server keeps the fail-closed behaviour (29/09/2026).
+    let _ = crate::fiscal::status::refresh_from_stored_credentials().await;
+
+    *stage = "pre_z_sync";
+    let pre_closeout_drain = crate::sync::force_sync_until_closeout_stable(db, sync_state, app)
         .await
         .map_err(|error| format!("Cannot close day: pre-Z-report sync failed: {error}"))?;
     info!(
@@ -1722,13 +1799,15 @@ pub async fn report_submit_z_report(
         },
         "Pre-closeout sync drain finished"
     );
+    *stage = "sync_blocked";
     if let Some(response) =
-        crate::sync::build_sync_closeout_blocked_response_for_stage(&db, "pre-Z-report sync")?
+        crate::sync::build_sync_closeout_blocked_response_for_stage(db, "pre-Z-report sync")?
     {
         return Ok(response);
     }
 
-    let initial_blockers = zreport::unsettled_payment_blockers(&db, &payload)?;
+    *stage = "payment_blockers";
+    let initial_blockers = zreport::unsettled_payment_blockers(db, payload)?;
     let blockers = if initial_blockers
         .iter()
         .any(|blocker| blocker.missing_local_payment_row())
@@ -1738,14 +1817,14 @@ pub async fn report_submit_z_report(
             .filter(|blocker| blocker.missing_local_payment_row())
             .map(|blocker| blocker.order_id.clone())
             .collect();
-        crate::sync::repair_local_payment_mirrors_for_orders(&db, &blocking_order_ids)
+        crate::sync::repair_local_payment_mirrors_for_orders(db, &blocking_order_ids)
             .await
             .map_err(|repair_error| {
                 format!(
                     "Cannot close day: failed to refresh payment mirrors for blocking orders: {repair_error}"
                 )
             })?;
-        zreport::unsettled_payment_blockers(&db, &payload)?
+        zreport::unsettled_payment_blockers(db, payload)?
     } else {
         initial_blockers
     };
@@ -1757,10 +1836,21 @@ pub async fn report_submit_z_report(
         ));
     }
 
-    let prepared = match zreport::prepare_z_report_submission(&db, &payload) {
+    // The window's fiscal receipts must have reached the tax authority under
+    // an active (or unknown) plugin — the close-day guard used to live only in
+    // the legacy `zreport_generate` command, which the renderer never calls,
+    // and checked today's UTC date. The refusal is typed; the renderer
+    // localizes it (29/09/2026).
+    *stage = "fiscal_guard";
+    if let Some(response) = zreport::fiscal_close_blocked_response(db, payload)? {
+        return Ok(response);
+    }
+
+    *stage = "prepare";
+    let prepared = match zreport::prepare_z_report_submission(db, payload) {
         Ok(prepared) => prepared,
         Err(error) => {
-            let blockers = zreport::unsettled_payment_blockers(&db, &payload)?;
+            let blockers = zreport::unsettled_payment_blockers(db, payload)?;
             if blockers.is_empty() {
                 return Err(error);
             }
@@ -1771,10 +1861,10 @@ pub async fn report_submit_z_report(
         }
     };
 
-    let post_submission_drain =
-        crate::sync::force_sync_until_closeout_stable(&db, &sync_state, &app)
-            .await
-            .map_err(|error| format!("Cannot close day: Z-report sync failed: {error}"))?;
+    *stage = "post_submission_sync";
+    let post_submission_drain = crate::sync::force_sync_until_closeout_stable(db, sync_state, app)
+        .await
+        .map_err(|error| format!("Cannot close day: Z-report sync failed: {error}"))?;
     info!(
         passes_executed = post_submission_drain.passes_executed,
         any_progress = post_submission_drain.any_progress,
@@ -1788,12 +1878,13 @@ pub async fn report_submit_z_report(
         "Post-submission sync drain finished"
     );
     if let Some(response) =
-        crate::sync::build_sync_closeout_blocked_response_for_stage(&db, "Z-report submission")?
+        crate::sync::build_sync_closeout_blocked_response_for_stage(db, "Z-report submission")?
     {
         return Ok(response);
     }
 
-    let mut result = zreport::finalize_prepared_z_report_submission(&db, &prepared)?;
+    *stage = "finalize";
+    let mut result = zreport::finalize_prepared_z_report_submission(db, &prepared)?;
 
     let z_report_id = extract_z_report_id_from_payload(&result)
         .or_else(|| {
@@ -1807,11 +1898,11 @@ pub async fn report_submit_z_report(
                 .and_then(|value| value.get("data"))
                 .and_then(extract_z_report_id_from_payload)
         })
-        .or_else(|| extract_z_report_id_from_payload(&payload));
+        .or_else(|| extract_z_report_id_from_payload(payload));
 
     if let Some(z_report_id) = z_report_id {
-        if crate::print::is_print_action_enabled(&db, "z_report") {
-            match print::enqueue_print_job(&db, "z_report", &z_report_id, None, &app) {
+        if crate::print::is_print_action_enabled(db, "z_report") {
+            match print::enqueue_print_job(db, "z_report", &z_report_id, None, app) {
                 Ok(job) => {
                     if let Some(obj) = result.as_object_mut() {
                         obj.insert("autoPrintJob".to_string(), job);
@@ -1829,16 +1920,68 @@ pub async fn report_submit_z_report(
     }
 
     let _ = app.emit("sync_complete", serde_json::json!({ "entity": "z_report" }));
+    *stage = "submitted";
     Ok(result)
+}
+
+/// "Record cash" / "Record card" on a payment blocker (the Z and the shift
+/// checkout): money the customer already paid, recorded without charging
+/// anything.
+///
+/// Item F (fix review 30/09/2026; parity with Android's "Record the payment"):
+/// recording money no one collected is a sensitive action. The renderer
+/// always asks first; this then needs the desktop's approval for money
+/// actions, an active cashier or manager shift on this terminal and a fresh
+/// PIN confirmation (`CashDrawerControl`; the desktop has no per-staff void
+/// permission), the same approval as "Money given back". The payment is keyed
+/// `z-record:<order>:<cents>` and the audit entry names who, when, the
+/// blocker, the tender and `charged: false`.
+pub(crate) fn record_payment_blocker_guarded(
+    db: &db::DbState,
+    auth_state: &crate::auth::AuthState,
+    arg0: Option<serde_json::Value>,
+) -> Result<serde_json::Value, crate::auth::GuardedCommandError> {
+    let mut payload = parse_resolve_payment_blocker_payload(arg0)?;
+    // With nobody on shift at this terminal (the Z needs everyone checked
+    // out), a manager approves with their own PIN (fix review 30/09/2026).
+    let approver = crate::auth::authorize_money_action(
+        crate::auth::MoneyApproval::VoidPayments,
+        db,
+        auth_state,
+    )?;
+    let session = crate::auth::get_session_json(auth_state);
+    let recorded_by = approver.manager_staff_id.clone().or_else(|| {
+        ["databaseStaffId", "staffId"].iter().find_map(|key| {
+            session
+                .get(*key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+        })
+    });
+    if let Some(object) = payload.as_object_mut() {
+        object.insert(
+            "recordedBy".to_string(),
+            recorded_by.map_or(serde_json::Value::Null, serde_json::Value::String),
+        );
+        object.insert(
+            "approvalVia".to_string(),
+            serde_json::Value::String(approver.via.to_string()),
+        );
+    }
+    Ok(payments::resolve_unsettled_payment_blocker_payment(
+        db, &payload,
+    )?)
 }
 
 #[tauri::command]
 pub async fn report_resolve_payment_blocker(
     arg0: Option<serde_json::Value>,
     db: tauri::State<'_, db::DbState>,
-) -> Result<serde_json::Value, String> {
-    let payload = parse_resolve_payment_blocker_payload(arg0)?;
-    payments::resolve_unsettled_payment_blocker_payment(&db, &payload)
+    auth_state: tauri::State<'_, crate::auth::AuthState>,
+) -> Result<serde_json::Value, crate::auth::GuardedCommandError> {
+    record_payment_blocker_guarded(&db, &auth_state, arg0)
 }
 
 #[tauri::command]
@@ -1866,6 +2009,55 @@ pub async fn products_get_catalog_count() -> Result<serde_json::Value, String> {
 #[cfg(test)]
 mod dto_tests {
     use super::*;
+
+    fn source_slice<'a>(source: &'a str, signature: &str) -> &'a str {
+        let start = source
+            .find(signature)
+            .unwrap_or_else(|| panic!("missing {signature}"));
+        let remainder = &source[start..];
+        let end = remainder[1..]
+            .find("\n#[tauri::command]")
+            .map(|index| index + 1)
+            .unwrap_or(remainder.len());
+        &remainder[..end]
+    }
+
+    /// 29/09/2026: the desktop's fiscal close-day guard lived only in the
+    /// legacy `zreport_generate` command, which the renderer never calls; the
+    /// real close had no fiscal check. Pin the order: the verdict is asked
+    /// first, the drain runs with it, the guard holds the close before the
+    /// report is prepared, and every attempt is recorded for support.
+    #[test]
+    fn the_z_submission_asks_the_fiscal_verdict_and_runs_the_guard_before_preparing() {
+        let source = include_str!("analytics.rs");
+        let stages = source_slice(source, "async fn submit_z_report_through_stages(");
+        let position = |marker: &str| {
+            stages
+                .find(marker)
+                .unwrap_or_else(|| panic!("missing {marker} in the Z submission"))
+        };
+        let refresh = position("crate::fiscal::status::refresh_from_stored_credentials()");
+        let drain = position("crate::sync::force_sync_until_closeout_stable(");
+        let guard = position("zreport::fiscal_close_blocked_response(db, payload)");
+        let prepare = position("zreport::prepare_z_report_submission(db, payload)");
+        assert!(refresh < drain, "the verdict is refreshed before the drain");
+        assert!(
+            drain < guard,
+            "the drain gets a chance to send the receipts"
+        );
+        assert!(
+            guard < prepare,
+            "the guard holds the close before preparing it"
+        );
+
+        let command = source_slice(source, "pub async fn report_submit_z_report(");
+        assert!(command.contains("zreport::record_last_closeout_attempt"));
+        assert!(command.contains("submit_z_report_through_stages("));
+
+        let preview = source_slice(source, "pub async fn report_generate_z_report(");
+        assert!(preview.contains("zreport::fiscal_queue_blockers_for_closeout(&db, &payload)"));
+        assert!(preview.contains("\"fiscalQueue\""));
+    }
 
     fn driver_earning_test_conn() -> rusqlite::Connection {
         let conn = rusqlite::Connection::open_in_memory().expect("open in-memory database");
@@ -2321,6 +2513,43 @@ mod dto_tests {
         assert_eq!(flattened["periodEnd"], "2026-03-15T18:00:00Z");
         assert_eq!(flattened["period"]["start"], "2026-03-15T08:00:00Z");
         assert_eq!(flattened["period"]["end"], "2026-03-15T18:00:00Z");
+    }
+
+    #[test]
+    fn flatten_generated_z_report_data_preserves_stored_gift_close_identity() {
+        let projection = serde_json::json!({"contract":"gift_close_report_v1","ready":true});
+        let generated = serde_json::json!({
+            "existing": true,
+            "report": {"id":"stored-z-1", "reportJson": {"date":"2026-09-30", "giftFinancialClose":projection}}
+        });
+        let flat = flatten_generated_z_report_data(&generated);
+        assert_eq!(flat["zReportId"], "stored-z-1");
+        assert_eq!(flat["giftFinancialClose"], projection);
+    }
+
+    #[test]
+    fn flatten_generated_z_report_data_keeps_pending_readiness_without_a_print_id() {
+        let readiness = serde_json::json!({"ready":false,"count":1,"confirmedCount":0,
+            "details":[{"code":"GIFT_CLOSE_PROOF_PENDING","shiftId":"shift-1"}]});
+        let generated = serde_json::json!({
+            "existing": false, "preview": true, "giftCloseReadiness":readiness,
+            "report": {"reportJson": {"date":"2026-09-30"}}
+        });
+        let flat = flatten_generated_z_report_data(&generated);
+        assert_eq!(flat["giftCloseReadiness"], readiness);
+        assert!(flat.get("zReportId").is_none());
+    }
+
+    #[test]
+    fn flatten_generated_z_report_data_does_not_expose_discarded_preview_ids() {
+        let generated = serde_json::json!({
+            "existing": false, "zReportId": "discarded-single-shift-row",
+            "report": {"reportJson": {"date":"2026-09-30",
+                "zReportId":"old-embedded-id", "z_report_id":"old-alias"}}
+        });
+        let flat = flatten_generated_z_report_data(&generated);
+        assert!(flat.get("zReportId").is_none());
+        assert!(flat.get("z_report_id").is_none());
     }
 
     // ===================================================================

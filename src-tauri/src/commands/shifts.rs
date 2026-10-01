@@ -656,6 +656,130 @@ fn map_scheduled_shift_row(row: &serde_json::Value) -> serde_json::Value {
     })
 }
 
+/// Starts (or re-authorizes the same key of) the selected cashier's original
+/// gift-card financial opening. The PIN is a transient request field only;
+/// the ordinary `shift_open` is untouched and never called first.
+#[tauri::command]
+pub async fn shift_financial_opening_begin(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    let payload = arg0.ok_or("Missing financial opening payload")?;
+    let result = crate::gift_financial_opening::begin_opening(&db, &payload).await?;
+    schedule_financial_opening_sync(&app, &result);
+    Ok(result)
+}
+
+/// Same-cashier hosted re-authorization of an existing original opening
+/// (restart, expiry or refusal); it changes only the volatile authorization.
+#[tauri::command]
+pub async fn shift_financial_opening_authorize(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    let payload = arg0.ok_or("Missing financial opening payload")?;
+    let result = crate::gift_financial_opening::authorize_opening(&db, &payload).await?;
+    schedule_financial_opening_sync(&app, &result);
+    Ok(result)
+}
+
+/// Nonsecret status of one original opening, or of this terminal's open ones.
+#[tauri::command]
+pub async fn shift_financial_opening_status(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+) -> Result<serde_json::Value, String> {
+    crate::gift_financial_opening::opening_status(&db, arg0.as_ref())
+}
+
+/// Native-only clear of every dedicated hosted cashier authorization (e.g. on
+/// logout), fencing in-flight issuance too. Durable originals, their queue
+/// items and the main login are untouched; no credential is returned.
+#[tauri::command]
+pub async fn shift_financial_opening_clear_authorization() -> Result<serde_json::Value, String> {
+    Ok(crate::gift_financial_opening::clear_authorizations())
+}
+
+/// Original-cashier hosted renewal of one retained pending financial closing
+/// (after its local close, a restart or expiry). It changes only the volatile
+/// authorization and never schedules the opening or ordinary shift sync.
+#[tauri::command]
+pub async fn shift_financial_closing_authorize(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+) -> Result<serde_json::Value, String> {
+    let payload = arg0.ok_or("Missing financial closing payload")?;
+    crate::gift_financial_opening::authorize_closing(&db, &payload).await
+}
+
+/// Nonsecret recovery list of the selected original cashier's retained
+/// financial closings in the current trusted terminal scope.
+#[tauri::command]
+pub async fn shift_financial_closing_list_pending(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+) -> Result<serde_json::Value, String> {
+    let payload = arg0.ok_or("Missing financial closing payload")?;
+    crate::gift_financial_closing::list_pending_closings(&db, &payload)
+}
+
+/// Nonsecret status of one retained financial closing; confirmed only from
+/// its adopted canonical proof.
+#[tauri::command]
+pub async fn shift_financial_closing_status(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+) -> Result<serde_json::Value, String> {
+    let payload = arg0.ok_or("Missing financial closing payload")?;
+    crate::gift_financial_closing::closing_status(&db, &payload)
+}
+
+/// Explicit retry of one retained original: natively makes only its exact
+/// protected queue row due again, then wakes the existing native sync (the
+/// `sync_force` path) without awaiting it. `queued` is not completion.
+#[tauri::command]
+pub async fn shift_financial_closing_retry(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    let payload = arg0.ok_or("Missing financial closing payload")?;
+    let (reply, wake) = crate::gift_financial_closing::request_closing_retry(&db, &payload)?;
+    if wake {
+        tauri::async_runtime::spawn(async move {
+            let sync_state = app
+                .state::<std::sync::Arc<crate::sync::SyncState>>()
+                .inner()
+                .clone();
+            let db = app.state::<db::DbState>();
+            match crate::sync::force_sync(&db, &sync_state, &app).await {
+                Ok(()) => {
+                    let _ = app.emit(
+                        "sync_complete",
+                        serde_json::json!({ "trigger": "gift_closing_retry" }),
+                    );
+                }
+                // The raw sync error stays native; the renderer re-reads status.
+                Err(_) => {
+                    let _ = app.emit(
+                        "sync_error",
+                        serde_json::json!({ "error": "GIFT_CLOSING_RETRY_WAKE_FAILED", "trigger": "gift_closing_retry" }),
+                    );
+                }
+            }
+        });
+    }
+    Ok(reply)
+}
+
+fn schedule_financial_opening_sync(app: &tauri::AppHandle, result: &serde_json::Value) {
+    if let Some(shift_id) = crate::gift_financial_opening::opening_shift_id(result) {
+        schedule_immediate_sync(app.clone(), "shift", shift_id);
+    }
+}
+
 #[tauri::command]
 pub async fn shift_open(
     arg0: Option<serde_json::Value>,
@@ -691,6 +815,18 @@ pub async fn shift_close(
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(true);
     if !success {
+        return Ok(result);
+    }
+    // A gift-bound close is only captured locally, pending financial
+    // confirmation: no generic auto-print and no ordinary sync handling.
+    if is_gift_financial_close(&result) {
+        let _ = app.emit(
+            "shift_updated",
+            serde_json::json!({
+                "action": "close",
+                "shift": result.clone()
+            }),
+        );
         return Ok(result);
     }
 
@@ -729,6 +865,13 @@ pub async fn shift_close(
         }),
     );
     Ok(result)
+}
+
+/// A native gift-bound close result, pending financial confirmation.
+fn is_gift_financial_close(result: &serde_json::Value) -> bool {
+    result
+        .get("giftFinancialClosing")
+        .is_some_and(serde_json::Value::is_object)
 }
 
 #[tauri::command]
@@ -894,19 +1037,49 @@ pub async fn shift_print_checkout(
     let role_type_for_job = role_type.clone();
     let terminal_name_for_job = terminal_name.clone();
 
+    if !crate::print::is_print_action_enabled(&db, "shift_close") {
+        return Ok(serde_json::json!({ "success": true, "skipped": true }));
+    }
+
+    // A gift-bound original prints only after its strict adopted close proof,
+    // and only its frozen canonical amounts; the caller's snapshot is dropped.
+    let gift_close = db
+        .conn
+        .lock()
+        .map_err(|e| e.to_string())
+        .and_then(|conn| print::gift_close_checkout_binding(&conn, &payload.shift_id));
+    let gift_bound = match gift_close {
+        Ok(binding) => binding.is_some(),
+        Err(error) => {
+            return Ok(serde_json::json!({
+                "success": false,
+                "pending": true,
+                "code": print::GIFT_CLOSE_PRINT_NOT_FINAL,
+                "error": error,
+                "shiftId": payload.shift_id,
+                "roleType": role_type,
+                "terminalName": terminal_name,
+            }));
+        }
+    };
+    let caller_snapshot = |value: serde_json::Value| {
+        if gift_bound {
+            serde_json::Value::Null
+        } else {
+            value
+        }
+    };
+
     let print_payload = serde_json::json!({
         "shiftId": shift_id,
         "roleType": role_type_for_job,
         "terminalName": terminal_name_for_job,
-        "snapshotCheckOutTime": payload.snapshot_check_out_time,
-        "expectedAmount": payload.expected_amount,
-        "closingAmount": payload.closing_amount,
-        "varianceAmount": payload.variance_amount,
+        "snapshotCheckOutTime": caller_snapshot(serde_json::json!(payload.snapshot_check_out_time)),
+        "expectedAmount": caller_snapshot(serde_json::json!(payload.expected_amount)),
+        "closingAmount": caller_snapshot(serde_json::json!(payload.closing_amount)),
+        "varianceAmount": caller_snapshot(serde_json::json!(payload.variance_amount)),
     });
 
-    if !crate::print::is_print_action_enabled(&db, "shift_close") {
-        return Ok(serde_json::json!({ "success": true, "skipped": true }));
-    }
     match print::enqueue_print_job_with_payload(
         &db,
         "shift_checkout",
@@ -1462,5 +1635,167 @@ mod dto_tests {
         .expect("object payload should parse");
         assert_eq!(from_string.branch_id, "branch-a");
         assert_eq!(from_object.branch_id, "branch-b");
+    }
+}
+
+/// Offline refusals of the financial opening commands; no hosted call is made.
+#[cfg(test)]
+mod tests {
+    const FINANCIAL_ORG: &str = "6da1cebf-7a5f-4b62-9e4f-5a6b7c8d9eaf";
+    const FINANCIAL_BRANCH: &str = "7eb2dfc0-8b6a-4c73-8f5a-6b7c8d9eafb0";
+    const FINANCIAL_STAFF: &str = "5c90bdae-6f4e-4a51-8d3e-4f5a6b7c8d9e";
+    const FINANCIAL_TERMINAL: &str = "terminal-main-01";
+
+    #[test]
+    fn gift_financial_close_result_skips_auto_print_and_ordinary_sync() {
+        use serde_json::json;
+        assert!(super::is_gift_financial_close(&json!({
+            "success": true,
+            "giftFinancialClosing": { "pendingFinancialConfirmation": true }
+        })));
+        assert!(!super::is_gift_financial_close(
+            &json!({ "success": true, "shiftId": "s" })
+        ));
+        assert!(!super::is_gift_financial_close(
+            &json!({ "success": true, "giftFinancialClosing": null })
+        ));
+    }
+
+    fn financial_opening_db() -> crate::db::DbState {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        crate::db::run_migrations_for_test(&conn);
+        // A seeded scope keeps these tests off the OS credential store.
+        for (setting, value) in [
+            ("organization_id", FINANCIAL_ORG),
+            ("branch_id", FINANCIAL_BRANCH),
+            ("terminal_id", FINANCIAL_TERMINAL),
+        ] {
+            crate::db::set_setting(&conn, "terminal", setting, value).expect("seed terminal scope");
+        }
+        crate::db::DbState {
+            conn: std::sync::Mutex::new(conn),
+            db_path: std::path::PathBuf::new(),
+        }
+    }
+
+    #[test]
+    fn financial_opening_commands_refuse_invalid_requests_before_any_write_or_call() {
+        let db = financial_opening_db();
+        for (payload, code) in [
+            (
+                serde_json::json!({ "staffId": FINANCIAL_STAFF, "openingCents": 100, "currency": "EUR" }),
+                "PIN_REQUIRED",
+            ),
+            (
+                serde_json::json!({ "staffId": FINANCIAL_STAFF, "openingCents": 100, "currency": "EUR", "pin": "12" }),
+                "PIN_REQUIRED",
+            ),
+            (
+                serde_json::json!({ "staffId": FINANCIAL_STAFF, "openingCents": 1.5, "currency": "EUR", "pin": "1234" }),
+                "INVALID_OPENING_CENTS",
+            ),
+            (
+                serde_json::json!({ "staffId": FINANCIAL_STAFF, "openingCents": 100, "currency": "eur", "pin": "1234" }),
+                "INVALID_CURRENCY",
+            ),
+            (
+                serde_json::json!({ "staffId": "staff-1", "openingCents": 100, "currency": "EUR", "pin": "1234" }),
+                "INVALID_STAFF",
+            ),
+        ] {
+            let result = tauri::async_runtime::block_on(
+                crate::gift_financial_opening::begin_opening(&db, &payload),
+            )
+            .expect("a refusal is a value");
+            assert_eq!(result["success"], false);
+            assert_eq!(result["code"], code, "{payload}");
+        }
+        let result =
+            tauri::async_runtime::block_on(crate::gift_financial_opening::authorize_opening(
+                &db,
+                &serde_json::json!({ "openingKey": "not-a-key", "pin": "1234" }),
+            ))
+            .unwrap();
+        assert_eq!(result["code"], "INVALID_OPENING_KEY");
+        let result = tauri::async_runtime::block_on(crate::gift_financial_opening::authorize_opening(
+            &db,
+            &serde_json::json!({ "openingKey": uuid::Uuid::new_v4().to_string(), "pin": "1234" }),
+        ))
+        .unwrap();
+        assert_eq!(result["code"], "OPENING_NOT_FOUND");
+        let conn = db.conn.lock().unwrap();
+        let rows: i64 = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM gift_financial_openings)
+                      + (SELECT COUNT(*) FROM parity_sync_queue)
+                      + (SELECT COUNT(*) FROM staff_shifts)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 0);
+    }
+
+    #[test]
+    fn financial_opening_status_and_same_key_mismatch_stay_local_and_secret_free() {
+        let db = financial_opening_db();
+        let key = uuid::Uuid::new_v4().to_string();
+        {
+            let conn = db.conn.lock().unwrap();
+            let scope = crate::gift_financial_opening::OpeningScope {
+                organization_id: FINANCIAL_ORG.to_string(),
+                branch_id: FINANCIAL_BRANCH.to_string(),
+                terminal_id: FINANCIAL_TERMINAL.to_string(),
+            };
+            let request = crate::gift_financial_opening::PrepareRequest {
+                opening_key: Some(key.clone()),
+                staff_id: FINANCIAL_STAFF.to_string(),
+                staff_name: None,
+                opening_cents: 2_000,
+                currency: "EUR".to_string(),
+            };
+            crate::gift_financial_opening::prepare_opening(
+                &conn,
+                &scope,
+                &request,
+                chrono::Utc::now(),
+            )
+            .expect("prepare the original");
+        }
+        let changed = serde_json::json!({
+            "openingKey": key,
+            "staffId": FINANCIAL_STAFF,
+            "openingCents": 2_001,
+            "currency": "EUR",
+            "pin": "1234"
+        });
+        let result = tauri::async_runtime::block_on(crate::gift_financial_opening::begin_opening(
+            &db, &changed,
+        ))
+        .unwrap();
+        assert_eq!(result["code"], "OPENING_KEY_TUPLE_MISMATCH");
+
+        let status = crate::gift_financial_opening::opening_status(
+            &db,
+            Some(&serde_json::json!({ "openingKey": key })),
+        )
+        .unwrap();
+        let openings = status["openings"].as_array().unwrap();
+        assert_eq!(openings.len(), 1);
+        assert_eq!(openings[0]["state"], "pending");
+        assert_eq!(openings[0]["usable"], false);
+        assert_eq!(openings[0]["hostedAuthorization"]["state"], "required");
+        let text = status.to_string().to_ascii_lowercase();
+        assert!(!text.contains("\"pin\"") && !text.contains("session"));
+        let terminal = crate::gift_financial_opening::opening_status(&db, None).unwrap();
+        assert_eq!(terminal["openings"].as_array().unwrap().len(), 1);
+        let conn = db.conn.lock().unwrap();
+        let shifts: i64 = conn
+            .query_row("SELECT COUNT(*) FROM staff_shifts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            shifts, 0,
+            "the ordinary shift path is never used as a fallback"
+        );
     }
 }

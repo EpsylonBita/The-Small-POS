@@ -163,8 +163,10 @@ test('LoyaltyPage refresh button is amber glass with aria-label only (no native 
   assert.doesNotMatch(page, /border border-white\/80 bg-white text-black/);
   assert.doesNotMatch(page, /border border-black bg-black text-white/);
 
-  // Behaviour/shape preserved: same handler, disabled guard, 44px square, spinner, neutral disabled.
-  assert.match(page, /onClick=\{\(\) => void fetchData\(\)\}/);
+  // Behaviour/shape preserved: disabled guard, 44px square, spinner, neutral disabled. Manual refresh
+  // forces a fresh load past the cache (fetchData(true)); the mount load stays unforced.
+  assert.match(page, /onClick=\{\(\) => void fetchData\(true\)\}/);
+  assert.match(page, /const fetchData = useCallback\(async \(force = false\) =>/);
   assert.match(page, /disabled=\{loading\}/);
   assert.match(page, /h-12 w-12/);
   assert.match(page, /<RefreshCw className=\{`w-5 h-5 \$\{loading \? 'animate-spin' : ''\}`\} \/>/);
@@ -185,7 +187,7 @@ test('LoyaltyPage Scan/refresh buttons carry no native title tooltip, but the mo
   assert.match(scanButton, /\{t\('loyalty\.scan\.button', 'Scan'\)\}/);
 
   // Refresh button: accessible name via aria-label, no native title tooltip.
-  const refreshButton = sliceBlock(page, 'onClick={() => void fetchData()}', '</button>');
+  const refreshButton = sliceBlock(page, 'onClick={() => void fetchData(true)}', '</button>');
   assert.match(refreshButton, /aria-label=\{t\('common\.refresh', 'Refresh'\)\}/);
   assert.doesNotMatch(refreshButton, /\btitle=/);
 

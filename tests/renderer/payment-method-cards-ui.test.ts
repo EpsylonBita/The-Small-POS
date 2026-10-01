@@ -57,8 +57,8 @@ test('payment method labels fit without clipping or per-letter Greek breaks', ()
   const fittedLabelUsages = source.match(/paymentMethodLabelBaseClass/g);
   assert.equal(
     fittedLabelUsages?.length,
-    5,
-    'the shared payment label class should be defined once and used by all four labels',
+    6,
+    'the shared payment label class should be defined once and used by all five labels, including Gift',
   );
 
   assert.doesNotMatch(
@@ -83,8 +83,8 @@ test('payment method cards use moderate padding so labels fit the md-width modal
   const paddingUsages = source.match(/paymentOptionPaddingClass/g);
   assert.equal(
     paddingUsages?.length,
-    5,
-    'the shared payment card padding class should be defined once and used by all four cards',
+    6,
+    'the shared payment card padding class should be defined once and used by all five cards, including Gift',
   );
 
   assert.doesNotMatch(

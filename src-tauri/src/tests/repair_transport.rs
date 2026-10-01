@@ -933,6 +933,12 @@ fn repair_envelope() -> String {
 fn create_repair_transport_queue_tables(connection: &Connection) {
     create_tables(connection).expect("create parity queue tables");
     connection
+        .execute_batch(crate::gift_financial_opening::SCHEMA_SQL)
+        .expect("create financial opening queue dependencies");
+    connection
+        .execute_batch(crate::gift_financial_closing::SCHEMA_SQL)
+        .expect("create financial closing queue dependencies");
+    connection
         .execute_batch(
             "CREATE TABLE IF NOT EXISTS orders (
                  id TEXT PRIMARY KEY,

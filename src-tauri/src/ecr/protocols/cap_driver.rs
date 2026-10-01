@@ -81,6 +81,9 @@ struct DriverCompletion {
     error: Option<String>,
     output: Option<String>,
     consumed: bool,
+    /// The error was found in this command's own Output file or in log lines
+    /// naming its command file, not only elsewhere in the shared log.
+    error_correlated: bool,
 }
 
 /// Vendor-supplied CAP Driver adapter. The boxed transport is retained only to
@@ -97,6 +100,9 @@ pub struct CapDriverProtocol {
     cash_payment_code: u8,
     card_payment_code: u8,
     eft_pos_index: u8,
+    /// Cashier payment number for gift card (voucher) tenders. No default:
+    /// the store sets it from the cashier's payment table.
+    voucher_payment_code: Option<u8>,
     require_service: bool,
     /// Probe the cashier ERP host/port over TCP during readiness. Off by
     /// default: the service may reach an RBS ELIO over UDP or a serial link,
@@ -161,6 +167,7 @@ impl CapDriverProtocol {
                 20,
             ),
             eft_pos_index: bounded_u8_setting(config, &["eftPosIndex", "eft_pos_index"], 1, 1, 99),
+            voucher_payment_code: gift_voucher_payment_code(config)?,
             require_service: bool_setting(config, &["requireService", "require_service"])
                 .unwrap_or(true),
             probe_device_tcp,
@@ -305,6 +312,7 @@ impl CapDriverProtocol {
 
         let mut cash = None;
         let mut card = None;
+        let mut gift = None;
         for payment in &fiscal.payments {
             match normalize_payment_method(&payment.method) {
                 "cash" => {
@@ -315,6 +323,11 @@ impl CapDriverProtocol {
                 "card" => {
                     if card.replace(payment.amount).is_some() {
                         return Err("CAP Driver supports one card payment entry".to_string());
+                    }
+                }
+                "gift_card" => {
+                    if gift.replace(payment.amount).is_some() {
+                        return Err("CAP Driver supports one gift card payment entry".to_string());
                     }
                 }
                 _ => {
@@ -333,6 +346,22 @@ impl CapDriverProtocol {
                 cents_to_money(amount),
                 self.eft_pos_index
             ));
+        }
+        // Gift card value was already debited by the server. It is declared on
+        // the cashier's voucher payment number: never LR (that starts an EFT
+        // sale) and never the cash number.
+        if let Some(amount) = gift {
+            let code = self
+                .voucher_payment_code
+                .ok_or("CAP Driver has no gift card (voucher) payment number configured")?;
+            // Payment 1 is the cashier's fixed cash number whatever cash code
+            // the POS was given; gift value never posts as cash or card.
+            if code == 1 || code == self.cash_payment_code || code == self.card_payment_code {
+                return Err(format!(
+                    "CAP payment number {code} is a cash or card payment; gift card value needs the cashier's voucher payment number"
+                ));
+            }
+            commands.push(format!("CR/{code}/{}/ΔΩΡΟΚΑΡΤΑ", cents_to_money(amount)));
         }
         if cash.is_some() {
             commands.push(format!("CR/{}/0/ΜΕΤΡΗΤΑ", self.cash_payment_code));
@@ -393,6 +422,9 @@ impl CapDriverProtocol {
                     .collect::<Vec<_>>()
                     .join("\n");
                 let error = classify_driver_error(&combined);
+                let error_correlated = error.is_some()
+                    && correlated_driver_error(output.as_deref(), log_delta.as_deref(), &file_name)
+                        .is_some();
                 return Ok(DriverCompletion {
                     status: if error.is_some() {
                         TransactionStatus::Error
@@ -402,6 +434,7 @@ impl CapDriverProtocol {
                     error,
                     output,
                     consumed: true,
+                    error_correlated,
                 });
             }
             thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
@@ -422,6 +455,9 @@ impl CapDriverProtocol {
             .collect::<Vec<_>>()
             .join("\n");
         let error = classify_driver_error(&combined);
+        let error_correlated = error.is_some()
+            && correlated_driver_error(output.as_deref(), log_delta.as_deref(), &file_name)
+                .is_some();
         Ok(DriverCompletion {
             status: if error.is_some() {
                 TransactionStatus::Error
@@ -436,6 +472,7 @@ impl CapDriverProtocol {
             }),
             output,
             consumed,
+            error_correlated,
         })
     }
 
@@ -467,12 +504,60 @@ impl CapDriverProtocol {
                 "adapter": "cap_driver",
                 "commandConsumed": completion.consumed,
                 "requiresReconciliation": ambiguous,
+                "errorCorrelated": completion.error_correlated,
                 "output": completion.output,
             })),
             started_at,
             completed_at: Utc::now().to_rfc3339(),
         }
     }
+
+    /// Everything needed to recognise this receipt's own command, Output file
+    /// and log lines after a restart, captured before the command is written.
+    fn dispatch_correlation(&self, transaction_id: &str) -> Result<serde_json::Value, String> {
+        let safe_id = sanitize_filename(transaction_id);
+        if safe_id != transaction_id {
+            return Err("The fiscal operation id is not a stable CAP file name".to_string());
+        }
+        let log_path = self.capture_path.join("CapDriverSVC_log.txt");
+        let log_offset = fs::metadata(&log_path).map(|meta| meta.len()).unwrap_or(0);
+        let submitted_floor_ms = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis() as u64)
+            .unwrap_or(0);
+        Ok(json!({
+            "adapter": "cap_driver",
+            "commandFile": format!("pos-tauri-{safe_id}.txt"),
+            "pendingFile": format!("pos-tauri-{safe_id}.pending"),
+            "capturePath": self.capture_path.to_string_lossy(),
+            "outputPath": self.output_path.to_string_lossy(),
+            "logPath": log_path.to_string_lossy(),
+            "logOffset": log_offset,
+            "submittedFloorMs": submitted_floor_ms,
+            "fileEncoding": self.file_encoding.label(),
+        }))
+    }
+}
+
+/// The driver error attributable to this command: from its own Output file, or
+/// from log lines naming its command file. An error elsewhere in the shared
+/// log belongs to another command and proves nothing about this one.
+fn correlated_driver_error(
+    output: Option<&str>,
+    log_delta: Option<&str>,
+    file_name: &str,
+) -> Option<String> {
+    let stem = file_name.trim_end_matches(".txt");
+    let own_lines = log_delta
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.contains(stem))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let found = [output.unwrap_or_default(), own_lines.as_str()]
+        .into_iter()
+        .find_map(classify_driver_error);
+    found
 }
 
 impl EcrProtocol for CapDriverProtocol {
@@ -522,6 +607,41 @@ impl EcrProtocol for CapDriverProtocol {
                 "CAP Driver does not support {:?} through the fiscal-cashier adapter",
                 request.transaction_type
             )),
+        }
+    }
+
+    /// Every `submit_commands` error happens at or before the rename that
+    /// publishes the command file, so only those refusals prove the register
+    /// saw nothing; once published, the completion is reported as found.
+    fn process_settled_receipt(
+        &mut self,
+        request: &TransactionRequest,
+    ) -> Result<SettledDispatch, String> {
+        if !self.initialized {
+            return Ok(SettledDispatch::NotPublished(
+                "CAP Driver adapter is not initialized".to_string(),
+            ));
+        }
+        if request.transaction_type != TransactionType::FiscalReceipt {
+            return Ok(SettledDispatch::NotPublished(format!(
+                "CAP Driver settles only fiscal receipts, not {:?}",
+                request.transaction_type
+            )));
+        }
+        let started_at = Utc::now().to_rfc3339();
+        let commands = match self.build_receipt_commands(request) {
+            Ok(commands) => commands,
+            Err(error) => return Ok(SettledDispatch::NotPublished(error)),
+        };
+        match self.submit_commands(
+            &request.transaction_id,
+            &commands,
+            self.transaction_timeout_ms,
+        ) {
+            Ok(completion) => Ok(SettledDispatch::Completed(
+                self.response_from_completion(request, started_at, completion),
+            )),
+            Err(error) => Ok(SettledDispatch::NotPublished(error)),
         }
     }
 
@@ -618,6 +738,21 @@ impl EcrProtocol for CapDriverProtocol {
 
     fn send_raw(&mut self, _data: &[u8]) -> Result<usize, String> {
         Err("CAP Driver accepts fiscal command files, not raw ESC/POS bytes".to_string())
+    }
+
+    fn gift_tender_codes(&self) -> Option<GiftTenderCodes> {
+        Some(GiftTenderCodes {
+            cash: self.cash_payment_code,
+            card: self.card_payment_code,
+            voucher: self.voucher_payment_code,
+        })
+    }
+
+    fn fiscal_dispatch_correlation(
+        &self,
+        transaction_id: &str,
+    ) -> Result<serde_json::Value, String> {
+        self.dispatch_correlation(transaction_id)
     }
 }
 
@@ -726,7 +861,151 @@ fn normalize_payment_method(method: &str) -> &'static str {
     match method.trim().to_ascii_lowercase().as_str() {
         "cash" | "μετρητά" | "metrita" => "cash",
         "card" | "credit_card" | "debit_card" | "pos" | "eftpos" | "κάρτα" => "card",
+        "gift_card" => "gift_card",
         _ => "unsupported",
+    }
+}
+
+const VOUCHER_PAYMENT_CODE_KEYS: [&str; 4] = [
+    "voucherPaymentCode",
+    "voucher_payment_code",
+    "giftCardPaymentCode",
+    "gift_card_payment_code",
+];
+
+/// The configured CAP payment number for gift card (voucher) tenders, if any.
+/// There is no default: a guessed number could post gift value as cash or card,
+/// so it must be 1-20 and differ from the cash and card payment numbers.
+pub fn gift_voucher_payment_code(config: &serde_json::Value) -> Result<Option<u8>, String> {
+    let Some(raw) = VOUCHER_PAYMENT_CODE_KEYS
+        .iter()
+        .find_map(|key| config.get(*key))
+        .filter(|value| {
+            !value.is_null() && value.as_str().is_none_or(|text| !text.trim().is_empty())
+        })
+    else {
+        return Ok(None);
+    };
+    let code = raw
+        .as_u64()
+        .or_else(|| raw.as_str().and_then(|text| text.trim().parse().ok()))
+        .and_then(|value| u8::try_from(value).ok())
+        .filter(|value| (1..=20).contains(value))
+        .ok_or("The CAP gift card (voucher) payment number must be between 1 and 20")?;
+    let cash = bounded_u8_setting(config, &["cashPaymentCode", "cash_payment_code"], 1, 1, 20);
+    let card = bounded_u8_setting(config, &["cardPaymentCode", "card_payment_code"], 2, 1, 20);
+    if code == cash || code == card {
+        return Err(format!(
+            "CAP payment number {code} is the cash or card payment; set the cashier's voucher payment number for gift cards"
+        ));
+    }
+    Ok(Some(code))
+}
+
+/// Voucher number for an already-settled gift card receipt, read from the
+/// exact settings the CAP adapter consumes (never connection details).
+/// Payment 1 is the cashier's fixed cash number and is refused even when the
+/// POS was given another cash code.
+pub fn settled_gift_voucher_code(config: &serde_json::Value) -> Result<u8, String> {
+    match gift_voucher_payment_code(config)? {
+        None => Err(
+            "Set the fiscal register's gift card (voucher) payment number before accepting gift cards"
+                .to_string(),
+        ),
+        Some(1) => Err(
+            "CAP payment number 1 is the cashier's cash payment; set the voucher payment number for gift cards"
+                .to_string(),
+        ),
+        Some(code) => Ok(code),
+    }
+}
+
+/// Outcome evidence for a settled gift card receipt, recovered from files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettledProbe {
+    /// This receipt's own Output file exists and carries no driver error.
+    Approved { output: String },
+    /// This receipt's own Output or log lines carry a driver error.
+    Failed { message: String },
+    /// The command file still waits in the capture folder.
+    Pending,
+    /// No published command, Output file or log line of this receipt exists.
+    NoTrace,
+    /// Nothing authoritative proves the outcome either way.
+    Unknown { reason: String },
+}
+
+/// Side-effect-free recovery for a settled gift card receipt. Reads only the
+/// files named by the persisted correlation; never writes, deletes, resubmits
+/// or sends a status command (`XX` would print an X report). The stem-prefix
+/// Output fallback is not used: only this receipt's exact file counts.
+pub fn probe_settled_receipt(correlation: &serde_json::Value) -> SettledProbe {
+    let text = |key: &str| {
+        correlation
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+    };
+    let (Some(command_file), Some(capture), Some(output_dir)) =
+        (text("commandFile"), text("capturePath"), text("outputPath"))
+    else {
+        return SettledProbe::Unknown {
+            reason: "The fiscal dispatch correlation is incomplete".to_string(),
+        };
+    };
+    let Ok(encoding) = FileEncoding::parse(text("fileEncoding").map(str::to_string)) else {
+        return SettledProbe::Unknown {
+            reason: "The fiscal dispatch correlation has an unknown file encoding".to_string(),
+        };
+    };
+    let capture = Path::new(capture);
+    if capture.join(command_file).exists() {
+        return SettledProbe::Pending;
+    }
+    let floor_ms = correlation
+        .get("submittedFloorMs")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0)
+        .saturating_sub(2_000);
+    let floor = SystemTime::UNIX_EPOCH + Duration::from_millis(floor_ms);
+    let output_path = Path::new(output_dir).join(command_file);
+    let output = fs::metadata(&output_path)
+        .ok()
+        .filter(|meta| meta.is_file())
+        .filter(|meta| meta.modified().is_ok_and(|modified| modified >= floor))
+        .and_then(|_| fs::read(&output_path).ok())
+        .map(|bytes| encoding.decode(&bytes));
+    let stem = command_file.trim_end_matches(".txt");
+    let log_lines = text("logPath")
+        .and_then(|path| {
+            let offset = correlation
+                .get("logOffset")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            read_log_delta(Path::new(path), offset)
+        })
+        .map(|bytes| {
+            encoding
+                .decode(&bytes)
+                .lines()
+                .filter(|line| line.contains(stem))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+    let combined = format!("{}\n{log_lines}", output.as_deref().unwrap_or_default());
+    if let Some(message) = classify_driver_error(&combined) {
+        return SettledProbe::Failed { message };
+    }
+    if let Some(output) = output {
+        return SettledProbe::Approved { output };
+    }
+    if log_lines.is_empty() {
+        // A leftover `.pending` file was never published to the service.
+        return SettledProbe::NoTrace;
+    }
+    SettledProbe::Unknown {
+        reason: "The CAP log mentions this receipt but no Output file proves it".to_string(),
     }
 }
 
@@ -972,6 +1251,43 @@ mod tests {
     }
 
     #[test]
+    fn card_remainder_after_a_partial_gift_charges_only_the_remainder() {
+        let voucher = adapter_with(
+            json!({ "requireService": false, "voucherPaymentCode": 5 }),
+            json!({}),
+        )
+        .expect("adapter with voucher payment");
+        let mut remainder = request("card");
+        remainder.amount = 5;
+        if let Some(fiscal) = remainder.fiscal_data.as_mut() {
+            fiscal.items[0].unit_price = 5;
+            fiscal.payments = vec![
+                FiscalPayment {
+                    method: "gift_card".to_string(),
+                    amount: 2,
+                },
+                FiscalPayment {
+                    method: "card".to_string(),
+                    amount: 3,
+                },
+            ];
+        }
+        let commands = voucher.build_receipt_commands(&remainder).unwrap();
+        let card: Vec<&String> = commands
+            .iter()
+            .filter(|command| command.starts_with("LR/"))
+            .collect();
+        assert_eq!(card.len(), 1, "{commands:?}");
+        assert!(card[0].contains("/0.03/ΚΑΡΤΑ"), "{commands:?}");
+        assert!(
+            commands
+                .iter()
+                .any(|command| command == "CR/5/0.02/ΔΩΡΟΚΑΡΤΑ"),
+            "{commands:?}"
+        );
+    }
+
+    #[test]
     fn builds_official_cap_cash_example_shape() {
         let commands = adapter().build_receipt_commands(&request("cash")).unwrap();
         assert_eq!(
@@ -982,6 +1298,87 @@ mod tests {
                 "CR/1/0/ΜΕΤΡΗΤΑ",
             ]
         );
+    }
+
+    #[test]
+    fn driver_errors_count_only_when_they_name_this_command() {
+        let own = "pos-tauri-gift-fiscal-1.txt";
+        let shared = "10:00 pos-tauri-other.txt error 0x0a\n10:01 pos-tauri-gift-fiscal-1.txt done";
+        assert!(classify_driver_error(shared).is_some());
+        assert_eq!(correlated_driver_error(None, Some(shared), own), None);
+        assert!(correlated_driver_error(
+            None,
+            Some("10:02 pos-tauri-gift-fiscal-1.txt error 0x0a"),
+            own
+        )
+        .is_some());
+        assert!(correlated_driver_error(Some("error 0x0a"), None, own).is_some());
+    }
+
+    #[test]
+    fn gift_card_uses_the_configured_voucher_payment_never_cash_or_eft() {
+        let voucher = adapter_with(
+            json!({ "requireService": false, "voucherPaymentCode": 5 }),
+            json!({}),
+        )
+        .expect("adapter with voucher payment");
+        let commands = voucher
+            .build_receipt_commands(&request("gift_card"))
+            .unwrap();
+        assert_eq!(
+            commands,
+            vec![
+                "SL/POS TAURI TEST//1.000/0.01/3/24",
+                "CM/ORDER 1/",
+                "CR/5/0.01/ΔΩΡΟΚΑΡΤΑ",
+            ]
+        );
+
+        let mut mixed = request("cash");
+        mixed.amount = 3;
+        if let Some(fiscal) = mixed.fiscal_data.as_mut() {
+            fiscal.items[0].unit_price = 3;
+            fiscal.payments = vec![
+                FiscalPayment {
+                    method: "gift_card".to_string(),
+                    amount: 2,
+                },
+                FiscalPayment {
+                    method: "cash".to_string(),
+                    amount: 1,
+                },
+            ];
+        }
+        let commands = voucher.build_receipt_commands(&mixed).unwrap();
+        assert_eq!(
+            commands[2..].to_vec(),
+            vec![
+                "CR/5/0.02/ΔΩΡΟΚΑΡΤΑ".to_string(),
+                "CR/1/0/ΜΕΤΡΗΤΑ".to_string()
+            ]
+        );
+        assert!(commands.iter().all(|command| !command.starts_with("LR/")));
+
+        // Unconfigured, cash-number or card-number vouchers never carry gift.
+        let error = adapter()
+            .build_receipt_commands(&request("gift_card"))
+            .unwrap_err();
+        assert!(error.contains("voucher"));
+        for code in [1, 2] {
+            assert!(adapter_with(json!({ "voucherPaymentCode": code }), json!({})).is_err());
+        }
+        assert!(adapter()
+            .build_receipt_commands(&request("giftcard_bank"))
+            .is_err());
+        assert_eq!(
+            gift_voucher_payment_code(&json!({ "gift_card_payment_code": "7" })),
+            Ok(Some(7))
+        );
+        assert_eq!(
+            gift_voucher_payment_code(&json!({ "voucherPaymentCode": "" })),
+            Ok(None)
+        );
+        assert!(gift_voucher_payment_code(&json!({ "voucherPaymentCode": 21 })).is_err());
     }
 
     #[test]
@@ -1147,5 +1544,120 @@ mod tests {
             response.error_message.as_deref(),
             Some("CAP Driver reported device error 0x42")
         );
+    }
+
+    #[test]
+    fn settled_gift_voucher_refuses_fixed_cash_one_and_actual_cash_or_card_codes() {
+        // Payment 1 is the cashier's fixed cash number even when the POS was
+        // given another cash code: the adapter still connects, never emits it.
+        let moved_cash = adapter_with(
+            json!({ "requireService": false, "cashPaymentCode": 3, "voucherPaymentCode": 1 }),
+            json!({}),
+        )
+        .expect("legacy configuration still connects");
+        let error = moved_cash
+            .build_receipt_commands(&request("gift_card"))
+            .unwrap_err();
+        assert!(error.contains("voucher payment number"), "{error}");
+        assert!(settled_gift_voucher_code(
+            &json!({ "cashPaymentCode": 3, "voucherPaymentCode": 1 })
+        )
+        .is_err());
+        assert!(settled_gift_voucher_code(&json!({})).is_err());
+        assert!(settled_gift_voucher_code(&json!({ "voucherPaymentCode": 2 })).is_err());
+        assert!(settled_gift_voucher_code(&json!({ "voucherPaymentCode": 21 })).is_err());
+        assert!(settled_gift_voucher_code(
+            &json!({ "connectionDetails": { "voucherPaymentCode": 7 } })
+        )
+        .is_err());
+        assert_eq!(
+            settled_gift_voucher_code(&json!({ "giftCardPaymentCode": "7" })),
+            Ok(7)
+        );
+
+        let voucher = adapter_with(
+            json!({ "requireService": false, "voucherPaymentCode": 7 }),
+            json!({}),
+        )
+        .unwrap();
+        assert_eq!(
+            voucher.gift_tender_codes(),
+            Some(GiftTenderCodes {
+                cash: 1,
+                card: 2,
+                voucher: Some(7)
+            })
+        );
+        let commands = voucher
+            .build_receipt_commands(&request("gift_card"))
+            .unwrap();
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|command| command.starts_with("CR/"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            commands.last().map(String::as_str),
+            Some("CR/7/0.01/ΔΩΡΟΚΑΡΤΑ")
+        );
+        assert!(commands.iter().all(|command| !command.starts_with("LR/")));
+    }
+
+    #[test]
+    fn settled_probe_reads_only_this_receipts_files_and_never_mutates_them() {
+        let dirs = TempDirs::new("probe-settled");
+        let adapter =
+            adapter_with(dirs.config(json!({ "voucherPaymentCode": 7 })), json!({})).unwrap();
+        assert!(adapter
+            .fiscal_dispatch_correlation("bad id/with slash")
+            .is_err());
+        let correlation = adapter
+            .fiscal_dispatch_correlation("gift-fiscal-probe1")
+            .unwrap();
+        assert_eq!(
+            correlation["commandFile"],
+            "pos-tauri-gift-fiscal-probe1.txt"
+        );
+        assert_eq!(probe_settled_receipt(&correlation), SettledProbe::NoTrace);
+
+        let command = dirs.capture.join("pos-tauri-gift-fiscal-probe1.txt");
+        fs::write(&command, "SL/X//1.000/0.01/3/24\r\n").unwrap();
+        assert_eq!(probe_settled_receipt(&correlation), SettledProbe::Pending);
+        assert!(command.exists(), "the probe never deletes or resubmits");
+        fs::remove_file(&command).unwrap();
+
+        // Another receipt's error in the shared log is not this outcome.
+        fs::write(
+            dirs.capture.join("CapDriverSVC_log.txt"),
+            "pos-tauri-other.txt (LR)Error 0x42: EFTPOS Payment Failed\r\n",
+        )
+        .unwrap();
+        assert_eq!(probe_settled_receipt(&correlation), SettledProbe::NoTrace);
+
+        let output = dirs.output.join("pos-tauri-gift-fiscal-probe1.txt");
+        fs::write(&output, "(CR)Error 0x00: OK\r\n").unwrap();
+        assert!(matches!(
+            probe_settled_receipt(&correlation),
+            SettledProbe::Approved { .. }
+        ));
+        assert!(output.exists());
+
+        let mut log = fs::OpenOptions::new()
+            .append(true)
+            .open(dirs.capture.join("CapDriverSVC_log.txt"))
+            .unwrap();
+        log.write_all(b"pos-tauri-gift-fiscal-probe1.txt (CR)Error 0x41: paper\r\n")
+            .unwrap();
+        drop(log);
+        assert!(matches!(
+            probe_settled_receipt(&correlation),
+            SettledProbe::Failed { .. }
+        ));
+        assert!(matches!(
+            probe_settled_receipt(&json!({ "commandFile": "x" })),
+            SettledProbe::Unknown { .. }
+        ));
     }
 }

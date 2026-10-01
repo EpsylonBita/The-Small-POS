@@ -7,6 +7,8 @@ describe('routePaymentEdit', () => {
     { id: 'returned', method: 'cash', status: 'refunded', amount: 4 },
     { id: 'partial-refund', method: 'card', status: 'completed', amount: 8, refundedAmount: 4 },
     { id: 'void', method: 'cash', status: 'voided', amount: 4 },
+    // Fix review 30/09/2026: set aside as a possible duplicate, under review.
+    { id: 'set-aside', method: 'cash', status: 'duplicate_review', amount: 4 },
   ])('explains why an adjusted ledger cannot change tender: $id', (adjusted) => {
     expect(routePaymentEdit(
       { status: 'pending', paymentStatus: 'paid' },
@@ -108,5 +110,69 @@ describe('routePaymentEdit', () => {
         [{ id: 'retained-payment', method: 'cash', status: 'completed', amount: 18.5 }],
       ),
     ).toEqual({ kind: 'blocked' });
+  });
+});
+
+// Shared rule R4 (round 3 review, 01/10/2026): "Record the payment" is never
+// offered for an order whose money the delivery platform holds. Edit options
+// -> payment routed a platform-held order with a pending or partly paid label
+// and no till row to the cash/card missing-payment repair; the till refused it
+// only when the disposition was known, the server refused it again otherwise
+// and set it aside again.
+describe('routePaymentEdit on platform-held money (R4)', () => {
+  const prepaid = JSON.stringify({ food_delivery: { prepaid: true, payment_method: 'online' } });
+
+  it.each(['pending', 'partially_paid'])(
+    'never routes a prepaid platform order (%s) to the missing-payment collection',
+    (paymentStatus) => {
+      expect(
+        routePaymentEdit(
+          {
+            id: 'ord-efood',
+            status: 'pending',
+            paymentStatus,
+            plugin: 'efood',
+            external_plugin_order_id: 'efood-1',
+            ghost_metadata: prepaid,
+          },
+          [],
+        ),
+      ).toEqual({ kind: 'blocked', reason: 'platform_held' });
+    },
+  );
+
+  it('never routes an order the server refused a till payment on as platform-held', () => {
+    expect(
+      routePaymentEdit(
+        { id: 'ord-held', status: 'pending', paymentStatus: 'partially_paid', plugin: 'wolt' },
+        [
+          {
+            id: 'pay-held',
+            method: 'card',
+            status: 'duplicate_review',
+            amount: 12,
+            platformHeldSetAside: true,
+          },
+        ],
+      ),
+    ).toEqual({ kind: 'blocked', reason: 'platform_held' });
+  });
+
+  it('still routes a store order, an own-driver platform order and a hand-tagged Wolt order', () => {
+    for (const order of [
+      { id: 'ord-store', status: 'pending', paymentStatus: 'pending' },
+      {
+        id: 'ord-own-driver',
+        status: 'pending',
+        paymentStatus: 'pending',
+        plugin: 'efood',
+        ghost_metadata: JSON.stringify({
+          food_delivery: { payment_method: 'cash', delivery_provider: 'vendor_delivery' },
+        }),
+      },
+      { id: 'ord-hand-wolt', status: 'pending', paymentStatus: 'pending', plugin: 'pos' },
+    ]) {
+      expect(routePaymentEdit(order, [])).toEqual({ kind: 'collect-missing' });
+    }
   });
 });

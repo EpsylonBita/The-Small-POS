@@ -1,25 +1,29 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react';
-import { posApiFetch } from '../utils/api-helpers';
+import {
+  clearKdsLocalDraft,
+  publishKdsLocalDraft,
+  readKdsModifierLabels,
+  type KdsLocalDraftItem,
+} from '../services/KdsLocalDraftStore';
 import { useResolvedPosIdentity } from './useResolvedPosIdentity';
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/**
+ * Mirrors the open order-entry cart onto the Windows kitchen display as a live
+ * draft. Strictly local: drafts go only to the in-memory KdsLocalDraftStore
+ * (no network, IPC or persistence) and carry no prices, catalog ids or
+ * customer data.
+ */
+
 const PUBLISH_DEBOUNCE_MS = 400;
+const DEFAULT_STATION = 'hot';
 
 interface KdsDraftSyncItem {
   id?: string | number;
-  menuItemId?: string;
-  menu_item_id?: string;
-  category_id?: string | null;
-  categoryId?: string | null;
-  station_id?: string | null;
-  stationId?: string | null;
   name?: string;
   quantity?: number;
   notes?: string | null;
+  station?: string | null;
   customizations?: unknown;
-  unitPrice?: number;
-  unit_price?: number;
-  price?: number;
 }
 
 interface UseKdsLiveDraftSyncParams {
@@ -27,11 +31,11 @@ interface UseKdsLiveDraftSyncParams {
   isOpen: boolean;
   cartItems: KdsDraftSyncItem[];
   orderType?: string;
-  customerName?: string | null;
 }
 
-function isValidUuid(value: unknown): value is string {
-  return typeof value === 'string' && UUID_RE.test(value.trim());
+interface PublishedDraftKey {
+  scope: string;
+  sessionId: string;
 }
 
 function normalizeOrderType(value?: string): string {
@@ -52,8 +56,19 @@ function createSessionId(): string {
   return `kds-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function buildLiveDraftDeleteEndpoint(sessionId: string): string {
-  return `/api/pos/kds/live-drafts?session_id=${encodeURIComponent(sessionId)}`;
+function trimmedText(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function toDraftItem(item: KdsDraftSyncItem, index: number): KdsLocalDraftItem {
+  return {
+    id: String(item.id ?? `item-${index + 1}`),
+    name: trimmedText(item.name) || 'Unknown Item',
+    quantity: Number.isFinite(item.quantity) ? Math.max(1, item.quantity || 1) : 1,
+    station: trimmedText(item.station) || DEFAULT_STATION,
+    notes: trimmedText(item.notes) || undefined,
+    modifiers: readKdsModifierLabels(item.customizations),
+  };
 }
 
 export function useKdsLiveDraftSync({
@@ -61,54 +76,20 @@ export function useKdsLiveDraftSync({
   isOpen,
   cartItems,
   orderType,
-  customerName,
 }: UseKdsLiveDraftSyncParams) {
   const { branchId, organizationId, terminalId, isReady } = useResolvedPosIdentity('branch+organization');
+  // Must equal the KDS owner's scope key exactly. An empty scope never publishes.
+  const scope = isReady && organizationId && branchId && terminalId
+    ? `${organizationId}|${branchId}|${terminalId}`
+    : '';
+  const resolvedOrderType = normalizeOrderType(orderType);
+  const items = useMemo(() => (cartItems || []).map(toDraftItem), [cartItems]);
+
   const sessionIdRef = useRef<string | null>(null);
   const publishTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const publishTokenRef = useRef(0);
-  const lastFingerprintRef = useRef<string>('');
-  const didPublishRef = useRef(false);
-  const draftSessionActiveRef = useRef(false);
-
-  const resolvedOrderType = normalizeOrderType(orderType);
-  const resolvedCustomerName = (customerName || '').trim() || null;
-
-  const normalizedItems = useMemo(() => {
-    return (cartItems || [])
-      .map((item, index) => {
-        const menuItemIdRaw = item.menu_item_id || item.menuItemId;
-        const menuItemId = isValidUuid(menuItemIdRaw) ? menuItemIdRaw.trim() : null;
-        const categoryIdRaw = item.category_id || item.categoryId;
-        const categoryId = isValidUuid(categoryIdRaw) ? categoryIdRaw.trim() : null;
-        const stationIdRaw = item.station_id || item.stationId;
-        const stationId = isValidUuid(stationIdRaw) ? stationIdRaw.trim() : null;
-        const quantity = Number.isFinite(item.quantity) ? Math.max(1, item.quantity || 1) : 1;
-        const unitPrice = Math.max(0, Number(item.unitPrice ?? item.unit_price ?? item.price ?? 0));
-        const name = (item.name || '').trim() || 'Unknown Item';
-        const notes = typeof item.notes === 'string' ? item.notes.trim() || null : null;
-
-        return {
-          id: String(item.id ?? `item-${index + 1}`),
-          menu_item_id: menuItemId,
-          category_id: categoryId,
-          station_id: stationId,
-          name,
-          quantity,
-          unit_price: unitPrice,
-          notes,
-          customizations: item.customizations ?? null,
-        };
-      })
-      .filter((item) => item.quantity > 0);
-  }, [cartItems]);
-
-  const ensureSessionId = useCallback(() => {
-    if (!sessionIdRef.current) {
-      sessionIdRef.current = createSessionId();
-    }
-    return sessionIdRef.current;
-  }, []);
+  const lastFingerprintRef = useRef('');
+  const publishedRef = useRef<PublishedDraftKey | null>(null);
 
   const clearScheduledPublish = useCallback(() => {
     if (publishTimerRef.current) {
@@ -117,148 +98,96 @@ export function useKdsLiveDraftSync({
     }
   }, []);
 
-  const clearDrafts = useCallback(async (explicitSessionId?: string | null) => {
-    const sessionId = explicitSessionId || sessionIdRef.current;
-    if (!sessionId || !terminalId || !branchId || !organizationId) {
-      return;
-    }
-
-    try {
-      await posApiFetch(buildLiveDraftDeleteEndpoint(sessionId), {
-        method: 'DELETE',
-      });
-      if (sessionIdRef.current === sessionId) {
-        didPublishRef.current = false;
-      }
-    } catch (error) {
-      console.warn('[useKdsLiveDraftSync] Failed to clear live draft:', error);
-    }
-  }, [branchId, organizationId, terminalId]);
-
-  // New modal-open session.
-  useEffect(() => {
-    if (!enabled) {
-      return;
-    }
-
-    if (isOpen) {
-      draftSessionActiveRef.current = true;
-      sessionIdRef.current = createSessionId();
-      lastFingerprintRef.current = '';
-      didPublishRef.current = false;
-      return;
-    }
-
-    const sessionId = sessionIdRef.current;
-    draftSessionActiveRef.current = false;
+  // Cancels the pending timer and invalidates its token in case it still fires.
+  const cancelPendingPublish = useCallback(() => {
     publishTokenRef.current += 1;
     clearScheduledPublish();
-    if (didPublishRef.current && sessionId) {
-      void clearDrafts(sessionId);
-    }
-    sessionIdRef.current = null;
+  }, [clearScheduledPublish]);
+
+  const clearPublishedDraft = useCallback(() => {
+    const published = publishedRef.current;
+    publishedRef.current = null;
     lastFingerprintRef.current = '';
-    didPublishRef.current = false;
-  }, [clearDrafts, clearScheduledPublish, enabled, isOpen]);
-
-  // Debounced publish while modal is open.
-  useEffect(() => {
-    if (!enabled || !isOpen || !isReady || !terminalId || !branchId || !organizationId) {
-      return;
+    if (published) {
+      clearKdsLocalDraft(published.scope, published.sessionId);
     }
+  }, []);
 
-    const sessionId = ensureSessionId();
+  const clearDrafts = useCallback(async (explicitSessionId?: string | null): Promise<void> => {
+    const sessionId = explicitSessionId || sessionIdRef.current;
     if (!sessionId) {
       return;
     }
+    if (sessionId === sessionIdRef.current) {
+      cancelPendingPublish();
+    }
+    if (publishedRef.current?.sessionId === sessionId) {
+      clearPublishedDraft();
+    }
+  }, [cancelPendingPublish, clearPublishedDraft]);
 
-    const fingerprint = JSON.stringify({
-      sessionId,
-      orderType: resolvedOrderType,
-      customerName: resolvedCustomerName,
-      items: normalizedItems,
-    });
+  // One draft session per modal open. Close, edit mode (enabled=false) and
+  // unmount clear the published draft and cancel queued publishes.
+  useEffect(() => {
+    if (!enabled || !isOpen) {
+      return;
+    }
+    sessionIdRef.current = createSessionId();
+    lastFingerprintRef.current = '';
+    return () => {
+      cancelPendingPublish();
+      clearPublishedDraft();
+      sessionIdRef.current = null;
+    };
+  }, [cancelPendingPublish, clearPublishedDraft, enabled, isOpen]);
 
-    if (lastFingerprintRef.current === fingerprint) {
+  // A scope change (or unmount) clears the draft published under the old
+  // scope before anything can publish under the new one.
+  useEffect(() => () => {
+    cancelPendingPublish();
+    clearPublishedDraft();
+  }, [cancelPendingPublish, clearPublishedDraft, scope]);
+
+  // Debounced local publish while the modal is open under a resolved scope.
+  useEffect(() => {
+    const sessionId = sessionIdRef.current;
+    if (!enabled || !isOpen || !scope || !sessionId) {
       return;
     }
 
-    clearScheduledPublish();
-    const token = ++publishTokenRef.current;
+    const fingerprint = JSON.stringify({ scope, sessionId, orderType: resolvedOrderType, items });
+    if (fingerprint === lastFingerprintRef.current) {
+      return;
+    }
 
+    cancelPendingPublish();
+    const token = publishTokenRef.current;
     publishTimerRef.current = setTimeout(() => {
       publishTimerRef.current = null;
-
-      if (token !== publishTokenRef.current) {
+      if (token !== publishTokenRef.current || sessionIdRef.current !== sessionId) {
         return;
       }
 
-      const run = async () => {
-        try {
-          if (normalizedItems.length === 0) {
-            if (didPublishRef.current) {
-              await clearDrafts(sessionId);
-              didPublishRef.current = false;
-            }
-            lastFingerprintRef.current = fingerprint;
-            return;
-          }
-
-          await posApiFetch('/api/pos/kds/live-drafts', {
-            method: 'POST',
-            body: JSON.stringify({
-              session_id: sessionId,
-              order_type: resolvedOrderType,
-              customer_name: resolvedCustomerName,
-              items: normalizedItems,
-            }),
-          });
-
-          if (!draftSessionActiveRef.current || sessionIdRef.current !== sessionId) {
-            await clearDrafts(sessionId);
-            return;
-          }
-
-          didPublishRef.current = true;
-          lastFingerprintRef.current = fingerprint;
-        } catch (error) {
-          console.warn('[useKdsLiveDraftSync] Failed to sync live draft:', error);
-        }
-      };
-
-      void run();
+      const published = publishedRef.current;
+      if (published && (published.scope !== scope || published.sessionId !== sessionId)) {
+        clearKdsLocalDraft(published.scope, published.sessionId);
+      }
+      // An empty cart publishes no items, which clears this session's draft.
+      publishKdsLocalDraft({
+        scope,
+        sessionId,
+        orderType: resolvedOrderType,
+        items,
+        updatedAt: new Date().toISOString(),
+      });
+      publishedRef.current = items.length > 0 ? { scope, sessionId } : null;
+      lastFingerprintRef.current = fingerprint;
     }, PUBLISH_DEBOUNCE_MS);
 
     return () => {
       clearScheduledPublish();
     };
-  }, [
-    branchId,
-    clearDrafts,
-    clearScheduledPublish,
-    enabled,
-    ensureSessionId,
-    isOpen,
-    isReady,
-    normalizedItems,
-    organizationId,
-    resolvedCustomerName,
-    resolvedOrderType,
-    terminalId,
-  ]);
-
-  // Safety cleanup.
-  useEffect(() => {
-    return () => {
-      const sessionId = sessionIdRef.current;
-      draftSessionActiveRef.current = false;
-      publishTokenRef.current += 1;
-      clearScheduledPublish();
-      if (didPublishRef.current && sessionId) {
-        void clearDrafts(sessionId);
-      }
-    };
-  }, [clearDrafts, clearScheduledPublish]);
+  }, [cancelPendingPublish, clearScheduledPublish, enabled, isOpen, items, resolvedOrderType, scope]);
 
   return {
     clearDrafts,

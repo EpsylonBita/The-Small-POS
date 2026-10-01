@@ -3,7 +3,7 @@ import {
   buildMyDataDeviceSettings, DEFAULT_MYDATA_CAP_SETTINGS, MYDATA_FISCAL_DEVICE_ID,
   myDataConnectionTypeFromSaved, readMyDataCapSettings, verifyAndSaveMyDataDevice,
   getMyDataCapPrefill,
-  myDataCapTargetMatches,
+  myDataCapTargetMatches, myDataVoucherCodeIssue, validateMyDataCapSettings,
 } from '../mydata-device-setup';
 
 const custom = {
@@ -99,6 +99,34 @@ describe('myDATA local device setup', () => {
     const save = vi.fn();
     await expect(verifyAndSaveMyDataDevice(ecr, { ...device(), settings: { ...device().settings, requireService: false } }, false, 'terminal-a', { ...connection, protocol }, save)).rejects.toThrow('Invalid CAP');
     expect(save).not.toHaveBeenCalled();
+  });
+
+  it('keeps an optional CAP voucher code exactly, with no default and one settings key', () => {
+    expect(readMyDataCapSettings(custom)).not.toHaveProperty('voucherPaymentCode');
+    expect(readMyDataCapSettings({ ...custom, voucher_payment_code: 9 }).voucherPaymentCode).toBe(9);
+    // An invalid saved code is kept so validation refuses it instead of dropping it.
+    expect(readMyDataCapSettings({ ...custom, voucherPaymentCode: 1 }).voucherPaymentCode).toBe(1);
+    expect(buildMyDataDeviceSettings('cap_driver', 'm', null, custom)).not.toHaveProperty('voucherPaymentCode');
+    const existing = { protocol: 'cap_driver', settings: { ...custom, voucherPaymentCode: 9, voucher_payment_code: 9, mode: 'kept' } };
+    const kept = buildMyDataDeviceSettings('cap_driver', 'm', existing, { ...custom, voucherPaymentCode: 9 });
+    expect(kept).toMatchObject({ voucherPaymentCode: 9, mode: 'kept' });
+    expect(kept).not.toHaveProperty('voucher_payment_code');
+    const cleared = buildMyDataDeviceSettings('cap_driver', 'm', existing, custom);
+    expect(cleared).not.toHaveProperty('voucherPaymentCode');
+    expect(cleared).not.toHaveProperty('voucher_payment_code');
+  });
+
+  it('accepts a voucher code 2–20 that differs from the cash and card codes', () => {
+    expect(myDataVoucherCodeIssue(undefined, 4, 7)).toBeNull();
+    expect(myDataVoucherCodeIssue('', 4, 7)).toBeNull();
+    expect(myDataVoucherCodeIssue(9, 4, 7)).toBeNull();
+    for (const code of [1, 0, 21, 2.5, '9', Number.NaN]) expect(myDataVoucherCodeIssue(code, 4, 7)).toBe('invalid');
+    expect(myDataVoucherCodeIssue(4, 4, 7)).toBe('collision');
+    expect(myDataVoucherCodeIssue(7, 4, 7)).toBe('collision');
+    expect(validateMyDataCapSettings({ ...custom, voucherPaymentCode: 9 })).toBe(true);
+    expect(validateMyDataCapSettings({ ...custom, voucherPaymentCode: 7 })).toBe(false);
+    expect(validateMyDataCapSettings({ ...custom, voucherPaymentCode: 1 })).toBe(false);
+    expect(() => buildMyDataDeviceSettings('cap_driver', 'm', null, { ...custom, voucherPaymentCode: 4 })).toThrow('Invalid CAP Driver settings');
   });
 
   it('prefills only absent local settings and target fields', () => {

@@ -139,7 +139,7 @@ function serve(connection: Record<string, unknown> = savedConnection) {
     success: true,
     data: path === '/pos/mydata/config'
       ? { config: { mode: 'fiscal_device', device_connection: connection }, provider_status: { is_enabled: false } }
-      : { integrations: [{ plugin_id: 'mydata', name: 'MyData', category: 'government', is_purchased: true, status: 'pending' }] },
+      : { branch_id: 'branch-1', integrations: [{ plugin_id: 'mydata', name: 'MyData', category: 'government', is_purchased: true, status: 'pending' }] },
   }));
 }
 async function openSetup() {
@@ -181,6 +181,43 @@ describe('myDATA guided desktop setup', () => {
     expect(mocks.posApiPost.mock.calls[0][1].device_connection).not.toHaveProperty('port');
   });
 
+  it('keeps a saved CAP voucher code through an unrelated edit and refuses a colliding one', async () => {
+    mocks.updateDevice.mockClear();
+    mocks.getDevices.mockResolvedValue([{ id: 'mydata-fiscal-device', protocol: 'cap_driver', settings: { ...cap, voucherPaymentCode: 9 } }]);
+    serve();
+    const modal = await openSetup();
+    const voucher = () => within(modal).getByLabelText('Voucher payment code (optional)');
+    await waitFor(() => expect(voucher()).toHaveValue(9));
+    const submit = within(modal).getByRole('button', { name: 'Connect, test & save' });
+    await waitFor(() => expect(submit).toBeEnabled());
+    fireEvent.change(voucher(), { target: { value: '4' } });
+    expect(within(modal).getByText('Use 2–20 and a code different from the cash and card codes.')).toBeInTheDocument();
+    fireEvent.click(submit);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(mocks.updateDevice).not.toHaveBeenCalled();
+    fireEvent.change(voucher(), { target: { value: '9' } });
+    fireEvent.change(within(modal).getByLabelText('Timeout (ms)'), { target: { value: '150000' } });
+    await waitFor(() => expect(submit).toBeEnabled());
+    fireEvent.click(submit);
+    await waitFor(() => expect(mocks.updateDevice).toHaveBeenCalledTimes(1));
+    const settings = mocks.updateDevice.mock.calls[0][1].settings;
+    expect(settings).toMatchObject({ ...cap, transactionTimeoutMs: 150000, voucherPaymentCode: 9 });
+    expect(settings).not.toHaveProperty('voucher_payment_code');
+  });
+
+  it('writes no voucher code for a CAP setup that never had one', async () => {
+    mocks.updateDevice.mockClear();
+    serve();
+    const modal = await openSetup();
+    await waitFor(() => expect(within(modal).getByLabelText('Capture folder')).toHaveValue(cap.capturePath));
+    expect(within(modal).getByLabelText('Voucher payment code (optional)')).toHaveValue(null);
+    const submit = within(modal).getByRole('button', { name: 'Connect, test & save' });
+    await waitFor(() => expect(submit).toBeEnabled());
+    fireEvent.click(submit);
+    await waitFor(() => expect(mocks.updateDevice).toHaveBeenCalledTimes(1));
+    expect(mocks.updateDevice.mock.calls[0][1].settings).not.toHaveProperty('voucherPaymentCode');
+  });
+
   it('retains a saved serial target and visibly disables direct Bluetooth', async () => {
     serve({ ...savedConnection, type: 'usb_serial', serial_port: 'COM7', baud_rate: 19200 });
     const modal = await openSetup();
@@ -197,6 +234,45 @@ describe('myDATA guided desktop setup', () => {
     await waitFor(() => expect(mocks.testConnection).toHaveBeenCalled());
     await waitFor(() => expect(screen.getByRole('button', { name: 'Connect, test & save' })).toBeEnabled());
     expect(mocks.posApiPost).not.toHaveBeenCalled();
+  });
+
+  it('never sends a non-CAP save once the terminal identity changed during the device test', async () => {
+    serve({ type: 'network', host: '192.168.1.60', port: 9100, protocol: 'generic', brand: 'RBS', model: 'generic model' });
+    let finishTest: (value: unknown) => void = () => undefined;
+    mocks.testConnection.mockImplementation(() => new Promise(resolve => { finishTest = resolve; }));
+    const branchOneSettings = mocks.getSetting.getMockImplementation();
+    try {
+      const { rerender } = render(<IntegrationsPage />);
+      await screen.findByRole('heading', { name: 'MyData' });
+      fireEvent.click(screen.getByRole('button', { name: 'Configure' }));
+      const modal = await screen.findByRole('dialog');
+      fireEvent.change(within(modal).getByLabelText('Device ERP port'), { target: { value: '9100' } });
+      const submit = within(modal).getByRole('button', { name: 'Connect, test & save' });
+      await waitFor(() => expect(submit).toBeEnabled());
+      fireEvent.click(submit);
+      // The save has stored and connected the device and waits on its last native step.
+      await waitFor(() => expect(mocks.connectDevice).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(mocks.testConnection).toHaveBeenCalledTimes(1));
+
+      // The terminal moves to another branch while the device test runs.
+      mocks.getSetting.mockImplementation((_section: string, key: string) => {
+        if (key === 'branch_id') return 'branch-2';
+        if (key === 'organization_id') return 'org-1';
+        return null;
+      });
+      rerender(<IntegrationsPage />);
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+      await act(async () => {
+        finishTest({ success: true, connected: true });
+        await new Promise(resolve => setTimeout(resolve, 0));
+      });
+
+      // The handshake passed, but the save belonged to branch-1: nothing is sent.
+      expect(mocks.posApiPost).not.toHaveBeenCalled();
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    } finally {
+      if (branchOneSettings) mocks.getSetting.mockImplementation(branchOneSettings);
+    }
   });
 
   it('prefills installed CAP settings without overwriting a target edited while status is pending', async () => {

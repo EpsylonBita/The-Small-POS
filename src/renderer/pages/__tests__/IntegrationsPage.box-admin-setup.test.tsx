@@ -247,11 +247,13 @@ describe('BOX card is Admin-Dashboard-managed on the till', () => {
   })
 
   it('honours read_only_admin_setup from the server for any plugin (data-driven, not id-listed)', async () => {
+    // bolt_food is not in the local fallback set (wolt joined it with #210), so
+    // only the server flag can make this card admin-managed.
     serve([
       {
-        plugin_id: 'wolt',
-        provider: 'wolt',
-        name: 'Wolt',
+        plugin_id: 'bolt_food',
+        provider: 'bolt_food',
+        name: 'Bolt Food',
         category: 'delivery',
         is_purchased: true,
         status: 'connected',
@@ -260,12 +262,12 @@ describe('BOX card is Admin-Dashboard-managed on the till', () => {
     ])
     render(<IntegrationsPage />)
 
-    await screen.findByText('Wolt')
+    await screen.findByText('Bolt Food')
     expect(screen.queryByRole('switch')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Open Admin Dashboard' }))
     await waitFor(() => {
       expect(mocks.openExternalUrl).toHaveBeenCalledWith(
-        'https://admin.example/plugins?plugin=wolt&branch_id=branch-1&organization_id=org-1',
+        'https://admin.example/plugins?plugin=bolt_food&branch_id=branch-1&organization_id=org-1',
       )
     })
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()

@@ -14,6 +14,10 @@ export function useTerminalSettings() {
   const [settings, setSettings] = useState<TerminalSettings>({})
   const [loading, setLoading] = useState<boolean>(true)
   const [error, setError] = useState<string | null>(null)
+  // Whether one read of the local settings has succeeded (item H, fix review
+  // 30/09/2026). Until it has, a money setting read through getSetting is
+  // only its fallback: checkout must not price, cap or split tax on it.
+  const [loaded, setLoaded] = useState<boolean>(false)
   const loadGeneration = useRef(0)
 
   useEffect(() => {
@@ -32,6 +36,7 @@ export function useTerminalSettings() {
         const s = await bridge.terminalConfig.getSettings()
         if (!isCurrent()) return
         setSettings(s || {})
+        setLoaded(true)
         if ((!s || Object.keys(s).length === 0) && attempt < 5) {
           retryTimer = setTimeout(() => load(attempt + 1), 2000 * (attempt + 1))
         }
@@ -79,7 +84,10 @@ export function useTerminalSettings() {
 
       if ((res as any)?.success !== false) {
         latestSettings = await bridge.terminalConfig.getSettings()
-        if (generation === loadGeneration.current) setSettings(latestSettings || {})
+        if (generation === loadGeneration.current) {
+          setSettings(latestSettings || {})
+          setLoaded(true)
+        }
       }
 
       if (res && typeof res === 'object' && !Array.isArray(res)) {
@@ -91,6 +99,28 @@ export function useTerminalSettings() {
       const out = { success: false, error: e?.message || 'Failed to refresh terminal settings' }
       if (generation === loadGeneration.current) setError(out.error)
       return out
+    } finally {
+      if (generation === loadGeneration.current) setLoading(false)
+    }
+  }, [bridge])
+
+  // Read the local settings again (no network): the "Try again" of a checkout
+  // paused because the money settings could not be read.
+  const reload = useCallback(async (): Promise<boolean> => {
+    const generation = ++loadGeneration.current
+    try {
+      const latest = await bridge.terminalConfig.getSettings()
+      if (generation === loadGeneration.current) {
+        setSettings(latest || {})
+        setLoaded(true)
+        setError(null)
+      }
+      return true
+    } catch (e: any) {
+      if (generation === loadGeneration.current) {
+        setError(e?.message || 'Failed to load terminal settings')
+      }
+      return false
     } finally {
       if (generation === loadGeneration.current) setLoading(false)
     }
@@ -115,7 +145,7 @@ export function useTerminalSettings() {
     [settings]
   )
 
-  return { settings, loading, error, refresh, getSetting }
+  return { settings, loading, error, loaded, refresh, reload, getSetting }
 }
 
 export default useTerminalSettings

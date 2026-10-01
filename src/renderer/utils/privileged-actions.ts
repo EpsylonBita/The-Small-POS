@@ -42,11 +42,18 @@ const normalizePayload = (
         ? value.ttl_seconds
         : null
 
+  // A manager's own PIN can give this approval (nobody on shift here).
+  const approval =
+    value.approval === 'void_payments' || value.approval === 'void_orders'
+      ? value.approval
+      : null
+
   return {
     code,
     scope,
     reason,
     ttlSeconds,
+    ...(approval ? { approval } : {}),
   }
 }
 

@@ -28,6 +28,33 @@ export interface ZReportDayOrder {
   staffName?: string | null;
 }
 
+/** One queued fiscal receipt, as the Z preview lists it (no payload). */
+export interface ZReportFiscalQueueRow {
+  queueItemId: string;
+  orderId: string;
+  receiptNumber?: string | null;
+  status: string;
+  attempts: number;
+  maxRetries: number;
+  createdAt: string;
+  lastAttempt?: string | null;
+  nextRetryAt?: string | null;
+  lastError?: string | null;
+}
+
+/** `ZReportData.fiscalQueue`: the fiscal close-day guard's view of the Z. */
+export interface ZReportFiscalQueue {
+  count: number;
+  /** `active` | `inactive` | `unknown` — the verdict the guard applied. */
+  activeVerdict: string;
+  blocking: boolean;
+  branchId: string;
+  reportDate: string;
+  periodStartAt: string;
+  cutoffAt?: string | null;
+  rows: ZReportFiscalQueueRow[];
+}
+
 export interface TodayStatistics {
   totalOrders: number;
   totalSales: number;
@@ -93,6 +120,83 @@ export interface OrderTypeBreakdown {
   };
 }
 
+/**
+ * One gift-bound drawer close frozen into the Z report (native `gift_close_report_v1`).
+ * Every figure comes from the adopted canonical proof; `expected = ordinaryExpected +
+ * giftLiabilityCash` and `variance = counted - expected`. Money stays in `currency`.
+ */
+export interface ZReportGiftCloseOriginal {
+  shiftId: string;
+  drawerId: string;
+  staffId: string;
+  staffName: string | null;
+  /** Proof public terminal id. */
+  terminalId: string;
+  currency: string;
+  ordinaryExpected: number;
+  ordinaryExpected_cents: number;
+  giftLiabilityCash: number;
+  giftLiabilityCash_cents: number;
+  expected: number;
+  expected_cents: number;
+  counted: number;
+  counted_cents: number;
+  variance: number;
+  variance_cents: number;
+  ordinaryAdjustment_cents: number;
+  drawerVersion?: number | string | null;
+  provenance: {
+    contract: 'gift_closing_v1' | string;
+    status: 'confirmed' | string;
+    localClosedAt?: string | null;
+    canonicalClosedAt?: string | null;
+    confirmedAt?: string | null;
+    adoptedAt?: string | null;
+  };
+}
+
+export type ZReportGiftCloseBlockerCode =
+  | 'GIFT_CLOSE_PROOF_PENDING'
+  | 'GIFT_CLOSE_PROOF_UNAVAILABLE'
+  | 'GIFT_CLOSE_PROOF_MISMATCH'
+  | 'GIFT_CLOSE_JOURNAL_MISSING'
+  | 'GIFT_OPENING_UNCONFIRMED';
+
+/** A gift-bound drawer close without confirmed canonical proof; it holds the Z report open. */
+export interface ZReportGiftCloseBlocker {
+  code: ZReportGiftCloseBlockerCode | string;
+  shiftId?: string | null;
+  drawerId?: string | null;
+  staffId?: string | null;
+  staffName?: string | null;
+  pendingReason?: string | null;
+}
+
+/**
+ * `reportJson.giftFinancialClose`: present only when the window has a gift-bound drawer or
+ * blocker. Gift card cash is a drawer liability, never sales, tender or tax. Persisted
+ * reports are always `ready` with no blockers.
+ */
+export interface ZReportGiftFinancialClose {
+  contract: 'gift_close_report_v1' | string;
+  ready: boolean;
+  giftLiabilityCash: number;
+  giftLiabilityCash_cents: number;
+  ordinaryAdjustment: number;
+  ordinaryAdjustment_cents: number;
+  originals: ZReportGiftCloseOriginal[];
+  blockers: ZReportGiftCloseBlocker[];
+}
+
+/** Preview/readiness gift close summary (`giftCloseReadiness` / `giftCloseProof`). */
+export interface ZReportGiftCloseReadiness {
+  ready: boolean;
+  count?: number;
+  confirmedCount?: number;
+  message?: string | null;
+  details?: ZReportGiftCloseBlocker[];
+}
+
 export interface ZReportData {
   date: string; // ISO date (yyyy-mm-dd)
   shiftId?: string;
@@ -128,6 +232,19 @@ export interface ZReportData {
     openingTotal?: number;
     driverCashGiven?: number;
     driverCashReturned?: number;
+    /** Canonical expected drawer cash; with a gift close it already includes gift card cash once. */
+    expected?: number;
+    expected_cents?: number;
+    closing?: number;
+    closing_cents?: number;
+    totalVariance_cents?: number;
+    /** Gift close components (present only with `giftFinancialClose`). */
+    ordinaryExpected?: number;
+    ordinaryExpected_cents?: number;
+    giftLiabilityCash?: number;
+    giftLiabilityCash_cents?: number;
+    ordinaryAdjustment?: number;
+    ordinaryAdjustment_cents?: number;
     driverCashBreakdown?: Array<{
       driverName: string;
       driverShiftId: string;
@@ -319,6 +436,15 @@ export interface ZReportData {
    * persisted before 1.4.114.
    */
   integrity?: ZReportIntegrity;
+  /**
+   * Fiscal receipts still queued for the window the next Z closes (native
+   * `fiscal_queue_blockers_for_closeout`). `blocking` is the close-day
+   * guard's answer: rows exist and the branch is not reported fiscally
+   * inactive. Shown before the cashier confirms, like Android's
+   * `fiscal_queue_not_empty` readiness blocker (29/09/2026). Absent on older
+   * builds; `{ status: 'unavailable' }` when the queue could not be read.
+   */
+  fiscalQueue?: ZReportFiscalQueue | { status: 'unavailable' };
   /** Completed-payment buckets (count + total) behind `daySummary`. */
   paymentsBreakdown?: Partial<
     Record<'cash' | 'card' | 'other' | 'platform_online' | 'platform_cod', { count: number; total: number }>
@@ -329,4 +455,11 @@ export interface ZReportData {
   };
   periodStart?: string;
   periodEnd?: string;
+  /** Persisted `z_reports` id when the report is a stored row. Live previews have none. */
+  zReportId?: string;
+  z_report_id?: string;
+  /** Frozen gift card drawer close; absent on ordinary reports. */
+  giftFinancialClose?: ZReportGiftFinancialClose;
+  /** Preview gift close readiness, when the mapper passes it through. */
+  giftCloseReadiness?: ZReportGiftCloseReadiness;
 }

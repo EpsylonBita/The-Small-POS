@@ -1210,14 +1210,24 @@ pub async fn sync_clear_all_orders(
     Ok(serde_json::json!({ "success": true, "cleared": cleared }))
 }
 
+/// What "Clean up deleted orders" did (shared rule R7).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DeletedOrderCleanup {
+    /// Orders with no payment rows in the open period: deleted.
+    pub deleted: usize,
+    /// Orders with payment rows or inside a closed Z: kept, hidden as deleted.
+    pub kept_hidden: usize,
+}
+
 fn cleanup_deleted_orders_in_transaction(
     conn: &mut rusqlite::Connection,
     remote_ids: &[String],
-) -> Result<usize, String> {
+) -> Result<DeletedOrderCleanup, String> {
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| format!("begin deleted-order cleanup transaction: {e}"))?;
-    let mut deleted = 0usize;
+    let mut cleanup = DeletedOrderCleanup::default();
+    let now = chrono::Utc::now().to_rfc3339();
 
     for remote_id in remote_ids {
         let remote_id = remote_id.trim();
@@ -1249,46 +1259,25 @@ fn cleanup_deleted_orders_in_transaction(
         let Some(local_id) = local_id else {
             continue;
         };
-
-        tx.execute(
-            "DELETE FROM sync_queue WHERE entity_type = 'order' AND entity_id = ?1",
-            rusqlite::params![local_id],
-        )
-        .map_err(|e| format!("delete order queue row for {local_id}: {e}"))?;
-        tx.execute(
-            "DELETE FROM sync_queue
-             WHERE entity_type = 'payment'
-               AND entity_id IN (SELECT id FROM order_payments WHERE order_id = ?1)",
-            rusqlite::params![local_id],
-        )
-        .map_err(|e| format!("delete payment queue rows for {local_id}: {e}"))?;
-        tx.execute(
-            "DELETE FROM sync_queue
-             WHERE entity_type = 'payment_adjustment'
-               AND entity_id IN (SELECT id FROM payment_adjustments WHERE order_id = ?1)",
-            rusqlite::params![local_id],
-        )
-        .map_err(|e| format!("delete payment-adjustment queue rows for {local_id}: {e}"))?;
-
-        let count = tx
-            .execute(
-                "DELETE FROM orders
-                 WHERE id = ?1
-                   AND lower(trim(COALESCE(order_context, ''))) <> 'repair_settlement'",
-                rusqlite::params![local_id],
-            )
-            .map_err(|e| format!("delete ordinary local order {local_id}: {e}"))?;
-        if count != 1 {
-            return Err(format!(
-                "local deleted-order target {local_id} changed classification during cleanup"
-            ));
+        // R7 (round 3; founder rule 30/09 and 01/10/2026): an order with
+        // payment rows or inside a closed Z is never deleted; it is kept,
+        // hidden as deleted, and its records with it.
+        match crate::commands::orders::apply_server_order_deletion(&tx, &local_id, &now)? {
+            crate::commands::orders::ServerDeletionOutcome::Deleted => cleanup.deleted += 1,
+            crate::commands::orders::ServerDeletionOutcome::KeptHidden => {
+                tracing::warn!(
+                    remote_id = %remote_id,
+                    local_id = %local_id,
+                    "Deleted-order cleanup kept an order with payment records or inside a closed Z, hidden as deleted"
+                );
+                cleanup.kept_hidden += 1;
+            }
         }
-        deleted += count;
     }
 
     tx.commit()
         .map_err(|e| format!("commit deleted-order cleanup transaction: {e}"))?;
-    Ok(deleted)
+    Ok(cleanup)
 }
 
 #[tauri::command]
@@ -1327,14 +1316,19 @@ pub async fn sync_cleanup_deleted_orders(
         .filter(|remote_id| !remote_id.is_empty())
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    let deleted = {
+    let cleanup = {
         let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
         cleanup_deleted_orders_in_transaction(&mut conn, &remote_ids)?
     };
 
     emit_sync_status_snapshot(&app, &db, &sync_state).await;
 
-    Ok(serde_json::json!({ "success": true, "deleted": deleted, "checked": checked }))
+    Ok(serde_json::json!({
+        "success": true,
+        "deleted": cleanup.deleted,
+        "keptHidden": cleanup.kept_hidden,
+        "checked": checked
+    }))
 }
 
 async fn sync_fetch_with_options(
@@ -1399,13 +1393,16 @@ pub async fn sync_clear_failed(
         &db,
         crate::recovery::RecoveryPointKind::PreClearOperationalData,
     )?;
-    let cleared = {
+    // Only failed rows of disposable entity types go (Android 1.0.13 parity,
+    // fix review 30/09/2026): orders, payments, shifts, drawers, Z reports,
+    // loyalty, stock, fiscal and repair rows, and any type added later, stay
+    // until they sync or someone resolves them.
+    let (cleared, kept) = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM sync_queue WHERE status = 'failed'", [])
-            .map_err(|e| e.to_string())?
+        sync::clear_failed_disposable_sync_rows(&conn)?
     };
     emit_sync_status_snapshot(&app, &db, &sync_state).await;
-    Ok(serde_json::json!({ "success": true, "cleared": cleared }))
+    Ok(serde_json::json!({ "success": true, "cleared": cleared, "kept": kept }))
 }
 
 #[tauri::command]
@@ -1453,12 +1450,27 @@ pub(crate) fn clear_old_orders_before(
     cutoff_utc: &str,
 ) -> Result<usize, String> {
     let open_table_tab = crate::business_day::open_unsettled_table_tab_expr("o");
+    // An order holding a payment set aside for review keeps it: that row is
+    // the only record of money a manager still has to give back, and the Z
+    // lists it until someone does (same rule as the end-of-day cleanup).
+    // So does an order with a card charged on this till whose payment is not
+    // saved yet: the record replays onto that order (fix review 30/09/2026).
+    let holds_undecided_money = format!(
+        "(EXISTS (SELECT 1 FROM order_payments held WHERE held.order_id = o.id AND held.status = '{}')
+          OR EXISTS (SELECT 1 FROM local_settings unsaved
+                     WHERE unsaved.setting_category = '{}'
+                       AND json_valid(unsaved.setting_value)
+                       AND json_extract(unsaved.setting_value, '$.orderId') = o.id))",
+        crate::payment_review::DUPLICATE_REVIEW_PAYMENT_STATUS,
+        crate::unsaved_payments::UNSAVED_CHARGED_PAYMENT_CATEGORY
+    );
     let _ = conn.execute(
         &format!(
             "DELETE FROM sync_queue WHERE entity_type = 'order' AND entity_id IN (
                 SELECT o.id FROM orders o
                 WHERE o.created_at < ?1
                   AND NOT {open_table_tab}
+                  AND NOT {holds_undecided_money}
             )"
         ),
         rusqlite::params![cutoff_utc],
@@ -1470,6 +1482,7 @@ pub(crate) fn clear_old_orders_before(
                 SELECT o.id FROM orders o
                 WHERE o.created_at < ?1
                   AND NOT {open_table_tab}
+                  AND NOT {holds_undecided_money}
              )"
         ),
         rusqlite::params![cutoff_utc],
@@ -1808,20 +1821,27 @@ mod dto_tests {
         );
         let before = deleted_order_cleanup_counts(&conn, "repair-order");
 
-        let deleted =
+        let cleanup =
             cleanup_deleted_orders_in_transaction(&mut conn, &["remote-repair-order".to_string()])
                 .expect("cleanup should classify the local order safely");
 
-        assert_eq!(deleted, 0);
+        assert_eq!(cleanup, DeletedOrderCleanup::default());
         assert_eq!(deleted_order_cleanup_counts(&conn, "repair-order"), before);
         assert_eq!(before, (1, 1, 1, 3));
     }
 
     #[test]
-    fn sync_cleanup_deleted_orders_removes_ordinary_order_and_children() {
+    fn sync_cleanup_deleted_orders_removes_ordinary_order_and_its_queue_rows() {
         let mut conn = rusqlite::Connection::open_in_memory().expect("open db");
         db::run_migrations_for_test(&conn);
         seed_deleted_order_cleanup_fixture(&conn, "ordinary-order", "remote-ordinary-order", None);
+        // No payment record on it (item D6): the payment and its adjustment
+        // go, their queue rows stay to be cleaned with the order's.
+        conn.execute_batch(
+            "DELETE FROM payment_adjustments WHERE order_id = 'ordinary-order';
+             DELETE FROM order_payments WHERE order_id = 'ordinary-order';",
+        )
+        .expect("an order without payment records");
 
         let deleted = cleanup_deleted_orders_in_transaction(
             &mut conn,
@@ -1829,11 +1849,51 @@ mod dto_tests {
         )
         .expect("ordinary cleanup should commit");
 
-        assert_eq!(deleted, 1);
+        assert_eq!(deleted.deleted, 1);
+        assert_eq!(deleted.kept_hidden, 0);
+        assert_eq!(
+            deleted_order_cleanup_counts(&conn, "ordinary-order").0,
+            0,
+            "the order is gone"
+        );
+        let order_queue_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_queue WHERE entity_id = 'ordinary-order'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(order_queue_rows, 0);
+    }
+
+    /// Item D6 (founder rule 30/09 and 01/10/2026): a server tombstone never
+    /// deletes an order this till holds payment records for (any status):
+    /// deleting it took the records with it. The order and every record stay.
+    #[test]
+    fn sync_cleanup_deleted_orders_keeps_an_order_with_payment_records() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open db");
+        db::run_migrations_for_test(&conn);
+        seed_deleted_order_cleanup_fixture(&conn, "ordinary-order", "remote-ordinary-order", None);
+        conn.execute(
+            "UPDATE order_payments SET status = 'voided' WHERE order_id = 'ordinary-order'",
+            [],
+        )
+        .expect("a voided record is a record too");
+        let before = deleted_order_cleanup_counts(&conn, "ordinary-order");
+
+        let deleted = cleanup_deleted_orders_in_transaction(
+            &mut conn,
+            &["remote-ordinary-order".to_string()],
+        )
+        .expect("cleanup commits");
+
+        assert_eq!(deleted.deleted, 0);
+        assert_eq!(deleted.kept_hidden, 1);
         assert_eq!(
             deleted_order_cleanup_counts(&conn, "ordinary-order"),
-            (0, 0, 0, 0)
+            before
         );
+        assert_eq!(before, (1, 1, 1, 3));
     }
 
     // Gap review P0-03 (review round 2): the 'Clear Old Orders' maintenance
@@ -1874,6 +1934,54 @@ mod dto_tests {
             .query_row("SELECT id FROM orders", [], |row| row.get(0))
             .expect("one order remains");
         assert_eq!(remaining_id, "ord-overnight-tab");
+    }
+
+    /// "Clear Old Orders" keeps an order holding a payment set aside for
+    /// review: that row is the only record of money a manager still has to
+    /// give back (fix review 30/09/2026).
+    #[test]
+    fn clear_old_orders_keeps_an_order_holding_a_set_aside_payment() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open db");
+        db::run_migrations_for_test(&conn);
+        for (id, created) in [
+            ("ord-old-plain", "2026-02-15T19:00:00Z"),
+            ("ord-old-set-aside", "2026-02-15T20:00:00Z"),
+        ] {
+            conn.execute(
+                "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents,
+                    status, order_type, payment_status, sync_status, created_at, updated_at)
+                 VALUES (?1, ?1, '[]', 13.0, 1300, 'completed', 'takeaway', 'paid', 'synced', ?2, ?2)",
+                rusqlite::params![id, created],
+            )
+            .expect("insert order");
+        }
+        conn.execute(
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status,
+                sync_status, sync_state, created_at, updated_at)
+             VALUES ('pay-held', 'ord-old-set-aside', 'cash', 13.0, 1300, 'completed',
+                     'pending', 'syncing', '2026-02-15T20:05:00Z', '2026-02-15T20:05:00Z')",
+            [],
+        )
+        .expect("insert payment");
+        crate::payment_review::set_aside_already_paid_payment(
+            &conn,
+            "pay-held",
+            Some("srv-card"),
+            "2026-02-15T20:06:00Z",
+        )
+        .expect("set aside");
+
+        let cleared = clear_old_orders_before(&conn, "2026-02-16T00:00:00+00:00").expect("clear");
+
+        assert_eq!(cleared, 1, "only the plain old order goes");
+        let held: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM order_payments WHERE id = 'pay-held'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(held, 1);
     }
 
     #[test]

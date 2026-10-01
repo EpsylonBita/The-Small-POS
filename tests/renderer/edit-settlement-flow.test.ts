@@ -49,6 +49,20 @@ test('settlement prompts only fire for the collect/refund requiredAction (never 
   assert.match(source, /action: \{ type: "none" \}/);
 });
 
+test('the paid-edit refund prompt refunds only what the local payment rows hold', () => {
+  // Review of the 29/09/2026 fixes: `paidTotal` also counts money the order
+  // proved without a local payment row; a refund of it names no payment, so a
+  // shrunk paid order whose rows were missing could never be saved.
+  const source = orderDashboardSource();
+  const refundBranch = source.slice(
+    source.indexOf('previews[0]?.requiredAction === "refund"'),
+    source.indexOf('for (const request of normalizedRequests)'),
+  );
+  assert.ok(refundBranch.length > 0, 'refund branch should be present');
+  assert.match(refundBranch, /resolveEditSettlementRefundAmount\(previews\[0\]\)/);
+  assert.doesNotMatch(refundBranch, /previews\[0\]\.paidTotal/);
+});
+
 test('edit-settlement collect + table-update toasts are routed through i18n (no bare English literal)', () => {
   const source = orderDashboardSource();
   // The payment-required toast and the table-updated toast both go through t(...) with

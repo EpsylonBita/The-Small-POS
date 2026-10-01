@@ -10,10 +10,10 @@
   "sync": {
     "healthModal": {
       "problems": {
-        "syncFailed": "La sincronizzazione non è riuscita. Apri il ripristino per verificare gli elementi interessati."
+        "syncFailed": "Alcuni record non sono stati sincronizzati. Restano salvati in modo sicuro su questo dispositivo."
       },
       "recommendations": {
-        "openRecovery": "Apri il ripristino e controlla l’elemento non riuscito prima di riprovare."
+        "openRecovery": "Controlla i record non riusciti prima di riprovare."
       }
     }
   }

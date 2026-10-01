@@ -1,6 +1,9 @@
 'use client'
 
 import React, { useState, useEffect, useMemo, useCallback } from 'react'
+import { useTranslation } from 'react-i18next'
+import { getDisplayPurchaseGuidance } from '@shared/modules/display-purchase-guidance'
+import { DisplayPurchaseGuidance } from './DisplayPurchaseGuidance'
 import { Lock, Sparkles, Check, ExternalLink, ChevronRight, Loader2 } from 'lucide-react'
 import { LiquidGlassModal } from '../ui/pos-glass-components'
 import { liquidGlassModalButton, liquidGlassModalCard, liquidGlassModalBadge } from '../../styles/designSystem'
@@ -51,6 +54,7 @@ export const ModuleUpsellCard: React.FC<ModuleUpsellCardProps> = ({
   onLearnMore,
   moduleInfo: externalModuleInfo,
 }) => {
+  const { t } = useTranslation()
   const [moduleInfo, setModuleInfo] = useState<ModuleUpsellInfo | null>(externalModuleInfo || null)
   const [isLoading, setIsLoading] = useState(!externalModuleInfo)
   const [isModalOpen, setIsModalOpen] = useState(false)
@@ -97,7 +101,7 @@ export const ModuleUpsellCard: React.FC<ModuleUpsellCardProps> = ({
 
   const [isCheckoutLoading, setIsCheckoutLoading] = useState(false)
 
-  // Handle upgrade click - creates Stripe Checkout session and opens in browser
+  // The browser presents a fresh offer and obtains confirmation before any purchase.
   const handleUpgrade = useCallback(async () => {
     setIsCheckoutLoading(true)
 
@@ -115,29 +119,6 @@ export const ModuleUpsellCard: React.FC<ModuleUpsellCardProps> = ({
         }),
       }).catch(() => {/* Ignore analytics errors */})
 
-      // Create Stripe Checkout session via API
-      const response = await fetch('/api/modules/checkout', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          module_id: moduleId,
-          billing_cycle: 'monthly',
-          source: 'pos_tauri',
-          context: 'locked_module',
-        }),
-      })
-
-      const data = await response.json()
-
-      if (!response.ok || !data.checkout_url) {
-        throw new Error(data.error || 'Failed to create checkout session')
-      }
-
-      // Open Stripe Checkout in external browser
-      await openExternalUrl(data.checkout_url)
-    } catch (err) {
-      console.error('Failed to create checkout:', err)
-      // Fallback to admin dashboard redirect
       const adminUrl = getAdminBaseUrl()
       const purchaseUrl = generateModulePurchaseUrl(adminUrl, moduleId, {
         source: 'pos_tauri',
@@ -145,6 +126,8 @@ export const ModuleUpsellCard: React.FC<ModuleUpsellCardProps> = ({
       })
 
       await openExternalUrl(purchaseUrl)
+    } catch (err) {
+      console.error('Failed to open module purchase:', err)
     } finally {
       setIsCheckoutLoading(false)
     }
@@ -180,6 +163,9 @@ export const ModuleUpsellCard: React.FC<ModuleUpsellCardProps> = ({
     return null
   }
 
+  const displayGuidance = getDisplayPurchaseGuidance(moduleInfo.module_id)
+  const displayedDescription = displayGuidance ? t(displayGuidance.summaryKey) : moduleInfo.description
+
   // Compact variant - inline card
   if (variant === 'compact') {
     return (
@@ -197,11 +183,12 @@ export const ModuleUpsellCard: React.FC<ModuleUpsellCardProps> = ({
 
             <div className="flex-1 min-w-0">
               <h4 className="liquid-glass-modal-text font-medium truncate">{moduleInfo.display_name}</h4>
-              <p className="liquid-glass-modal-text-muted text-sm truncate">{moduleInfo.description}</p>
+              <p className={`liquid-glass-modal-text-muted text-sm ${displayGuidance ? '' : 'truncate'}`}>{displayedDescription}</p>
             </div>
 
             <ChevronRight className="h-5 w-5 text-gray-500 flex-shrink-0" />
           </div>
+          <DisplayPurchaseGuidance moduleId={moduleInfo.module_id} compact />
         </button>
 
         {/* Expanded modal */}
@@ -285,6 +272,13 @@ const ModuleUpsellContent: React.FC<ModuleUpsellContentProps> = ({
   compact = false,
   isLoading = false,
 }) => {
+  const { t } = useTranslation()
+  const displayGuidance = getDisplayPurchaseGuidance(moduleInfo.module_id)
+  const displayedDescription = displayGuidance ? t(displayGuidance.summaryKey) : moduleInfo.description
+  const displayedFeatures = displayGuidance
+    ? displayGuidance.featureKeys.map(key => ({ id: key, name: t(key), description: '' }))
+    : moduleInfo.features
+
   return (
     <div className="space-y-6">
       {/* Header with icon and description */}
@@ -296,9 +290,11 @@ const ModuleUpsellContent: React.FC<ModuleUpsellContentProps> = ({
           {compact && (
             <h4 className="liquid-glass-modal-text font-semibold mb-1">{moduleInfo.display_name}</h4>
           )}
-          <p className="liquid-glass-modal-text-muted">{moduleInfo.description}</p>
+          <p className="liquid-glass-modal-text-muted">{displayedDescription}</p>
         </div>
       </div>
+
+      <DisplayPurchaseGuidance moduleId={moduleInfo.module_id} />
 
       {/* Features list */}
       <div>
@@ -307,7 +303,7 @@ const ModuleUpsellContent: React.FC<ModuleUpsellContentProps> = ({
           Included Features
         </h5>
         <ul className="space-y-2">
-          {moduleInfo.features.slice(0, compact ? 3 : 5).map((feature) => (
+          {displayedFeatures.slice(0, compact ? 3 : 5).map((feature) => (
             <li key={feature.id} className="flex items-start gap-2">
               <Check className="h-4 w-4 text-green-400 mt-0.5 flex-shrink-0" />
               <div>
@@ -318,9 +314,9 @@ const ModuleUpsellContent: React.FC<ModuleUpsellContentProps> = ({
               </div>
             </li>
           ))}
-          {moduleInfo.features.length > (compact ? 3 : 5) && (
+          {displayedFeatures.length > (compact ? 3 : 5) && (
             <li className="liquid-glass-modal-text-muted text-sm pl-6">
-              +{moduleInfo.features.length - (compact ? 3 : 5)} more features
+              +{displayedFeatures.length - (compact ? 3 : 5)} more features
             </li>
           )}
         </ul>

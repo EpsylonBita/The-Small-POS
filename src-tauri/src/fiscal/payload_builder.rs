@@ -156,6 +156,13 @@ pub fn build_fiscal_receipt_input(
 
     let issued_at = normalize_issued_at(&header.issued_at);
     let business_day_iso = extract_business_day(&issued_at);
+    // The store's configured currency (29/09/2026: a Swiss store's receipts
+    // were labelled EUR). EUR only when nothing valid is configured. A
+    // fiscally active plugin that cannot accept it is logged as a clear
+    // warning; the receipt is still built and queued (the server decides).
+    let currency =
+        resolve_store_currency_code(conn).unwrap_or_else(|| DEFAULT_FISCAL_CURRENCY.to_string());
+    let _ = super::currency::warn_if_currency_unsupported(conn, branch_id);
     let sequence_number =
         super::sequence_counter::next_sequence(conn, branch_id, &business_day_iso)?;
 
@@ -169,7 +176,7 @@ pub fn build_fiscal_receipt_input(
             "netCents": net_cents,
             "vatCents": tax_cents,
             "grossCents": gross_cents,
-            "currency": "EUR",
+            "currency": currency,
         },
         "vatBreakdown": vat_breakdown,
         "lines": lines,
@@ -272,7 +279,13 @@ fn parse_items_json(json_text: &str) -> Vec<ParsedOrderItem> {
 fn read_completed_payments(conn: &Connection, order_id: &str) -> Result<Vec<PaymentRow>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, method, amount_cents, amount, transaction_ref
+            "SELECT id, method, amount_cents, amount, transaction_ref,
+                    COALESCE((
+                        SELECT SUM(CAST(ROUND(pa.amount * 100) AS INTEGER))
+                        FROM payment_adjustments pa
+                        WHERE pa.payment_id = order_payments.id
+                          AND pa.adjustment_type IN ('refund', 'void')
+                    ), 0)
              FROM order_payments
              WHERE order_id = ?1 AND status = 'completed'
              ORDER BY created_at ASC",
@@ -280,19 +293,35 @@ fn read_completed_payments(conn: &Connection, order_id: &str) -> Result<Vec<Paym
         .map_err(|e| format!("prepare read_completed_payments: {e}"))?;
     let rows = stmt
         .query_map(params![order_id], |row| {
-            Ok(PaymentRow {
+            let payment = PaymentRow {
                 id: row.get(0)?,
                 method: row.get(1)?,
-                // tip_amount_cents is separate from the amount applied to the order.
                 amount_cents: read_cents(row, 2, 3)?,
                 transaction_ref: row.get(4)?,
-            })
+            };
+            Ok((payment, row.get::<_, i64>(5)?))
         })
         .map_err(|e| format!("query_map read_completed_payments: {e}"))?;
 
     let mut out = Vec::new();
     for r in rows {
-        out.push(r.map_err(|e| format!("read payment row: {e}"))?);
+        let (mut payment, adjusted_cents) = r.map_err(|e| format!("read payment row: {e}"))?;
+        // tip_amount_cents is separate from the amount applied to the order;
+        // refunds and voids recorded as adjustments are not tendered, nor is a
+        // gift card row's proven return floor (the larger of the two, once).
+        let reversed_cents = crate::payments::effective_reversed_cents(
+            conn,
+            &payment.id,
+            order_id,
+            &payment.method,
+            payment.amount_cents,
+            adjusted_cents,
+        )?;
+        payment.amount_cents = (payment.amount_cents - reversed_cents).max(0);
+        // A tender refunded or voided in full is not part of the receipt.
+        if !(reversed_cents > 0 && payment.amount_cents == 0) {
+            out.push(payment);
+        }
     }
     Ok(out)
 }
@@ -393,6 +422,43 @@ fn map_to_cis_payment_code(method: Option<&str>) -> &'static str {
     }
 }
 
+/// Currency of a fiscal receipt when the store has none configured.
+pub(crate) const DEFAULT_FISCAL_CURRENCY: &str = "EUR";
+
+/// Settings the store's currency is read from, in the order the Android POS
+/// reads them (`resolveStoreCurrencyCode`): organization, payment,
+/// restaurant, terminal.
+const CURRENCY_SETTING_CANDIDATES: [(&str, &str); 4] = [
+    ("organization", "currency"),
+    ("payment", "currency"),
+    ("restaurant", "currency"),
+    ("terminal", "currency"),
+];
+
+/// The store's configured ISO 4217 currency code (upper case), or `None`.
+///
+/// Deliberately NOT inferred from the country: a country setting can be
+/// wrong (Le Petit Paris, a Swiss store, was configured as "United States"),
+/// and a guessed currency would end up in fiscal documents. A value that is
+/// not three letters (`€`, `EURO`) is ignored. A missing `local_settings`
+/// table (older fixtures) reads as nothing configured.
+pub(crate) fn resolve_store_currency_code(conn: &Connection) -> Option<String> {
+    CURRENCY_SETTING_CANDIDATES
+        .iter()
+        .find_map(|(category, key)| {
+            let raw: String = conn
+                .query_row(
+                    "SELECT setting_value FROM local_settings
+                     WHERE setting_category = ?1 AND setting_key = ?2",
+                    params![category, key],
+                    |row| row.get(0),
+                )
+                .ok()?;
+            let code = raw.trim().trim_matches('"').trim().to_ascii_uppercase();
+            (code.len() == 3 && code.chars().all(|ch| ch.is_ascii_uppercase())).then_some(code)
+        })
+}
+
 /// Look up the operator OIB (per-cashier Croatian taxpayer ID) for the
 /// given staff_id. Falls back to `default_operator_oib` if no per-staff
 /// entry is configured, then empty string if even the default is
@@ -483,6 +549,17 @@ mod audit_1_tests {
                 transaction_ref TEXT,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE payment_adjustments (
+                id TEXT PRIMARY KEY,
+                payment_id TEXT NOT NULL,
+                order_id TEXT NOT NULL,
+                adjustment_type TEXT NOT NULL
+                    CHECK (adjustment_type IN ('void', 'refund')),
+                amount REAL NOT NULL,
+                reason TEXT NOT NULL,
+                staff_id TEXT,
+                created_at TEXT
+            );
             CREATE TABLE local_settings (
                 setting_category TEXT NOT NULL,
                 setting_key TEXT NOT NULL,
@@ -499,6 +576,9 @@ mod audit_1_tests {
             ",
         )
         .expect("create schema");
+        // Real v87 journal: a gift card tender reads its proven return floor.
+        crate::commands::gift_card_returns::ensure_return_schema(&conn)
+            .expect("gift return journal");
         conn
     }
 
@@ -524,6 +604,61 @@ mod audit_1_tests {
             [],
         )
         .expect("insert payment");
+    }
+
+    fn set_setting(conn: &Connection, category: &str, key: &str, value: &str) {
+        conn.execute(
+            "INSERT OR REPLACE INTO local_settings (setting_category, setting_key, setting_value)
+             VALUES (?1, ?2, ?3)",
+            params![category, key, value],
+        )
+        .expect("set local setting");
+    }
+
+    /// 29/09/2026: the payload hard-coded EUR although Le Petit Paris trades
+    /// in CHF. The receipt carries the store's configured currency.
+    #[test]
+    fn the_receipt_carries_the_stores_configured_currency() {
+        let conn = make_test_db();
+        seed_simple_order(&conn);
+        set_setting(&conn, "organization", "currency", "chf");
+        let payload = build_fiscal_receipt_input(&conn, "ord-1", "branch-1").unwrap();
+        assert_eq!(payload["totals"]["currency"], "CHF");
+    }
+
+    #[test]
+    fn the_currency_follows_the_android_setting_order_and_eur_is_only_the_fallback() {
+        let conn = make_test_db();
+        seed_simple_order(&conn);
+
+        // Nothing configured: EUR.
+        assert_eq!(resolve_store_currency_code(&conn), None);
+        let payload = build_fiscal_receipt_input(&conn, "ord-1", "branch-1").unwrap();
+        assert_eq!(payload["totals"]["currency"], "EUR");
+
+        // A country is never turned into a currency (the Swiss store was
+        // configured as "United States").
+        set_setting(&conn, "organization", "country", "United States");
+        assert_eq!(resolve_store_currency_code(&conn), None);
+
+        // Not an ISO code: ignored.
+        set_setting(&conn, "organization", "currency", "€");
+        set_setting(&conn, "terminal", "currency", "EURO");
+        assert_eq!(resolve_store_currency_code(&conn), None);
+
+        // organization -> payment -> restaurant -> terminal.
+        set_setting(&conn, "terminal", "currency", "ALL");
+        assert_eq!(resolve_store_currency_code(&conn).as_deref(), Some("ALL"));
+        set_setting(&conn, "payment", "currency", "\"chf\"");
+        assert_eq!(resolve_store_currency_code(&conn).as_deref(), Some("CHF"));
+        set_setting(&conn, "organization", "currency", "EUR");
+        assert_eq!(resolve_store_currency_code(&conn).as_deref(), Some("EUR"));
+    }
+
+    #[test]
+    fn a_database_without_local_settings_reads_as_no_currency_configured() {
+        let conn = Connection::open_in_memory().expect("open in-memory");
+        assert_eq!(resolve_store_currency_code(&conn), None);
     }
 
     #[test]
@@ -557,6 +692,151 @@ mod audit_1_tests {
         assert_eq!(payload["totals"]["grossCents"], 0);
         assert_eq!(payload["totals"]["vatCents"], 0);
         assert_eq!(payload["payments"][0]["amountCents"], 0);
+    }
+
+    #[test]
+    fn gift_card_tender_proof_without_its_canonical_original_fails_closed() {
+        let conn = make_test_db();
+        seed_simple_order(&conn);
+        conn.execute_batch(
+            "UPDATE order_payments SET method = 'gift_card', amount_cents = 500,
+                 transaction_ref = 'gift_card:tx-1' WHERE id = 'pay-1';
+             INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, reason)
+             VALUES ('adj-here', 'pay-1', 'ord-1', 'refund', 1.0, 'returned here');",
+        )
+        .unwrap();
+        // This completed proof cannot bind to a canonical original in the fixture.
+        let prove = |key: &str, order: &str| {
+            conn.execute(
+                "INSERT INTO gift_card_return_attempts (
+                    return_key, organization_id, branch_id, terminal_id, local_payment_id,
+                    remote_payment_id, local_order_id, remote_order_id, card_id, debit_transaction_id,
+                    redemption_key, currency, gross_cents, action, requested_cents, reason, staff_id,
+                    request_body, state, return_id, reversal_transaction_id, payment_adjustment_id,
+                    returned_cents, total_returned_cents, remaining_cents, payment_status,
+                    order_total_cents, order_paid_cents, order_remaining_cents, order_payment_status,
+                    card_balance_cents, replayed, completed_at, created_at, updated_at
+                 ) VALUES (?1, 'org-1', 'branch-1', 'term-1', 'pay-1', 'remote-pay', ?2, 'remote-ord',
+                           'card-1', 'tx-1', 'redeem-1', 'EUR', 500, 'refund', 100, 'returned', 'staff-1',
+                           '{}', 'completed', ?1, ?1, ?1, 100, 300, 200, 'completed', 500, 200, 300,
+                           'partially_paid', 300, 0, 'now', 'now', 'now')",
+                params![key, order],
+            )
+            .map(|_| ())
+        };
+        let payments = |conn: &Connection| {
+            build_fiscal_receipt_input(conn, "ord-1", "branch-1")
+                .map(|payload| payload["payments"].clone())
+        };
+        assert_eq!(
+            payments(&conn).unwrap()[0]["amountCents"],
+            400,
+            "500 minus the recorded 100"
+        );
+        prove("00000000-0000-4000-8000-000000000001", "ord-1").unwrap();
+        assert!(
+            payments(&conn).is_err(),
+            "an unproven completed proof must not read as zero"
+        );
+    }
+
+    #[test]
+    fn settled_full_gift_card_is_one_gift_tender_not_a_card() {
+        let conn = make_test_db();
+        seed_simple_order(&conn);
+        conn.execute(
+            "UPDATE order_payments SET method = 'gift_card', amount_cents = 500,
+                 transaction_ref = 'gift_card:tx-1' WHERE id = 'pay-1'",
+            [],
+        )
+        .unwrap();
+        let payload = build_fiscal_receipt_input(&conn, "ord-1", "branch-1").unwrap();
+        let payments = payload["payments"].as_array().unwrap();
+        assert_eq!(payments.len(), 1);
+        assert_eq!(payments[0]["method"], "gift_card");
+        assert_eq!(payments[0]["amountCents"], 500);
+        assert_eq!(payments[0]["reference"], "gift_card:tx-1");
+        assert_eq!(payload["metadata"]["paymentMethodCode"], "O");
+    }
+
+    #[test]
+    fn settled_gift_and_cash_tenders_are_refund_net() {
+        let conn = make_test_db();
+        seed_simple_order(&conn);
+        conn.execute_batch(
+            "UPDATE orders SET total_amount_cents = 500 WHERE id = 'ord-1';
+             UPDATE order_payments SET amount = 4.00, amount_cents = 400 WHERE id = 'pay-1';
+             INSERT INTO order_payments
+                 (id, order_id, method, amount, amount_cents, status, transaction_ref, created_at)
+             VALUES
+                 ('pay-gift', 'ord-1', 'gift_card', 2.00, 200, 'completed', 'gift_card:tx-2',
+                  '2026-05-25T10:00:02Z'),
+                 ('pay-card', 'ord-1', 'card', 1.00, 100, 'completed', 'eft-1',
+                  '2026-05-25T10:00:03Z');
+             INSERT INTO payment_adjustments
+                 (id, payment_id, order_id, adjustment_type, amount, reason, created_at)
+             VALUES
+                 ('adj-cash', 'pay-1', 'ord-1', 'refund', 1.00, 'overpaid', '2026-05-25T10:01:00Z'),
+                 ('adj-card', 'pay-card', 'ord-1', 'refund', 1.00, 'returned', '2026-05-25T10:01:01Z');",
+        )
+        .unwrap();
+        let payload = build_fiscal_receipt_input(&conn, "ord-1", "branch-1").unwrap();
+        let tenders: Vec<(String, i64)> = payload["payments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|payment| {
+                (
+                    payment["method"].as_str().unwrap().to_string(),
+                    payment["amountCents"].as_i64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            tenders,
+            vec![("cash".to_string(), 300), ("gift_card".to_string(), 200)]
+        );
+        assert_eq!(payload["totals"]["grossCents"], 500);
+    }
+
+    #[test]
+    fn void_adjustments_are_netted_like_refunds() {
+        let conn = make_test_db();
+        seed_simple_order(&conn);
+        conn.execute_batch(
+            "UPDATE orders SET total_amount_cents = 500 WHERE id = 'ord-1';
+             UPDATE order_payments SET amount = 4.00, amount_cents = 400 WHERE id = 'pay-1';
+             INSERT INTO order_payments
+                 (id, order_id, method, amount, amount_cents, status, transaction_ref, created_at)
+             VALUES
+                 ('pay-gift', 'ord-1', 'gift_card', 2.00, 200, 'completed', 'gift_card:tx-2',
+                  '2026-05-25T10:00:02Z'),
+                 ('pay-card', 'ord-1', 'card', 1.00, 100, 'completed', 'eft-1',
+                  '2026-05-25T10:00:03Z');
+             INSERT INTO payment_adjustments
+                 (id, payment_id, order_id, adjustment_type, amount, reason, created_at)
+             VALUES
+                 ('adj-cash', 'pay-1', 'ord-1', 'void', 1.00, 'keyed twice', '2026-05-25T10:01:00Z'),
+                 ('adj-card', 'pay-card', 'ord-1', 'void', 1.00, 'voided', '2026-05-25T10:01:01Z');",
+        )
+        .unwrap();
+        let payload = build_fiscal_receipt_input(&conn, "ord-1", "branch-1").unwrap();
+        let tenders: Vec<(String, i64)> = payload["payments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|payment| {
+                (
+                    payment["method"].as_str().unwrap().to_string(),
+                    payment["amountCents"].as_i64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            tenders,
+            vec![("cash".to_string(), 300), ("gift_card".to_string(), 200)]
+        );
+        assert_eq!(payload["totals"]["grossCents"], 500);
     }
 
     #[test]

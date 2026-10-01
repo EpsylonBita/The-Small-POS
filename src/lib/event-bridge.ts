@@ -45,6 +45,9 @@ const EVENT_MAP: Record<string, string> = {
   'order_created': 'order-created',
   'order_deleted': 'order-deleted',
   'order_payment_updated': 'order-payment-updated',
+  // The server's answer to this till's own accept: what the order's platform
+  // took (services/platformAcceptNotice.ts tells the cashier).
+  'order_platform_ack': 'order-platform-ack',
 
   // --- Customer events ---
   'customer_created': 'customer-created',

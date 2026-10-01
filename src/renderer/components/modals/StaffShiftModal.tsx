@@ -24,6 +24,11 @@ import { ConfirmDialog, ConfirmVariant } from '../ui/ConfirmDialog';
 import { ErrorAlert } from '../ui/ErrorAlert';
 import { UnsettledPaymentBlockersPanel } from '../ui/UnsettledPaymentBlockersPanel';
 import { useKeyboardShortcut } from '../../hooks/useKeyboardShortcut';
+import { usePrivilegedActionConfirmation } from '../../hooks/usePrivilegedActionConfirmation';
+import {
+  useRecordPaymentBlocker,
+  type RecordPaymentBlockerOutcome,
+} from '../../hooks/useRecordPaymentBlocker';
 import { StaffShiftCheckoutFooterActions } from './StaffShiftCheckoutFooterActions';
 import {
   buildShiftCheckoutPrintSnapshot,
@@ -32,10 +37,40 @@ import {
   resolveCashierCheckoutExpenseTotal,
 } from '../../utils/staffShiftCheckoutPrint';
 import { getBridge } from '../../../lib';
+import { GiftCardsApiService } from '../../services/GiftCardsApiService';
+import { getCachedTerminalCredentials } from '../../services/terminal-credentials';
+import { financialOpening, openingMatchesScope, parseOpeningCents, type FinancialOpeningScope } from '../../lib/financial-opening';
 import type {
+  ShiftFinancialClosingRecoveryView,
+  ShiftFinancialOpeningView,
   PaymentIntegrityErrorPayload,
   UnsettledPaymentBlocker,
 } from '../../../lib/ipc-contracts';
+import {
+  GIFT_CLOSE_ORIGINAL_CODES,
+  GIFT_CLOSE_REDISCOVER_CODES,
+  GIFT_CLOSE_TERMS_CODES,
+  GiftCloseAmount,
+  GiftClosePendingList,
+  GiftCloseRecoveryPanel,
+  buildGiftClosePreview,
+  buildGiftClosingRequest,
+  giftCloseCodeText,
+  giftCloseText,
+  isGiftBoundCheckoutState,
+  readCloseBlocker,
+  readDrawer,
+  readGiftCloseResult,
+  readOpeningList,
+  readPendingList,
+  readRefusalCode,
+  toSafeCents,
+  type GiftCheckoutState,
+  type GiftCloseApproval,
+  type GiftClosePendingState,
+  type GiftCloseRecoveryTarget,
+  type GiftCloseText,
+} from './StaffShiftGiftClose';
 import {
   formatPaymentIntegrityError,
   extractPaymentIntegrityPayload,
@@ -454,6 +489,119 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   const [hasActiveErganiPlugin, setHasActiveErganiPlugin] = useState(false);
   const [roleType, setRoleType] = useState<StaffShiftRole>('cashier');
   const [staffAuthMetadataStatus, setStaffAuthMetadataStatus] = useState<'available' | 'missing'>('available');
+  const [financialEntry, setFinancialEntry] = useState<{
+    status: 'checking' | 'ordinary' | 'ready' | 'blocked';
+    scope?: FinancialOpeningScope;
+    currency?: string;
+    original?: ShiftFinancialOpeningView;
+  }>({ status: 'checking' });
+  const financialAttempts = useRef(new Map<string, {
+    openingKey: string; openingCents: number; currency: string; issuanceRefused?: boolean;
+  }>());
+  const financialBusy = useRef(false);
+  const financialTouched = useRef(false);
+  const financialCompleted = useRef(false);
+  const financialClear = useRef<Promise<boolean>>(Promise.resolve(true));
+  const checkInGeneration = useRef(0);
+  const checkInMounted = useRef(true);
+  const getCheckInIdentity = () => {
+    const credentials = getCachedTerminalCredentials();
+    return JSON.stringify([isOpen, mode, checkInStep, selectedStaff?.id, roleType,
+      staff?.staffId, staff?.organizationId, staff?.branchId, staff?.terminalId,
+      getSetting('terminal', 'organization_id'), getSetting('terminal', 'branch_id'),
+      getSetting('terminal', 'terminal_id'), credentials.organizationId,
+      credentials.branchId, credentials.terminalId]);
+  };
+  const currentCheckInIdentity = useRef(getCheckInIdentity);
+  currentCheckInIdentity.current = getCheckInIdentity;
+  const renderedCheckInIdentity = getCheckInIdentity();
+  const previousCheckInIdentity = useRef(renderedCheckInIdentity);
+  if (previousCheckInIdentity.current !== renderedCheckInIdentity) {
+    previousCheckInIdentity.current = renderedCheckInIdentity;
+    checkInGeneration.current += 1;
+  }
+  const captureCheckInGuard = () => {
+    const generation = checkInGeneration.current;
+    const identity = currentCheckInIdentity.current();
+    return () => checkInMounted.current && isOpen &&
+      generation === checkInGeneration.current && identity === currentCheckInIdentity.current();
+  };
+  const clearFinancialAuthorization = () => {
+    checkInGeneration.current += 1;
+    financialBusy.current = false;
+    if (financialTouched.current && !financialCompleted.current) {
+      financialTouched.current = false;
+      financialClear.current = financialOpening.clearAuthorization().then(() => true, () => false);
+    }
+  };
+  useEffect(() => {
+    checkInMounted.current = true;
+    financialCompleted.current = false;
+    return () => {
+      checkInMounted.current = false;
+      clearFinancialAuthorization();
+    };
+  }, [isOpen, mode]);
+
+  // The native discovery survives remount/restart. The small in-memory map only
+  // keeps a possibly-sent key when an IPC reply itself was lost.
+  useEffect(() => {
+    // A replaced modal identity invalidates the old operation immediately;
+    // release only its UI lock and revoke its dedicated native authorization.
+    if (financialBusy.current) {
+      clearFinancialAuthorization();
+      setLoading(false);
+      setEnteredPin('');
+    }
+    if (!isOpen || mode !== 'checkin' || checkInStep !== 'enter-cash' || roleType !== 'cashier' || !selectedStaff) return;
+    const current = captureCheckInGuard();
+    setFinancialEntry({ status: 'checking' });
+    let cancelled = false;
+    const valid = () => !cancelled && current();
+    void (async () => {
+      try {
+        const [organizationId, branchId, terminalId] = await Promise.all([
+          bridge.terminalConfig.getOrganizationId(), bridge.terminalConfig.getBranchId(), bridge.terminalConfig.getTerminalId(),
+        ]);
+        if (!valid()) return;
+        if (!normalizeContextId(organizationId) || !normalizeContextId(branchId) || !normalizeContextId(terminalId)) throw new Error('scope');
+        const scope: FinancialOpeningScope = { organizationId, branchId, terminalId, staffId: selectedStaff.id };
+        const remembered = financialAttempts.current.get(JSON.stringify(scope));
+        const result = await financialOpening.status(remembered?.openingKey);
+        if (!valid()) return;
+        const original = result.openings.find((entry) => openingMatchesScope(entry, scope) &&
+          (!remembered || entry.openingKey === remembered.openingKey));
+        if (original || remembered) {
+          financialTouched.current = true;
+          const frozen = original ?? remembered!;
+          financialAttempts.current.set(JSON.stringify(scope), {
+            openingKey: frozen.openingKey, openingCents: frozen.openingCents, currency: frozen.currency,
+            ...(!original && remembered?.issuanceRefused ? { issuanceRefused: true } : {}),
+          });
+          setOpeningCash(`${Math.floor(frozen.openingCents / 100)},${String(frozen.openingCents % 100).padStart(2, '0')}`);
+          setFinancialEntry({ status: 'ready', scope, currency: frozen.currency, original });
+          return;
+        }
+        const capability = await new GiftCardsApiService(bridge).getStatus();
+        if (!valid()) return;
+        const optedIn = capability.ok && capability.data.enabled && capability.data.moduleEnabled &&
+          capability.data.terminalEnabled && capability.data.configured && !capability.data.unavailable;
+        if (!optedIn) {
+          setFinancialEntry({ status: 'ordinary', scope });
+          return;
+        }
+        const currency = capability.data.currency;
+        if (!currency || !/^[A-Z]{3}$/.test(currency)) throw new Error('currency');
+        setFinancialEntry({ status: 'ready', scope, currency });
+      } catch {
+        if (valid()) {
+          setFinancialEntry({ status: 'blocked' });
+          setError(t('modals.staffShift.financialOpeningUnavailable'));
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [renderedCheckInIdentity]);
 
   // Cross-terminal busy-state — populated by `bridge.staffAuth.refreshDirectory()`.
   // Keys are staff ids that are checked in on a DIFFERENT terminal than this one;
@@ -806,11 +954,14 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   const prefersReducedMotion = useReducedMotion();
   const [contentDirection, setContentDirection] = useState<MotionDirection>(1);
   const [supportsHoverMotion, setSupportsHoverMotion] = useState(false);
-  const isModalCloseBlocked = loading || showPaymentConfirm || confirmDialog.isOpen;
+  const isModalCloseBlocked = (loading && !financialBusy.current) || showPaymentConfirm || confirmDialog.isOpen;
   const handleModalClose = () => {
     if (isModalCloseBlocked) {
       return;
     }
+    giftEpoch.current += 1;
+    clearFinancialAuthorization();
+    setEnteredPin('');
     onClose();
   };
 
@@ -1002,6 +1153,265 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     () => resolveCashierCheckoutExpenseTotal(shiftSummary, expenses, effectiveShift?.id),
     [shiftSummary, expenses, effectiveShift?.id],
   );
+
+  // Gift-bound cashier close. Native retains one original per shift; every
+  // async step here is fenced by the open/terminal epoch and its own intent.
+  const giftTerminalScope = (() => {
+    const credentials = getCachedTerminalCredentials();
+    return JSON.stringify([getSetting('terminal', 'organization_id'), getSetting('terminal', 'branch_id'),
+      getSetting('terminal', 'terminal_id'), credentials.organizationId, credentials.branchId,
+      credentials.terminalId]);
+  })();
+  const giftActorKey = staff?.databaseStaffId || staff?.staffId || '';
+  const giftOpenKey = `${isOpen ? 'open' : 'closed'}:${giftTerminalScope}:${giftActorKey}`;
+  const giftEpoch = useRef(0);
+  const previousGiftOpenKey = useRef(giftOpenKey);
+  if (previousGiftOpenKey.current !== giftOpenKey) {
+    previousGiftOpenKey.current = giftOpenKey;
+    giftEpoch.current += 1;
+  }
+  const giftMounted = useRef(true);
+  const giftDiscoveryToken = useRef(0);
+  const giftCloseToken = useRef(0);
+  const giftPendingToken = useRef(0);
+  const giftShiftId = useRef<string | null>(null);
+  giftShiftId.current = effectiveShift?.id ? String(effectiveShift.id) : null;
+  const giftExpenses = useRef(expenses);
+  giftExpenses.current = expenses;
+  const [giftCheckout, setGiftCheckout] = useState<GiftCheckoutState>({ kind: 'idle' });
+  const [giftApproval, setGiftApproval] = useState<GiftCloseApproval | null>(null);
+  const [giftBusy, setGiftBusy] = useState(false);
+  const [giftRecoveryTarget, setGiftRecoveryTarget] = useState<GiftCloseRecoveryTarget | null>(null);
+  const [giftPending, setGiftPending] = useState<GiftClosePendingState | null>(null);
+  const [giftDiscoveryNonce, setGiftDiscoveryNonce] = useState(0);
+  const giftCloseOwnsCheckout = isCashierCheckoutRole &&
+    (giftRecoveryTarget !== null || isGiftBoundCheckoutState(giftCheckout, effectiveShift?.id));
+  const giftCloseChecking = isCashierCheckoutRole && giftCheckout.kind === 'loading' &&
+    giftCheckout.shiftId === String(effectiveShift?.id ?? '');
+  const giftText = (entry: GiftCloseText) =>
+    String(t(entry.key, { defaultValue: entry.defaultValue, ...(entry.values ?? {}) }));
+  const captureGiftGuard = () => {
+    const epoch = giftEpoch.current;
+    return () => giftMounted.current && epoch === giftEpoch.current;
+  };
+  const rediscoverGiftClose = () => setGiftDiscoveryNonce((value) => value + 1);
+
+  useEffect(() => {
+    giftMounted.current = true;
+    return () => {
+      giftMounted.current = false;
+    };
+  }, []);
+
+  // A closed modal or a changed terminal scope retires every gift-close UI effect.
+  useEffect(() => {
+    setGiftCheckout({ kind: 'idle' });
+    setGiftApproval(null);
+    setGiftBusy(false);
+    setGiftRecoveryTarget(null);
+    setGiftPending(null);
+  }, [giftOpenKey]);
+
+  useEffect(() => {
+    setGiftApproval(null);
+  }, [closingCash]);
+
+  // Discovers whether this cashier shift closes with gift card cash and, if so,
+  // prepares the exact terms. Anything unreadable blocks; nothing becomes zero.
+  useEffect(() => {
+    giftDiscoveryToken.current += 1;
+    const shift = effectiveShift;
+    const shiftId = shift?.id ? String(shift.id) : '';
+    if (!isOpen || effectiveMode !== 'checkout' || !shift || !shiftId ||
+        (shift.role_type !== 'cashier' && shift.role_type !== 'manager')) {
+      setGiftCheckout((current) => (current.kind === 'idle' ? current : { kind: 'idle' }));
+      return;
+    }
+    const token = giftDiscoveryToken.current;
+    const guard = captureGiftGuard();
+    const valid = () => guard() && token === giftDiscoveryToken.current && giftShiftId.current === shiftId;
+    setGiftApproval(null);
+    setGiftCheckout((current) => ('opening' in current && current.shiftId === shiftId
+      ? { kind: 'preparing', shiftId, opening: current.opening }
+      : { kind: 'loading', shiftId }));
+
+    void (async () => {
+      let openings: ShiftFinancialOpeningView[] | null;
+      try {
+        openings = readOpeningList(await bridge.shiftFinancialOpening.status());
+      } catch {
+        openings = null;
+      }
+      if (!valid()) return;
+      if (!openings) {
+        setGiftCheckout({ kind: 'unknown', shiftId });
+        return;
+      }
+      // The persisted opening decides the gift binding, not the current entitlement.
+      const opening = openings.find((entry) => entry.shiftId === shiftId);
+      if (!opening) {
+        setGiftCheckout({ kind: 'ordinary', shiftId });
+        return;
+      }
+      const block = (code: string, count?: number) =>
+        setGiftCheckout({ kind: 'blocked', shiftId, opening, code, count });
+      setGiftCheckout({ kind: 'preparing', shiftId, opening });
+
+      // A retained original always wins over a second close.
+      let pending: ReturnType<typeof readPendingList>;
+      try {
+        pending = readPendingList(await bridge.shiftFinancialClosing.listPending({ staffId: opening.staffId }));
+      } catch {
+        pending = { ok: false, code: 'LOCAL_READ_FAILED' };
+      }
+      if (!valid()) return;
+      if (!pending.ok) return block(pending.code);
+      const retained = pending.closings.find((closing) => closing.shiftId === shiftId);
+      if (retained) {
+        if (!retained.closingKey) return block('GIFT_CLOSING_ORIGINAL_MISSING');
+        const closingKey = retained.closingKey;
+        const epoch = giftEpoch.current;
+        setGiftCheckout({ kind: 'retained', shiftId, opening });
+        setGiftRecoveryTarget((current) => (current && current.closingKey === closingKey && current.epoch === epoch
+          ? current
+          : {
+            epoch,
+            origin: 'checkout',
+            staffId: opening.staffId,
+            closingKey,
+            shiftId,
+            roleType: String(shift.role_type),
+            currency: retained.currency ?? opening.currency,
+            retainedCountedCents: retained.countedCents,
+            initial: retained,
+            approved: null,
+          }));
+        return;
+      }
+      if (opening.state !== 'confirmed_usable' || !opening.usable) {
+        return block(opening.state === 'pending' ? 'FINANCIAL_OPENING_PENDING' : 'OPENING_UNUSABLE');
+      }
+
+      let blocker: ReturnType<typeof readCloseBlocker>;
+      try {
+        blocker = readCloseBlocker(await bridge.giftFunding.closeBlocker({ shiftId }));
+      } catch {
+        blocker = { ok: false, code: 'FUNDING_BLOCKER_UNAVAILABLE' };
+      }
+      if (!valid()) return;
+      if (!blocker.ok) return block('FUNDING_BLOCKER_UNAVAILABLE');
+      if (blocker.blocked || blocker.unresolved > 0) return block('GIFT_FUNDING_UNRESOLVED', blocker.unresolved);
+
+      let drawer: ReturnType<typeof readDrawer>;
+      try {
+        drawer = readDrawer(await bridge.giftFunding.refreshDrawer({ staffId: opening.staffId }));
+      } catch {
+        drawer = { ok: false, code: 'GIFT_CLOSING_DRAWER_UNAVAILABLE' };
+      }
+      if (!valid()) return;
+      if (!drawer.ok) return block('GIFT_CLOSING_DRAWER_UNAVAILABLE');
+
+      let summary: any = null;
+      try {
+        const result = await bridge.shifts.getSummary(shiftId, { skipBackfill: true });
+        summary = result?.data || result;
+      } catch {
+        summary = null;
+      }
+      if (!valid()) return;
+      if (!summary || typeof summary !== 'object' || summary.success === false) {
+        return block('ORDINARY_SUMMARY_UNAVAILABLE');
+      }
+      const ordinaryExpectedCents = toSafeCents(getCashierExpectedBreakdown(
+        summary,
+        shift,
+        getEffectiveOpeningAmount(shift, summary),
+        resolveCashierCheckoutExpenseTotal(summary, giftExpenses.current, shiftId),
+      ).expected);
+      const preview = ordinaryExpectedCents === null ? null : buildGiftClosePreview({
+        epoch: token,
+        opening,
+        drawer: drawer.drawer,
+        ordinaryExpectedCents,
+      });
+      if (!preview) {
+        return block(ordinaryExpectedCents === null ? 'ORDINARY_SUMMARY_UNAVAILABLE' : 'GIFT_CLOSING_DRAWER_MISMATCH');
+      }
+      setGiftCheckout({ kind: 'ready', shiftId, opening, preview });
+    })();
+  }, [isOpen, effectiveMode, effectiveShift?.id, effectiveShift?.role_type, giftOpenKey, giftDiscoveryNonce]);
+
+  // Retained originals of the selected cashier stay reachable from check-in.
+  const loadGiftPending = (staffId: string) => {
+    giftPendingToken.current += 1;
+    const token = giftPendingToken.current;
+    const guard = captureGiftGuard();
+    setGiftPending({ staffId, kind: 'loading' });
+    void (async () => {
+      let parsed: ReturnType<typeof readPendingList>;
+      try {
+        parsed = readPendingList(await bridge.shiftFinancialClosing.listPending({ staffId }));
+      } catch {
+        parsed = { ok: false, code: 'LOCAL_READ_FAILED' };
+      }
+      if (!guard() || token !== giftPendingToken.current) return;
+      setGiftPending(parsed.ok
+        ? { staffId, kind: 'ready', closings: parsed.closings, truncated: parsed.truncated }
+        : { staffId, kind: 'failed', code: parsed.code });
+    })();
+  };
+
+  const openGiftRecoveryFromCheckIn = (staffId: string, closing: ShiftFinancialClosingRecoveryView) => {
+    if (!closing.closingKey) return;
+    setEnteredPin('');
+    setError('');
+    setGiftRecoveryTarget({
+      epoch: giftEpoch.current,
+      origin: 'checkin',
+      staffId,
+      closingKey: closing.closingKey,
+      shiftId: closing.shiftId,
+      roleType: 'cashier',
+      currency: closing.currency,
+      retainedCountedCents: closing.countedCents,
+      initial: closing,
+      approved: null,
+    });
+  };
+
+  // True when the gift-bound close owns this checkout intent.
+  const handleGiftCheckoutIntent = (): boolean => {
+    if (giftRecoveryTarget) return true;
+    const shiftId = giftShiftId.current;
+    if (!shiftId || !('shiftId' in giftCheckout) || giftCheckout.shiftId !== shiftId) return false;
+    switch (giftCheckout.kind) {
+      case 'loading':
+        setError(giftText(giftCloseText('checking', 'Checking whether this shift closes with gift card cash…')));
+        return true;
+      case 'preparing':
+        setError(giftText(giftCloseText('preparing', 'Preparing the gift card close terms…')));
+        return true;
+      case 'blocked':
+        setError(giftText(giftCloseCodeText(giftCheckout.code, giftCheckout.count)));
+        return true;
+      case 'retained':
+        setError(giftText(giftCloseCodeText('GIFT_CLOSING_ORIGINAL_EXISTS')));
+        return true;
+      case 'ready': {
+        if (giftBusy) return true;
+        const countedCents = parseOpeningCents(closingCash);
+        if (countedCents === null) {
+          setError(giftText(giftCloseText('countInvalid', 'Enter the counted cash with at most two decimals.')));
+          return true;
+        }
+        setError('');
+        setGiftApproval({ epoch: giftCheckout.preview.epoch, countedCents });
+        return true;
+      }
+      default:
+        return false;
+    }
+  };
 
   // Expected cash to return for the active role at checkout. When this is
   // effectively zero (slow/empty shift), the operator shouldn't have to type
@@ -1913,6 +2323,11 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   };
 
   const handleStaffSelect = async (staffMember: StaffMember) => {
+    // Retire the previous selection before any asynchronous work for the new cashier.
+    giftEpoch.current += 1;
+    setGiftRecoveryTarget(null);
+    setGiftApproval(null);
+    clearFinancialAuthorization();
     setSelectedStaff(staffMember);
     setEnteredPin('');
     setError('');
@@ -1967,6 +2382,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     }
 
     // Otherwise continue the normal check-in flow
+    loadGiftPending(staffMember.id);
     navigateCheckInStep('enter-pin');
   };
 
@@ -2191,17 +2607,21 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     branchId: string,
     terminalId: string,
     staffRole: string,
+    current: () => boolean,
   ) => {
     const eligibility = await loadCheckInEligibility(branchId, terminalId);
+    if (!current()) return;
     setCheckInEligibility(eligibility);
     const normalizedRole = normalizeShiftRole(staffRole);
     if (normalizedRole) setRoleType(normalizedRole);
+    setLoading(false);
     navigateCheckInStep('select-role');
     setError('');
   };
 
   const handlePinSubmit = async () => {
     if (!selectedStaff) return;
+    const current = captureCheckInGuard();
 
     setLoading(true);
     setError('');
@@ -2213,6 +2633,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       if (!branchId || !terminalId) {
         try {
           const local = (await bridge.settings.get()) as unknown as SettingsResult;
+          if (!current()) return;
           branchId = branchId || ((local?.['terminal.branch_id'] as string | undefined) ?? local?.terminal?.branch_id);
           terminalId = terminalId || ((local?.['terminal.terminal_id'] as string | undefined) ?? local?.terminal?.terminal_id);
         } catch { }
@@ -2220,6 +2641,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       if (!branchId) {
         try {
           const val = await bridge.terminalConfig.getSetting('terminal', 'branch_id');
+          if (!current()) return;
           if (val) branchId = val as string;
         } catch { }
       }
@@ -2227,16 +2649,19 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       if (!branchId) {
         try {
           const bid = await bridge.terminalConfig.getBranchId();
+          if (!current()) return;
           if (bid) branchId = bid as string;
         } catch { }
       }
       if (!terminalId) {
         try {
           const val = await bridge.terminalConfig.getSetting('terminal', 'terminal_id');
+          if (!current()) return;
           if (val) terminalId = val as string;
         } catch { }
       }
 
+      if (!current()) return;
       // Validate branchId before attempting check-in
       if (!branchId || (typeof branchId === 'string' && branchId.trim() === '')) {
         console.error('[StaffShiftModal] Cannot check in: branchId is not configured');
@@ -2256,10 +2681,11 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           selectedStaff.id,
           enteredPin.trim(),
         );
+        if (!current()) return;
 
         if (legacyProbe.success) {
           const staffRole = selectedStaff.role_name;
-          await finishPinVerification(branchId, terminalId, staffRole);
+          await finishPinVerification(branchId, terminalId, staffRole, current);
           return;
         }
 
@@ -2283,6 +2709,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           branchId,
           pin: enteredPin.trim(),
         });
+        if (!current()) return;
         const normalizedAuth = authRes;
         const authSucceeded = normalizedAuth?.success === true;
 
@@ -2294,7 +2721,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
         if (authSucceeded) {
           const staffRole = selectedStaff.role_name;
-          await finishPinVerification(branchId, terminalId, staffRole);
+          await finishPinVerification(branchId, terminalId, staffRole, current);
           return; // done
         }
 
@@ -2309,6 +2736,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         setEnteredPin('');
         return;
       } catch (e) {
+        if (!current()) return;
         const errorMessage = extractErrorMessage(e, t('modals.staffShift.verifyPinFailed'));
         console.warn('IPC PIN auth error:', errorMessage);
         if (errorMessage.toLowerCase().includes('invalid pin') || errorMessage.toLowerCase().includes('pin is required')) {
@@ -2320,11 +2748,12 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         return;
       }
     } catch (err) {
+      if (!current()) return;
       console.error('PIN verification error:', err);
       setError(t('modals.staffShift.verifyPinFailed'));
       setEnteredPin('');
     } finally {
-      setLoading(false);
+      if (current()) setLoading(false);
     }
   };
 
@@ -2369,6 +2798,142 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     }
   };
 
+  const handleFinancialCheckIn = async (openingCents: number) => {
+    if (financialBusy.current || !selectedStaff || !financialEntry.scope || !financialEntry.currency) return;
+    financialBusy.current = true;
+    const current = captureCheckInGuard();
+    const scope = financialEntry.scope;
+    const holder = JSON.stringify(scope);
+    const cashier = selectedStaff;
+    const pin = enteredPin;
+    let capturedOriginal = financialEntry.original;
+    const stale = new Error('STALE_FINANCIAL_OPENING');
+    const guarded = async <T,>(operation: () => Promise<T>): Promise<T> => {
+      if (!current()) throw stale;
+      const result = await operation();
+      if (!current()) throw stale;
+      return result;
+    };
+    const validateOriginal = (opening: ShiftFinancialOpeningView) => {
+      const remembered = financialAttempts.current.get(holder);
+      if (!openingMatchesScope(opening, scope) || (remembered &&
+          (opening.openingKey !== remembered.openingKey || opening.openingCents !== remembered.openingCents || opening.currency !== remembered.currency)) ||
+          (capturedOriginal && (opening.shiftId !== capturedOriginal.shiftId || opening.drawerId !== capturedOriginal.drawerId ||
+            opening.checkedInAt !== capturedOriginal.checkedInAt || opening.businessDate !== capturedOriginal.businessDate ||
+            opening.isDayStart !== capturedOriginal.isDayStart || opening.calculationVersion !== capturedOriginal.calculationVersion))) {
+        throw new Error(t('modals.staffShift.financialOpeningUnavailable'));
+      }
+      capturedOriginal = opening;
+      financialAttempts.current.set(holder, { openingKey: opening.openingKey, openingCents: opening.openingCents, currency: opening.currency });
+      setOpeningCash(`${Math.floor(opening.openingCents / 100)},${String(opening.openingCents % 100).padStart(2, '0')}`);
+      setFinancialEntry({ status: 'ready', scope, currency: opening.currency, original: opening });
+    };
+    setLoading(true);
+    setError('');
+    setSuccess('');
+    try {
+      if (!await guarded(() => financialClear.current)) throw new Error(t('modals.staffShift.financialOpeningUnavailable'));
+      const [organizationId, branchId, terminalId] = await guarded(() => Promise.all([
+        bridge.terminalConfig.getOrganizationId(), bridge.terminalConfig.getBranchId(), bridge.terminalConfig.getTerminalId(),
+      ]));
+      if (organizationId !== scope.organizationId || branchId !== scope.branchId || terminalId !== scope.terminalId) {
+        throw new Error(t('modals.staffShift.financialOpeningUnavailable'));
+      }
+      let remembered = financialAttempts.current.get(holder);
+      const status = await guarded(() => financialOpening.status(remembered?.openingKey));
+      let original = status.openings.find((entry) => openingMatchesScope(entry, scope) &&
+        (!remembered || entry.openingKey === remembered.openingKey));
+      let startedHere = false;
+      if (!original && remembered && !remembered.issuanceRefused) {
+        // A lost begin reply is unknown, never permission to issue another original.
+        setError(t('modals.staffShift.financialOpeningUnknown'));
+        return;
+      }
+      if (!original) {
+        if (!/^\d{4,8}$/.test(pin)) {
+          setError(t('modals.staffShift.financialOpeningReauthorize'));
+          financialBusy.current = false;
+          setLoading(false);
+          navigateCheckInStep('enter-pin');
+          return;
+        }
+        remembered = remembered ?? { openingKey: crypto.randomUUID(), openingCents, currency: financialEntry.currency };
+        remembered.issuanceRefused = false;
+        financialAttempts.current.set(holder, remembered);
+        financialTouched.current = true;
+        startedHere = true;
+        const response = await guarded(() => financialOpening.begin({ openingKey: remembered!.openingKey,
+          openingCents: remembered!.openingCents, currency: remembered!.currency, staffId: cashier.id, staffName: cashier.name, pin }));
+        setEnteredPin('');
+        // This exact native refusal happens before intent/queue creation. A
+        // fresh user PIN may retry the same key/body; IPC loss never enables it.
+        if (!response.success && response.code === 'HOSTED_CHECK_IN_REFUSED') {
+          remembered.issuanceRefused = true;
+          setError(t('modals.staffShift.financialOpeningReauthorize'));
+          financialBusy.current = false;
+          setLoading(false);
+          navigateCheckInStep('enter-pin');
+          return;
+        }
+        if (!response.success) throw new Error(response.error);
+        original = response.opening;
+      }
+      validateOriginal(original);
+      if (original.state === 'confirmed_unusable' || (original.state === 'confirmed_usable' && !original.usable)) {
+        setError(t('modals.staffShift.financialOpeningUnusable'));
+        return;
+      }
+      if (original.hostedAuthorization.state === 'required') {
+        if (startedHere || !/^\d{4,8}$/.test(pin)) {
+          setError(t('modals.staffShift.financialOpeningReauthorize'));
+          financialBusy.current = false;
+          setLoading(false);
+          navigateCheckInStep('enter-pin');
+          return;
+        }
+        financialTouched.current = true;
+        const response = await guarded(() => financialOpening.authorize(original!.openingKey, pin));
+        setEnteredPin('');
+        if (!response.success) throw new Error(response.error);
+        original = response.opening;
+        validateOriginal(original);
+      }
+      if (original.state !== 'confirmed_usable' || !original.usable || original.hostedAuthorization.state !== 'authorized') {
+        setError(t(original.state === 'confirmed_unusable' ? 'modals.staffShift.financialOpeningUnusable' : 'modals.staffShift.financialOpeningPending'));
+        return;
+      }
+      const shift = await guarded(() => financialOpening.readConfirmedShift(original!));
+      const latest = await guarded(() => financialOpening.status(original!.openingKey));
+      const confirmed = latest.openings.find((entry) => entry.openingKey === original!.openingKey);
+      if (!shift || !confirmed || !openingMatchesScope(confirmed, scope) || confirmed.shiftId !== shift.id ||
+          confirmed.state !== 'confirmed_usable' || !confirmed.usable || confirmed.hostedAuthorization.state !== 'authorized') {
+        setError(t('modals.staffShift.financialOpeningUnusable'));
+        return;
+      }
+      validateOriginal(confirmed);
+      if (!current()) return;
+      // Publish the actual matching native row, never an optimistic view/stub.
+      financialCompleted.current = true;
+      financialTouched.current = false;
+      setEnteredPin('');
+      setStaff({ staffId: cashier.id, name: cashier.name, role: 'cashier', branchId, terminalId, organizationId });
+      setActiveShiftImmediate(shift);
+      onClose();
+    } catch (failure) {
+      if (current() && failure !== stale) {
+        setEnteredPin('');
+        setError(financialAttempts.current.has(holder)
+          ? t('modals.staffShift.financialOpeningUnknown')
+          : extractErrorMessage(failure, t('modals.staffShift.financialOpeningUnavailable')));
+      }
+    } finally {
+      if (current()) {
+        financialBusy.current = false;
+        setLoading(false);
+      }
+    }
+  };
+
   const handleCheckIn = async (bypassZeroConfirm = false, roleOverride?: StaffShiftRole) => {
     if (!selectedStaff || !staff) {
       setError(t('modals.staffShift.noStaffSelected'));
@@ -2376,6 +2941,22 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     }
 
     const selectedRoleType = roleOverride ?? roleType;
+
+    if (selectedRoleType === 'cashier' && financialEntry.status !== 'ordinary') {
+      if (financialEntry.status !== 'ready' || financialBusy.current) return;
+      const openingCents = parseOpeningCents(openingCash);
+      if (openingCents === null) {
+        setError(t('modals.staffShift.invalidOpeningCash'));
+        return;
+      }
+      const remembered = financialEntry.scope && financialAttempts.current.has(JSON.stringify(financialEntry.scope));
+      if (!remembered && openingCents === 0 && !bypassZeroConfirm) {
+        setShowZeroCashConfirm(true);
+        return;
+      }
+      await handleFinancialCheckIn(openingCents);
+      return;
+    }
 
     // Driver-specific validation: cannot take starting cash without active cashier
     const driverAmount = parseMoneyInputValue(driverStartingAmount);
@@ -2577,6 +3158,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     if (!effectiveShift || !staff) {
       console.log('❌ No active shift or staff found');
       setError(t('modals.staffShift.noActiveShift'));
+      return;
+    }
+
+    if (isCashierCheckoutRole && handleGiftCheckoutIntent()) {
       return;
     }
 
@@ -2796,7 +3381,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       }) as unknown as ShiftIpcResult;
       console.log('closeShift result:', result);
 
-      if (result.success) {
+      if (result.success && (result as unknown as Record<string, unknown>).giftFinancialClosing != null) {
+        // A retained gift original is never a generic success or print.
+        rediscoverGiftClose();
+      } else if (result.success) {
         setCheckoutPaymentBlockers([]);
         const variance = result?.variance ?? result?.data?.variance ?? 0;
         const varianceText = t(variance >= 0 ? 'shiftManager.overage' : 'shiftManager.shortage', {
@@ -2868,6 +3456,9 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         const paymentIntegrityPayload = extractPaymentIntegrityPayload(result);
         setCheckoutPaymentBlockers(paymentIntegrityPayload?.blockers || []);
         setError(result.error || t('modals.staffShift.closeShiftFailed'));
+        if (readRefusalCode(result, '').startsWith('GIFT_CLOSING_')) {
+          rediscoverGiftClose();
+        }
       }
     } catch (err) {
       const paymentIntegrityPayload = extractPaymentIntegrityPayload(err);
@@ -2878,9 +3469,115 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     }
   };
 
+  // Sends only the approved preview: hosted fingerprint, exact count and the
+  // shown ordinary cents. A retained result is pending until canonical proof.
+  const submitGiftClose = async () => {
+    const approval = giftApproval;
+    const state = giftCheckout;
+    const shift = effectiveShift;
+    if (!approval || !shift || !staff || giftBusy || state.kind !== 'ready' ||
+        state.shiftId !== String(shift.id) || approval.epoch !== state.preview.epoch) {
+      return;
+    }
+    const countedCents = parseOpeningCents(closingCash);
+    if (countedCents === null || countedCents !== approval.countedCents) {
+      setGiftApproval(null);
+      setError(giftText(giftCloseText('countChanged', 'The count changed after review. Review it again.')));
+      return;
+    }
+    const { preview, opening, shiftId } = state;
+    const epoch = giftEpoch.current;
+    const guard = captureGiftGuard();
+    giftCloseToken.current += 1;
+    const token = giftCloseToken.current;
+    const closedBy =
+      staff.databaseStaffId ||
+      (isUuidValue(staff.staffId) ? staff.staffId.trim() : undefined);
+    const payload = {
+      shiftId,
+      closingCash: countedCents / 100,
+      closedBy,
+      giftClosing: buildGiftClosingRequest(preview, countedCents),
+    };
+
+    setGiftBusy(true);
+    setError('');
+    setSuccess('');
+    setCheckoutPaymentBlockers([]);
+    let result: unknown;
+    try {
+      result = await bridge.shifts.close(payload);
+    } catch (err) {
+      result = { success: false, code: readRefusalCode(err, 'LOCAL_STORE_FAILED') };
+    }
+    // The native close stays durable; a retired intent only drops its UI effects.
+    if (!guard() || token !== giftCloseToken.current) return;
+    setGiftBusy(false);
+    setGiftApproval(null);
+    // A published local close may already have cleared the active shift.
+    if (giftShiftId.current !== null && giftShiftId.current !== shiftId) return;
+
+    const outcome = readGiftCloseResult(result);
+    if (outcome.kind === 'retained') {
+      setClosingCash('');
+      setGiftCheckout({ kind: 'retained', shiftId, opening });
+      setGiftRecoveryTarget({
+        epoch,
+        origin: 'checkout',
+        staffId: preview.staffId,
+        closingKey: outcome.closingKey,
+        shiftId,
+        roleType: String(shift.role_type),
+        currency: preview.currency,
+        retainedCountedCents: outcome.countedCents ?? countedCents,
+        initial: null,
+        approved: {
+          ordinaryExpectedCents: preview.ordinaryExpectedCents,
+          giftCashCents: preview.giftCashCents,
+          expectedCents: preview.expectedCents,
+          varianceCents: countedCents - preview.expectedCents,
+          countedCents,
+        },
+      });
+      try {
+        await refreshActiveShift();
+      } catch (err) {
+        console.warn('[StaffShiftModal] Active shift refresh after gift close failed:', err);
+      }
+      return;
+    }
+    if (outcome.kind === 'refused') {
+      const paymentIntegrityPayload = extractPaymentIntegrityPayload(result);
+      setCheckoutPaymentBlockers(paymentIntegrityPayload?.blockers || []);
+      if (GIFT_CLOSE_TERMS_CODES.has(outcome.code)) {
+        setClosingCash('');
+      }
+      setError(giftText(giftCloseCodeText(outcome.code)));
+      if (GIFT_CLOSE_TERMS_CODES.has(outcome.code) || GIFT_CLOSE_ORIGINAL_CODES.has(outcome.code) ||
+          GIFT_CLOSE_REDISCOVER_CODES.has(outcome.code) || outcome.code === 'LOCAL_STORE_FAILED') {
+        rediscoverGiftClose();
+      }
+      return;
+    }
+    setError(giftText(giftCloseCodeText('LOCAL_READ_FAILED')));
+    rediscoverGiftClose();
+  };
+
   const handlePrintCheckout = async () => {
     if (!effectiveShift) {
       setError(t('modals.staffShift.noActiveShift'));
+      return;
+    }
+
+    if (giftCloseOwnsCheckout || giftCloseChecking) {
+      // Only a canonically confirmed original prints, from native proof.
+      await queueShiftCheckoutPrint({
+        bridge,
+        shiftId: effectiveShift.id,
+        roleType: effectiveShift.role_type,
+        giftClose: 'pending',
+      });
+      setError(giftText(giftCloseText('printPending', 'The checkout prints only after financial confirmation.')));
       return;
     }
 
@@ -2946,77 +3643,110 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     }
   };
 
-  const handleResolveCheckoutPaymentBlocker = async (
+  // "Record cash" / "Record card" on a checkout blocker (item F, 30/09/2026;
+  // parity with Android's "Record the payment"): confirmed first, then
+  // approved like the other money actions on this terminal (cashier or
+  // manager shift + PIN). The till keys it `z-record:<order>:<cents>` and
+  // audits who recorded it, with `charged: false`. Nothing is charged.
+  const handleCheckoutRecordOutcome = (
     blocker: UnsettledPaymentBlocker,
     method: 'cash' | 'card',
+    outcome: RecordPaymentBlockerOutcome,
   ) => {
-    const actionKey = `${blocker.orderId}:${method}`;
-    setResolvingCheckoutBlockerKey(actionKey);
-    setError('');
-    setSuccess('');
-
-    try {
-      const result = await bridge.reports.resolvePaymentBlocker({
-        orderId: blocker.orderId,
-        method,
-        staffShiftId: effectiveShift?.id,
-        staffId:
-          staff?.databaseStaffId ||
-          (isUuidValue(staff?.staffId) ? staff.staffId.trim() : undefined),
-      });
-
-      if (result?.success === false) {
-        const paymentIntegrityPayload = extractPaymentIntegrityPayload(result);
+    const methodLabel = t(
+      method === 'cash' ? 'modals.zReport.cash' : 'modals.zReport.card',
+    ).toLowerCase();
+    switch (outcome.kind) {
+      case 'cancelled':
+        return;
+      case 'shift_required':
+        setError(
+          t('modals.zReport.setAsideShiftRequired', {
+            defaultValue:
+              'A cashier or manager has to be checked in on this terminal to confirm it.',
+          }),
+        );
+        return;
+      case 'refused': {
+        const paymentIntegrityPayload = extractPaymentIntegrityPayload(outcome.result);
         if (paymentIntegrityPayload?.blockers) {
           setCheckoutPaymentBlockers(paymentIntegrityPayload.blockers);
         }
         setError(
           formatPaymentIntegrityError(
-            result,
+            outcome.result,
             t('modals.staffShift.closeShiftFailed'),
             t,
           ),
         );
         return;
       }
-
-      const remainingBlockers =
-        extractPaymentIntegrityPayload({
-          blockers:
-            (result as unknown as { remainingBlockers?: unknown })
-              ?.remainingBlockers,
-        })?.blockers ?? [];
-
-      setCheckoutPaymentBlockers((current) => [
-        ...current.filter((item) => item.orderId !== blocker.orderId),
-        ...remainingBlockers,
-      ]);
-      setSuccess(
-        t('modals.staffShift.paymentRepairRecorded', {
-          orderNumber: blocker.orderNumber,
-          method: t(
-            method === 'cash' ? 'modals.zReport.cash' : 'modals.zReport.card',
-          ).toLowerCase(),
-          defaultValue:
-            'Recorded the missing {{method}} payment for {{orderNumber}}. Retry shift checkout.',
-        }),
-      );
-    } catch (err) {
-      const paymentIntegrityPayload = extractPaymentIntegrityPayload(err);
-      if (paymentIntegrityPayload?.blockers) {
-        setCheckoutPaymentBlockers(paymentIntegrityPayload.blockers);
+      case 'failed': {
+        const paymentIntegrityPayload = extractPaymentIntegrityPayload(outcome.error);
+        if (paymentIntegrityPayload?.blockers) {
+          setCheckoutPaymentBlockers(paymentIntegrityPayload.blockers);
+        }
+        setError(
+          formatPaymentIntegrityError(
+            outcome.error,
+            t('modals.staffShift.closeShiftFailed'),
+            t,
+          ),
+        );
+        return;
       }
-      setError(
-        formatPaymentIntegrityError(
-          err,
-          t('modals.staffShift.closeShiftFailed'),
-          t,
-        ),
-      );
-    } finally {
-      setResolvingCheckoutBlockerKey(null);
+      case 'already_recorded':
+      case 'recorded': {
+        const remainingBlockers =
+          extractPaymentIntegrityPayload({
+            blockers: (outcome.result as { remainingBlockers?: unknown } | null)
+              ?.remainingBlockers,
+          })?.blockers ?? [];
+        setCheckoutPaymentBlockers((current) => [
+          ...current.filter((item) => item.orderId !== blocker.orderId),
+          ...remainingBlockers,
+        ]);
+        setSuccess(
+          outcome.kind === 'already_recorded'
+            ? t('modals.zReport.recordAlreadyRecorded', {
+                orderNumber: blocker.orderNumber,
+                method: methodLabel,
+                defaultValue:
+                  'This {{method}} payment for {{orderNumber}} was already recorded. Nothing was added.',
+              })
+            : t('modals.staffShift.paymentRepairRecorded', {
+                orderNumber: blocker.orderNumber,
+                method: methodLabel,
+                defaultValue:
+                  'Recorded the missing {{method}} payment for {{orderNumber}}. Retry shift checkout.',
+              }),
+        );
+      }
     }
   };
+
+  const {
+    runWithPrivilegedConfirmation: runCheckoutRecordApproval,
+    confirmationModal: checkoutRecordApprovalModal,
+  } = usePrivilegedActionConfirmation();
+  const recordCheckoutBlocker = useRecordPaymentBlocker({
+    runWithPrivilegedConfirmation: runCheckoutRecordApproval,
+    record: (blocker, method, amountCents) => {
+      setError('');
+      setSuccess('');
+      return bridge.reports.resolvePaymentBlocker({
+        orderId: blocker.orderId,
+        method,
+        amountCents,
+        staffShiftId: effectiveShift?.id,
+        staffId:
+          staff?.databaseStaffId ||
+          (isUuidValue(staff?.staffId) ? staff.staffId.trim() : undefined),
+      });
+    },
+    onOutcome: handleCheckoutRecordOutcome,
+    setBusyKey: setResolvingCheckoutBlockerKey,
+  });
 
   const handleRecordExpense = async () => {
     if (!effectiveShift || !staff) {
@@ -3424,6 +4154,16 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           defaultValue: 'No sales, expenses, refunds, or cash amounts will be recorded for this role during checkout.',
         }),
         accentClass: 'text-emerald-300',
+        minimal: true,
+      };
+    }
+
+    if (giftCloseOwnsCheckout) {
+      return {
+        label: giftText(giftCloseText('title', 'Gift card cash close')),
+        amount: 0,
+        note: giftText(giftCloseText('footerNote', 'Review the expected cash above.')),
+        accentClass: 'text-yellow-300',
         minimal: true,
       };
     }
@@ -4238,7 +4978,156 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     );
   };
 
+  const renderGiftCheckoutView = () => {
+    const state = giftCheckout;
+    if (state.kind !== 'preparing' && state.kind !== 'blocked' && state.kind !== 'ready' && state.kind !== 'retained') {
+      return null;
+    }
+    const preview = state.kind === 'ready' ? state.preview : null;
+    const countedCents = preview ? parseOpeningCents(closingCash) : null;
+    const varianceCents = preview && countedCents !== null ? countedCents - preview.expectedCents : null;
+    const approval = preview && giftApproval?.epoch === preview.epoch ? giftApproval : null;
+    const secondaryButtonClass = 'inline-flex items-center justify-center rounded-xl border border-slate-200/80 bg-white/80 px-4 py-2.5 text-sm font-semibold text-slate-700 transition-all disabled:cursor-not-allowed disabled:opacity-60 dark:border-white/10 dark:bg-white/10 dark:text-slate-200';
+
+    return (
+      <div className="space-y-4" data-testid="gift-close-checkout" data-state={state.kind}>
+        {renderCheckoutBackButton()}
+        <section className={checkoutSurfaceClass}>
+          <div className="text-xs uppercase tracking-[0.22em] text-yellow-700 dark:text-yellow-300/90">
+            {giftText(giftCloseText('title', 'Gift card cash close'))}
+          </div>
+          {state.kind === 'preparing' && (
+            <p data-testid="gift-close-preparing" className="mt-3 text-sm text-slate-600 dark:text-slate-300/80">
+              {giftText(giftCloseText('preparing', 'Preparing the gift card close terms…'))}
+            </p>
+          )}
+          {state.kind === 'blocked' && (
+            <div className="mt-3 space-y-3">
+              <p data-testid="gift-close-blocked" data-code={state.code} className="text-sm font-semibold text-red-700 dark:text-red-300">
+                {giftText(giftCloseCodeText(state.code, state.count))}
+              </p>
+              <button type="button" data-testid="gift-close-refresh" onClick={rediscoverGiftClose} className={secondaryButtonClass}>
+                {giftText(giftCloseText('checkAgain', 'Check again'))}
+              </button>
+            </div>
+          )}
+          {state.kind === 'retained' && (
+            <p data-testid="gift-close-retained" className="mt-3 text-sm text-slate-600 dark:text-slate-300/80">
+              {giftText(giftCloseCodeText('GIFT_CLOSING_ORIGINAL_EXISTS'))}
+            </p>
+          )}
+          {preview && (
+            <>
+              <dl className="mt-4 space-y-2">
+                <GiftCloseAmount
+                  testId="gift-close-ordinary"
+                  label={giftText(giftCloseText('ordinaryExpected', 'Ordinary cash expected'))}
+                  cents={preview.ordinaryExpectedCents}
+                  currency={preview.currency}
+                />
+                <GiftCloseAmount
+                  testId="gift-close-gift-cash"
+                  label={giftText(giftCloseText('giftCash', 'Gift card cash'))}
+                  cents={preview.giftCashCents}
+                  currency={preview.currency}
+                />
+                <GiftCloseAmount
+                  testId="gift-close-expected"
+                  label={giftText(giftCloseText('expectedTotal', 'Expected in drawer'))}
+                  cents={preview.expectedCents}
+                  currency={preview.currency}
+                  strong
+                />
+              </dl>
+              <label className="mt-5 block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">
+                {giftText(giftCloseText('countLabel', 'Counted cash in drawer'))}
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  data-testid="gift-close-count"
+                  value={closingCash}
+                  disabled={giftBusy || approval !== null}
+                  onChange={(e) => setClosingCash(formatMoneyInputWithCents(e.target.value))}
+                  className="liquid-glass-modal-input mt-3 w-full text-3xl font-black text-center"
+                />
+              </label>
+              <dl className="mt-3">
+                <GiftCloseAmount
+                  testId="gift-close-variance"
+                  label={giftText(giftCloseText('variance', 'Variance'))}
+                  cents={varianceCents}
+                  currency={preview.currency}
+                  signed
+                />
+              </dl>
+            </>
+          )}
+        </section>
+        {approval && (
+          <section data-testid="gift-close-approval" className={checkoutInsetSurfaceClass}>
+            <h4 className="text-base font-bold text-slate-900 dark:text-white">
+              {giftText(giftCloseText('approveTitle', 'Approve the gift card close'))}
+            </h4>
+            <p className="mt-1 text-sm text-slate-600 dark:text-slate-300/80">
+              {giftText(giftCloseText('approveBody', 'Close this shift with the terms and count shown above?'))}
+            </p>
+            <div className="mt-4 flex flex-wrap gap-3">
+              <button
+                type="button"
+                data-testid="gift-close-cancel"
+                disabled={giftBusy}
+                onClick={() => setGiftApproval(null)}
+                className={secondaryButtonClass}
+              >
+                {giftText(giftCloseText('cancel', 'Cancel'))}
+              </button>
+              <button
+                type="button"
+                data-testid="gift-close-approve"
+                disabled={giftBusy}
+                onClick={() => { void submitGiftClose(); }}
+                className="inline-flex items-center justify-center rounded-xl bg-red-600 px-4 py-2.5 text-sm font-bold text-white transition-all disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {giftText(giftCloseText('approve', 'Approve and close'))}
+              </button>
+            </div>
+          </section>
+        )}
+      </div>
+    );
+  };
+
+  const renderGiftRecovery = () => {
+    const target = giftRecoveryTarget;
+    if (!target) {
+      return null;
+    }
+
+    return (
+      <GiftCloseRecoveryPanel
+        key={`${target.epoch}:${target.staffId}:${target.closingKey}`}
+        bridge={bridge}
+        target={target}
+        isCurrent={() => giftMounted.current && target.epoch === giftEpoch.current}
+        print={(shiftId, roleType, isCurrent) => queueShiftCheckoutPrint({ bridge, shiftId, roleType, giftClose: 'confirmed', isCurrent })}
+        onDone={() => {
+          giftEpoch.current += 1;
+          setGiftRecoveryTarget(null);
+          if (target.origin === 'checkout') {
+            onClose();
+          } else if (selectedStaff?.id === target.staffId) {
+            loadGiftPending(target.staffId);
+          }
+        }}
+      />
+    );
+  };
+
   const renderCashierCheckoutView = () => {
+    if (giftCloseOwnsCheckout && !giftRecoveryTarget) {
+      return renderGiftCheckoutView();
+    }
+
     if (!effectiveShift || !shiftSummary) {
       return null;
     }
@@ -5246,6 +6135,9 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   const renderCheckInBackButton = (targetStep: CheckInStep) => (
     <motion.button
       onClick={() => {
+        clearFinancialAuthorization();
+        setEnteredPin('');
+        setLoading(false);
         setError('');
         navigateCheckInStep(targetStep);
       }}
@@ -5611,6 +6503,13 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     if (checkInStep === 'enter-pin' && selectedStaff) {
       return (
         <div className="space-y-3" data-testid="staff-pin-section">
+          {giftPending?.staffId === selectedStaff.id && (
+            <GiftClosePendingList
+              state={giftPending}
+              onSelect={(closing) => openGiftRecoveryFromCheckIn(selectedStaff.id, closing)}
+              onReload={() => loadGiftPending(selectedStaff.id)}
+            />
+          )}
           <div className="grid gap-4 xl:grid-cols-[minmax(280px,0.9fr)_minmax(0,1.1fr)]">
             {renderSelectedStaffSummary({
               helper: t('modals.staffShift.enterPinHelper'),
@@ -5817,6 +6716,9 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       const cashValue = isStartingCashRole
         ? (!activeCashierExists ? '0,00' : driverStartingAmount)
         : openingCash;
+      const originalOpening = roleType === 'cashier' && financialEntry.scope
+        ? financialAttempts.current.get(JSON.stringify(financialEntry.scope))
+        : undefined;
 
       return (
         <div className="space-y-6" data-testid="staff-cash-section">
@@ -5850,17 +6752,21 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 <label className={`block ${checkInEyebrowClass}`}>{cashTitle}</label>
 
                 <div className="mt-4 flex items-center gap-4">
-                  <Euro
+                  {roleType === 'cashier' && financialEntry.status !== 'ordinary' ? (
+                    <span data-testid="financial-opening-currency" className="text-xl font-bold">{financialEntry.currency ?? '—'}</span>
+                  ) : <Euro
                     className={`h-14 w-14 shrink-0 ${selectedRolePresentation.iconColor}`}
                     strokeWidth={3}
-                  />
+                  />}
 
                   <input
                     type="text"
                     inputMode="decimal"
                     value={cashValue}
                     onChange={(e) => {
-                      const val = formatMoneyInputWithCents(e.target.value);
+                      const raw = e.target.value;
+                      const val = /^[\d.,]*$/.test(raw) && (raw.match(/[.,]/g)?.length ?? 0) <= 1
+                        ? formatMoneyInputWithCents(raw) : raw;
                       if (isStartingCashRole) {
                         setDriverStartingAmount(val);
                       } else {
@@ -5870,11 +6776,22 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                     onFocus={(e) => e.target.select()}
                     placeholder="0,00"
                     className="liquid-glass-modal-input flex-1 text-3xl font-black text-center"
-                    readOnly={isStartingCashRole && !activeCashierExists}
+                    readOnly={!!originalOpening || financialBusy.current || (isStartingCashRole && !activeCashierExists)}
                     autoFocus
                   />
                 </div>
               </div>
+
+              {originalOpening && (
+                <p role="status" className={`mt-4 ${checkInMutedTextClass}`}>
+                  {t(financialEntry.original?.state === 'confirmed_unusable' ||
+                    (financialEntry.original?.state === 'confirmed_usable' && !financialEntry.original.usable)
+                    ? 'modals.staffShift.financialOpeningUnusable'
+                    : financialEntry.original?.hostedAuthorization.state === 'required'
+                      ? 'modals.staffShift.financialOpeningReauthorize'
+                      : 'modals.staffShift.financialOpeningPending')}
+                </p>
+              )}
 
               {showZeroCashConfirm && roleType === 'cashier' && (
                 <div className="mt-5 rounded-[22px] border border-yellow-300 bg-yellow-50 p-4 dark:border-yellow-400/35 dark:bg-yellow-400/10">
@@ -5991,6 +6908,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
               }}
               disabled={
                 loading ||
+                  (roleType === 'cashier' && (financialEntry.status === 'checking' || financialEntry.status === 'blocked')) ||
                   (cashEntryRole &&
                   (roleType === 'driver' || roleType === 'server') &&
                   !activeCashierExists &&
@@ -6013,7 +6931,11 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 </>
               ) : (
                 <>
-                  {t('modals.staffShift.startShift')}
+                  {t(roleType === 'cashier' && financialEntry.status === 'checking'
+                    ? 'modals.staffShift.financialOpeningChecking'
+                    : roleType === 'cashier' && financialEntry.scope && financialAttempts.current.has(JSON.stringify(financialEntry.scope))
+                      ? 'modals.staffShift.financialOpeningResume'
+                      : 'modals.staffShift.startShift')}
                   <Check className="h-4 w-4" />
                 </>
               )}
@@ -6130,7 +7052,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   'These orders belong to the current business day. Record or confirm the missing payment row before the cashier can check out.',
               })}
               className="mb-4"
-              onResolveBlocker={handleResolveCheckoutPaymentBlocker}
+              onResolveBlocker={recordCheckoutBlocker.requestRecord}
               resolvingKey={resolvingCheckoutBlockerKey}
             />
           )}
@@ -6245,11 +7167,13 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
               animate="center"
               exit="exit"
             >
-              {satelliteCheckout
-                ? renderSatelliteCheckoutView()
-                : effectiveMode === 'checkin'
-                  ? renderCheckInContent()
-                  : renderCheckoutContent()}
+              {giftRecoveryTarget
+                ? renderGiftRecovery()
+                : satelliteCheckout
+                  ? renderSatelliteCheckoutView()
+                  : effectiveMode === 'checkin'
+                    ? renderCheckInContent()
+                    : renderCheckoutContent()}
             </motion.div>
           </AnimatePresence>
 
@@ -7981,14 +8905,16 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   }}
                   printLabel={t('common.actions.print', 'Print')}
                   checkoutLabel={
-                    loading
+                    loading || giftBusy
                       ? t('modals.staffShift.closingShift')
                       : t('modals.staffShift.checkOut')
                   }
                   isPrinting={isPrintCheckoutLoading}
-                  isPrintDisabled={loading || isPrintCheckoutLoading || !canPrintCheckoutSnapshot}
-                  isCheckoutLoading={loading}
-                  isCheckoutDisabled={loading || isCheckoutAmountMissing}
+                  isPrintDisabled={loading || isPrintCheckoutLoading || !canPrintCheckoutSnapshot ||
+                    giftCloseOwnsCheckout || giftCloseChecking}
+                  isCheckoutLoading={loading || giftBusy}
+                  isCheckoutDisabled={loading || isCheckoutAmountMissing || giftBusy || giftRecoveryTarget !== null ||
+                    giftApproval !== null || (giftCloseOwnsCheckout && giftCheckout.kind !== 'ready')}
                 />
               </div>
             </div>
@@ -8042,6 +8968,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         onClose={closeConfirm}
         isLoading={loading}
       />
+      {recordCheckoutBlocker.confirmDialog}
+      {checkoutRecordApprovalModal}
     </>
   );
 }

@@ -1,4 +1,4 @@
-import { AlertTriangle, Banknote, CreditCard } from "lucide-react";
+import { AlertTriangle, Banknote, CreditCard, RotateCcw, Undo2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import type { UnsettledPaymentBlocker } from "../../../lib/ipc-contracts";
@@ -7,8 +7,13 @@ import {
   getLocalizedPaymentBlockerReason,
   getLocalizedPaymentMethod,
   getLocalizedPaymentStatus,
+  isPaymentsNeedReviewBlocker,
+  isPaymentsNotSavedBlocker,
+  paymentBlockerKey,
 } from "../../../lib/payment-integrity";
-import { formatCurrency } from "../../utils/format";
+import { formatCurrency, formatDateTime } from "../../utils/format";
+import { setAsideResolvingKey } from "../../utils/paymentSetAside";
+import { unsavedResolvingKey, unsavedSavingKey } from "../../utils/unsavedPayments";
 
 interface UnsettledPaymentBlockersPanelProps {
   blockers: UnsettledPaymentBlocker[];
@@ -19,6 +24,21 @@ interface UnsettledPaymentBlockersPanelProps {
     blocker: UnsettledPaymentBlocker,
     method: "cash" | "card",
   ) => void;
+  /**
+   * "Money given back to the customer" for a payment set aside as a possible
+   * duplicate (`payments_need_review`). The caller confirms and authorizes.
+   */
+  onResolveSetAsidePayment?: (blocker: UnsettledPaymentBlocker) => void;
+  /**
+   * "Save payment again" for a card charged on this till whose payment is
+   * not saved yet (`payments_not_saved`): the same write, no new charge.
+   */
+  onSaveUnsavedPayment?: (blocker: UnsettledPaymentBlocker) => void;
+  /**
+   * "Money given back to the customer" for a card charged and never saved.
+   * The caller confirms and authorizes.
+   */
+  onResolveUnsavedPayment?: (blocker: UnsettledPaymentBlocker) => void;
   resolvingKey?: string | null;
 }
 
@@ -45,12 +65,27 @@ function getMethodIcon(method: string) {
   return <AlertTriangle className="h-3.5 w-3.5" />;
 }
 
+/**
+ * `payments_not_saved` for a card charged at new-order checkout whose order
+ * this till has not written yet (`new_order`, `new_order_cannot_save`).
+ */
+export function isNewOrderCheckoutBlocker(blocker: UnsettledPaymentBlocker): boolean {
+  return (
+    blocker.reasonCode === "payments_not_saved" &&
+    typeof blocker.reasonVariant === "string" &&
+    blocker.reasonVariant.startsWith("new_order")
+  );
+}
+
 export function UnsettledPaymentBlockersPanel({
   blockers,
   title,
   helperText,
   className = "",
   onResolveBlocker,
+  onResolveSetAsidePayment,
+  onSaveUnsavedPayment,
+  onResolveUnsavedPayment,
   resolvingKey = null,
 }: UnsettledPaymentBlockersPanelProps) {
   const { t } = useTranslation();
@@ -101,16 +136,35 @@ export function UnsettledPaymentBlockersPanel({
           // which then never reconciles at close. The same applies to a
           // settlement recorded in the wrong tender — that one needs a void,
           // not more money.
+          // A set-aside payment is money to give BACK, never money to take;
+          // a card charged but not saved is money already taken: never again.
           const NON_TENDER_REASON_CODES = [
             "unsupported_payment_method",
             "platform_settlement_missing",
             "platform_settlement_mismatch",
             "overpaid_order",
             "duplicate_payment",
+            "payments_need_review",
+            "payments_not_saved",
+            // A cancelled order still labelled paid (item D7, a warning): its
+            // record is restored from the server or the owner decides; money
+            // is never recorded on a cancelled order from here.
+            "cancelled_order_claims_payment",
           ];
+          const reviewPayment = isPaymentsNeedReviewBlocker(blocker)
+            ? blocker.reviewPayment
+            : undefined;
+          const unsavedPayment = isPaymentsNotSavedBlocker(blocker)
+            ? blocker.unsavedPayment
+            : undefined;
+          // Shared rule R4 (round 3, 01/10/2026): an order whose money the
+          // delivery platform holds is never offered "Record the payment":
+          // the money is restored from the server (Sync Now), never taken at
+          // the till (the server refuses it, and the loop starts again).
           const canResolveHere =
             typeof onResolveBlocker === "function" &&
             outstanding > 0.009 &&
+            blocker.platformHeld !== true &&
             !NON_TENDER_REASON_CODES.includes(blocker.reasonCode);
           const preferredMethod =
             blocker.reasonCode === "missing_cash_payment" ||
@@ -127,13 +181,26 @@ export function UnsettledPaymentBlockersPanel({
             : (["cash", "card"] as const);
           return (
             <div
-              key={`${blocker.orderId}-${blocker.reasonCode}`}
+              key={paymentBlockerKey(blocker)}
+              data-testid={
+                reviewPayment
+                  ? `set-aside-payment-${reviewPayment.paymentId}`
+                  : unsavedPayment
+                    ? `unsaved-payment-${unsavedPayment.idempotencyKey}`
+                    : undefined
+              }
               className="rounded-2xl border border-white/10 bg-slate-950/40 p-4"
             >
               <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
                 <div>
                   <div className="text-lg font-black text-white">
-                    {blocker.orderNumber}
+                    {/* A card charged at new-order checkout whose order is not
+                        written yet (item E): no order number exists. */}
+                    {isNewOrderCheckoutBlocker(blocker)
+                      ? t("payment.notSaved.newOrder", {
+                          defaultValue: "New order, not saved yet",
+                        })
+                      : blocker.orderNumber}
                   </div>
                   <div className="mt-1 text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
                     {t("paymentIntegrity.reasonLabel", {
@@ -145,6 +212,87 @@ export function UnsettledPaymentBlockersPanel({
                   </div>
                 </div>
 
+                {reviewPayment ? (
+                <div className="grid gap-2 sm:grid-cols-3 xl:min-w-[330px]">
+                  <div className="rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-3">
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                      {t("paymentIntegrity.setAsidePaymentLabel", {
+                        defaultValue: "Set-aside payment",
+                      })}
+                    </div>
+                    <div className="mt-2 text-sm font-bold text-amber-200">
+                      {formatCurrency(reviewPayment.amount || 0)}
+                    </div>
+                  </div>
+                  <div className="rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-3">
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                      {t("paymentIntegrity.takenAtLabel", {
+                        defaultValue: "Taken at",
+                      })}
+                    </div>
+                    <div className="mt-2 text-sm font-bold text-white">
+                      {reviewPayment.takenAt
+                        ? formatDateTime(reviewPayment.takenAt, {
+                            day: "2-digit",
+                            month: "2-digit",
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          })
+                        : "-"}
+                    </div>
+                  </div>
+                  <div className="rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-3">
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                      {t("paymentIntegrity.totalLabel", {
+                        defaultValue: "Total",
+                      })}
+                    </div>
+                    <div className="mt-2 text-sm font-bold text-white">
+                      {formatCurrency(blocker.totalAmount || 0)}
+                    </div>
+                  </div>
+                </div>
+                ) : unsavedPayment ? (
+                <div className="grid gap-2 sm:grid-cols-3 xl:min-w-[330px]">
+                  <div className="rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-3">
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                      {t("paymentIntegrity.unsavedPaymentLabel", {
+                        defaultValue: "Charged, not saved",
+                      })}
+                    </div>
+                    <div className="mt-2 text-sm font-bold text-red-200">
+                      {formatCurrency(unsavedPayment.amount || 0)}
+                    </div>
+                  </div>
+                  <div className="rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-3">
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                      {t("paymentIntegrity.chargedAtLabel", {
+                        defaultValue: "Charged at",
+                      })}
+                    </div>
+                    <div className="mt-2 text-sm font-bold text-white">
+                      {unsavedPayment.capturedAt
+                        ? formatDateTime(unsavedPayment.capturedAt, {
+                            day: "2-digit",
+                            month: "2-digit",
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          })
+                        : "-"}
+                    </div>
+                  </div>
+                  <div className="rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-3">
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                      {t("paymentIntegrity.totalLabel", {
+                        defaultValue: "Total",
+                      })}
+                    </div>
+                    <div className="mt-2 text-sm font-bold text-white">
+                      {formatCurrency(blocker.totalAmount || 0)}
+                    </div>
+                  </div>
+                </div>
+                ) : (
                 <div className="grid gap-2 sm:grid-cols-3 xl:min-w-[330px]">
                   <div className="rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-3">
                     <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
@@ -177,6 +325,7 @@ export function UnsettledPaymentBlockersPanel({
                     </div>
                   </div>
                 </div>
+                )}
               </div>
 
               <div className="mt-4 flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
@@ -190,7 +339,11 @@ export function UnsettledPaymentBlockersPanel({
                     {getLocalizedPaymentMethod(blocker.paymentMethod || "pending", t)}
                   </span>
                   <span className="inline-flex rounded-full border border-slate-400/20 bg-slate-500/10 px-2.5 py-1 text-xs font-semibold uppercase tracking-wide text-slate-200">
-                    {getLocalizedPaymentStatus(blocker.paymentStatus || "pending", t)}
+                    {reviewPayment
+                      ? getLocalizedPaymentStatus("duplicate_review", t)
+                      : unsavedPayment
+                        ? getLocalizedPaymentStatus("not_saved", t)
+                        : getLocalizedPaymentStatus(blocker.paymentStatus || "pending", t)}
                   </span>
                 </div>
 
@@ -203,6 +356,74 @@ export function UnsettledPaymentBlockersPanel({
                   {getLocalizedPaymentBlockerFix(blocker, t, formatCurrency)}
                 </div>
               </div>
+
+              {reviewPayment && typeof onResolveSetAsidePayment === "function" && (
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    disabled={Boolean(resolvingKey)}
+                    onClick={() => onResolveSetAsidePayment(blocker)}
+                    className={`inline-flex min-h-[44px] items-center gap-2 rounded-2xl border border-transparent bg-amber-400 px-3 py-2 text-sm font-semibold text-slate-950 transition-transform active:scale-[0.98] active:bg-amber-300 ${
+                      resolvingKey ? "cursor-not-allowed opacity-60" : ""
+                    }`}
+                    aria-busy={resolvingKey === setAsideResolvingKey(reviewPayment.paymentId)}
+                  >
+                    <Undo2 className="h-4 w-4" />
+                    {resolvingKey === setAsideResolvingKey(reviewPayment.paymentId)
+                      ? t("paymentIntegrity.setAsideResolving", {
+                          defaultValue: "Recording...",
+                        })
+                      : t("paymentIntegrity.setAsideReturnedAction", {
+                          defaultValue: "Money given back to the customer",
+                        })}
+                  </button>
+                </div>
+              )}
+
+              {unsavedPayment && (
+                <div className="mt-4 flex flex-wrap gap-2">
+                  {unsavedPayment.canSaveAgain && typeof onSaveUnsavedPayment === "function" && (
+                    <button
+                      type="button"
+                      disabled={Boolean(resolvingKey)}
+                      onClick={() => onSaveUnsavedPayment(blocker)}
+                      className={`inline-flex min-h-[44px] items-center gap-2 rounded-2xl border border-transparent bg-emerald-400 px-3 py-2 text-sm font-semibold text-slate-950 transition-transform active:scale-[0.98] active:bg-emerald-300 ${
+                        resolvingKey ? "cursor-not-allowed opacity-60" : ""
+                      }`}
+                      aria-busy={resolvingKey === unsavedSavingKey(unsavedPayment.idempotencyKey)}
+                    >
+                      <RotateCcw className="h-4 w-4" />
+                      {resolvingKey === unsavedSavingKey(unsavedPayment.idempotencyKey)
+                        ? t("paymentIntegrity.unsavedSaving", {
+                            defaultValue: "Saving...",
+                          })
+                        : t("paymentIntegrity.unsavedSaveAgainAction", {
+                            defaultValue: "Save payment again",
+                          })}
+                    </button>
+                  )}
+                  {typeof onResolveUnsavedPayment === "function" && (
+                    <button
+                      type="button"
+                      disabled={Boolean(resolvingKey)}
+                      onClick={() => onResolveUnsavedPayment(blocker)}
+                      className={`inline-flex min-h-[44px] items-center gap-2 rounded-2xl border border-amber-400/40 bg-amber-500/15 px-3 py-2 text-sm font-semibold text-amber-100 transition-transform active:scale-[0.98] active:bg-amber-500/25 ${
+                        resolvingKey ? "cursor-not-allowed opacity-60" : ""
+                      }`}
+                      aria-busy={resolvingKey === unsavedResolvingKey(unsavedPayment.idempotencyKey)}
+                    >
+                      <Undo2 className="h-4 w-4" />
+                      {resolvingKey === unsavedResolvingKey(unsavedPayment.idempotencyKey)
+                        ? t("paymentIntegrity.unsavedResolving", {
+                            defaultValue: "Recording...",
+                          })
+                        : t("paymentIntegrity.unsavedReturnedAction", {
+                            defaultValue: "Money given back to the customer",
+                          })}
+                    </button>
+                  )}
+                </div>
+              )}
 
               {canResolveHere && (
                 <div className="mt-4 flex flex-wrap gap-2">

@@ -29,6 +29,11 @@ pub const MAX_LOG_FILES: usize = 10;
 #[derive(Debug, Clone, Copy)]
 pub struct DiagnosticsExportOptions {
     pub include_logs: bool,
+    /// Kept for the IPC contract only: every bundle is redacted, whatever
+    /// this says. Review 30/09/2026: it defaulted to false, so an export
+    /// asked for without options (`diagnostics:export` with no payload) left
+    /// the terminal unredacted. The Android bundle has no unredacted export
+    /// either.
     pub redact_sensitive: bool,
 }
 
@@ -36,7 +41,7 @@ impl Default for DiagnosticsExportOptions {
     fn default() -> Self {
         Self {
             include_logs: true,
-            redact_sensitive: false,
+            redact_sensitive: true,
         }
     }
 }
@@ -69,6 +74,7 @@ pub fn get_system_health(db: &DbState) -> Result<Value, String> {
     let (
         schema_version,
         sync_backlog,
+        sync_backlog_status,
         payment_adjustment_backlog,
         last_sync_times,
         mut printer_status,
@@ -82,7 +88,17 @@ pub fn get_system_health(db: &DbState) -> Result<Value, String> {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap_or(0);
 
-        let sync_backlog = get_sync_backlog(&conn);
+        // A failed read keeps the backlog's shape but says so
+        // (syncBacklogStatus): the Health view's backlog card shows
+        // "unavailable", never "clear" (review 30/09/2026). The bundle's
+        // sync_backlog.json reports the failure itself.
+        let (sync_backlog, sync_backlog_status) = match get_sync_backlog(&conn) {
+            Ok(backlog) => (backlog, "ok"),
+            Err(error) => {
+                warn!(error = %error, "Failed to read the sync backlog for system health");
+                (json!({}), "unavailable")
+            }
+        };
         let payment_adjustment_backlog = get_payment_adjustment_backlog(&conn);
         let last_sync_times = get_last_sync_times(&conn);
         let printer_status = get_printer_status(&conn);
@@ -101,6 +117,7 @@ pub fn get_system_health(db: &DbState) -> Result<Value, String> {
         (
             schema_version,
             sync_backlog,
+            sync_backlog_status,
             payment_adjustment_backlog,
             last_sync_times,
             printer_status,
@@ -153,6 +170,7 @@ pub fn get_system_health(db: &DbState) -> Result<Value, String> {
     Ok(json!({
         "schemaVersion": schema_version,
         "syncBacklog": sync_backlog,
+        "syncBacklogStatus": sync_backlog_status,
         "paymentAdjustmentBacklog": payment_adjustment_backlog,
         "syncBlockerDetails": sync_blocker_details,
         "terminalContext": terminal_context,
@@ -175,65 +193,52 @@ pub fn get_system_health(db: &DbState) -> Result<Value, String> {
     }))
 }
 
-fn get_sync_backlog(conn: &rusqlite::Connection) -> Value {
-    // Counts from sync_queue
-    let mut result = json!({});
-    if let Ok(mut stmt) = conn.prepare(
-        "SELECT entity_type, status, COUNT(*) FROM sync_queue GROUP BY entity_type, status",
-    ) {
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            })
-            .ok();
-        // Wave 9 H5: guard the `as_object_mut()` call instead of `.unwrap()`.
-        // `result` is initialised via `json!({})` so `as_object_mut` almost
-        // always returns `Some` — but the unwrap panics inside a Tauri
-        // command path, and a panic there is uniformly worse than a
-        // missing diagnostic row. The guard also makes this safe if a
-        // future refactor ever makes `result` non-object-shaped.
-        if let Some(rows) = rows {
-            if let Some(obj) = result.as_object_mut() {
-                for row in rows.flatten() {
-                    let (entity_type, status, count) = row;
-                    let entry = obj.entry(&entity_type).or_insert_with(|| json!({}));
-                    entry[&status] = json!(count);
-                }
-            }
-        }
+/// Unsynced rows by queue entity and status, plus the payment and adjustment
+/// sync states. A failed read is an error, never an empty ("clear") backlog
+/// (review 30/09/2026: sync_backlog.json recorded `{}` as "ok").
+fn get_sync_backlog(conn: &rusqlite::Connection) -> Result<Value, String> {
+    let mut result = serde_json::Map::new();
+    let mut stmt = conn
+        .prepare(
+            "SELECT entity_type, status, COUNT(*) FROM sync_queue GROUP BY entity_type, status",
+        )
+        .map_err(|error| format!("sync_queue backlog: {error}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+        .map_err(|error| format!("sync_queue backlog: {error}"))?;
+    for (entity_type, status, count) in rows {
+        let entry = result.entry(entity_type).or_insert_with(|| json!({}));
+        entry[&status] = json!(count);
     }
 
     // Also check order_payments and payment_adjustments sync states
-    for table in &["order_payments", "payment_adjustments"] {
+    for table in ["order_payments", "payment_adjustments"] {
         let query = format!(
             "SELECT sync_state, COUNT(*) FROM {table} WHERE sync_state != 'applied' GROUP BY sync_state"
         );
-        if let Ok(mut stmt) = conn.prepare(&query) {
-            let rows = stmt
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-                })
-                .ok();
-            if let Some(rows) = rows {
-                // Wave 9 H5: see rationale above. Same guard, repeated here
-                // rather than hoisted so the two loops stay structurally
-                // similar to the diagnostics shape.
-                if let Some(obj) = result.as_object_mut() {
-                    for row in rows.flatten() {
-                        let (state, count) = row;
-                        let entry = obj.entry(*table).or_insert_with(|| json!({}));
-                        entry[&state] = json!(count);
-                    }
-                }
-            }
+        let mut stmt = conn
+            .prepare(&query)
+            .map_err(|error| format!("{table} sync states: {error}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+            .map_err(|error| format!("{table} sync states: {error}"))?;
+        for (state, count) in rows {
+            let entry = result.entry(table).or_insert_with(|| json!({}));
+            entry[&state] = json!(count);
         }
     }
 
-    result
+    Ok(Value::Object(result))
 }
 
 fn get_checkout_payment_blockers(db: &DbState) -> Result<Value, String> {
@@ -629,30 +634,31 @@ fn get_credential_state(db: &DbState) -> Value {
     })
 }
 
-fn get_terminal_settings_snapshot(conn: &rusqlite::Connection) -> Value {
+/// The terminal, organization and restaurant settings. A failed read is an
+/// error, never an empty snapshot (review 30/09/2026).
+fn get_terminal_settings_snapshot(conn: &rusqlite::Connection) -> Result<Value, String> {
     let mut snapshot = serde_json::Map::new();
-    let mut stmt = match conn.prepare(
-        "SELECT setting_category, setting_key, setting_value
+    let mut stmt = conn
+        .prepare(
+            "SELECT setting_category, setting_key, setting_value
          FROM local_settings
          WHERE setting_category IN ('terminal', 'organization', 'restaurant')
          ORDER BY setting_category ASC, setting_key ASC",
-    ) {
-        Ok(stmt) => stmt,
-        Err(_) => return Value::Object(snapshot),
-    };
+        )
+        .map_err(|error| format!("local_settings: {error}"))?;
 
-    let rows = match stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-        ))
-    }) {
-        Ok(rows) => rows,
-        Err(_) => return Value::Object(snapshot),
-    };
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+        .map_err(|error| format!("local_settings: {error}"))?;
 
-    for row in rows.flatten() {
+    for row in rows {
         let (category, key, value) = row;
         let category_entry = snapshot
             .entry(category)
@@ -662,7 +668,7 @@ fn get_terminal_settings_snapshot(conn: &rusqlite::Connection) -> Value {
         }
     }
 
-    Value::Object(snapshot)
+    Ok(Value::Object(snapshot))
 }
 
 fn write_json_to_zip(
@@ -729,28 +735,104 @@ fn get_printer_status(conn: &rusqlite::Connection) -> Value {
         }
     }
 
-    // Unrestricted pending aggregate, deliberately NOT derived from the five-row
+    // Unrestricted waiting aggregate, deliberately NOT derived from the five-row
     // `recentJobs` window above. On a till with two printers a job can stay stuck
     // on one while newer jobs keep completing through the other, pushing the
     // stalled one out of that window — and with it, any alert that reads only
     // `recentJobs`. The stall detector needs the whole queue, not the newest few.
-    let (pending_count, oldest_pending_created_at) = conn
-        .query_row(
-            "SELECT COUNT(*), MIN(created_at) FROM print_jobs WHERE status = 'pending'",
-            [],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
-        )
-        .unwrap_or((0, None));
+    // A read that fails is `null` (not read), never `count: 0` (nothing waits).
+    let pending_jobs = match read_print_queue_waiting(conn) {
+        Ok(waiting) => json!({
+            "count": waiting.count,
+            "oldestCreatedAt": waiting.oldest_created_at,
+            "pausedCount": waiting.paused_count,
+        }),
+        Err(error) => {
+            warn!(error = %error, "Failed to read the print queue for system health");
+            Value::Null
+        }
+    };
 
     json!({
         "configured": profile_count > 0,
         "profileCount": profile_count,
         "defaultProfile": serde_json::Value::Null,
         "recentJobs": recent_jobs,
-        "pendingJobs": {
-            "count": pending_count,
-            "oldestCreatedAt": oldest_pending_created_at,
-        },
+        "pendingJobs": pending_jobs,
+    })
+}
+
+/// The print jobs `printerStatus.pendingJobs` reports (the key keeps its old
+/// name so older readers still parse it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PrintQueueWaiting {
+    /// Jobs waiting to print that nothing is holding on purpose.
+    count: i64,
+    /// When the oldest of them was queued; the Health view and the
+    /// `printer.jobs_not_printing` incident age it.
+    oldest_created_at: Option<String>,
+    /// Jobs held by a pause (evidence only; they never count as stalled).
+    paused_count: i64,
+}
+
+/// Jobs still waiting to print over the whole queue, for the Health view's
+/// "receipts are not printing" rule and the support incident.
+///
+/// - `pending` and `printing`. The worker marks a job `printing` when it takes
+///   it, and `recover_stale_printing_jobs` fails one left there after 30 s
+///   unless an attempt still holds it (a spooler job the printer never took),
+///   so a `printing` job minutes old is stuck, not slow. Both are aged from
+///   `created_at`, like Android's queue (`PrintQueueService.getWaitingJobSummary`):
+///   the receipt has been owed since then.
+/// - Jobs held by a pause are left out: the whole queue (`queue_paused`) or
+///   the job's printer (`queue_paused_profile::<id>`), the rule the dispatcher
+///   (`select_ready_pending_jobs`), the stale-job sweep and the print queue
+///   screen's `paused` flag use. Someone paused them on purpose, so they are
+///   not "not printing"; they are counted in `paused_count`.
+fn read_print_queue_waiting(conn: &rusqlite::Connection) -> Result<PrintQueueWaiting, String> {
+    const WAITING: &str = "status IN ('pending', 'printing')";
+    let waiting_total: i64 = conn
+        .query_row(
+            &format!("SELECT COUNT(*) FROM print_jobs WHERE {WAITING}"),
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("count waiting print jobs: {error}"))?;
+
+    if crate::print::is_print_queue_paused_with_conn(conn, None) {
+        return Ok(PrintQueueWaiting {
+            count: 0,
+            oldest_created_at: None,
+            paused_count: waiting_total,
+        });
+    }
+
+    let mut paused_profiles: Vec<String> = crate::print::paused_printer_profiles(conn)
+        .into_iter()
+        .collect();
+    paused_profiles.sort();
+    let mut sql = format!("SELECT COUNT(*), MIN(created_at) FROM print_jobs WHERE {WAITING}");
+    if !paused_profiles.is_empty() {
+        let placeholders = (1..=paused_profiles.len())
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        sql.push_str(&format!(
+            " AND (printer_profile_id IS NULL OR printer_profile_id NOT IN ({placeholders}))"
+        ));
+    }
+    let (count, oldest_created_at) = conn
+        .query_row(
+            &sql,
+            rusqlite::params_from_iter(paused_profiles.iter()),
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .map_err(|error| format!("read waiting print jobs: {error}"))?;
+
+    Ok(PrintQueueWaiting {
+        count,
+        oldest_created_at,
+        paused_count: (waiting_total - count).max(0),
     })
 }
 
@@ -790,9 +872,100 @@ pub fn export_diagnostics_with_options(
     output_dir: &Path,
     export_options: DiagnosticsExportOptions,
 ) -> Result<String, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    export_diagnostics_bundle(db, output_dir, export_options, None)
+}
 
-    let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
+/// Format name and version written to `diagnostics_manifest.json`, shared
+/// with the Android bundle (`thesmall-pos-diagnostics-v2`).
+pub const DIAGNOSTICS_FORMAT: &str = "thesmall-pos-diagnostics-v2";
+pub const DIAGNOSTICS_FORMAT_VERSION: u32 = 2;
+pub const DIAGNOSTICS_MANIFEST_FILE: &str = "diagnostics_manifest.json";
+pub const HEALTH_VIEW_FILE: &str = "health_view.json";
+/// A Health view snapshot larger than this is not embedded.
+const MAX_HEALTH_VIEW_BYTES: usize = 256 * 1024;
+
+/// One collector's outcome, as the manifest records it.
+struct CollectorRecord {
+    file: &'static str,
+    status: &'static str,
+    duration_ms: u128,
+    error: Option<String>,
+}
+
+/// Run one collector. A collector that fails writes `{ status:
+/// "unavailable", error }` and the export goes on: an empty value must never
+/// stand in for "healthy", and one broken table must not cost support the
+/// other files.
+fn run_collector(
+    records: &mut Vec<CollectorRecord>,
+    file: &'static str,
+    collect: impl FnOnce() -> Result<Value, String>,
+) -> Value {
+    let started = std::time::Instant::now();
+    let (value, status, error) = match collect() {
+        Ok(value) => {
+            let status = match value.get("status").and_then(Value::as_str) {
+                Some("not_collected") => "not_collected",
+                Some("unavailable") => "unavailable",
+                _ => "ok",
+            };
+            (value, status, None)
+        }
+        Err(error) => {
+            let error = crate::print::safe_operational_error(Some(error), 512)
+                .unwrap_or_else(|| "collector failed".to_string());
+            (
+                json!({ "status": "unavailable", "error": error }),
+                "unavailable",
+                Some(error),
+            )
+        }
+    };
+    records.push(CollectorRecord {
+        file,
+        status,
+        duration_ms: started.elapsed().as_millis(),
+        error,
+    });
+    value
+}
+
+/// What the operator saw in the Health view when the export was started:
+/// the renderer's snapshot (shared `buildHealthView`,
+/// `thesmall-pos-health-view-v1`) is the file itself, as in the Android
+/// bundle; `not_collected` when it sent none.
+fn health_view_document(health_view: Option<Value>) -> Result<Value, String> {
+    let Some(view) = health_view.filter(Value::is_object) else {
+        return Ok(json!({
+            "status": "not_collected",
+            "reason": "the export was not started from the Health view",
+        }));
+    };
+    let encoded_len = serde_json::to_vec(&view)
+        .map(|bytes| bytes.len())
+        .unwrap_or(0);
+    if encoded_len > MAX_HEALTH_VIEW_BYTES {
+        return Ok(json!({
+            "status": "unavailable",
+            "reason": "health view snapshot too large",
+            "bytes": encoded_len,
+        }));
+    }
+    Ok(view)
+}
+
+/// Collects diagnostics data and writes a zip file to the given directory,
+/// with the Health view the operator saw (`health_view.json`) when the
+/// renderer sends it. Returns the path to the zip file.
+pub fn export_diagnostics_bundle(
+    db: &DbState,
+    output_dir: &Path,
+    export_options: DiagnosticsExportOptions,
+    health_view: Option<Value>,
+) -> Result<String, String> {
+    let export_started = std::time::Instant::now();
+    let generated_at = chrono::Utc::now();
+    let timestamp = generated_at.format("%Y%m%d_%H%M%S").to_string();
     let zip_name = format!("thesmall-pos-diagnostics-{timestamp}.zip");
     let zip_path = output_dir.join(&zip_name);
 
@@ -802,186 +975,282 @@ pub fn export_diagnostics_with_options(
 
     let zip_options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
+    // Redaction is always on (see DiagnosticsExportOptions::redact_sensitive).
+    let _ = export_options.redact_sensitive;
+    let source = health_view_source(health_view.as_ref());
+    let mut records: Vec<CollectorRecord> = Vec::new();
+    let mut documents: Vec<(&'static str, Value)> = Vec::new();
 
     // 1. About info
-    let about = redact_value_for_export(get_about_info(), export_options.redact_sensitive);
-    write_json_to_zip(&mut zip, &zip_options, "about.json", &about)?;
+    let about = run_collector(&mut records, "about.json", || Ok(get_about_info()));
+    documents.push(("about.json", about));
 
-    drop(conn); // Release lock while cross-module helpers acquire the DB mutex.
-    let health = redact_value_for_export(get_system_health(db)?, export_options.redact_sensitive);
-    let terminal_context =
-        redact_value_for_export(get_terminal_context(db), export_options.redact_sensitive);
-    let sync_status = redact_value_for_export(
-        get_sync_status_summary(db)?,
-        export_options.redact_sensitive,
-    );
-    let closeout_readiness = redact_value_for_export(
-        crate::zreport::get_closeout_readiness_snapshot(db, &json!({}))?,
-        export_options.redact_sensitive,
-    );
-    let parity_queue_status = redact_value_for_export(
-        get_parity_queue_status(db).unwrap_or(Value::Null),
-        export_options.redact_sensitive,
-    );
-    let parity_actionable_items = redact_value_for_export(
-        get_parity_actionable_items(db, 50).unwrap_or(Value::Null),
-        export_options.redact_sensitive,
-    );
-    let parity_failure_families = redact_value_for_export(
-        get_parity_failure_families(db).unwrap_or(Value::Null),
-        export_options.redact_sensitive,
-    );
-    let financial_queue_items = redact_value_for_export(
-        crate::commands::sync::query_financial_queue_items(50, db).unwrap_or(Value::Null),
-        export_options.redact_sensitive,
-    );
-    let financial_integrity = redact_value_for_export(
-        crate::commands::sync::collect_financial_integrity(db).unwrap_or(Value::Null),
-        export_options.redact_sensitive,
-    );
-    let financial_queue_status = redact_value_for_export(
-        get_financial_queue_status(db).unwrap_or(Value::Null),
-        export_options.redact_sensitive,
-    );
-    let last_parity_sync =
-        redact_value_for_export(get_last_parity_sync(db), export_options.redact_sensitive);
-    let credential_state =
-        redact_value_for_export(get_credential_state(db), export_options.redact_sensitive);
-    let sync_blocker_details = redact_value_for_export(
-        get_sync_blocker_details_json(
-            crate::sync::get_sync_blocker_details(db, 25)?,
-            get_parity_blocker_details(db, 25),
-        ),
-        export_options.redact_sensitive,
-    );
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let terminal_settings_snapshot = redact_value_for_export(
-        get_terminal_settings_snapshot(&conn),
-        export_options.redact_sensitive,
-    );
-    let backlog = redact_value_for_export(get_sync_backlog(&conn), export_options.redact_sensitive);
-    let payment_adjustment_backlog = redact_value_for_export(
-        get_payment_adjustment_backlog(&conn),
-        export_options.redact_sensitive,
-    );
-    let errors = redact_value_for_export(
-        json!(get_recent_sync_errors(&conn, 20)),
-        export_options.redact_sensitive,
-    );
-    let printers = redact_value_for_export(
-        get_printer_diagnostics(&conn)?,
-        export_options.redact_sensitive,
-    );
-
-    // 2. System identity + runtime state
-    write_json_to_zip(&mut zip, &zip_options, "system_health.json", &health)?;
-    write_json_to_zip(
-        &mut zip,
-        &zip_options,
-        "terminal_context.json",
-        &terminal_context,
-    )?;
-    write_json_to_zip(&mut zip, &zip_options, "sync_status.json", &sync_status)?;
-    write_json_to_zip(
-        &mut zip,
-        &zip_options,
-        "closeout_readiness.json",
-        &closeout_readiness,
-    )?;
-    write_json_to_zip(
-        &mut zip,
-        &zip_options,
+    // 2. System identity + runtime state. Each helper takes the DB mutex
+    // itself (std::sync::Mutex is not reentrant).
+    let health = run_collector(&mut records, "system_health.json", || get_system_health(db));
+    documents.push(("system_health.json", health));
+    let terminal_context = run_collector(&mut records, "terminal_context.json", || {
+        Ok(get_terminal_context(db))
+    });
+    // The closeout evidence is about this terminal's branch, as the terminal
+    // context names it (local settings first).
+    let closeout_payload = match terminal_context
+        .get("branchId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|branch_id| !branch_id.is_empty())
+    {
+        Some(branch_id) => json!({ "branchId": branch_id }),
+        None => json!({}),
+    };
+    documents.push(("terminal_context.json", terminal_context));
+    let sync_status = run_collector(&mut records, "sync_status.json", || {
+        get_sync_status_summary(db)
+    });
+    documents.push(("sync_status.json", sync_status));
+    let closeout_readiness = run_collector(&mut records, "closeout_readiness.json", || {
+        crate::zreport::get_closeout_readiness_snapshot(db, &closeout_payload)
+    });
+    documents.push(("closeout_readiness.json", closeout_readiness));
+    let terminal_settings_snapshot =
+        run_collector(&mut records, "terminal_settings_snapshot.json", || {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            get_terminal_settings_snapshot(&conn)
+        });
+    documents.push((
         "terminal_settings_snapshot.json",
-        &terminal_settings_snapshot,
-    )?;
-    write_json_to_zip(
-        &mut zip,
-        &zip_options,
-        "parity_queue_status.json",
-        &parity_queue_status,
-    )?;
-    write_json_to_zip(
-        &mut zip,
-        &zip_options,
-        "parity_actionable_items.json",
-        &parity_actionable_items,
-    )?;
-    write_json_to_zip(
-        &mut zip,
-        &zip_options,
-        "parity_failure_families.json",
-        &parity_failure_families,
-    )?;
-    write_json_to_zip(
-        &mut zip,
-        &zip_options,
-        "financial_queue_status.json",
-        &financial_queue_status,
-    )?;
-    write_json_to_zip(
-        &mut zip,
-        &zip_options,
-        "financial_queue_items.json",
-        &financial_queue_items,
-    )?;
-    write_json_to_zip(
-        &mut zip,
-        &zip_options,
-        "financial_integrity.json",
-        &financial_integrity,
-    )?;
-    write_json_to_zip(
-        &mut zip,
-        &zip_options,
-        "last_parity_sync.json",
-        &last_parity_sync,
-    )?;
-    write_json_to_zip(
-        &mut zip,
-        &zip_options,
-        "credential_state.json",
-        &credential_state,
-    )?;
+        terminal_settings_snapshot,
+    ));
+    let parity_queue_status = run_collector(&mut records, "parity_queue_status.json", || {
+        get_parity_queue_status(db)
+    });
+    documents.push(("parity_queue_status.json", parity_queue_status));
+    let parity_actionable_items =
+        run_collector(&mut records, "parity_actionable_items.json", || {
+            get_parity_actionable_items(db, 50)
+        });
+    documents.push(("parity_actionable_items.json", parity_actionable_items));
+    let parity_failure_families =
+        run_collector(&mut records, "parity_failure_families.json", || {
+            get_parity_failure_families(db)
+        });
+    documents.push(("parity_failure_families.json", parity_failure_families));
+    let financial_queue_status = run_collector(&mut records, "financial_queue_status.json", || {
+        get_financial_queue_status(db)
+    });
+    documents.push(("financial_queue_status.json", financial_queue_status));
+    let financial_queue_items = run_collector(&mut records, "financial_queue_items.json", || {
+        crate::commands::sync::query_financial_queue_items(50, db)
+    });
+    documents.push(("financial_queue_items.json", financial_queue_items));
+    let financial_integrity = run_collector(&mut records, "financial_integrity.json", || {
+        crate::commands::sync::collect_financial_integrity(db)
+    });
+    documents.push(("financial_integrity.json", financial_integrity));
+    let last_parity_sync = run_collector(&mut records, "last_parity_sync.json", || {
+        Ok(get_last_parity_sync(db))
+    });
+    documents.push(("last_parity_sync.json", last_parity_sync));
+    let credential_state = run_collector(&mut records, "credential_state.json", || {
+        Ok(get_credential_state(db))
+    });
+    documents.push(("credential_state.json", credential_state));
 
     // 3. Queue/backlog snapshots
-    write_json_to_zip(&mut zip, &zip_options, "sync_backlog.json", &backlog)?;
-    write_json_to_zip(
-        &mut zip,
-        &zip_options,
+    let backlog = run_collector(&mut records, "sync_backlog.json", || {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        get_sync_backlog(&conn)
+    });
+    documents.push(("sync_backlog.json", backlog));
+    let payment_adjustment_backlog =
+        run_collector(&mut records, "payment_adjustment_backlog.json", || {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            Ok(get_payment_adjustment_backlog(&conn))
+        });
+    documents.push((
         "payment_adjustment_backlog.json",
-        &payment_adjustment_backlog,
-    )?;
-    write_json_to_zip(
-        &mut zip,
-        &zip_options,
-        "sync_blocker_details.json",
-        &sync_blocker_details,
-    )?;
+        payment_adjustment_backlog,
+    ));
+    let sync_blocker_details = run_collector(&mut records, "sync_blocker_details.json", || {
+        Ok(get_sync_blocker_details_json(
+            crate::sync::get_sync_blocker_details(db, 25)?,
+            get_parity_blocker_details(db, 25),
+        ))
+    });
+    documents.push(("sync_blocker_details.json", sync_blocker_details));
 
     // 4. Recent operational history
-    write_json_to_zip(&mut zip, &zip_options, "sync_errors.json", &errors)?;
-    write_json_to_zip(
-        &mut zip,
-        &zip_options,
-        "printer_diagnostics.json",
-        &printers,
-    )?;
+    let errors = run_collector(&mut records, "sync_errors.json", || {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        Ok(json!(get_recent_sync_errors(&conn, 20)?))
+    });
+    documents.push(("sync_errors.json", errors));
+    let printers = run_collector(&mut records, "printer_diagnostics.json", || {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        get_printer_diagnostics(&conn)
+    });
+    documents.push(("printer_diagnostics.json", printers));
+
+    // 5. What the operator saw in the Health view (bundle v2).
+    let health_view = run_collector(&mut records, HEALTH_VIEW_FILE, || {
+        health_view_document(health_view)
+    });
+    documents.push((HEALTH_VIEW_FILE, health_view));
 
     // Raw runtime logs can contain queue identifiers, tenant context and
     // encrypted repair envelopes emitted before field-level redaction. V1
     // renderer diagnostics therefore fail closed: `include_logs` remains in
     // the compatibility DTO, but no local export embeds raw log files.
+    let mut write_errors: Vec<Value> = Vec::new();
+    let mut truncated: Vec<String> = Vec::new();
+    for (file_name, value) in documents {
+        let value = redact_value_for_export(value, file_name, &mut truncated);
+        if let Err(error) = write_json_to_zip(&mut zip, &zip_options, file_name, &value) {
+            write_errors.push(json!({ "entry": file_name, "error": error }));
+        }
+    }
+
+    // 6. The manifest last, so it can name every collector and timing. One
+    // shape with the Android bundle: shared/pos/health/__fixtures__/
+    // diagnostics-manifest-contract.json (the tests read it).
+    let collectors: Vec<Value> = records
+        .iter()
+        .map(|record| {
+            let mut collector = json!({
+                "entry": record.file,
+                "status": record.status,
+                "durationMs": record.duration_ms,
+            });
+            if let Some(error) = &record.error {
+                collector["error"] = json!(error);
+            }
+            collector
+        })
+        .collect();
+    let collector_errors: Vec<Value> = records
+        .iter()
+        .filter_map(|record| {
+            record
+                .error
+                .as_ref()
+                .map(|error| json!({ "entry": record.file, "error": error }))
+        })
+        .chain(write_errors)
+        .collect();
+    let mut entries: Vec<&str> = records.iter().map(|record| record.file).collect();
+    entries.push(DIAGNOSTICS_MANIFEST_FILE);
+    let manifest = json!({
+        "format": DIAGNOSTICS_FORMAT,
+        "formatVersion": DIAGNOSTICS_FORMAT_VERSION,
+        "platform": std::env::consts::OS,
+        "source": source,
+        "app": {
+            "versionName": env!("CARGO_PKG_VERSION"),
+            "versionCode": Value::Null,
+            "packageName": Value::Null,
+            "buildTimestamp": env!("BUILD_TIMESTAMP"),
+            "gitSha": env!("BUILD_GIT_SHA"),
+        },
+        "arch": std::env::consts::ARCH,
+        "generatedAt": generated_at.to_rfc3339(),
+        "collectedInMs": export_started.elapsed().as_millis(),
+        "redaction": {
+            "enabled": true,
+            "rules": DIAGNOSTICS_REDACTION_RULES,
+        },
+        "logsIncluded": false,
+        "compression": "DEFLATE",
+        "limits": {
+            "listRows": MAX_EXPORT_LIST_ROWS,
+            "stringChars": MAX_EXPORT_STRING_CHARS,
+        },
+        "entries": entries,
+        "collectors": collectors,
+        "errors": collector_errors,
+        "truncated": truncated,
+    });
+    let mut manifest_truncated = Vec::new();
+    write_json_to_zip(
+        &mut zip,
+        &zip_options,
+        DIAGNOSTICS_MANIFEST_FILE,
+        &redact_value_for_export(manifest, DIAGNOSTICS_MANIFEST_FILE, &mut manifest_truncated),
+    )?;
 
     zip.finish().map_err(|e| e.to_string())?;
 
     Ok(zip_path.to_string_lossy().to_string())
 }
 
-fn redact_value_for_export(value: Value, enabled: bool) -> Value {
-    if !enabled {
-        return value;
+/// The redaction rules a bundle names in its manifest, the same text as the
+/// Android bundle's (`DIAGNOSTICS_REDACTION_RULES` in
+/// shared/pos/health/diagnostics-bundle.ts).
+const DIAGNOSTICS_REDACTION_RULES: &str = "desktop key list + email/phone scrub (v3: dates, times, canonical IPv4, versions, UUIDs and presence booleans kept; phone groups joined by any space; staff/customer names redacted; queue payloads summarized)";
+
+/// Lists are capped at 50 rows in the bundle, as on Android
+/// (`MAX_EXPORT_LIST_ROWS`).
+const MAX_EXPORT_LIST_ROWS: usize = 50;
+
+/// Where the export was started, from the Health view snapshot the renderer
+/// sent (`health_modal`, ...); `unknown` without one.
+fn health_view_source(health_view: Option<&Value>) -> String {
+    health_view
+        .and_then(|view| view.get("source"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|source| {
+            !source.is_empty()
+                && source.len() <= 40
+                && source
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+        })
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+/// Cut lists to MAX_EXPORT_LIST_ROWS rows, recording `file: path (total N)`
+/// for each list cut (the manifest's `truncated`, as on Android).
+fn cap_export_lists(value: Value, file: &str, path: &str, truncated: &mut Vec<String>) -> Value {
+    match value {
+        Value::Array(items) => {
+            let total = items.len();
+            if total > MAX_EXPORT_LIST_ROWS {
+                let shown = if path.is_empty() { "$" } else { path };
+                truncated.push(format!("{file}: {shown} (total {total})"));
+            }
+            Value::Array(
+                items
+                    .into_iter()
+                    .take(MAX_EXPORT_LIST_ROWS)
+                    .enumerate()
+                    .map(|(index, item)| {
+                        cap_export_lists(item, file, &format!("{path}[{index}]"), truncated)
+                    })
+                    .collect(),
+            )
+        }
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(key, item)| {
+                    let child = if path.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{path}.{key}")
+                    };
+                    let item = cap_export_lists(item, file, &child, truncated);
+                    (key, item)
+                })
+                .collect(),
+        ),
+        other => other,
     }
-    redact_sensitive_fields(value)
+}
+
+/// Every bundle file goes out capped and redacted; there is no unredacted
+/// export.
+fn redact_value_for_export(value: Value, file: &str, truncated: &mut Vec<String>) -> Value {
+    redact_sensitive_fields(cap_export_lists(value, file, "", truncated))
 }
 
 pub(crate) fn redact_remote_diagnostics_value(value: Value) -> Value {
@@ -1000,134 +1269,885 @@ pub fn export_remote_incident_bundle(db: &DbState, output_dir: &Path) -> Result<
     )
 }
 
-fn scrub_sensitive_string(value: &str) -> String {
-    let mut output = String::with_capacity(value.len().min(512));
-    for word in value.split_whitespace() {
-        let lower = word.to_ascii_lowercase();
-        let scrubbed = if lower.contains('@') && lower.contains('.') {
-            "[REDACTED_EMAIL]"
-        } else {
-            let digit_count = word.chars().filter(|c| c.is_ascii_digit()).count();
-            let phone_shaped = word
-                .chars()
-                .all(|c| c.is_ascii_digit() || matches!(c, '+' | '-' | '(' | ')' | '.' | '/'));
-            if phone_shaped && digit_count >= 8 {
-                "[REDACTED_PHONE]"
-            } else {
-                word
-            }
-        };
+// ---------------------------------------------------------------------------
+// Redaction (bundle v2)
+//
+// One rule set with the Android bundle (POSSystemMobile
+// `services/diagnostics/redaction.ts`, the TODO'd source of the shared
+// `shared/pos/health` rules): the desktop key list and markers, emails and
+// phone numbers scrubbed inside free text, with the fixes the health parity
+// plan (§5) asks for:
+// - ISO dates, times, IPv4 addresses, version strings, UUIDs, amounts and
+//   ids stay readable (v1 turned `window.reportDate` and a printer IP into
+//   [REDACTED_PHONE]);
+// - presence booleans stay readable: a boolean or null can never carry a
+//   secret (`apiKeyPresent`, `pin_reset_required: false`);
+// - staff and customer names are redacted;
+// - `pin` only matches as a whole key word, so `shipping` or `mapping` stay.
+// ---------------------------------------------------------------------------
 
-        if !output.is_empty() {
-            output.push(' ');
+const REDACTED: &str = "[REDACTED]";
+const REDACTED_EMAIL: &str = "[REDACTED_EMAIL]";
+const REDACTED_PHONE: &str = "[REDACTED_PHONE]";
+/// Free text is capped at 1 KB in the bundle, as on Android
+/// (`MAX_EXPORT_STRING_CHARS` in `services/diagnostics/redaction.ts`).
+const MAX_EXPORT_STRING_CHARS: usize = 1024;
+
+fn digit_count(value: &str) -> usize {
+    value.chars().filter(char::is_ascii_digit).count()
+}
+
+fn all_digits(value: &str) -> bool {
+    !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn is_uuid_token(token: &str) -> bool {
+    token.len() == 36
+        && token.char_indices().all(|(index, ch)| match index {
+            8 | 13 | 18 | 23 => ch == '-',
+            _ => ch.is_ascii_hexdigit(),
+        })
+}
+
+/// `YYYY-MM-DD`.
+fn is_iso_date_token(token: &str) -> bool {
+    let parts: Vec<&str> = token.split('-').collect();
+    parts.len() == 3
+        && parts[0].len() == 4
+        && parts[1].len() == 2
+        && parts[2].len() == 2
+        && parts.iter().all(|part| all_digits(part))
+}
+
+/// `D/M/YY`, `DD.MM.YYYY`, `DD-MM-YYYY` ... (one separator kind or mixed, as
+/// the Android rule accepts).
+fn is_day_first_date_token(token: &str) -> bool {
+    let parts: Vec<&str> = token.split(['/', '.', '-']).collect();
+    parts.len() == 3
+        && (1..=2).contains(&parts[0].len())
+        && (1..=2).contains(&parts[1].len())
+        && (2..=4).contains(&parts[2].len())
+        && parts.iter().all(|part| all_digits(part))
+}
+
+/// `YYYY/M/D`, `YYYY.MM.DD`.
+fn is_year_first_date_token(token: &str) -> bool {
+    let parts: Vec<&str> = token.split(['/', '.']).collect();
+    parts.len() == 3
+        && parts[0].len() == 4
+        && (1..=2).contains(&parts[1].len())
+        && (1..=2).contains(&parts[2].len())
+        && parts.iter().all(|part| all_digits(part))
+}
+
+/// A dotted quad in canonical form: an octet with a leading zero
+/// ("079.123.45.67") makes it a phone number, not an address.
+fn is_ipv4_token(token: &str) -> bool {
+    let parts: Vec<&str> = token.split('.').collect();
+    parts.len() == 4
+        && parts.iter().all(|part| {
+            (1..=3).contains(&part.len())
+                && all_digits(part)
+                && (part.len() == 1 || !part.starts_with('0'))
+                && part.parse::<u16>().is_ok_and(|octet| octet <= 255)
+        })
+}
+
+/// `v1.4.119`, `1.0.13`, `10.0.2622`, `126.0.6478.127` is not (major > 2 digits).
+fn is_version_token(token: &str) -> bool {
+    let body = token.strip_prefix(['v', 'V']).unwrap_or(token);
+    let parts: Vec<&str> = body.split('.').collect();
+    if !(3..=4).contains(&parts.len()) || !parts.iter().all(|part| all_digits(part)) {
+        return false;
+    }
+    (1..=2).contains(&parts[0].len())
+        && (1..=4).contains(&parts[1].len())
+        && (1..=4).contains(&parts[2].len())
+        && parts
+            .get(3)
+            .is_none_or(|part| (1..=9).contains(&part.len()))
+}
+
+/// `-12.50`, `221.5`.
+fn is_decimal_amount_token(token: &str) -> bool {
+    let body = token.strip_prefix('-').unwrap_or(token);
+    let Some((whole, fraction)) = body.split_once('.') else {
+        return false;
+    };
+    (1..=9).contains(&whole.len())
+        && (1..=2).contains(&fraction.len())
+        && all_digits(whole)
+        && all_digits(fraction)
+}
+
+/// Digit-heavy tokens that are not phone numbers and must stay readable.
+fn is_readable_numeric_token(token: &str) -> bool {
+    is_uuid_token(token)
+        || is_iso_date_token(token)
+        || is_day_first_date_token(token)
+        || is_year_first_date_token(token)
+        || is_ipv4_token(token)
+        || is_version_token(token)
+        || is_decimal_amount_token(token)
+}
+
+fn is_phone_shaped(token: &str) -> bool {
+    !token.is_empty()
+        && token
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || matches!(ch, '+' | '-' | '(' | ')' | '.' | '/'))
+}
+
+/// `local@domain.tld` anywhere in the token.
+fn contains_email(token: &str) -> bool {
+    token.match_indices('@').any(|(at, _)| {
+        let before_ok = token[..at]
+            .chars()
+            .next_back()
+            .is_some_and(|ch| ch != '@' && !ch.is_whitespace());
+        let domain = token[at + 1..].split('@').next().unwrap_or_default();
+        let dot_ok = domain
+            .char_indices()
+            .any(|(index, ch)| ch == '.' && index > 0 && index + 1 < domain.len());
+        before_ok && dot_ok
+    })
+}
+
+/// A URL keeps its origin and path; the query can carry tokens.
+fn scrub_url_query(token: &str) -> String {
+    match token.find(['?', '#']) {
+        Some(index) => format!("{}?{REDACTED}", &token[..index]),
+        None => token.to_string(),
+    }
+}
+
+fn scrub_token(token: &str) -> String {
+    // Too short for a URL or 8 digits, and no '@': nothing to find.
+    if token.chars().nth(7).is_none() && !token.contains('@') {
+        return token.to_string();
+    }
+    let core_start = token
+        .find(|ch: char| !matches!(ch, '(' | '"' | '\'' | '[' | '{' | '<' | ',' | ';'))
+        .unwrap_or(token.len());
+    let prefix = &token[..core_start];
+    let rest = &token[core_start..];
+    let core_end = rest
+        .rfind(|ch: char| {
+            !matches!(
+                ch,
+                ')' | '"' | '\'' | ']' | '}' | '>' | ',' | ';' | ':' | '!' | '?' | '.'
+            )
+        })
+        .map(|index| index + rest[index..].chars().next().map_or(1, char::len_utf8))
+        .unwrap_or(0);
+    let core = &rest[..core_end];
+    let suffix = &rest[core_end..];
+    if core.is_empty() {
+        return token.to_string();
+    }
+    let lower = core.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        return format!("{prefix}{}{suffix}", scrub_url_query(core));
+    }
+    if core.contains('@') && contains_email(core) {
+        return format!("{prefix}{REDACTED_EMAIL}{suffix}");
+    }
+    if is_phone_shaped(core) && digit_count(core) >= 8 && !is_readable_numeric_token(core) {
+        return format!("{prefix}{REDACTED_PHONE}{suffix}");
+    }
+    token.to_string()
+}
+
+/// Separator spaces: Unicode White_Space plus the zero-width separators
+/// U+200B to U+200D, U+2060 and U+FEFF, the same set as the Android
+/// `isSeparatorSpace` (shared/pos/health/diagnostics-redaction.ts). Text is
+/// split into tokens on them and phone number groups join across them, so a
+/// phone written with non-breaking spaces, narrow spaces, tabs or a
+/// byte-order mark between its groups is still one number.
+fn is_separator_space(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch as u32, 0x200B..=0x200D | 0x2060 | 0xFEFF)
+}
+
+/// Whole tokens (between separator spaces): emails, phone-shaped tokens, URL
+/// queries. Separators are kept as they are.
+fn scrub_tokens(chars: &[char]) -> String {
+    let mut output = String::with_capacity(chars.len());
+    let mut token = String::new();
+    for &ch in chars {
+        if is_separator_space(ch) {
+            if !token.is_empty() {
+                output.push_str(&scrub_token(&token));
+                token.clear();
+            }
+            output.push(ch);
+        } else {
+            token.push(ch);
         }
-        output.push_str(scrubbed);
-        if output.len() >= 2000 {
-            output.truncate(2000);
-            output.push_str("...");
-            break;
-        }
+    }
+    if !token.is_empty() {
+        output.push_str(&scrub_token(&token));
     }
     output
 }
 
+// Phone numbers the single-token rule cannot see: split into groups
+// ("+41 79 123 45 67", "2310 123456", groups joined by any separator space),
+// with a trunk prefix ("+41 (0)79 123 45 67"), or glued to a label
+// ("τηλ:6941234567", "phone=6941234567", "tel:+306941234567", Postgres
+// "Key (phone)=(...)"). One character scanner, the same rules as the Android
+// bundle (shared/pos/health/diagnostics-redaction.ts scrubPhoneRuns); the
+// shared vectors pin both.
+//
+// A run starts at a digit, a '+' before a digit or a "(0)"-style trunk group,
+// right after the start of the text, a separator space, one of ([{<"',;=: or
+// a '.' that ends a word ("τηλ.6941..."). It is one or more chunks joined by
+// single separator spaces; a chunk is digit groups joined by '-', '.' or '/'
+// (or a trunk group followed directly by digits), at most 32 characters. It
+// must end at the end of the text, a separator space, one of )]}>"',; or
+// .!?: before a separator space or the end.
+// - one chunk: at least 8 digits and not a readable token (date, IPv4,
+//   version, amount, UUID), unless a phone label comes right before it;
+// - several chunks: 10 to 15 digits, 2+ digits each (a leading '+' chunk may
+//   have 1). After a "+CC" chunk or a phone label, chunks may be dotted and
+//   hold up to 12 digits, and nothing is exempt as readable; otherwise every
+//   chunk is digits and '-' only, 8 digits at most, and not readable.
+// The longest valid run wins; a run that ends inside a longer token (an ISO
+// time "03:24:37.5588+00:00", "192.168.1.19:9100") is left alone. Collection
+// stops at 8 chunks or once 15 digits are passed, so the scan stays linear.
+// When the text was cut (scan_window), a run that reaches the cut is redacted
+// up to it: the rest of the number is unknown.
+
+const RUN_LEFT_BOUNDARY: &[char] = &['(', '[', '{', '<', '"', '\'', ',', ';', '=', ':'];
+const RUN_RIGHT_BOUNDARY: &[char] = &[')', ']', '}', '>', '"', '\'', ',', ';'];
+const RUN_SENTENCE_END: &[char] = &['.', '!', '?', ':'];
+const RUN_GROUP_SEPARATOR: &[char] = &['-', '.', '/'];
+const MAX_TRUNK_DIGITS: usize = 4;
+/// A chunk longer than this is an id or a hash, not a phone number.
+const MAX_CHUNK_CHARS: usize = 32;
+const MAX_RUN_CHUNKS: usize = 8;
+const MAX_RUN_DIGITS: usize = 15;
+/// How far past a chunk the scanner looks: a separator and a "(1234)" trunk group.
+const RUN_LOOKAHEAD: usize = 8;
+/// What may sit between a phone label and its number: "τηλ: ", "(phone)=(".
+const LABEL_GAP: &[char] = &[':', '=', '(', ')', '[', ']', '.', '-', '"', '\'', '#'];
+const MAX_LABEL_GAP: usize = 4;
+const MAX_LABEL_LETTERS: usize = 16;
+/// Words that say the number after them is a phone number (lower case).
+const PHONE_LABELS: &[&str] = &[
+    "phone",
+    "phones",
+    "telephone",
+    "tel",
+    "tél",
+    "tele",
+    "telefon",
+    "telefono",
+    "teléfono",
+    "telefone",
+    "téléphone",
+    "mobile",
+    "mobil",
+    "mob",
+    "cell",
+    "cellphone",
+    "cellulare",
+    "celular",
+    "cel",
+    "handy",
+    "natel",
+    "portable",
+    "fax",
+    "whatsapp",
+    "viber",
+    "msisdn",
+    "τηλ",
+    "τηλέφωνο",
+    "τηλεφωνο",
+    "κιν",
+    "κινητό",
+    "κινητο",
+    "φαξ",
+];
+
+fn digit_at(chars: &[char], index: usize) -> bool {
+    chars.get(index).is_some_and(char::is_ascii_digit)
+}
+
+/// Length of a "(0)" trunk group at `index`, or 0.
+fn trunk_group_len(chars: &[char], index: usize) -> usize {
+    if chars.get(index) != Some(&'(') {
+        return 0;
+    }
+    let mut cursor = index + 1;
+    while cursor < chars.len()
+        && chars[cursor].is_ascii_digit()
+        && cursor - index - 1 < MAX_TRUNK_DIGITS
+    {
+        cursor += 1;
+    }
+    let digits = cursor - index - 1;
+    if digits >= 1 && chars.get(cursor) == Some(&')') {
+        digits + 2
+    } else {
+        0
+    }
+}
+
+struct PhoneChunk {
+    start: usize,
+    end: usize,
+    digits: usize,
+    groups: usize,
+    /// Digits, '-' and trunk groups only (no '.' or '/').
+    plain: bool,
+    /// Nothing but digits: no readable token can look like that.
+    digits_only: bool,
+    leading_plus: bool,
+}
+
+fn parse_phone_chunk(chars: &[char], start: usize, allow_plus: bool) -> Option<PhoneChunk> {
+    let mut cursor = start;
+    let mut leading_plus = false;
+    if allow_plus && chars.get(cursor) == Some(&'+') && digit_at(chars, cursor + 1) {
+        leading_plus = true;
+        cursor += 1;
+    }
+    let mut digits = 0;
+    let mut groups = 0;
+    let mut plain = true;
+    let mut digits_only = !leading_plus;
+    loop {
+        let mut after_trunk = false;
+        if digit_at(chars, cursor) {
+            while digit_at(chars, cursor) {
+                digits += 1;
+                cursor += 1;
+                if cursor - start > MAX_CHUNK_CHARS {
+                    return None;
+                }
+            }
+        } else {
+            let trunk = trunk_group_len(chars, cursor);
+            if trunk == 0 {
+                break;
+            }
+            digits += trunk - 2;
+            cursor += trunk;
+            after_trunk = true;
+            digits_only = false;
+        }
+        groups += 1;
+        if cursor - start > MAX_CHUNK_CHARS {
+            return None;
+        }
+        // "(0)79": digits straight after a trunk group.
+        if after_trunk && digit_at(chars, cursor) {
+            continue;
+        }
+        match chars.get(cursor) {
+            Some(separator)
+                if RUN_GROUP_SEPARATOR.contains(separator)
+                    && (digit_at(chars, cursor + 1) || trunk_group_len(chars, cursor + 1) > 0) =>
+            {
+                if *separator != '-' {
+                    plain = false;
+                }
+                digits_only = false;
+                cursor += 1;
+            }
+            _ => break,
+        }
+    }
+    (groups > 0).then_some(PhoneChunk {
+        start,
+        end: cursor,
+        digits,
+        groups,
+        plain,
+        digits_only,
+        leading_plus,
+    })
+}
+
+fn phone_run_can_start(chars: &[char], index: usize) -> bool {
+    let character = chars[index];
+    let starts_run = character.is_ascii_digit()
+        || (character == '+' && digit_at(chars, index + 1))
+        || trunk_group_len(chars, index) > 0;
+    if !starts_run {
+        return false;
+    }
+    if index == 0 {
+        return true;
+    }
+    let previous = chars[index - 1];
+    is_separator_space(previous)
+        || RUN_LEFT_BOUNDARY.contains(&previous)
+        || (previous == '.' && index >= 2 && chars[index - 2].is_alphabetic())
+}
+
+fn phone_run_can_end(chars: &[char], end: usize) -> bool {
+    let Some(&next) = chars.get(end) else {
+        return true;
+    };
+    if is_separator_space(next) || RUN_RIGHT_BOUNDARY.contains(&next) {
+        return true;
+    }
+    RUN_SENTENCE_END.contains(&next)
+        && chars
+            .get(end + 1)
+            .is_none_or(|&after| is_separator_space(after))
+}
+
+/// Whether a phone label ("τηλ:", "phone=", "(phone)=(", "tel ") ends right
+/// before `start`.
+fn preceded_by_phone_label(chars: &[char], start: usize) -> bool {
+    let mut cursor = start;
+    let mut gap = 0;
+    while cursor > 0
+        && gap < MAX_LABEL_GAP
+        && (is_separator_space(chars[cursor - 1]) || LABEL_GAP.contains(&chars[cursor - 1]))
+    {
+        cursor -= 1;
+        gap += 1;
+    }
+    let word_end = cursor;
+    while cursor > 0 && word_end - cursor < MAX_LABEL_LETTERS && chars[cursor - 1].is_alphabetic() {
+        cursor -= 1;
+    }
+    if cursor == word_end {
+        return false;
+    }
+    let word = chars[cursor..word_end]
+        .iter()
+        .collect::<String>()
+        .to_lowercase();
+    PHONE_LABELS.contains(&word.as_str())
+}
+
+/// End (exclusive) of the phone number starting at `start`. `cut`: the text
+/// was cut after its last token, so a run that reaches the end is redacted up
+/// to it (the number may go on past the cut).
+fn match_phone_run(chars: &[char], start: usize, cut: bool) -> Option<usize> {
+    let first = parse_phone_chunk(chars, start, true)?;
+    // Too few digits to stand alone (8) or to begin a longer number (2, or 1 after '+').
+    if first.digits < 2 && !first.leading_plus {
+        return None;
+    }
+    let labelled = preceded_by_phone_label(chars, start);
+    // A "+CC" first chunk is a country code: what follows is a phone number.
+    let strong = labelled || (first.leading_plus && first.groups == 1 && first.digits <= 4);
+    let readable = |chunk: &PhoneChunk| {
+        !chunk.digits_only
+            && is_readable_numeric_token(&chars[chunk.start..chunk.end].iter().collect::<String>())
+    };
+    // Whether a chunk can be part of a number of several chunks.
+    let joinable = |chunk: &PhoneChunk, index: usize| {
+        let minimum = if index == 0 && chunk.leading_plus {
+            1
+        } else {
+            2
+        };
+        if chunk.digits < minimum {
+            return false;
+        }
+        if strong {
+            return chunk.digits <= 12;
+        }
+        chunk.plain && chunk.digits <= 8 && !readable(chunk)
+    };
+
+    // Collect the chunks that can join (every longer run would fail).
+    let first_end = first.end;
+    let first_digits = first.digits;
+    let first_joinable = joinable(&first, 0);
+    let mut totals = vec![first.digits];
+    let mut chunks = vec![first];
+    if first_joinable {
+        let mut cursor = first_end;
+        while chunks.len() < MAX_RUN_CHUNKS
+            && totals[totals.len() - 1] <= MAX_RUN_DIGITS
+            && chars.get(cursor).is_some_and(|&ch| is_separator_space(ch))
+        {
+            let Some(next) = parse_phone_chunk(chars, cursor + 1, false) else {
+                break;
+            };
+            if !joinable(&next, chunks.len()) {
+                break;
+            }
+            cursor = next.end;
+            totals.push(totals[totals.len() - 1] + next.digits);
+            chunks.push(next);
+        }
+        if cut && cursor + RUN_LOOKAHEAD >= chars.len() {
+            return Some(chars.len());
+        }
+    }
+
+    for count in (2..=chunks.len()).rev() {
+        let total = totals[count - 1];
+        let end = chunks[count - 1].end;
+        if (10..=MAX_RUN_DIGITS).contains(&total) && phone_run_can_end(chars, end) {
+            return Some(end);
+        }
+    }
+    (first_digits >= 8
+        && phone_run_can_end(chars, first_end)
+        && (labelled || !readable(&chunks[0])))
+    .then_some(first_end)
+}
+
+fn scrub_phone_runs(value: &str, cut: bool) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    let mut output = String::with_capacity(value.len());
+    let mut index = 0;
+    while index < chars.len() {
+        if phone_run_can_start(&chars, index) {
+            if let Some(end) = match_phone_run(&chars, index, cut) {
+                output.push_str(REDACTED_PHONE);
+                index = end;
+                continue;
+            }
+        }
+        output.push(chars[index]);
+        index += 1;
+    }
+    output
+}
+
+/// Characters scanned past the cap. A phone number the scanner collects spans
+/// at most 8 chunks of 32 characters (263), so every number that reaches into
+/// the first `max_chars` characters is read whole.
+const SCAN_MARGIN: usize = 320;
+/// A token the scan cap falls in is read to its end (an email anywhere in a
+/// token hides the whole token), but no further than `max_chars` times this.
+const MAX_TOKEN_READ_FACTOR: usize = 8;
+
+/// The part of the text that is scanned (Android `scanWindow`): the first
+/// `max_chars` + SCAN_MARGIN characters, finished to the end of the token the
+/// cap falls in. A token longer than the read limit is dropped whole: no rule
+/// can judge a token it cannot see the end of. The flag says text was dropped.
+fn scan_window(value: &str, max_chars: usize) -> (Vec<char>, bool) {
+    let limit = max_chars.saturating_add(SCAN_MARGIN);
+    let read_limit = limit.max(max_chars.saturating_mul(MAX_TOKEN_READ_FACTOR));
+    let mut all: Vec<char> = value.chars().take(read_limit.saturating_add(1)).collect();
+    let more = all.len() > read_limit;
+    all.truncate(read_limit);
+    if all.len() <= limit && !more {
+        return (all, false);
+    }
+    let mut end = limit.min(all.len());
+    if end > 0 && !is_separator_space(all[end - 1]) {
+        while end < all.len() && !is_separator_space(all[end]) {
+            end += 1;
+        }
+    }
+    if end == all.len() {
+        if !more {
+            return (all, false);
+        }
+        while end > 0 && !is_separator_space(all[end - 1]) {
+            end -= 1;
+        }
+    }
+    all.truncate(end);
+    (all, true)
+}
+
+/// At most `max_chars` characters; '…' marks text that was cut.
+fn cap_export_text(value: String, max_chars: usize, cut: bool) -> String {
+    let mut rest = value.chars();
+    let head: String = rest.by_ref().take(max_chars).collect();
+    if rest.next().is_none() && !cut {
+        return value;
+    }
+    format!("{head}…")
+}
+
+/// Replace emails and phone numbers inside free text: whole tokens first
+/// (emails, phone-shaped tokens, URL queries), then phone numbers the tokens
+/// hide (spaced groups, trunk prefixes, labels such as "τηλ:" or "phone=").
+/// Dates, times, IPv4 addresses, versions, UUIDs, amounts and ids stay
+/// readable, whitespace is kept, URL query strings are dropped because they
+/// can carry tokens. Capped at 1 KB.
+fn scrub_sensitive_string(value: &str) -> String {
+    scrub_sensitive_string_with_limit(value, MAX_EXPORT_STRING_CHARS)
+}
+
+/// Text bounded for an operator or for support that never keeps part of an
+/// email or a phone number (review 30/09/2026: operational errors were cut
+/// at 512 or 1024 characters before the export scrubbed them, and a number
+/// the cut fell in kept up to nine digits). The text is scrubbed first with
+/// the export rules, which read the whole number or email the bound falls in
+/// (scan_window), then cut to `max_chars` characters, the last one being '…'
+/// when text was dropped. print::safe_operational_error and every other
+/// bounded text that reaches the bundle go through here.
+pub(crate) fn scrub_and_bound_text(value: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let scrubbed = scrub_sensitive_string_with_limit(value, max_chars);
+    if scrubbed.chars().count() <= max_chars {
+        return scrubbed;
+    }
+    // Cut: the '…' takes the last place. What is dropped is already scrubbed.
+    let mut bounded: String = scrubbed.chars().take(max_chars - 1).collect();
+    bounded.push('…');
+    bounded
+}
+
+/// `scrub_sensitive_string` with another cap. Only about the first
+/// `max_chars` characters are scanned (scan_window): a stored message can be
+/// any size and every string of the bundle passes here.
+fn scrub_sensitive_string_with_limit(value: &str, max_chars: usize) -> String {
+    let (chars, cut) = scan_window(value, max_chars);
+    let tokens_scrubbed = scrub_tokens(&chars);
+    cap_export_text(scrub_phone_runs(&tokens_scrubbed, cut), max_chars, cut)
+}
+
 fn redact_sensitive_fields(value: Value) -> Value {
+    redact_value(value, None)
+}
+
+fn redact_value(value: Value, parent_key: Option<&str>) -> Value {
     match value {
         Value::Object(map) => {
             let mut redacted = serde_json::Map::new();
             for (key, value) in map {
-                if should_redact_key(&key) {
-                    redacted.insert(key, Value::String("[REDACTED]".to_string()));
+                if should_redact_key_for(&key, &value, parent_key) {
+                    redacted.insert(key, Value::String(REDACTED.to_string()));
                 } else {
-                    redacted.insert(key, redact_sensitive_fields(value));
+                    let child = redact_value(value, Some(&key));
+                    redacted.insert(key, child);
                 }
             }
             Value::Object(redacted)
         }
-        Value::Array(items) => {
-            Value::Array(items.into_iter().map(redact_sensitive_fields).collect())
-        }
+        Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .map(|item| redact_value(item, parent_key))
+                .collect(),
+        ),
         Value::String(value) => Value::String(scrub_sensitive_string(&value)),
         other => other,
     }
 }
 
+/// Whether a key's value is replaced by [REDACTED], whatever it holds.
+#[cfg(test)]
 fn should_redact_key(key: &str) -> bool {
-    let normalized = key.to_ascii_lowercase();
-    let non_secret_presence_markers = ["hasapikey", "hasadminurl"];
-    if non_secret_presence_markers.contains(&normalized.as_str()) {
+    should_redact_key_for(key, &Value::String(String::new()), None)
+}
+
+const SENSITIVE_EXACT_KEYS: &[&str] = &[
+    "auth",
+    "access_token",
+    "refresh_token",
+    "customer_name",
+    "customername",
+    "customer_phone",
+    "customerphone",
+    "customer_email",
+    "customeremail",
+    "phone",
+    "email",
+    "address",
+    "street_address",
+    "streetaddress",
+    "delivery_address",
+    "deliveryaddress",
+    "customer_address",
+    "customeraddress",
+    "billing_address",
+    "billingaddress",
+    "shipping_address",
+    "shippingaddress",
+    "delivery_notes",
+    "deliverynotes",
+    "note",
+    "notes",
+    "payment_ref",
+    "paymentref",
+    "payment_reference",
+    "transaction_ref",
+    "transactionref",
+    "payload",
+    "raw_payload",
+    "rawpayload",
+    "raw",
+    "data",
+    "body",
+    "headers",
+    "card_number",
+    "cardnumber",
+    "output_path",
+    "outputpath",
+    "document_snapshot_zlib",
+    "document_snapshot_sha256",
+    "render_profile_snapshot_json",
+    "logo_data",
+    "logodata",
+];
+
+/// Substrings that make a key secret (`pin` is matched as a word below).
+const SENSITIVE_KEY_MARKERS: &[&str] = &[
+    "api_key",
+    "apikey",
+    "api-key",
+    "secret",
+    "password",
+    "passwd",
+    "passcode",
+    "private_key",
+    "privatekey",
+    "token",
+    "bearer",
+    "authorization",
+    "cookie",
+    "snapshot",
+    "envelope",
+    "logo_data",
+    "logodata",
+    "output_path",
+    "outputpath",
+];
+
+const PIN_KEY_WORDS: &[&str] = &["pin", "pins", "pincode", "pinhash"];
+
+/// Prefixes of `<prefix>_?name` keys that name a person.
+const PERSONAL_NAME_PREFIXES: &[&str] = &[
+    "customer",
+    "staff",
+    "driver",
+    "cashier",
+    "waiter",
+    "guest",
+    "contact",
+    "first",
+    "last",
+    "full",
+    "given",
+    "family",
+    "middle",
+    "user",
+    "employee",
+    "recipient",
+    "cardholder",
+    "holder",
+    "member",
+    "person",
+    "manager",
+    "operator",
+    "owner",
+    "created_by",
+    "updated_by",
+    "checked_in_by",
+];
+
+/// Parent keys whose objects describe a person, so their `name` is personal.
+const PERSON_CONTEXT_MARKERS: &[&str] = &[
+    "customer",
+    "staff",
+    "driver",
+    "cashier",
+    "waiter",
+    "guest",
+    "contact",
+    "employee",
+    "recipient",
+    "member",
+    "person",
+    "cardholder",
+    "operator",
+];
+
+const GENERIC_NAME_KEYS: &[&str] = &[
+    "name",
+    "full_name",
+    "fullname",
+    "display_name",
+    "displayname",
+];
+
+/// `staffPinHash` → [staff, pin, hash]; `pin_reset` → [pin, reset].
+fn key_words(key: &str) -> Vec<String> {
+    let mut spaced = String::with_capacity(key.len() + 4);
+    let mut previous: Option<char> = None;
+    for ch in key.chars() {
+        if ch.is_ascii_uppercase()
+            && previous.is_some_and(|prev| prev.is_ascii_lowercase() || prev.is_ascii_digit())
+        {
+            spaced.push('_');
+        }
+        spaced.push(ch.to_ascii_lowercase());
+        previous = Some(ch);
+    }
+    spaced
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// `hasApiKey`, `is_active`, `apiKeyPresent`.
+fn is_presence_key(key: &str) -> bool {
+    let prefixed = ["has", "is"].iter().any(|prefix| {
+        key.strip_prefix(prefix)
+            .and_then(|rest| rest.chars().next())
+            .is_some_and(|next| next.is_ascii_uppercase() || next == '_')
+    });
+    prefixed || key.to_ascii_lowercase().ends_with("present")
+}
+
+fn is_personal_name_key(normalized: &str) -> bool {
+    let Some(prefix) = normalized.strip_suffix("name") else {
+        return false;
+    };
+    let prefix = prefix.strip_suffix('_').unwrap_or(prefix);
+    PERSONAL_NAME_PREFIXES.contains(&prefix)
+}
+
+fn should_redact_key_for(key: &str, value: &Value, parent_key: Option<&str>) -> bool {
+    if value.is_boolean() || value.is_null() {
         return false;
     }
-    let sensitive_exact = [
-        "auth",
-        "access_token",
-        "refresh_token",
-        "customer_name",
-        "customername",
-        "customer_phone",
-        "customerphone",
-        "customer_email",
-        "customeremail",
-        "phone",
-        "email",
-        "address",
-        "street_address",
-        "delivery_address",
-        "deliveryaddress",
-        "delivery_notes",
-        "deliverynotes",
-        "note",
-        "notes",
-        "payment_ref",
-        "paymentref",
-        "payment_reference",
-        "transaction_ref",
-        "transactionref",
-        "payload",
-        "raw_payload",
-        "rawpayload",
-        "raw",
-        "data",
-        "body",
-        "headers",
-        "card_number",
-        "cardnumber",
-        "output_path",
-        "outputpath",
-        "document_snapshot_zlib",
-        "document_snapshot_sha256",
-        "render_profile_snapshot_json",
-        "logo_data",
-        "logodata",
-    ];
-    if sensitive_exact.contains(&normalized.as_str())
+    let normalized = key.to_ascii_lowercase();
+    if is_presence_key(key) || normalized == "payloadsummary" {
+        return false;
+    }
+    if SENSITIVE_EXACT_KEYS.contains(&normalized.as_str())
         || normalized.ends_with("_payload")
         || normalized.ends_with("payload")
         || normalized.ends_with("_raw")
     {
         return true;
     }
-    let sensitive_markers = [
-        "api_key",
-        "apikey",
-        "api-key",
-        "secret",
-        "password",
-        "token",
-        "bearer",
-        "authorization",
-        "cookie",
-        "pin",
-        "snapshot",
-        "envelope",
-        "logo_data",
-        "logodata",
-        "output_path",
-        "outputpath",
-    ];
-    sensitive_markers
+    if SENSITIVE_KEY_MARKERS
         .iter()
         .any(|marker| normalized.contains(marker))
+    {
+        return true;
+    }
+    if key_words(key)
+        .iter()
+        .any(|word| PIN_KEY_WORDS.contains(&word.as_str()))
+    {
+        return true;
+    }
+    if normalized.contains("email") || normalized.contains("phone") {
+        return true;
+    }
+    if is_personal_name_key(&normalized) {
+        return true;
+    }
+    GENERIC_NAME_KEYS.contains(&normalized.as_str())
+        && parent_key.is_some_and(|parent| {
+            let parent = parent.to_ascii_lowercase();
+            PERSON_CONTEXT_MARKERS
+                .iter()
+                .any(|marker| parent.contains(marker))
+        })
 }
 
 /// Recent sync failures for the exported support bundle.
@@ -1140,15 +2160,19 @@ fn should_redact_key(key: &str) -> bool {
 /// came from, and parity conflicts are included explicitly: a manual conflict is
 /// the one failure an operator cannot clear by waiting, so it is the one support
 /// most needs to see.
-fn get_recent_sync_errors(conn: &rusqlite::Connection, limit: i64) -> Vec<Value> {
-    let mut errors = Vec::new();
-    if let Ok(mut stmt) = conn.prepare(
-        "SELECT id, entity_type, status, last_error, retry_count, created_at, updated_at
+/// The latest queue rows with an error, from both queues. A failed read is an
+/// error, never an empty ("no errors") list (review 30/09/2026).
+fn get_recent_sync_errors(conn: &rusqlite::Connection, limit: i64) -> Result<Vec<Value>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, entity_type, status, last_error, retry_count, created_at, updated_at
          FROM sync_queue
          WHERE last_error IS NOT NULL AND last_error != ''
          ORDER BY updated_at DESC LIMIT ?1",
-    ) {
-        if let Ok(rows) = stmt.query_map(params![limit], |row| {
+        )
+        .map_err(|error| format!("sync_queue errors: {error}"))?;
+    let mut errors = stmt
+        .query_map(params![limit], |row| {
             Ok(json!({
                 "queue": "sync_queue",
                 "id": row.get::<_, String>(0)?,
@@ -1159,58 +2183,58 @@ fn get_recent_sync_errors(conn: &rusqlite::Connection, limit: i64) -> Vec<Value>
                 "createdAt": row.get::<_, String>(5)?,
                 "updatedAt": row.get::<_, Option<String>>(6)?,
             }))
-        }) {
-            for row in rows.flatten() {
-                errors.push(row);
-            }
-        }
-    }
+        })
+        .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+        .map_err(|error| format!("sync_queue errors: {error}"))?;
 
     // Parity rows go through `renderer_list_actionable_items`, not raw SQL. That
     // accessor carries the repair-ownership exclusions, and native repair queue
     // data must never reach an exported bundle — a hand-written query here would
     // have to restate those rules and would leak the moment they changed.
-    if let Ok(items) = crate::sync_queue::renderer_list_actionable_items(
+    let items = crate::sync_queue::renderer_list_actionable_items(
         conn,
         &crate::sync_queue::QueueListQuery {
             limit: Some(limit),
             module_type: None,
         },
-    ) {
-        for item in items
-            .into_iter()
-            .filter(|item| item.status == "conflict" || item.status == "failed")
-        {
-            errors.push(json!({
-                "queue": "parity_sync_queue",
-                "id": item.id,
-                "entityType": item.module_type,
-                "tableName": item.table_name,
-                "status": item.status,
-                // A conflict with no reason is itself the finding; say so rather
-                // than exporting a null the reader has to interpret.
-                "lastError": crate::print::safe_operational_error(item.error_message, 1024)
-                    .unwrap_or_else(|| "(no reason recorded)".to_string()),
-                "retryCount": item.attempts,
-                "createdAt": item.created_at,
-                "updatedAt": item.last_attempt,
-                "conflictStrategy": item.conflict_strategy,
-                "operation": item.operation,
-            }));
-        }
+    )
+    .map_err(|error| format!("parity queue errors: {error}"))?;
+    for item in items
+        .into_iter()
+        .filter(|item| item.status == "conflict" || item.status == "failed")
+    {
+        errors.push(json!({
+            "queue": "parity_sync_queue",
+            "id": item.id,
+            "entityType": item.module_type,
+            "tableName": item.table_name,
+            "status": item.status,
+            // A conflict with no reason is itself the finding; say so rather
+            // than exporting a null the reader has to interpret.
+            "lastError": crate::print::safe_operational_error(item.error_message, 1024)
+                .unwrap_or_else(|| "(no reason recorded)".to_string()),
+            "retryCount": item.attempts,
+            "createdAt": item.created_at,
+            "updatedAt": item.last_attempt,
+            "conflictStrategy": item.conflict_strategy,
+            "operation": item.operation,
+        }));
     }
 
-    errors
+    Ok(errors)
 }
 
+/// Printer names, targets and status texts for the bundle: scrubbed, then
+/// bounded, so the cut never keeps part of an email or a phone number
+/// (scrub_and_bound_text).
 fn bounded_diagnostic_text(value: Option<String>, max_chars: usize) -> Option<String> {
     let value = value?;
-    let bounded: String = value
+    let cleaned: String = value
         .trim()
         .chars()
         .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
-        .take(max_chars)
         .collect();
+    let bounded = scrub_and_bound_text(&cleaned, max_chars);
     (!bounded.is_empty()).then_some(bounded)
 }
 
@@ -1475,6 +2499,7 @@ mod tests {
         let health = get_system_health(&db_state).unwrap();
         assert!(health.get("schemaVersion").is_some());
         assert!(health.get("syncBacklog").is_some());
+        assert_eq!(health["syncBacklogStatus"], json!("ok"));
         assert!(health.get("paymentAdjustmentBacklog").is_some());
         assert!(health.get("terminalContext").is_some());
         assert!(health.get("syncStatusSummary").is_some());
@@ -1484,7 +2509,191 @@ mod tests {
         assert!(health.get("lastParitySync").is_some());
         assert!(health.get("credentialState").is_some());
         assert!(health.get("checkoutPaymentBlockers").is_some());
+        // Nothing waits to print: read, and zero (not "not read").
+        assert_eq!(
+            health["printerStatus"]["pendingJobs"],
+            json!({ "count": 0, "oldestCreatedAt": null, "pausedCount": 0 })
+        );
         // Cleanup
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn insert_print_job(
+        conn: &rusqlite::Connection,
+        id: &str,
+        profile_id: Option<&str>,
+        status: &str,
+        created_at: &str,
+    ) {
+        conn.execute(
+            "INSERT INTO print_jobs
+             (id, entity_type, entity_id, printer_profile_id, status, created_at, updated_at)
+             VALUES (?1, 'order_receipt', ?1, ?2, ?3, ?4, ?4)",
+            params![id, profile_id, status, created_at],
+        )
+        .unwrap();
+    }
+
+    fn pending_jobs(db_state: &DbState) -> Value {
+        get_system_health(db_state).unwrap()["printerStatus"]["pendingJobs"].clone()
+    }
+
+    /// Review 30/09/2026: the aggregate counted only `pending`. A job a worker
+    /// took (`printing`) whose send never finished was invisible, so the Health
+    /// view's "receipts are not printing" rule (and `printer.jobs_not_printing`)
+    /// saw it only through jobs queued behind it. Both states are waiting, aged
+    /// from `created_at`; finished, dispatched, failed and cancelled jobs are not.
+    #[test]
+    fn print_aggregate_counts_jobs_stuck_printing_as_waiting() {
+        let dir = std::env::temp_dir().join(format!("diag_print_waiting_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_state = crate::db::init(&dir).unwrap();
+        let stuck_printing = (chrono::Utc::now() - chrono::Duration::minutes(90)).to_rfc3339();
+        let queued_behind = (chrono::Utc::now() - chrono::Duration::minutes(40)).to_rfc3339();
+        let long_ago = (chrono::Utc::now() - chrono::Duration::hours(5)).to_rfc3339();
+        {
+            let conn = db_state.conn.lock().unwrap();
+            // Only a `printing` job: the old aggregate said nothing was waiting.
+            insert_print_job(
+                &conn,
+                "job-printing",
+                Some("front"),
+                "printing",
+                &stuck_printing,
+            );
+            for (id, status) in [
+                ("job-printed", "printed"),
+                ("job-dispatched", "dispatched"),
+                ("job-failed", "failed"),
+                ("job-cancelled", "cancelled"),
+            ] {
+                insert_print_job(&conn, id, Some("front"), status, &long_ago);
+            }
+        }
+        assert_eq!(
+            pending_jobs(&db_state),
+            json!({ "count": 1, "oldestCreatedAt": stuck_printing, "pausedCount": 0 })
+        );
+
+        {
+            let conn = db_state.conn.lock().unwrap();
+            insert_print_job(&conn, "job-pending", None, "pending", &queued_behind);
+        }
+        let aggregate = pending_jobs(&db_state);
+        assert_eq!(
+            aggregate,
+            json!({ "count": 2, "oldestCreatedAt": stuck_printing, "pausedCount": 0 })
+        );
+
+        // The support incident reads the same aggregate: a job stuck printing
+        // for 90 minutes is a real stall past its 20-minute rule.
+        let incidents = crate::incident_reporting::classify_incidents(&json!({
+            "terminalContext": { "terminalId": "term-1" },
+            "printerStatus": { "configured": true, "recentJobs": [], "pendingJobs": aggregate },
+        }));
+        assert!(incidents
+            .iter()
+            .any(|candidate| candidate.issue_code == "printer.jobs_not_printing"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review 30/09/2026: jobs held by a pause are not "not printing". Someone
+    /// paused the queue or the printer on purpose; the Health view must not
+    /// tell staff that receipts are stuck, nor page support. They are left out
+    /// by the rule the dispatcher uses (the global key, or the job's printer)
+    /// and counted apart as evidence.
+    #[test]
+    fn print_aggregate_leaves_out_jobs_held_by_a_pause() {
+        let dir = std::env::temp_dir().join(format!("diag_print_paused_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_state = crate::db::init(&dir).unwrap();
+        let front_old = (chrono::Utc::now() - chrono::Duration::minutes(60)).to_rfc3339();
+        let front_printing = (chrono::Utc::now() - chrono::Duration::minutes(45)).to_rfc3339();
+        let kitchen = (chrono::Utc::now() - chrono::Duration::minutes(8)).to_rfc3339();
+        let unassigned = (chrono::Utc::now() - chrono::Duration::minutes(6)).to_rfc3339();
+        {
+            let conn = db_state.conn.lock().unwrap();
+            insert_print_job(&conn, "front-1", Some("front"), "pending", &front_old);
+            insert_print_job(&conn, "front-2", Some("front"), "printing", &front_printing);
+            insert_print_job(&conn, "kitchen-1", Some("kitchen"), "pending", &kitchen);
+            insert_print_job(&conn, "default-1", None, "pending", &unassigned);
+            crate::db::set_setting(&conn, "printing", "queue_paused_profile::front", "true")
+                .unwrap();
+            // A resumed printer is not paused.
+            crate::db::set_setting(&conn, "printing", "queue_paused_profile::kitchen", "false")
+                .unwrap();
+        }
+        // The paused printer's jobs are out; the others still age, from the
+        // oldest of them.
+        assert_eq!(
+            pending_jobs(&db_state),
+            json!({ "count": 2, "oldestCreatedAt": kitchen, "pausedCount": 2 })
+        );
+
+        {
+            let conn = db_state.conn.lock().unwrap();
+            crate::db::set_setting(&conn, "printing", "queue_paused", "true").unwrap();
+        }
+        let aggregate = pending_jobs(&db_state);
+        assert_eq!(
+            aggregate,
+            json!({ "count": 0, "oldestCreatedAt": null, "pausedCount": 4 })
+        );
+        // Nothing reports a paused queue to support either — even though the
+        // five-row `recentJobs` window still lists the paused pending rows (it
+        // is not pause-filtered). Re-review 30/09/2026: the classifier used to
+        // fall back to that window whenever `oldestCreatedAt` was null and paged
+        // support for a queue paused on purpose.
+        let paused_recent_jobs = json!([
+            { "id": "front-1", "status": "pending", "createdAt": front_old },
+            { "id": "kitchen-1", "status": "pending", "createdAt": kitchen },
+        ]);
+        let incidents = crate::incident_reporting::classify_incidents(&json!({
+            "terminalContext": { "terminalId": "term-1" },
+            "printerStatus": {
+                "configured": true,
+                "recentJobs": paused_recent_jobs,
+                "pendingJobs": aggregate,
+            },
+        }));
+        assert!(incidents
+            .iter()
+            .all(|candidate| candidate.issue_code != "printer.jobs_not_printing"));
+        // A failed queue read (null aggregate) is unknown, not a stall: it must
+        // not rescan the unfiltered window either.
+        let incidents = crate::incident_reporting::classify_incidents(&json!({
+            "terminalContext": { "terminalId": "term-1" },
+            "printerStatus": {
+                "configured": true,
+                "recentJobs": paused_recent_jobs,
+                "pendingJobs": null,
+            },
+        }));
+        assert!(incidents
+            .iter()
+            .all(|candidate| candidate.issue_code != "printer.jobs_not_printing"));
+        // The older payload shape, with no `pendingJobs` key at all, still ages
+        // its pending rows from `recentJobs`.
+        let incidents = crate::incident_reporting::classify_incidents(&json!({
+            "terminalContext": { "terminalId": "term-1" },
+            "printerStatus": { "configured": true, "recentJobs": paused_recent_jobs },
+        }));
+        assert!(incidents
+            .iter()
+            .any(|candidate| candidate.issue_code == "printer.jobs_not_printing"));
+
+        {
+            let conn = db_state.conn.lock().unwrap();
+            crate::db::set_setting(&conn, "printing", "queue_paused", "false").unwrap();
+            crate::db::set_setting(&conn, "printing", "queue_paused_profile::front", "false")
+                .unwrap();
+        }
+        assert_eq!(
+            pending_jobs(&db_state),
+            json!({ "count": 4, "oldestCreatedAt": front_old, "pausedCount": 0 })
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2157,5 +3366,924 @@ mod tests {
         assert_eq!(redacted["nested"]["status"], json!("ok"));
         assert_eq!(redacted["items"][0]["password"], json!("[REDACTED]"));
         assert_eq!(redacted["items"][1]["name"], json!("safe"));
+    }
+}
+
+/// Diagnostics bundle v2 (health parity plan §5, 29/09/2026 incident): the
+/// v1 scrubber turned `window.reportDate` and a printer IP into
+/// [REDACTED_PHONE] and redacted `apiKeyPresent`, while names went out in
+/// clear; the bundle had no manifest, no Health view and nothing about the
+/// fiscal queue that held the Z.
+///
+/// The shared vectors (`shared/pos/health/__fixtures__/redaction-vectors.json`)
+/// are the cases both exporters must agree on: the Android bundle's rules
+/// (`shared/pos/health/diagnostics-redaction.ts`) are tested against the
+/// same file. The tests below them pin desktop-only details.
+#[cfg(test)]
+mod bundle_v2_tests {
+    use super::*;
+
+    const SHARED_REDACTION_VECTORS: &str =
+        include_str!("../../../shared/pos/health/__fixtures__/redaction-vectors.json");
+
+    fn shared_vectors() -> Value {
+        serde_json::from_str(SHARED_REDACTION_VECTORS).expect("parse the shared redaction vectors")
+    }
+
+    fn string_pairs(value: &Value) -> Vec<(String, String)> {
+        value
+            .as_array()
+            .expect("vector list")
+            .iter()
+            .map(|pair| {
+                (
+                    pair[0].as_str().expect("input").to_string(),
+                    pair[1].as_str().expect("expected").to_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// Review 30/09/2026: `+41 79 123 45 67`, `+41 (0)79 123 45 67`,
+    /// `τηλ:6941234567`, `phone=…`, `tel:+30…` and Postgres
+    /// `Key (phone)=(…)` went out in clear, `0041 79 123 45 67` half.
+    #[test]
+    fn scrubs_and_keeps_the_shared_string_vectors() {
+        let vectors = shared_vectors();
+        for (input, expected) in string_pairs(&vectors["scrubString"]["keepReadable"])
+            .into_iter()
+            .chain(string_pairs(&vectors["scrubString"]["scrub"]))
+        {
+            assert_eq!(scrub_sensitive_string(&input), expected, "{input}");
+        }
+        let max_chars = vectors["scrubString"]["maxChars"]
+            .as_u64()
+            .expect("maxChars") as usize;
+        assert_eq!(max_chars, MAX_EXPORT_STRING_CHARS);
+    }
+
+    #[test]
+    fn redacts_the_shared_key_vectors() {
+        let vectors = shared_vectors();
+        let keys = &vectors["keys"];
+        for key in keys["redact"].as_array().expect("redact keys") {
+            let key = key.as_str().expect("key");
+            assert!(should_redact_key(key), "{key} must be redacted");
+        }
+        for key in keys["keep"].as_array().expect("keep keys") {
+            let key = key.as_str().expect("key");
+            assert!(!should_redact_key(key), "{key} must stay readable");
+        }
+        for entry in keys["presenceValues"].as_array().expect("presence values") {
+            let key = entry["key"].as_str().expect("key");
+            assert_eq!(
+                should_redact_key_for(key, &entry["value"], None),
+                entry["redacted"].as_bool().expect("redacted"),
+                "{key} = {}",
+                entry["value"]
+            );
+        }
+        for entry in keys["personContext"].as_array().expect("person context") {
+            let key = entry["key"].as_str().expect("key");
+            let parent = entry["parent"].as_str().expect("parent");
+            assert_eq!(
+                should_redact_key_for(key, &json!("value"), Some(parent)),
+                entry["redacted"].as_bool().expect("redacted"),
+                "{key} inside {parent}"
+            );
+        }
+    }
+
+    #[test]
+    fn redacts_the_shared_document_vector() {
+        let vectors = shared_vectors();
+        assert_eq!(
+            redact_sensitive_fields(vectors["document"]["input"].clone()),
+            vectors["document"]["expected"]
+        );
+    }
+
+    fn read_zip_json(archive: &mut zip::ZipArchive<std::fs::File>, name: &str) -> Value {
+        let mut file = archive.by_name(name).expect("zip entry should exist");
+        let mut contents = String::new();
+        file.read_to_string(&mut contents)
+            .expect("read zip json contents");
+        serde_json::from_str(&contents).expect("parse zip json")
+    }
+
+    #[test]
+    fn dates_times_ips_versions_ids_and_amounts_stay_readable() {
+        for readable in [
+            "2026-09-29",
+            "29/09/2026",
+            "29.09.26",
+            "2026/09/29",
+            "11:05:13",
+            "2026-09-29T11:05:13.140276+00:00",
+            "2026-09-30T04:59:59.999Z",
+            "192.168.1.100",
+            "10.0.0.254",
+            "1.4.119",
+            "v1.0.13",
+            "1.0.13.602015",
+            "221.50",
+            "-12.5",
+            "d28cef2e-bbf2-496a-b922-45b497525715",
+            "terminal-d80762ac",
+            "cust-9b36be15-9c2d-4ce1-a61b-c12f487cb2c1",
+        ] {
+            assert_eq!(scrub_sensitive_string(readable), readable, "{readable}");
+        }
+        // In free text, with punctuation around them.
+        assert_eq!(
+            scrub_sensitive_string("Z of (2026-09-29), printer 192.168.1.100:9100 offline."),
+            "Z of (2026-09-29), printer 192.168.1.100:9100 offline."
+        );
+        // Whitespace is kept, not collapsed.
+        assert_eq!(
+            scrub_sensitive_string("line one\n  line two\tend"),
+            "line one\n  line two\tend"
+        );
+    }
+
+    #[test]
+    fn emails_and_phone_numbers_are_scrubbed() {
+        assert_eq!(
+            scrub_sensitive_string("mail maria.p@example.com now"),
+            "mail [REDACTED_EMAIL] now"
+        );
+        assert_eq!(
+            scrub_sensitive_string("<maria@example.gr>,"),
+            "<[REDACTED_EMAIL]>,"
+        );
+        for phone in [
+            "6912345678",
+            "+306912345678",
+            "210-123-4567",
+            "0030.210.1234567",
+        ] {
+            assert_eq!(scrub_sensitive_string(phone), "[REDACTED_PHONE]", "{phone}");
+        }
+        // Surrounding punctuation stays around the marker.
+        assert_eq!(scrub_sensitive_string("(210)1234567"), "([REDACTED_PHONE]");
+        // Groups that only add up to a phone number together.
+        assert_eq!(
+            scrub_sensitive_string("call +30 691 234 5678 today"),
+            "call [REDACTED_PHONE] today"
+        );
+        assert_eq!(
+            scrub_sensitive_string("tel 2310 123456"),
+            "tel [REDACTED_PHONE]"
+        );
+        // Short digit groups are not phones.
+        assert_eq!(scrub_sensitive_string("table 12 seat 4"), "table 12 seat 4");
+        // A URL keeps its path; the query can carry a token.
+        assert_eq!(
+            scrub_sensitive_string("GET https://admin.example.com/api/pos/fiscal/status?token=abc"),
+            "GET https://admin.example.com/api/pos/fiscal/status?[REDACTED]"
+        );
+    }
+
+    #[test]
+    fn free_text_is_capped_at_one_kilobyte_like_the_android_bundle() {
+        let exact = "a".repeat(1024);
+        assert_eq!(scrub_sensitive_string(&exact), exact);
+
+        let long = format!("{}tail", "b".repeat(1024));
+        let capped = scrub_sensitive_string(&long);
+        assert_eq!(capped.chars().count(), 1025);
+        assert!(capped.starts_with(&"b".repeat(1024)));
+        assert!(capped.ends_with('…'));
+    }
+
+    fn digit_groups(separator: &str, width: usize) -> String {
+        let modulo = 10usize.pow(width as u32);
+        let mut text = String::new();
+        let mut index = 0usize;
+        while text.len() < 64 * 1024 {
+            if index > 0 {
+                text.push_str(separator);
+            }
+            text.push_str(&format!("{:0width$}", index % modulo, width = width));
+            index += 1;
+        }
+        text
+    }
+
+    /// Review 30/09/2026 (F5): the phone scanner was cubic in the number of
+    /// digit groups and read the whole string before the 1 KB cap, so one
+    /// long stored error could stall the export. It now scans about the
+    /// first kilobyte and collects at most 8 chunks or 15 digits per number.
+    #[test]
+    fn sixty_four_kilobytes_of_digit_groups_scan_in_well_under_100_ms() {
+        let nbsp = char::from_u32(0xA0).expect("no-break space").to_string();
+        for (label, input) in [
+            ("two-digit groups", digit_groups(" ", 2)),
+            ("one-digit groups", digit_groups(" ", 1)),
+            (
+                "three-digit groups joined by no-break spaces",
+                digit_groups(&nbsp, 3),
+            ),
+            ("dashed groups", digit_groups("-", 2)),
+            ("dotted groups", digit_groups(".", 3)),
+        ] {
+            // The export cap, and a cap past the input so all 64 KB are scanned.
+            for max_chars in [MAX_EXPORT_STRING_CHARS, 1 << 20] {
+                // Fastest of three runs, so a busy test machine is not a failure.
+                let fastest = (0..3)
+                    .map(|_| {
+                        let started = std::time::Instant::now();
+                        let scrubbed = scrub_sensitive_string_with_limit(&input, max_chars);
+                        assert!(scrubbed.chars().count() <= max_chars + 1, "{label}");
+                        started.elapsed()
+                    })
+                    .min()
+                    .expect("three runs");
+                assert!(
+                    fastest < std::time::Duration::from_millis(100),
+                    "{label}, cap {max_chars}: {fastest:?}"
+                );
+            }
+        }
+    }
+
+    /// A number or email the scan cap falls in is read whole or redacted up to
+    /// the cap, never shown in part, even when an earlier URL query shrinks
+    /// the text so the cap region lands inside the first kilobyte.
+    #[test]
+    fn a_number_at_the_scan_cap_is_never_shown_in_part() {
+        let url = format!("https://h.example/p?{}", "q".repeat(1000));
+        let tail = "x ".repeat(400);
+        for sensitive in [
+            "+41 79 123 45 67",
+            "6941234567",
+            "tel: 694 123 4567",
+            "0030 210 1234567",
+            "maria.papadopoulou@example.com",
+        ] {
+            for offset in 0..400 {
+                let input = format!("{url} {} {sensitive} done {tail}", "w".repeat(offset));
+                let scrubbed = scrub_sensitive_string(&input);
+                assert!(
+                    !scrubbed.chars().any(|ch| ch.is_ascii_digit()) && !scrubbed.contains("maria"),
+                    "{sensitive} at offset {offset}: {scrubbed}"
+                );
+                assert!(scrubbed.ends_with('…'), "{sensitive} at offset {offset}");
+            }
+        }
+    }
+
+    /// Review 30/09/2026: text bounded before the export scrubbed it (print
+    /// safe_operational_error at 512/1024, printer texts, conflict reasons)
+    /// kept part of a number or email the bound fell in. Bounded text is now
+    /// scrubbed first, whatever the bound, and stays within it.
+    #[test]
+    fn bounded_text_never_keeps_part_of_a_number_or_an_email() {
+        for max_chars in [31usize, 96, 160, 512] {
+            for sensitive in [
+                "+41 79 123 45 67",
+                "6941234567",
+                "Key (phone)=(079.123.45.67)",
+                "maria.papadopoulou@example.com",
+            ] {
+                for offset in 0..(max_chars + 40) {
+                    let text = format!(
+                        "{} {sensitive} done {}",
+                        "e".repeat(offset),
+                        "w ".repeat(60)
+                    );
+                    let bounded = scrub_and_bound_text(&text, max_chars);
+                    assert!(
+                        bounded.chars().count() <= max_chars,
+                        "{max_chars} {sensitive} at {offset}: {bounded}"
+                    );
+                    assert!(
+                        !bounded.chars().any(|ch| ch.is_ascii_digit())
+                            && !bounded.contains("maria"),
+                        "{max_chars} {sensitive} at {offset}: {bounded}"
+                    );
+                }
+            }
+        }
+        // Short text is only scrubbed; empty bound is empty.
+        assert_eq!(
+            scrub_and_bound_text("printer 192.168.1.100:9100 offline", 64),
+            "printer 192.168.1.100:9100 offline"
+        );
+        assert_eq!(
+            scrub_and_bound_text("call 6941234567", 64),
+            "call [REDACTED_PHONE]"
+        );
+        assert_eq!(scrub_and_bound_text("anything", 0), "");
+        // The printer texts of the bundle go through it too.
+        let name = format!("{} tel 694 123 4567", "Kitchen".repeat(3));
+        let bounded = bounded_diagnostic_text(Some(name), 30).expect("bounded name");
+        assert!(!bounded.chars().any(|ch| ch.is_ascii_digit()), "{bounded}");
+        assert!(bounded.chars().count() <= 30);
+    }
+
+    /// A token longer than the read limit cannot be judged (an email may end
+    /// it), so it is dropped whole; a long token that ends inside the limit
+    /// is read to its end and capped as before.
+    #[test]
+    fn a_token_too_long_to_read_whole_is_dropped() {
+        let hidden = format!("Error: {}@example.com", "a".repeat(20_000));
+        assert_eq!(scrub_sensitive_string(&hidden), "Error: …");
+
+        let readable = format!("Error: {}", "a".repeat(5_000));
+        let scrubbed = scrub_sensitive_string(&readable);
+        assert_eq!(scrubbed.chars().count(), MAX_EXPORT_STRING_CHARS + 1);
+        assert!(scrubbed.starts_with("Error: aaaa"));
+    }
+
+    #[test]
+    fn presence_booleans_stay_and_secrets_and_payloads_go() {
+        let redacted = redact_sensitive_fields(json!({
+            "hasApiKey": true,
+            "hasAdminUrl": false,
+            "apiKeyPresent": true,
+            "pin_reset_required": false,
+            "api_key": null,
+            "isOnline": true,
+            "api_key_value": "sk-live-123",
+            "authorization": "Bearer abc",
+            "staffPinHash": "9f86d081",
+            "pin": "1234",
+            "data": { "orderId": "x" },
+            "raw_payload": "{}",
+            "shipping_zone": "north",
+            "mapping": "grid",
+            "status": "failed",
+        }));
+        for kept in [
+            "hasApiKey",
+            "hasAdminUrl",
+            "apiKeyPresent",
+            "pin_reset_required",
+            "api_key",
+            "isOnline",
+            "shipping_zone",
+            "mapping",
+            "status",
+        ] {
+            assert_ne!(redacted[kept], json!(REDACTED), "{kept} must stay readable");
+        }
+        assert_eq!(redacted["apiKeyPresent"], json!(true));
+        assert_eq!(redacted["api_key"], Value::Null);
+        for gone in [
+            "api_key_value",
+            "authorization",
+            "staffPinHash",
+            "pin",
+            "data",
+            "raw_payload",
+        ] {
+            assert_eq!(redacted[gone], json!(REDACTED), "{gone} must be redacted");
+        }
+    }
+
+    #[test]
+    fn staff_and_customer_names_are_redacted_but_places_and_devices_are_not() {
+        let redacted = redact_sensitive_fields(json!({
+            "customerName": "Maria Papadopoulou",
+            "staff_name": "Nikos",
+            "driverName": "Kostas",
+            "checked_in_by_name": "Eleni",
+            "staff": { "name": "Nikos", "role": "cashier" },
+            "activeStaffBlockers": { "details": [{ "staffName": "Nikos", "roleType": "cashier" }] },
+            "customer": { "full_name": "Maria P" },
+            "branchName": "Kifisia Branch",
+            "organizationName": "The Small Group",
+            "terminalName": "Main POS",
+            "profiles": [{ "name": "Kitchen printer", "printerName": "Front Queue" }],
+            "customerPhone": "6912345678",
+            "phone_country_code": "GR",
+            "customer_email": "maria@example.com",
+        }));
+        for gone in [
+            &redacted["customerName"],
+            &redacted["staff_name"],
+            &redacted["driverName"],
+            &redacted["checked_in_by_name"],
+            &redacted["staff"]["name"],
+            &redacted["activeStaffBlockers"]["details"][0]["staffName"],
+            &redacted["customer"]["full_name"],
+            &redacted["customerPhone"],
+            &redacted["phone_country_code"],
+            &redacted["customer_email"],
+        ] {
+            assert_eq!(gone, &json!(REDACTED));
+        }
+        assert_eq!(redacted["staff"]["role"], json!("cashier"));
+        assert_eq!(redacted["branchName"], json!("Kifisia Branch"));
+        assert_eq!(redacted["organizationName"], json!("The Small Group"));
+        assert_eq!(redacted["terminalName"], json!("Main POS"));
+        assert_eq!(redacted["profiles"][0]["name"], json!("Kitchen printer"));
+        assert_eq!(redacted["profiles"][0]["printerName"], json!("Front Queue"));
+    }
+
+    /// The two v1 casualties from the incident bundle.
+    #[test]
+    fn the_report_date_and_printer_ip_survive_redaction() {
+        let redacted = redact_sensitive_fields(json!({
+            "window": { "reportDate": "2026-09-29", "periodStartAt": "2026-09-29T05:00:00+00:00" },
+            "printer": { "ip": "192.168.1.100", "port": 9100 },
+            "about": { "version": "1.4.119" },
+        }));
+        assert_eq!(redacted["window"]["reportDate"], json!("2026-09-29"));
+        assert_eq!(
+            redacted["window"]["periodStartAt"],
+            json!("2026-09-29T05:00:00+00:00")
+        );
+        assert_eq!(redacted["printer"]["ip"], json!("192.168.1.100"));
+        assert_eq!(redacted["about"]["version"], json!("1.4.119"));
+    }
+
+    fn export_with(db_state: &DbState, dir: &Path, health_view: Option<Value>) -> String {
+        export_diagnostics_bundle(
+            db_state,
+            dir,
+            DiagnosticsExportOptions {
+                include_logs: false,
+                redact_sensitive: true,
+            },
+            health_view,
+        )
+        .expect("export diagnostics bundle")
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn the_bundle_carries_a_manifest_the_health_view_and_the_fiscal_closeout_evidence() {
+        crate::fiscal::active_cache::reset_for_tests();
+        let dir = std::env::temp_dir().join(format!("diag_v2_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_state = crate::db::init(&dir).unwrap();
+        {
+            let conn = db_state.conn.lock().unwrap();
+            crate::db::set_setting(&conn, "terminal", "branch_id", "branch-lpp").unwrap();
+            conn.execute(
+                "INSERT INTO parity_sync_queue (
+                     id, table_name, record_id, operation, data, organization_id, created_at,
+                     attempts, status, error_message, module_type, conflict_strategy
+                 ) VALUES ('fiscal-1', 'fiscal_submission', 'order-2e556433', 'INSERT',
+                     '{\"branchId\":\"branch-lpp\",\"receiptNumber\":\"R-1\",\"customerEmail\":\"maria@example.com\"}',
+                     'org-1', ?1, 4, 'pending', 'HTTP_400_CLIENT_ERROR: Invalid FiscalReceiptInput',
+                     'fiscal', 'last-write-wins')",
+                [chrono::Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+            crate::zreport::record_last_closeout_attempt(
+                &conn,
+                &crate::zreport::CloseoutAttempt {
+                    at: "2026-09-29T16:38:14Z".to_string(),
+                    stage: "fiscal_guard".to_string(),
+                    code: "FISCAL_CLOSE_BLOCKED".to_string(),
+                    message: Some(
+                        "Cannot close day: 1 fiscal receipt(s) of 2026-09-29 have not been sent"
+                            .to_string(),
+                    ),
+                },
+            )
+            .unwrap();
+        }
+
+        // The renderer's snapshot, in the shared buildHealthView format.
+        let view = json!({
+            "format": "thesmall-pos-health-view-v1",
+            "platform": "windows",
+            "source": "health_modal",
+            "state": "needs_attention",
+            "issues": [{ "code": "fiscal_queue_not_empty", "params": { "count": 1 } }],
+            "operatorNote": "call maria@example.com",
+        });
+        let path = export_with(&db_state, &dir, Some(view));
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
+
+        let manifest = read_zip_json(&mut archive, DIAGNOSTICS_MANIFEST_FILE);
+        assert_eq!(manifest["format"], json!(DIAGNOSTICS_FORMAT));
+        assert_eq!(manifest["formatVersion"], json!(2));
+        assert_eq!(manifest["platform"], json!(std::env::consts::OS));
+        assert_eq!(manifest["source"], json!("health_modal"));
+        assert_eq!(manifest["redaction"]["enabled"], json!(true));
+        assert_eq!(manifest["logsIncluded"], json!(false));
+        let files: Vec<String> = manifest["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|file| file.as_str().unwrap().to_string())
+            .collect();
+        for expected in [
+            "about.json",
+            "system_health.json",
+            "closeout_readiness.json",
+            "sync_errors.json",
+            "printer_diagnostics.json",
+            HEALTH_VIEW_FILE,
+            DIAGNOSTICS_MANIFEST_FILE,
+        ] {
+            assert!(
+                files.contains(&expected.to_string()),
+                "manifest lists {expected}"
+            );
+        }
+        assert_eq!(
+            archive.len(),
+            files.len(),
+            "every listed file is in the zip"
+        );
+        assert!(manifest["collectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|collector| collector["durationMs"].is_number()));
+
+        // The snapshot is the file itself, as in the Android bundle.
+        let health_view = read_zip_json(&mut archive, HEALTH_VIEW_FILE);
+        assert_eq!(health_view["format"], json!("thesmall-pos-health-view-v1"));
+        assert_eq!(health_view["source"], json!("health_modal"));
+        assert_eq!(health_view["state"], json!("needs_attention"));
+        assert_eq!(
+            health_view["issues"][0]["code"],
+            json!("fiscal_queue_not_empty")
+        );
+        assert!(
+            health_view.get("view").is_none(),
+            "no wrapper: {health_view}"
+        );
+        assert_eq!(
+            health_view["operatorNote"],
+            json!("call [REDACTED_EMAIL]"),
+            "the renderer's snapshot is redacted like every other file"
+        );
+        let health_collector = manifest["collectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|collector| collector["entry"] == json!(HEALTH_VIEW_FILE))
+            .cloned()
+            .expect("health view collector recorded");
+        assert_eq!(health_collector["status"], json!("ok"));
+
+        let closeout = read_zip_json(&mut archive, "closeout_readiness.json");
+        let fiscal = &closeout["fiscalQueueBlockers"];
+        assert_eq!(fiscal["count"], json!(1));
+        assert_eq!(fiscal["activeVerdict"], json!("unknown"));
+        assert_eq!(fiscal["wouldBlockClose"], json!(true));
+        assert_eq!(fiscal["rows"][0]["orderId"], json!("order-2e556433"));
+        assert_eq!(fiscal["rows"][0]["attempts"], json!(4));
+        assert_eq!(
+            closeout["lastCloseoutAttempt"]["code"],
+            json!("FISCAL_CLOSE_BLOCKED")
+        );
+        assert_eq!(
+            closeout["lastCloseoutAttempt"]["stage"],
+            json!("fiscal_guard")
+        );
+        assert_eq!(
+            closeout["window"]["reportDate"]
+                .as_str()
+                .map(|day| day.len()),
+            Some(10),
+            "the report date stays readable: {closeout}"
+        );
+
+        let mut bundle_text = String::new();
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index).unwrap();
+            entry.read_to_string(&mut bundle_text).unwrap();
+        }
+        assert!(
+            !bundle_text.contains("maria@example.com"),
+            "no email leaves the terminal"
+        );
+
+        drop(archive);
+        drop(db_state);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_health_view_document_is_the_snapshot_or_says_why_not() {
+        let view = json!({
+            "format": "thesmall-pos-health-view-v1",
+            "state": "attention",
+            "counts": { "parityPending": 2 },
+        });
+        assert_eq!(health_view_document(Some(view.clone())).unwrap(), view);
+
+        for missing in [
+            None,
+            Some(Value::Null),
+            Some(json!("state")),
+            Some(json!([1])),
+        ] {
+            let document = health_view_document(missing).unwrap();
+            assert_eq!(document["status"], json!("not_collected"), "{document}");
+        }
+
+        let too_large = json!({ "padding": "x".repeat(MAX_HEALTH_VIEW_BYTES) });
+        let document = health_view_document(Some(too_large)).unwrap();
+        assert_eq!(document["status"], json!("unavailable"));
+        assert!(document["bytes"].as_u64().unwrap() > MAX_HEALTH_VIEW_BYTES as u64);
+    }
+
+    #[test]
+    fn without_a_health_view_the_file_says_not_collected() {
+        let dir = std::env::temp_dir().join(format!("diag_v2_nohv_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_state = crate::db::init(&dir).unwrap();
+        let path = export_with(&db_state, &dir, None);
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
+        let health_view = read_zip_json(&mut archive, HEALTH_VIEW_FILE);
+        assert_eq!(health_view["status"], json!("not_collected"));
+        let manifest = read_zip_json(&mut archive, DIAGNOSTICS_MANIFEST_FILE);
+        assert_eq!(manifest["source"], json!("unknown"));
+        let health_collector = manifest["collectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|collector| collector["entry"] == json!(HEALTH_VIEW_FILE))
+            .cloned()
+            .expect("health view collector recorded");
+        assert_eq!(health_collector["status"], json!("not_collected"));
+        drop(archive);
+        drop(db_state);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// v1 aborted the whole export when one collector failed; support then
+    /// had nothing at all. A failing collector is now reported, and the rest
+    /// of the bundle still ships.
+    #[test]
+    fn a_failing_collector_is_reported_unavailable_and_the_rest_still_ships() {
+        let dir = std::env::temp_dir().join(format!("diag_v2_fail_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_state = crate::db::init(&dir).unwrap();
+        db_state
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TABLE print_target_state;")
+            .unwrap();
+
+        let path = export_with(&db_state, &dir, None);
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
+        let printers = read_zip_json(&mut archive, "printer_diagnostics.json");
+        assert_eq!(printers["status"], json!("unavailable"));
+        assert!(printers["error"].is_string());
+        let manifest = read_zip_json(&mut archive, DIAGNOSTICS_MANIFEST_FILE);
+        assert!(manifest["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error["entry"] == json!("printer_diagnostics.json")));
+        // The other files are still there.
+        let about = read_zip_json(&mut archive, "about.json");
+        assert!(about.get("version").is_some());
+        drop(archive);
+        drop(db_state);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review 30/09/2026: the Health view's backlog card read "clear" when
+    /// the backlog read failed. System health now says the backlog is
+    /// unavailable, with the same empty shape.
+    #[test]
+    fn system_health_says_when_the_backlog_could_not_be_read() {
+        let dir = std::env::temp_dir().join(format!("diag_backlog_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_state = crate::db::init(&dir).unwrap();
+        db_state
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TABLE sync_queue; CREATE TABLE sync_queue (id TEXT PRIMARY KEY);")
+            .unwrap();
+        let health = get_system_health(&db_state).expect("system health still answers");
+        assert_eq!(health["syncBacklogStatus"], json!("unavailable"));
+        assert_eq!(health["syncBacklog"], json!({}));
+        drop(db_state);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review 30/09/2026: sync_errors.json, sync_backlog.json and
+    /// terminal_settings_snapshot.json turned a failed read into `[]` or `{}`
+    /// recorded "ok", which reads as "no errors, nothing waiting".
+    #[test]
+    fn unreadable_queue_and_settings_are_reported_unavailable_not_empty() {
+        let dir = std::env::temp_dir().join(format!("diag_v2_unreadable_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_state = crate::db::init(&dir).unwrap();
+        db_state
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "DROP TABLE sync_queue;
+                 CREATE TABLE sync_queue (id TEXT PRIMARY KEY);
+                 DROP TABLE local_settings;
+                 CREATE TABLE local_settings (id TEXT PRIMARY KEY);",
+            )
+            .unwrap();
+
+        let path = export_with(&db_state, &dir, None);
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
+        let unreadable = [
+            "sync_errors.json",
+            "sync_backlog.json",
+            "terminal_settings_snapshot.json",
+        ];
+        for file in unreadable {
+            let document = read_zip_json(&mut archive, file);
+            assert_eq!(
+                document["status"],
+                json!("unavailable"),
+                "{file}: {document}"
+            );
+            assert!(document["error"].is_string(), "{file}: {document}");
+        }
+        let manifest = read_zip_json(&mut archive, DIAGNOSTICS_MANIFEST_FILE);
+        let errors = manifest["errors"].as_array().expect("manifest errors");
+        for file in unreadable {
+            assert!(
+                errors.iter().any(|error| error["entry"] == json!(file)),
+                "{file} missing from {errors:?}"
+            );
+        }
+        drop(archive);
+        drop(db_state);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    const MANIFEST_CONTRACT: &str =
+        include_str!("../../../shared/pos/health/__fixtures__/diagnostics-manifest-contract.json");
+
+    fn keys_of(value: &Value) -> Vec<String> {
+        let mut keys: Vec<String> = value
+            .as_object()
+            .expect("an object")
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    fn strings_of(value: &Value) -> Vec<String> {
+        let mut strings: Vec<String> = value
+            .as_array()
+            .expect("a list")
+            .iter()
+            .map(|item| item.as_str().expect("a string").to_string())
+            .collect();
+        strings.sort();
+        strings
+    }
+
+    /// Review 30/09/2026: the desktop wrote files/file/durationMs/
+    /// redaction.applied/app.version, Android entries/entry/collectedInMs/
+    /// redaction.enabled/app.versionName. One shape now, pinned by the shared
+    /// contract both apps' tests read.
+    #[test]
+    fn the_manifest_has_the_shape_both_apps_share() {
+        let contract: Value =
+            serde_json::from_str(MANIFEST_CONTRACT).expect("parse the manifest contract");
+        let dir = std::env::temp_dir().join(format!("diag_v2_contract_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_state = crate::db::init(&dir).unwrap();
+        db_state
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TABLE print_target_state;")
+            .unwrap();
+        let path = export_with(&db_state, &dir, None);
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
+        let manifest = read_zip_json(&mut archive, DIAGNOSTICS_MANIFEST_FILE);
+
+        let mut expected_keys = strings_of(&contract["requiredKeys"]);
+        expected_keys.extend(strings_of(&contract["platformExtras"]["manifest"]));
+        expected_keys.sort();
+        assert_eq!(keys_of(&manifest), expected_keys);
+        for retired in strings_of(&contract["retiredKeys"]) {
+            assert!(manifest.get(&retired).is_none(), "retired key {retired}");
+        }
+        let mut app_keys = strings_of(&contract["appKeys"]);
+        app_keys.extend(strings_of(&contract["platformExtras"]["app"]));
+        app_keys.sort();
+        assert_eq!(keys_of(&manifest["app"]), app_keys);
+        assert_eq!(
+            manifest["app"]["versionName"],
+            json!(env!("CARGO_PKG_VERSION"))
+        );
+        assert_eq!(
+            keys_of(&manifest["redaction"]),
+            strings_of(&contract["redactionKeys"])
+        );
+        assert_eq!(
+            keys_of(&manifest["limits"]),
+            strings_of(&contract["limitsKeys"])
+        );
+        for (key, value) in contract["values"].as_object().unwrap() {
+            assert_eq!(&manifest[key], value, "{key}");
+        }
+        let statuses = strings_of(&contract["collectorStatuses"]);
+        for collector in manifest["collectors"].as_array().unwrap() {
+            for key in strings_of(&contract["collectorKeys"]) {
+                assert!(
+                    collector.get(&key).is_some(),
+                    "collector {collector} lacks {key}"
+                );
+            }
+            assert!(statuses.contains(&collector["status"].as_str().unwrap().to_string()));
+        }
+        let error = manifest["errors"]
+            .as_array()
+            .unwrap()
+            .first()
+            .expect("the dropped printer table is reported");
+        assert_eq!(keys_of(error), strings_of(&contract["errorKeys"]));
+        assert!(manifest["truncated"].is_array());
+        drop(archive);
+        drop(db_state);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review 30/09/2026: `redact_sensitive` defaulted to false, so an export
+    /// without options — or one asking for `redactSensitive: false` — left
+    /// the terminal with the API key and customer details in clear.
+    #[test]
+    fn every_export_is_redacted_whatever_the_options_say() {
+        let dir = std::env::temp_dir().join(format!("diag_v2_redact_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_state = crate::db::init(&dir).unwrap();
+        {
+            let conn = db_state.conn.lock().unwrap();
+            crate::db::set_setting(&conn, "terminal", "api_key", "super-secret-export-key")
+                .unwrap();
+        }
+        assert!(DiagnosticsExportOptions::default().redact_sensitive);
+        let paths = [
+            export_diagnostics(&db_state, &dir).expect("default export"),
+            export_diagnostics_with_options(
+                &db_state,
+                &dir,
+                DiagnosticsExportOptions {
+                    include_logs: false,
+                    redact_sensitive: false,
+                },
+            )
+            .expect("export asking for no redaction"),
+        ];
+        for path in paths {
+            let mut archive = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
+            let settings = read_zip_json(&mut archive, "terminal_settings_snapshot.json");
+            assert_eq!(settings["terminal"]["api_key"], json!(REDACTED), "{path}");
+            let manifest = read_zip_json(&mut archive, DIAGNOSTICS_MANIFEST_FILE);
+            assert_eq!(manifest["redaction"]["enabled"], json!(true));
+            let mut bundle_text = String::new();
+            for index in 0..archive.len() {
+                let mut entry = archive.by_index(index).unwrap();
+                entry.read_to_string(&mut bundle_text).unwrap();
+            }
+            assert!(!bundle_text.contains("super-secret-export-key"), "{path}");
+        }
+        drop(db_state);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lists_are_capped_at_fifty_rows_and_the_cut_is_recorded() {
+        let rows: Vec<Value> = (0..60).map(|index| json!({ "index": index })).collect();
+        let mut truncated = Vec::new();
+        let capped = redact_value_for_export(
+            json!({ "rows": rows, "nested": { "items": [1, 2] } }),
+            "sync_errors.json",
+            &mut truncated,
+        );
+        assert_eq!(
+            capped["rows"].as_array().unwrap().len(),
+            MAX_EXPORT_LIST_ROWS
+        );
+        assert_eq!(capped["nested"]["items"], json!([1, 2]));
+        assert_eq!(
+            truncated,
+            vec!["sync_errors.json: rows (total 60)".to_string()]
+        );
+    }
+
+    #[test]
+    fn the_source_comes_from_the_health_view_or_is_unknown() {
+        assert_eq!(
+            health_view_source(Some(&json!({ "source": "health_modal" }))),
+            "health_modal"
+        );
+        assert_eq!(
+            health_view_source(Some(&json!({ "source": "../../etc" }))),
+            "unknown"
+        );
+        assert_eq!(health_view_source(Some(&json!({}))), "unknown");
+        assert_eq!(health_view_source(None), "unknown");
     }
 }

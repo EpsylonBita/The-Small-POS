@@ -1,18 +1,15 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { createContext, useContext, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { motion } from 'framer-motion';
 import {
   CheckCircle2,
   Clock3,
-  Copy,
   Monitor,
   RefreshCw,
   ScreenShare,
-  Wifi,
   X,
 } from 'lucide-react';
 import { useTheme } from '../contexts/theme-context';
-import { environment } from '../../config/environment';
 import {
   getBridge,
   offEvent,
@@ -20,38 +17,57 @@ import {
   type ExternalDisplayCapabilities,
   type ExternalDisplayInfo,
 } from '../../lib';
+import { KdsReadCoordinator } from '../services/KdsReadCoordinator';
+import {
+  ExternalPresentationOwner,
+  closeStaleExternalOpen,
+  externalDisplayChoices,
+  externalOpenParams,
+  isExternalContentLive,
+  isExternalDisplayFree,
+  liveExternalPresentation,
+} from '../services/ExternalDisplayOwnership';
+import { findLocalPreparationMark, localPreparationStore } from '../services/KdsLocalPhaseStore';
+import {
+  getKdsRecordIdentityKeys,
+  getKdsVisibleOrderNumber,
+  isActiveLocalKitchenOrder,
+  matchesKdsTenant,
+  matchesKdsTerminal,
+  overlayKitchenStatus,
+  readCanonicalKitchenStatus,
+  readKdsString,
+} from '../services/KdsLocalOrders';
+import { useLocalPreparationSnapshot } from '../hooks/useLocalPreparation';
+import { useResolvedPosIdentity } from '../hooks/useResolvedPosIdentity';
+import { useModules } from '../contexts/module-context';
 import { useOrderStore } from '../hooks/useOrderStore';
-import { formatCompactOrderNumberForDisplay, getVisibleOrderNumber } from '../utils/orderNumberUtils';
+import { formatCompactOrderNumberForDisplay } from '../utils/orderNumberUtils';
 import { pageMotionContainer, pageMotionItem } from '../components/ui/page-motion';
 
 type DisplayStatus = 'pending' | 'preparing' | 'ready';
 
+/** One customer screen row: public order number and stage only, never customer, cart, note or payment data. */
 interface DisplayRow {
   order_id: string;
-  client_order_id?: string | null;
-  order_number?: string | null;
-  order_type?: string | null;
-  table_number?: string | null;
-  status: string;
-  created_at?: string | null;
-  updated_at?: string | null;
+  order_number: string;
+  status: DisplayStatus;
+  created_at: string | null;
+  updated_at: string | null;
 }
 
-interface CustomerDisplayApiStatus {
-  configured?: boolean;
-  enabled?: boolean;
-  paired?: boolean;
-  pairing_supported?: boolean;
-  pairing_session_id?: string | null;
-  error?: string | null;
+/** One fresh read of the local SQLite orders, tagged with the scope it was read for. */
+interface LocalOrdersRead {
+  scope: string;
+  orders: readonly Record<string, unknown>[];
 }
 
-const DISPLAY_STATUSES = new Set<DisplayStatus>(['pending', 'preparing', 'ready']);
 const CUSTOMER_DISPLAY_CONTENT_TYPE = 'customer_display';
-
-function isDisplayStatus(status: string): status is DisplayStatus {
-  return DISPLAY_STATUSES.has(status as DisplayStatus);
-}
+// Customers wait at the counter for pickup and takeaway orders; table service is never called here.
+const CUSTOMER_DISPLAY_ORDER_TYPES = new Set(['pickup', 'takeaway']);
+// Native events for local order changes. There is no display API, realtime channel or poll.
+const LOCAL_ORDER_EVENTS = ['order-created', 'order-status-updated', 'order-deleted'];
+const SYNC_REFRESH_INTERVAL_MS = 30000;
 
 function readSearchParam(name: string): string | null {
   if (typeof window === 'undefined') return null;
@@ -66,41 +82,17 @@ function isExternalDisplayWindow(): boolean {
   return readSearchParam('externalDisplay') === CUSTOMER_DISPLAY_CONTENT_TYPE;
 }
 
-const normalizeDisplayText = (value: unknown): string =>
-  typeof value === 'string' ? value.trim() : '';
+const hasValue = (value: unknown): boolean =>
+  (typeof value === 'string' && value.trim() !== '') || (typeof value === 'number' && Number.isFinite(value));
 
-const getDisplayOrderLookupKeys = (record: Record<string, unknown> | null | undefined): string[] => {
-  if (!record) return [];
-  return [
-    'id',
-    'supabase_id',
-    'supabaseId',
-    'order_id',
-    'client_order_id',
-    'clientOrderId',
-    'client_request_id',
-    'clientRequestId',
-    'display_order_number',
-    'displayOrderNumber',
-    'order_number',
-    'orderNumber',
-  ]
-    .map((key) => normalizeDisplayText(record[key]))
-    .filter(Boolean);
-};
+function isCustomerDisplayOrder(order: Record<string, unknown>): boolean {
+  const orderType = (readKdsString(order, 'order_type') || readKdsString(order, 'orderType')).toLowerCase().replace(/_/g, '-');
+  return CUSTOMER_DISPLAY_ORDER_TYPES.has(orderType) && !hasValue(order['table_number']) && !hasValue(order['tableNumber']);
+}
 
-function getOrderIdentifier(order: DisplayRow, localOrder?: Record<string, unknown> | null): string {
-  const localOrderNumber = getVisibleOrderNumber({
-    display_order_number: normalizeDisplayText(localOrder?.display_order_number),
-    displayOrderNumber: normalizeDisplayText(localOrder?.displayOrderNumber),
-    order_number: normalizeDisplayText(localOrder?.order_number),
-    orderNumber: normalizeDisplayText(localOrder?.orderNumber),
-  });
-  if (localOrderNumber) return formatCompactOrderNumberForDisplay(localOrderNumber);
-
-  const orderNumber = typeof order.order_number === 'string' ? order.order_number.trim() : '';
-  if (orderNumber) return formatCompactOrderNumberForDisplay(orderNumber);
-  return order.order_id.slice(0, 8);
+function getOrderIdentifier(order: Record<string, unknown>, orderId: string): string {
+  const visibleNumber = getKdsVisibleOrderNumber(order);
+  return visibleNumber ? formatCompactOrderNumberForDisplay(visibleNumber) : orderId.slice(0, 8);
 }
 
 function getOrderUpdatedAtMs(order: DisplayRow): number {
@@ -110,69 +102,69 @@ function getOrderUpdatedAtMs(order: DisplayRow): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function normalizeStatus(status: string): DisplayStatus | null {
-  const normalized = status.toLowerCase();
-  if (normalized === 'ready' || normalized === 'completed') return 'ready';
-  if (normalized === 'preparing' || normalized === 'in_progress') return 'preparing';
-  if (normalized === 'pending' || normalized === 'confirmed' || normalized === 'received') {
-    return 'pending';
-  }
-  return null;
-}
-
-function isCustomerDisplayActive(capabilities: ExternalDisplayCapabilities | null): boolean {
-  return Boolean(
-    capabilities?.activePresentations?.some(
-      (presentation) => presentation.contentType === CUSTOMER_DISPLAY_CONTENT_TYPE
-    )
-  );
-}
-
-const CustomerDisplayPage: React.FC = () => {
+function useCustomerDisplayOwner(pageActive: boolean) {
   const bridge = getBridge();
   const { t, i18n } = useTranslation();
   const { resolvedTheme } = useTheme();
-  const localOrders = useOrderStore((state) => state.orders);
-  const loadLocalOrders = useOrderStore((state) => state.loadOrders);
-  const [rows, setRows] = useState<DisplayRow[]>([]);
-  const [displayStatus, setDisplayStatus] = useState<CustomerDisplayApiStatus | null>(null);
+  const storeOrders = useOrderStore((state) => state.orders);
+  const preparation = useLocalPreparationSnapshot();
+  const [ordersRead, setOrdersRead] = useState<LocalOrdersRead | null>(null);
+  const [readError, setReadError] = useState<string | null>(null);
   const [capabilities, setCapabilities] = useState<ExternalDisplayCapabilities | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
   const [isDisplayBusy, setIsDisplayBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const isDark = resolvedTheme === 'dark';
-  const externalWindow = isExternalDisplayWindow();
-  const localOrderLookup = useMemo(() => {
-    const lookup = new Map<string, Record<string, unknown>>();
-    localOrders.forEach((order) => {
-      const record = order as unknown as Record<string, unknown>;
-      getDisplayOrderLookupKeys(record).forEach((key) => {
-        lookup.set(key, record);
-      });
-    });
-    return lookup;
-  }, [localOrders]);
-
-  const findLocalOrderForDisplayRow = useCallback(
-    (order: DisplayRow): Record<string, unknown> | null => {
-      return (
-        localOrderLookup.get(normalizeDisplayText(order.order_id)) ||
-        localOrderLookup.get(normalizeDisplayText(order.client_order_id)) ||
-        localOrderLookup.get(normalizeDisplayText(order.order_number)) ||
-        null
-      );
-    },
-    [localOrderLookup]
+  const { organizationId, branchId, terminalId, isReady } = useResolvedPosIdentity('branch+organization');
+  const { isModuleEnabled } = useModules();
+  // Purchase and terminal entitlement: without it nothing is read, projected or kept open.
+  const enabled = isModuleEnabled('customer_display');
+  const identityScope = enabled && isReady && organizationId && branchId && terminalId ? `${organizationId}|${branchId}|${terminalId}` : '';
+  const scopeRef = useRef(identityScope);
+  scopeRef.current = identityScope;
+  const displayGeneration = useRef(0);
+  const scheduleRead = useRef<() => void>(() => {});
+  const coordinator = useRef(new KdsReadCoordinator()).current;
+  // The one presentation this owner may close: its own open's token or the running one it adopted.
+  const [presentation] = useState(() => new ExternalPresentationOwner(CUSTOMER_DISPLAY_CONTENT_TYPE));
+  // Opening or running only; a closing window no longer shows this terminal's orders.
+  const activeExternalDisplay = Boolean(identityScope) && isExternalContentLive(capabilities, CUSTOMER_DISPLAY_CONTENT_TYPE);
+  // A closing window keeps its screen reserved until native destroyed it, so keep reading the screens.
+  const watchExternalDisplay = Boolean(identityScope) && Boolean(
+    capabilities?.activePresentations?.some((item) => item.contentType === CUSTOMER_DISPLAY_CONTENT_TYPE)
   );
+  const ownerActive = Boolean(identityScope) && (pageActive || activeExternalDisplay);
+  useEffect(() => {
+    coordinator.configure(identityScope, ownerActive);
+    return () => coordinator.configure('', false);
+  }, [coordinator, identityScope, ownerActive]);
+  useEffect(() => {
+    setOrdersRead(null); setReadError(null); setCapabilities(null); setIsDisplayBusy(false);
+    return () => {
+      displayGeneration.current++;
+      coordinator.configure('', false);
+      void bridge.invoke('customer-display-publish', null).catch(() => {});
+      // Sign-out, identity change or revoked entitlement: close only the presentation this owner holds.
+      void presentation.release(bridge).catch(() => {});
+    };
+  }, [bridge, coordinator, identityScope, presentation]);
 
   const fetchCapabilities = useCallback(async () => {
-    if (externalWindow) return;
+    if (!identityScope) return;
+    const requestedScope = identityScope;
+    const generation = displayGeneration.current;
+    // The answer to a read issued before this owner's last open or stop never changes what it owns.
+    const ownership = presentation.revision;
     try {
       const result = await bridge.externalDisplay.getCapabilities();
+      if (scopeRef.current !== requestedScope || generation !== displayGeneration.current) return;
+      // Adopts the running presentation only while this owner holds none and opens nothing; forgets its
+      // own once native lists no customer presentation at all (e.g. the window was closed from the OS).
+      presentation.observe(result, ownership);
       setCapabilities(result);
     } catch (err) {
+      if (scopeRef.current !== requestedScope || generation !== displayGeneration.current) return;
       setCapabilities({
         success: false,
         supported: false,
@@ -180,104 +172,267 @@ const CustomerDisplayPage: React.FC = () => {
         error: err instanceof Error ? err.message : 'Failed to inspect monitors',
       });
     }
-  }, [bridge, externalWindow]);
+  }, [bridge, identityScope, presentation]);
 
-  const fetchRows = useCallback(
-    async (showLoading = false) => {
-      if (showLoading) {
-        setIsLoading(true);
-      }
+  // A fresh native read of the local SQLite orders, offline-only orders included; never a display API.
+  const readLocalOrders = useCallback(
+    async () => coordinator.request(async isCurrent => {
+      const requestedScope = identityScope;
       try {
-        const result = await bridge.adminApi.fetchFromAdmin('/api/pos/customer-display?limit=200');
-        if (result?.success && result?.data?.success && Array.isArray(result.data.rows)) {
-          setRows(result.data.rows as DisplayRow[]);
-          setDisplayStatus({
-            configured: Boolean(result.data.configured),
-            enabled: Boolean(result.data.enabled),
-            paired: Boolean(result.data.paired),
-            pairing_supported: Boolean(result.data.pairing_supported),
-            pairing_session_id:
-              typeof result.data.pairing_session_id === 'string'
-                ? result.data.pairing_session_id
-                : null,
-            error:
-              typeof result.data.settings_error === 'string'
-                ? result.data.settings_error
-                : null,
-          });
-          setError(null);
-          return;
-        }
-        throw new Error(result?.data?.error || result?.error || 'Failed to fetch customer display');
+        const orders: unknown = await bridge.orders.getAll();
+        if (!isCurrent() || scopeRef.current !== requestedScope) return;
+        if (!Array.isArray(orders)) throw new Error('Local orders are unreadable');
+        setOrdersRead({ scope: requestedScope, orders: orders as Record<string, unknown>[] });
+        setReadError(null);
       } catch (err) {
-        console.error('Customer display fetch failed', err);
-        setError(
+        // A failed read keeps the last good rows of this scope; a first read shows nothing.
+        if (!isCurrent() || scopeRef.current !== requestedScope) return;
+        console.error('Customer display local read failed', err);
+        setReadError(
           err instanceof Error
             ? err.message
             : t('customerDisplay.errors.fetchRowsFailed', 'Failed to load customer display orders')
         );
-        if (showLoading) {
-          setRows([]);
-        }
-      } finally {
-        if (showLoading) {
-          setIsLoading(false);
-        }
       }
-    },
-    [bridge, t]
+      const stages = localPreparationStore.getSnapshot();
+      if (stages.scope === requestedScope && (!stages.state || stages.error)) await localPreparationStore.refresh(requestedScope);
+    }),
+    [bridge, t, coordinator, identityScope]
   );
 
   useEffect(() => {
-    void fetchRows(true);
+    if (!ownerActive) return;
+    void readLocalOrders();
     void fetchCapabilities();
-    void loadLocalOrders().catch(() => {});
-  }, [fetchCapabilities, fetchRows, loadLocalOrders]);
+  }, [ownerActive, fetchCapabilities, readLocalOrders]);
 
   useEffect(() => {
-    let timeout: ReturnType<typeof setTimeout> | null = null;
-
-    const scheduleRefresh = () => {
-      if (timeout) return;
-      timeout = setTimeout(() => {
-        timeout = null;
-        void fetchRows(false);
-      }, 150);
+    if (!ownerActive) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let lastSync = 0;
+    let disposed = false;
+    const schedule = () => {
+      if (timer || disposed) return;
+      timer = setTimeout(() => { timer = null; void readLocalOrders(); }, 150);
     };
-
-    onEvent('order-status-updated', scheduleRefresh);
-    onEvent('order-created', scheduleRefresh);
-    onEvent('sync:complete', scheduleRefresh);
-
+    // Sync writes cloud changes into local SQLite; re-read it at most every 30 seconds.
+    const sync = () => { if (Date.now() - lastSync >= SYNC_REFRESH_INTERVAL_MS) { lastSync = Date.now(); schedule(); } };
+    scheduleRead.current = schedule;
+    LOCAL_ORDER_EVENTS.forEach(event => onEvent(event, schedule));
+    onEvent('sync:complete', sync);
     return () => {
-      if (timeout) {
-        clearTimeout(timeout);
-      }
-      offEvent('order-status-updated', scheduleRefresh);
-      offEvent('order-created', scheduleRefresh);
-      offEvent('sync:complete', scheduleRefresh);
+      disposed = true; scheduleRead.current = () => {}; if (timer) clearTimeout(timer);
+      LOCAL_ORDER_EVENTS.forEach(event => offEvent(event, schedule)); offEvent('sync:complete', sync);
     };
-  }, [fetchRows]);
+  }, [ownerActive, readLocalOrders]);
+
+  // The central order store reloading local orders is one more local change signal.
+  const seenStoreOrders = useRef(storeOrders);
+  useEffect(() => {
+    if (seenStoreOrders.current === storeOrders) return;
+    seenStoreOrders.current = storeOrders;
+    scheduleRead.current();
+  }, [storeOrders]);
 
   useEffect(() => {
-    const interval = setInterval(() => {
-      void fetchRows(false);
-    }, externalWindow ? 1000 : 2000);
-    return () => clearInterval(interval);
-  }, [externalWindow, fetchRows]);
+    if (!watchExternalDisplay) return;
+    const timer = setInterval(() => void fetchCapabilities(), 2000);
+    return () => clearInterval(timer);
+  }, [watchExternalDisplay, fetchCapabilities]);
+
+  const preparationState = identityScope && preparation.scope === identityScope ? preparation.state : null;
+  const localOrders = identityScope && ordersRead?.scope === identityScope ? ordersRead.orders : null;
+  // Fail closed: until this scope's orders and kitchen stages are both read, nothing stale can show.
+  const isLoading = !localOrders || !preparationState;
+  const loadError = readError || (identityScope && preparation.scope === identityScope ? preparation.error : null);
 
   const displayOrders = useMemo(() => {
-    return rows
-      .map((order) => {
-        const status = normalizeStatus(order.status);
-        return status ? { ...order, status } : null;
-      })
-      .filter((order): order is DisplayRow & { status: DisplayStatus } => {
-        return Boolean(order && isDisplayStatus(order.status));
-      })
-      .sort((a, b) => getOrderUpdatedAtMs(b) - getOrderUpdatedAtMs(a));
-  }, [rows]);
+    if (!localOrders || !preparationState) return [];
+    const seen = new Set<string>();
+    const rows: DisplayRow[] = [];
+    localOrders.forEach((order) => {
+      const keys = getKdsRecordIdentityKeys(order);
+      if (keys.length === 0 || keys.some((key) => seen.has(key))) return;
+      if (!matchesKdsTenant(organizationId || null, branchId || null, order) || !matchesKdsTerminal(terminalId || null, order)) return;
+      if (!isActiveLocalKitchenOrder(order) || !isCustomerDisplayOrder(order)) return;
+      keys.forEach((key) => seen.add(key));
+      const mark = findLocalPreparationMark(preparationState, keys);
+      const status = overlayKitchenStatus(readCanonicalKitchenStatus(order), mark?.phase);
+      // Collected from the kitchen: the order leaves this screen and stays unchanged everywhere else.
+      if (!status) return;
+      const createdAt = readKdsString(order, 'created_at') || readKdsString(order, 'createdAt') || null;
+      const updatedAt = readKdsString(order, 'updated_at') || readKdsString(order, 'updatedAt') || createdAt;
+      rows.push({
+        order_id: keys[0],
+        order_number: getOrderIdentifier(order, keys[0]),
+        status,
+        created_at: createdAt,
+        // A newer kitchen stage moves the order to the top of the screen.
+        updated_at: mark && !(Date.parse(mark.at) <= Date.parse(updatedAt ?? '')) ? mark.at : updatedAt,
+      });
+    });
+    return rows.sort((a, b) => getOrderUpdatedAtMs(b) - getOrderUpdatedAtMs(a));
+  }, [localOrders, preparationState, organizationId, branchId, terminalId]);
 
+  const handleRefresh = async () => {
+    setIsRefreshing(true);
+    try {
+      await Promise.all([readLocalOrders(), fetchCapabilities(), localPreparationStore.refresh(identityScope)]);
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
+  const openExternalDisplay = async (display?: ExternalDisplayInfo) => {
+    if (!identityScope) return;
+    const openedScope = identityScope;
+    const generation = displayGeneration.current;
+    const isCurrent = () => scopeRef.current === openedScope && generation === displayGeneration.current;
+    setIsDisplayBusy(true);
+    setNotice(null);
+    setError(null);
+    // The open names the presentation this owner holds, first adopting the running one the cashier sees.
+    presentation.observe(capabilities);
+    const endOpen = presentation.beginOpen();
+    try {
+      // Auto names only the content and the held token: native takes the first free external screen,
+      // never the cashier's, and reopens only the presentation still holding `expectedToken`, so a late
+      // or stale open takes over nothing. A chosen screen travels as its opaque id and is refused, never redirected.
+      const result = await bridge.externalDisplay.open(externalOpenParams(CUSTOMER_DISPLAY_CONTENT_TYPE, display, presentation.ownedToken));
+      if (!isCurrent()) {
+        // Stopped, signed out or revoked meanwhile: close only what this late open created.
+        await closeStaleExternalOpen(bridge, CUSTOMER_DISPLAY_CONTENT_TYPE, result);
+        return;
+      }
+      if (!result?.success) {
+        // The refusal is final: no other screen and no Auto retry. The open settled, so the fresh
+        // answer may also forget a presentation that is gone (e.g. closed from the OS).
+        endOpen();
+        setError(
+          result?.error ||
+            t('customerDisplay.errors.startExternalFailed', 'Failed to open external customer display')
+        );
+        await fetchCapabilities();
+        return;
+      }
+      presentation.opened(result);
+      endOpen();
+      setNotice(
+        t(
+          'customerDisplay.notices.externalRunning',
+          'Customer display is running on the selected monitor or TV.'
+        )
+      );
+      await fetchCapabilities();
+    } catch (err) {
+      if (!isCurrent()) return;
+      setError(
+        err instanceof Error
+          ? err.message
+          : t(
+              'customerDisplay.errors.startExternalFailed',
+              'Failed to open external customer display'
+            )
+      );
+    } finally {
+      endOpen();
+      if (isCurrent()) setIsDisplayBusy(false);
+    }
+  };
+
+  const closeExternalDisplay = async () => {
+    const closingScope = identityScope;
+    const generation = ++displayGeneration.current;
+    const isCurrent = () => scopeRef.current === closingScope && generation === displayGeneration.current;
+    // Owning nothing yet (e.g. after a reload), take the running presentation the cashier sees.
+    presentation.observe(capabilities);
+    setCapabilities(previous => previous ? { ...previous, activePresentations: previous.activePresentations?.filter(item => item.contentType !== CUSTOMER_DISPLAY_CONTENT_TYPE) } : null);
+    await bridge.invoke('customer-display-publish', null).catch(() => {});
+    setIsDisplayBusy(true);
+    setNotice(null);
+    setError(null);
+    try {
+      // Only the owned token closes: a newer session's presentation is never touched.
+      const result = await presentation.release(bridge);
+      if (!isCurrent()) return;
+      if (result && !result.success) {
+        throw new Error(
+          result.error ||
+            t('customerDisplay.errors.stopExternalFailed', 'Failed to stop external customer display')
+        );
+      }
+      if (result) setNotice(t('customerDisplay.notices.externalStopped', 'External customer display stopped.'));
+      // The screen stays reserved until native destroyed the window; read the screens again.
+      await fetchCapabilities();
+    } catch (err) {
+      if (!isCurrent()) return;
+      setError(
+        err instanceof Error
+          ? err.message
+          : t(
+              'customerDisplay.errors.stopExternalFailed',
+              'Failed to stop external customer display'
+            )
+      );
+    } finally {
+      if (isCurrent()) setIsDisplayBusy(false);
+    }
+  };
+
+  // Valid external screens only: never the cashier's monitor; an external OS primary is allowed.
+  const externalChoices = identityScope ? externalDisplayChoices(capabilities) : [];
+  const runningDisplayId = activeExternalDisplay
+    ? liveExternalPresentation(capabilities, CUSTOMER_DISPLAY_CONTENT_TYPE)?.displayId ?? null
+    : null;
+  const canOpenExternal = Boolean(capabilities?.supported) && externalChoices.some(isExternalDisplayFree);
+
+  return { identityScope, displayOrders, capabilities, isRefreshing, isLoading, isDisplayBusy, notice, error, loadError, isDark, locale: i18n.language, activeExternalDisplay, externalChoices, runningDisplayId, canOpenExternal, handleRefresh, openExternalDisplay, closeExternalDisplay };
+}
+
+type DisplayModel = ReturnType<typeof useCustomerDisplayOwner>;
+type DisplaySnapshot = Pick<DisplayModel, 'displayOrders' | 'isLoading' | 'isDark' | 'locale'>;
+const CustomerDisplayContext = createContext<{ model: DisplayModel; attach: () => () => void } | null>(null);
+export function CustomerDisplayProvider({ children }: { children: React.ReactNode }) {
+  const [consumers, setConsumers] = useState(0);
+  const model = useCustomerDisplayOwner(consumers > 0);
+  const attach = useCallback(() => { setConsumers(count => count + 1); return () => setConsumers(count => Math.max(0, count - 1)); }, []);
+  useEffect(() => {
+    // Public rows and theme only: never screens, capabilities or a presentation token.
+    const snapshot: DisplaySnapshot | null = model.activeExternalDisplay ? {
+      displayOrders: model.displayOrders, isLoading: model.isLoading, isDark: model.isDark, locale: model.locale,
+    } : null;
+    void getBridge().invoke('customer-display-publish', snapshot).catch(() => {});
+  }, [model.activeExternalDisplay, model.displayOrders, model.isLoading, model.isDark, model.locale]);
+  return <CustomerDisplayContext.Provider value={{ model, attach }}>{children}</CustomerDisplayContext.Provider>;
+}
+function LocalCustomerDisplayPage() {
+  const context = useContext(CustomerDisplayContext);
+  if (!context) throw new Error('Customer display requires its persistent owner');
+  useEffect(() => context.attach(), [context.attach]);
+  return <CustomerDisplayView model={context.model} externalWindow={false} />;
+}
+function ExternalCustomerDisplayPage() {
+  const [snapshot, setSnapshot] = useState<DisplaySnapshot | null>(null);
+  const { i18n } = useTranslation();
+  useEffect(() => {
+    let disposed = false; let reading = false;
+    const read = async () => {
+      if (reading) return; reading = true;
+      try { const value = await getBridge().invoke('customer-display-snapshot'); if (!disposed) setSnapshot(value || null); }
+      catch { if (!disposed) setSnapshot(null); }
+      finally { reading = false; }
+    };
+    void read(); const timer = setInterval(() => void read(), 500);
+    return () => { disposed = true; clearInterval(timer); };
+  }, []);
+  useEffect(() => { if (snapshot?.locale && snapshot.locale !== i18n.language) void i18n.changeLanguage(snapshot.locale); }, [snapshot?.locale, i18n]);
+  if (!snapshot) return <div className="h-screen bg-black" />;
+  return <CustomerDisplayView externalWindow model={{ ...snapshot, capabilities: null, isRefreshing: false, isDisplayBusy: false, notice: null, error: null, loadError: null, activeExternalDisplay: true, externalChoices: [], runningDisplayId: null, canOpenExternal: false, openExternalDisplay: async () => {}, closeExternalDisplay: async () => {} } as unknown as DisplayModel} />;
+}
+function CustomerDisplayPage() { return isExternalDisplayWindow() ? <ExternalCustomerDisplayPage /> : <LocalCustomerDisplayPage />; }
+function CustomerDisplayView({ model, externalWindow }: { model: DisplayModel; externalWindow: boolean }) {
+  const { t } = useTranslation();
+  const { displayOrders, capabilities, isRefreshing, isLoading, isDisplayBusy, notice, error, loadError, isDark, activeExternalDisplay, externalChoices, runningDisplayId, canOpenExternal, handleRefresh, openExternalDisplay, closeExternalDisplay } = model;
   const phaseCounts = useMemo(
     () =>
       displayOrders.reduce(
@@ -324,117 +479,7 @@ const CustomerDisplayPage: React.FC = () => {
     [t]
   );
 
-  const handleRefresh = async () => {
-    setIsRefreshing(true);
-    try {
-      await Promise.all([fetchRows(false), fetchCapabilities()]);
-    } finally {
-      setIsRefreshing(false);
-    }
-  };
-
-  const openExternalDisplay = async (display?: ExternalDisplayInfo) => {
-    setIsDisplayBusy(true);
-    setNotice(null);
-    setError(null);
-    try {
-      const result = await bridge.externalDisplay.open({
-        contentType: CUSTOMER_DISPLAY_CONTENT_TYPE,
-        displayIndex: display?.index,
-      });
-      if (!result?.success) {
-        throw new Error(result?.error || 'Failed to open external customer display');
-      }
-      setNotice(
-        t(
-          'customerDisplay.notices.externalRunning',
-          'Customer display is running on the selected monitor or TV.'
-        )
-      );
-      await fetchCapabilities();
-    } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : t(
-              'customerDisplay.errors.startExternalFailed',
-              'Failed to open external customer display'
-            )
-      );
-    } finally {
-      setIsDisplayBusy(false);
-    }
-  };
-
-  const closeExternalDisplay = async () => {
-    setIsDisplayBusy(true);
-    setNotice(null);
-    setError(null);
-    try {
-      const result = await bridge.externalDisplay.close({ contentType: CUSTOMER_DISPLAY_CONTENT_TYPE });
-      if (!result?.success) {
-        throw new Error(result?.error || 'Failed to close external customer display');
-      }
-      setNotice(t('customerDisplay.notices.externalStopped', 'External customer display stopped.'));
-      await fetchCapabilities();
-    } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : t(
-              'customerDisplay.errors.stopExternalFailed',
-              'Failed to stop external customer display'
-            )
-      );
-    } finally {
-      setIsDisplayBusy(false);
-    }
-  };
-
-  const copyTvDisplayLink = async () => {
-    setNotice(null);
-    setError(null);
-    try {
-      const result = await bridge.adminApi.fetchFromAdmin('/api/pos/customer-display', {
-        method: 'POST',
-        body: JSON.stringify({ action: 'pair' }),
-      });
-      const sessionId =
-        result?.data?.pairing_session_id ||
-        result?.data?.pairingSessionId ||
-        displayStatus?.pairing_session_id;
-      if (!result?.success || !result?.data?.success || !sessionId) {
-        throw new Error(result?.data?.error || result?.error || 'Failed to create TV link');
-      }
-      const language = (i18n.language || 'en').split('-')[0];
-      const theme = isDark ? 'dark' : 'light';
-      const url = `${environment.ADMIN_DASHBOARD_URL.replace(/\/+$/, '')}/display/customer/${encodeURIComponent(
-        sessionId
-      )}?lang=${encodeURIComponent(language)}&theme=${encodeURIComponent(theme)}`;
-      await bridge.clipboard.writeText(url);
-      setDisplayStatus((prev) => ({
-        ...(prev || {}),
-        paired: true,
-        pairing_session_id: sessionId,
-      }));
-      setNotice(
-        t(
-          'customerDisplay.notices.tvLinkCopied',
-          'TV link copied. Open it in a Smart TV browser or wireless receiver.'
-        )
-      );
-    } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : t('customerDisplay.errors.createTvLinkFailed', 'Failed to create TV display link')
-      );
-    }
-  };
-
-  const activeExternalDisplay = isCustomerDisplayActive(capabilities);
-  const monitors = capabilities?.displays || [];
-  const availableMonitors = monitors.length > 1 ? monitors : monitors.slice(0, 1);
+  const failure = error || loadError || capabilities?.error;
 
   return (
     <motion.div
@@ -478,18 +523,6 @@ const CustomerDisplayPage: React.FC = () => {
 
             {!externalWindow && (
               <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => void copyTvDisplayLink()}
-                  className={`inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-sm font-semibold transition-all active:scale-[0.98] ${
-                    isDark
-                      ? 'border-zinc-700 bg-zinc-900 active:bg-zinc-800'
-                      : 'border-slate-200 bg-white active:bg-slate-100'
-                  }`}
-                >
-                  <Copy className="h-4 w-4" />
-                  {t('customerDisplay.actions.copyTvLink', 'Copy TV Link')}
-                </button>
                 {activeExternalDisplay ? (
                   <button
                     type="button"
@@ -503,8 +536,8 @@ const CustomerDisplayPage: React.FC = () => {
                 ) : (
                   <button
                     type="button"
-                    onClick={() => void openExternalDisplay(availableMonitors[1] || availableMonitors[0])}
-                    disabled={isDisplayBusy}
+                    onClick={() => void openExternalDisplay()}
+                    disabled={isDisplayBusy || !canOpenExternal}
                     className={`inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-sm font-semibold transition-all active:scale-[0.98] disabled:opacity-60 disabled:active:scale-100 ${
                       isDark
                         ? 'border-amber-400/40 bg-amber-500/10 text-amber-200 active:bg-amber-500/20'
@@ -560,16 +593,14 @@ const CustomerDisplayPage: React.FC = () => {
                 }`}
               >
                 <div className="flex items-center gap-2">
-                  <Wifi className="h-5 w-5 text-emerald-400" />
+                  <Monitor className="h-5 w-5 text-emerald-400" />
                   <span className={isDark ? 'text-zinc-300' : 'text-slate-700'}>
-                    {t('customerDisplay.displaySession', 'Display session')}
+                    {t('customerDisplay.actions.externalDisplay', 'External Display')}
                   </span>
                 </div>
                 <div className="mt-2 text-sm font-semibold">
-                  {displayStatus?.paired || activeExternalDisplay
+                  {activeExternalDisplay
                     ? t('customerDisplay.status.connected', 'Connected')
-                    : displayStatus?.enabled
-                      ? t('customerDisplay.status.enabled', 'Enabled')
                     : t('customerDisplay.status.ready', 'Ready')}
                 </div>
               </motion.div>
@@ -577,7 +608,7 @@ const CustomerDisplayPage: React.FC = () => {
           )}
         </motion.section>
 
-        {!externalWindow && monitors.length > 0 && (
+        {!externalWindow && (
           <motion.section
             variants={pageMotionItem}
             className={`rounded-2xl border p-4 ${
@@ -590,46 +621,66 @@ const CustomerDisplayPage: React.FC = () => {
                 {t('customerDisplay.external.monitors', 'Connected monitors and TVs')}
               </h2>
             </div>
-            <motion.div variants={pageMotionContainer} className="flex gap-2 overflow-x-auto pb-1 scrollbar-hide">
-              {monitors.map((monitor) => (
-                <motion.button
-                  variants={pageMotionItem}
-                  key={monitor.index}
-                  type="button"
-                  onClick={() => void openExternalDisplay(monitor)}
-                  disabled={isDisplayBusy}
-                  className={`min-w-[210px] rounded-xl border px-3 py-3 text-left transition-all active:scale-[0.98] ${
-                    isDark
-                      ? 'border-zinc-700 bg-zinc-900 active:bg-zinc-800'
-                      : 'border-slate-200 bg-slate-50 active:bg-slate-100'
-                  } disabled:opacity-60`}
-                >
-                  <div className="font-semibold">{monitor.name}</div>
-                  <div className={isDark ? 'text-sm text-zinc-400' : 'text-sm text-slate-600'}>
-                    {monitor.size?.width || 0} x {monitor.size?.height || 0}
-                  </div>
-                </motion.button>
-              ))}
-            </motion.div>
-            <p className={`mt-3 text-sm ${isDark ? 'text-zinc-400' : 'text-slate-600'}`}>
+            {externalChoices.length > 0 && (
+              <motion.div variants={pageMotionContainer} className="flex gap-2 overflow-x-auto pb-1 scrollbar-hide">
+                {externalChoices.map((display) => {
+                  // Shows this content now; any other reservation (other content or a closing window) blocks it.
+                  const running = display.id === runningDisplayId;
+                  const free = isExternalDisplayFree(display);
+                  return (
+                    <motion.button
+                      variants={pageMotionItem}
+                      key={display.id}
+                      type="button"
+                      onClick={() => void openExternalDisplay(display)}
+                      disabled={isDisplayBusy || !free}
+                      className={`min-w-[210px] rounded-xl border px-3 py-3 text-left transition-all active:scale-[0.98] disabled:active:scale-100 ${
+                        running
+                          ? 'border-emerald-500/40 bg-emerald-500/10'
+                          : `${
+                              isDark
+                                ? 'border-zinc-700 bg-zinc-900 active:bg-zinc-800'
+                                : 'border-slate-200 bg-slate-50 active:bg-slate-100'
+                            } disabled:opacity-60`
+                      }`}
+                    >
+                      <div className="font-semibold">{display.name}</div>
+                      <div className={isDark ? 'text-sm text-zinc-400' : 'text-sm text-slate-600'}>
+                        {display.size?.width || 0} x {display.size?.height || 0}
+                      </div>
+                      {running ? (
+                        <div className="mt-1 text-xs font-semibold text-emerald-400">
+                          {t('customerDisplay.external.running', 'Showing the customer display')}
+                        </div>
+                      ) : !free ? (
+                        <div className={`mt-1 text-xs font-semibold ${isDark ? 'text-zinc-400' : 'text-slate-500'}`}>
+                          {t('customerDisplay.external.inUse', 'In use')}
+                        </div>
+                      ) : null}
+                    </motion.button>
+                  );
+                })}
+              </motion.div>
+            )}
+            <p className={`${externalChoices.length > 0 ? 'mt-3 ' : ''}text-sm ${isDark ? 'text-zinc-400' : 'text-slate-600'}`}>
               {t(
                 'customerDisplay.external.help',
-                'Cable displays and OS-level wireless displays appear here. For Smart TVs without monitor mode, copy the TV link.'
+                'Cable displays and OS-level wireless displays appear here. Select one to show the customer display.'
               )}
             </p>
           </motion.section>
         )}
 
-        {(notice || error || displayStatus?.error || capabilities?.error) && !externalWindow && (
+        {(notice || failure) && !externalWindow && (
           <motion.div
             variants={pageMotionItem}
             className={`rounded-xl border px-4 py-3 text-sm font-medium ${
-              error || displayStatus?.error || capabilities?.error
+              failure
                 ? 'border-red-500/40 bg-red-500/10 text-red-200'
                 : 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200'
             }`}
           >
-            {error || displayStatus?.error || capabilities?.error || notice}
+            {failure || notice}
           </motion.div>
         )}
 
@@ -671,7 +722,6 @@ const CustomerDisplayPage: React.FC = () => {
             >
               {displayOrders.map((order) => {
                 const phase = getPhase(order.status);
-                const identifier = getOrderIdentifier(order, findLocalOrderForDisplayRow(order));
                 const Icon = phase.Icon;
 
                 return (
@@ -690,7 +740,7 @@ const CustomerDisplayPage: React.FC = () => {
                           }`}
                         >
                           {t('customerDisplay.orderLine', 'Order ({{number}}) is {{status}}', {
-                            number: identifier,
+                            number: order.order_number,
                             status: phase.sentence,
                           })}
                         </div>

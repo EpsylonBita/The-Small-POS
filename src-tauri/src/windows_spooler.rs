@@ -135,16 +135,22 @@ pub enum NativeJobField {
     Status,
 }
 
+/// Why a level-1 spooler response was rejected. `NeededBytesExceedBuffer`:
+/// `pcbNeeded` exceeds the `cbBuf` buffer. `PointerOutOfRange`: a string
+/// pointer is outside that buffer. `PointerIntoFixedPortion`: it lands inside
+/// the JOB_INFO_1W array rather than the variable-data block after it
+/// (MS-RPRN 2.2.2). Strings anywhere in the variable-data block are valid,
+/// including beyond `pcbNeeded`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MalformedResponseKind {
-    CopiedBytesExceedAllocation,
+    NeededBytesExceedBuffer,
     ResponseRangeOverflow,
     StructMisaligned,
     ShortStructRegion,
     CountInconsistent,
     CountOverflow,
     PointerOutOfRange { field: NativeJobField },
-    PointerOutsideCopiedRegion { field: NativeJobField },
+    PointerIntoFixedPortion { field: NativeJobField },
     PointerMisaligned { field: NativeJobField },
     MissingTerminator { field: NativeJobField },
     NullRequiredField { field: NativeJobField },
@@ -732,6 +738,13 @@ mod system {
         }
     }
 
+    /// The `pJob` buffer handed to GetJobW/EnumJobsW. The whole allocation is
+    /// passed as `cbBuf` and is zero-filled before the call: the spooler packs
+    /// the strings from the END of `cbBuf` toward the beginning (MS-RPRN
+    /// 2.2.2), leaving any unused space as a gap between the last JOB_INFO_1W
+    /// and the first string. `pcbNeeded` is therefore a byte count, not the end
+    /// of an initialized prefix, and the decoder must be able to scan anywhere
+    /// in the buffer without touching uninitialized memory.
     struct AlignedJobBuffer {
         storage: Vec<MaybeUninit<JOB_INFO_1W>>,
         allocation_size: usize,
@@ -761,6 +774,13 @@ mod system {
                     requested: required_bytes,
                 })?;
             storage.resize_with(slots, MaybeUninit::uninit);
+            // SAFETY: `storage` owns exactly `slots` elements, i.e.
+            // `allocation_size` writable bytes. Zeroing them in place (not via
+            // a typed copy, which need not preserve padding) initializes every
+            // byte of the buffer the spooler and the decoder will see.
+            unsafe {
+                ptr::write_bytes(storage.as_mut_ptr().cast::<u8>(), 0, allocation_size);
+            }
             Ok(Self {
                 storage,
                 allocation_size,
@@ -876,13 +896,33 @@ mod system {
             .ok_or_else(|| malformed(operation, MalformedResponseKind::CountOverflow))
     }
 
+    /// Byte ranges of one level-1 response, as absolute addresses.
+    #[derive(Clone, Copy)]
+    struct ResponseRegions {
+        /// First byte of the buffer handed to the spooler.
+        buffer_start: usize,
+        /// First byte after the JOB_INFO_1W array, where variable data begins.
+        variable_start: usize,
+        /// One past the last byte of the buffer (`buffer_start + cbBuf`).
+        buffer_end: usize,
+    }
+
+    /// Copies one spooler-owned UTF-16 string out of the response buffer.
+    ///
+    /// Win32 places the strings anywhere in the variable-data block, and in
+    /// practice at the END of `cbBuf` (MS-RPRN 2.2.2), not inside the first
+    /// `pcbNeeded` bytes. The pointer is therefore bounded by the variable-data
+    /// block of the whole buffer and the NUL scan never runs past its end.
+    ///
+    /// # Safety
+    ///
+    /// Every byte in `[regions.buffer_start, regions.buffer_end)` must be
+    /// initialized (see [`AlignedJobBuffer`]) and live for the call.
     unsafe fn copy_native_wide(
         value: *const u16,
         required: bool,
         field: NativeJobField,
-        allocation_start: usize,
-        allocation_end: usize,
-        copied_end: usize,
+        regions: ResponseRegions,
         operation: SpoolerOperation,
     ) -> Result<Option<String>, SpoolerError> {
         if value.is_null() {
@@ -897,16 +937,16 @@ mod system {
         }
 
         let address = value as usize;
-        if address < allocation_start || address >= allocation_end {
+        if address < regions.buffer_start || address >= regions.buffer_end {
             return Err(malformed(
                 operation,
                 MalformedResponseKind::PointerOutOfRange { field },
             ));
         }
-        if address >= copied_end {
+        if address < regions.variable_start {
             return Err(malformed(
                 operation,
-                MalformedResponseKind::PointerOutsideCopiedRegion { field },
+                MalformedResponseKind::PointerIntoFixedPortion { field },
             ));
         }
         if address % align_of::<u16>() != 0 {
@@ -916,10 +956,10 @@ mod system {
             ));
         }
 
-        let readable_units = (copied_end - address) / size_of::<u16>();
+        let readable_units = (regions.buffer_end - address) / size_of::<u16>();
         for len in 0..readable_units {
             // SAFETY: address is aligned and the loop is bounded to complete
-            // u16 elements wholly inside the API-reported initialized region.
+            // u16 elements wholly inside the initialized response buffer.
             if unsafe { *value.add(len) } == 0 {
                 // SAFETY: the preceding bounded scan established `len`
                 // initialized, aligned UTF-16 units before the terminator.
@@ -933,27 +973,41 @@ mod system {
         ))
     }
 
+    /// Decodes a level-1 GetJobW/EnumJobsW response.
+    ///
+    /// `buffer_size` is the exact `cbBuf` handed to the spooler and
+    /// `needed_bytes` is the `pcbNeeded` it returned on success. The GetJob
+    /// docs call that "the number of bytes copied": a COUNT, not the end of an
+    /// initialized prefix. The JOB_INFO_1W array sits at the start of the
+    /// buffer, but the spooler packs the strings from the end of `cbBuf`
+    /// toward the beginning, so whenever `cbBuf > pcbNeeded` the strings lie
+    /// beyond `pcbNeeded` (MS-RPRN 2.2.2 "Custom-Marshaled Data Types", and
+    /// its product-behavior note <92> for 64-bit Windows). Strings are
+    /// therefore bounded by the variable-data block of the whole buffer, and
+    /// `needed_bytes` is only a consistency check.
+    ///
+    /// # Safety
+    ///
+    /// `allocation_base` must point to `buffer_size` live bytes that were all
+    /// initialized before the native call (see [`AlignedJobBuffer`]).
     unsafe fn decode_level_one_response(
         allocation_base: *const u8,
-        allocation_size: usize,
-        copied_bytes: usize,
+        buffer_size: usize,
+        needed_bytes: usize,
         count: usize,
         operation: SpoolerOperation,
     ) -> Result<Vec<SpoolJobSnapshot>, SpoolerError> {
-        if copied_bytes > allocation_size {
+        if needed_bytes > buffer_size {
             return Err(malformed(
                 operation,
-                MalformedResponseKind::CopiedBytesExceedAllocation,
+                MalformedResponseKind::NeededBytesExceedBuffer,
             ));
         }
-        let allocation_start = allocation_base as usize;
-        let allocation_end = allocation_start
-            .checked_add(allocation_size)
+        let buffer_start = allocation_base as usize;
+        let buffer_end = buffer_start
+            .checked_add(buffer_size)
             .ok_or_else(|| malformed(operation, MalformedResponseKind::ResponseRangeOverflow))?;
-        let copied_end = allocation_start
-            .checked_add(copied_bytes)
-            .ok_or_else(|| malformed(operation, MalformedResponseKind::ResponseRangeOverflow))?;
-        if allocation_base.is_null() || allocation_start % align_of::<JOB_INFO_1W>() != 0 {
+        if allocation_base.is_null() || buffer_start % align_of::<JOB_INFO_1W>() != 0 {
             return Err(malformed(
                 operation,
                 MalformedResponseKind::StructMisaligned,
@@ -961,35 +1015,40 @@ mod system {
         }
 
         let struct_bytes = checked_struct_bytes(count, operation)?;
-        if struct_bytes > copied_bytes {
-            let reason = if count > 0 && copied_bytes < size_of::<JOB_INFO_1W>() {
+        if struct_bytes > needed_bytes {
+            let reason = if count > 0 && needed_bytes < size_of::<JOB_INFO_1W>() {
                 MalformedResponseKind::ShortStructRegion
             } else {
                 MalformedResponseKind::CountInconsistent
             };
             return Err(malformed(operation, reason));
         }
+        let regions = ResponseRegions {
+            buffer_start,
+            // Cannot overflow: struct_bytes <= needed_bytes <= buffer_size, and
+            // buffer_start + buffer_size was checked above.
+            variable_start: buffer_start + struct_bytes,
+            buffer_end,
+        };
 
         let mut snapshots = Vec::new();
         snapshots.try_reserve_exact(count).map_err(|_| {
-            buffer_sizing_error(operation, BufferSizingIssue::AllocationFailed, copied_bytes)
+            buffer_sizing_error(operation, BufferSizingIssue::AllocationFailed, needed_bytes)
         })?;
         for index in 0..count {
-            // SAFETY: base alignment and checked `count * size_of` prove this
-            // complete JOB_INFO_1W lies in the API-reported initialized region.
-            // Copying one value avoids forming a slice over allocation tail.
+            // SAFETY: base alignment and the checked `count * size_of` <=
+            // needed_bytes <= buffer_size prove this complete JOB_INFO_1W lies
+            // in the initialized buffer. Copying one value avoids a slice.
             let info = unsafe { ptr::read(allocation_base.cast::<JOB_INFO_1W>().add(index)) };
-            // SAFETY: each helper validates nullability, alignment, allocation
-            // range, initialized-region range, and a bounded NUL terminator
-            // before reading/copying any UTF-16 units.
+            // SAFETY: each helper validates nullability, buffer range, the
+            // fixed/variable boundary, alignment and a NUL terminator bounded
+            // by the buffer end before reading/copying any UTF-16 units.
             let printer_name = unsafe {
                 copy_native_wide(
                     info.pPrinterName,
                     true,
                     NativeJobField::PrinterName,
-                    allocation_start,
-                    allocation_end,
-                    copied_end,
+                    regions,
                     operation,
                 )
             }?
@@ -1007,9 +1066,7 @@ mod system {
                     info.pDocument,
                     true,
                     NativeJobField::DocumentName,
-                    allocation_start,
-                    allocation_end,
-                    copied_end,
+                    regions,
                     operation,
                 )
             }?
@@ -1021,19 +1078,35 @@ mod system {
                     },
                 )
             })?;
+            // The status label is informational only: dispatch state comes
+            // from the `Status` bits and ownership from the printer/document
+            // names above, which stay strict. A port monitor may set arbitrary
+            // status text, so an unreadable label is dropped (after the same
+            // validation, never read) instead of failing the whole snapshot
+            // and with it monitoring and cancellation.
+            //
             // SAFETY: status is optional, but every non-null pointer receives
             // the identical range/alignment/terminator validation.
-            let status_text = unsafe {
-                copy_native_wide(
-                    info.pStatus,
-                    false,
-                    NativeJobField::Status,
-                    allocation_start,
-                    allocation_end,
-                    copied_end,
-                    operation,
-                )
-            }?;
+            let status_field = NativeJobField::Status;
+            let status_text = match unsafe {
+                copy_native_wide(info.pStatus, false, status_field, regions, operation)
+            } {
+                Ok(text) => text,
+                Err(SpoolerError::MalformedResponse { reason, .. }) => {
+                    // Support evidence only: the operation, the numeric
+                    // spooler JobId, the field and the rejection kind. Never
+                    // the label, the printer/document names or buffer bytes.
+                    tracing::warn!(
+                        operation = ?operation,
+                        job_id = info.JobId,
+                        field = ?status_field,
+                        kind = ?reason,
+                        "Windows spooler job status label was unreadable and was dropped"
+                    );
+                    None
+                }
+                Err(other) => return Err(other),
+            };
             snapshots.push(SpoolJobSnapshot {
                 job_id: info.JobId,
                 printer_name,
@@ -1112,8 +1185,9 @@ mod system {
                 let capacity = buffer.cb_size();
                 let allocation_size = buffer.allocation_size();
                 let mut next_needed = 0u32;
-                // SAFETY: buffer is writable/aligned for `capacity` bytes and
-                // remains live while only API-reported copied bytes are decoded.
+                // SAFETY: buffer is writable/aligned/zero-filled for
+                // `capacity` bytes and stays live until decoding has copied
+                // every string out of it.
                 let result = unsafe {
                     GetJobW(
                         handle.0,
@@ -1125,9 +1199,12 @@ mod system {
                     )
                 };
                 if result != 0 {
-                    // SAFETY: buffer is live and aligned; the decoder treats
-                    // `next_needed` as the exclusive initialized-byte boundary
-                    // and validates the single structure and every pointer.
+                    // SAFETY: buffer is live, aligned and fully initialized
+                    // for `allocation_size` (== the `cbBuf` passed above).
+                    // The decoder bounds every string by that buffer, not by
+                    // `next_needed`: the spooler packs strings at the END of
+                    // `cbBuf` (MS-RPRN 2.2.2), past `pcbNeeded` whenever the
+                    // slot-rounded buffer is larger than needed.
                     let snapshots = unsafe {
                         decode_level_one_response(
                             buffer.as_mut_bytes(),
@@ -1213,8 +1290,9 @@ mod system {
                 let allocation_size = buffer.allocation_size();
                 let mut next_needed = 0u32;
                 returned = 0;
-                // SAFETY: buffer is writable/aligned for `capacity` bytes and
-                // stays live while only API-reported copied bytes are decoded.
+                // SAFETY: buffer is writable/aligned/zero-filled for
+                // `capacity` bytes and stays live until decoding has copied
+                // every string out of it.
                 let result = unsafe {
                     EnumJobsW(
                         handle.0,
@@ -1228,9 +1306,10 @@ mod system {
                     )
                 };
                 if result != 0 {
-                    // SAFETY: buffer is live and aligned; the decoder bounds
-                    // structures and every string by `next_needed`, then copies
-                    // them before the allocation is dropped.
+                    // SAFETY: buffer is live, aligned and fully initialized
+                    // for `allocation_size` (== `cbBuf`); the decoder bounds
+                    // the structures by `next_needed` and every string by the
+                    // whole buffer, then copies them before it is dropped.
                     return unsafe {
                         decode_level_one_response(
                             buffer.as_mut_bytes(),
@@ -1302,15 +1381,23 @@ mod system {
         use super::*;
 
         struct NativeFixture {
-            storage: Vec<MaybeUninit<JOB_INFO_1W>>,
-            copied_bytes: usize,
+            buffer: AlignedJobBuffer,
+            /// The `pcbNeeded` the fake spooler reports.
+            needed_bytes: usize,
         }
 
         impl NativeFixture {
-            fn blank(slots: usize, copied_bytes: usize) -> Self {
+            /// A response buffer built by the production allocator, so every
+            /// fixture starts from the same zero-filled `cbBuf` the spooler
+            /// receives.
+            fn blank(slots: usize, needed_bytes: usize) -> Self {
                 Self {
-                    storage: vec![MaybeUninit::zeroed(); slots],
-                    copied_bytes,
+                    buffer: AlignedJobBuffer::try_new(
+                        slots * size_of::<JOB_INFO_1W>(),
+                        SpoolerOperation::EnumJobs,
+                    )
+                    .unwrap(),
+                    needed_bytes,
                 }
             }
 
@@ -1320,23 +1407,27 @@ mod system {
                 let printer = fixture.write_wide(struct_bytes, "Κουζίνα");
                 let document_offset = struct_bytes + ("Κουζίνα".encode_utf16().count() + 1) * 2;
                 let document = fixture.write_wide(document_offset, "TheSmallPOS/marker");
-                fixture.copied_bytes =
+                fixture.needed_bytes =
                     document_offset + ("TheSmallPOS/marker".encode_utf16().count() + 1) * 2;
                 fixture.write_info(printer, document, ptr::null_mut());
                 fixture
             }
 
             fn base(&self) -> *const u8 {
-                self.storage.as_ptr().cast::<u8>()
+                self.buffer.storage.as_ptr().cast::<u8>()
             }
 
             fn allocation_size(&self) -> usize {
-                self.storage.len() * size_of::<JOB_INFO_1W>()
+                self.buffer.allocation_size()
             }
 
             fn write_wide(&mut self, offset: usize, value: &str) -> *mut u16 {
                 let units: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
-                let bytes = units.len() * size_of::<u16>();
+                self.write_units(offset, &units)
+            }
+
+            fn write_units(&mut self, offset: usize, units: &[u16]) -> *mut u16 {
+                let bytes = std::mem::size_of_val(units);
                 assert_eq!(offset % align_of::<u16>(), 0);
                 assert!(offset + bytes <= self.allocation_size());
                 // SAFETY: offset/length were checked against this live
@@ -1344,19 +1435,31 @@ mod system {
                 unsafe {
                     ptr::copy_nonoverlapping(
                         units.as_ptr().cast::<u8>(),
-                        self.storage.as_mut_ptr().cast::<u8>().add(offset),
+                        self.buffer.as_mut_bytes().add(offset),
                         bytes,
                     );
-                    self.storage.as_mut_ptr().cast::<u8>().add(offset).cast()
+                    self.buffer.as_mut_bytes().add(offset).cast()
                 }
             }
 
             fn write_info(&mut self, printer: *mut u16, document: *mut u16, status: *mut u16) {
+                self.write_info_at(0, 73, printer, document, status);
+            }
+
+            fn write_info_at(
+                &mut self,
+                index: usize,
+                job_id: u32,
+                printer: *mut u16,
+                document: *mut u16,
+                status: *mut u16,
+            ) {
+                assert!((index + 1) * size_of::<JOB_INFO_1W>() <= self.allocation_size());
                 // SAFETY: all-zero is a valid JOB_INFO_1W value because it is
                 // composed solely of integer fields, pointers, and SYSTEMTIME
                 // integer fields; required pointers are assigned below.
                 let mut info: JOB_INFO_1W = unsafe { std::mem::zeroed() };
-                info.JobId = 73;
+                info.JobId = job_id;
                 info.pPrinterName = printer;
                 info.pDocument = document;
                 info.pStatus = status;
@@ -1364,17 +1467,21 @@ mod system {
                 info.Position = 4;
                 info.TotalPages = 2;
                 info.PagesPrinted = 1;
-                // SAFETY: the allocation is aligned for JOB_INFO_1W and has at
-                // least one full slot; this initializes its leading structure.
+                // SAFETY: the allocation is aligned for JOB_INFO_1W and the
+                // assertion above proves slot `index` lies wholly inside it.
                 unsafe {
-                    self.storage.as_mut_ptr().cast::<JOB_INFO_1W>().write(info);
+                    self.buffer
+                        .as_mut_bytes()
+                        .cast::<JOB_INFO_1W>()
+                        .add(index)
+                        .write(info);
                 }
             }
 
             fn info_mut(&mut self) -> &mut JOB_INFO_1W {
                 // SAFETY: write_info initialized the aligned leading slot in
                 // every fixture before this accessor is used.
-                unsafe { &mut *self.storage.as_mut_ptr().cast::<JOB_INFO_1W>() }
+                unsafe { &mut *self.buffer.as_mut_bytes().cast::<JOB_INFO_1W>() }
             }
 
             fn decode(&self, count: usize) -> Result<Vec<SpoolJobSnapshot>, SpoolerError> {
@@ -1384,7 +1491,7 @@ mod system {
                     decode_level_one_response(
                         self.base(),
                         self.allocation_size(),
-                        self.copied_bytes,
+                        self.needed_bytes,
                         count,
                         SpoolerOperation::EnumJobs,
                     )
@@ -1426,7 +1533,7 @@ mod system {
         }
 
         #[test]
-        fn decoder_rejects_out_of_range_and_uncopied_tail_pointers() {
+        fn decoder_rejects_pointers_outside_the_buffer() {
             let mut outside = NativeFixture::valid();
             // A one-past-allocation pointer is legal to construct but never to
             // dereference; the decoder must reject it first.
@@ -1444,15 +1551,62 @@ mod system {
                 },
             );
 
-            let mut tail = NativeFixture::valid();
-            tail.info_mut().pPrinterName =
-                unsafe { tail.base().add(tail.copied_bytes + 2).cast_mut().cast() };
+            let mut before = NativeFixture::valid();
+            // Never dereferenced: the range check must reject it first.
+            before.info_mut().pDocument = before.base().wrapping_sub(2).cast_mut().cast();
             assert_malformed(
-                tail.decode(1),
-                MalformedResponseKind::PointerOutsideCopiedRegion {
+                before.decode(1),
+                MalformedResponseKind::PointerOutOfRange {
+                    field: NativeJobField::DocumentName,
+                },
+            );
+        }
+
+        #[test]
+        fn decoder_rejects_strings_that_overlap_the_fixed_structures() {
+            let mut fixture = NativeFixture::valid();
+            // Offset 8 is the pPrinterName slot itself: inside the buffer but
+            // inside the JOB_INFO_1W array, never in the variable-data block.
+            fixture.info_mut().pPrinterName = unsafe { fixture.base().add(8).cast_mut().cast() };
+            assert_malformed(
+                fixture.decode(1),
+                MalformedResponseKind::PointerIntoFixedPortion {
                     field: NativeJobField::PrinterName,
                 },
             );
+
+            // With two structures the second slot is fixed portion as well.
+            let mut two = NativeFixture::blank(4, 2 * size_of::<JOB_INFO_1W>() + 64);
+            let tail = two.allocation_size() - 8;
+            let text = two.write_wide(tail, "abc");
+            let inside_second = unsafe {
+                two.base()
+                    .add(size_of::<JOB_INFO_1W>() + 16)
+                    .cast_mut()
+                    .cast()
+            };
+            two.write_info_at(0, 1, text, text, ptr::null_mut());
+            two.write_info_at(1, 2, inside_second, text, ptr::null_mut());
+            assert_malformed(
+                two.decode(2),
+                MalformedResponseKind::PointerIntoFixedPortion {
+                    field: NativeJobField::PrinterName,
+                },
+            );
+        }
+
+        #[test]
+        fn decoder_accepts_a_string_beyond_pcb_needed_inside_the_buffer() {
+            let mut tail = NativeFixture::valid();
+            let offset = tail.allocation_size() - ("Μπαρ".encode_utf16().count() + 1) * 2;
+            assert!(offset > tail.needed_bytes);
+            let printer = tail.write_wide(offset, "Μπαρ");
+            tail.info_mut().pPrinterName = printer;
+
+            let snapshots = tail.decode(1).unwrap();
+
+            assert_eq!(snapshots[0].printer_name, "Μπαρ");
+            assert_eq!(snapshots[0].document_name, "TheSmallPOS/marker");
         }
 
         #[test]
@@ -1472,19 +1626,159 @@ mod system {
                 },
             );
 
+            // No NUL anywhere between the string and the end of `cbBuf`: the
+            // scan must stop at the buffer end, not run past it.
             let mut unterminated = NativeFixture::blank(3, size_of::<JOB_INFO_1W>() + 8);
-            let printer = unterminated.write_wide(size_of::<JOB_INFO_1W>(), "abc");
-            let document = printer;
-            unterminated.write_info(printer, document, ptr::null_mut());
-            // Overwrite the terminator so every initialized u16 after the
-            // pointer is nonzero.
-            unsafe { printer.add(3).write(0x41) };
+            let variable_units =
+                (unterminated.allocation_size() - size_of::<JOB_INFO_1W>()) / size_of::<u16>();
+            let printer =
+                unterminated.write_units(size_of::<JOB_INFO_1W>(), &vec![0x41; variable_units]);
+            unterminated.write_info(printer, printer, ptr::null_mut());
             assert_malformed(
                 unterminated.decode(1),
                 MalformedResponseKind::MissingTerminator {
                     field: NativeJobField::PrinterName,
                 },
             );
+        }
+
+        /// Collects the formatted output of a scoped `tracing` subscriber.
+        #[derive(Clone, Default)]
+        struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+        struct CapturedLogGuard(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+        impl std::io::Write for CapturedLogGuard {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .expect("lock captured logs")
+                    .extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedLogs {
+            type Writer = CapturedLogGuard;
+
+            fn make_writer(&'writer self) -> Self::Writer {
+                CapturedLogGuard(self.0.clone())
+            }
+        }
+
+        impl CapturedLogs {
+            fn contents(&self) -> String {
+                String::from_utf8(self.0.lock().expect("lock captured logs").clone())
+                    .expect("captured logs are UTF-8")
+            }
+        }
+
+        /// Decodes `fixture` under a scoped subscriber and returns what it logged.
+        fn decode_logging(
+            fixture: &NativeFixture,
+            count: usize,
+        ) -> (Result<Vec<SpoolJobSnapshot>, SpoolerError>, String) {
+            let logs = CapturedLogs::default();
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .without_time()
+                .with_writer(logs.clone())
+                .finish();
+            let result = tracing::subscriber::with_default(subscriber, || fixture.decode(count));
+            (result, logs.contents())
+        }
+
+        /// The dropped-label warning names the field and the rejection kind
+        /// and carries no label text, printer/document name or buffer bytes.
+        fn assert_status_drop_warning(logs: &str, kind: MalformedResponseKind) {
+            let message = "Windows spooler job status label was unreadable and was dropped";
+            assert_eq!(logs.matches(message).count(), 1, "{logs}");
+            assert!(logs.contains("WARN"), "{logs}");
+            assert!(logs.contains("operation=EnumJobs"), "{logs}");
+            assert!(logs.contains("job_id=73"), "{logs}");
+            assert!(logs.contains("field=Status"), "{logs}");
+            assert!(logs.contains(&format!("kind={kind:?}")), "{logs}");
+            for private in ["Κουζίνα", "TheSmallPOS", "AAAA", "0x"] {
+                assert!(!logs.contains(private), "leaked {private:?}: {logs}");
+            }
+        }
+
+        #[test]
+        fn decoder_drops_an_unreadable_status_label_but_keeps_the_snapshot() {
+            let field = NativeJobField::Status;
+            let past_end = NativeFixture::valid().allocation_size();
+            let into_fixed = 16;
+            let misaligned = size_of::<JOB_INFO_1W>() + 1;
+            for (offset, kind) in [
+                (past_end, MalformedResponseKind::PointerOutOfRange { field }),
+                (
+                    into_fixed,
+                    MalformedResponseKind::PointerIntoFixedPortion { field },
+                ),
+                (
+                    misaligned,
+                    MalformedResponseKind::PointerMisaligned { field },
+                ),
+            ] {
+                let mut fixture = NativeFixture::valid();
+                // Never dereferenced: validation rejects each of these first.
+                let pointer = fixture.base().wrapping_add(offset).cast_mut().cast::<u16>();
+                fixture.info_mut().pStatus = pointer;
+
+                let (result, logs) = decode_logging(&fixture, 1);
+                let snapshots = result.unwrap();
+
+                assert_eq!(snapshots[0].status_text, None);
+                assert_eq!(snapshots[0].status_bits, 0x10);
+                assert_eq!(snapshots[0].printer_name, "Κουζίνα");
+                assert_eq!(snapshots[0].document_name, "TheSmallPOS/marker");
+                assert_status_drop_warning(&logs, kind);
+            }
+
+            // Unterminated to the end of the buffer.
+            let mut unterminated = NativeFixture::valid();
+            let start = unterminated.needed_bytes;
+            let units = (unterminated.allocation_size() - start) / size_of::<u16>();
+            let status = unterminated.write_units(start, &vec![0x41; units]);
+            unterminated.info_mut().pStatus = status;
+            let (result, logs) = decode_logging(&unterminated, 1);
+            assert_eq!(result.unwrap()[0].status_text, None);
+            assert_status_drop_warning(&logs, MalformedResponseKind::MissingTerminator { field });
+        }
+
+        #[test]
+        fn decoder_logs_nothing_for_a_readable_or_absent_status_label() {
+            let (result, logs) = decode_logging(&NativeFixture::valid(), 1);
+            assert_eq!(result.unwrap()[0].status_text, None);
+            assert_eq!(logs, "");
+
+            let mut labelled = NativeFixture::valid();
+            let start = labelled.needed_bytes;
+            let status = labelled.write_wide(start, "Printing");
+            labelled.needed_bytes = start + ("Printing".encode_utf16().count() + 1) * 2;
+            labelled.info_mut().pStatus = status;
+            let (result, logs) = decode_logging(&labelled, 1);
+            assert_eq!(result.unwrap()[0].status_text.as_deref(), Some("Printing"));
+            assert_eq!(logs, "");
+        }
+
+        #[test]
+        fn job_buffer_is_zero_filled_across_the_whole_allocation() {
+            // 250 needed bytes round up to three 96-byte (x64) slots, leaving a
+            // gap the spooler never writes; it must still be initialized.
+            let mut buffer = AlignedJobBuffer::try_new(250, SpoolerOperation::GetJob).unwrap();
+            assert!(buffer.allocation_size() > 250);
+            assert_eq!(buffer.cb_size() as usize, buffer.allocation_size());
+            // SAFETY: the allocation is live for `allocation_size` bytes and
+            // `try_new` initialized every one of them.
+            let bytes = unsafe {
+                std::slice::from_raw_parts(buffer.as_mut_bytes(), buffer.allocation_size())
+            };
+            assert!(bytes.iter().all(|byte| *byte == 0));
         }
 
         #[test]
@@ -1512,9 +1806,9 @@ mod system {
         }
 
         #[test]
-        fn decoder_copies_valid_strings_only_from_the_reported_region() {
+        fn decoder_accepts_strings_packed_right_after_the_struct() {
             let fixture = NativeFixture::valid();
-            assert!(fixture.copied_bytes < fixture.allocation_size());
+            assert!(fixture.needed_bytes < fixture.allocation_size());
 
             let snapshots = fixture.decode(1).unwrap();
 
@@ -1525,13 +1819,178 @@ mod system {
             assert_eq!(snapshots[0].position, 4);
         }
 
+        fn wide_bytes(value: &str) -> usize {
+            (value.encode_utf16().count() + 1) * size_of::<u16>()
+        }
+
+        /// Packs `strings` from the end of the fixture's `cbBuf` toward the
+        /// beginning, first string at the highest address, the way the
+        /// Windows spooler fills the variable-data block (MS-RPRN 2.2.2).
+        fn pack_from_buffer_end(
+            fixture: &mut NativeFixture,
+            end: &mut usize,
+            strings: &[&str],
+        ) -> Vec<*mut u16> {
+            strings
+                .iter()
+                .map(|value| {
+                    *end -= wide_bytes(value);
+                    fixture.write_wide(*end, value)
+                })
+                .collect()
+        }
+
+        /// Lays out one GetJob level-1 response the way the Windows spooler
+        /// does: the JOB_INFO_1W at the start of the buffer, the strings
+        /// packed from the END of `cbBuf` (printer, machine, user, document,
+        /// datatype, status — printer name at the highest address), and
+        /// `pcbNeeded` reporting the byte count actually needed. The buffer
+        /// comes from the production allocator for that `pcbNeeded`, so the
+        /// JOB_INFO_1W slot rounding becomes the gap between the struct and
+        /// the first string, exactly as on a till.
+        fn spooler_packed_get_job_response(
+            printer: &str,
+            document: &str,
+            status: &str,
+        ) -> (NativeFixture, usize) {
+            let strings = [printer, "TILL-01", "pos", document, "RAW", status];
+            let needed = size_of::<JOB_INFO_1W>()
+                + strings.iter().map(|value| wide_bytes(value)).sum::<usize>();
+            let mut fixture = NativeFixture {
+                buffer: AlignedJobBuffer::try_new(needed, SpoolerOperation::GetJob).unwrap(),
+                needed_bytes: needed,
+            };
+            let mut end = fixture.allocation_size();
+            let pointers = pack_from_buffer_end(&mut fixture, &mut end, &strings);
+            assert_eq!(
+                end,
+                fixture.allocation_size() - (needed - size_of::<JOB_INFO_1W>())
+            );
+            fixture.write_info(pointers[0], pointers[3], pointers[5]);
+            let info = fixture.info_mut();
+            info.pMachineName = pointers[1];
+            info.pUserName = pointers[2];
+            info.pDatatype = pointers[4];
+            let gap = fixture.allocation_size() - needed;
+            (fixture, gap)
+        }
+
+        /// Incident 2026-09-30 (Tomikro Parisi, desktop 1.4.119, Star
+        /// mC-Print3 Windows queue "MCP31 - Ethernet:TCP:"): GetJob status
+        /// reads failed with `MalformedResponse(PointerOutsideCopiedRegion {
+        /// field: PrinterName })`, so monitoring blocked the lane and staff got
+        /// "cancel failed". The spooler had returned a valid response; the old
+        /// decoder treated `pcbNeeded` as the end of the initialized strings.
+        /// Before the fix 47 of these 48 layouts were rejected: every gap of 44
+        /// bytes or more (the queue name's size with its NUL) as
+        /// `PointerOutsideCopiedRegion`, smaller gaps as `MissingTerminator`;
+        /// only a zero gap decoded.
         #[test]
-        fn decoder_rejects_copied_bytes_beyond_allocation() {
+        fn get_job_decoder_accepts_strings_packed_at_the_end_of_the_buffer() {
+            let queue = "MCP31 - Ethernet:TCP:";
+            let document = format_document_marker(
+                Uuid::parse_str("3ef0486a-7ff5-4a41-a5a7-feb8eb0432b4").unwrap(),
+                Uuid::parse_str("8128c30d-65fc-41aa-98f2-797b3fdec375").unwrap(),
+                "receipt",
+            )
+            .unwrap();
+            let mut gaps = std::collections::BTreeSet::new();
+            let mut failures = Vec::new();
+            // Growing the status text two bytes at a time walks `pcbNeeded`
+            // through every even residue of the JOB_INFO_1W slot size, i.e.
+            // every rounding gap production can produce.
+            for status_units in 0..size_of::<JOB_INFO_1W>() / 2 {
+                let status = "P".repeat(status_units);
+                let (fixture, gap) = spooler_packed_get_job_response(queue, &document, &status);
+                gaps.insert(gap);
+                // SAFETY: the fixture storage stays live for the call.
+                let decoded = unsafe {
+                    decode_level_one_response(
+                        fixture.base(),
+                        fixture.allocation_size(),
+                        fixture.needed_bytes,
+                        1,
+                        SpoolerOperation::GetJob,
+                    )
+                };
+                let snapshot = match decoded {
+                    Ok(mut snapshots) if snapshots.len() == 1 => snapshots.remove(0),
+                    other => {
+                        failures.push(format!("gap {gap}: {other:?}"));
+                        continue;
+                    }
+                };
+                assert_eq!(snapshot.printer_name, queue, "gap {gap}");
+                assert_eq!(snapshot.document_name, document, "gap {gap}");
+                assert_eq!(snapshot.status_text.as_deref(), Some(status.as_str()));
+                assert_eq!(snapshot.job_id, 73);
+                assert!(validate_owned_job(queue, 73, &document, &snapshot).is_ok());
+            }
+            assert!(
+                failures.is_empty(),
+                "{} of {} layouts rejected:\n{}",
+                failures.len(),
+                gaps.len(),
+                failures.join("\n")
+            );
+            assert_eq!(gaps.len(), size_of::<JOB_INFO_1W>() / 2);
+            assert!(gaps.contains(&0));
+            assert!(gaps
+                .iter()
+                .any(|gap| *gap >= wide_bytes(queue) && *gap < size_of::<JOB_INFO_1W>()));
+        }
+
+        #[test]
+        fn enum_jobs_decoder_accepts_two_jobs_packed_at_the_end_of_the_buffer() {
+            let struct_bytes = 2 * size_of::<JOB_INFO_1W>();
+            let first = ["Κουζίνα", "TILL-01", "pos", "TheSmallPOS/a", "RAW"];
+            let second = [
+                "Κουζίνα",
+                "TILL-01",
+                "pos",
+                "TheSmallPOS/b",
+                "RAW",
+                "Printing",
+            ];
+            let needed = struct_bytes
+                + first
+                    .iter()
+                    .chain(second.iter())
+                    .map(|value| wide_bytes(value))
+                    .sum::<usize>();
+            let mut fixture = NativeFixture {
+                buffer: AlignedJobBuffer::try_new(needed + 40, SpoolerOperation::EnumJobs).unwrap(),
+                needed_bytes: needed,
+            };
+            let mut end = fixture.allocation_size();
+            let a = pack_from_buffer_end(&mut fixture, &mut end, &first);
+            let b = pack_from_buffer_end(&mut fixture, &mut end, &second);
+            assert!(
+                end > struct_bytes,
+                "a gap separates the structs and strings"
+            );
+            fixture.write_info_at(0, 11, a[0], a[3], ptr::null_mut());
+            fixture.write_info_at(1, 12, b[0], b[3], b[5]);
+
+            let snapshots = fixture.decode(2).unwrap();
+
+            assert_eq!(snapshots.len(), 2);
+            assert_eq!(snapshots[0].job_id, 11);
+            assert_eq!(snapshots[0].document_name, "TheSmallPOS/a");
+            assert_eq!(snapshots[0].status_text, None);
+            assert_eq!(snapshots[1].job_id, 12);
+            assert_eq!(snapshots[1].printer_name, "Κουζίνα");
+            assert_eq!(snapshots[1].document_name, "TheSmallPOS/b");
+            assert_eq!(snapshots[1].status_text.as_deref(), Some("Printing"));
+        }
+
+        #[test]
+        fn decoder_rejects_needed_bytes_beyond_the_buffer() {
             let mut fixture = NativeFixture::valid();
-            fixture.copied_bytes = fixture.allocation_size() + 1;
+            fixture.needed_bytes = fixture.allocation_size() + 1;
             assert_malformed(
                 fixture.decode(1),
-                MalformedResponseKind::CopiedBytesExceedAllocation,
+                MalformedResponseKind::NeededBytesExceedBuffer,
             );
         }
 

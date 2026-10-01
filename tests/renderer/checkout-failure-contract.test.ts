@@ -58,6 +58,88 @@ test('a failure after the order persisted still finalizes (duplicate protection)
   );
 });
 
+// Item E (30/09/2026): a card charged at checkout whose order the till could
+// not save is held for "Save payment again". The checkout must end (a retry
+// from the same cart is a new checkout and a second charge), never as a
+// success, and every surface tells the cashier "charged, not saved".
+test('a card charged at checkout and not saved ends the checkout, never as a success', () => {
+  assert.deepEqual(
+    resolveOrderCompletionOutcome({
+      succeeded: false,
+      orderPersisted: false,
+      chargedNotSaved: true,
+    }),
+    { completionResult: false, resetOrderUiState: true },
+  );
+
+  const dashboard = sliceBetween(
+    rendererSource('components', 'OrderDashboard.tsx'),
+    'const handleOrderComplete = async (',
+    'const resetEditOrderState',
+  );
+  assert.match(
+    dashboard,
+    /else if \(result\.paymentNotSaved\) \{[\s\S]*?notifyPaymentNotSaved\(result, t\);[\s\S]*?announceUnsavedCheckoutChanged\(\);[\s\S]*?return finishOrderCompletion\(false, true\);/,
+  );
+
+  const flow = sliceBetween(
+    rendererSource('components', 'OrderFlow.tsx'),
+    'const handleOrderComplete = useCallback(',
+    '\n  return (',
+  );
+  assert.match(
+    flow,
+    /else if \(result\.paymentNotSaved\) \{[\s\S]*?notifyPaymentNotSaved\(result, t\);[\s\S]*?announceUnsavedCheckoutChanged\(\);[\s\S]*?chargedNotSaved: true/,
+  );
+
+  const page = rendererSource('pages', 'NewOrderPage.tsx');
+  assert.match(
+    page,
+    /if \(!result\.success && result\.paymentNotSaved\) \{[\s\S]*?notifyPaymentNotSaved\(result, t\);[\s\S]*?announceUnsavedCheckoutChanged\(\);[\s\S]*?setShowMenuModal\(false\);[\s\S]*?return false;/,
+  );
+});
+
+// Item H (30/09/2026, the same decision as Android): a read error of the
+// store's tax rate is not "missing". Checkout pauses with a message and "Try
+// again"; nothing is priced or its tax split on an assumed 24%.
+test('checkout pauses while the store tax rate cannot be read, never on an assumed 24%', () => {
+  for (const segments of [
+    ['components', 'OrderFlow.tsx'],
+    ['pages', 'NewOrderPage.tsx'],
+  ]) {
+    const source = rendererSource(...segments);
+    assert.doesNotMatch(source, /setTaxRatePercentage\(24\)/, segments.join('/'));
+    assert.doesNotMatch(source, /'tax_rate_percentage', 24\)/, segments.join('/'));
+    assert.match(
+      source,
+      /resolveCheckoutTaxRate\(\{ loaded: terminalSettingsLoaded, getSetting \}\)/,
+      segments.join('/'),
+    );
+    const handler = sliceBetween(
+      source,
+      'const handleOrderComplete = useCallback(',
+      'setIsProcessingOrder(true);',
+    );
+    assert.match(
+      handler,
+      /if \(taxRatePercentage === null\) \{\s*notifyMoneySettingsUnavailable\(t, reloadTerminalSettings\);\s*return false;\s*\}/,
+      segments.join('/'),
+    );
+  }
+
+  const dashboard = rendererSource('components', 'OrderDashboard.tsx');
+  assert.doesNotMatch(dashboard, /'tax_rate_percentage', 24\)/);
+  const edit = sliceBetween(
+    dashboard,
+    'const handleEditMenuComplete = async',
+    'const handleEditMenuClose',
+  );
+  assert.match(
+    edit,
+    /resolveCheckoutTaxRate\([\s\S]*?if \(!editTaxRate\.available\) \{\s*notifyMoneySettingsUnavailable\(t, reloadTerminalSettings\);\s*return;/,
+  );
+});
+
 test('OrderDashboard.handleOrderComplete resolves an explicit boolean and success-gates the UI reset', () => {
   const source = rendererSource('components', 'OrderDashboard.tsx');
   const handler = sliceBetween(
@@ -304,4 +386,51 @@ test('OrderDashboard never emits a second toast when a payment-integrity blocker
     en.orderDashboard.collectPaymentFailed,
     'Greek collectPaymentFailed must be a real translation',
   );
+});
+
+// Fix review 30/09/2026 (double charge on a slow card terminal): every press of
+// Pay for the same cart carries the same checkout id (the till deduplicates the
+// order and the card approval by it and refuses a second press while the first
+// still waits), the id is dropped only when the order exists or the checkout
+// ends, and a checkout without an answer keeps the cart instead of failing.
+test('every checkout surface pays the same cart with the same checkout id', () => {
+  const surfaces: Array<[string, string]> = [
+    ['components/OrderFlow.tsx', 'const clientRequestId = takeCheckoutRequestId();'],
+    ['pages/NewOrderPage.tsx', 'const clientRequestId = takeCheckoutRequestId();'],
+    ['components/OrderDashboard.tsx', 'clientRequestId: takeCheckoutRequestId(),'],
+  ];
+  for (const [file, take] of surfaces) {
+    const source = rendererSource(...file.split('/'));
+    assert.ok(source.includes('useCheckoutRequestId()'), `${file} holds one checkout id per cart`);
+    assert.ok(source.includes(take), `${file} reuses the checkout id on every press`);
+    assert.doesNotMatch(
+      source,
+      /const clientRequestId =\s*globalThis\.crypto\?\.randomUUID/,
+      `${file} must not draw a new checkout id per press`,
+    );
+    assert.match(
+      source,
+      /isCheckoutOutcomeUnknown\(result\)\)?\s*\{[\s\S]{0,300}?notifyCheckoutOutcomeUnknown\(result, t\);/,
+      `${file} keeps the cart when the payment has no answer yet`,
+    );
+    assert.ok(
+      source.includes('resetCheckoutRequestId();'),
+      `${file} starts a new checkout id once the order exists`,
+    );
+  }
+
+  const store = rendererSource('hooks', 'useOrderStore.ts');
+  assert.match(store, /const CHECKOUT_WITH_PAYMENT_TIMEOUT_MS = 180_000;/);
+  assert.match(
+    store,
+    /carriesPayment \? CHECKOUT_WITH_PAYMENT_TIMEOUT_MS : TIMING\.ORDER_CREATE_TIMEOUT/,
+  );
+
+  for (const lng of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
+    const payment = JSON.parse(
+      readFileSync(path.join(process.cwd(), 'src', 'locales', `${lng}.json`), 'utf8'),
+    ).payment;
+    assert.equal(typeof payment.checkoutOutcomeUnknown, 'string', `${lng} checkoutOutcomeUnknown`);
+    assert.equal(typeof payment.checkoutInProgress, 'string', `${lng} checkoutInProgress`);
+  }
 });
