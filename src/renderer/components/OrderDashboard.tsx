@@ -116,6 +116,7 @@ import { PrintPreviewModal } from "./modals/PrintPreviewModal";
 import { FloatingActionButton } from "./ui/FloatingActionButton";
 import { useTheme } from "../contexts/theme-context";
 import { useI18n } from "../contexts/i18n-context";
+import { isBoxOrder, runBoxApprovalDecision } from './order/box-order-decision';
 import { usePaymentPrintPrompt, type PaymentPrintPromptContext } from "../hooks/usePaymentPrintPrompt";
 import { MODULE_IDS, useAcquiredModules } from "../hooks/useAcquiredModules";
 import { useTables } from "../hooks/useTables";
@@ -1590,6 +1591,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       () =>
         selectedOrderObjects.length > 0 &&
         selectedOrderObjects.every((order) => {
+          if (isBoxOrder(order)) return false;
           const plugin =
             order.plugin ||
             order.order_plugin ||
@@ -2127,6 +2129,16 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       orderId: string,
       estimatedTime?: number,
     ): Promise<boolean> => {
+      if (isBoxOrder(selectedOrderForApproval?.id === orderId ? selectedOrderForApproval : [...orders, ...pendingExternalOrders].find(order => order.id === orderId))) {
+        // OrderApprovalPanel owns BOX feedback and closes only on resolution.
+        await runBoxApprovalDecision(() => approveOrder(orderId, estimatedTime), async () => {
+          await loadOrders();
+          setShowApprovalPanel(false);
+          setSelectedOrderForApproval(null);
+          setIsViewOnlyMode(true);
+        });
+        return true;
+      }
       // The order's platform may take a shorter preparation time than the
       // one chosen: the server's answer to this accept says so, and the
       // cashier is told. Listening starts before the accept goes out.
@@ -2189,6 +2201,16 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     // approval panel then stays open and reports no success. The panel
     // announces a success itself.
     const handleDeclineOrder = async (orderId: string, reason: string): Promise<boolean> => {
+      if (isBoxOrder(selectedOrderForApproval?.id === orderId ? selectedOrderForApproval : [...orders, ...pendingExternalOrders].find(order => order.id === orderId))) {
+        if (await declineRefusalAnnounced(orderId)) return false;
+        await runBoxApprovalDecision(() => declineOrder(orderId, reason), async () => {
+          await loadOrders();
+          setShowApprovalPanel(false);
+          setSelectedOrderForApproval(null);
+          setIsViewOnlyMode(true);
+        });
+        return true;
+      }
       try {
         // Asked again: money may have been taken while the reason was typed.
         // The till refuses it again at decline.
@@ -4113,7 +4135,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           !isSplitPayment &&
           (paymentMethod === "cash" ||
             paymentMethod === "card" ||
-            paymentMethod === "room_charge")
+            paymentMethod === "room_charge" || paymentMethod === "twint")
             ? {
                 method: paymentMethod,
                 payment_method: paymentMethod,
@@ -4127,6 +4149,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                     ? orderData.paymentData?.change
                     : undefined,
                 transactionRef: orderData.paymentData?.transactionId,
+                idempotencyKey: orderData.paymentData?.idempotencyKey,
+                currency: orderData.paymentData?.currency,
+                metadata: orderData.paymentData?.metadata,
                 tipAmount,
                 tipRecipientRole,
                 tipRecipientStaffId,
@@ -4135,7 +4160,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             : undefined;
 
         const existingOrderId = orderData.paymentData?.existingOrderId;
-        if (existingOrderId && (paymentMethod === "cash" || paymentMethod === "card")) {
+        if (existingOrderId && (paymentMethod === "cash" || paymentMethod === "card" || paymentMethod === "twint")) {
           // Existing-order guard: continue the modal's claim or take the
           // order's ordinary claim before the first await of this write.
           const givenOwner: OrdinaryCollectionOwner | null =
@@ -4161,7 +4186,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                 method: paymentMethod,
                 amount: total,
                 transactionRef: orderData.paymentData?.transactionId ?? null,
-                idempotencyKey: null,
+                idempotencyKey: orderData.paymentData?.idempotencyKey ?? null,
                 settlementGeneration: null,
                 terminalTransactionId: null,
               },
@@ -4182,6 +4207,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                         ? orderData.paymentData?.change
                         : undefined,
                     transactionRef: orderData.paymentData?.transactionId,
+                    idempotencyKey: orderData.paymentData?.idempotencyKey,
+                    currency: orderData.paymentData?.currency,
+                    metadata: orderData.paymentData?.metadata,
                     tipAmount,
                     tipRecipientRole,
                     tipRecipientStaffId,
@@ -5654,7 +5682,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
               method: paymentMethod,
               amount: pendingPayment.outstandingAmount,
               transactionRef: selection.transactionId ?? null,
-              idempotencyKey: selection.transactionId ?? null,
+              idempotencyKey: selection.idempotencyKey ?? selection.transactionId ?? null,
               settlementGeneration: pendingPayment.settlementGeneration,
               terminalTransactionId: null,
             },
@@ -5669,7 +5697,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                   changeGiven:
                     paymentMethod === "cash" ? selection.change : undefined,
                   transactionRef: selection.transactionId,
-                  idempotencyKey: selection.transactionId,
+                  idempotencyKey: selection.idempotencyKey ?? selection.transactionId,
+                  currency: selection.currency,
+                  metadata: selection.metadata,
                   collectOutstandingBalance: true,
                   expectedSettlementGeneration: pendingPayment.settlementGeneration,
                   tipAmount: pendingPayment.tipAmount,
@@ -6150,8 +6180,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           // `cancelled`; neither wrote, queued or sent anything. A cancelled
           // order is never announced as ready: the cashier gets the
           // platform's cancellation notice for it instead.
+          const readyOrders = selectedOrderObjects.filter((order) => !isBoxOrder(order));
+          if (readyOrders.length === 0) return;
           const outcome = await markPlatformOrdersReady(
-            selectedOrderObjects.map((order) => ({
+            readyOrders.map((order) => ({
               id: order.id,
               displayNumber:
                 formatCompactOrderNumberForDisplay(getVisibleOrderNumber(order)) ||
@@ -6163,7 +6195,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           if (outcome.failedOrderNumber !== null) {
             return;
           }
-          if (outcome.markedReady < selectedOrderObjects.length) {
+          if (outcome.markedReady < readyOrders.length) {
             await loadOrders();
           }
           handleClearSelection();
@@ -6577,10 +6609,11 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         // server's `cancellation_reason` column and shows up in both the
         // pos-tauri order detail view and the admin dashboard.
         for (const orderId of pendingCancelOrders) {
+          const targetOrder = [...orders, ...pendingExternalOrders].find(order => order.id === orderId);
           const { success, errorCode } = await updateOrderStatusDetailed(
             orderId,
             "cancelled",
-            cancellationOptions,
+            isBoxOrder(targetOrder) ? { cancellationReason: reason } : cancellationOptions,
           );
           if (!success && errorCode === ORDER_HAS_PAYMENTS) {
             // Money was taken on it since the reason was asked: the till
@@ -6800,7 +6833,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         const target = missingPaymentRepairTarget;
         if (
           !target ||
-          selection.method === "split" ||
+          (selection.method === "split" || selection.method === "twint") ||
           missingPaymentRepairRef.current
         ) {
           return false;
@@ -6857,7 +6890,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                 method: paymentMethod,
                 amount: selection.amount,
                 transactionRef: selection.transactionId ?? null,
-                idempotencyKey: selection.transactionId ?? null,
+                idempotencyKey: selection.idempotencyKey ?? selection.transactionId ?? null,
                 settlementGeneration: target.settlementGeneration,
                 terminalTransactionId: null,
               },
@@ -6870,7 +6903,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                     cashReceived: selection.cashReceived,
                     changeGiven: selection.change,
                     transactionRef: selection.transactionId,
-                    idempotencyKey: selection.transactionId,
+                    idempotencyKey: selection.idempotencyKey ?? selection.transactionId,
+
                     expectedSettlementGeneration: target.settlementGeneration,
                   }),
                   bridge,
@@ -9140,6 +9174,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             amount={missingPaymentRepairTarget.amount}
             orderType={missingPaymentRepairTarget.orderType}
             allowSplit={false}
+            allowTwint={false}
             isProcessing={isRepairingMissingPayment}
             onSelect={handleMissingPaymentRepair}
             existingOrder={repairExistingOrder}

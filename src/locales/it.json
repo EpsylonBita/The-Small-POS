@@ -1,4 +1,19 @@
 {
+  "twintPayment": {
+    "receiptNotSaved": "Confermato, non salvato",
+    "receiptConfirmedAt": "Confermato dal cassiere alle",
+    "receiptReconcile": "Conserva l’incasso TWINT manuale originale per la verifica da parte di un responsabile. Non riscuotere un altro pagamento.",
+    "exactAmount": "Scansiona il QR del negozio e inserisci esattamente questo importo in TWINT.",
+    "manualConfirmation": "Verifica la ricezione del pagamento prima di confermare. Non è disponibile una notifica automatica del pagamento.",
+    "customerDisplay": "Il QR è visualizzato sullo schermo cliente.",
+    "qrAlt": "QR TWINT ufficiale del negozio",
+    "saveFailed": "Il pagamento non è stato salvato. Verifica il suo stato prima di riprovare.",
+    "confirm": "Conferma pagamento ricevuto",
+    "skip": "Salta — conferma ricezione",
+    "receiptRecovery": "Un incasso TWINT è confermato, ma il suo pagamento non è salvato. Salva l’incasso originale prima di accettare un altro pagamento.",
+    "receiptSaved": "L’incasso TWINT originale è stato salvato.",
+    "saveOriginal": "Salva l’incasso TWINT originale"
+  },
   "displayPurchase": {
     "beforePurchase": "Prima dell'acquisto",
     "operation": "Come funziona",
@@ -4826,7 +4841,7 @@
         "payments_not_saved": "Carta addebitata, pagamento non salvato",
         "cancelled_order_claims_payment": "Ordine annullato che risulta ancora pagato"
       },
-      "revenueSplitHint": "Contanti + Carta + Piattaforme = Incassato reale",
+      "revenueSplitHint": "Totale dei pagamenti ricevuti",
       "liveShiftBreakdown": "Panoramica turni live",
       "liveCurrentWindow": "Finestra attuale live",
       "historicalPreview": "Anteprima storica",
@@ -6428,7 +6443,20 @@
     }
   },
   "suppliers": {
+    "paymentMethod": {
+      "unknown": "Modo sconosciuto"
+    },
+    "payment": {
+      "reversal": "Pagamento annullato"
+    },
     "capture": {
+      "automation": {
+        "recordedMark": "Registrata da sola",
+        "recordedStockMark": "Registrata da sola · magazzino aggiornato",
+        "billMark": "Bolletta",
+        "openAndCorrect": "Apri e correggi",
+        "noSaveNeeded": "Niente da salvare — questa fattura è già registrata."
+      },
       "settings": {
         "title": "Impostazioni di scansione",
         "subtitle": "Da dove questa cassa riceve le fatture scansionate.",
@@ -8349,6 +8377,25 @@
     }
   },
   "integrations": {
+    "paymentSetup": {
+      "state": {
+        "manual_ready": "Conferma manuale",
+        "not_configured": "Configurazione necessaria",
+        "pending_verification": "In attesa di verifica",
+        "partner_setup_required": "Attivazione del fornitore necessaria",
+        "unavailable": "Stato non disponibile"
+      },
+      "detail": {
+        "manual_ready": "Il QR del negozio è pronto. Il cassiere deve confermare ogni pagamento TWINT ricevuto.",
+        "not_configured": "Configura questa connessione di pagamento nella dashboard amministrativa. I pagamenti non sono ancora disponibili.",
+        "pending_verification": "La configurazione è stata salvata. I pagamenti saranno disponibili dopo la verifica della connessione.",
+        "partner_setup_required": "Il fornitore deve attivare la connessione prima di poter ricevere pagamenti. Continua nella dashboard amministrativa.",
+        "unavailable": "Non è stato possibile confermare la disponibilità dei pagamenti. Verifica la configurazione nella dashboard amministrativa."
+      },
+      "openAdminFailed": "Impossibile aprire le impostazioni dei pagamenti nella dashboard amministrativa.",
+      "twintDescription": "Pagamenti TWINT",
+      "worldline_terminalsDescription": "Terminali di pagamento Worldline"
+    },
     "title": "Plugin",
     "subtitle": "Connetti plugin di terze parti",
     "loading": "Caricamento plugin...",

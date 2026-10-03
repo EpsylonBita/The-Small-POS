@@ -171,6 +171,9 @@ fn reserve_direct_sale(
         let reserved = (|| {
             if let Some(order_id) = order_id {
                 direct_sale_admission(conn, order_id, None)?;
+                crate::unsaved_payments::refuse_new_collection_while_manual_receipt(
+                    conn, order_id,
+                )?;
                 let unresolved_gift: i64 = conn
                     .query_row(
                         "SELECT COUNT(*) FROM gift_card_redemption_attempts
@@ -4458,6 +4461,42 @@ mod dto_tests {
         drop(conn);
         reserve_direct_sale(&restarted, &competing, Some("direct-sale-order"))
             .expect("a distinct remaining split portion may collect after exact booking");
+    }
+
+    #[tokio::test]
+    async fn twint_retained_manual_receipt_refuses_fresh_card_sale_before_hardware_dispatch() {
+        let (_cleanup, db, second) = file_backed_outstanding_attempt_test_dbs("manual-sale-order");
+        {
+            let conn = db.conn.lock().unwrap();
+            let mut entry=crate::unsaved_payments::UnsavedChargedPayment::for_payment("manual-sale-order",&serde_json::json!({"orderId":"manual-sale-order","method":"twint","amount":12,"currency":"CHF","idempotencyKey":"retained-manual","metadata":{"provider":"twint","confirmation":"cashier","confirmation_action":"skip","qr_mode":"static_qr_manual"}}),None,"now").unwrap();
+            entry.kind = "manual_twint_payment".into();
+            crate::unsaved_payments::record(&conn, &entry).unwrap();
+        }
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let attempt =
+            direct_sale_attempt("new-sale", "manual-sale-order", "processing", 1200, true);
+        let error = dispatch_after_durable_direct_sale(
+            &second,
+            &attempt,
+            Some("manual-sale-order"),
+            || async {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("TWINT_RECEIPT_PENDING"));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            second
+                .conn
+                .lock()
+                .unwrap()
+                .query_row("SELECT count(*) FROM ecr_transactions", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
     }
 
     #[tokio::test]

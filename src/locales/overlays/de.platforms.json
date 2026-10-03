@@ -141,5 +141,23 @@
     "acknowledge": "Ich habe das gelesen",
     "persistPending": "Diese Meldung konnte noch nicht gespeichert werden. Vor der Bestätigung erneut versuchen.",
     "retry": "Erneut versuchen"
+  },
+  "boxOrder": {
+    "decisionUnconfirmed": "BOX hat diese Entscheidung noch nicht bestätigt. Prüfen Sie die Bestellung und die Verbindung und versuchen Sie es erneut, wenn sie noch aussteht.",
+    "testOrder": "TEST · SANDBOX",
+    "reasonLabel": "An BOX gesendeter Grund",
+    "reasonPrompt": "BOX akzeptiert nur diese Gründe. Wählen Sie den Grund, der gesendet wird.",
+    "reasonRequired": "Wählen Sie einen Grund, um diese BOX-Bestellung abzulehnen.",
+    "reasonSentAs": "An BOX gesendet als: {{value}}",
+    "decisionFinal": "BOX-Entscheidungen sind endgültig. Diese Bestellung kann hier nicht wieder geöffnet werden.",
+    "reasons": {
+      "highOrderVolume": "Hohes Bestellaufkommen",
+      "noCourierAvailable": "Kein Fahrer verfügbar",
+      "productUnavailable": "Produkt nicht verfügbar",
+      "outsideServiceArea": "Außerhalb des Liefergebiets",
+      "wrongProductPrice": "Falscher Produktpreis",
+      "closingSoon": "Wir schließen bald",
+      "badWeather": "Wegen schlechten Wetters"
+    }
   }
 }

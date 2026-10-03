@@ -628,6 +628,8 @@ fn insert_attempt(
     request_fingerprint: &str,
     now: &str,
 ) -> Result<Attempt, Refusal> {
+    crate::unsaved_payments::refuse_new_collection_while_manual_receipt(conn, local_order_id)
+        .map_err(|error| Refusal::new("TWINT_RECEIPT_PENDING", error))?;
     let idempotency_key = format!("gift-redeem-{}", uuid::Uuid::new_v4());
     conn.execute(
         "INSERT INTO gift_card_redemption_attempts (
@@ -3051,6 +3053,42 @@ mod tests {
     }
 
     #[test]
+    fn twint_retained_manual_receipt_refuses_fresh_gift_attempt_before_debit() {
+        let conn = test_conn();
+        seed_order(&conn, "order-1", Some(REMOTE_ORDER), 2000);
+        let mut entry=crate::unsaved_payments::UnsavedChargedPayment::for_payment("order-1",&json!({"orderId":"order-1","method":"twint","amount":12,"currency":"CHF","idempotencyKey":"retained-manual","metadata":{"provider":"twint","confirmation":"cashier","confirmation_action":"confirm","qr_mode":"static_qr_manual"}}),None,"now").unwrap();
+        entry.kind = "manual_twint_payment".into();
+        crate::unsaved_payments::record(&conn, &entry).unwrap();
+        let refusal = match prepare_with_scope_gated(
+            &conn,
+            scope(),
+            &request(5.0, "GC12345678"),
+            "order-1",
+            "now",
+            None,
+        ) {
+            Err(refusal) => refusal,
+            Ok(_) => panic!("manual receipt must block a fresh gift debit"),
+        };
+        assert_eq!(refusal.code, "TWINT_RECEIPT_PENDING");
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM gift_card_redemption_attempts",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            crate::unsaved_payments::list(&conn, Some("order-1"))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn gift_payments_refuse_refund_void_and_method_edit_before_any_write() {
         let conn = test_conn();
         seed_order(&conn, "order-1", Some(REMOTE_ORDER), 2000);
@@ -3695,12 +3733,17 @@ mod tests {
                 .query_row("PRAGMA schema_version", [], |row| row.get(0))
                 .unwrap();
             conn.execute_batch("PRAGMA writable_schema=ON;").unwrap();
+            let unsupported_sql = sql.replace(
+                "CHECK (method IN ('cash', 'card', 'other', 'gift_card', 'twint'))",
+                "CHECK (method IN ('cash','card','other','twint')) /* 'gift_card' */",
+            );
+            assert_ne!(
+                unsupported_sql, sql,
+                "the fixture must remove gift admission from the current v95 CHECK"
+            );
             conn.execute(
                 "UPDATE sqlite_master SET sql=?1 WHERE name='order_payments' AND type='table'",
-                [sql.replace(
-                    "CHECK (method IN ('cash', 'card', 'other', 'gift_card'))",
-                    "CHECK (method IN ('cash','card','other')) /* 'gift_card' */",
-                )],
+                [unsupported_sql],
             )
             .unwrap();
             conn.execute_batch(&format!(

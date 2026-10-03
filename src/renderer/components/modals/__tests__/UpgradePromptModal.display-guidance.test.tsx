@@ -11,7 +11,7 @@ const mocks = vi.hoisted(() => ({ api: vi.fn(), context: vi.fn(), open: vi.fn() 
 const ORG = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 const context = { organizationId: ORG, key: 'current-context', adminUrl: 'https://admin.test' }
 function catalog(): PublicLaunchCatalogDTO {
-  return { available: true, currency: 'USD', version: 'test', reason: null,
+  return { available: true, currency: 'EUR', version: 'test', reason: null,
     base: { id: 'starter', planName: 'starter', displayName: 'Starter', monthly: 10, annual: 120,
       includedModuleIds: ['menu', 'orders'], builtInScreens: ['dashboard'], includedResources: { branches: 1, posTerminals: 1 }, staffLimit: null, action: 'checkout' },
     modules: ['kitchen_display','customer_display','inventory'].map(module_id => ({ module_id, display_name: module_id,
@@ -64,11 +64,11 @@ describe('actual desktop purchase entry', () => {
   })
   it.each(['menu','orders'])('shows the one Starter price while preserving %s in the browser hint', async moduleId => {
     render(<UpgradePromptModal moduleId={moduleId} isOpen onClose={vi.fn()} />)
-    expect(await screen.findByText('$10.00 / Month')).toBeVisible()
+    expect(await screen.findByText('€10.00 / Month')).toBeVisible()
     expect(screen.getByText('Includes 1 branch(es) and 1 terminal(s).')).toBeVisible()
     expect(screen.getByText('Staff included without a per-person fee.')).toBeVisible()
     fireEvent.click(screen.getByRole('button', { name: 'Year' }))
-    expect(screen.getByText('$120.00 / Year')).toBeVisible()
+    expect(screen.getByText('€120.00 / Year')).toBeVisible()
     await clickOpen()
     const url = new URL(mocks.open.mock.calls[0][0])
     expect(Object.fromEntries(url.searchParams)).toMatchObject({ purchase: moduleId, organization_id: ORG, billing: 'annual', source: 'pos_tauri', context: 'locked_module' })
@@ -78,7 +78,7 @@ describe('actual desktop purchase entry', () => {
     dto.modules = [...dto.modules, { ...dto.modules[0], module_id: 'suppliers', action: 'included', monthly: 0, annual: 0, included_in: ['inventory'] }]
     mocks.api.mockResolvedValue({ success: true, data: dto })
     render(<UpgradePromptModal moduleId="suppliers" isOpen onClose={vi.fn()} />)
-    expect(await screen.findByText('$3.00 / Month')).toBeVisible()
+    expect(await screen.findByText('€3.00 / Month')).toBeVisible()
     expect(screen.getByText('Also included with: inventory')).toBeVisible()
   })
   it.each(['offline','invalid currency','missing identity'])('offers no invented price or purchase while %s', async failure => {

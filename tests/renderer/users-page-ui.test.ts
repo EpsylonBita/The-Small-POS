@@ -391,11 +391,11 @@ test('UsersPage details modal Escape uses the topmost-dialog gate and the close-
   // Close-only callback mirrors the footer Close button and never calls ban/delete/save.
   assert.match(
     source,
-    /const closeDetailsModal = useCallback\(\(\) => \{\s*setShowDetailsModal\(false\);\s*setSelectedUser\(null\);\s*setUserAddresses\(\[\]\);\s*\}, \[\]\);/,
+    /const closeDetailsModal = useCallback\(\(\) => \{\s*setShowDetailsModal\(false\);\s*setSelectedUser\(null\);\s*setUserAddresses\(\[\]\);\s*\+\+customerDetailsGeneration\.current;\s*invalidateAddressSearch\(true\);\s*setEditingAddressId\(null\);\s*setEditedAddress\(\{\}\);\s*\}, \[invalidateAddressSearch\]\);/,
   );
   assert.doesNotMatch(
     source,
-    /const closeDetailsModal = useCallback\(\(\) => \{[\s\S]*?(handleToggleBan|confirmDeleteAddress|handleSaveAddress)[\s\S]*?\}, \[\]\);/,
+    /const closeDetailsModal = useCallback\(\(\) => \{[\s\S]*?(handleToggleBan|confirmDeleteAddress|handleSaveAddress)[\s\S]*?\}, \[invalidateAddressSearch\]\);/,
     'the details close path must not trigger ban/delete/address-save side effects',
   );
 

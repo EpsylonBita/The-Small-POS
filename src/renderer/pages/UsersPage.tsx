@@ -4,6 +4,9 @@ import { posApiFetch, posApiGet } from '../utils/api-helpers';
 import { renderModalPortal } from '../utils/render-modal-portal';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../contexts/theme-context';
+import { useModuleAccess } from '../contexts/module-context';
+import { extractSavedAddressCoordinates } from '../utils/saved-address-geolocation';
+import { toValidLatLng } from '../utils/coordinates';
 import toast from 'react-hot-toast';
 import { getBridge, offEvent, onEvent } from '../../lib';
 import { parseSpecialAddressInput } from '../utils/specialAddress';
@@ -75,6 +78,8 @@ interface CustomerAddress {
   formatted_address?: string;
   resolved_street_number?: string;
   address_fingerprint?: string;
+  coordinate_source?: string | null;
+  geocoded_at?: string | null;
 }
 
 const USERS_PAGE_SIZE = 10;
@@ -192,6 +197,9 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
   const bridge = getBridge();
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
+  const hasDeliveryModule = useModuleAccess('delivery').isEnabled;
+  const hasDeliveryZonesModule = useModuleAccess('delivery_zones').isEnabled;
+  const hasDeliveryPro = hasDeliveryModule && hasDeliveryZonesModule;
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState(initialSearchTerm);
@@ -210,6 +218,40 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [isLoadingAddresses, setIsLoadingAddresses] = useState(false);
   const addressSessionTokenRef = useRef<string | null>(null);
+  const addressSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const addressGeneration = useRef(0);
+  const customerDetailsGeneration = useRef(0);
+  const mounted = useRef(true);
+  const addressScope = useRef('');
+  addressScope.current = JSON.stringify([selectedUser?.id, editingAddressId, showDetailsModal, hasDeliveryPro]);
+
+  // Every text/lifecycle change invalidates autocomplete and details together.
+  const invalidateAddressSearch = useCallback((resetSession = false) => {
+    const generation = ++addressGeneration.current;
+    if (addressSearchTimer.current) clearTimeout(addressSearchTimer.current);
+    addressSearchTimer.current = null;
+    setAddressSuggestions([]);
+    setShowSuggestions(false);
+    setIsLoadingAddresses(false);
+    if (resetSession) addressSessionTokenRef.current = null;
+    return generation;
+  }, []);
+
+  useEffect(() => {
+    invalidateAddressSearch(true);
+  }, [editingAddressId, selectedUser?.id, showDetailsModal, hasDeliveryPro, invalidateAddressSearch]);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      ++addressGeneration.current;
+      ++customerDetailsGeneration.current;
+      if (addressSearchTimer.current) clearTimeout(addressSearchTimer.current);
+      addressSessionTokenRef.current = null;
+    };
+  }, []);
+
 
   useEffect(() => {
     setSearchTerm(initialSearchTerm);
@@ -230,7 +272,11 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
     setShowDetailsModal(false);
     setSelectedUser(null);
     setUserAddresses([]);
-  }, []);
+    ++customerDetailsGeneration.current;
+    invalidateAddressSearch(true);
+    setEditingAddressId(null);
+    setEditedAddress({});
+  }, [invalidateAddressSearch]);
 
   // Close-only path for the address-delete confirmation. Escape (and the existing
   // cancel/backdrop) clear the pending target only; it never calls the delete submit,
@@ -384,12 +430,19 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
   };
 
   const handleViewUser = async (user: UserProfile) => {
+    const generation = ++customerDetailsGeneration.current;
+    const isCurrent = () => mounted.current && generation === customerDetailsGeneration.current;
+    invalidateAddressSearch(true);
+    setEditingAddressId(null);
+    setEditedAddress({});
+    setUserAddresses([]);
     setSelectedUser(user);
     setShowDetailsModal(true);
 
     try {
       let matchedCustomer: any = await bridge.customers.lookupById(user.id);
 
+      if (!isCurrent()) return;
       if (!matchedCustomer && user.phone) {
         const result = await posApiGet<any>(`pos/customers?phone=${encodeURIComponent(user.phone)}`);
         const payload = result.success ? result.data : null;
@@ -401,6 +454,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
         }
       }
 
+      if (!isCurrent()) return;
       if (matchedCustomer?.addresses && matchedCustomer.addresses.length > 0) {
         setUserAddresses(matchedCustomer.addresses.map((addr: any) => ({
           id: addr.id,
@@ -413,23 +467,27 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
           address_type: addr.address_type || 'delivery',
           is_default: addr.is_default,
           delivery_notes: addr.delivery_notes || addr.notes,
-          latitude: addr.latitude,
-          longitude: addr.longitude,
+          latitude: extractSavedAddressCoordinates(addr)?.lat,
+          longitude: extractSavedAddressCoordinates(addr)?.lng,
           place_id: addr.place_id || addr.google_place_id,
           formatted_address: addr.formatted_address,
           resolved_street_number: addr.resolved_street_number,
           address_fingerprint: addr.address_fingerprint,
+          coordinate_source: addr.coordinate_source,
+          geocoded_at: addr.geocoded_at,
         })));
       } else {
         setUserAddresses([]);
       }
     } catch (error) {
+      if (!isCurrent()) return;
       console.error('Error fetching customer details:', error);
       setUserAddresses([]);
     }
   };
 
   const handleEditAddress = (address: CustomerAddress) => {
+    invalidateAddressSearch(true);
     setEditingAddressId(address.id);
     setEditedAddress({
       street_address: address.street_address,
@@ -445,6 +503,8 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
       formatted_address: address.formatted_address,
       resolved_street_number: address.resolved_street_number,
       address_fingerprint: address.address_fingerprint,
+      coordinate_source: address.coordinate_source,
+      geocoded_at: address.geocoded_at,
     });
     setAddressSuggestions([]);
     setShowSuggestions(false);
@@ -452,6 +512,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
   };
 
   const handleCancelEdit = () => {
+    invalidateAddressSearch(true);
     setEditingAddressId(null);
     setEditedAddress({});
     setAddressSuggestions([]);
@@ -459,146 +520,170 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
     addressSessionTokenRef.current = null;
   };
 
-  const searchAddresses = async (input: string) => {
-    if (parseSpecialAddressInput(input).shouldSkipZoneValidation) {
+  const searchAddresses = async (input: string, generation: number, scope: string) => {
+    const isCurrent = () => mounted.current && generation === addressGeneration.current
+      && scope === addressScope.current;
+    if (!isCurrent()) return;
+    const query = input.trim();
+    if (query.length < 3 || parseSpecialAddressInput(query).shouldSkipZoneValidation) {
       addressSessionTokenRef.current = null;
-      setAddressSuggestions([]);
-      setShowSuggestions(false);
       return;
     }
 
-    if (input.length < 3) {
-      addressSessionTokenRef.current = null;
-      setAddressSuggestions([]);
-      setShowSuggestions(false);
+    const savedMatches = userAddresses.filter(address =>
+      address.street_address.toLocaleLowerCase().startsWith(query.toLocaleLowerCase())
+    ).slice(0, 5);
+    if (savedMatches.length > 0 || !hasDeliveryPro) {
+      setAddressSuggestions(savedMatches.map(address => ({
+        description: [address.street_address, address.city].filter(Boolean).join(', '),
+        source: 'saved',
+        savedAddress: address,
+      })));
+      setShowSuggestions(savedMatches.length > 0);
       return;
     }
 
     setIsLoadingAddresses(true);
     try {
-      if (!addressSessionTokenRef.current) {
-        addressSessionTokenRef.current = createAddressSessionToken();
-      }
-
+      if (!addressSessionTokenRef.current) addressSessionTokenRef.current = createAddressSessionToken();
       const result = await posApiFetch<any>('pos/address/autocomplete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          query: input.trim(),
-          session_token: addressSessionTokenRef.current,
-          location: { latitude: 37.9755, longitude: 23.7348 }, // Athens center
-          radius: 20000 // 20km radius
-        }),
+        body: JSON.stringify({ query, session_token: addressSessionTokenRef.current }),
       });
-
-      if (!result.success) {
-        throw new Error(result.error || 'Failed to search addresses');
-      }
-
-      const payload = result.data;
-      if (payload?.predictions && Array.isArray(payload.predictions)) {
-        setAddressSuggestions(payload.predictions.slice(0, 5));
-        setShowSuggestions(true);
-      } else {
-        setAddressSuggestions([]);
-        setShowSuggestions(false);
-      }
+      if (!isCurrent()) return;
+      if (!result.success) throw new Error(result.error || 'Failed to search addresses');
+      const predictions = Array.isArray(result.data?.predictions) ? result.data.predictions.slice(0, 5) : [];
+      setAddressSuggestions(predictions);
+      setShowSuggestions(predictions.length > 0);
     } catch (error) {
+      if (!isCurrent()) return;
       console.error('Error searching addresses:', error);
       setAddressSuggestions([]);
       setShowSuggestions(false);
     } finally {
-      setIsLoadingAddresses(false);
+      if (isCurrent()) setIsLoadingAddresses(false);
     }
   };
 
+  const queueAddressSearch = (input: string) => {
+    const generation = invalidateAddressSearch();
+    const scope = addressScope.current;
+    if (input.trim().length < 3 || parseSpecialAddressInput(input).shouldSkipZoneValidation) {
+      addressSessionTokenRef.current = null;
+      return;
+    }
+    addressSearchTimer.current = setTimeout(() => {
+      addressSearchTimer.current = null;
+      void searchAddresses(input, generation, scope);
+    }, 350);
+  };
+
+  const handleAddressTextChange = (field: 'street_address' | 'city' | 'postal_code', value: string) => {
+    if (field === 'street_address') queueAddressSearch(value);
+    else invalidateAddressSearch();
+    setEditedAddress(prev => ({
+      ...prev,
+      [field]: value,
+      latitude: undefined,
+      longitude: undefined,
+      place_id: undefined,
+      formatted_address: undefined,
+      resolved_street_number: undefined,
+      address_fingerprint: undefined,
+      coordinate_source: undefined,
+      geocoded_at: undefined,
+    }));
+  };
+
   const handleAddressSuggestionClick = async (suggestion: any) => {
+    const generation = invalidateAddressSearch();
+    const scope = addressScope.current;
+    const isCurrent = () => mounted.current && generation === addressGeneration.current
+      && scope === addressScope.current;
+    if (suggestion.source === 'saved') {
+      const saved = suggestion.savedAddress as CustomerAddress;
+      const point = extractSavedAddressCoordinates(saved);
+      // Copy location only: the edited row keeps its own floor/default/notes and identity.
+      setEditedAddress(prev => ({
+        ...prev,
+        street_address: saved.street_address,
+        city: saved.city,
+        postal_code: saved.postal_code,
+        latitude: point?.lat,
+        longitude: point?.lng,
+        place_id: saved.place_id,
+        formatted_address: saved.formatted_address,
+        resolved_street_number: saved.resolved_street_number,
+        address_fingerprint: saved.address_fingerprint,
+        coordinate_source: saved.coordinate_source,
+        geocoded_at: saved.geocoded_at,
+      }));
+      addressSessionTokenRef.current = null;
+      return;
+    }
+    if (!hasDeliveryPro) return;
+    const sessionToken = addressSessionTokenRef.current;
+    addressSessionTokenRef.current = null;
+    const applyDescription = () => setEditedAddress(prev => ({
+      ...prev,
+      street_address: suggestion.description,
+      latitude: undefined,
+      longitude: undefined,
+      place_id: undefined,
+      formatted_address: undefined,
+      resolved_street_number: undefined,
+      address_fingerprint: undefined,
+      coordinate_source: undefined,
+      geocoded_at: undefined,
+    }));
     try {
-      // Get place details to extract postal code and city
       const result = await posApiFetch<any>('pos/address/details', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          place_id: suggestion.place_id,
-          session_token: addressSessionTokenRef.current || undefined,
-        }),
+        body: JSON.stringify({ place_id: suggestion.place_id, session_token: sessionToken || undefined }),
       });
-
-      if (!result.success) {
-        throw new Error(result.error || 'Failed to load place details');
-      }
-
-      const payload = result.data;
-
-      if (payload && payload.result) {
-        const addressComponents = payload.result.address_components || [];
-
-        // Extract street number and route (street name)
-        const streetNumber = addressComponents.find((c: any) => c.types.includes('street_number'))?.long_name || '';
-        const route = addressComponents.find((c: any) => c.types.includes('route'))?.long_name || '';
-        const streetAddress = `${route} ${streetNumber}`.trim();
-        const latitude = payload.result.geometry?.location?.lat;
-        const longitude = payload.result.geometry?.location?.lng;
-        const formattedAddress = payload.result.formatted_address || suggestion.description;
-
-        // Extract city
-        const city = addressComponents.find((c: any) =>
-          c.types.includes('locality') || c.types.includes('administrative_area_level_3')
-        )?.long_name || '';
-
-        // Extract postal code
-        const postalCode = addressComponents.find((c: any) => c.types.includes('postal_code'))?.long_name || '';
-
+      if (!isCurrent()) return;
+      if (!result.success) throw new Error(result.error || 'Failed to load place details');
+      const details = result.data?.result;
+      if (details) {
+        const components = details.address_components || [];
+        const streetNumber = components.find((c: any) => c.types.includes('street_number'))?.long_name || '';
+        const route = components.find((c: any) => c.types.includes('route'))?.long_name || '';
+        const streetAddress = `${route} ${streetNumber}`.trim() || suggestion.description;
+        const point = toValidLatLng(details.geometry?.location);
+        const formattedAddress = details.formatted_address || suggestion.description;
+        const city = components.find((c: any) => c.types.includes('locality') || c.types.includes('administrative_area_level_3'))?.long_name;
+        const postalCode = components.find((c: any) => c.types.includes('postal_code'))?.long_name;
         setEditedAddress(prev => ({
           ...prev,
-          street_address: streetAddress || suggestion.description,
-          city,
-          postal_code: postalCode,
-          latitude,
-          longitude,
-          place_id: payload.result.place_id || suggestion.place_id,
+          street_address: streetAddress,
+          city: city || prev.city,
+          postal_code: postalCode || prev.postal_code,
+          latitude: point?.lat,
+          longitude: point?.lng,
+          place_id: details.place_id || suggestion.place_id,
           formatted_address: formattedAddress,
           resolved_street_number: streetNumber || undefined,
-          address_fingerprint: buildAddressFingerprint(formattedAddress, latitude, longitude),
+          address_fingerprint: buildAddressFingerprint(formattedAddress, point?.lat, point?.lng),
+          coordinate_source: point ? 'google' : undefined,
+          geocoded_at: point ? new Date().toISOString() : undefined,
         }));
-      } else {
-        // Fallback: use the description
-        setEditedAddress(prev => ({
-          ...prev,
-          street_address: suggestion.description,
-          latitude: undefined,
-          longitude: undefined,
-          place_id: undefined,
-          formatted_address: undefined,
-          resolved_street_number: undefined,
-          address_fingerprint: undefined,
-        }));
-      }
-
-      setShowSuggestions(false);
-      setAddressSuggestions([]);
+      } else applyDescription();
     } catch (error) {
+      if (!isCurrent()) return;
       console.error('Error getting place details:', error);
-      // Fallback: use the description
-      setEditedAddress(prev => ({
-        ...prev,
-        street_address: suggestion.description,
-        latitude: undefined,
-        longitude: undefined,
-        place_id: undefined,
-        formatted_address: undefined,
-        resolved_street_number: undefined,
-        address_fingerprint: undefined,
-      }));
-      setShowSuggestions(false);
-      setAddressSuggestions([]);
+      applyDescription();
     } finally {
-      addressSessionTokenRef.current = null;
+      if (isCurrent()) addressSessionTokenRef.current = null;
     }
   };
 
   const handleSaveAddress = async (addressId: string) => {
     if (!selectedUser) return;
+    const generation = invalidateAddressSearch(true);
+    const scope = addressScope.current;
+    const customerGeneration = customerDetailsGeneration.current;
 
     try {
       // Combine street_address and city into a single address field for the API
@@ -634,6 +719,8 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
         formatted_address: isSpecialAddress ? combinedAddress : editedAddress.formatted_address || combinedAddress,
         resolved_street_number: isSpecialAddress ? null : editedAddress.resolved_street_number,
         address_fingerprint: editedAddress.address_fingerprint || fallbackFingerprint,
+        coordinate_source: isSpecialAddress ? null : editedAddress.coordinate_source,
+        geocoded_at: isSpecialAddress ? null : editedAddress.geocoded_at,
       };
       const raw = await bridge.customers.updateAddress(
         addressId,
@@ -656,32 +743,40 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
           : t('users.updateAddressSuccess', 'Address updated successfully'),
       );
 
-      // Update local state with the returned address data
+      // A completed write belongs to its original customer view. Keep any newer edit open.
+      if (!mounted.current || customerGeneration !== customerDetailsGeneration.current) return;
+      // Use the accepted row/payload; never revive the old point after a text edit.
+      const savedLocation = { ...addressUpdatePayload, ...result.data };
+      const savedPoint = extractSavedAddressCoordinates(savedLocation);
       setUserAddresses(prev => prev.map(addr =>
         addr.id === addressId
           ? {
               ...addr,
               version: result.data?.version ?? addr.version,
-              street_address: editedAddress.street_address || addr.street_address,
-              city: isSpecialAddress ? '' : editedAddress.city || addr.city,
-              postal_code: editedAddress.postal_code || addr.postal_code,
-              floor_number: editedAddress.floor_number || addr.floor_number,
-              delivery_notes: editedAddress.delivery_notes || addr.delivery_notes,
+              street_address: streetAddress,
+              city,
+              postal_code: editedAddress.postal_code ?? '',
+              floor_number: editedAddress.floor_number,
+              delivery_notes: editedAddress.delivery_notes,
               address_type: editedAddress.address_type || addr.address_type,
               is_default: editedAddress.is_default !== undefined ? editedAddress.is_default : addr.is_default,
-              latitude: isSpecialAddress ? undefined : editedAddress.latitude ?? addr.latitude,
-              longitude: isSpecialAddress ? undefined : editedAddress.longitude ?? addr.longitude,
-              place_id: isSpecialAddress ? undefined : editedAddress.place_id || addr.place_id,
-              formatted_address: isSpecialAddress ? combinedAddress : editedAddress.formatted_address || combinedAddress || addr.formatted_address,
-              resolved_street_number: isSpecialAddress ? undefined : editedAddress.resolved_street_number || addr.resolved_street_number,
-              address_fingerprint: editedAddress.address_fingerprint || fallbackFingerprint || addr.address_fingerprint,
+              latitude: savedPoint?.lat,
+              longitude: savedPoint?.lng,
+              place_id: savedLocation.place_id ?? savedLocation.google_place_id ?? undefined,
+              formatted_address: savedLocation.formatted_address,
+              resolved_street_number: savedLocation.resolved_street_number ?? undefined,
+              address_fingerprint: savedLocation.address_fingerprint,
+              coordinate_source: savedLocation.coordinate_source,
+              geocoded_at: savedLocation.geocoded_at,
             }
           : addr
       ));
 
-      setEditingAddressId(null);
-      setEditedAddress({});
-      addressSessionTokenRef.current = null;
+      if (generation === addressGeneration.current && scope === addressScope.current) {
+        setEditingAddressId(null);
+        setEditedAddress({});
+        addressSessionTokenRef.current = null;
+      }
     } catch (error) {
       console.error('Error updating address:', error);
       // Never a native error's raw text: the refusal's own message, else the generic one.
@@ -1267,20 +1362,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
                                 <input
                                   type="text"
                                   value={editedAddress.street_address || ''}
-                                  onChange={(e) => {
-                                    const streetAddress = e.target.value;
-                                    setEditedAddress(prev => ({
-                                      ...prev,
-                                      street_address: streetAddress,
-                                      latitude: undefined,
-                                      longitude: undefined,
-                                      place_id: undefined,
-                                      formatted_address: undefined,
-                                      resolved_street_number: undefined,
-                                      address_fingerprint: undefined,
-                                    }));
-                                    searchAddresses(e.target.value);
-                                  }}
+                                  onChange={(e) => handleAddressTextChange('street_address', e.target.value)}
                                   onFocus={() => {
                                     if (addressSuggestions.length > 0) {
                                       setShowSuggestions(true);
@@ -1339,16 +1421,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
                                 <input
                                   type="text"
                                   value={editedAddress.city || ''}
-                                  onChange={(e) => setEditedAddress(prev => ({
-                                    ...prev,
-                                    city: e.target.value,
-                                    latitude: undefined,
-                                    longitude: undefined,
-                                    place_id: undefined,
-                                    formatted_address: undefined,
-                                    resolved_street_number: undefined,
-                                    address_fingerprint: undefined,
-                                  }))}
+                                  onChange={(e) => handleAddressTextChange('city', e.target.value)}
                                   className={`w-full px-3 py-2 rounded-2xl text-sm ${
                                     resolvedTheme === 'dark'
                                       ? 'bg-gray-800 text-white border-gray-600'
@@ -1365,16 +1438,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
                                 <input
                                   type="text"
                                   value={editedAddress.postal_code || ''}
-                                  onChange={(e) => setEditedAddress(prev => ({
-                                    ...prev,
-                                    postal_code: e.target.value,
-                                    latitude: undefined,
-                                    longitude: undefined,
-                                    place_id: undefined,
-                                    formatted_address: undefined,
-                                    resolved_street_number: undefined,
-                                    address_fingerprint: undefined,
-                                  }))}
+                                  onChange={(e) => handleAddressTextChange('postal_code', e.target.value)}
                                   className={`w-full px-3 py-2 rounded-2xl text-sm ${
                                     resolvedTheme === 'dark'
                                       ? 'bg-gray-800 text-white border-gray-600'

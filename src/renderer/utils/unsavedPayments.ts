@@ -141,9 +141,13 @@ function announceStillNotSaved(
   t: TFunction,
   formatMoney: (amount: number) => string,
 ): void {
+  const manual = entries.filter(isManualTwintRecord);
+  if (manual.length) toast.error(t(manual.every(entry=>entry.canSaveAgain===false) ? 'twintPayment.receiptReconcile' : 'twintPayment.receiptRecovery'),{duration:PAYMENT_NOT_SAVED_TOAST_MS});
+  const ordinary = entries.filter(entry=>!isManualTwintRecord(entry));
+  if (!ordinary.length) return;
   toast.error(
     t('payment.notSaved.stillNotSaved', {
-      amount: formatMoney(sumAmounts(entries)),
+      amount: formatMoney(sumAmounts(ordinary)),
       defaultValue:
         'The {{amount}} charged is still not saved on this till. Do NOT charge again. Try Save payment again; if it cannot be saved, give the money back and a manager confirms it on the Z-report.',
     }),
@@ -165,9 +169,12 @@ export function announceSaveAgainResult(
     const message = formatSetAsidePaymentMessage(answer, t, formatMoney);
     if (message) toast.error(message, { duration: PAYMENT_NOT_SAVED_TOAST_MS });
   }
-  const unsaved: UnsavedChargedPaymentSummary[] = Array.isArray(result?.unsaved)
+  const retained: UnsavedChargedPaymentSummary[] = Array.isArray(result?.unsaved)
     ? result.unsaved
     : [];
+  const manual=retained.filter(isManualTwintRecord);
+  if (manual.length) announceStillNotSaved(manual,t,formatMoney);
+  const unsaved=retained.filter(entry=>!isManualTwintRecord(entry));
   if (unsaved.length > 0) {
     if (unsaved.every((entry) => entry.canSaveAgain === false)) {
       toast.error(
@@ -181,7 +188,7 @@ export function announceSaveAgainResult(
     } else {
       announceStillNotSaved(unsaved, t, formatMoney);
     }
-  } else if (Number(result?.saved || 0) > 0) {
+  } else if (manual.length===0 && Number(result?.saved || 0) > 0) {
     toast.success(t('payment.notSaved.saved', { defaultValue: 'Payment saved' }));
   }
   return Number(result?.saved || 0) > 0 || setAside.length > 0;
@@ -190,6 +197,14 @@ export function announceSaveAgainResult(
 /** The record kind of a card charged at new-order checkout (item E). */
 export const NEW_ORDER_CHECKOUT_KIND = 'new_order_checkout';
 
+export function isManualTwintRecord(entry: {method?: string;kind?: string|null}): boolean {
+  return entry.method==='twint' && (entry.kind==='manual_twint_checkout' || entry.kind==='manual_twint_payment');
+}
+
+export function retainedManualTwintAmount(entry: UnsavedChargedPaymentSummary): number {
+  return Number.isSafeInteger(entry.amountCents) ? entry.amountCents / 100 : Number(entry.amount || 0);
+}
+
 /**
  * A card charged at new-order checkout whose order this till could not save
  * yet: the record holds the order and its payment until they are saved.
@@ -197,7 +212,7 @@ export const NEW_ORDER_CHECKOUT_KIND = 'new_order_checkout';
 export function isNewOrderCheckoutRecord(
   entry: { kind?: string | null } | null | undefined,
 ): boolean {
-  return entry?.kind === NEW_ORDER_CHECKOUT_KIND;
+  return entry?.kind === NEW_ORDER_CHECKOUT_KIND || entry?.kind === 'manual_twint_checkout';
 }
 
 /** Fired when a checkout ends with a card charged and not saved. */
@@ -306,7 +321,7 @@ export function pendingNotSavedMessage(
   );
   return (
     formatPaymentNotSavedMessage(
-      { errorCode: 'PAYMENT_NOT_SAVED_PENDING', amountCents },
+      { errorCode: 'PAYMENT_NOT_SAVED_PENDING', amountCents, manualReceiptConfirmed:pending.some(isManualTwintRecord) },
       t,
       formatMoney,
     ) ?? ''

@@ -1515,6 +1515,54 @@ pub async fn report_get_hourly_sales(
     Ok(serde_json::json!({ "success": true, "data": data }))
 }
 
+pub(crate) fn load_payment_method_breakdown_for_day(
+    conn: &rusqlite::Connection,
+    branch_id: &str,
+    date: &str,
+) -> Result<serde_json::Value, String> {
+    let mut result = serde_json::json!({
+        "cash": {"count":0,"total":0.0}, "card": {"count":0,"total":0.0},
+        "twint": {"count":0,"total":0.0}, "other": {"count":0,"total":0.0},
+    });
+    let mut stmt = conn.prepare(
+        "SELECT op.method, COUNT(*), COALESCE(SUM(COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER))),0)
+         FROM order_payments op JOIN orders o ON o.id = op.order_id
+         WHERE (?1 = '' OR o.branch_id = ?1) AND substr(op.created_at,1,10) = ?2
+           AND op.status = 'completed'
+           AND (op.method <> 'twint' OR op.currency = 'CHF')
+           AND NOT (COALESCE(op.payment_origin,'') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id,'')) = '')
+           AND COALESCE(o.is_ghost,0) = 0 AND COALESCE(o.is_test,0) = 0
+           AND COALESCE(o.order_context,'') <> 'repair_settlement'
+           AND (op.method = 'twint' OR o.status NOT IN ('cancelled','canceled','refunded'))
+         GROUP BY op.method"
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![branch_id, date], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    for row in rows {
+        let (method, count, cents) = row.map_err(|e| e.to_string())?;
+        let key = match method.as_str() {
+            "cash" => "cash",
+            "card" => "card",
+            "twint" => "twint",
+            _ => "other",
+        };
+        let bucket = &mut result[key];
+        bucket["count"] = serde_json::json!(bucket["count"].as_i64().unwrap_or_default() + count);
+        bucket["total"] = serde_json::json!(
+            bucket["total"].as_f64().unwrap_or_default()
+                + crate::money::Cents::new(cents).to_f64_dp2()
+        );
+    }
+    Ok(result)
+}
+
 #[tauri::command]
 pub async fn report_get_payment_method_breakdown(
     arg0: Option<serde_json::Value>,
@@ -1528,46 +1576,8 @@ pub async fn report_get_payment_method_breakdown(
         .unwrap_or_default();
     let date = resolve_report_date(payload.date);
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let rows = load_report_rows_for_day(&conn, &branch_id, &date)?;
-
-    let mut cash_count = 0i64;
-    let mut cash_total = 0.0f64;
-    let mut card_count = 0i64;
-    let mut card_total = 0.0f64;
-
-    for (status, _created_at, payment_method, _order_type, total_amount, items) in rows {
-        if is_cancelled_status(&status) {
-            continue;
-        }
-        let method = payment_method.unwrap_or_default().to_ascii_lowercase();
-        let revenue = if total_amount > 0.0 {
-            total_amount
-        } else {
-            crate::parse_item_totals(&items).0
-        };
-
-        if method.contains("cash") {
-            cash_count += 1;
-            cash_total += revenue;
-        } else if method.contains("card") {
-            card_count += 1;
-            card_total += revenue;
-        }
-    }
-
-    Ok(serde_json::json!({
-        "success": true,
-        "data": {
-            "cash": {
-                "count": cash_count,
-                "total": cash_total,
-            },
-            "card": {
-                "count": card_count,
-                "total": card_total,
-            }
-        }
-    }))
+    let data = load_payment_method_breakdown_for_day(&conn, &branch_id, &date)?;
+    Ok(serde_json::json!({"success": true, "data": data}))
 }
 
 #[tauri::command]

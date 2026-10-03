@@ -359,8 +359,8 @@ test('every recovered full-balance payment asks native to collect the authoritat
     assert.match(handler, /expectedSettlementGeneration:\s*pendingPayment\.settlementGeneration/, `${label} must bind collection to the displayed ledger generation`);
     assert.match(
       handler,
-      /idempotencyKey:\s*selection\.transactionId/,
-      `${label} must bind the native attempt to the tender transaction`,
+      /idempotencyKey:\s*selection\.idempotencyKey \?\? selection\.transactionId/,
+      `${label} must retain the original receipt key or tender transaction`,
     );
     assert.doesNotMatch(
       handler,
@@ -427,10 +427,12 @@ test('every recovered full-balance payment asks native to collect the authoritat
 test('OutstandingPaymentMethodModal is presentational and disables new tips', () => {
   const source = rendererSource('components', 'modals', 'OutstandingPaymentMethodModal.tsx');
 
-  assert.match(source, /export type OutstandingPaymentMethod = 'cash' \| 'card' \| 'split';/);
+  assert.match(source, /export type OutstandingPaymentMethod = 'cash' \| 'card' \| 'split' \| 'twint';/);
   assert.match(source, /<PaymentModal/);
   assert.match(source, /allowTips=\{false\}/);
   assert.match(source, /method: paymentData\.method/);
+  assert.match(source, /const operationKey = paymentData\.method === 'twint' \? paymentData\.idempotencyKey : transactionId;/);
+  assert.match(source, /idempotencyKey: operationKey,/);
   assert.match(source, /const result = await onSelect\(selection\)/);
   assert.match(source, /method: 'split'/);
   assert.doesNotMatch(source, /recordPayment|createOrder|getBridge/);

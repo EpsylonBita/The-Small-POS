@@ -445,3 +445,64 @@ test('the desktop capture vocabulary deliberately excludes the email door', () =
       + 'now needs it, add the label to all six locales in the same change.',
   );
 });
+
+// ---------------------------------------------------------------------------
+// The automatic mark — supplier-invoice-automation task 8.2
+//
+// A supplier the owner opted in has their invoices recorded by the office at
+// reading time (design §4.13, decision A24). Everything the till then says
+// about that — the mark, the stock variant, the bill label, the one action and
+// the "nothing to save" sentence — is a locale key in all five files, because
+// a mark that only exists in English is a raw identifier in Greek (R16.3,
+// R17.1).
+// ---------------------------------------------------------------------------
+
+/** Every leaf of `suppliers.capture.automation`, by name. */
+const AUTOMATION_KEYS = [
+  'suppliers.capture.automation.recordedMark',
+  'suppliers.capture.automation.recordedStockMark',
+  'suppliers.capture.automation.billMark',
+  'suppliers.capture.automation.openAndCorrect',
+  'suppliers.capture.automation.noSaveNeeded',
+];
+
+test('the automatic mark answers in every POS locale', () => {
+  for (const file of localeFiles()) {
+    const available = localeLeafKeys(file);
+    const missing = AUTOMATION_KEYS.filter((key) => !available.has(key));
+
+    assert.deepEqual(
+      missing,
+      [],
+      `${file} is missing the automatic mark:\n${missing.map((key) => `  - ${key}`).join('\n')}`,
+    );
+
+    for (const key of AUTOMATION_KEYS) {
+      const value = localeValue(file, key);
+      assert.equal(typeof value, 'string', `${file}: ${key} must be a sentence`);
+      assert.ok(String(value).trim().length > 0, `${file}: ${key} is empty`);
+    }
+  }
+});
+
+test('the queue and the drawer render the mark from those keys, never from a code', () => {
+  const queue = stripComments(
+    read(path.join(rendererRoot, 'components', 'suppliers', 'CaptureQueuePanel.tsx')),
+  );
+  const page = stripComments(read(SUPPLIERS_PAGE));
+
+  // Both outcomes are a key of their own: the queue never builds the mark by
+  // interpolating `recorded_stock_updated` into a sentence.
+  for (const source of [queue, page]) {
+    assert.match(source, /suppliers\.capture\.automation\.recordedMark/);
+    assert.match(source, /suppliers\.capture\.automation\.recordedStockMark/);
+    assert.match(source, /suppliers\.capture\.automation\.billMark/);
+  }
+  assert.match(queue, /suppliers\.capture\.automation\.openAndCorrect/);
+  assert.match(page, /suppliers\.capture\.automation\.noSaveNeeded/);
+
+  // The outcome and kind codes decide which key is used; neither is ever the
+  // thing rendered.
+  assert.doesNotMatch(queue, />\{[^}]*automation\.outcome[^}]*\}</);
+  assert.doesNotMatch(queue, />\{[^}]*automation\.kind[^}]*\}</);
+});

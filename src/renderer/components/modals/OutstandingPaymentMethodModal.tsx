@@ -10,7 +10,7 @@ import {
 import type { PaymentCompletionData, PaymentModalExistingOrder } from './PaymentModal';
 import { PaymentModal } from './PaymentModal';
 
-export type OutstandingPaymentMethod = 'cash' | 'card' | 'split';
+export type OutstandingPaymentMethod = 'cash' | 'card' | 'split' | 'twint';
 
 export interface OutstandingPaymentSelection {
   method: OutstandingPaymentMethod;
@@ -18,6 +18,9 @@ export interface OutstandingPaymentSelection {
   cashReceived?: number;
   change?: number;
   transactionId?: string;
+  idempotencyKey?: string;
+  currency?: string;
+  metadata?: PaymentCompletionData['metadata'];
   reconciliationOnly?: boolean;
   /**
    * The payment modal's ordinary collection claim for this cash/card attempt.
@@ -55,6 +58,7 @@ export interface OutstandingPaymentMethodModalProps {
   amount: number;
   orderType?: 'pickup' | 'delivery' | 'dine-in';
   allowSplit?: boolean;
+  allowTwint?: boolean;
   isProcessing?: boolean;
   onSelect: (
     selection: OutstandingPaymentSelection,
@@ -71,6 +75,7 @@ export const OutstandingPaymentMethodModal: React.FC<
   amount,
   orderType,
   allowSplit = true,
+  allowTwint = true,
   isProcessing = false,
   onSelect,
   existingOrder,
@@ -168,10 +173,11 @@ export const OutstandingPaymentMethodModal: React.FC<
   const handlePaymentComplete = async (paymentData: PaymentCompletionData) => {
     const ordinaryOwner = paymentData.ordinaryOwner;
     const transactionId = paymentData.transactionId?.trim();
+    const operationKey = paymentData.method === 'twint' ? paymentData.idempotencyKey : transactionId;
     if (
-      !transactionId ||
-      transactionId.length > 128 ||
-      !/^[A-Za-z0-9._:-]+$/.test(transactionId)
+      !operationKey ||
+      operationKey.length > 128 ||
+      !/^[A-Za-z0-9._:-]+$/.test(operationKey)
     ) {
       return refuseBeforeSelect(ordinaryOwner);
     }
@@ -184,11 +190,14 @@ export const OutstandingPaymentMethodModal: React.FC<
     inFlightOwnerRef.current = ordinaryOwner ?? null;
     try {
       const selection: OutstandingPaymentSelection = {
-        method: paymentData.method as 'cash' | 'card',
+        method: paymentData.method as 'cash' | 'card' | 'twint',
         amount,
         cashReceived: paymentData.cashReceived,
         change: paymentData.change,
         transactionId,
+        idempotencyKey: operationKey,
+        currency: paymentData.currency,
+        metadata: paymentData.metadata,
         ...(ordinaryOwner ? { ordinaryOwner } : {}),
       };
       const result = await onSelect(selection);
@@ -225,6 +234,7 @@ export const OutstandingPaymentMethodModal: React.FC<
       orderType={orderType}
       isProcessing={isProcessing || isReconciling}
       allowTips={false}
+      allowTwint={allowTwint}
       onPaymentComplete={handlePaymentComplete}
       onSplitPayment={allowSplit ? handleSplitPayment : undefined}
       existingOrder={existingOrder}

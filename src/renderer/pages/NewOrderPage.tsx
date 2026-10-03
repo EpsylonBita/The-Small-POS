@@ -591,7 +591,7 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
       const initialPayment =
         !isGhostOrder &&
         !isSplitPayment &&
-        (paymentMethod === 'cash' || paymentMethod === 'card' || paymentMethod === 'room_charge')
+        (paymentMethod === 'cash' || paymentMethod === 'card' || paymentMethod === 'room_charge' || paymentMethod === 'twint')
           ? {
               method: paymentMethod,
               payment_method: paymentMethod,
@@ -599,6 +599,9 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
               cashReceived: paymentMethod === 'cash' ? orderData.paymentData.cashReceived : undefined,
               changeGiven: paymentMethod === 'cash' ? orderData.paymentData.change : undefined,
               transactionRef: orderData.paymentData.transactionId,
+              idempotencyKey: orderData.paymentData.idempotencyKey,
+              currency: orderData.paymentData.currency,
+              metadata: orderData.paymentData.metadata,
               staffId: currentOrderType === 'delivery' ? undefined : staff?.staffId,
               staffShiftId: currentOrderType === 'delivery' ? undefined : activeShift?.id,
               tipAmount,
@@ -648,7 +651,7 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
       }
 
       const existingOrderId = orderData.paymentData?.existingOrderId;
-      if (existingOrderId && (paymentMethod === 'cash' || paymentMethod === 'card')) {
+      if (existingOrderId && (paymentMethod === 'cash' || paymentMethod === 'card' || paymentMethod === 'twint')) {
         const askBeforeFallbackPrint = await shouldAskPaymentPrint();
         const paymentResult: any = await bridge.payments.recordPayment({
           orderId: existingOrderId,
@@ -657,6 +660,9 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
           cashReceived: paymentMethod === 'cash' ? orderData.paymentData.cashReceived : undefined,
           changeGiven: paymentMethod === 'cash' ? orderData.paymentData.change : undefined,
           transactionRef: orderData.paymentData.transactionId,
+          idempotencyKey: orderData.paymentData.idempotencyKey,
+          currency: orderData.paymentData.currency,
+          metadata: orderData.paymentData.metadata,
           staffId: currentOrderType === 'delivery' ? undefined : staff?.staffId,
           staffShiftId: currentOrderType === 'delivery' ? undefined : activeShift?.id,
           tipAmount,
@@ -1001,7 +1007,9 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
           cashReceived: paymentMethod === 'cash' ? selection.cashReceived : undefined,
           changeGiven: paymentMethod === 'cash' ? selection.change : undefined,
           transactionRef: selection.transactionId,
-          idempotencyKey: selection.transactionId,
+          idempotencyKey: selection.idempotencyKey ?? selection.transactionId,
+                  currency: selection.currency,
+                  metadata: selection.metadata,
           collectOutstandingBalance: true,
           expectedSettlementGeneration: pendingPayment.settlementGeneration,
           staffId: pendingPayment.orderType === 'delivery' ? undefined : staff?.staffId,

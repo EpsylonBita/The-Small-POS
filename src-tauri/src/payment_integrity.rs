@@ -442,7 +442,9 @@ pub fn load_payments_not_saved_blockers(
             payment_status: normalize_payment_status(&payment_status),
             payment_method: normalize_payment_method(&record.method),
             reason_code: crate::unsaved_payments::PAYMENTS_NOT_SAVED_REASON_CODE.to_string(),
-            reason_text: if new_order {
+            reason_text: if record.is_manual_twint() {
+                format!("The cashier confirmed receipt of {} CHF through TWINT at {}, but its payment is not saved on this till. Save the original receipt; do not collect again.",format_money(amount),record.captured_at)
+            } else if new_order {
                 format!(
                     "A {} {} payment charged at {} for a new order is not saved on this till yet: the order and its payment are held until they are saved. The customer was charged; do not charge again.",
                     format_money(amount),
@@ -457,12 +459,15 @@ pub fn load_payments_not_saved_blockers(
                     record.captured_at
                 )
             },
-            suggested_fix: match (new_order, can_save_again) {
+            suggested_fix: if record.is_manual_twint() {
+                if can_save_again { "Save the original manual TWINT receipt without another QR payment or cashier confirmation.".to_string() }
+                else { "Keep the original manual TWINT receipt for a manager to reconcile. Do not collect again.".to_string() }
+            } else { match (new_order, can_save_again) {
                 (true, true) => "Save the payment again: it saves the order and its payment, with no new charge. If it cannot be saved, give the money back to the customer and confirm it here.".to_string(),
                 (true, false) => "This order and its payment cannot be saved on this till. Give the money back to the customer, then confirm it here.".to_string(),
                 (false, true) => "Save the payment again. If it cannot be saved, give the money back to the customer and confirm it here.".to_string(),
                 (false, false) => "This payment cannot be saved on this till. Give the money back to the customer, then confirm it here.".to_string(),
-            },
+            } },
             severity: IntegritySeverity::Blocking.as_str().to_string(),
             difference_cents: 0,
             reason_amounts,
@@ -847,7 +852,7 @@ fn order_blocker_row_select() -> String {
             FROM order_payments op
             WHERE op.order_id = o.id
               AND $COUNTED_OP
-              AND LOWER(TRIM(COALESCE(op.method, ''))) NOT IN ('cash', 'card')
+              AND LOWER(TRIM(COALESCE(op.method, ''))) NOT IN ('cash', 'card', 'twint')
               -- THE-437 platform settlements are method='other' BY DESIGN:
               -- bank money the platform remits, never drawer cash and never
               -- the card terminal. They must not read as 'unsupported' — the

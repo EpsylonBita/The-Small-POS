@@ -6,6 +6,17 @@ import toast from 'react-hot-toast';
 import type { Order, OrderStatus } from '../../types/orders';
 import { isExternalPlatform, getPlatformName } from '../../utils/plugin-icons';
 import { getBridge } from '../../../lib';
+import { OrderApprovalPanel } from './OrderApprovalPanel';
+import { isBoxOrder } from './box-order-decision';
+
+type BoxDecisionMode = 'approve' | 'decline';
+
+// The decision panel portals out of the card, but React still bubbles its
+// events through the component tree into the card's select / double-click
+// handlers. Keep them inside the panel.
+const stopCardEvent = (event: React.SyntheticEvent) => {
+  event.stopPropagation();
+};
 
 interface OrderStatusControlsProps {
   order: Order;
@@ -34,11 +45,15 @@ export function OrderStatusControls({
   const bridge = getBridge();
   const { t } = useTranslation();
   const { theme } = useTheme();
-  const { updatePreparationProgress } = useOrderStore();
+  const { updatePreparationProgress, approveOrder, declineOrder } = useOrderStore();
   const [isLoading, setIsLoading] = useState(false);
   const [isNotifyingPlatform, setIsNotifyingPlatform] = useState(false);
   const [preparationProgress, setPreparationProgress] = useState(order.preparationProgress || 0);
+  const [boxDecisionMode, setBoxDecisionMode] = useState<BoxDecisionMode | null>(null);
   const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
+  // BOX takes one accept or one reject (with its own reason list) through the
+  // approval panel, has no ready callback, and its decision is final.
+  const isBox = isBoxOrder(order);
 
   // Check if this is an external platform order. The Rust bridge emits
   // camelCase (externalPluginOrderId) while the admin API sends snake_case —
@@ -78,6 +93,15 @@ export function OrderStatusControls({
 
   const handleStatusChange = useCallback(
     async (newStatus: OrderStatus) => {
+      // A BOX order is accepted or rejected only through the approval panel,
+      // and a rejected BOX order is never reopened.
+      if (
+        isBox &&
+        ((order.status === 'pending' && (newStatus === 'confirmed' || newStatus === 'cancelled')) ||
+          (order.status === 'cancelled' && newStatus === 'pending'))
+      ) {
+        return;
+      }
       setIsLoading(true);
       try {
         await onStatusChange(order.id, newStatus);
@@ -89,8 +113,30 @@ export function OrderStatusControls({
         setIsLoading(false);
       }
     },
-    [order.id, onStatusChange, t]
+    [isBox, order.id, order.status, onStatusChange, t]
   );
+
+  const handleBoxApprove = useCallback(
+    async (orderId: string, estimatedTime?: number) => {
+      if (!(await approveOrder(orderId, estimatedTime))) {
+        throw new Error('BOX order approval failed');
+      }
+    },
+    [approveOrder]
+  );
+
+  const handleBoxDecline = useCallback(
+    async (orderId: string, reason: string) => {
+      if (!(await declineOrder(orderId, reason))) {
+        throw new Error('BOX order decline failed');
+      }
+    },
+    [declineOrder]
+  );
+
+  const closeBoxDecision = useCallback(() => {
+    setBoxDecisionMode(null);
+  }, []);
 
   const handleProgressChange = useCallback(
     (newProgress: number) => {
@@ -138,7 +184,7 @@ export function OrderStatusControls({
         return (
           <div className="flex gap-2">
             <button
-              onClick={() => handleStatusChange('confirmed')}
+              onClick={() => (isBox ? setBoxDecisionMode('approve') : handleStatusChange('confirmed'))}
               disabled={disabled || isLoading}
               className={`${baseButtonClass} ${
                 theme === 'dark'
@@ -149,7 +195,7 @@ export function OrderStatusControls({
               {isLoading ? t('orders.actions.processing') : t('orders.actions.approve')}
             </button>
             <button
-              onClick={() => handleStatusChange('cancelled')}
+              onClick={() => (isBox ? setBoxDecisionMode('decline') : handleStatusChange('cancelled'))}
               disabled={disabled || isLoading}
               className={`${baseButtonClass} ${
                 theme === 'dark'
@@ -204,8 +250,8 @@ export function OrderStatusControls({
             >
               {isLoading ? t('orders.actions.processing') : t('orders.actions.markReady')}
             </button>
-            {/* Notify Platform Ready button for external platform orders */}
-            {isPlatformOrder && (
+            {/* Notify Platform Ready button for external platform orders (BOX has no ready callback) */}
+            {isPlatformOrder && !isBox && (
               <button
                 onClick={handleNotifyPlatformReady}
                 disabled={disabled || isNotifyingPlatform}
@@ -249,8 +295,8 @@ export function OrderStatusControls({
               >
                 {t('orders.actions.setAsPickup', 'Set as Pickup')}
               </button>
-              {/* Notify Platform Ready button for external platform delivery orders */}
-              {isPlatformOrder && (
+              {/* Notify Platform Ready button for external platform delivery orders (BOX has no ready callback) */}
+              {isPlatformOrder && !isBox && (
                 <button
                   onClick={handleNotifyPlatformReady}
                   disabled={disabled || isNotifyingPlatform}
@@ -301,6 +347,18 @@ export function OrderStatusControls({
       default:
         // Allow reactivation from cancelled back to pending
         if (order.status === 'cancelled') {
+          if (isBox) {
+            return (
+              <p
+                data-testid="box-decision-final"
+                className={`text-sm ${theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}`}
+              >
+                {t('boxOrder.decisionFinal', {
+                  defaultValue: 'BOX decisions are final. This order cannot be reopened here.',
+                })}
+              </p>
+            );
+          }
           return (
             <button
               onClick={() => handleStatusChange('pending')}
@@ -319,5 +377,27 @@ export function OrderStatusControls({
     }
   };
 
-  return <div className="flex flex-col gap-2">{renderButtons()}</div>;
+  return (
+    <div className="flex flex-col gap-2">
+      {renderButtons()}
+      {isBox && order.status === 'pending' && boxDecisionMode ? (
+        <div
+          className="contents"
+          onClick={stopCardEvent}
+          onDoubleClick={stopCardEvent}
+          onMouseDown={stopCardEvent}
+          onPointerDown={stopCardEvent}
+        >
+          <OrderApprovalPanel
+            order={order}
+            dismissible
+            initialDeclineOpen={boxDecisionMode === 'decline'}
+            onApprove={handleBoxApprove}
+            onDecline={handleBoxDecline}
+            onClose={closeBoxDecision}
+          />
+        </div>
+      ) : null}
+    </div>
+  );
 }

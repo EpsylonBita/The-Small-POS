@@ -1,3 +1,4 @@
+import { resolveZReportSections } from '../../../../shared/reports/z-report-sections';
 import type {
   ZReportData,
   ZReportGiftCloseBlocker,
@@ -64,7 +65,7 @@ export function resolveShiftEarnedTotal(staff?: Partial<ZReportStaffReport> | nu
     return explicitTotal;
   }
 
-  return toNumber(staff?.orders?.cashAmount) + toNumber(staff?.orders?.cardAmount);
+  return toNumber(staff?.orders?.cashAmount) + toNumber(staff?.orders?.cardAmount) + toNumber(staff?.orders?.twintAmount);
 }
 
 export function resolveShiftActivityCount(staff?: Partial<ZReportStaffReport> | null): number {
@@ -506,4 +507,35 @@ export function buildZReportGiftCloseCsvRows(
     rows.push({ Section: section, Metric: labels.finalActions, Value: labels.blocked });
   }
   return rows;
+}
+
+/** Canonical tender amount; absent historical reports have no TWINT value. */
+export function resolveZReportTwintTotal(report: ZReportData | null | undefined): number {
+  return toNumber(report?.sales?.twintSales ?? report?.paymentsBreakdown?.twint?.total ?? report?.daySummary?.twintTotal);
+}
+
+/** Unknown legacy flags infer recorded activity only, never grant a module or payment. */
+export function resolveZReportPresentation(report: ZReportData | null | undefined) {
+  const staff = report?.staffReports ?? [];
+  const drivers = staff.filter(s => s.role === 'driver');
+  const sales = report?.sales as (ZReportData['sales'] & { deliveryOrders?: number; deliverySales?: number }) | undefined;
+  const deliveryCount = toNumber(sales?.deliveryOrders);
+  const deliveryAmount = toNumber(sales?.deliverySales);
+  const driverMoney = drivers.reduce((sum, s) => sum + Math.abs(toNumber(s.orders?.totalAmount))
+    + Math.abs(toNumber(s.drawer?.opening)) + Math.abs(toNumber(s.driver?.earnings))
+    + Math.abs(toNumber(s.driver?.cashToReturn)) + Math.abs(toNumber(s.payments?.staffPayments)), 0)
+    + Math.abs(toNumber(report?.driverEarnings?.totalEarnings))
+    + Math.abs(toNumber(report?.cashDrawer?.driverCashGiven)) + Math.abs(toNumber(report?.cashDrawer?.driverCashReturned));
+  return resolveZReportSections({
+    deliveryModuleEnabled: report?.presentation?.deliveryModuleEnabled ?? (deliveryCount > 0 || drivers.length > 0),
+    twintPluginEnabled: report?.presentation?.twintPluginEnabled === true,
+    expenseCount: (report?.expenses?.items?.length ?? 0) + toNumber(report?.expenses?.pendingCount),
+    expenseTotal: Math.abs(toNumber(report?.expenses?.total)) + Math.abs(toNumber(report?.expenses?.staffPaymentsTotal)),
+    deliveryOrderCount: deliveryCount, deliveryAmount,
+    driverShiftCount: drivers.length,
+    driverDeliveryCount: toNumber(report?.driverEarnings?.totalDeliveries), driverMoneyTotal: driverMoney,
+    waiterShiftCount: staff.filter(s => s.role === 'waiter').length,
+    twintPaymentCount: toNumber(report?.sales?.twintPaymentCount ?? report?.paymentsBreakdown?.twint?.count),
+    twintTotal: resolveZReportTwintTotal(report),
+  });
 }

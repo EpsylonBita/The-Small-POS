@@ -47,6 +47,7 @@ vi.mock('../../../../lib', () => ({
 
 vi.mock('../../../utils/format', () => ({
   formatDate: (value: string) => `on ${value.slice(0, 10)}`,
+  formatCurrency: (amount: number, currency: string) => `${currency} ${amount.toFixed(2)}`,
 }));
 
 vi.mock('../../../services/capture-client', async (importOriginal) => {
@@ -85,6 +86,7 @@ function renderQueue(overrides: Record<string, unknown> = {}) {
   const props = {
     onReview: vi.fn(),
     onContinueCapture: vi.fn(),
+    onCorrect: vi.fn(),
     staffId: 'staff-1',
     onChanged: vi.fn(),
     ...overrides,
@@ -334,5 +336,182 @@ describe('CaptureQueuePanel', () => {
     handler();
     await waitFor(() => expect(screen.getByText('Needs a look')).toBeInTheDocument());
     rerender(<CaptureQueuePanel onReview={vi.fn()} onContinueCapture={vi.fn()} />);
+  });
+});
+
+/**
+ * supplier-invoice-automation task 8.2 — the invoice the office recorded by
+ * itself (design §4.13, decision A24; requirements R16.1, R16.3, R16.5, R16.6).
+ *
+ * The capture never reaches `ready_review`: the server recorded the invoice at
+ * reading time and the worker confirmed the capture through the `committed`
+ * door, storing the server's `automation` block verbatim. What the person must
+ * find at the till is the result — the mark, the supplier, the number, the date
+ * and the amount as printed — and one action to open and correct it, never a
+ * review form for something that already exists.
+ */
+describe('CaptureQueuePanel — invoices the office recorded by itself', () => {
+  const automation = {
+    outcome: 'recorded_stock_updated',
+    invoiceId: 'invoice-7',
+    invoiceNumber: '0768596',
+    invoiceDate: '2026-08-01',
+    amount: 302.45,
+    supplierName: 'ΟΤΕ Α.Ε.',
+    kind: 'bill',
+    supplierInvoiceId: 'invoice-7',
+    attachmentUrl: 'org/branch/invoice-7/scan-cap-1.pdf',
+    attachmentPending: false,
+  };
+
+  /**
+   * A `committed` history entry exactly as this till stores one.
+   *
+   * `confirm_commit` (src-tauri/src/capture/worker.rs) hands the server's block
+   * straight to `record_event`, which writes `details_json = details.to_string()`
+   * — so the stored result **is** the block, with no wrapper, and that is what
+   * `capture_get_history` parses back into `details`. A fixture that nested it
+   * under `automation` would be a shape the client never writes, and would let
+   * a reader that only understands the nested shape pass while the mark stays
+   * dead at the till.
+   */
+  function committedEvent(details: unknown, overrides: Record<string, unknown> = {}) {
+    return {
+      id: 'evt-committed',
+      captureId: 'cap-1',
+      eventType: 'committed',
+      staffId: null,
+      details,
+      createdAt: '2026-09-08T09:10:00.000Z',
+      ...overrides,
+    };
+  }
+
+  beforeEach(() => {
+    // A recorded capture is committed, so it is no longer a queue row.
+    mocks.listCaptureDocuments.mockResolvedValue([]);
+  });
+
+  it('shows the automatic mark with what the paper said, and one action to correct it', async () => {
+    mocks.getCaptureHistory.mockResolvedValue({
+      events: [committedEvent(automation)],
+      ingest: [],
+    });
+    const { props } = renderQueue();
+
+    const row = await screen.findByTestId('capture-recorded-row-cap-1');
+    expect(within(row).getByText('Saved on its own · stock updated')).toBeInTheDocument();
+    // Content read off the document, shown as read (R17.5).
+    expect(row).toHaveTextContent('ΟΤΕ Α.Ε.');
+    expect(row).toHaveTextContent('0768596');
+    expect(row).toHaveTextContent('on 2026-08-01');
+    expect(row).toHaveTextContent('EUR 302.45');
+    // A bill says so, in words (R16.6).
+    expect(row).toHaveTextContent('Bill');
+
+    fireEvent.click(within(row).getByRole('button', { name: /Open and correct/ }));
+    expect(props.onCorrect).toHaveBeenCalledWith(
+      expect.objectContaining({
+        invoiceId: 'invoice-7',
+        invoiceNumber: '0768596',
+        outcome: 'recorded_stock_updated',
+        kind: 'bill',
+      }),
+    );
+  });
+
+  it('says only what happened: no stock, no bill, no invented extras', async () => {
+    mocks.getCaptureHistory.mockResolvedValue({
+      events: [
+        committedEvent({ ...automation, outcome: 'recorded', kind: 'goods', invoiceDate: null }),
+      ],
+      ingest: [],
+    });
+    renderQueue();
+
+    const row = await screen.findByTestId('capture-recorded-row-cap-1');
+    expect(within(row).getByText('Saved on its own')).toBeInTheDocument();
+    expect(row).not.toHaveTextContent('stock updated');
+    expect(row).not.toHaveTextContent('Bill');
+  });
+
+  it('leaves a person\'s own save exactly as it was — no mark, no row', async () => {
+    mocks.getCaptureHistory.mockResolvedValue({
+      events: [
+        committedEvent({
+          success: true,
+          supplierInvoiceId: 'invoice-3',
+          attachmentUrl: 'key.pdf',
+          attachmentPending: false,
+        }),
+      ],
+      ingest: [],
+    });
+    renderQueue();
+
+    await waitFor(() => expect(mocks.getCaptureHistory).toHaveBeenCalled());
+    expect(screen.queryByTestId('capture-recorded-row-cap-1')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('capture-history-toggle'));
+    const history = await screen.findByTestId('capture-history');
+    expect(history).toHaveTextContent('An invoice was saved.');
+    expect(history).not.toHaveTextContent('Saved on its own');
+  });
+
+  it('tells the same story in the history as on the row', async () => {
+    mocks.getCaptureHistory.mockResolvedValue({
+      events: [committedEvent(automation)],
+      ingest: [],
+    });
+    renderQueue();
+
+    await screen.findByTestId('capture-recorded-row-cap-1');
+    fireEvent.click(screen.getByTestId('capture-history-toggle'));
+
+    const history = await screen.findByTestId('capture-history');
+    expect(history).toHaveTextContent('Saved on its own · stock updated');
+    expect(history).not.toHaveTextContent('An invoice was saved.');
+  });
+
+  it('never renders a raw block: a malformed result is simply not a recording', async () => {
+    mocks.getCaptureHistory.mockResolvedValue({
+      events: [committedEvent({ outcome: 'maybe', invoiceId: 'invoice-7' })],
+      ingest: [],
+    });
+    renderQueue();
+
+    await waitFor(() => expect(mocks.getCaptureHistory).toHaveBeenCalled());
+    expect(screen.queryByTestId('capture-recorded-row-cap-1')).not.toBeInTheDocument();
+    expect(screen.queryByText(/maybe/)).not.toBeInTheDocument();
+  });
+
+  it('still lights the mark if the block ever arrives inside an envelope', async () => {
+    // Nothing this client writes nests the block, but a payload that did must
+    // light the same mark rather than silently render nothing.
+    mocks.getCaptureHistory.mockResolvedValue({
+      events: [committedEvent({ automation })],
+      ingest: [],
+    });
+    renderQueue();
+
+    const row = await screen.findByTestId('capture-recorded-row-cap-1');
+    expect(within(row).getByText('Saved on its own · stock updated')).toBeInTheDocument();
+  });
+
+  it('offers no control that pretends to set the owner switches', async () => {
+    mocks.getCaptureHistory.mockResolvedValue({
+      events: [committedEvent(automation)],
+      ingest: [],
+    });
+    const { container } = renderQueue();
+
+    await screen.findByTestId('capture-recorded-row-cap-1');
+    // The switches live in the admin dashboard only (Out of Scope 7, R16.5).
+    expect(screen.queryByRole('switch')).not.toBeInTheDocument();
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
+    expect(container.querySelector('input[type="checkbox"]')).toBeNull();
+    // The only action on a recorded row is opening it to correct it.
+    const row = screen.getByTestId('capture-recorded-row-cap-1');
+    expect(within(row).getAllByRole('button')).toHaveLength(1);
   });
 });

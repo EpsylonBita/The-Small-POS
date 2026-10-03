@@ -760,6 +760,8 @@ pub struct ZReportStaffEntry {
     pub order_count: i64,
     pub cash_amount: f64,
     pub card_amount: f64,
+    #[serde(default)]
+    pub twint_amount: f64,
     pub total_amount: f64,
     pub opening_cash: f64,
     pub staff_payment: f64,
@@ -825,6 +827,14 @@ pub struct ZReportDoc {
     #[serde(default)]
     pub drawer_cash_sales: Option<f64>,
     pub card_sales: f64,
+    #[serde(default)]
+    pub twint_sales: f64,
+    #[serde(default)]
+    pub twint_payment_count: i64,
+    #[serde(default)]
+    pub twint_plugin_enabled: Option<bool>,
+    #[serde(default)]
+    pub delivery_module_enabled: Option<bool>,
     /// THE-437: platform-held money — prepaid online platform orders.
     #[serde(default)]
     pub platform_online_sales: f64,
@@ -1836,8 +1846,8 @@ fn z_report_expense_reason<'a>(lang: &str, reason: &'a str) -> &'a str {
 }
 
 fn z_report_staff_payment_total(staff: &ZReportStaffEntry) -> f64 {
-    if staff.cash_amount != 0.0 || staff.card_amount != 0.0 {
-        staff.cash_amount + staff.card_amount
+    if staff.cash_amount != 0.0 || staff.card_amount != 0.0 || staff.twint_amount != 0.0 {
+        staff.cash_amount + staff.card_amount + staff.twint_amount
     } else {
         staff.total_amount
     }
@@ -2178,14 +2188,74 @@ struct DrawerEquationRow {
     sign: DrawerEquationSign,
 }
 
-fn z_report_drawer_equation_rows(doc: &ZReportDoc) -> [DrawerEquationRow; 4] {
+#[derive(Debug, PartialEq)]
+struct ZReportSections {
+    expenses: bool,
+    delivery: bool,
+    drivers: bool,
+    waiters: bool,
+    twint: bool,
+}
+
+// Same presentation-only policy as shared/reports/z-report-sections.ts.
+fn z_report_sections(doc: &ZReportDoc) -> ZReportSections {
+    let drivers: Vec<_> = doc
+        .staff_reports
+        .iter()
+        .filter(|s| s.role == "driver")
+        .collect();
+    let driver_money = doc.driver_cash_given.abs()
+        + doc.driver_cash_returned.abs()
+        + drivers
+            .iter()
+            .map(|s| {
+                s.total_amount.abs()
+                    + s.cash_amount.abs()
+                    + s.card_amount.abs()
+                    + s.twint_amount.abs()
+                    + s.opening_cash.abs()
+                    + s.staff_payment.abs()
+                    + s.tips_received.abs()
+            })
+            .sum::<f64>();
+    let delivery_enabled = doc
+        .delivery_module_enabled
+        .unwrap_or(doc.delivery_orders > 0 || !drivers.is_empty());
+    ZReportSections {
+        expenses: !doc.expense_lines.is_empty()
+            || doc.expenses_total != 0.0
+            || !doc.staff_payment_lines.is_empty()
+            || doc.staff_payments_total != 0.0,
+        delivery: (delivery_enabled && (doc.delivery_orders > 0 || doc.delivery_sales != 0.0))
+            || doc.delivery_sales != 0.0,
+        drivers: (delivery_enabled && !drivers.is_empty()) || driver_money != 0.0,
+        waiters: doc.staff_reports.iter().any(|s| s.role == "waiter"),
+        twint: doc.twint_plugin_enabled == Some(true)
+            || doc.twint_payment_count > 0
+            || doc.twint_sales != 0.0,
+    }
+}
+
+fn z_report_visible_staff(doc: &ZReportDoc) -> Vec<&ZReportStaffEntry> {
+    let sections = z_report_sections(doc);
+    doc.staff_reports
+        .iter()
+        .filter(|s| match s.role.as_str() {
+            "driver" => sections.drivers,
+            "waiter" => sections.waiters,
+            _ => true,
+        })
+        .collect()
+}
+
+fn z_report_drawer_equation_rows(doc: &ZReportDoc) -> Vec<DrawerEquationRow> {
     let net_driver_cash = doc.driver_cash_returned - doc.driver_cash_given;
     let all_cash_out = doc.drawer_refunds_total.unwrap_or(doc.refunds_total)
         + doc.drawer_expenses_total.unwrap_or(doc.expenses_total)
         + doc.cash_drops
         + doc.staff_payments_total;
 
-    [
+    vec![
         DrawerEquationRow {
             label_key: "Opening",
             amount: doc.opening_cash,
@@ -2207,6 +2277,9 @@ fn z_report_drawer_equation_rows(doc: &ZReportDoc) -> [DrawerEquationRow; 4] {
             sign: DrawerEquationSign::Subtract,
         },
     ]
+    .into_iter()
+    .filter(|row| !matches!(row.label_key, "Net Driver Cash" | "All Cash Out") || row.amount != 0.0)
+    .collect()
 }
 
 fn format_drawer_equation_amount(
@@ -4985,6 +5058,8 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
             html_shell(receipt_label(lang, "SHIFT CHECKOUT"), &body, cfg)
         }
         ReceiptDocument::ZReport(doc) => {
+            let sections = z_report_sections(doc);
+            let visible_staff = z_report_visible_staff(doc);
             let shift_line = z_report_shift_line(doc, lang)
                 .map(|(label, value)| {
                     format!(
@@ -5056,6 +5131,12 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                 esc(receipt_label(lang, "Card")),
                 money(doc.card_sales),
             ));
+            if sections.twint {
+                body.push_str(&format!(
+                    "<div class=\"line\"><span>TWINT</span><span>{}</span></div>",
+                    money(doc.twint_sales)
+                ));
+            }
             if doc.platform_online_sales > 0.0 {
                 body.push_str(&format!(
                     "<div class=\"line\"><span>{}</span><span>{}</span></div>",
@@ -5099,7 +5180,7 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
             // Order breakdown
             let has_breakdown = doc.dine_in_orders > 0
                 || doc.takeaway_orders > 0
-                || doc.delivery_orders > 0
+                || sections.delivery
                 || doc.repair_orders > 0;
             if has_breakdown {
                 body.push_str(&format!(
@@ -5122,7 +5203,7 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                         money(doc.takeaway_sales),
                     ));
                 }
-                if doc.delivery_orders > 0 {
+                if sections.delivery {
                     body.push_str(&format!(
                         "<div class=\"line\"><span>{} ({})</span><span>{}</span></div>",
                         esc(receipt_label(lang, "Delivery")),
@@ -5142,12 +5223,12 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
             }
 
             // Staff details come before the expense reconciliation.
-            if !doc.staff_reports.is_empty() {
+            if !visible_staff.is_empty() {
                 body.push_str(&format!(
                     "<div class=\"section\"><div class=\"center\"><strong>{}</strong></div>",
                     esc(receipt_label(lang, "STAFF"))
                 ));
-                for staff in &doc.staff_reports {
+                for staff in &visible_staff {
                     let role_label = match staff.role.as_str() {
                         "driver" => receipt_label(lang, "Driver"),
                         "cashier" => receipt_label(lang, "Cashier"),
@@ -5170,6 +5251,12 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                         esc(receipt_label(lang, "TOTAL")),
                         money(z_report_staff_payment_total(staff)),
                     ));
+                    if staff.twint_amount != 0.0 {
+                        body.push_str(&format!(
+                            "<div class=\"line\"><span>TWINT</span><span>{}</span></div>",
+                            money(staff.twint_amount)
+                        ));
+                    }
                     if staff.staff_payment > 0.0 {
                         body.push_str(&format!(
                             "<div class=\"line\"><span>{}</span><span>{}</span></div>",
@@ -5189,11 +5276,7 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
             }
 
             // Expense analysis includes staff-payment detail and one combined total.
-            if !doc.expense_lines.is_empty()
-                || doc.expenses_total != 0.0
-                || !doc.staff_payment_lines.is_empty()
-                || doc.staff_payments_total != 0.0
-            {
+            if sections.expenses {
                 body.push_str(&format!(
                     "<div class=\"section\"><div class=\"center\"><strong>{}</strong></div>",
                     esc(receipt_label(lang, "EXPENSES"))
@@ -5301,6 +5384,12 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                 esc(receipt_label(lang, "Card")),
                 money(doc.card_sales),
             ));
+            if sections.twint {
+                body.push_str(&format!(
+                    "<div class=\"line\"><span>TWINT</span><span>{}</span></div>",
+                    money(doc.twint_sales)
+                ));
+            }
             if doc.platform_online_sales > 0.0 {
                 body.push_str(&format!(
                     "<div class=\"line\"><span>{}</span><span>{}</span></div>",
@@ -9113,6 +9202,8 @@ fn render_classic_non_customer_raster_exact_ttf(
             }
         }
         ReceiptDocument::ZReport(doc) => {
+            let sections = z_report_sections(doc);
+            let visible_staff = z_report_visible_staff(doc);
             canvas.draw_reverse_banner(receipt_label(lang, "Z REPORT"));
             canvas.draw_pair(
                 &format!("{}:", receipt_label(lang, "Date")),
@@ -9160,6 +9251,13 @@ fn render_classic_non_customer_raster_exact_ttf(
                 &money_with_currency_locale(doc.card_sales, &cur, comma),
                 preset.item_style,
             );
+            if sections.twint {
+                canvas.draw_pair(
+                    "TWINT:",
+                    &money_with_currency_locale(doc.twint_sales, &cur, comma),
+                    preset.item_style,
+                );
+            }
             if doc.platform_online_sales > 0.0 {
                 canvas.draw_pair(
                     &format!("{}:", receipt_label(lang, "Platform Online")),
@@ -9199,15 +9297,61 @@ fn render_classic_non_customer_raster_exact_ttf(
                 &money_with_currency_locale(doc.discounts_total, &cur, comma),
                 preset.item_style,
             );
+            if doc.dine_in_orders > 0
+                || doc.takeaway_orders > 0
+                || sections.delivery
+                || doc.repair_orders > 0
+            {
+                canvas.draw_rule();
+                canvas.draw_text_line(
+                    receipt_label(lang, "ORDER BREAKDOWN"),
+                    BitmapAlign::Center,
+                    preset.section_style,
+                );
+                for (label, count, amount, visible) in [
+                    (
+                        "Dine-in",
+                        doc.dine_in_orders,
+                        doc.dine_in_sales,
+                        doc.dine_in_orders > 0,
+                    ),
+                    (
+                        "Takeaway",
+                        doc.takeaway_orders,
+                        doc.takeaway_sales,
+                        doc.takeaway_orders > 0,
+                    ),
+                    (
+                        "Delivery",
+                        doc.delivery_orders,
+                        doc.delivery_sales,
+                        sections.delivery,
+                    ),
+                    (
+                        "Repairs",
+                        doc.repair_orders,
+                        doc.repair_sales,
+                        doc.repair_orders > 0,
+                    ),
+                ] {
+                    if visible {
+                        canvas.draw_pair(
+                            &format!("{} ({count})", receipt_label(lang, label)),
+                            &money_with_currency_locale(amount, &cur, comma),
+                            preset.item_style,
+                        );
+                    }
+                }
+            }
             // --- Staff details ---
-            if !doc.staff_reports.is_empty() {
+            if !visible_staff.is_empty() {
                 canvas.draw_rule();
                 canvas.draw_text_line(
                     receipt_label(lang, "STAFF"),
                     BitmapAlign::Center,
                     preset.section_style,
                 );
-                for staff in &doc.staff_reports {
+                for staff in &visible_staff {
                     let role_label = match staff.role.as_str() {
                         "driver" => receipt_label(lang, "Driver"),
                         "cashier" => receipt_label(lang, "Cashier"),
@@ -9266,6 +9410,13 @@ fn render_classic_non_customer_raster_exact_ttf(
                         &money_with_currency_locale(staff.card_amount, &cur, comma),
                         preset.item_style,
                     );
+                    if staff.twint_amount != 0.0 {
+                        canvas.draw_pair(
+                            "  TWINT:",
+                            &money_with_currency_locale(staff.twint_amount, &cur, comma),
+                            preset.item_style,
+                        );
+                    }
                     canvas.draw_pair(
                         &format!("  {}:", receipt_label(lang, "TOTAL")),
                         &money_with_currency_locale(
@@ -9279,11 +9430,7 @@ fn render_classic_non_customer_raster_exact_ttf(
             }
 
             // --- Expense analysis, including detailed staff payments ---
-            if !doc.expense_lines.is_empty()
-                || doc.expenses_total != 0.0
-                || !doc.staff_payment_lines.is_empty()
-                || doc.staff_payments_total != 0.0
-            {
+            if sections.expenses {
                 canvas.draw_rule();
                 canvas.draw_text_line(
                     receipt_label(lang, "EXPENSES"),
@@ -9429,6 +9576,13 @@ fn render_classic_non_customer_raster_exact_ttf(
                 &money_with_currency_locale(doc.card_sales, &cur, comma),
                 preset.item_style,
             );
+            if sections.twint {
+                canvas.draw_pair(
+                    "TWINT:",
+                    &money_with_currency_locale(doc.twint_sales, &cur, comma),
+                    preset.item_style,
+                );
+            }
             if doc.platform_online_sales > 0.0 {
                 canvas.draw_pair(
                     &format!("{}:", receipt_label(lang, "Platform Online")),
@@ -11719,6 +11873,8 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
             }
         }
         ReceiptDocument::ZReport(doc) => {
+            let sections = z_report_sections(doc);
+            let visible_staff = z_report_visible_staff(doc);
             builder
                 .center()
                 .bold(true)
@@ -11810,7 +11966,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
             // --- Order breakdown ---
             let has_breakdown = doc.dine_in_orders > 0
                 || doc.takeaway_orders > 0
-                || doc.delivery_orders > 0
+                || sections.delivery
                 || doc.repair_orders > 0;
             if has_breakdown {
                 builder
@@ -11842,7 +11998,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                         width,
                     );
                 }
-                if doc.delivery_orders > 0 {
+                if sections.delivery {
                     emit_pair(
                         &mut builder,
                         &format!(
@@ -11866,7 +12022,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
             }
 
             // --- Staff details ---
-            if !doc.staff_reports.is_empty() {
+            if !visible_staff.is_empty() {
                 emit_rule(&mut builder, width, '-');
                 builder
                     .center()
@@ -11875,7 +12031,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     .lf()
                     .bold(false)
                     .left();
-                for staff in &doc.staff_reports {
+                for staff in &visible_staff {
                     let role_label = match staff.role.as_str() {
                         "driver" => receipt_label(lang, "Driver"),
                         "cashier" => receipt_label(lang, "Cashier"),
@@ -11940,6 +12096,14 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                         &money_locale(staff.card_amount, comma),
                         width,
                     );
+                    if staff.twint_amount != 0.0 {
+                        emit_pair(
+                            &mut builder,
+                            "TWINT",
+                            &money_locale(staff.twint_amount, comma),
+                            width,
+                        );
+                    }
                     emit_pair_bold(
                         &mut builder,
                         receipt_label(lang, "TOTAL"),
@@ -11950,11 +12114,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
             }
 
             // --- Expense analysis, including detailed staff payments ---
-            if !doc.expense_lines.is_empty()
-                || doc.expenses_total != 0.0
-                || !doc.staff_payment_lines.is_empty()
-                || doc.staff_payments_total != 0.0
-            {
+            if sections.expenses {
                 emit_rule(&mut builder, width, '-');
                 builder
                     .center()
@@ -12079,6 +12239,14 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                 &money_locale(doc.card_sales, comma),
                 width,
             );
+            if sections.twint {
+                emit_pair(
+                    &mut builder,
+                    "TWINT",
+                    &money_locale(doc.twint_sales, comma),
+                    width,
+                );
+            }
             if doc.platform_online_sales > 0.0 {
                 emit_pair(
                     &mut builder,
@@ -16611,6 +16779,113 @@ mod tests {
                 < html
                     .find("Gift card drawer closes (confirmed)")
                     .expect("section")
+        );
+    }
+
+    #[test]
+    fn twint_conditional_z_sections_reach_html_text_and_raster() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            classic_customer_render_mode: ClassicCustomerRenderMode::Text,
+            currency_symbol: "CHF".into(),
+            ..LayoutConfig::default()
+        };
+        let minimal = ZReportDoc {
+            delivery_module_enabled: Some(false),
+            twint_plugin_enabled: Some(false),
+            ..ZReportDoc::default()
+        };
+        let document = ReceiptDocument::ZReport(minimal.clone());
+        let html = render_html(&document, &cfg);
+        let text = String::from_utf8_lossy(&render_escpos(&document, &cfg).bytes).to_string();
+        for output in [&html, &text] {
+            for absent in [
+                "TWINT",
+                "EXPENSES",
+                "Delivery (",
+                "Driver",
+                "waiter",
+                "STAFF",
+                "Net Driver Cash",
+                "All Cash Out",
+            ] {
+                assert!(!output.contains(absent), "unexpected {absent}");
+            }
+        }
+        let base = render_classic_non_customer_raster_exact_ttf(&document, &cfg).unwrap();
+        let mut enabled = minimal.clone();
+        enabled.twint_plugin_enabled = Some(true);
+        let enabled_doc = ReceiptDocument::ZReport(enabled.clone());
+        assert!(render_html(&enabled_doc, &cfg).contains("TWINT</span><span>0.00"));
+        assert!(
+            String::from_utf8_lossy(&render_escpos(&enabled_doc, &cfg).bytes).contains("TWINT")
+        );
+        assert!(
+            render_classic_non_customer_raster_exact_ttf(&enabled_doc, &cfg)
+                .unwrap()
+                .height()
+                > base.height()
+        );
+        enabled.twint_plugin_enabled = Some(false);
+        enabled.twint_sales = 25.0;
+        enabled.delivery_sales = 9.0;
+        enabled.expenses_total = 2.0;
+        enabled.staff_reports = vec![
+            ZReportStaffEntry {
+                name: "Historical driver".into(),
+                role: "driver".into(),
+                twint_amount: 25.0,
+                total_amount: 25.0,
+                ..ZReportStaffEntry::default()
+            },
+            ZReportStaffEntry {
+                name: "Waiter present".into(),
+                role: "waiter".into(),
+                ..ZReportStaffEntry::default()
+            },
+        ];
+        let recorded = ReceiptDocument::ZReport(enabled);
+        for output in [
+            render_html(&recorded, &cfg),
+            String::from_utf8_lossy(&render_escpos(&recorded, &cfg).bytes).to_string(),
+        ] {
+            for present in [
+                "TWINT",
+                "EXPENSES",
+                "Delivery (0)",
+                "Historical driver",
+                "Waiter present",
+            ] {
+                assert!(output.contains(present), "missing {present}");
+            }
+        }
+        assert!(
+            render_classic_non_customer_raster_exact_ttf(&recorded, &cfg)
+                .unwrap()
+                .height()
+                > base.height()
+        );
+        let empty_driver = ZReportDoc {
+            delivery_module_enabled: Some(false),
+            staff_reports: vec![ZReportStaffEntry {
+                name: "Hidden empty driver".into(),
+                role: "driver".into(),
+                ..ZReportStaffEntry::default()
+            }],
+            ..ZReportDoc::default()
+        };
+        assert!(z_report_visible_staff(&empty_driver).is_empty());
+        assert!(
+            !render_html(&ReceiptDocument::ZReport(empty_driver.clone()), &cfg).contains("STAFF")
+        );
+        assert_eq!(
+            render_classic_non_customer_raster_exact_ttf(
+                &ReceiptDocument::ZReport(empty_driver),
+                &cfg
+            )
+            .unwrap()
+            .height(),
+            base.height()
         );
     }
 

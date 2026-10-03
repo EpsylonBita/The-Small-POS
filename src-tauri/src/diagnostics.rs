@@ -19,6 +19,9 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use tracing::warn;
 
+#[path = "diagnostics_runtime_logs.rs"]
+mod runtime_logs;
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -907,9 +910,15 @@ fn run_collector(
             let status = match value.get("status").and_then(Value::as_str) {
                 Some("not_collected") => "not_collected",
                 Some("unavailable") => "unavailable",
+                Some("partial") => "partial",
                 _ => "ok",
             };
-            (value, status, None)
+            let error = value
+                .get("reasonCode")
+                .and_then(Value::as_str)
+                .filter(|_| matches!(status, "partial" | "unavailable"))
+                .map(str::to_owned);
+            (value, status, error)
         }
         Err(error) => {
             let error = crate::print::safe_operational_error(Some(error), 512)
@@ -962,6 +971,22 @@ pub fn export_diagnostics_bundle(
     output_dir: &Path,
     export_options: DiagnosticsExportOptions,
     health_view: Option<Value>,
+) -> Result<String, String> {
+    export_diagnostics_bundle_with_log_dir(
+        db,
+        output_dir,
+        export_options,
+        health_view,
+        &get_log_dir(),
+    )
+}
+
+fn export_diagnostics_bundle_with_log_dir(
+    db: &DbState,
+    output_dir: &Path,
+    export_options: DiagnosticsExportOptions,
+    health_view: Option<Value>,
+    log_dir: &Path,
 ) -> Result<String, String> {
     let export_started = std::time::Instant::now();
     let generated_at = chrono::Utc::now();
@@ -1097,13 +1122,21 @@ pub fn export_diagnostics_bundle(
     });
     documents.push((HEALTH_VIEW_FILE, health_view));
 
-    // Raw runtime logs can contain queue identifiers, tenant context and
-    // encrypted repair envelopes emitted before field-level redaction. V1
-    // renderer diagnostics therefore fail closed: `include_logs` remains in
-    // the compatibility DTO, but no local export embeds raw log files.
+    // The log collector projects finite technical events, never raw prose or
+    // attachments. Repair envelopes and payload-bearing records stay sealed.
+    let runtime_logs = run_collector(&mut records, "runtime_logs.json", || {
+        Ok(runtime_logs::collect(log_dir, export_options.include_logs))
+    });
+    let logs_included = runtime_logs::has_events(&runtime_logs);
+    documents.push(("runtime_logs.json", runtime_logs));
     let mut write_errors: Vec<Value> = Vec::new();
     let mut truncated: Vec<String> = Vec::new();
     for (file_name, value) in documents {
+        if (file_name == "runtime_logs.json" && value["truncated"] == true)
+            || (file_name == "printer_diagnostics.json" && value["history"]["truncated"] == true)
+        {
+            truncated.push(format!("{file_name}: bounded history"));
+        }
         let value = redact_value_for_export(value, file_name, &mut truncated);
         if let Err(error) = write_json_to_zip(&mut zip, &zip_options, file_name, &value) {
             write_errors.push(json!({ "entry": file_name, "error": error }));
@@ -1158,11 +1191,13 @@ pub fn export_diagnostics_bundle(
             "enabled": true,
             "rules": DIAGNOSTICS_REDACTION_RULES,
         },
-        "logsIncluded": false,
+        "logsIncluded": logs_included,
         "compression": "DEFLATE",
         "limits": {
             "listRows": MAX_EXPORT_LIST_ROWS,
             "stringChars": MAX_EXPORT_STRING_CHARS,
+            "runtimeLogs": runtime_logs::limits(),
+            "printHistoryRows": 50,
         },
         "entries": entries,
         "collectors": collectors,
@@ -2271,8 +2306,9 @@ fn get_printer_diagnostics(conn: &rusqlite::Connection) -> Result<Value, String>
     let mut jobs_statement = conn
         .prepare(
             "SELECT id, entity_type, status, printer_profile_id, retry_count,
-                    warning_code, warning_message, last_error, created_at, last_attempt_at
-             FROM print_jobs ORDER BY created_at DESC LIMIT 10",
+                    warning_code, warning_message, last_error, created_at, last_attempt_at,
+                    updated_at, completed_at, next_retry_at, max_retries
+             FROM print_jobs ORDER BY julianday(created_at) DESC, created_at DESC, id DESC LIMIT 50",
         )
         .map_err(|error| format!("prepare print history diagnostics: {error}"))?;
     let recent_jobs = jobs_statement
@@ -2288,6 +2324,10 @@ fn get_printer_diagnostics(conn: &rusqlite::Connection) -> Result<Value, String>
                 "lastError": crate::print::safe_operational_error(row.get(7)?, 1024),
                 "createdAt": row.get::<_, String>(8)?,
                 "lastAttemptAt": row.get::<_, Option<String>>(9)?,
+                "updatedAt": row.get::<_, String>(10)?,
+                "completedAt": row.get::<_, Option<String>>(11)?,
+                "nextRetryAt": row.get::<_, Option<String>>(12)?,
+                "maxRetries": row.get::<_, i64>(13)?,
             }))
         })
         .map_err(|error| format!("query print history diagnostics: {error}"))?
@@ -2295,37 +2335,110 @@ fn get_printer_diagnostics(conn: &rusqlite::Connection) -> Result<Value, String>
         .map_err(|error| format!("read print history diagnostics: {error}"))?;
     drop(jobs_statement);
 
-    let mut attempts_statement = conn
+    let blocker_predicate = crate::print_dispatch::shared_attempt_blocker_predicate_sql("a");
+    let active_attempts = read_printer_attempt_diagnostics(conn, &blocker_predicate)?;
+    let recent_attempts = read_printer_attempt_diagnostics(conn, "1 = 1")?;
+    let (jobs_total, attempts_total, active_total, circuits_total): (i64, i64, i64, i64) = conn
+        .query_row(
+            &format!(
+                "SELECT (SELECT COUNT(*) FROM print_jobs),
+                            (SELECT COUNT(*) FROM print_job_attempts),
+                            (SELECT COUNT(*) FROM print_job_attempts a WHERE {blocker_predicate}),
+                            (SELECT COUNT(*) FROM print_target_state)"
+            ),
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .map_err(|error| format!("count printer diagnostics history: {error}"))?;
+    let waiting = read_print_queue_waiting(conn)?;
+
+    let mut circuits_statement = conn
         .prepare(
+            "SELECT target_key, transport, circuit_state, blocked_reason, blocked_at, updated_at
+             FROM print_target_state
+             ORDER BY julianday(updated_at) DESC, updated_at DESC, target_key DESC LIMIT 50",
+        )
+        .map_err(|error| format!("prepare print target diagnostics: {error}"))?;
+    let target_circuits = circuits_statement
+        .query_map([], |row| {
+            Ok(json!({
+                "targetKey": bounded_diagnostic_text(row.get(0)?, 320),
+                "transport": row.get::<_, String>(1)?,
+                "circuitState": row.get::<_, String>(2)?,
+                "blockedReason": crate::print::safe_operational_error(row.get(3)?, 512),
+                "blockedAt": row.get::<_, Option<String>>(4)?,
+                "updatedAt": row.get::<_, String>(5)?,
+            }))
+        })
+        .map_err(|error| format!("query print target diagnostics: {error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("read print target diagnostics: {error}"))?;
+    let omitted_jobs = (jobs_total - recent_jobs.len() as i64).max(0);
+    let omitted_recent = (attempts_total - recent_attempts.len() as i64).max(0);
+    let omitted_active = (active_total - active_attempts.len() as i64).max(0);
+    let omitted_circuits = (circuits_total - target_circuits.len() as i64).max(0);
+    let truncated =
+        omitted_jobs > 0 || omitted_recent > 0 || omitted_active > 0 || omitted_circuits > 0;
+    Ok(json!({
+        "status": if truncated { "partial" } else { "ok" },
+        "capturedAt": chrono::Utc::now().to_rfc3339(),
+        "profiles": profiles,
+        "recentJobs": recent_jobs,
+        "activeAttempts": active_attempts,
+        "recentAttempts": recent_attempts,
+        "targetCircuits": target_circuits,
+        "pendingJobs": {
+            "count": waiting.count,
+            "oldestCreatedAt": waiting.oldest_created_at,
+            "pausedCount": waiting.paused_count,
+        },
+        "queuePaused": crate::print::is_print_queue_paused_with_conn(conn, None),
+        "history": {
+            "listLimit": 50,
+            "jobsTotal": jobs_total,
+            "attemptsTotal": attempts_total,
+            "activeAttemptsTotal": active_total,
+            "targetCircuitsTotal": circuits_total,
+            "jobsOmitted": omitted_jobs,
+            "recentAttemptsOmitted": omitted_recent,
+            "activeAttemptsOmitted": omitted_active,
+            "targetCircuitsOmitted": omitted_circuits,
+            "truncated": truncated,
+        },
+    }))
+}
+
+/// A read-only projection of every attempt epoch. Latest-only filtering would
+/// lose cancelled evidence and can hide an older durable target blocker.
+fn read_printer_attempt_diagnostics(
+    conn: &rusqlite::Connection,
+    predicate: &str,
+) -> Result<Vec<Value>, String> {
+    let mut attempts_statement = conn
+        .prepare(&format!(
             "SELECT a.id, a.print_job_id, a.transport, a.resolved_target,
                     a.document_name, a.spool_job_id, a.state,
                     a.native_status_bits, a.native_status_text,
                     a.started_at, a.last_seen_at, a.completed_at,
-                    a.cancel_requested_at, a.cancel_confirmed_at, a.last_error
-             FROM print_job_attempts a
-             WHERE (
-                 a.state IN (
-                     'created', 'submitting', 'windows_queued', 'windows_printing',
-                     'paused', 'cancel_requested', 'unknown', 'cancel_failed'
-                 )
-                 OR (a.state = 'spool_error' AND a.spool_job_id IS NOT NULL)
-             )
-               AND a.id = (
-                   SELECT latest.id FROM print_job_attempts latest
-                   WHERE latest.print_job_id = a.print_job_id
-                   ORDER BY latest.attempt_number DESC LIMIT 1
-               )
-             ORDER BY a.started_at DESC LIMIT 50",
-        )
-        .map_err(|error| format!("prepare active print attempts diagnostics: {error}"))?;
-    let active_attempts = attempts_statement
+                    a.cancel_requested_at, a.cancel_confirmed_at, a.last_error,
+                    a.attempt_number, a.bytes_requested, a.bytes_written
+             FROM print_job_attempts a WHERE {predicate}
+             ORDER BY MAX(COALESCE(julianday(a.completed_at), 0),
+                          COALESCE(julianday(a.last_seen_at), 0),
+                          COALESCE(julianday(a.cancel_requested_at), 0),
+                          COALESCE(julianday(a.cancel_confirmed_at), 0),
+                          COALESCE(julianday(a.started_at), 0)) DESC,
+                      a.attempt_number DESC, a.id DESC LIMIT 50"
+        ))
+        .map_err(|error| format!("prepare print attempts diagnostics: {error}"))?;
+    let attempts = attempts_statement
         .query_map([], |row| {
             let attempt_id = row.get::<_, String>(0)?;
             let job_id = row.get::<_, String>(1)?;
             let transport = row.get::<_, String>(2)?;
             let marker = row.get::<_, String>(4)?;
             let windows_job_id = if transport == "windows" {
-                row.get::<_, Option<i64>>(5)?.filter(|job_id| *job_id > 0)
+                row.get::<_, Option<i64>>(5)?.filter(|job_id| (1..=i64::from(u32::MAX)).contains(job_id))
             } else {
                 None
             };
@@ -2361,41 +2474,20 @@ fn get_printer_diagnostics(conn: &rusqlite::Connection) -> Result<Value, String>
                 "cancelRequestedAt": row.get::<_, Option<String>>(12)?,
                 "cancelConfirmedAt": row.get::<_, Option<String>>(13)?,
                 "lastError": crate::print::safe_operational_error(row.get(14)?, 1024),
+                "attemptNumber": row.get::<_, i64>(15)?,
+                "bytesRequested": row.get::<_, i64>(16)?,
+                "bytesWritten": if transport == "windows" { None } else { Some(row.get::<_, i64>(17)?) },
+                "bytesWrittenSemantics": if transport == "windows" {
+                    "not_collected"
+                } else {
+                    "persisted_os_accepted_prefix_not_paper_confirmation_zero_may_be_unobserved"
+                },
             }))
         })
         .map_err(|error| format!("query active print attempts diagnostics: {error}"))?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("read active print attempts diagnostics: {error}"))?;
-    drop(attempts_statement);
-
-    let mut circuits_statement = conn
-        .prepare(
-            "SELECT target_key, transport, circuit_state, blocked_reason, blocked_at, updated_at
-             FROM print_target_state
-             ORDER BY updated_at DESC LIMIT 50",
-        )
-        .map_err(|error| format!("prepare print target diagnostics: {error}"))?;
-    let target_circuits = circuits_statement
-        .query_map([], |row| {
-            Ok(json!({
-                "targetKey": bounded_diagnostic_text(row.get(0)?, 320),
-                "transport": row.get::<_, String>(1)?,
-                "circuitState": row.get::<_, String>(2)?,
-                "blockedReason": crate::print::safe_operational_error(row.get(3)?, 512),
-                "blockedAt": row.get::<_, Option<String>>(4)?,
-                "updatedAt": row.get::<_, String>(5)?,
-            }))
-        })
-        .map_err(|error| format!("query print target diagnostics: {error}"))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("read print target diagnostics: {error}"))?;
-
-    Ok(json!({
-        "profiles": profiles,
-        "recentJobs": recent_jobs,
-        "activeAttempts": active_attempts,
-        "targetCircuits": target_circuits,
-    }))
+        .map_err(|error| format!("read print attempts diagnostics: {error}"));
+    attempts
 }
 
 // ---------------------------------------------------------------------------
@@ -3115,6 +3207,185 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn printer_diagnostics_retains_cancelled_unknown_bytes_and_all_attempt_blockers() {
+        let dir =
+            std::env::temp_dir().join(format!("diag_attempt_history_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let db = crate::db::init(&dir).unwrap();
+        let conn = db.conn.lock().unwrap();
+        let job = uuid::Uuid::new_v4().to_string();
+        let attempt = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO print_jobs (id, entity_type, entity_id, entity_payload_json,
+              status, created_at, updated_at, last_error)
+             VALUES (?1, 'delivery_slip', 'HISTORY-PRIVATE-CUSTOMER',
+              '{\"notes\":\"HISTORY-PRIVATE-NOTE\"}', 'failed',
+              '2026-10-02T22:15:17Z', '2026-10-02T22:15:23Z', 'Transport outcome unknown')",
+            [&job],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO print_job_attempts (id, print_job_id, attempt_number,
+              transport, resolved_target, document_name, state, bytes_requested,
+              bytes_written, started_at, last_seen_at, last_error)
+             VALUES (?1, ?2, 1, 'raw_tcp', 'raw_tcp:12:192.168.1.19:9100',
+              'HISTORY-PRIVATE-DOCUMENT', 'unknown', 115081, 32768,
+              '2026-10-02T22:15:18Z', '2026-10-02T22:15:23Z', 'TCP write timeout')",
+            params![attempt, job],
+        )
+        .unwrap();
+        let open = get_printer_diagnostics(&conn).unwrap();
+        assert_eq!(open["activeAttempts"][0]["state"], "unknown");
+        conn.execute(
+            "UPDATE print_job_attempts SET state = 'cancelled',
+              cancel_requested_at = '2026-10-02T22:25:57Z',
+              cancel_confirmed_at = '2026-10-02T22:25:58Z',
+              completed_at = '2026-10-02T22:25:58Z' WHERE id = ?1",
+            [&attempt],
+        )
+        .unwrap();
+        let before: i64 = conn
+            .query_row("SELECT total_changes()", [], |row| row.get(0))
+            .unwrap();
+        let closed = get_printer_diagnostics(&conn).unwrap();
+        assert_eq!(closed["activeAttempts"], json!([]));
+        let history = &closed["recentAttempts"][0];
+        assert_eq!(history["state"], "cancelled");
+        assert_eq!(history["bytesRequested"], 115081);
+        assert_eq!(history["bytesWritten"], 32768);
+        assert_eq!(history["cancelRequestedAt"], "2026-10-02T22:25:57Z");
+        assert_eq!(history["cancelConfirmedAt"], "2026-10-02T22:25:58Z");
+        assert_eq!(history["completedAt"], "2026-10-02T22:25:58Z");
+        assert_eq!(closed["recentJobs"][0]["status"], "failed");
+        assert_eq!(
+            conn.query_row("SELECT total_changes()", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            before
+        );
+        assert!(!closed.to_string().contains("HISTORY-PRIVATE"));
+
+        // A newer terminal attempt cannot hide an older unresolved epoch.
+        conn.execute(
+            "UPDATE print_job_attempts SET state = 'unknown' WHERE id = ?1",
+            [&attempt],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO print_job_attempts (id, print_job_id, attempt_number,
+              transport, resolved_target, document_name, state, bytes_requested,
+              started_at, completed_at) VALUES (?1, ?2, 2, 'windows',
+              'windows:front queue', 'HISTORY-PRIVATE-NEWER', 'sent', 115081,
+              '2026-10-02T22:26:00Z', '2026-10-02T22:26:01Z')",
+            params![uuid::Uuid::new_v4().to_string(), job],
+        )
+        .unwrap();
+        let epochs = get_printer_diagnostics(&conn).unwrap();
+        assert_eq!(epochs["activeAttempts"].as_array().unwrap().len(), 1);
+        assert_eq!(epochs["activeAttempts"][0]["attemptId"], attempt);
+        assert_eq!(epochs["recentAttempts"][0]["attemptNumber"], 2);
+        assert!(epochs["recentAttempts"][0]["bytesWritten"].is_null());
+        assert_eq!(
+            epochs["recentAttempts"][0]["bytesWrittenSemantics"],
+            "not_collected"
+        );
+        drop(conn);
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn diagnostics_log_entry_manifest_and_history_limits_are_truthful() {
+        let dir = std::env::temp_dir().join(format!("diag_logs_manifest_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let db = crate::db::init(&dir).unwrap();
+        let logs = dir.join("isolated-runtime-logs");
+        fs::create_dir(&logs).unwrap();
+        fs::write(logs.join("pos.2026-10-02"), concat!(
+            "2026-10-02T22:15:23Z ERROR printers: TCP timed out bytes_requested=115081 bytes_written=32768\n",
+            "2026-10-02T22:15:24Z WARN repairs: payload=PRIVATE-REPAIR ciphertext=PRIVATE-CIPHER\n",
+            "unfinished-private-line"
+        )).unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            for index in 0..51 {
+                conn.execute(
+                    "INSERT INTO print_jobs (id, entity_type, entity_id, status, created_at, updated_at)
+                     VALUES (?1, 'order_receipt', 'PRIVATE-ENTITY', 'dispatched',
+                      '2026-10-02T20:00:00Z', '2026-10-02T20:00:00Z')",
+                    [format!("history-{index:03}")],
+                ).unwrap();
+            }
+            for (id, timestamp) in [
+                ("utc-newest", "2026-10-02T22:00:00Z"),
+                ("offset-older", "2026-10-02T23:00:00+02:00"),
+            ] {
+                conn.execute("INSERT INTO print_jobs (id, entity_type, entity_id, status, created_at, updated_at)
+                    VALUES (?1, 'order_receipt', 'PRIVATE-ENTITY', 'dispatched', ?2, ?2)", params![id, timestamp]).unwrap();
+            }
+        }
+        let path = export_diagnostics_bundle_with_log_dir(
+            &db,
+            &dir,
+            DiagnosticsExportOptions::default(),
+            None,
+            &logs,
+        )
+        .unwrap();
+        let mut zip = zip::ZipArchive::new(fs::File::open(&path).unwrap()).unwrap();
+        let events = read_zip_json(&mut zip, "runtime_logs.json");
+        assert_eq!(events["status"], "partial");
+        assert_eq!(events["events"]["error"][0]["bytesWritten"], 32768);
+        assert_eq!(events["counts"]["linesExcludedRepair"], 1);
+        assert!(!events.to_string().contains("PRIVATE"));
+        let printers = read_zip_json(&mut zip, "printer_diagnostics.json");
+        assert_eq!(printers["recentJobs"][0]["id"], "utc-newest");
+        assert_eq!(printers["recentJobs"].as_array().unwrap().len(), 50);
+        assert_eq!(printers["history"]["jobsOmitted"], 3);
+        let manifest = read_zip_json(&mut zip, DIAGNOSTICS_MANIFEST_FILE);
+        assert_eq!(manifest["logsIncluded"], true);
+        assert!(manifest["entries"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("runtime_logs.json")));
+        for name in ["runtime_logs.json", "printer_diagnostics.json"] {
+            assert!(manifest["truncated"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value.as_str().unwrap().starts_with(name)));
+            assert!(manifest["collectors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|collector| collector["entry"] == name && collector["status"] == "partial"));
+        }
+        drop(zip);
+        let disabled = export_diagnostics_bundle_with_log_dir(
+            &db,
+            &dir,
+            DiagnosticsExportOptions {
+                include_logs: false,
+                redact_sensitive: true,
+            },
+            None,
+            &logs,
+        )
+        .unwrap();
+        let mut zip = zip::ZipArchive::new(fs::File::open(disabled).unwrap()).unwrap();
+        assert_eq!(
+            read_zip_json(&mut zip, "runtime_logs.json")["reasonCode"],
+            "disabled"
+        );
+        assert_eq!(
+            read_zip_json(&mut zip, DIAGNOSTICS_MANIFEST_FILE)["logsIncluded"],
+            false
+        );
+        drop(zip);
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

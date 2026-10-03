@@ -1,4 +1,19 @@
 {
+  "twintPayment": {
+    "receiptNotSaved": "Konfirmuar, pa u ruajtur",
+    "receiptConfirmedAt": "Konfirmuar nga arkëtari më",
+    "receiptReconcile": "Mbajeni arkëtimin fillestar manual TWINT për verifikim nga një përgjegjës. Mos merrni një pagesë tjetër.",
+    "exactAmount": "Skanoni QR-në e dyqanit dhe vendosni pikërisht këtë shumë në TWINT.",
+    "manualConfirmation": "Kontrolloni që pagesa është marrë përpara konfirmimit. Nuk ka njoftim automatik të pagesës.",
+    "customerDisplay": "QR-ja shfaqet në ekranin e klientit.",
+    "qrAlt": "QR zyrtar TWINT i dyqanit",
+    "saveFailed": "Pagesa nuk u ruajt. Kontrolloni statusin përpara se të provoni sërish.",
+    "confirm": "Konfirmo pagesën e marrë",
+    "skip": "Kalo — konfirmo marrjen",
+    "receiptRecovery": "Një arkëtim TWINT është konfirmuar, por pagesa nuk është ruajtur. Ruani arkëtimin fillestar përpara se të merrni një pagesë tjetër.",
+    "receiptSaved": "Arkëtimi fillestar TWINT u ruajt.",
+    "saveOriginal": "Ruaj arkëtimin fillestar TWINT"
+  },
   "displayPurchase": {
     "beforePurchase": "Para se ta blesh",
     "operation": "Si funksionon",
@@ -4826,7 +4841,7 @@
         "payments_not_saved": "Kartë e debituar, pagesë e paruajtur",
         "cancelled_order_claims_payment": "Porosi e anuluar shfaqet ende si e paguar"
       },
-      "revenueSplitHint": "Kesh + Kartë + Platforma = Xhiroja reale",
+      "revenueSplitHint": "Totali i pagesave të marra",
       "liveShiftBreakdown": "Pasqyra live e turneve",
       "liveCurrentWindow": "Periudha aktuale live",
       "historicalPreview": "Parapamje nga historiku",
@@ -6578,6 +6593,13 @@
         "ready": "Gati",
         "unavailable": "S'gjendet",
         "watching": "Po ndiqet"
+      },
+      "automation": {
+        "recordedMark": "Ruajtur automatikisht",
+        "recordedStockMark": "Ruajtur automatikisht · stoku u përditësua",
+        "billMark": "Faturë shërbimi",
+        "openAndCorrect": "Hap dhe korrigjo",
+        "noSaveNeeded": "S'ka nevojë ta ruash — kjo faturë është ruajtur tashmë."
       }
     },
     "title": "Furnitorë",
@@ -6807,6 +6829,12 @@
     },
     "summary": {
       "title": "Përmbledhje e furnitorit"
+    },
+    "paymentMethod": {
+      "unknown": "Mënyrë e panjohur"
+    },
+    "payment": {
+      "reversal": "Pagesa u anulua"
     }
   },
   "procurement": {
@@ -8349,6 +8377,25 @@
     }
   },
   "integrations": {
+    "paymentSetup": {
+      "state": {
+        "manual_ready": "Konfirmim manual",
+        "not_configured": "Kërkohet konfigurim",
+        "pending_verification": "Në pritje të verifikimit",
+        "partner_setup_required": "Kërkohet aktivizim nga ofruesi",
+        "unavailable": "Statusi nuk është i disponueshëm"
+      },
+      "detail": {
+        "manual_ready": "QR-ja e dyqanit është gati. Arkëtari duhet të konfirmojë çdo pagesë TWINT të marrë.",
+        "not_configured": "Konfiguroni këtë lidhje pagese në panelin e administratorit. Pagesat nuk janë ende të disponueshme.",
+        "pending_verification": "Konfigurimi u ruajt. Pagesat do të jenë të disponueshme pasi lidhja të verifikohet.",
+        "partner_setup_required": "Ofruesi duhet ta aktivizojë këtë lidhje për të pranuar pagesa. Vazhdoni në panelin e administratorit.",
+        "unavailable": "Nuk u konfirmua gatishmëria për pagesa. Kontrolloni konfigurimin në panelin e administratorit."
+      },
+      "openAdminFailed": "Nuk mund të hapen cilësimet e pagesave në panelin e administratorit.",
+      "twintDescription": "Pagesa TWINT",
+      "worldline_terminalsDescription": "Terminale pagese Worldline"
+    },
     "title": "Integrime",
     "subtitle": "Lidh integrime të jashtme",
     "loading": "Duke ngarkuar integrimet...",

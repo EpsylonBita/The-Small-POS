@@ -856,8 +856,10 @@ export interface CreateOrderPayload {
 }
 
 export interface CreateOrderInitialPayment {
-  method: "cash" | "card" | "other" | "room_charge";
-  payment_method?: "cash" | "card" | "other" | "room_charge";
+  method: "cash" | "card" | "other" | "room_charge" | "twint";
+  payment_method?: "cash" | "card" | "other" | "room_charge" | "twint";
+  idempotencyKey?: string;
+  metadata?: { provider: 'twint'; confirmation: 'cashier'; confirmation_action: 'confirm' | 'skip'; qr_mode: 'static_qr_manual' };
   amount: number;
   currency?: string;
   discountAmount?: number;
@@ -1031,8 +1033,9 @@ export interface CustomerAddress {
 export interface RecordPaymentParams {
   orderId: string;
   order_id?: string;
-  method: "cash" | "card" | "room_charge";
-  payment_method?: "cash" | "card" | "room_charge";
+  method: "cash" | "card" | "room_charge" | "twint";
+  payment_method?: "cash" | "card" | "room_charge" | "twint";
+  metadata?: { provider: 'twint'; confirmation: 'cashier'; confirmation_action: 'confirm' | 'skip'; qr_mode: 'static_qr_manual' };
   amount: number;
   amount_cents?: number;
   currency?: string;
@@ -1105,6 +1108,9 @@ export interface PaymentSettlementRow {
   refundedAmount: number;
   remainingRefundable: number;
   items: unknown[];
+  /** Manual TWINT identity, with no provider transaction reference. */
+  idempotencyKey?: string | null;
+  metadata?: Record<string, unknown> | null;
 }
 
 export interface PaymentSettlementSnapshot {
@@ -1198,6 +1204,8 @@ export interface UnsavedChargedPaymentSummary {
    * `orderId` is then the checkout's client request id).
    */
   kind: string;
+  manualScope?: string | null;
+  manualReceiptConfirmed?: boolean;
   /** When the terminal approved it (RFC 3339). */
   capturedAt: string;
   attempts: number;

@@ -4,7 +4,7 @@ import { AlertTriangle, Loader2, RotateCcw } from 'lucide-react';
 
 import type { UnsavedChargedPaymentSummary } from '../../../lib/ipc-adapter';
 import { formatCurrency, formatDateTime } from '../../utils/format';
-import { isNewOrderCheckoutRecord } from '../../utils/unsavedPayments';
+import { isManualTwintRecord, isNewOrderCheckoutRecord, retainedManualTwintAmount } from '../../utils/unsavedPayments';
 
 interface UnsavedChargedPaymentBannerProps {
   payments: UnsavedChargedPaymentSummary[];
@@ -33,7 +33,9 @@ export function UnsavedChargedPaymentBanner({
   if (payments.length === 0) {
     return null;
   }
-  const total = payments.reduce((sum, entry) => sum + Number(entry.amount || 0), 0);
+  const manual=payments.filter(isManualTwintRecord);
+  const ordinary=payments.filter(entry=>!isManualTwintRecord(entry));
+  const total = ordinary.reduce((sum, entry) => sum + Number(entry.amount || 0), 0);
   const canSaveAgain = payments.some((entry) => entry.canSaveAgain !== false);
 
   return (
@@ -46,15 +48,16 @@ export function UnsavedChargedPaymentBanner({
         <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
         <div className="min-w-0 flex-1 space-y-1.5">
           <div className="text-sm font-black">
-            {t('payment.notSaved.title', { defaultValue: 'Charged, not saved yet' })}
+            {manual.length ? t('twintPayment.receiptNotSaved') : t('payment.notSaved.title', { defaultValue: 'Charged, not saved yet' })}
           </div>
-          <p className="text-xs font-semibold leading-relaxed opacity-90">
+          {manual.length>0 && <p className="text-xs font-semibold leading-relaxed opacity-90">TWINT · {t('twintPayment.receiptRecovery')}</p>}
+          {ordinary.length>0 && <p className="text-xs font-semibold leading-relaxed opacity-90">
             {t('payment.notSaved.message', {
               amount: formatCurrency(total),
               defaultValue:
                 'The card was charged {{amount}}. The payment could not be saved on this till yet. Do NOT charge again: save the payment again.',
             })}
-          </p>
+          </p>}
           <ul className="space-y-0.5 text-xs font-semibold opacity-80">
             {payments.map((entry) => (
               <li key={entry.idempotencyKey}>
@@ -63,9 +66,9 @@ export function UnsavedChargedPaymentBanner({
                       defaultValue: 'New order, not saved yet',
                     })} · `
                   : ''}
-                {formatCurrency(Number(entry.amount || 0))}
+                {isManualTwintRecord(entry) ? `TWINT · ${formatCurrency(retainedManualTwintAmount(entry),entry.currency || 'CHF')}` : formatCurrency(Number(entry.amount || 0))}
                 {entry.capturedAt
-                  ? ` · ${t('payment.notSaved.chargedAt', {
+                  ? isManualTwintRecord(entry) ? ` · ${t('twintPayment.receiptConfirmedAt')} ${formatDateTime(entry.capturedAt)}` : ` · ${t('payment.notSaved.chargedAt', {
                       time: formatDateTime(entry.capturedAt),
                       defaultValue: 'charged {{time}}',
                     })}`
@@ -87,11 +90,12 @@ export function UnsavedChargedPaymentBanner({
               )}
               {isSaving
                 ? t('payment.notSaved.saving', { defaultValue: 'Saving…' })
-                : t('payment.notSaved.saveAgain', { defaultValue: 'Save payment again' })}
+                : manual.length && !ordinary.length ? t('twintPayment.saveOriginal') : t('payment.notSaved.saveAgain', { defaultValue: 'Save payment again' })}
             </button>
           ) : (
             <p className="text-xs font-bold opacity-90">
-              {t('payment.notSaved.cannotSave', {
+              {manual.length>0 && t('twintPayment.receiptReconcile')}
+              {ordinary.length>0 && t('payment.notSaved.cannotSave', {
                 amount: formatCurrency(total),
                 defaultValue:
                   'The {{amount}} charged cannot be saved on this till. Do NOT charge again. Give the money back to the customer, then a manager confirms it on the Z-report.',

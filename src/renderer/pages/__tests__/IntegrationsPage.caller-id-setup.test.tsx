@@ -148,7 +148,7 @@ const respondByEndpoint = (integrations: Record<string, unknown>[]) =>
       return { success: true, data: { enabled: true, sourceLines: [], receivingLines: [] } }
     }
     if (endpoint === '/pos/integrations') {
-      return { success: true, data: { integrations } }
+      return { success: true, data: { branch_id: 'branch-1', integrations } }
     }
     return { success: false, status: 404, error: 'not found' }
   })

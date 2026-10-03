@@ -2003,6 +2003,7 @@ fn preview_response_from_built_date_z_report(
             "totalOrders": report.total_orders,
             "cashSales": report.cash_sales,
             "cardSales": report.card_sales,
+            "twintSales": report.twint_sales,
             "refundsTotal": report.refunds_total,
             "voidsTotal": report.voids_total,
             "discountsTotal": report.discounts_total,
@@ -2222,6 +2223,7 @@ struct BuiltDateZReport {
     total_orders: i64,
     cash_sales: f64,
     card_sales: f64,
+    twint_sales: f64,
     refunds_total: f64,
     voids_total: f64,
     discounts_total: f64,
@@ -2234,6 +2236,83 @@ struct BuiltDateZReport {
     payments_breakdown: Value,
     report_json: Value,
     gift_close: GiftCloseReport,
+}
+
+/// Presentation evidence only: this remembered cache never admits a payment.
+fn z_report_presentation_from_cache(
+    modules: &Value,
+    integrations: &Value,
+    organization_id: &str,
+    branch_id: &str,
+    terminal_id: &str,
+) -> Value {
+    let scoped = !organization_id.is_empty()
+        && !branch_id.is_empty()
+        && !terminal_id.is_empty()
+        && modules.get("organizationId").and_then(Value::as_str) == Some(organization_id)
+        && modules.get("branchId").and_then(Value::as_str) == Some(branch_id)
+        && modules.get("terminalId").and_then(Value::as_str) == Some(terminal_id);
+    if !scoped {
+        return serde_json::json!({});
+    }
+    let Some(enabled) = modules.get("apiModules").and_then(Value::as_array) else {
+        return serde_json::json!({});
+    };
+    let has_module = |id: &str| {
+        enabled
+            .iter()
+            .any(|m| m.get("module_id").and_then(Value::as_str) == Some(id))
+    };
+    let mut flags = serde_json::json!({"deliveryModuleEnabled": has_module("delivery")});
+    if !has_module("plugin_integrations") {
+        flags["twintPluginEnabled"] = serde_json::json!(false);
+    } else if integrations.get("success").and_then(Value::as_bool) == Some(true) {
+        if let Some(plugins) = integrations.get("integrations").and_then(Value::as_array) {
+            let twint_enabled = plugins.iter().any(|plugin| {
+                plugin.get("plugin_id").and_then(Value::as_str) == Some("twint")
+                    && plugin.get("branch_id").and_then(Value::as_str) == Some(branch_id)
+                    && plugin.get("is_purchased").and_then(Value::as_bool) == Some(true)
+                    && plugin.get("is_enabled").and_then(Value::as_bool) == Some(true)
+                    && plugin
+                        .pointer("/settings/target_terminal_id")
+                        .map_or(true, |target| {
+                            target.is_null() || target.as_str() == Some(terminal_id)
+                        })
+            });
+            flags["twintPluginEnabled"] = serde_json::json!(twint_enabled);
+        }
+    }
+    flags
+}
+
+fn load_z_report_presentation(db: &DbState, conn: &Connection, report_branch: &str) -> Value {
+    let setting = |key: &str| {
+        db::get_setting(conn, "terminal", key)
+            .or_else(|| storage::get_credential(key))
+            .unwrap_or_default()
+    };
+    let organization_id = setting("organization_id");
+    let branch_id = setting("branch_id");
+    // Managed API identity is canonical even when legacy display settings differ.
+    let terminal_id = ["pos_api_key", "api_key"]
+        .iter()
+        .find_map(|key| crate::api::extract_terminal_id_from_connection_string(&setting(key)))
+        .unwrap_or_else(|| setting("terminal_id"));
+    if report_branch != branch_id {
+        return serde_json::json!({});
+    }
+    let modules = crate::core_helpers::read_module_cache(db).unwrap_or(Value::Null);
+    let integrations = db::get_setting(conn, "local", "admin_api_get::/api/pos/integrations")
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|cache| cache.get("data").cloned())
+        .unwrap_or(Value::Null);
+    z_report_presentation_from_cache(
+        &modules,
+        &integrations,
+        &organization_id,
+        &branch_id,
+        &terminal_id,
+    )
 }
 
 fn normalize_order_type(value: &str) -> String {
@@ -3284,7 +3363,7 @@ fn build_staff_report(
     let cash_breakdown_row = cash_breakdown_lookup.get(&shift.id);
 
     let (
-        orders_value,
+        mut orders_value,
         orders_details,
         orders_truncated,
         driver_value,
@@ -3388,6 +3467,19 @@ fn build_staff_report(
             drawer_value,
         )
     };
+
+    let twint_cents: i64 = conn.query_row(
+        &format!("SELECT COALESCE(SUM(COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER))),0)
+         FROM order_payments op JOIN orders o ON o.id = op.order_id
+         WHERE op.staff_shift_id = ?1 AND op.method = 'twint' AND op.status = 'completed'
+           AND op.currency = 'CHF'
+           AND NOT (COALESCE(op.payment_origin,'') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id,'')) = '')
+           AND COALESCE(o.is_ghost,0) = 0 AND COALESCE(o.is_test,0) = 0
+           AND COALESCE(o.order_context,'') <> 'repair_settlement'
+           AND {financial_expr} >= ?2 AND (?3 IS NULL OR {financial_expr} <= ?3)", financial_expr = business_day::order_financial_timestamp_expr("o")),
+        params![shift.id,shift.check_in_time.as_deref().unwrap_or(business_day::EPOCH_RFC3339),shift.check_out_time.as_deref()], |row| row.get(0),
+    ).map_err(|e| format!("load staff TWINT payments: {e}"))?;
+    orders_value["twintAmount"] = serde_json::json!(Cents::new(twint_cents).to_f64_dp2());
 
     Ok(serde_json::json!({
         "staffShiftId": shift.id,
@@ -3885,12 +3977,13 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
             // THE-437: platform_ref splits bank-settled platform money out of
             // `other` — see the multi-shift twin in build_z_report_for_date.
             "SELECT op.method,
-                    CASE WHEN op.method NOT IN ('cash','card')
+                    CASE WHEN op.method NOT IN ('cash','card','twint')
                               AND COALESCE(op.transaction_ref, '') LIKE 'platform_settlement:%'
                          THEN COALESCE(op.transaction_ref, '')
                          ELSE '' END AS platform_ref,
                     COUNT(*) as cnt,
-                    COALESCE(SUM(COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER))), 0) as total
+                    COALESCE(SUM(COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER))), 0) as total,
+                    COALESCE(SUM(CASE WHEN op.method = 'twint' AND o.status IN ('cancelled','canceled','refunded') THEN COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER)) ELSE 0 END),0) as retained_total
              FROM order_payments op
              JOIN orders o ON o.id = op.order_id
              WHERE op.staff_shift_id = ?1
@@ -3898,35 +3991,41 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
                AND COALESCE(o.is_ghost, 0) = 0
                AND COALESCE(o.is_test, 0) = 0
                AND COALESCE(o.order_context, '') <> 'repair_settlement'
-               AND o.status NOT IN ('cancelled', 'canceled')
+               AND (?2 = '' OR o.branch_id = ?2 OR o.branch_id IS NULL)
+               AND (op.method <> 'twint' OR op.currency = 'CHF')
+               AND (op.method = 'twint' OR o.status NOT IN ('cancelled', 'canceled', 'refunded'))
              GROUP BY op.method, platform_ref",
         )
         .map_err(|e| format!("prepare payment query: {e}"))?;
 
     let mut cash_sales = 0.0_f64;
     let mut card_sales = 0.0_f64;
+    let mut twint_sales = 0.0_f64;
+    let mut retained_twint_sales = 0.0_f64;
     let mut other_sales = 0.0_f64;
     let mut platform_online_sales = 0.0_f64;
     let mut platform_cod_sales = 0.0_f64;
     let mut cash_count = 0_i64;
     let mut card_count = 0_i64;
+    let mut twint_count = 0_i64;
     let mut other_count = 0_i64;
     let mut platform_online_count = 0_i64;
     let mut platform_cod_count = 0_i64;
 
     let pay_rows = pay_stmt
-        .query_map(params![shift_id], |row| {
+        .query_map(params![shift_id, branch_id], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, i64>(2)?,
                 Cents::new(row.get::<_, i64>(3)?).to_f64_dp2(),
+                Cents::new(row.get::<_, i64>(4)?).to_f64_dp2(),
             ))
         })
         .map_err(|e| format!("query payments: {e}"))?;
 
     for row in pay_rows.flatten() {
-        let (method, platform_ref, count, total) = row;
+        let (method, platform_ref, count, total, retained_total) = row;
         match method.as_str() {
             "cash" => {
                 cash_sales += total;
@@ -3935,6 +4034,11 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
             "card" => {
                 card_sales += total;
                 card_count += count;
+            }
+            "twint" => {
+                twint_sales += total;
+                retained_twint_sales += retained_total;
+                twint_count += count;
             }
             _ if platform_ref.starts_with("platform_settlement:online") => {
                 platform_online_sales += total;
@@ -4311,6 +4415,7 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
     let payments_breakdown = serde_json::json!({
         "cash": { "count": cash_count, "total": cash_sales },
         "card": { "count": card_count, "total": card_sales },
+        "twint": { "count": twint_count, "total": twint_sales },
         "other": { "count": other_count, "total": other_sales },
         "platform_online": { "count": platform_online_count, "total": platform_online_sales },
         "platform_cod": { "count": platform_cod_count, "total": platform_cod_sales },
@@ -4352,8 +4457,12 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
     // nested) carries a `_cents` integer sibling so admin-dashboard can
     // read either shape during the bake window.
     let total_sales = gross_sales - discounts_total;
-    let day_total =
-        cash_sales + card_sales + other_sales + platform_online_sales + platform_cod_sales;
+    let day_total = cash_sales
+        + card_sales
+        + twint_sales
+        + other_sales
+        + platform_online_sales
+        + platform_cod_sales;
     if !gift_close.is_empty() {
         if let Some(drawer) = drawer.as_mut() {
             // The adopted mirror's expected is already the canonical total.
@@ -4365,7 +4474,10 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
             gift_close.annotate_drawer(drawer, expected_cents);
         }
     }
+    let presentation = load_z_report_presentation(db, &conn, &branch_id);
     let mut report_json = serde_json::json!({
+        "presentation": presentation,
+        "paymentsBreakdown": payments_breakdown,
         "date": report_date,
         "shifts": shift_counts,
         "sales": {
@@ -4378,6 +4490,12 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
             "cashSales_cents": Cents::round_half_even(cash_sales).as_i64(),
             "cardSales": card_sales,
             "cardSales_cents": Cents::round_half_even(card_sales).as_i64(),
+            "twintSales": twint_sales,
+            "twintPaymentCount": twint_count,
+            "retainedTwintSales": retained_twint_sales,
+            "retainedTwintSalesCents": Cents::round_half_even(retained_twint_sales).as_i64(),
+            "twintSalesCents": Cents::round_half_even(twint_sales).as_i64(),
+            "twint_sales_cents": Cents::round_half_even(twint_sales).as_i64(),
             "platformOnlineSales": platform_online_sales,
             "platformOnlineSales_cents": Cents::round_half_even(platform_online_sales).as_i64(),
             "platformCodSales": platform_cod_sales,
@@ -4428,6 +4546,8 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
             "cashTotal_cents": Cents::round_half_even(cash_sales).as_i64(),
             "cardTotal": card_sales,
             "cardTotal_cents": Cents::round_half_even(card_sales).as_i64(),
+            "twintTotal": twint_sales,
+            "twintTotal_cents": Cents::round_half_even(twint_sales).as_i64(),
             "platformOnlineTotal": platform_online_sales,
             "platformOnlineTotal_cents": Cents::round_half_even(platform_online_sales).as_i64(),
             "platformCodTotal": platform_cod_sales,
@@ -4660,6 +4780,7 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
             "totalOrders": total_orders,
             "cashSales": cash_sales,
             "cardSales": card_sales,
+            "twintSales": twint_sales,
             "refundsTotal": refunds_total,
             "voidsTotal": voids_total,
             "discountsTotal": discounts_total,
@@ -5353,12 +5474,13 @@ fn build_z_report_for_date(
     // turnover.
     let payment_scope_sql = format!(
         "SELECT op.method,
-                CASE WHEN op.method NOT IN ('cash','card')
+                CASE WHEN op.method NOT IN ('cash','card','twint')
                           AND COALESCE(op.transaction_ref, '') LIKE 'platform_settlement:%'
                      THEN COALESCE(op.transaction_ref, '')
                      ELSE '' END AS platform_ref,
                 COUNT(*) as cnt,
-                COALESCE(SUM(COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER))), 0) as total
+                COALESCE(SUM(COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER))), 0) as total,
+                    COALESCE(SUM(CASE WHEN op.method = 'twint' AND o.status IN ('cancelled','canceled','refunded') THEN COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER)) ELSE 0 END),0) as retained_total
          FROM order_payments op
          JOIN orders o ON o.id = op.order_id
          WHERE {payment_scope_predicate}
@@ -5368,7 +5490,8 @@ fn build_z_report_for_date(
            AND COALESCE(o.is_ghost, 0) = 0
            AND COALESCE(o.is_test, 0) = 0
            AND COALESCE(o.order_context, '') <> 'repair_settlement'
-           AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
+           AND (op.method <> 'twint' OR op.currency = 'CHF')
+           AND (op.method = 'twint' OR o.status NOT IN ('cancelled', 'canceled', 'refunded'))
          GROUP BY op.method, platform_ref"
     );
     let mut pay_stmt = conn
@@ -5377,11 +5500,14 @@ fn build_z_report_for_date(
 
     let mut cash_sales = 0.0_f64;
     let mut card_sales = 0.0_f64;
+    let mut twint_sales = 0.0_f64;
+    let mut retained_twint_sales = 0.0_f64;
     let mut other_sales = 0.0_f64;
     let mut platform_online_sales = 0.0_f64;
     let mut platform_cod_sales = 0.0_f64;
     let mut cash_count = 0_i64;
     let mut card_count = 0_i64;
+    let mut twint_count = 0_i64;
     let mut other_count = 0_i64;
     let mut platform_online_count = 0_i64;
     let mut platform_cod_count = 0_i64;
@@ -5393,12 +5519,13 @@ fn build_z_report_for_date(
                 row.get::<_, String>(1)?,
                 row.get::<_, i64>(2)?,
                 Cents::new(row.get::<_, i64>(3)?).to_f64_dp2(),
+                Cents::new(row.get::<_, i64>(4)?).to_f64_dp2(),
             ))
         })
         .map_err(|e| format!("query payments: {e}"))?;
 
     for row in pay_rows.flatten() {
-        let (method, platform_ref, count, total) = row;
+        let (method, platform_ref, count, total, retained_total) = row;
         match method.as_str() {
             "cash" => {
                 cash_sales += total;
@@ -5407,6 +5534,11 @@ fn build_z_report_for_date(
             "card" => {
                 card_sales += total;
                 card_count += count;
+            }
+            "twint" => {
+                twint_sales += total;
+                retained_twint_sales += retained_total;
+                twint_count += count;
             }
             _ if platform_ref.starts_with("platform_settlement:online") => {
                 platform_online_sales += total;
@@ -5899,6 +6031,7 @@ fn build_z_report_for_date(
     let payments_breakdown = serde_json::json!({
         "cash": { "count": cash_count, "total": cash_sales },
         "card": { "count": card_count, "total": card_sales },
+        "twint": { "count": twint_count, "total": twint_sales },
         "other": { "count": other_count, "total": other_sales },
         "platform_online": { "count": platform_online_count, "total": platform_online_sales },
         "platform_cod": { "count": platform_cod_count, "total": platform_cod_sales },
@@ -6062,8 +6195,12 @@ fn build_z_report_for_date(
     // W4d-iv additive emission: every monetary float key carries a `_cents`
     // sibling. Mirrors the single-shift body at line 2844.
     let total_sales = gross_sales - discounts_total;
-    let day_total =
-        cash_sales + card_sales + other_sales + platform_online_sales + platform_cod_sales;
+    let day_total = cash_sales
+        + card_sales
+        + twint_sales
+        + other_sales
+        + platform_online_sales
+        + platform_cod_sales;
 
     // Reconciliation, computed on the SAME window and population as the
     // totals above. `sales.totalSales` is the order side, `daySummary.total`
@@ -6133,7 +6270,10 @@ fn build_z_report_for_date(
         &integrity_blockers,
     );
 
+    let presentation = load_z_report_presentation(db, &conn, &branch_id);
     let mut report_json = serde_json::json!({
+        "presentation": presentation,
+        "paymentsBreakdown": payments_breakdown,
         "date": date,
         "shifts": {
             "total": shifts_total,
@@ -6151,6 +6291,12 @@ fn build_z_report_for_date(
             "cashSales_cents": Cents::round_half_even(cash_sales).as_i64(),
             "cardSales": card_sales,
             "cardSales_cents": Cents::round_half_even(card_sales).as_i64(),
+            "twintSales": twint_sales,
+            "twintPaymentCount": twint_count,
+            "retainedTwintSales": retained_twint_sales,
+            "retainedTwintSalesCents": Cents::round_half_even(retained_twint_sales).as_i64(),
+            "twintSalesCents": Cents::round_half_even(twint_sales).as_i64(),
+            "twint_sales_cents": Cents::round_half_even(twint_sales).as_i64(),
             "platformOnlineSales": platform_online_sales,
             "platformOnlineSales_cents": Cents::round_half_even(platform_online_sales).as_i64(),
             "platformCodSales": platform_cod_sales,
@@ -6199,6 +6345,8 @@ fn build_z_report_for_date(
             "cashTotal_cents": Cents::round_half_even(cash_sales).as_i64(),
             "cardTotal": card_sales,
             "cardTotal_cents": Cents::round_half_even(card_sales).as_i64(),
+            "twintTotal": twint_sales,
+            "twintTotal_cents": Cents::round_half_even(twint_sales).as_i64(),
             "platformOnlineTotal": platform_online_sales,
             "platformOnlineTotal_cents": Cents::round_half_even(platform_online_sales).as_i64(),
             "platformCodTotal": platform_cod_sales,
@@ -6241,6 +6389,7 @@ fn build_z_report_for_date(
         total_orders,
         cash_sales,
         card_sales,
+        twint_sales,
         refunds_total,
         voids_total,
         discounts_total,
@@ -6506,6 +6655,7 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
             "totalOrders": built.total_orders,
             "cashSales": built.cash_sales,
             "cardSales": built.card_sales,
+            "twintSales": built.twint_sales,
             "refundsTotal": built.refunds_total,
             "voidsTotal": built.voids_total,
             "discountsTotal": built.discounts_total,
@@ -8395,6 +8545,194 @@ mod tests {
             invalidator.count(),
             1,
             "lookup failure must not invalidate without a print INSERT"
+        );
+    }
+
+    #[test]
+    fn twint_z_uses_canonical_portions_and_persists_a_distinct_bucket() {
+        let db = test_db();
+        let shift = seed_closed_shift(&db);
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE order_payments SET amount=10,amount_cents=1000 WHERE id='pay-1'",
+                [],
+            )
+            .unwrap();
+            conn.execute("UPDATE order_payments SET method='card',amount=20,amount_cents=2000,order_id='ord-3' WHERE id='pay-2'", []).unwrap();
+            conn.execute("UPDATE order_payments SET method='twint',amount=25,amount_cents=2500,currency='CHF',idempotency_key='twint-original' WHERE id='pay-3'", []).unwrap();
+            // A completed legacy/corrupt receipt is not a CHF TWINT tender
+            // merely because its method is TWINT. Ordinary EUR rows above
+            // keep their existing cash/card admission and amounts.
+            for (id, currency) in [
+                ("wrong-currency-twint", "EUR"),
+                ("malformed-currency-twint", "chf"),
+                ("empty-currency-twint", ""),
+            ] {
+                conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,status,staff_shift_id,currency,created_at,updated_at) VALUES(?1,'ord-3','twint',99,9900,'completed',?2,?3,'2026-02-16T18:00:00Z','2026-02-16T18:00:00Z')",params![id,shift,currency]).unwrap();
+            }
+            for (id, status) in [
+                ("ignored-review", "duplicate_review"),
+                ("ignored-refunded", "refunded"),
+                ("ignored-void", "voided"),
+            ] {
+                conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,status,staff_shift_id,currency,created_at,updated_at) VALUES(?1,'ord-3','twint',99,9900,?2,?3,'CHF','2026-02-16T18:00:00Z','2026-02-16T18:00:00Z')",params![id,status,shift]).unwrap();
+            }
+            conn.execute("INSERT OR IGNORE INTO order_payments(id,order_id,method,amount,amount_cents,status,staff_shift_id,currency,idempotency_key,created_at,updated_at) VALUES('twint-replay','ord-3','twint',25,2500,'completed',?1,'CHF','twint-original','2026-02-16T18:00:00Z','2026-02-16T18:00:00Z')",params![shift]).unwrap();
+        }
+        let built = build_z_report_for_date(&db,&serde_json::json!({"branchId":"branch-1","date":"2026-02-16","cutoffAt":"2026-02-16T23:00:00Z"}), false).unwrap();
+        assert_eq!(built.report_json["daySummary"]["total"], 55.0);
+        assert_eq!(built.report_json["sales"]["cardSales"], 20.0);
+        assert_eq!(built.report_json["sales"]["twintSales"], 25.0);
+        assert_eq!(built.report_json["sales"]["twintPaymentCount"], 1);
+        assert_eq!(built.report_json["sales"]["twintSalesCents"], 2500);
+        assert_eq!(
+            built.report_json["staffReports"][0]["orders"]["twintAmount"],
+            25.0
+        );
+        assert_eq!(built.payments_breakdown["other"]["total"], 0.0);
+        let generated = generate_z_report(&db, &serde_json::json!({"shiftId":shift})).unwrap();
+        assert_eq!(
+            generated["report"]["reportJson"]["daySummary"]["total"],
+            55.0
+        );
+        assert_eq!(
+            generated["report"]["reportJson"]["sales"]["twintPaymentCount"],
+            1
+        );
+        assert_eq!(
+            generated["report"]["reportJson"]["staffReports"][0]["orders"]["twintAmount"],
+            25.0
+        );
+        let saved = get_z_report(
+            &db,
+            &serde_json::json!({"zReportId":generated["zReportId"]}),
+        )
+        .unwrap();
+        let json: Value =
+            serde_json::from_str(saved["report"]["reportJson"].as_str().unwrap()).unwrap();
+        assert_eq!(json["sales"]["twintSales"], 25.0);
+        assert!(json["presentation"].is_object());
+        // Analytics reads the same completed portions, including a split order.
+        let conn = db.conn.lock().unwrap();
+        let analytics = crate::commands::analytics::load_payment_method_breakdown_for_day(
+            &conn,
+            "branch-1",
+            "2026-02-16",
+        )
+        .unwrap();
+        // Old fixture orders have no branch; scope must not treat them as current branch.
+        assert_eq!(analytics["twint"]["total"], 0.0);
+        conn.execute("UPDATE orders SET branch_id='branch-1'", [])
+            .unwrap();
+        let analytics = crate::commands::analytics::load_payment_method_breakdown_for_day(
+            &conn,
+            "branch-1",
+            "2026-02-16",
+        )
+        .unwrap();
+        assert_eq!(analytics["twint"]["total"], 25.0);
+        assert_eq!(analytics["twint"]["count"], 1);
+        assert_eq!(analytics["card"]["total"], 20.0);
+        assert_eq!(analytics["other"]["total"], 0.0);
+        assert_eq!(
+            crate::commands::analytics::load_payment_method_breakdown_for_day(
+                &conn,
+                "foreign",
+                "2026-02-16"
+            )
+            .unwrap()["twint"]["total"],
+            0.0
+        );
+        assert_eq!(
+            crate::commands::analytics::load_payment_method_breakdown_for_day(
+                &conn,
+                "branch-1",
+                "2026-02-17"
+            )
+            .unwrap()["twint"]["total"],
+            0.0
+        );
+        conn.execute("UPDATE orders SET status='cancelled' WHERE id='ord-3'", [])
+            .unwrap();
+        let retained = crate::commands::analytics::load_payment_method_breakdown_for_day(
+            &conn,
+            "branch-1",
+            "2026-02-16",
+        )
+        .unwrap();
+        assert_eq!(
+            retained["twint"]["total"], 25.0,
+            "cancelling fulfillment never returns TWINT money"
+        );
+        assert_eq!(
+            retained["card"]["total"], 0.0,
+            "ordinary cancellation semantics stay unchanged"
+        );
+        conn.execute("INSERT INTO orders(id,order_number,branch_id,items,total_amount,total_amount_cents,status,payment_status,order_type,staff_shift_id,created_at,updated_at) VALUES('partial-twint','#partial','branch-1','[]',30,3000,'completed','partially_paid','dine-in',?1,'2026-02-16T18:00:00Z','2026-02-16T18:00:00Z')",params![shift]).unwrap();
+        conn.execute("INSERT INTO orders(id,order_number,branch_id,items,total_amount,total_amount_cents,status,payment_status,order_type,staff_shift_id,created_at,updated_at) VALUES('future-twint','#future','branch-1','[]',50,5000,'completed','paid','dine-in',?1,'2026-02-17T01:00:00Z','2026-02-17T01:00:00Z')",params![shift]).unwrap();
+        for (id, date, amount) in [
+            ("partial-5", "2026-02-16T18:00:00Z", 5),
+            ("later-50", "2026-02-17T01:00:00Z", 50),
+        ] {
+            conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,status,staff_shift_id,currency,created_at,updated_at) VALUES(?1,CASE WHEN ?1='later-50' THEN 'future-twint' ELSE 'partial-twint' END,'twint',?2,?2*100,'completed',?3,'CHF',?4,?4)",params![id,amount,shift,date]).unwrap();
+        }
+        assert_eq!(
+            crate::commands::analytics::load_payment_method_breakdown_for_day(
+                &conn,
+                "branch-1",
+                "2026-02-16"
+            )
+            .unwrap()["twint"]["total"],
+            30.0
+        );
+        persist_pending_z_report_context(
+            &conn,
+            &PendingZReportContext {
+                branch_id: "branch-1".into(),
+                report_date: "2026-02-16".into(),
+                cutoff_at: "2026-02-16T23:00:00Z".into(),
+                period_start_at: business_day::EPOCH_RFC3339.into(),
+            },
+        )
+        .unwrap();
+        drop(conn);
+        let retained_z=build_z_report_for_date(&db,&serde_json::json!({"branchId":"branch-1","date":"2026-02-16","cutoffAt":"2026-02-16T23:00:00Z"}),false).unwrap();
+        assert_eq!(retained_z.report_json["sales"]["twintSales"], 30.0);
+        assert_eq!(retained_z.report_json["sales"]["retainedTwintSales"], 25.0);
+        assert_eq!(retained_z.payments_breakdown["other"]["total"], 0.0);
+    }
+
+    #[test]
+    fn twint_presentation_cache_requires_scope_and_entitlement_but_not_qr_readiness() {
+        let mut modules = serde_json::json!({"organizationId":"org","branchId":"branch","terminalId":"term","apiModules":[{"module_id":"plugin_integrations"}]});
+        let mut integrations = serde_json::json!({"success":true,"integrations":[{"plugin_id":"twint","branch_id":"branch","is_purchased":true,"is_enabled":true,"settings":{"target_terminal_id":null},"payment_setup":{"configuration_state":"pending_verification","integration_mode":"worldline_terminal"}}]});
+        let flags =
+            z_report_presentation_from_cache(&modules, &integrations, "org", "branch", "term");
+        assert_eq!(flags["twintPluginEnabled"], true);
+        assert_eq!(flags["deliveryModuleEnabled"], false);
+        integrations["integrations"][0]["settings"]["target_terminal_id"] =
+            serde_json::json!("other-term");
+        assert_eq!(
+            z_report_presentation_from_cache(&modules, &integrations, "org", "branch", "term")
+                ["twintPluginEnabled"],
+            false
+        );
+        integrations["integrations"][0]["settings"]["target_terminal_id"] = Value::Null;
+        integrations["integrations"][0]["is_purchased"] = serde_json::json!(false);
+        assert_eq!(
+            z_report_presentation_from_cache(&modules, &integrations, "org", "branch", "term")
+                ["twintPluginEnabled"],
+            false
+        );
+        modules["terminalId"] = serde_json::json!("foreign");
+        assert_eq!(
+            z_report_presentation_from_cache(&modules, &integrations, "org", "branch", "term"),
+            serde_json::json!({})
+        );
+        assert_eq!(
+            z_report_presentation_from_cache(&Value::Null, &Value::Null, "org", "branch", "term"),
+            serde_json::json!({})
         );
     }
 

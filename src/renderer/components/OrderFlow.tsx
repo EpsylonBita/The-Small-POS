@@ -1017,7 +1017,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
           method: paymentMethod,
           amount: pendingPayment.outstandingAmount,
           transactionRef: selection.transactionId ?? null,
-          idempotencyKey: selection.transactionId ?? null,
+          idempotencyKey: selection.idempotencyKey ?? selection.transactionId ?? null,
           settlementGeneration: pendingPayment.settlementGeneration,
           terminalTransactionId: null,
         }, async () => {
@@ -1029,7 +1029,9 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
               cashReceived: paymentMethod === 'cash' ? selection.cashReceived : undefined,
               changeGiven: paymentMethod === 'cash' ? selection.change : undefined,
               transactionRef: selection.transactionId,
-              idempotencyKey: selection.transactionId,
+              idempotencyKey: selection.idempotencyKey ?? selection.transactionId,
+                  currency: selection.currency,
+                  metadata: selection.metadata,
               collectOutstandingBalance: true,
               expectedSettlementGeneration: pendingPayment.settlementGeneration,
               staffId: pendingPayment.orderType === 'delivery' ? undefined : staff?.staffId,
@@ -1523,7 +1525,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
       const initialPayment =
         !isGhostOrder &&
         !isSplitPayment &&
-        (paymentMethod === 'cash' || paymentMethod === 'card' || paymentMethod === 'room_charge')
+        (paymentMethod === 'cash' || paymentMethod === 'card' || paymentMethod === 'room_charge' || paymentMethod === 'twint')
           ? {
               method: paymentMethod,
               payment_method: paymentMethod,
@@ -1531,6 +1533,9 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
               cashReceived: paymentMethod === 'cash' ? orderData.paymentData.cashReceived : undefined,
               changeGiven: paymentMethod === 'cash' ? orderData.paymentData.change : undefined,
               transactionRef: orderData.paymentData.transactionId,
+              idempotencyKey: orderData.paymentData.idempotencyKey,
+              currency: orderData.paymentData.currency,
+              metadata: orderData.paymentData.metadata,
               staffId: selectedOrderType === 'delivery' ? undefined : staff?.staffId,
               staffShiftId: selectedOrderType === 'delivery' ? undefined : activeShift?.id,
               tipAmount,
@@ -1565,7 +1570,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
       }
 
       const existingOrderId = orderData.paymentData?.existingOrderId;
-      if (existingOrderId && (paymentMethod === 'cash' || paymentMethod === 'card')) {
+      if (existingOrderId && (paymentMethod === 'cash' || paymentMethod === 'card' || paymentMethod === 'twint')) {
         // Existing-order guard: continue the modal's claim or take the order's
         // ordinary claim before the first await of this write.
         const givenOwner: OrdinaryCollectionOwner | null = orderData.paymentData?.ordinaryOwner ?? null;
@@ -1588,7 +1593,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
             method: paymentMethod,
             amount: total_amount,
             transactionRef: orderData.paymentData.transactionId ?? null,
-            idempotencyKey: null,
+            idempotencyKey: orderData.paymentData.idempotencyKey ?? null,
             settlementGeneration: null,
             terminalTransactionId: null,
           }, async () => {
@@ -1602,6 +1607,9 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
                 cashReceived: paymentMethod === 'cash' ? orderData.paymentData.cashReceived : undefined,
                 changeGiven: paymentMethod === 'cash' ? orderData.paymentData.change : undefined,
                 transactionRef: orderData.paymentData.transactionId,
+                idempotencyKey: orderData.paymentData.idempotencyKey,
+                currency: orderData.paymentData.currency,
+                metadata: orderData.paymentData.metadata,
                 staffId: selectedOrderType === 'delivery' ? undefined : staff?.staffId,
                 staffShiftId: selectedOrderType === 'delivery' ? undefined : activeShift?.id,
                 tipAmount,

@@ -1,3 +1,4 @@
+import twintLogo from '../../../../shared/payments/assets/twint-logo.png';
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { motion } from 'framer-motion';
@@ -302,6 +303,8 @@ const ReportsPage: React.FC = () => {
               <PaymentMethodChart
                 cashTotal={paymentBreakdown.cash.total}
                 cardTotal={paymentBreakdown.card.total}
+                twintTotal={paymentBreakdown.twint?.total}
+                otherTotal={paymentBreakdown.other?.total}
                 isDark={isDark}
                 currency={currency}
               />
@@ -317,6 +320,14 @@ const ReportsPage: React.FC = () => {
               />
             )}
           </div>
+
+          {Boolean(paymentBreakdown?.twint?.count || paymentBreakdown?.twint?.total) && (
+            <div data-payment-method="twint" className={`p-6 rounded-xl border ${isDark ? 'bg-gray-800/50 border-gray-700/50 text-white' : 'bg-white/80 border-gray-200/50 text-gray-900'}`}>
+              <img src={twintLogo} alt="TWINT" className="h-8 mb-4 rounded" />
+              <p className="text-3xl font-bold mb-2">{formatMoney(paymentBreakdown?.twint?.total ?? 0)}</p>
+              <p className="text-sm">{paymentBreakdown?.twint?.count ?? 0} {t('reports.payments.transactions')}</p>
+            </div>
+          )}
 
           {/* Additional Metrics Cards */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">

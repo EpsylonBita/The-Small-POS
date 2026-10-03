@@ -1,6 +1,8 @@
 import React from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import i18next from 'i18next';
+import toast from 'react-hot-toast';
+import {formatCurrency} from '../../../utils/format';
 import { I18nextProvider, useTranslation } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -44,6 +46,8 @@ import {
   UNSAVED_CHECKOUT_CHANGED_EVENT,
   announceUnsavedCheckoutChanged,
   useUnsavedCheckoutPayments,
+  useUnsavedChargedPayments,
+  announceSaveAgainResult,
 } from '../../../utils/unsavedPayments';
 import { UnsavedChargedPaymentBanner } from '../UnsavedChargedPaymentBanner';
 import { UnsettledPaymentBlockersPanel } from '../UnsettledPaymentBlockersPanel';
@@ -83,6 +87,48 @@ const orderRecord = {
   orderId: 'order-2',
   kind: 'single',
 };
+
+const manualRecord={...orderRecord,idempotencyKey:'original-twint',orderId:'original-order',kind:'manual_twint_payment',method:'twint',currency:'CHF',amount:999,amountCents:1200,manualReceiptConfirmed:true};
+
+function ExistingManualBanner() {
+  const {t}=useTranslation();
+  const unsaved=useUnsavedChargedPayments('original-order',true,t,(amount)=>`${amount.toFixed(2)} €`);
+  return <UnsavedChargedPaymentBanner payments={unsaved.payments} onSaveAgain={unsaved.saveAgain} isSaving={unsaved.isSaving}/>;
+}
+
+describe('retained manual TWINT banners and retry notices',()=>{
+  afterEach(cleanup);
+  it.each(Object.keys(LOCALES) as Lng[])('%s: existing-order receipt displays retained CHF cents and cashier wording',async(lng)=>{
+    const i18n=await createI18n(lng);
+    render(<I18nextProvider i18n={i18n}><UnsavedChargedPaymentBanner payments={[manualRecord]} onSaveAgain={vi.fn()}/></I18nextProvider>);
+    const banner=screen.getByTestId('unsaved-charged-payment-banner');
+    expect(banner.textContent).toContain('CHF');expect(banner.textContent).toContain('12.00');expect(banner.textContent).not.toContain('999');expect(banner.textContent).not.toContain('€');
+    expect(banner.textContent).toContain(i18n.t('twintPayment.receiptRecovery'));expect(banner.textContent).toContain(i18n.t('twintPayment.receiptConfirmedAt'));
+    expect(screen.getByRole('button',{name:i18n.t('twintPayment.saveOriginal')})).toBeInTheDocument();
+    cleanup();render(<I18nextProvider i18n={i18n}><UnsavedChargedPaymentBanner payments={[{...manualRecord,canSaveAgain:false}]} onSaveAgain={vi.fn()}/></I18nextProvider>);
+    expect(screen.getByText(i18n.t('twintPayment.receiptReconcile'))).toBeInTheDocument();expect(screen.queryByRole('button')).toBeNull();
+  });
+  it('existing-order thrown retry retains the original and never recommends a cash/card return',async()=>{
+    const i18n=await createI18n('en');mock.listUnsavedPayments.mockReset().mockResolvedValue({success:true,payments:[manualRecord]});mock.saveUnsavedPayments.mockReset().mockRejectedValue(new Error('ledger unavailable'));vi.mocked(toast.error).mockClear();
+    render(<I18nextProvider i18n={i18n}><ExistingManualBanner/></I18nextProvider>);
+    fireEvent.click(await screen.findByRole('button',{name:i18n.t('twintPayment.saveOriginal')}));
+    await waitFor(()=>expect(toast.error).toHaveBeenCalledWith(i18n.t('twintPayment.receiptRecovery'),expect.any(Object)));
+    expect(mock.saveUnsavedPayments).toHaveBeenCalledWith({orderId:'original-order'});expect(screen.getByTestId('unsaved-charged-payment-banner')).toBeInTheDocument();
+    expect(vi.mocked(toast.error).mock.calls.map(call=>String(call[0])).join(' ')).not.toMatch(/give.*money.*back|card was charged|provider approved/i);
+  });
+  it('lasting refusal asks for original-receipt review while ordinary refusal keeps its existing message',async()=>{
+    const i18n=await createI18n('en');vi.mocked(toast.error).mockClear();
+    expect(announceSaveAgainResult({saved:0,unsaved:[{...manualRecord,canSaveAgain:false}]},i18n.t,(amount)=>`${amount.toFixed(2)} €`)).toBe(false);
+    expect(toast.error).toHaveBeenCalledWith(i18n.t('twintPayment.receiptReconcile'),expect.any(Object));
+    vi.mocked(toast.error).mockClear();announceSaveAgainResult({saved:0,unsaved:[{...orderRecord,canSaveAgain:false}]},i18n.t,(amount)=>`${amount.toFixed(2)} €`);
+    expect(toast.error).toHaveBeenCalledWith(i18n.t('payment.notSaved.cannotSave',{amount:'13.00 €'}),expect.any(Object));
+  });
+  it('mixed currency holds show original rows without flattening TWINT into card/EUR money',async()=>{
+    const i18n=await createI18n('en');render(<I18nextProvider i18n={i18n}><UnsavedChargedPaymentBanner payments={[manualRecord,orderRecord]} onSaveAgain={vi.fn()}/></I18nextProvider>);
+    expect(screen.getByTestId('unsaved-charged-payment-banner').textContent).toContain('CHF');expect(screen.getByTestId('unsaved-charged-payment-banner').textContent).not.toContain('25.00');
+    expect(screen.getAllByRole('listitem')).toHaveLength(2);expect(screen.getByText(i18n.t('payment.notSaved.message',{amount:formatCurrency(13)}))).toBeInTheDocument();
+  });
+});
 
 function DashboardBanner() {
   const { t } = useTranslation();
@@ -190,6 +236,23 @@ const newOrderBlocker = (canSaveAgain: boolean): UnsettledPaymentBlocker => ({
 });
 
 describe('the Z blocker of a checkout charged and not saved', () => {
+  it.each(Object.keys(LOCALES) as Lng[])('%s: manual TWINT receipts use cashier confirmation and manager reconciliation words',async(lng)=>{
+    const i18n=await createI18n(lng);
+    for (const kind of ['manual_twint_checkout','manual_twint_payment']) {
+      const blocker=newOrderBlocker(true);blocker.paymentMethod='twint';blocker.unsavedPayment={...blocker.unsavedPayment!,method:'twint',kind,currency:'CHF'};
+      expect(getLocalizedPaymentBlockerReason(blocker,i18n.t)).toEqual(i18n.t('twintPayment.receiptRecovery'));
+      expect(getLocalizedPaymentBlockerFix(blocker,i18n.t)).toEqual(i18n.t('twintPayment.saveOriginal'));
+      blocker.unsavedPayment.canSaveAgain=false;
+      expect(getLocalizedPaymentBlockerFix(blocker,i18n.t)).toEqual(i18n.t('twintPayment.receiptReconcile'));
+    }
+  });
+  it('manual TWINT Z blocker keeps Save original and CHF but hides generic returned resolution',async()=>{
+    const i18n=await createI18n('en');const blocker=newOrderBlocker(true);blocker.paymentMethod='twint';blocker.unsavedPayment={...blocker.unsavedPayment!,method:'twint',kind:'manual_twint_payment',currency:'CHF',amount:999,amountCents:1200};
+    render(<I18nextProvider i18n={i18n}><UnsettledPaymentBlockersPanel blockers={[blocker]} onSaveUnsavedPayment={vi.fn()} onResolveUnsavedPayment={vi.fn()}/></I18nextProvider>);
+    expect(screen.getByRole('button',{name:i18n.t('twintPayment.saveOriginal')})).toBeInTheDocument();expect(screen.queryByRole('button',{name:i18n.t('paymentIntegrity.unsavedReturnedAction')})).toBeNull();
+    expect(screen.getByTestId(`unsaved-payment-${CHECKOUT_KEY}`).textContent).toContain(formatCurrency(12,'CHF'));
+    expect(screen.getByTestId(`unsaved-payment-${CHECKOUT_KEY}`).textContent).not.toContain('€');
+  });
   afterEach(() => cleanup());
 
   it.each(Object.keys(LOCALES) as Lng[])(

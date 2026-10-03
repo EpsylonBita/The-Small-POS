@@ -2363,6 +2363,51 @@ impl DispatchManager {
         parent: ParentTransition,
         observation: AttemptObservation,
     ) -> Result<ApplyResult, DispatchError> {
+        self.finalize_attempt_and_parent_inner(
+            conn,
+            lease,
+            attempt_id,
+            outcome,
+            parent,
+            observation,
+            false,
+        )
+    }
+
+    /// A timeout or ambiguous transport error belongs to the active Windows
+    /// executor, rather than to an asynchronous native/poll observation. Its
+    /// timestamp may have been captured before an in-flight start callback.
+    pub(crate) fn finalize_windows_ambiguity(
+        &self,
+        conn: &Connection,
+        lease: &mut AttemptLease,
+        attempt_id: Uuid,
+        reason: &str,
+        observation: AttemptObservation,
+    ) -> Result<ApplyResult, DispatchError> {
+        self.finalize_attempt_and_parent_inner(
+            conn,
+            lease,
+            attempt_id,
+            DispatchState::Unknown,
+            ParentTransition::ManualFailure {
+                error: reason.to_owned(),
+            },
+            observation,
+            true,
+        )
+    }
+
+    fn finalize_attempt_and_parent_inner(
+        &self,
+        conn: &Connection,
+        lease: &mut AttemptLease,
+        attempt_id: Uuid,
+        outcome: DispatchState,
+        parent: ParentTransition,
+        mut observation: AttemptObservation,
+        owned_windows_ambiguity: bool,
+    ) -> Result<ApplyResult, DispatchError> {
         if !Arc::ptr_eq(&self.lanes, &lease.lanes) {
             return Err(DispatchError::LeaseOwnershipMismatch);
         }
@@ -2387,6 +2432,43 @@ impl DispatchManager {
         let attempt = read_attempt(&tx, attempt_id)?.ok_or(DispatchError::MissingAttempt)?;
         if normalize_target(&attempt.identity.target_key)? != lease.normalized_key {
             return Err(DispatchError::AttemptTargetMismatch);
+        }
+        if owned_windows_ambiguity {
+            if attempt.transport != "windows" {
+                return Err(DispatchError::InvalidTarget(
+                    "Windows ambiguity requires a Windows attempt",
+                ));
+            }
+            if !matches!(
+                attempt.state,
+                DispatchState::Submitting
+                    | DispatchState::WindowsQueued
+                    | DispatchState::WindowsPrinting
+                    | DispatchState::Paused
+            ) || attempt.cancel_requested_at.is_some()
+                || attempt.cancel_confirmed_at.is_some()
+            {
+                return Ok(ApplyResult::NotApplied);
+            }
+            if lease.release_on_drop
+                || self
+                    .lanes
+                    .lock()
+                    .map_err(|_| DispatchError::LockPoisoned)?
+                    .get(&lease.normalized_key)
+                    != Some(&LaneBlock::Held(lease.token))
+            {
+                return Err(DispatchError::LaneBusy);
+            }
+            // BEGIN IMMEDIATE excludes a competing callback here. Advance only
+            // this owned terminal decision to the latest durable observation;
+            // native/poll/cancellation callers retain their original CAS fence.
+            if let Some(last_seen_at) = &attempt.last_seen_at {
+                let last_seen_at = DateTime::parse_from_rfc3339(last_seen_at)
+                    .map_err(|_| DispatchError::InvalidTarget("invalid attempt timestamp"))?
+                    .with_timezone(&Utc);
+                observation.now = observation.now.max(last_seen_at);
+            }
         }
         if !opens_circuit {
             let circuit_is_open = tx.query_row(
@@ -3143,6 +3225,59 @@ mod tests {
         )
         .unwrap();
         (manager, lease, attempt)
+    }
+
+    fn prepared_windows_attempt(
+        conn: &Connection,
+        job_id: &str,
+    ) -> (DispatchManager, AttemptLease, AttemptIdentity) {
+        insert_job(conn, job_id);
+        let manager = DispatchManager::isolated_for_test();
+        let target = PrinterTargetKey::WindowsQueue("Front".into());
+        let lease = manager.claim(target.clone()).unwrap();
+        let attempt = prepare_managed_attempt(
+            conn,
+            PrepareManagedAttempt {
+                local_job_id: job_id.into(),
+                printer_profile_id: "profile".into(),
+                target,
+                document_kind: "order_receipt".into(),
+                payload: vec![1, 2, 3],
+                render_profile_snapshot_json: r#"{"version":1}"#.into(),
+                now: at(1),
+            },
+        )
+        .unwrap();
+        begin_managed_submission(conn, attempt.attempt_id, at(2)).unwrap();
+        (manager, lease, attempt)
+    }
+
+    fn test_windows_start(conn: &Connection, attempt_id: Uuid, second: u32) {
+        assert_eq!(
+            persist_spool_started(
+                conn,
+                attempt_id,
+                &crate::windows_spooler::SpoolStarted {
+                    job_id: 606,
+                    printer_name: "Front".into(),
+                    document_name: read_attempt(conn, attempt_id)
+                        .unwrap()
+                        .unwrap()
+                        .document_name,
+                    submitted_at: at(second),
+                },
+            )
+            .unwrap(),
+            ApplyResult::Applied
+        );
+    }
+
+    fn windows_timeout_observation(second: u32) -> AttemptObservation {
+        AttemptObservation {
+            now: at(second),
+            last_error: Some("dispatch timeout; manual review required".into()),
+            ..AttemptObservation::default()
+        }
     }
 
     /// A leaked raw lane used to be a life sentence.
@@ -6590,6 +6725,406 @@ mod tests {
             next_retry_at.is_none(),
             "an ambiguous dispatch must never queue an automatic re-send"
         );
+    }
+
+    #[test]
+    fn owned_windows_timeout_finalizes_after_newer_spool_start() {
+        let conn = test_db();
+        let job_id = Uuid::new_v4().to_string();
+        let (manager, mut lease, attempt) = prepared_windows_attempt(&conn, &job_id);
+        let target = PrinterTargetKey::WindowsQueue("Front".into());
+
+        // Force the CI ordering without sleeps: the caller captures its timeout,
+        // then the native callback commits before the finalizer acquires SQLite.
+        let timeout_observation = windows_timeout_observation(3);
+        test_windows_start(&conn, attempt.attempt_id, 4);
+
+        // Untrusted asynchronous observations still lose their stale CAS.
+        assert_eq!(
+            transition_attempt(
+                &conn,
+                attempt.attempt_id,
+                DispatchState::Unknown,
+                observation(3)
+            )
+            .unwrap(),
+            ApplyResult::NotApplied
+        );
+        assert_eq!(
+            observe_attempt(
+                &conn,
+                attempt.attempt_id,
+                DispatchState::WindowsQueued,
+                observation(3)
+            )
+            .unwrap(),
+            ApplyResult::NotApplied
+        );
+        assert_eq!(
+            manager
+                .finalize_attempt_and_parent(
+                    &conn,
+                    &mut lease,
+                    attempt.attempt_id,
+                    DispatchState::Unknown,
+                    ParentTransition::ManualFailure {
+                        error: "stale native error".into()
+                    },
+                    windows_timeout_observation(3),
+                )
+                .unwrap(),
+            ApplyResult::NotApplied
+        );
+        assert_eq!(
+            manager
+                .finalize_windows_ambiguity(
+                    &conn,
+                    &mut lease,
+                    attempt.attempt_id,
+                    "manual review required",
+                    timeout_observation,
+                )
+                .unwrap(),
+            ApplyResult::Applied
+        );
+        let stored = read_attempt(&conn, attempt.attempt_id).unwrap().unwrap();
+        assert_eq!(stored.state, DispatchState::Unknown);
+        assert_eq!(stored.spool_job_id, Some(606));
+        assert_eq!(
+            stored.last_seen_at.as_deref(),
+            Some(timestamp(at(4)).as_str())
+        );
+        assert_parent_history_at(&conn, &job_id, "failed", &timestamp(at(4)));
+        let parent: (i64, Option<String>) = conn
+            .query_row(
+                "SELECT retry_count, next_retry_at FROM print_jobs WHERE id = ?1",
+                [&job_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(parent, (1, None));
+        let circuit: (String, String) = conn
+            .query_row(
+                "SELECT circuit_state, blocked_at FROM print_target_state WHERE target_key = ?1",
+                [normalize_target(&target).unwrap()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(circuit, ("open".into(), timestamp(at(4))));
+        assert_eq!(
+            manager
+                .accept_windows_handoff(&conn, &lease, attempt.attempt_id, "windows://late", at(5))
+                .unwrap(),
+            ApplyResult::NotApplied
+        );
+        assert_eq!(
+            read_attempt(&conn, attempt.attempt_id).unwrap().unwrap(),
+            stored
+        );
+        assert_parent_history_at(&conn, &job_id, "failed", &timestamp(at(4)));
+        assert!(matches!(
+            manager.claim(target),
+            Err(DispatchError::CircuitOpen)
+        ));
+    }
+
+    #[test]
+    fn owned_windows_timeout_preserves_exact_time_without_newer_observation() {
+        let conn = test_db();
+        let job_id = Uuid::new_v4().to_string();
+        let (manager, mut lease, attempt) = prepared_windows_attempt(&conn, &job_id);
+        assert_eq!(
+            manager
+                .finalize_windows_ambiguity(
+                    &conn,
+                    &mut lease,
+                    attempt.attempt_id,
+                    "manual review required",
+                    windows_timeout_observation(8),
+                )
+                .unwrap(),
+            ApplyResult::Applied
+        );
+        assert_parent_history_at(&conn, &job_id, "failed", &timestamp(at(8)));
+        assert_eq!(
+            read_attempt(&conn, attempt.attempt_id)
+                .unwrap()
+                .unwrap()
+                .last_seen_at,
+            Some(timestamp(at(8)))
+        );
+    }
+
+    #[test]
+    fn owned_windows_timeout_preserves_terminal_and_cancellation_states() {
+        for state in [
+            DispatchState::CancelRequested,
+            DispatchState::Cancelled,
+            DispatchState::SpoolCompleted,
+        ] {
+            let conn = test_db();
+            let job_id = Uuid::new_v4().to_string();
+            let (manager, mut lease, attempt) = prepared_windows_attempt(&conn, &job_id);
+            test_windows_start(&conn, attempt.attempt_id, 4);
+            if state == DispatchState::Cancelled {
+                transition_attempt(
+                    &conn,
+                    attempt.attempt_id,
+                    DispatchState::CancelRequested,
+                    observation(5),
+                )
+                .unwrap();
+            }
+            assert_eq!(
+                transition_attempt(&conn, attempt.attempt_id, state, observation(6)).unwrap(),
+                ApplyResult::Applied
+            );
+            let before = read_attempt(&conn, attempt.attempt_id).unwrap().unwrap();
+            assert_eq!(
+                manager
+                    .finalize_windows_ambiguity(
+                        &conn,
+                        &mut lease,
+                        attempt.attempt_id,
+                        "manual review required",
+                        windows_timeout_observation(3),
+                    )
+                    .unwrap(),
+                ApplyResult::NotApplied
+            );
+            assert_eq!(
+                read_attempt(&conn, attempt.attempt_id).unwrap().unwrap(),
+                before
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT status FROM print_jobs WHERE id = ?1",
+                    [&job_id],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+                "printing"
+            );
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM print_target_state", [], |row| row
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+        for parent_status in ["cancelled", "dispatched"] {
+            let conn = test_db();
+            let job_id = Uuid::new_v4().to_string();
+            let (manager, mut lease, attempt) = prepared_windows_attempt(&conn, &job_id);
+            test_windows_start(&conn, attempt.attempt_id, 4);
+            conn.execute(
+                "UPDATE print_jobs SET status = ?1 WHERE id = ?2",
+                params![parent_status, job_id],
+            )
+            .unwrap();
+            let before = read_attempt(&conn, attempt.attempt_id).unwrap().unwrap();
+            assert_eq!(
+                manager
+                    .finalize_windows_ambiguity(
+                        &conn,
+                        &mut lease,
+                        attempt.attempt_id,
+                        "manual review required",
+                        windows_timeout_observation(3)
+                    )
+                    .unwrap(),
+                ApplyResult::NotApplied
+            );
+            assert_eq!(
+                read_attempt(&conn, attempt.attempt_id).unwrap().unwrap(),
+                before
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT status FROM print_jobs WHERE id = ?1",
+                    [&job_id],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+                parent_status
+            );
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM print_target_state", [], |row| row
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn owned_windows_timeout_cannot_finalize_a_newer_attempt_epoch() {
+        let conn = test_db();
+        let job_id = Uuid::new_v4().to_string();
+        let (manager, mut lease, attempt_a) = prepared_windows_attempt(&conn, &job_id);
+        test_windows_start(&conn, attempt_a.attempt_id, 4);
+        conn.execute(
+            "UPDATE print_jobs SET status = 'pending' WHERE id = ?1",
+            [&job_id],
+        )
+        .unwrap();
+        let attempt_b = prepare_managed_attempt(
+            &conn,
+            PrepareManagedAttempt {
+                local_job_id: job_id.clone(),
+                printer_profile_id: "profile".into(),
+                target: PrinterTargetKey::WindowsQueue("Front".into()),
+                document_kind: "order_receipt".into(),
+                payload: vec![1, 2, 3],
+                render_profile_snapshot_json: r#"{"version":1}"#.into(),
+                now: at(5),
+            },
+        )
+        .unwrap();
+        begin_managed_submission(&conn, attempt_b.attempt_id, at(6)).unwrap();
+        let before_a = read_attempt(&conn, attempt_a.attempt_id).unwrap().unwrap();
+        let before_b = read_attempt(&conn, attempt_b.attempt_id).unwrap().unwrap();
+        assert_eq!(
+            manager
+                .finalize_windows_ambiguity(
+                    &conn,
+                    &mut lease,
+                    attempt_a.attempt_id,
+                    "manual review required",
+                    windows_timeout_observation(3)
+                )
+                .unwrap(),
+            ApplyResult::NotApplied
+        );
+        assert_eq!(
+            read_attempt(&conn, attempt_a.attempt_id).unwrap().unwrap(),
+            before_a
+        );
+        assert_eq!(
+            read_attempt(&conn, attempt_b.attempt_id).unwrap().unwrap(),
+            before_b
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT status FROM print_jobs WHERE id = ?1",
+                [&job_id],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "printing"
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM print_target_state", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn owned_windows_timeout_requires_live_matching_lease() {
+        let conn = test_db();
+        let job_id = Uuid::new_v4().to_string();
+        let (manager, mut lease, attempt) = prepared_windows_attempt(&conn, &job_id);
+        let stranger = DispatchManager::isolated_for_test();
+        assert!(matches!(
+            stranger.finalize_windows_ambiguity(
+                &conn,
+                &mut lease,
+                attempt.attempt_id,
+                "manual review required",
+                windows_timeout_observation(3)
+            ),
+            Err(DispatchError::LeaseOwnershipMismatch)
+        ));
+        let mut wrong_target = manager
+            .claim(PrinterTargetKey::WindowsQueue("Back".into()))
+            .unwrap();
+        assert!(matches!(
+            manager.finalize_windows_ambiguity(
+                &conn,
+                &mut wrong_target,
+                attempt.attempt_id,
+                "manual review required",
+                windows_timeout_observation(3)
+            ),
+            Err(DispatchError::AttemptTargetMismatch)
+        ));
+        lease.mark_terminal(DispatchState::TransportError).unwrap();
+        assert!(matches!(
+            manager.finalize_windows_ambiguity(
+                &conn,
+                &mut lease,
+                attempt.attempt_id,
+                "manual review required",
+                windows_timeout_observation(3)
+            ),
+            Err(DispatchError::LaneBusy)
+        ));
+        assert_eq!(
+            read_attempt(&conn, attempt.attempt_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            DispatchState::Submitting
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT status FROM print_jobs WHERE id = ?1",
+                [&job_id],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "printing"
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM print_target_state", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn owned_windows_timeout_rolls_back_parent_and_attempt_if_circuit_write_fails() {
+        let conn = test_db();
+        let job_id = Uuid::new_v4().to_string();
+        let (manager, mut lease, attempt) = prepared_windows_attempt(&conn, &job_id);
+        test_windows_start(&conn, attempt.attempt_id, 4);
+        let before = read_attempt(&conn, attempt.attempt_id).unwrap().unwrap();
+        conn.execute_batch("CREATE TRIGGER reject_timeout_circuit BEFORE INSERT ON print_target_state BEGIN SELECT RAISE(ABORT, 'circuit write failed'); END;").unwrap();
+        assert!(manager
+            .finalize_windows_ambiguity(
+                &conn,
+                &mut lease,
+                attempt.attempt_id,
+                "manual review required",
+                windows_timeout_observation(3)
+            )
+            .is_err());
+        assert_eq!(
+            read_attempt(&conn, attempt.attempt_id).unwrap().unwrap(),
+            before
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT status, retry_count FROM print_jobs WHERE id = ?1",
+                [&job_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            )
+            .unwrap(),
+            ("printing".into(), 0)
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM print_target_state", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert!(matches!(
+            manager.claim(PrinterTargetKey::WindowsQueue("Front".into())),
+            Err(DispatchError::LaneBusy)
+        ));
     }
 
     #[test]

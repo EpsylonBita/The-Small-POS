@@ -11938,6 +11938,7 @@ struct RemoteOrdersPageApply {
     newest_updated_at: Option<String>,
     newly_materialized_order_ids: Vec<String>,
     reconciled_order_events: Vec<(String, Option<String>)>,
+    confirmed_box_approval_order_ids: Vec<String>,
     error: Option<String>,
 }
 
@@ -11946,6 +11947,7 @@ fn apply_remote_orders_page(conn: &Connection, orders: Vec<Value>) -> RemoteOrde
     let mut newest_updated_at: Option<String> = None;
     let mut newly_materialized_order_ids: Vec<String> = Vec::new();
     let mut reconciled_order_events: Vec<(String, Option<String>)> = Vec::new();
+    let mut confirmed_box_approval_order_ids: Vec<String> = Vec::new();
     let mut page_error: Option<String> = None;
 
     for remote_order in orders {
@@ -12120,6 +12122,18 @@ fn apply_remote_orders_page(conn: &Connection, orders: Vec<Value>) -> RemoteOrde
                     Some(value) => serde_json::to_string(value).ok(),
                     None => None,
                 };
+                let remote_items_json =
+                    match crate::commands::orders::preserve_food_items_on_incomplete_snapshot(
+                        conn,
+                        &local_id,
+                        remote_items_json,
+                    ) {
+                        Ok(items) => items,
+                        Err(error) => {
+                            page_error = Some(error);
+                            break;
+                        }
+                    };
                 let remote_total = num_any(&remote_order, &["total_amount", "totalAmount"]);
                 let remote_subtotal = num_any(&remote_order, &["subtotal"]);
                 let remote_tax = num_any(&remote_order, &["tax_amount", "taxAmount"]);
@@ -12172,6 +12186,27 @@ fn apply_remote_orders_page(conn: &Connection, orders: Vec<Value>) -> RemoteOrde
                     }
                 };
                 if updated > 0 {
+                    if remote_items_json
+                        .as_deref()
+                        .is_some_and(crate::print::has_usable_food_order_items)
+                    {
+                        if let Err(error) =
+                            crate::commands::orders::release_food_item_waiting_prints(
+                                conn, &local_id,
+                            )
+                        {
+                            page_error = Some(error);
+                            break;
+                        }
+                    }
+                    if crate::commands::orders::should_print_box_acceptance_backflow(
+                        conn,
+                        &local_id,
+                        previous_status.as_deref(),
+                        &remote_order,
+                    ) {
+                        confirmed_box_approval_order_ids.push(local_id.clone());
+                    }
                     if local_order_has_completed_payment_rows(conn, &local_id).unwrap_or(false) {
                         if let Err(error) = recompute_local_order_payment_snapshot(
                             conn,
@@ -12224,7 +12259,34 @@ fn apply_remote_orders_page(conn: &Connection, orders: Vec<Value>) -> RemoteOrde
         newest_updated_at,
         newly_materialized_order_ids,
         reconciled_order_events,
+        confirmed_box_approval_order_ids,
         error: page_error,
+    }
+}
+
+fn enqueue_materialized_remote_order_prints(
+    db: &DbState,
+    local_id: &str,
+    bootstrap_active: bool,
+    skip_auto_print: bool,
+    auto_print_types: &[&str],
+    invalidator: &dyn crate::print::PrintQueueInvalidator,
+) {
+    let unconfirmed_box = db.conn.lock().ok().is_some_and(|conn| {
+        crate::commands::orders::skip_unconfirmed_box_arrival_print(&conn, local_id)
+    });
+    if bootstrap_active
+        || skip_auto_print
+        || unconfirmed_box
+        || !crate::print::is_print_action_enabled(db, "after_order")
+    {
+        return;
+    }
+    for entity_type in auto_print_types {
+        if let Err(error) = print::enqueue_print_job(db, entity_type, local_id, None, invalidator) {
+            warn!(order_id = %local_id, entity_type = %entity_type, error = %error,
+                "Failed to enqueue print job for newly materialized remote order");
+        }
     }
 }
 
@@ -12371,12 +12433,19 @@ async fn reconcile_remote_orders(
             newest_updated_at,
             newly_materialized_order_ids,
             reconciled_order_events,
+            confirmed_box_approval_order_ids,
             error: page_error,
         } = {
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
             apply_remote_orders_page(&conn, orders)
         };
         reconciled += page_reconciled;
+
+        if !bootstrap_active {
+            for local_id in confirmed_box_approval_order_ids {
+                crate::commands::orders::enqueue_after_approve_platform_prints(db, &local_id, app);
+            }
+        }
 
         for (local_id, status_event) in reconciled_order_events {
             if let Ok(order_json) = get_order_by_id(db, &local_id) {
@@ -12489,23 +12558,14 @@ async fn reconcile_remote_orders(
                 );
             }
 
-            if !bootstrap_active
-                && !skip_auto_print
-                && crate::print::is_print_action_enabled(db, "after_order")
-            {
-                for entity_type in auto_print_types {
-                    if let Err(error) =
-                        print::enqueue_print_job(db, entity_type, &local_id, None, app)
-                    {
-                        warn!(
-                            order_id = %local_id,
-                            entity_type = %entity_type,
-                            error = %error,
-                            "Failed to enqueue print job for newly materialized remote order"
-                        );
-                    }
-                }
-            }
+            enqueue_materialized_remote_order_prints(
+                db,
+                &local_id,
+                bootstrap_active,
+                skip_auto_print,
+                auto_print_types,
+                app,
+            );
         }
 
         // A row-apply failure was captured above (and already committed rows
@@ -13286,6 +13346,11 @@ fn sync_remote_order_snapshot_into_local(
             Value::String(raw) => raw.clone(),
             other => serde_json::to_string(other).unwrap_or_else(|_| "[]".to_string()),
         });
+    let items_json = crate::commands::orders::preserve_food_items_on_incomplete_snapshot(
+        conn,
+        local_order_id,
+        items_json,
+    )?;
     let total_amount = num_any(remote_order, &["total_amount", "totalAmount"]);
     let tax_amount = num_any(remote_order, &["tax_amount", "taxAmount"]);
     let subtotal = num_any(remote_order, &["subtotal"]);
@@ -13537,6 +13602,13 @@ fn sync_remote_order_snapshot_into_local(
     )
     .map_err(|e| format!("sync remote order snapshot into local cache: {e}"))?;
 
+    if items_json
+        .as_deref()
+        .is_some_and(crate::print::has_usable_food_order_items)
+    {
+        crate::commands::orders::release_food_item_waiting_prints(conn, local_order_id)?;
+    }
+
     // W6: inbound remote `payment_method` is consumed by sync payload
     // construction upstream but is no longer persisted locally (column
     // dropped in v55). Derived per read via `derive_payment_method`.
@@ -13562,6 +13634,122 @@ fn sync_remote_order_snapshot_into_local(
     }
 
     Ok(updated)
+}
+
+/// A print intent remains a targeted repair source even when the joined-order
+/// cursor has already passed the parent. Claims are persisted before network I/O.
+async fn hydrate_pending_food_print_items(db: &DbState) -> Result<usize, String> {
+    let targets: Vec<(String, String)> = {
+        let conn = db.conn.lock().map_err(|error| error.to_string())?;
+        let mut statement = conn.prepare(
+            "SELECT DISTINCT o.id, o.supabase_id FROM orders o JOIN print_jobs j ON j.entity_id = o.id
+             WHERE j.status = 'pending' AND j.document_snapshot_zlib IS NULL
+               AND j.warning_code = 'food_order_items_pending'
+               AND j.entity_type IN ('order_receipt', 'delivery_slip', 'kitchen_ticket', 'order_completed_receipt', 'order_canceled_receipt')
+               AND COALESCE(o.supabase_id, '') != ''
+               AND COALESCE(o.order_context, '') != 'repair_settlement'
+               AND (SELECT COUNT(*) FROM recovery_action_log a
+                    WHERE a.action_id = 'hydrate_food_print_items' AND a.entity_id = o.id
+                      AND json_extract(a.payload_json, '$.remoteOrderId') = o.supabase_id) < 6
+             ORDER BY o.id LIMIT 20",
+        ).map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?
+    };
+    let mut recovered = 0;
+    // Bound work per sync pass as well as total network attempts per identity.
+    let mut attempted = 0;
+    for (local_id, remote_id) in targets {
+        let claim = {
+            let conn = db.conn.lock().map_err(|error| error.to_string())?;
+            claim_food_print_item_hydration(&conn, &local_id, &remote_id)?
+        };
+        let Some(claim_id) = claim else { continue };
+        attempted += 1;
+        let result =
+            crate::commands::orders::fetch_order_items_for_local_cache(db, &local_id, false).await;
+        let ready = result
+            .as_ref()
+            .is_ok_and(|items| crate::print::has_usable_food_order_items(&items.to_string()));
+        let conn = db.conn.lock().map_err(|error| error.to_string())?;
+        conn.execute(
+            "UPDATE recovery_action_log SET success = ?1, message = ?2 WHERE id = ?3",
+            params![
+                ready,
+                if ready {
+                    "Structured food items recovered"
+                } else {
+                    "Structured food items still unavailable"
+                },
+                claim_id
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        recovered += usize::from(ready);
+        if attempted >= 2 {
+            break;
+        }
+    }
+    Ok(recovered)
+}
+
+fn claim_food_print_item_hydration(
+    conn: &Connection,
+    local_id: &str,
+    remote_id: &str,
+) -> Result<Option<String>, String> {
+    let Ok((organization_id, expected_branch, _)) =
+        crate::commands::orders::food_item_fetch_scope(conn)
+    else {
+        return Ok(None);
+    };
+    let row: Option<(String, String, String, Option<String>, Option<String>)> = conn.query_row(
+        "SELECT COALESCE(plugin, ''), COALESCE(supabase_id, ''), COALESCE(items, '[]'), branch_id, organization_id
+         FROM orders WHERE id = ?1 AND COALESCE(order_context, '') != 'repair_settlement'",
+        [local_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+    ).optional().map_err(|error| error.to_string())?;
+    let Some((plugin, stored_remote, items, branch, org)) = row else {
+        return Ok(None);
+    };
+    if !crate::print::is_food_delivery_plugin(&plugin)
+        || stored_remote != remote_id
+        || uuid::Uuid::parse_str(remote_id).is_err()
+        || crate::print::has_usable_food_order_items(&items)
+    {
+        return Ok(None);
+    }
+    if branch.as_deref() != Some(expected_branch.as_str())
+        || org
+            .as_deref()
+            .is_some_and(|org| !org.is_empty() && org != organization_id)
+    {
+        return Ok(None);
+    }
+    let (count, cooling): (i64, bool) = conn.query_row(
+        "SELECT COUNT(*), COALESCE(MAX(julianday(created_at)) > julianday('now', '-10 seconds'), 0)
+         FROM recovery_action_log WHERE action_id = 'hydrate_food_print_items' AND entity_id = ?1
+           AND json_extract(payload_json, '$.remoteOrderId') = ?2",
+        params![local_id, remote_id], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).map_err(|error| error.to_string())?;
+    if count >= 6 || cooling {
+        return Ok(None);
+    }
+    let claim_id = uuid::Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT INTO recovery_action_log (id, action_id, issue_code, entity_type, entity_id,
+         order_id, success, message, payload_json) VALUES (?1, 'hydrate_food_print_items',
+         'food_order_items_pending', 'order', ?2, ?2, 0, 'Authorized item hydration started', ?3)",
+        params![
+            claim_id,
+            local_id,
+            serde_json::json!({"remoteOrderId": remote_id, "version": 1}).to_string()
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(Some(claim_id))
 }
 
 fn extract_remote_orders_from_response(response: &Value) -> Vec<Value> {
@@ -14907,6 +15095,10 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
 
     let reconciled_orders = reconcile_remote_orders(db, &admin_url, &api_key, app).await?;
     total_progress += reconciled_orders.reconciled;
+    match hydrate_pending_food_print_items(db).await {
+        Ok(recovered) => total_progress += recovered,
+        Err(error) => warn!(error = %error, "Pending food-print item hydration deferred"),
+    }
     if let Err(error) = finalize_sync_bootstrap_mode_after_remote_catchup(db, &reconciled_orders) {
         warn!(error = %error, "Failed to clear sync bootstrap mode after remote catch-up");
     }
@@ -15818,6 +16010,7 @@ fn normalize_payment_method_for_sync(raw_method: Option<&str>) -> Option<String>
         "" => return None,
         "cash" => "cash",
         "card" => "card",
+        "twint" => "twint",
         "digital_wallet" | "wallet" | "digital-wallet" => "digital_wallet",
         "room_charge" | "room-charge" => "room_charge",
         _ => "other",
@@ -16644,7 +16837,9 @@ async fn sync_order_batch_via_direct_api(
         let raw_payment_method =
             str_any(&data, &["payment_method"]).unwrap_or_else(|| "cash".to_string());
         let payment_method_normalized = match raw_payment_method.to_lowercase().as_str() {
-            "cash" | "card" | "digital_wallet" | "other" | "room_charge" => raw_payment_method,
+            "cash" | "card" | "digital_wallet" | "other" | "room_charge" | "twint" => {
+                raw_payment_method
+            }
             "room-charge" => "room_charge".to_string(),
             "pending" => "cash".to_string(),
             _ => "other".to_string(),
@@ -18632,6 +18827,16 @@ async fn sync_payment_items(
             "tip_recipient_staff_id": tip_recipient_staff_id,
             "tip_recipient_staff_shift_id": tip_recipient_staff_shift_id,
         });
+
+        if payment_method == "twint" {
+            if let Some(metadata) = data.get("metadata").and_then(Value::as_object) {
+                for key in ["provider", "confirmation", "confirmation_action", "qr_mode"] {
+                    if let Some(value) = metadata.get(key) {
+                        body["metadata"][key] = value.clone();
+                    }
+                }
+            }
+        }
 
         // Include payment_items if present in the sync payload (split-by-items)
         if let Some(items_arr) = data.get("items") {
@@ -25001,6 +25206,262 @@ mod tests {
         assert_eq!(
             total_orders, 2,
             "retry must add exactly row B, no duplicates"
+        );
+    }
+
+    #[test]
+    fn food_item_readiness_empty_sync_preserves_hydrated_list_and_other_updates() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (id, supabase_id, items, total_amount, total_amount_cents,
+            status, payment_status, sync_status, plugin, created_at, updated_at)
+            VALUES ('food-sync', 'food-remote', ?1, 10, 1000, 'pending', 'pending', 'synced',
+            'efood', '2026-10-01T10:00:00Z', '2026-10-01T10:00:00Z')",
+            [r#"[{"name":"Waffle","quantity":1,"price":8},{"name":"Drink","quantity":1,"price":2}]"#],
+        )
+        .unwrap();
+        let original: String = conn
+            .query_row(
+                "SELECT items FROM orders WHERE id = 'food-sync'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let applied = apply_remote_orders_page(
+            &conn,
+            vec![serde_json::json!({
+                "id":"food-remote", "plugin":"efood", "items":[], "status":"confirmed",
+                "payment_status":"pending", "total_amount":11, "updated_at":"2026-10-02T10:00:00Z"
+            })],
+        );
+        assert!(applied.error.is_none(), "{:?}", applied.error);
+        let state: (String, String, f64) = conn
+            .query_row(
+                "SELECT items, status, total_amount FROM orders WHERE id = 'food-sync'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(state, (original, "confirmed".into(), 11.0));
+    }
+
+    #[test]
+    fn food_item_readiness_hydration_claims_are_durable_capped_and_identity_scoped() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let remote_id = uuid::Uuid::new_v4().to_string();
+        conn.execute("INSERT INTO orders (id, supabase_id, items, total_amount, total_amount_cents,
+            status, sync_status, plugin, branch_id, created_at, updated_at)
+            VALUES ('food-claim', ?1, '[]', 10, 1000, 'confirmed', 'synced', 'efood', 'expected-branch', datetime('now'), datetime('now'))",
+            [&remote_id]).unwrap();
+        assert!(claim_food_print_item_hydration(
+            &conn,
+            "food-claim",
+            &uuid::Uuid::new_v4().to_string()
+        )
+        .unwrap()
+        .is_none());
+        assert!(
+            claim_food_print_item_hydration(&conn, "food-claim", &remote_id)
+                .unwrap()
+                .is_none()
+        );
+        for (key, value) in [
+            ("organization_id", "food-org"),
+            ("branch_id", "expected-branch"),
+            ("terminal_id", "food-terminal"),
+        ] {
+            db::set_setting(&conn, "terminal", key, value).unwrap();
+        }
+        for _ in 0..6 {
+            assert!(
+                claim_food_print_item_hydration(&conn, "food-claim", &remote_id)
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(
+                claim_food_print_item_hydration(&conn, "food-claim", &remote_id)
+                    .unwrap()
+                    .is_none()
+            );
+            conn.execute(
+                "UPDATE recovery_action_log SET created_at = datetime('now', '-20 seconds')",
+                [],
+            )
+            .unwrap();
+        }
+        assert!(
+            claim_food_print_item_hydration(&conn, "food-claim", &remote_id)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM recovery_action_log WHERE action_id = 'hydrate_food_print_items'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            6
+        );
+        let new_remote_id = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "UPDATE orders SET supabase_id = ?1, plugin = 'pos' WHERE id = 'food-claim'",
+            [&new_remote_id],
+        )
+        .unwrap();
+        assert!(
+            claim_food_print_item_hydration(&conn, "food-claim", &new_remote_id)
+                .unwrap()
+                .is_none()
+        );
+        conn.execute(
+            "UPDATE orders SET plugin = 'efood', branch_id = 'other-branch' WHERE id = 'food-claim'",
+            [],
+        )
+        .unwrap();
+        db::set_setting(&conn, "terminal", "branch_id", "expected-branch").unwrap();
+        assert!(
+            claim_food_print_item_hydration(&conn, "food-claim", &new_remote_id)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_apply_remote_orders_page_box_new_arrival_waits_for_own_confirmation_before_print() {
+        for (plugin, is_test) in [("box", false), ("box", true), ("efood", false)] {
+            let db = test_db();
+            let mut remote = serde_json::json!({ "id": "box-new-remote", "order_number": "BOX-FIXTURE", "items": [{ "name": "Fixture", "quantity": 1, "price": 7.95 }], "total_amount": 7.95, "status": "pending", "payment_status": "pending", "payment_method": "card", "order_type": "delivery", "plugin": plugin, "platform": plugin, "is_test": is_test, "integration_environment": "production", "updated_at": "2026-10-01T10:00:00Z", "ghost_metadata": { "food_delivery": { "platform": plugin }, "_the_small_box_decision": { "version": 1, "state": "pending", "action": "accepted" } } });
+            let initial = apply_remote_orders_page(&db.conn.lock().unwrap(), vec![remote.clone()]);
+            assert!(initial.error.is_none());
+            assert_eq!(initial.newly_materialized_order_ids.len(), 1);
+            let local_id = &initial.newly_materialized_order_ids[0];
+            enqueue_materialized_remote_order_prints(
+                &db,
+                local_id,
+                false,
+                false,
+                print::auto_print_entity_types_for_order_type("delivery"),
+                &crate::print::NoopPrintQueueInvalidator,
+            );
+            let print_count = || {
+                db.conn
+                    .lock()
+                    .unwrap()
+                    .query_row("SELECT COUNT(*) FROM print_jobs", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .unwrap()
+            };
+            assert_eq!(print_count(), if plugin == "efood" { 1 } else { 0 });
+            remote["status"] = serde_json::json!("confirmed");
+            remote["updated_at"] = serde_json::json!("2026-10-01T10:01:00Z");
+            remote["ghost_metadata"]["_the_small_box_decision"]["state"] =
+                serde_json::json!("confirmed");
+            let accepted = apply_remote_orders_page(&db.conn.lock().unwrap(), vec![remote]);
+            assert!(accepted.error.is_none());
+            if plugin == "box" {
+                assert_eq!(
+                    accepted.confirmed_box_approval_order_ids,
+                    vec![local_id.clone()]
+                );
+                for id in accepted.confirmed_box_approval_order_ids {
+                    crate::commands::orders::enqueue_after_approve_platform_prints(
+                        &db,
+                        &id,
+                        &crate::print::NoopPrintQueueInvalidator,
+                    );
+                }
+                assert_eq!(print_count(), if is_test { 0 } else { 1 });
+            } else {
+                assert!(accepted.confirmed_box_approval_order_ids.is_empty());
+                assert_eq!(print_count(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn test_apply_remote_orders_page_box_confirmed_acceptance_prints_once_after_pending_unknown() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("INSERT INTO orders (id, supabase_id, items, total_amount, total_amount_cents, status, payment_status, sync_status, created_at, updated_at, plugin, order_type) VALUES ('box-late', 'box-remote', '[]', 7.95, 795, 'pending', 'pending', 'synced', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'box', 'delivery')", []).unwrap();
+        }
+        let mut remote = serde_json::json!({ "id": "box-remote", "status": "pending", "payment_status": "pending", "updated_at": "2026-01-02T00:00:00Z", "ghost_metadata": { "_the_small_box_decision": { "version": 1, "state": "pending", "action": "accepted" } } });
+        let unknown = apply_remote_orders_page(&db.conn.lock().unwrap(), vec![remote.clone()]);
+        assert!(unknown.error.is_none());
+        assert!(unknown.confirmed_box_approval_order_ids.is_empty());
+        assert_eq!(
+            db.conn
+                .lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM print_jobs", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        remote["status"] = serde_json::json!("confirmed");
+        remote["updated_at"] = serde_json::json!("2026-01-03T00:00:00Z");
+        remote["ghost_metadata"]["_the_small_box_decision"]["state"] =
+            serde_json::json!("confirmed");
+        let confirmed = apply_remote_orders_page(&db.conn.lock().unwrap(), vec![remote.clone()]);
+        assert!(confirmed.error.is_none());
+        assert_eq!(confirmed.confirmed_box_approval_order_ids, vec!["box-late"]);
+        for id in confirmed.confirmed_box_approval_order_ids {
+            crate::commands::orders::enqueue_after_approve_platform_prints(
+                &db,
+                &id,
+                &crate::print::NoopPrintQueueInvalidator,
+            );
+        }
+        assert_eq!(db.conn.lock().unwrap().query_row("SELECT COUNT(*) FROM print_jobs WHERE entity_type = 'delivery_slip' AND entity_id = 'box-late'", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+        db.conn
+            .lock()
+            .unwrap()
+            .execute("UPDATE print_jobs SET status = 'printed'", [])
+            .unwrap();
+        crate::commands::orders::enqueue_after_approve_platform_prints(
+            &db,
+            "box-late",
+            &crate::print::NoopPrintQueueInvalidator,
+        );
+        assert_eq!(
+            db.conn
+                .lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM print_jobs", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        remote["updated_at"] = serde_json::json!("2026-01-04T00:00:00Z");
+        let repeated = apply_remote_orders_page(&db.conn.lock().unwrap(), vec![remote]);
+        assert!(repeated.confirmed_box_approval_order_ids.is_empty());
+        db.conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM print_jobs", [])
+            .unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute("UPDATE orders SET is_test = 1", [])
+            .unwrap();
+        crate::commands::orders::enqueue_after_approve_platform_prints(
+            &db,
+            "box-late",
+            &crate::print::NoopPrintQueueInvalidator,
+        );
+        assert_eq!(
+            db.conn
+                .lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM print_jobs", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
         );
     }
 

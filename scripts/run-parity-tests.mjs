@@ -196,6 +196,7 @@ await build({
   format: 'esm',
   platform: 'node',
   packages: 'external',
+  loader: { '.png': 'dataurl' },
   target: 'node20',
   sourcemap: 'inline',
   logLevel: 'silent',

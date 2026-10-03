@@ -281,7 +281,7 @@ test('Caller ID card is terminal-owned and never reads the billing-owned server 
   // The assignment (entitlement check + queries + lease signature on the server) is loaded by the
   // dedicated hook, never inside the 30 s plugins refresh.
   const loadStart = source.indexOf('const loadIntegrations = useCallback(');
-  const loadEnd = source.indexOf('}, [refreshMyDataReportingFlag]);', loadStart);
+  const loadEnd = source.indexOf('}, [closeConfigForms, getSetting, refreshMyDataReportingFlag]);', loadStart);
   assert.ok(loadStart > 0 && loadEnd > loadStart, 'loadIntegrations body found');
   assert.doesNotMatch(source.slice(loadStart, loadEnd), /callerIdGetServerConfig|caller-id\/config/);
   const configCalls = source.match(/callerIdGetServerConfig\(\)/g) ?? [];

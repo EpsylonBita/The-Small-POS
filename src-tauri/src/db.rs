@@ -47,7 +47,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-pub(crate) const CURRENT_SCHEMA_VERSION: i32 = 94;
+pub(crate) const CURRENT_SCHEMA_VERSION: i32 = 95;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -389,22 +389,29 @@ where
     let needs_v79_backfill = needs_v79_repair_aggregate_backfill(conn, current)?;
     let needs_v81_backfill = needs_v81_payment_identity_backfill(conn, current)?;
     let needs_v83_backfill = needs_v83_gift_payment_backfill(conn, current)?;
+    let needs_v95_backfill = needs_v95_twint_payment_backfill(conn, current)?;
     if current == CURRENT_SCHEMA_VERSION
         && !needs_v56_backfill
         && !needs_v79_backfill
         && !needs_v81_backfill
         && !needs_v83_backfill
+        && !needs_v95_backfill
     {
         info!("Database schema up to date (v{current})");
         return Ok(());
     }
-    let pending_migrations = computed_pending_migrations(
+    let mut pending_migrations = computed_pending_migrations(
         current,
         needs_v56_backfill,
         needs_v79_backfill,
         needs_v81_backfill,
         needs_v83_backfill,
     );
+    if needs_v95_backfill {
+        pending_migrations.push(95);
+        pending_migrations.sort_unstable();
+        pending_migrations.dedup();
+    }
 
     if current > 0 {
         let db_path = resolve_main_path(conn)
@@ -726,6 +733,9 @@ where
     if current < 94 {
         run_migration_tx(conn, 94, migrate_v94)?;
     }
+    if current < 95 || needs_v95_backfill {
+        run_migration_tx(conn, 95, migrate_v95)?;
+    }
 
     Ok(())
 }
@@ -1023,6 +1033,8 @@ fn migrate_v84(conn: &Connection) -> Result<(), String> {
 const ORDER_PAYMENT_METHOD_CHECK: &str = "CHECK (method IN ('cash', 'card', 'other'))";
 const ORDER_PAYMENT_METHOD_CHECK_WITH_GIFT_CARD: &str =
     "CHECK (method IN ('cash', 'card', 'other', 'gift_card'))";
+const ORDER_PAYMENT_METHOD_CHECK_WITH_TWINT: &str =
+    "CHECK (method IN ('cash', 'card', 'other', 'gift_card', 'twint'))";
 
 fn has_known_order_payment_method_check(sql: &str, check: &str) -> bool {
     // Recognize the actual v4/v36 method declaration, not quoted data or a
@@ -1044,7 +1056,8 @@ pub(crate) fn order_payments_support_gift_cards(conn: &Connection) -> Result<boo
         .optional()
         .map_err(|e| format!("inspect gift payment capability: {e}"))?;
     Ok(sql.is_some_and(|sql| {
-        has_known_order_payment_method_check(&sql, ORDER_PAYMENT_METHOD_CHECK_WITH_GIFT_CARD)
+        (has_known_order_payment_method_check(&sql, ORDER_PAYMENT_METHOD_CHECK_WITH_GIFT_CARD)
+            || has_known_order_payment_method_check(&sql, ORDER_PAYMENT_METHOD_CHECK_WITH_TWINT))
             && !sql.contains(ORDER_PAYMENT_METHOD_CHECK)
     }))
 }
@@ -1147,6 +1160,139 @@ fn widen_order_payment_methods_for_gift_cards(conn: &Connection) -> Result<(), S
             Err(error)
         }
     }
+}
+
+fn widen_order_payment_methods_for_twint(conn: &Connection) -> Result<(), String> {
+    let read_sql = || -> Result<Option<String>, String> {
+        conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'order_payments'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("read order_payments schema: {e}"))
+    };
+    let sql = read_sql()?.ok_or("order_payments table is missing")?;
+    if has_known_order_payment_method_check(&sql, ORDER_PAYMENT_METHOD_CHECK_WITH_TWINT) {
+        return Ok(());
+    }
+    let old_check =
+        if has_known_order_payment_method_check(&sql, ORDER_PAYMENT_METHOD_CHECK_WITH_GIFT_CARD) {
+            ORDER_PAYMENT_METHOD_CHECK_WITH_GIFT_CARD
+        } else if has_known_order_payment_method_check(&sql, ORDER_PAYMENT_METHOD_CHECK) {
+            ORDER_PAYMENT_METHOD_CHECK
+        } else {
+            return Err("order_payments method CHECK has an unexpected shape".to_string());
+        };
+    let widened = sql.replacen(old_check, ORDER_PAYMENT_METHOD_CHECK_WITH_TWINT, 1);
+
+    conn.execute_batch("SAVEPOINT v95_order_payment_methods;")
+        .map_err(|e| format!("begin v95 schema edit: {e}"))?;
+    let edited = (|| -> Result<(), String> {
+        let cookie: i64 = conn
+            .query_row("PRAGMA schema_version", [], |row| row.get(0))
+            .map_err(|e| format!("read schema cookie: {e}"))?;
+        conn.execute_batch("PRAGMA writable_schema = ON;")
+            .map_err(|e| format!("enable schema edit: {e}"))?;
+        let bumped = conn
+            .execute(
+                "UPDATE sqlite_master SET sql = ?1 WHERE type = 'table' AND name = 'order_payments'",
+                params![widened],
+            )
+            .map_err(|e| format!("edit order_payments schema: {e}"))
+            .and_then(|rows| match rows {
+                1 => conn
+                    .execute_batch(&format!("PRAGMA schema_version = {};", cookie + 1))
+                    .map_err(|e| format!("bump schema cookie: {e}")),
+                other => Err(format!("edited {other} order_payments schema rows")),
+            });
+        conn.execute_batch("PRAGMA writable_schema = OFF;")
+            .map_err(|e| format!("disable schema edit: {e}"))?;
+        bumped?;
+        // The bumped cookie makes this connection reload the schema; reading
+        // the table proves the edited definition parses.
+        conn.query_row("SELECT 1 FROM order_payments LIMIT 1", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .optional()
+        .map_err(|e| format!("read order_payments after schema edit: {e}"))?;
+        match read_sql()? {
+            Some(sql)
+                if sql == widened
+                    && has_known_order_payment_method_check(
+                        &sql,
+                        ORDER_PAYMENT_METHOD_CHECK_WITH_TWINT,
+                    ) =>
+            {
+                Ok(())
+            }
+            _ => Err("order_payments schema edit did not persist".to_string()),
+        }
+    })();
+    match edited {
+        Ok(()) => conn
+            .execute_batch("RELEASE v95_order_payment_methods;")
+            .map_err(|e| format!("commit v95 schema edit: {e}")),
+        Err(error) => {
+            let _ = conn.execute_batch("PRAGMA writable_schema = OFF;");
+            let _ = conn.execute_batch(
+                "ROLLBACK TO v95_order_payment_methods; RELEASE v95_order_payment_methods;",
+            );
+            Err(error)
+        }
+    }
+}
+
+pub(crate) fn order_payments_support_twint(conn: &Connection) -> Result<bool, String> {
+    let sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE name='order_payments' AND type='table'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    Ok(sql.is_some_and(|sql| {
+        has_known_order_payment_method_check(&sql, ORDER_PAYMENT_METHOD_CHECK_WITH_TWINT)
+    }))
+}
+
+fn needs_v95_twint_payment_backfill(conn: &Connection, current: i32) -> Result<bool, String> {
+    if current < 95 || order_payments_support_twint(conn)? {
+        return Ok(false);
+    }
+    let sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE name='order_payments' AND type='table'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let known_check = sql.is_some_and(|sql| {
+        has_known_order_payment_method_check(&sql, ORDER_PAYMENT_METHOD_CHECK_WITH_GIFT_CARD)
+            || has_known_order_payment_method_check(&sql, ORDER_PAYMENT_METHOD_CHECK)
+    });
+    let defensive = conn
+        .db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_DEFENSIVE)
+        .map_err(|e| e.to_string())?;
+    Ok(known_check && !defensive)
+}
+
+fn migrate_v95(conn: &Connection) -> Result<(), String> {
+    // Like v83, an unrecognized or defensive legacy CHECK keeps ordinary
+    // tenders usable. TWINT admission separately checks the actual capability.
+    if let Err(error) = widen_order_payment_methods_for_twint(conn) {
+        warn!("TWINT payment capability is unavailable: {error}");
+    }
+    conn.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS idx_order_payments_twint_idempotency ON order_payments(idempotency_key) WHERE method = 'twint' AND idempotency_key IS NOT NULL;")
+        .map_err(|e| format!("v95 idempotency index: {e}"))?;
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_version (version) VALUES (95)",
+        [],
+    )
+    .map_err(|e| format!("v95 schema version: {e}"))?;
+    Ok(())
 }
 
 /// The `status` CHECK of `order_payments` as migration v36 wrote it. v90
@@ -1822,7 +1968,7 @@ enum PreMigrationRecoveryMode {
 }
 
 const NATIVE_REPAIR_ATOMIC_MIGRATION_ALLOWLIST: &[i32] = &[
-    56, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94,
+    56, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95,
 ];
 
 fn computed_pending_migrations(
@@ -9228,15 +9374,17 @@ mod tests {
     fn migration_v79_native_repair_atomic_only_policy_uses_computed_explicit_allowlist() {
         assert_eq!(
             computed_pending_migrations(75, true, false, false, false),
-            vec![56, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94]
+            vec![
+                56, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95
+            ]
         );
         assert_eq!(
             computed_pending_migrations(78, false, false, false, false),
-            vec![79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94]
+            vec![79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
         );
         assert_eq!(
             computed_pending_migrations(79, false, true, false, false),
-            vec![79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94]
+            vec![79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
         );
         // A v81 whose columns went missing is re-run even though it is no longer
         // the newest version and MAX(schema_version) says the database is current.
@@ -9254,6 +9402,9 @@ mod tests {
         // v83 only widens the `order_payments.method` CHECK text; it reads and
         // writes no native repair state.
         assert!(native_repair_atomic_only_allowed(82, &[83]));
+        // v95 performs the same atomic method-CHECK widening as v83 and adds
+        // an idempotency index; it does not read or write native repair state.
+        assert!(native_repair_atomic_only_allowed(94, &[95]));
         assert!(native_repair_atomic_only_allowed(80, &[81]));
 
         // v82 only rewrites non-repair `parity_sync_queue` bookkeeping: its
@@ -9299,6 +9450,50 @@ mod tests {
         assert!(!native_repair_atomic_only_allowed(79, &[]));
     }
 
+    #[test]
+    fn twint_v95_migration_preserves_cash_and_gift_capability() {
+        let conn = test_db();
+        run_migrations_for_test(&conn);
+        gift_v83_seed_ordinary_payment(&conn);
+        gift_v83_rewind_check(&conn, ORDER_PAYMENT_METHOD_CHECK_WITH_GIFT_CARD);
+        migrate_v95(&conn).unwrap();
+        assert!(order_payments_support_twint(&conn).unwrap());
+        assert!(order_payments_support_gift_cards(&conn).unwrap());
+        conn.execute("INSERT INTO order_payments(id,order_id,method,amount,status,created_at,updated_at) VALUES ('twint-v95','v83-order','twint',5,'completed','now','now')", []).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM order_payments", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn twint_v95_unknown_check_keeps_ordinary_tenders_usable_without_repeated_schema_edit() {
+        let conn = test_db();
+        run_migrations_for_test(&conn);
+        gift_v83_seed_ordinary_payment(&conn);
+        gift_v83_rewind_check(
+            &conn,
+            "CHECK (method IN ('cash','card','other')) /* 'twint' */",
+        );
+        migrate_v95(&conn).unwrap();
+        assert!(!order_payments_support_twint(&conn).unwrap());
+        assert!(!needs_v95_twint_payment_backfill(&conn, 95).unwrap());
+        conn.execute(
+            "UPDATE order_payments SET method='card' WHERE id='v83-cash'",
+            [],
+        )
+        .unwrap();
+        assert!(conn
+            .execute(
+                "UPDATE order_payments SET method='twint' WHERE id='v83-cash'",
+                []
+            )
+            .is_err());
+        assert_eq!(pragma_val(&conn, "writable_schema"), "0");
+    }
+
     fn gift_v83_rewind_check(conn: &Connection, replacement: &str) {
         let sql: String = conn
             .query_row(
@@ -9307,18 +9502,19 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(
-            sql.matches(ORDER_PAYMENT_METHOD_CHECK_WITH_GIFT_CARD)
-                .count(),
-            1
-        );
+        let original_check = if sql.contains(ORDER_PAYMENT_METHOD_CHECK_WITH_TWINT) {
+            ORDER_PAYMENT_METHOD_CHECK_WITH_TWINT
+        } else {
+            ORDER_PAYMENT_METHOD_CHECK_WITH_GIFT_CARD
+        };
+        assert_eq!(sql.matches(original_check).count(), 1);
         let cookie: i64 = conn
             .query_row("PRAGMA schema_version", [], |row| row.get(0))
             .unwrap();
         conn.execute_batch("PRAGMA writable_schema=ON;").unwrap();
         conn.execute(
             "UPDATE sqlite_master SET sql=?1 WHERE name='order_payments' AND type='table'",
-            [sql.replacen(ORDER_PAYMENT_METHOD_CHECK_WITH_GIFT_CARD, replacement, 1)],
+            [sql.replacen(original_check, replacement, 1)],
         )
         .unwrap();
         conn.execute_batch(&format!(
@@ -9491,7 +9687,7 @@ mod tests {
         // guard trigger; it reads and writes no native repair state.
         assert_eq!(
             computed_pending_migrations(85, false, false, false, false),
-            vec![86, 87, 88, 89, 90, 91, 92, 93, 94]
+            vec![86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
         );
         assert!(native_repair_atomic_only_allowed(85, &[86]));
     }
@@ -9502,7 +9698,7 @@ mod tests {
         // guard triggers; it reads and writes no native repair state.
         assert_eq!(
             computed_pending_migrations(86, false, false, false, false),
-            vec![87, 88, 89, 90, 91, 92, 93, 94]
+            vec![87, 88, 89, 90, 91, 92, 93, 94, 95]
         );
         assert!(native_repair_atomic_only_allowed(86, &[87]));
         assert!(native_repair_atomic_only_allowed(85, &[86, 87]));
@@ -9608,7 +9804,7 @@ mod tests {
         // state.
         assert_eq!(
             computed_pending_migrations(87, false, false, false, false),
-            vec![88, 89, 90, 91, 92, 93, 94]
+            vec![88, 89, 90, 91, 92, 93, 94, 95]
         );
         assert!(native_repair_atomic_only_allowed(87, &[88]));
         assert!(native_repair_atomic_only_allowed(86, &[87, 88]));
@@ -9648,7 +9844,7 @@ mod tests {
         gift_v83_rewind_check(&conn, ORDER_PAYMENT_METHOD_CHECK);
         assert_eq!(
             computed_pending_migrations(83, false, false, false, true),
-            vec![83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94]
+            vec![83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
         );
         let error = run_migrations_with_preflight(
             &conn,

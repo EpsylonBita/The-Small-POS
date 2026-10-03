@@ -3335,6 +3335,14 @@ fn select_ready_pending_jobs_after(
     Ok(rows)
 }
 
+#[cfg(test)]
+std::thread_local! {
+    // The job-specific signal is transferred explicitly to its scoped executor;
+    // unrelated jobs and parallel tests never share a deadline override.
+    static TEST_WINDOWS_DISPATCH_DEADLINE: std::cell::RefCell<Option<(String, std::sync::mpsc::Receiver<()>)>> = const { std::cell::RefCell::new(None) };
+    static TEST_EXECUTOR_DISPATCH_DEADLINE: std::cell::RefCell<Option<std::sync::mpsc::Receiver<()>>> = const { std::cell::RefCell::new(None) };
+}
+
 /// Run a blocking hardware-dispatch closure under a hard wall-clock timeout.
 ///
 /// `print_raw_to_windows` (the default Windows spooler transport) has no timeout
@@ -3357,6 +3365,16 @@ where
         // If the receiver already timed out and was dropped, this send is a
         // harmless no-op.
         let _ = tx.send(f());
+    });
+    #[cfg(test)]
+    let timeout = TEST_EXECUTOR_DISPATCH_DEADLINE.with(|slot| match slot.borrow_mut().take() {
+        Some(signal) => {
+            signal
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("test must signal the dispatch deadline after native start");
+            std::time::Duration::ZERO
+        }
+        None => timeout,
     });
     match rx.recv_timeout(timeout) {
         Ok(value) => Ok(value),
@@ -6010,6 +6028,34 @@ pub(crate) fn is_food_delivery_plugin(plugin: &str) -> bool {
     crate::platforms::is_external_delivery_platform(plugin)
 }
 
+/// Only structured rows can establish food-print readiness. Notes and generated
+/// fallback text are deliberately not a source of products.
+pub(crate) fn has_usable_food_order_items(raw: &str) -> bool {
+    serde_json::from_str::<Value>(raw)
+        .ok()
+        .is_some_and(|value| {
+            value.as_array().is_some_and(|items| {
+                !items.is_empty()
+                    && items.iter().all(|item| {
+                        food_item_display_name(item).is_some()
+                            && item
+                                .get("quantity")
+                                .and_then(parse_number)
+                                .is_some_and(|quantity| quantity.is_finite() && quantity > 0.0)
+                    })
+            })
+        })
+}
+
+fn food_item_display_name(item: &Value) -> Option<&str> {
+    item.get("name")
+        .or_else(|| item.get("itemName"))
+        .or_else(|| item.get("menu_item_name"))
+        .or_else(|| item.get("title"))
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+}
+
 /// The rider-facing 4-digit code from ghost_metadata.food_delivery — the
 /// number efood's own slip prints huge («#4545») and riders match orders by.
 fn food_delivery_short_code(ghost_metadata_json: &str) -> Option<String> {
@@ -7021,6 +7067,25 @@ fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &st
         cash_sales,
         drawer_cash_sales,
         card_sales,
+        twint_sales: number_from_paths(
+            payload,
+            &[
+                "/sales/twintSales",
+                "/daySummary/twintTotal",
+                "/paymentsBreakdown/twint/total",
+            ],
+        )
+        .unwrap_or(0.0),
+        twint_payment_count: payload
+            .pointer("/paymentsBreakdown/twint/count")
+            .and_then(Value::as_i64)
+            .unwrap_or_default(),
+        twint_plugin_enabled: payload
+            .pointer("/presentation/twintPluginEnabled")
+            .and_then(Value::as_bool),
+        delivery_module_enabled: payload
+            .pointer("/presentation/deliveryModuleEnabled")
+            .and_then(Value::as_bool),
         platform_online_sales: number_from_paths(
             payload,
             &[
@@ -7106,6 +7171,7 @@ fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &st
                             .pointer("/orders/cardAmount")
                             .and_then(Value::as_f64)
                             .unwrap_or(0.0),
+                        twint_amount: number_from_paths(s, &["/orders/twintAmount"]).unwrap_or(0.0),
                         total_amount: s
                             .pointer("/orders/totalAmount")
                             .and_then(Value::as_f64)
@@ -7261,6 +7327,25 @@ fn build_z_report_doc_with_conn(
         cash_sales,
         drawer_cash_sales: number_from_paths(&rj, &["/cashDrawer/cashSales"]),
         card_sales,
+        twint_sales: number_from_paths(
+            &rj,
+            &[
+                "/sales/twintSales",
+                "/daySummary/twintTotal",
+                "/paymentsBreakdown/twint/total",
+            ],
+        )
+        .unwrap_or(0.0),
+        twint_payment_count: rj
+            .pointer("/paymentsBreakdown/twint/count")
+            .and_then(Value::as_i64)
+            .unwrap_or_default(),
+        twint_plugin_enabled: rj
+            .pointer("/presentation/twintPluginEnabled")
+            .and_then(Value::as_bool),
+        delivery_module_enabled: rj
+            .pointer("/presentation/deliveryModuleEnabled")
+            .and_then(Value::as_bool),
         platform_online_sales: number_from_paths(
             &rj,
             &[
@@ -7376,6 +7461,7 @@ fn build_z_report_doc_with_conn(
                             .pointer("/orders/cardAmount")
                             .and_then(Value::as_f64)
                             .unwrap_or(0.0),
+                        twint_amount: number_from_paths(s, &["/orders/twintAmount"]).unwrap_or(0.0),
                         total_amount: s
                             .pointer("/orders/totalAmount")
                             .and_then(Value::as_f64)
@@ -9271,6 +9357,9 @@ fn prepare_frozen_attempt_with_hooks(
             // never proof re-read afterwards and attached to its bytes.
             let (document, gift_close_binding) =
                 build_document_and_gift_binding_for_job(db, entity_type, entity_id, payload_json)?;
+            if defer_incomplete_food_print(db, job_id, entity_type, entity_id, &document)? {
+                return Ok(None);
+            }
             #[cfg(test)]
             gift_close_capture_hook::run(db);
             sanitize_path_segment("entity_type", entity_type)?;
@@ -9500,6 +9589,86 @@ fn prepare_frozen_attempt_with_hooks(
     }))
 }
 
+/// A fresh food document waits before profile association, rendering, freezing
+/// or claiming transport. Stored snapshots take the earlier immutable branch.
+fn defer_incomplete_food_print(
+    db: &DbState,
+    job_id: &str,
+    entity_type: &str,
+    entity_id: &str,
+    document: &ReceiptDocument,
+) -> Result<bool, String> {
+    if !matches!(
+        entity_type,
+        "order_receipt"
+            | "delivery_slip"
+            | "kitchen_ticket"
+            | "order_completed_receipt"
+            | "order_canceled_receipt"
+    ) {
+        return Ok(false);
+    }
+    let items = match document {
+        ReceiptDocument::OrderReceipt(doc) | ReceiptDocument::DeliverySlip(doc) => &doc.items,
+        ReceiptDocument::KitchenTicket(doc) => &doc.items,
+        _ => return Ok(false),
+    };
+    let conn = lock_conn_recovering(db);
+    let row: Option<(String, String, String)> = conn
+        .query_row(
+            "SELECT COALESCE(plugin, ''), COALESCE(items, '[]'), COALESCE(supabase_id, '')
+         FROM orders WHERE id = ?1 AND COALESCE(order_context, '') != 'repair_settlement'",
+            [entity_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(|error| format!("read food print readiness: {error}"))?;
+    let Some((plugin, raw_items, remote_id)) = row else {
+        return Ok(false);
+    };
+    if !is_food_delivery_plugin(&plugin) {
+        return Ok(false);
+    }
+    // Compare the actual built projection too: a UI cache fill between the
+    // document read and this check must not authorize an older empty/placeholder doc.
+    let source = serde_json::from_str::<Value>(&raw_items).ok();
+    let matches_source = source
+        .as_ref()
+        .and_then(Value::as_array)
+        .is_some_and(|rows| {
+            rows.len() == items.len()
+                && rows.iter().zip(items).all(|(row, item)| {
+                    food_item_display_name(row) == Some(item.name.as_str())
+                        && row.get("quantity").and_then(parse_number) == Some(item.quantity)
+                        && parse_item_total(row) == item.total
+                })
+        });
+    if has_usable_food_order_items(&raw_items) && matches_source {
+        crate::commands::orders::release_food_item_waiting_prints(&conn, entity_id)?;
+        return Ok(false);
+    }
+    let attempts: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM recovery_action_log WHERE action_id = 'hydrate_food_print_items'
+         AND entity_id = ?1 AND json_extract(payload_json, '$.remoteOrderId') = ?2",
+            params![entity_id, remote_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("read food item hydration attempts: {error}"))?;
+    let message = if attempts >= 6 {
+        "Food order items are still unavailable after automatic recovery. Open this order to refresh its items, then retry printing."
+    } else {
+        "Waiting for structured food order items. Automatic recovery will retry; open this order to refresh its items if it remains pending."
+    };
+    conn.execute(
+        "UPDATE print_jobs SET next_retry_at = datetime('now', ?1),
+         warning_code = 'food_order_items_pending', warning_message = ?2, updated_at = datetime('now')
+         WHERE id = ?3 AND status = 'pending' AND document_snapshot_zlib IS NULL",
+        params![if attempts >= 6 { "+60 seconds" } else { "+10 seconds" }, message, job_id],
+    ).map_err(|error| format!("defer incomplete food print: {error}"))?;
+    Ok(true)
+}
+
 fn execute_raw_attempt(
     db: &DbState,
     manager: &DispatchManager,
@@ -9716,14 +9885,11 @@ fn execute_windows_attempt(
         }
         Ok(Err(error)) => {
             let _ = manager
-                .finalize_attempt_and_parent(
+                .finalize_windows_ambiguity(
                     &lock_conn_recovering(db),
                     &mut attempt.lease,
                     attempt.identity.attempt_id,
-                    DispatchState::Unknown,
-                    ParentTransition::ManualFailure {
-                        error: MANUAL_RECOVERY_ERROR.into(),
-                    },
+                    MANUAL_RECOVERY_ERROR,
                     AttemptObservation {
                         now: Utc::now(),
                         last_error: Some(format!("{error}. {MANUAL_RECOVERY_ERROR}")),
@@ -9734,14 +9900,11 @@ fn execute_windows_attempt(
         }
         Err(timeout_error) => {
             let _ = manager
-                .finalize_attempt_and_parent(
+                .finalize_windows_ambiguity(
                     &lock_conn_recovering(db),
                     &mut attempt.lease,
                     attempt.identity.attempt_id,
-                    DispatchState::Unknown,
-                    ParentTransition::ManualFailure {
-                        error: MANUAL_RECOVERY_ERROR.into(),
-                    },
+                    MANUAL_RECOVERY_ERROR,
                     AttemptObservation {
                         now: Utc::now(),
                         last_error: Some(format!("{timeout_error}. {MANUAL_RECOVERY_ERROR}")),
@@ -9894,16 +10057,37 @@ fn process_pending_jobs_with_adapters_outcome(
         let drawer = SystemManagedDrawerTransport;
         for attempt in prepared {
             let worker_spooler = Arc::clone(&spooler);
-            workers.push(scope.spawn(move || match attempt.target {
-                printers::ResolvedPrinterTarget::WindowsQueue { .. } => execute_windows_attempt(
-                    db,
-                    manager,
-                    worker_spooler,
-                    &drawer,
-                    windows_timeout,
-                    attempt,
-                ),
-                _ => execute_raw_attempt(db, manager, raw, &drawer, attempt),
+            #[cfg(test)]
+            let test_deadline = TEST_WINDOWS_DISPATCH_DEADLINE.with(|slot| {
+                let mut slot = slot.borrow_mut();
+                if matches!(
+                    attempt.target,
+                    printers::ResolvedPrinterTarget::WindowsQueue { .. }
+                ) && slot
+                    .as_ref()
+                    .is_some_and(|(job_id, _)| job_id == &attempt.identity.local_job_id)
+                {
+                    slot.take().map(|(_, signal)| signal)
+                } else {
+                    None
+                }
+            });
+            workers.push(scope.spawn(move || {
+                #[cfg(test)]
+                TEST_EXECUTOR_DISPATCH_DEADLINE.with(|slot| *slot.borrow_mut() = test_deadline);
+                match attempt.target {
+                    printers::ResolvedPrinterTarget::WindowsQueue { .. } => {
+                        execute_windows_attempt(
+                            db,
+                            manager,
+                            worker_spooler,
+                            &drawer,
+                            windows_timeout,
+                            attempt,
+                        )
+                    }
+                    _ => execute_raw_attempt(db, manager, raw, &drawer, attempt),
+                }
             }));
         }
         for worker in workers {
@@ -10608,6 +10792,33 @@ mod tests {
     mod gift_close_print {
         use super::*;
         include!("print_gift_close_tests.rs");
+    }
+
+    #[test]
+    fn twint_z_reprint_uses_saved_amount_and_presentation_not_live_settings() {
+        let db = test_db();
+        let frozen = serde_json::json!({"sales":{"twintSales":25},"paymentsBreakdown":{"twint":{"count":1,"total":25}},"presentation":{"twintPluginEnabled":true,"deliveryModuleEnabled":false},"staffReports":[{"staffName":"Cashier","role":"cashier","orders":{"cashAmount":10,"cardAmount":20,"twintAmount":25,"totalAmount":55}}]});
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("INSERT INTO staff_shifts(id,staff_id,role_type,status,check_in_time,created_at,updated_at) VALUES('shift','staff','cashier','closed','2026-10-02T09:00:00Z','now','now')",[]).unwrap();
+            conn.execute("INSERT INTO z_reports(id,shift_id,branch_id,terminal_id,report_date,generated_at,report_json,created_at,updated_at) VALUES('twint-frozen','shift','branch','term','2026-10-02','2026-10-02T18:00:00Z',?1,'now','now')",params![frozen.to_string()]).unwrap();
+            db::set_setting(
+                &conn,
+                "local",
+                "admin_api_get::/api/pos/integrations",
+                r#"{"data":{"success":true,"integrations":[]}}"#,
+            )
+            .unwrap();
+        }
+        let doc = build_z_report_doc(&db, "twint-frozen").unwrap();
+        assert_eq!(doc.twint_sales, 25.0);
+        assert_eq!(doc.twint_payment_count, 1);
+        assert_eq!(doc.twint_plugin_enabled, Some(true));
+        assert_eq!(doc.delivery_module_enabled, Some(false));
+        assert_eq!(doc.staff_reports[0].twint_amount, 25.0);
+        let preview = build_z_report_doc_from_payload(&db, &frozen, "preview");
+        assert_eq!(preview.twint_sales, doc.twint_sales);
+        assert_eq!(preview.twint_plugin_enabled, doc.twint_plugin_enabled);
     }
 
     fn test_db() -> DbState {
@@ -14851,6 +15062,266 @@ mod tests {
     }
 
     #[test]
+    fn food_item_readiness_defers_without_freezing_then_prints_once() {
+        for entity_type in ["order_receipt", "delivery_slip", "kitchen_ticket"] {
+            for raw_items in ["[]", "null", "\"[]\"", "[null]"] {
+                let db = test_db();
+                let job_id = Uuid::new_v4().to_string();
+                {
+                    let conn = db.conn.lock().unwrap();
+                    insert_receipt_order(&conn, "food-wait", "F-5604", 10.0);
+                    conn.execute(
+                        "UPDATE orders SET plugin = 'efood', supabase_id = ?1, items = ?2,
+                         notes = ?3, special_instructions = ?4 WHERE id = 'food-wait'",
+                        params![
+                            Uuid::new_v4().to_string(),
+                            raw_items,
+                            "Πολλά σχόλια για την παραγγελία 🙂❤️👍🏽\nκαι δεύτερη γραμμή",
+                            "Πολλά σχόλια\n--- Order Items ---\nWaffle x1"
+                        ],
+                    )
+                    .unwrap();
+                    insert_managed_network_profile(
+                        &conn,
+                        "food-profile",
+                        "printer.local",
+                        9100,
+                        true,
+                    );
+                    conn.execute(
+                        "UPDATE printer_profiles SET role = ?1 WHERE id = 'food-profile'",
+                        [if entity_type == "kitchen_ticket" {
+                            "kitchen"
+                        } else {
+                            "receipt"
+                        }],
+                    )
+                    .unwrap();
+                    conn.execute(
+                        "INSERT INTO print_jobs (id, entity_type, entity_id, status, created_at, updated_at)
+                         VALUES (?1, ?2, 'food-wait', 'pending', datetime('now'), datetime('now'))",
+                        params![job_id, entity_type],
+                    ).unwrap();
+                }
+                let data_dir =
+                    std::env::temp_dir().join(format!("food-readiness-{}", Uuid::new_v4()));
+                let raw = CapturingManagedRaw::default();
+                let spooler: Arc<dyn WindowsSpooler> = Arc::new(FakeWindowsSpooler::new(73));
+                let manager = DispatchManager::isolated_for_test();
+                assert_eq!(
+                    process_pending_jobs_with_adapters(
+                        &db,
+                        &data_dir,
+                        &manager,
+                        &raw,
+                        Arc::clone(&spooler),
+                        Duration::from_secs(10)
+                    )
+                    .unwrap(),
+                    1
+                );
+                assert!(raw.calls.lock().unwrap().is_empty());
+                {
+                    let conn = db.conn.lock().unwrap();
+                    let state: (String, i64, Option<Vec<u8>>, i64) = conn
+                        .query_row(
+                            "SELECT status, retry_count, document_snapshot_zlib,
+                         (SELECT COUNT(*) FROM print_job_attempts WHERE print_job_id = ?1)
+                         FROM print_jobs WHERE id = ?1",
+                            [&job_id],
+                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                        )
+                        .unwrap();
+                    assert_eq!(state, ("pending".into(), 0, None, 0));
+                    assert_eq!(
+                        conn.query_row(
+                            "SELECT warning_code FROM print_jobs WHERE id = ?1",
+                            [&job_id],
+                            |row| row.get::<_, String>(0)
+                        )
+                        .unwrap(),
+                        "food_order_items_pending"
+                    );
+                    conn.execute("UPDATE orders SET items = ?1 WHERE id = 'food-wait'", [
+                        r#"[{"name":"Waffle","quantity":1,"price":8,"total_price":8,"notes":"χωρίς ζάχαρη","customizations":{"modifiers":[{"name":"σοκολάτα","quantity":1,"price":0.5}]}},{"name":"Drink","quantity":1,"price":2,"total_price":2}]"#
+                    ]).unwrap();
+                    conn.execute(
+                        "UPDATE print_jobs SET next_retry_at = NULL WHERE id = ?1",
+                        [&job_id],
+                    )
+                    .unwrap();
+                }
+                let document = build_document_for_job(&db, entity_type, "food-wait", None).unwrap();
+                let items = match &document {
+                    ReceiptDocument::OrderReceipt(doc) | ReceiptDocument::DeliverySlip(doc) => {
+                        &doc.items
+                    }
+                    ReceiptDocument::KitchenTicket(doc) => &doc.items,
+                    _ => unreachable!(),
+                };
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0].name, "Waffle");
+                assert_eq!(
+                    (items[0].quantity, items[0].total, items[1].total),
+                    (1.0, 8.0, 2.0)
+                );
+                assert_eq!(items[0].note.as_deref(), Some("χωρίς ζάχαρη"));
+                assert_eq!(items[0].customizations[0].name, "σοκολάτα");
+                assert_eq!(items[0].customizations[0].price, Some(0.5));
+                match &document {
+                    ReceiptDocument::OrderReceipt(doc) | ReceiptDocument::DeliverySlip(doc) => {
+                        assert_eq!(
+                            doc.order_notes,
+                            vec![
+                                "Πολλά σχόλια για την παραγγελία 🙂❤️👍🏽\nκαι δεύτερη γραμμή",
+                                "Πολλά σχόλια"
+                            ]
+                        );
+                        assert!(doc
+                            .totals
+                            .iter()
+                            .any(|total| total.label == "TOTAL" && total.amount == 10.0));
+                    }
+                    ReceiptDocument::KitchenTicket(doc) => {
+                        assert_eq!(doc.special_instructions.as_deref(), Some("Πολλά σχόλια"));
+                    }
+                    _ => unreachable!(),
+                }
+                assert!(!serde_json::to_string(&document)
+                    .unwrap()
+                    .contains("Order Items"));
+                assert_eq!(
+                    process_pending_jobs_with_adapters(
+                        &db,
+                        &data_dir,
+                        &manager,
+                        &raw,
+                        Arc::clone(&spooler),
+                        Duration::from_secs(10)
+                    )
+                    .unwrap(),
+                    1
+                );
+                assert_eq!(
+                    process_pending_jobs_with_adapters(
+                        &db,
+                        &data_dir,
+                        &manager,
+                        &raw,
+                        spooler,
+                        Duration::from_secs(10)
+                    )
+                    .unwrap(),
+                    0
+                );
+                assert_eq!(raw.calls.lock().unwrap().len(), 1);
+                let _ = std::fs::remove_dir_all(data_dir);
+            }
+        }
+    }
+
+    #[test]
+    fn food_item_readiness_notes_and_exhaustion_preserve_separate_products_and_pending_intent() {
+        let db = test_db();
+        let job_id = Uuid::new_v4().to_string();
+        let remote_id = Uuid::new_v4().to_string();
+        {
+            let conn = db.conn.lock().unwrap();
+            insert_receipt_order(&conn, "food-notes", "F-Notes", 10.0);
+            conn.execute(
+                "UPDATE orders SET plugin = 'efood', supabase_id = ?1, items = '[null]' WHERE id = 'food-notes'",
+                [&remote_id],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO print_jobs (id, entity_type, entity_id, status, created_at, updated_at)
+                VALUES (?1, 'delivery_slip', 'food-notes', 'pending', datetime('now'), datetime('now'))", [&job_id]).unwrap();
+            for _ in 0..6 {
+                conn.execute("INSERT INTO recovery_action_log (id, action_id, issue_code, entity_id, payload_json)
+                    VALUES (?1, 'hydrate_food_print_items', 'food_order_items_pending', 'food-notes', ?2)",
+                    params![Uuid::new_v4().to_string(), serde_json::json!({"remoteOrderId":remote_id,"version":1}).to_string()]).unwrap();
+            }
+        }
+        let incomplete = build_document_for_job(&db, "delivery_slip", "food-notes", None).unwrap();
+        assert!(defer_incomplete_food_print(
+            &db,
+            &job_id,
+            "delivery_slip",
+            "food-notes",
+            &incomplete
+        )
+        .unwrap());
+        {
+            let conn = db.conn.lock().unwrap();
+            let warning: (String, String, i64, Option<Vec<u8>>) = conn.query_row(
+                "SELECT status, warning_message, retry_count, document_snapshot_zlib FROM print_jobs WHERE id = ?1",
+                [&job_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            ).unwrap();
+            assert_eq!(
+                (warning.0.as_str(), warning.2, warning.3),
+                ("pending", 0, None)
+            );
+            assert!(warning.1.contains("Open this order to refresh its items"));
+            conn.execute("UPDATE orders SET items = ?1 WHERE id = 'food-notes'", [
+                r#"[{"name":"Waffle","quantity":1,"price":8,"total_price":8},{"name":"Drink","quantity":1,"price":2,"total_price":2}]"#,
+            ]).unwrap();
+        }
+        // A cache fill after document construction cannot authorize the older
+        // placeholder projection. Rebuilding below is the only ready path.
+        assert!(defer_incomplete_food_print(
+            &db,
+            &job_id,
+            "delivery_slip",
+            "food-notes",
+            &incomplete,
+        )
+        .unwrap());
+        for note in [
+            String::new(),
+            "No sugar".into(),
+            "Πολλά σχόλια σε πολλές γραμμές\n"
+                .repeat(12)
+                .trim_end()
+                .to_string(),
+            "Ελληνικά 🙂😀❤️👍🏽👨‍👩‍👧‍👦🇬🇷1️⃣ \"quoted\" \\ escaped\nάλλη γραμμή".into(),
+        ] {
+            {
+                let conn = db.conn.lock().unwrap();
+                conn.execute(
+                    "UPDATE orders SET notes = ?1, special_instructions = ?2 WHERE id = 'food-notes'",
+                    params![
+                        note,
+                        format!("{note}\n--- Order Items ---\nWaffle x1 @8; Drink x1 @2")
+                    ],
+                )
+                .unwrap();
+            }
+            let document =
+                build_document_for_job(&db, "delivery_slip", "food-notes", None).unwrap();
+            let ReceiptDocument::DeliverySlip(doc) = &document else {
+                unreachable!()
+            };
+            assert_eq!(doc.items.len(), 2);
+            assert_eq!((doc.items[0].total, doc.items[1].total), (8.0, 2.0));
+            assert_eq!(
+                doc.order_notes,
+                if note.is_empty() { vec![] } else { vec![note] }
+            );
+            assert!(!serde_json::to_string(doc).unwrap().contains("Order Items"));
+            assert!(!defer_incomplete_food_print(
+                &db,
+                &job_id,
+                "delivery_slip",
+                "food-notes",
+                &document
+            )
+            .unwrap());
+        }
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM print_jobs WHERE id = ?1 AND status = 'pending' AND warning_code IS NULL AND next_retry_at IS NULL",
+            [&job_id], |row| row.get::<_, i64>(0)).unwrap(), 1);
+    }
+
+    #[test]
     fn managed_worker_persists_snapshot_and_attempt_before_any_transport_call() {
         let db = test_db();
         let job_id = Uuid::new_v4().to_string();
@@ -15315,7 +15786,7 @@ mod tests {
 
         {
             let conn = db.conn.lock().unwrap();
-            conn.execute("UPDATE orders SET total_amount = 999, total_amount_cents = 99900 WHERE id = 'frozen-order'", []).unwrap();
+            conn.execute("UPDATE orders SET total_amount = 999, total_amount_cents = 99900, plugin = 'efood', items = '[]' WHERE id = 'frozen-order'", []).unwrap();
             conn.execute(
                 "UPDATE printer_profiles
                  SET printer_name = 'mutated.local',
@@ -16123,7 +16594,12 @@ mod tests {
         let worker_manager = Arc::clone(&manager);
         let worker_spooler: Arc<dyn WindowsSpooler> = late.clone();
         let output_dir = db_dir.join("output");
+        let timeout_job_id = job_id.clone();
+        let (timeout_tx, timeout_rx) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
+            TEST_WINDOWS_DISPATCH_DEADLINE.with(|slot| {
+                *slot.borrow_mut() = Some((timeout_job_id, timeout_rx));
+            });
             process_pending_jobs_with_adapters(
                 &worker_db,
                 &output_dir,
@@ -16133,14 +16609,15 @@ mod tests {
                 Duration::from_secs(1),
             )
         });
-        // 30s, not 5: test-side patience only — on a loaded CI runner the
-        // detached native thread can take that long to be scheduled (fourth
-        // member of the print-concurrency flake family, run 33092046600).
+        // Fire the deadline only after the real callback has persisted Windows
+        // ownership. Keep the fake blocked until all durable assertions finish.
         if !late.wait_until_started(Duration::from_secs(30)) {
+            let _ = timeout_tx.send(());
             late.release();
             let worker_result = worker.join().unwrap();
             panic!("Windows start callback did not finish before timeout: {worker_result:?}");
         }
+        timeout_tx.send(()).unwrap();
         assert_eq!(worker.join().unwrap().unwrap(), 1);
         {
             let conn = db.conn.lock().unwrap();

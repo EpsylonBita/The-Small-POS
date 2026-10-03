@@ -36,13 +36,15 @@ import { useModules } from '../contexts/module-context';
 import { useShift } from '../contexts/shift-context';
 import { useOnBarcodeScan } from '../contexts/barcode-scanner-context';
 import { formatCurrency, formatDate } from '../utils/format';
-import { posApiFetch, posApiGet, posApiPost } from '../utils/api-helpers';
+import { posApiFetch, posApiGet, posApiPatch, posApiPost } from '../utils/api-helpers';
 import { extractSupplierImportFile } from '../utils/supplier-import-parser';
 import { renderModalPortal } from '../utils/render-modal-portal';
 import PurchaseOrdersTab from '../components/procurement/PurchaseOrdersTab';
 import CaptureScanSettingsModal from '../components/suppliers/CaptureScanSettingsModal';
 import CapturePagesPanel from '../components/suppliers/CapturePagesPanel';
-import CaptureQueuePanel from '../components/suppliers/CaptureQueuePanel';
+import CaptureQueuePanel, {
+  type CaptureAutomation,
+} from '../components/suppliers/CaptureQueuePanel';
 import { CAPTURE_REVIEW_REQUEST_EVENT } from '../components/CaptureNotificationManager';
 import {
   acquireFromScanner,
@@ -93,13 +95,22 @@ interface Supplier {
 
 type InvoiceStatus = 'unpaid' | 'paid' | 'overdue' | 'cancelled';
 type PaymentStatus = InvoiceStatus | 'partial';
-type PaymentMethod = 'cash' | 'bank_transfer' | 'check' | 'credit_card' | 'other';
+/**
+ * `unknown` is not a choice anybody makes at this till: it is the method a
+ * payment carries when the supplier's own statement implied it and the shop
+ * never stated how it was paid (supplier-invoice-automation §4.5, M3). It has
+ * a plain-language label and no option in the payment form.
+ */
+type PaymentMethod = 'cash' | 'bank_transfer' | 'check' | 'credit_card' | 'other' | 'unknown';
+/** Where a payment came from. `reversal` is the contra row that undoes one. */
+type PaymentOrigin = 'manual' | 'statement' | 'reversal';
 
 interface SupplierPayment {
   id: string;
   amount: number | string;
   payment_date: string;
   payment_method: PaymentMethod | string;
+  origin?: PaymentOrigin | string;
   payment_number?: string | null;
   reference_number?: string | null;
   notes?: string | null;
@@ -257,6 +268,45 @@ const getInvoicePaymentStatus = (invoice: Invoice): PaymentStatus => {
 const getInvoiceDisplayDate = (invoice: Invoice): string =>
   invoice.invoice_date || invoice.created_at || invoice.due_date;
 
+/**
+ * The plain-language label for one payment row.
+ *
+ * Two of these never come from a person at this till (spec
+ * `.claude/specs/supplier-invoice-automation`, design §4.5, §4.13; R16.3): a
+ * payment the supplier's own statement implied carries no stated method, and a
+ * payment that was undone is a contra row beside the original it reverses.
+ * Both say so in words; neither shows an internal code.
+ *
+ * A reversal is recognised by two signals, because either one alone can be
+ * absent. The one that always arrives is the sign: a negative amount is what a
+ * contra row *is* — the schema lets no other payment be negative — and it is
+ * what `GET /api/pos/supplier-invoices` sends today. That route's query is
+ * deliberately unchanged by this feature: `supplier_payments.origin` exists
+ * only from M4, production has not taken it, and naming a column the database
+ * has not got fails the whole select and blanks this screen. `origin` is the
+ * word the office stores and is read here for the day the route can hand it
+ * over safely. The mobile till reads the sign for the same label, so both
+ * clients say the same thing either way.
+ *
+ * Exported for its own test: this is a pure decision over one row, and the pin
+ * that matters is the answer it gives for a row shaped as the route sends one.
+ */
+export const getPaymentLabelKey = (payment: SupplierPayment): string => {
+  if (payment.origin === 'reversal' || toNumber(payment.amount) < 0) {
+    return 'suppliers.payment.reversal';
+  }
+  if (payment.payment_method === 'unknown') {
+    return 'suppliers.paymentMethod.unknown';
+  }
+  if (payment.payment_method === 'bank_transfer') {
+    return 'suppliers.invoices.methods.bankTransfer';
+  }
+  if (payment.payment_method === 'credit_card') {
+    return 'suppliers.invoices.methods.creditCard';
+  }
+  return `suppliers.invoices.methods.${payment.payment_method}`;
+};
+
 const getDateInputValue = () => new Date().toISOString().slice(0, 10);
 
 function getSupplierImportErrorMessage(
@@ -375,6 +425,37 @@ const SuppliersPage: React.FC = () => {
   const [reviewPoOptions, setReviewPoOptions] = useState<PosPurchaseOrder[]>([]);
   /** null is the default and the decline (R9.2) — linkage is always opt-in. */
   const [reviewPoId, setReviewPoId] = useState<string | null>(null);
+  /**
+   * The invoice the office recorded by itself, open for correction — the
+   * header and nothing else (supplier-invoice-automation §4.13, R16.1). While
+   * this is set the drawer is in **correct** mode: no rows, no preview, no
+   * commit, because the invoice already exists.
+   */
+  const [correctInvoice, setCorrectInvoice] = useState<CaptureAutomation | null>(null);
+  const [correctAmount, setCorrectAmount] = useState('');
+  const [correctDueDate, setCorrectDueDate] = useState('');
+  const [correctNotes, setCorrectNotes] = useState('');
+  /**
+   * The header as the server holds it right now, fetched fresh every time the
+   * drawer opens in correct mode. `correctInvoice` is the capture's one-time
+   * commit notice — content read off the paper at reading time, never updated
+   * again — so diffing a new correction against it (or against whatever a
+   * second correction happened to leave in the form) is how an untouched
+   * field gets sent back at its stale value and quietly undoes somebody
+   * else's edit. This is the one source of truth a correction's PATCH is
+   * allowed to diff against.
+   */
+  const [correctBaseline, setCorrectBaseline] = useState<{
+    invoiceNumber: string;
+    invoiceDate: string;
+    dueDate: string;
+    amount: number;
+    notes: string;
+  } | null>(null);
+  const [correctLoading, setCorrectLoading] = useState(false);
+  const [correctLoadError, setCorrectLoadError] = useState<string | null>(null);
+  const correctionRequest = useRef(0);
+  useEffect(() => () => { correctionRequest.current += 1; }, []);
 
   // Ref + stable title id so the portaled import overlay can declare labelled dialog
   // semantics and join the topmost-[role="dialog"] Escape stack used across the POS.
@@ -403,6 +484,7 @@ const SuppliersPage: React.FC = () => {
   // can never trigger a preview, save, file import, scan, barcode add, or delete.
   const closeImport = useCallback(() => {
     setImportOpen(false);
+    correctionRequest.current += 1;
     // Leaving review keeps every edit: the draft is written back to the
     // capture row, so returning later — or after a restart — resumes exactly
     // where the user left off. Failing to persist must not trap them in the
@@ -819,6 +901,8 @@ const SuppliersPage: React.FC = () => {
   };
 
   const resetImportForm = useCallback(() => {
+    correctionRequest.current += 1;
+    setSaving(false);
     setImportOpen(false);
     setSupplierName('');
     setSupplierEmail('');
@@ -834,6 +918,13 @@ const SuppliersPage: React.FC = () => {
     setReviewQuality('good');
     setReviewPoOptions([]);
     setReviewPoId(null);
+    setCorrectInvoice(null);
+    setCorrectAmount('');
+    setCorrectDueDate('');
+    setCorrectNotes('');
+    setCorrectBaseline(null);
+    setCorrectLoading(false);
+    setCorrectLoadError(null);
   }, []);
 
   // ---- Invoice capture wiring ------------------------------------------ //
@@ -935,6 +1026,179 @@ const SuppliersPage: React.FC = () => {
     },
     [openCaptureReview]
   );
+
+  /**
+   * «Άνοιγμα και διόρθωση» — the same drawer, in **correct** mode.
+   *
+   * The invoice the office recorded already exists, with its attachment and
+   * (where the second switch is on) its stock: there is nothing to preview and
+   * nothing to save for it to be real, which is what the toast says. What a
+   * person can still do is fix what the reading got wrong on the header, and
+   * that is one PATCH — never a second stock door (design §4.13, R16.1).
+   */
+  const openCaptureCorrection = useCallback(
+    (automation: CaptureAutomation) => {
+      const requestId = ++correctionRequest.current;
+      setSaving(false);
+      setSupplierName(automation.supplierName);
+      setSupplierEmail('');
+      setSupplierPhone('');
+      setSupplierNotes('');
+      setInvoiceNumber('');
+      setInvoiceDate('');
+      setCorrectAmount('');
+      setCorrectDueDate('');
+      setCorrectNotes('');
+      setCorrectInvoice(automation);
+      setCorrectBaseline(null);
+      setCorrectLoadError(null);
+
+      // Correct mode is not review: no capture is being committed here, so
+      // nothing about the review path (draft rows, confidence, PO offer) is
+      // carried into it.
+      setDraftRows([emptyImportRow()]);
+      setImportDraft(null);
+      setImportError(null);
+      setFileNotice(null);
+      setReviewCapture(null);
+      setReviewConfidence([]);
+      setReviewQuality('good');
+      setReviewPoOptions([]);
+      setReviewPoId(null);
+
+      setCaptureQueueOpen(false);
+      setImportOpen(true);
+
+      // `automation` is the capture's one-time commit notice, frozen at
+      // reading time — a second door (the office, or an earlier correction
+      // from this same till) can have moved the header since. So the form
+      // is not fillable from it: read the row fresh here, same as the
+      // office's own edit screen would, and fail visibly rather than filling
+      // from a snapshot that may already be wrong.
+      setCorrectLoading(true);
+      void (async () => {
+        try {
+          const result = await posApiGet<{
+            success: boolean
+            invoice?: {
+              invoice_number: string
+              invoice_date: string | null
+              due_date: string | null
+              amount: number | string
+              notes: string | null
+            }
+            error?: string
+          }>(`pos/supplier-invoices/${automation.invoiceId}`);
+          if (requestId !== correctionRequest.current) return;
+          const invoice = result.data?.invoice;
+          if (!result.success || result.data?.success === false || !invoice) {
+            throw new Error(result.error || result.data?.error || 'Failed to load the invoice');
+          }
+
+          setInvoiceNumber(invoice.invoice_number);
+          setInvoiceDate(invoice.invoice_date ?? '');
+          setCorrectDueDate(invoice.due_date ?? '');
+          const amount = Number(invoice.amount);
+          setCorrectAmount(Number.isFinite(amount) && amount > 0 ? String(amount) : '');
+          setCorrectNotes(invoice.notes ?? '');
+          setCorrectBaseline({
+            invoiceNumber: invoice.invoice_number,
+            invoiceDate: invoice.invoice_date ?? '',
+            dueDate: invoice.due_date ?? '',
+            amount: Number.isFinite(amount) ? amount : 0,
+            notes: invoice.notes ?? '',
+          });
+        } catch (loadError) {
+          if (requestId !== correctionRequest.current) return;
+          const message = getSupplierImportErrorMessage(t, loadError, 'saveFailed');
+          setCorrectLoadError(message);
+          toast.error(message);
+        } finally {
+          if (requestId === correctionRequest.current) setCorrectLoading(false);
+        }
+      })();
+
+      toast.success(
+        t('suppliers.capture.automation.noSaveNeeded', 'No saving needed — this invoice is already filed.')
+      );
+    },
+    [t]
+  );
+
+  /**
+   * Send the corrected header, and only the fields the person actually
+   * changed. Nothing changed means nothing is sent: an edit form that answers
+   * "saved" to an untouched form teaches people the word means nothing.
+   */
+  const saveHeaderCorrection = useCallback(async () => {
+    const requestId = correctionRequest.current;
+    const invoice = correctInvoice;
+    const baseline = correctBaseline;
+    // Nothing to diff against yet (still loading, or the load failed): there
+    // is no honest "changed" to compute, so there is nothing to save.
+    if (!invoice || !baseline) return;
+
+    const body: Record<string, unknown> = {};
+    const nextNumber = invoiceNumber.trim();
+    if (nextNumber && nextNumber !== baseline.invoiceNumber) {
+      body.invoiceNumber = nextNumber;
+    }
+    const nextDate = invoiceDate.trim();
+    if (nextDate && nextDate !== baseline.invoiceDate) {
+      body.invoiceDate = nextDate;
+    }
+    const nextDueDate = correctDueDate.trim();
+    if (nextDueDate && nextDueDate !== baseline.dueDate) {
+      body.dueDate = nextDueDate;
+    }
+    const nextAmount = Number(correctAmount.replace(',', '.'));
+    if (Number.isFinite(nextAmount) && nextAmount > 0 && nextAmount !== baseline.amount) {
+      body.amount = nextAmount;
+    }
+    const nextNotes = correctNotes.trim();
+    if (nextNotes !== baseline.notes) {
+      body.notes = nextNotes;
+    }
+
+    if (Object.keys(body).length === 0) {
+      resetImportForm();
+      return;
+    }
+
+    setSaving(true);
+    setImportError(null);
+    try {
+      const result = await posApiPatch<{ success: boolean; error?: string }>(
+        `pos/supplier-invoices/${invoice.invoiceId}`,
+        body
+      );
+      if (requestId !== correctionRequest.current) return;
+      if (!result.success || result.data?.success === false) {
+        throw new Error(result.error || result.data?.error || 'Correction failed');
+      }
+      toast.success(t('suppliers.capture.review.saved', 'Invoice saved.'));
+      resetImportForm();
+      await fetchData();
+    } catch (correctionError) {
+      if (requestId !== correctionRequest.current) return;
+      const message = getSupplierImportErrorMessage(t, correctionError, 'saveFailed');
+      setImportError(message);
+      toast.error(message);
+    } finally {
+      if (requestId === correctionRequest.current) setSaving(false);
+    }
+  }, [
+    correctAmount,
+    correctBaseline,
+    correctDueDate,
+    correctInvoice,
+    correctNotes,
+    fetchData,
+    invoiceDate,
+    invoiceNumber,
+    resetImportForm,
+    t,
+  ]);
 
   // "Check invoice" on a capture toast lands on that document, not just on
   // this page. [R3.6, R11.9]
@@ -1960,7 +2224,7 @@ const SuppliersPage: React.FC = () => {
                               <span className={`text-xs ${subtleClass}`}>{formatDate(payment.payment_date)}</span>
                             </div>
                             <p className={`mt-1 text-xs ${subtleClass}`}>
-                              {t(`suppliers.invoices.methods.${payment.payment_method === 'bank_transfer' ? 'bankTransfer' : payment.payment_method === 'credit_card' ? 'creditCard' : payment.payment_method}`, payment.payment_method)}
+                              {t(getPaymentLabelKey(payment), payment.payment_method)}
                             </p>
                             {payment.reference_number && <p className={`mt-1 break-words text-xs ${subtleClass}`}>{payment.reference_number}</p>}
                           </div>
@@ -1999,7 +2263,11 @@ const SuppliersPage: React.FC = () => {
               <div className="flex shrink-0 items-center justify-between border-b border-inherit p-4">
                 <div>
                   <h2 id={importTitleId} className="text-xl font-bold">{t('suppliers.import.title', 'Import supplier items')}</h2>
-                  <p className={`text-sm ${subtleClass}`}>{t('suppliers.import.subtitle', 'Review rows first, then sync stock to inventory.')}</p>
+                  <p className={`text-sm ${subtleClass}`}>
+                    {correctInvoice
+                      ? t('suppliers.capture.automation.noSaveNeeded', 'No saving needed — this invoice is already filed.')
+                      : t('suppliers.import.subtitle', 'Review rows first, then sync stock to inventory.')}
+                  </p>
                 </div>
                 <button
                   onClick={closeImport}
@@ -2011,6 +2279,119 @@ const SuppliersPage: React.FC = () => {
               </div>
 
               <div className="min-h-0 flex-1 overflow-y-auto scrollbar-hide p-4">
+                {correctInvoice ? (
+                  /*
+                    Correct mode: the office already recorded this invoice, so
+                    the drawer shows what happened and offers the header — the
+                    number, the two dates, the amount and a note — and nothing
+                    else. No rows, no preview, no commit, no stock.
+                    [supplier-invoice-automation §4.13, R16.1]
+                  */
+                  <div className="space-y-4" data-testid="capture-correct-header">
+                    <div className={`rounded-xl border p-4 ${isDark ? 'border-zinc-800 bg-zinc-900/70' : 'border-gray-200 bg-gray-50'}`}>
+                      <p className="font-bold">
+                        {correctInvoice.outcome === 'recorded_stock_updated'
+                          ? t('suppliers.capture.automation.recordedStockMark', 'Saved on its own · stock updated')
+                          : t('suppliers.capture.automation.recordedMark', 'Saved on its own')}
+                      </p>
+                      <p className={`mt-1 text-sm ${subtleClass}`}>
+                        {correctInvoice.supplierName}
+                        {correctInvoice.kind === 'bill'
+                          ? ` · ${t('suppliers.capture.automation.billMark', 'Bill')}`
+                          : ''}
+                      </p>
+                    </div>
+
+                    <div className={`rounded-xl border p-4 ${isDark ? 'border-zinc-800 bg-zinc-900/70' : 'border-gray-200 bg-gray-50'}`}>
+                      {correctLoading && (
+                        <div className={`mb-3 flex items-center gap-2 text-sm ${subtleClass}`}>
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          <span>{t('common.loading', 'Loading…')}</span>
+                        </div>
+                      )}
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        <input
+                          value={invoiceNumber}
+                          disabled={correctLoading || !correctBaseline}
+                          onChange={(event) => {
+                            setInvoiceNumber(event.target.value);
+                            setImportError(null);
+                          }}
+                          className={`h-10 rounded-xl border px-3 text-sm outline-none disabled:opacity-50 ${fieldClass}`}
+                          placeholder={t('suppliers.import.invoiceNumber', 'Invoice number')}
+                        />
+                        <input
+                          value={invoiceDate}
+                          disabled={correctLoading || !correctBaseline}
+                          onChange={(event) => {
+                            setInvoiceDate(event.target.value);
+                            setImportError(null);
+                          }}
+                          className={`h-10 rounded-xl border px-3 text-sm outline-none disabled:opacity-50 ${fieldClass}`}
+                          placeholder={t('suppliers.import.invoiceDate', 'Invoice date')}
+                        />
+                        <input
+                          value={correctDueDate}
+                          disabled={correctLoading || !correctBaseline}
+                          onChange={(event) => {
+                            setCorrectDueDate(event.target.value);
+                            setImportError(null);
+                          }}
+                          className={`h-10 rounded-xl border px-3 text-sm outline-none disabled:opacity-50 ${fieldClass}`}
+                          placeholder={t('suppliers.dueDate', 'Due date')}
+                        />
+                        <input
+                          value={correctAmount}
+                          disabled={correctLoading || !correctBaseline}
+                          onChange={(event) => {
+                            setCorrectAmount(event.target.value);
+                            setImportError(null);
+                          }}
+                          className={`h-10 rounded-xl border px-3 text-sm outline-none disabled:opacity-50 ${fieldClass}`}
+                          placeholder={t('suppliers.amount', 'Amount')}
+                        />
+                      </div>
+                      <textarea
+                        value={correctNotes}
+                        disabled={correctLoading || !correctBaseline}
+                        onChange={(event) => {
+                          setCorrectNotes(event.target.value);
+                          setImportError(null);
+                        }}
+                        className={`mt-2 min-h-20 w-full resize-none rounded-xl border px-3 py-2 text-sm outline-none disabled:opacity-50 ${fieldClass}`}
+                        placeholder={t('suppliers.fields.notes', 'Notes')}
+                      />
+                      {correctLoadError && (
+                        <div className={`mt-3 flex gap-2 rounded-2xl border px-3 py-2 text-sm ${isDark ? 'border-red-500/30 bg-red-500/10 text-red-100' : 'border-red-200 bg-red-50 text-red-800'}`}>
+                          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                          <span>{correctLoadError}</span>
+                        </div>
+                      )}
+                      {importError && (
+                        <div className={`mt-3 flex gap-2 rounded-2xl border px-3 py-2 text-sm ${isDark ? 'border-red-500/30 bg-red-500/10 text-red-100' : 'border-red-200 bg-red-50 text-red-800'}`}>
+                          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                          <span>{importError}</span>
+                        </div>
+                      )}
+                      <div className="mt-3 flex flex-wrap justify-end gap-2">
+                        <button
+                          onClick={closeImport}
+                          className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-4 text-sm font-semibold ${iconButtonClass}`}
+                        >
+                          {t('common.close', 'Close')}
+                        </button>
+                        <button
+                          disabled={saving || correctLoading || !correctBaseline}
+                          onClick={() => void saveHeaderCorrection()}
+                          className={`inline-flex min-h-10 items-center gap-2 rounded-2xl border px-4 text-sm font-semibold disabled:opacity-50 ${isDark ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-200 active:bg-emerald-500/25' : 'border-emerald-200 bg-emerald-600 text-white active:bg-emerald-700'}`}
+                        >
+                          {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                          {t('common.save', 'Save')}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
                 <div className="grid gap-4 xl:grid-cols-[360px_minmax(0,1fr)]">
                   <div className="space-y-4">
                     <div className={`rounded-xl border p-4 ${isDark ? 'border-zinc-800 bg-zinc-900/70' : 'border-gray-200 bg-gray-50'}`}>
@@ -2354,6 +2735,7 @@ const SuppliersPage: React.FC = () => {
                     )}
                   </div>
                 </div>
+                )}
               </div>
             </motion.div>
           </motion.div>
@@ -2428,7 +2810,9 @@ const SuppliersPage: React.FC = () => {
                     sourceName: document.sourceName,
                   });
                 }}
+                onCorrect={openCaptureCorrection}
                 staffId={captureStaffId}
+                currencyCode={currencyCode}
                 onChanged={refreshCaptureQueue}
               />
             </div>

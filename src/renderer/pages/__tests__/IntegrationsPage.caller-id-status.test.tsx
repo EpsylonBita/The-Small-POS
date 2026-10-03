@@ -440,7 +440,7 @@ describe('Caller ID card on the plugins page', () => {
           : { success: true, data: configPayload }
       }
       if (endpoint === '/pos/integrations') {
-        return { success: true, data: { integrations: integrationsPayload } }
+        return { success: true, data: { branch_id: 'branch-1', integrations: integrationsPayload } }
       }
       return { success: false, status: 404, error: 'not found' }
     })

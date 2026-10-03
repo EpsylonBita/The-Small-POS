@@ -798,24 +798,27 @@ pub(crate) fn read_local_setting(db: &db::DbState, category: &str, key: &str) ->
     db::get_setting(&conn, category, key)
 }
 
-fn resolve_connection_string_terminal_identity(db: &db::DbState) -> Option<String> {
-    read_local_setting(db, "terminal", "pos_api_key")
-        .or_else(|| read_local_setting(db, "terminal", "api_key"))
-        .and_then(|raw| api::extract_terminal_id_from_connection_string(raw.trim()))
-        .and_then(|value| normalize_terminal_identity(Some(value)))
+pub(crate) fn resolve_canonical_local_terminal_identity(db: &db::DbState) -> Option<String> {
+    let conn = db.conn.lock().ok()?;
+    resolve_canonical_terminal_identity_in_connection(&conn)
 }
 
-pub(crate) fn resolve_canonical_local_terminal_identity(db: &db::DbState) -> Option<String> {
-    resolve_connection_string_terminal_identity(db)
+pub(crate) fn resolve_canonical_terminal_identity_in_connection(
+    conn: &rusqlite::Connection,
+) -> Option<String> {
+    db::get_setting(conn, "terminal", "pos_api_key")
+        .or_else(|| db::get_setting(conn, "terminal", "api_key"))
+        .and_then(|raw| api::extract_terminal_id_from_connection_string(raw.trim()))
+        .and_then(|value| normalize_terminal_identity(Some(value)))
         .or_else(|| {
             resolve_managed_terminal_identity(
-                read_local_setting(db, "terminal", "terminal_type").as_deref(),
-                read_local_setting(db, "terminal", "pos_operating_mode").as_deref(),
-                read_local_setting(db, "terminal", "owner_terminal_id").as_deref(),
-                read_local_setting(db, "terminal", "source_terminal_id").as_deref(),
+                db::get_setting(conn, "terminal", "terminal_type").as_deref(),
+                db::get_setting(conn, "terminal", "pos_operating_mode").as_deref(),
+                db::get_setting(conn, "terminal", "owner_terminal_id").as_deref(),
+                db::get_setting(conn, "terminal", "source_terminal_id").as_deref(),
             )
         })
-        .or_else(|| normalize_terminal_identity(read_local_setting(db, "terminal", "terminal_id")))
+        .or_else(|| normalize_terminal_identity(db::get_setting(conn, "terminal", "terminal_id")))
         .or_else(|| normalize_terminal_identity(storage::get_credential("terminal_id")))
 }
 

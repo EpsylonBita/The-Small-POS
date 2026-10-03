@@ -193,6 +193,11 @@ test('SuppliersPage supplier translation keys exist in every POS locale', () => 
     'invoices.methods.check',
     'invoices.methods.creditCard',
     'invoices.methods.other',
+    // supplier-invoice-automation task 8.2 (§4.5, §4.13, R16.3): a payment the
+    // supplier's own statement implied states no method, and a payment that was
+    // undone is a contra row. Both are labelled in words, in all five locales.
+    'paymentMethod.unknown',
+    'payment.reversal',
     'summary.title',
     'status.unpaid',
     'status.partial',
@@ -498,4 +503,79 @@ test('Round 257: the desktop supplier detail aside is compacted with bottom brea
   assert.doesNotMatch(source, /\{selectedSupplier \? \(\s*<div className="space-y-4">/);
   assert.doesNotMatch(source, /scrollbar-hide p-4">\s*\{selectedSupplier \? \(/);
   assert.doesNotMatch(source, /rounded-xl border p-4 \$\{isDark \? 'border-zinc-800 bg-zinc-900' : 'border-gray-200 bg-gray-50'\}/);
+});
+
+// --- supplier-invoice-automation task 8.2 (design §4.13, Process 8; R16.1, R16.3, R16.5) ---
+//
+// For a supplier the owner opted in, the server records the invoice at reading
+// time. The till then shows the *result* and one action — «Άνοιγμα και
+// διόρθωση» — which opens this same drawer in **correct** mode: the header,
+// one PATCH, and never a second stock door. The switches themselves have no POS
+// control at all (Out of Scope 7), and the two office-written payment rows are
+// labelled in words rather than by their codes.
+
+test('the recorded invoice opens the import drawer in correct mode and PATCHes the header only', () => {
+  const source = suppliersPageSource();
+
+  // The queue hands the stored automation block back for correction.
+  assert.match(source, /onCorrect=\{openCaptureCorrection\}/);
+  assert.match(source, /const openCaptureCorrection = useCallback\(/);
+  assert.match(source, /suppliers\.capture\.automation\.noSaveNeeded/);
+
+  // Correct mode is header-only, and its one write is the PATCH route.
+  assert.match(source, /data-testid="capture-correct-header"/);
+  assert.match(
+    source,
+    /posApiPatch<\{ success: boolean; error\?: string \}>\(\s*`pos\/supplier-invoices\/\$\{invoice\.invoiceId\}`/,
+  );
+
+  // It never previews, commits, applies stock, or confirms a capture commit.
+  const correction = source.match(
+    /const saveHeaderCorrection = useCallback\(async \(\) => \{([\s\S]*?)\n  \}, \[/,
+  );
+  assert.ok(correction, 'saveHeaderCorrection must remain a useCallback with a dependency array');
+  assert.doesNotMatch(
+    correction[1],
+    /(previewImport|commitImport|confirmCaptureCommit|offlineCommitSupplierImport|advanceCapture|poLinkage)/,
+    'correcting a recorded header must not preview, commit, queue or move stock',
+  );
+  // The body carries the header fields and nothing else — no status, no rows.
+  assert.doesNotMatch(correction[1], /body\.(status|rows|paidDate|paid_date|supplierId)/);
+});
+
+test('no POS control pretends to set the owner switches', () => {
+  const source = suppliersPageSource();
+
+  // The two switch columns and their API spelling are never named on a till
+  // surface: they are the admin dashboard's, and only the admin's (R16.5).
+  assert.doesNotMatch(source, /record_automatically|recordAutomatically/);
+  assert.doesNotMatch(source, /update_stock_automatically|updateStockAutomatically/);
+});
+
+test('the two office-written payment rows are labelled in words, never by their code', () => {
+  const source = suppliersPageSource();
+
+  // Exported, so the answer it gives is pinned by a real test
+  // (`src/renderer/pages/__tests__/SuppliersPage.paymentLabels.test.ts`) and
+  // not only by the shape of the source read here.
+  assert.match(source, /export const getPaymentLabelKey = \(payment: SupplierPayment\): string =>/);
+  // Two signals for a reversal: the negative amount a contra row carries — the
+  // one the route sends today, and what the mobile till reads — and the word
+  // the office stores, for the day `GET /api/pos/supplier-invoices` can select
+  // `origin` safely (the column arrives with M4, which production has not
+  // taken, and one missing name fails the whole select).
+  assert.match(
+    source,
+    /if \(payment\.origin === 'reversal' \|\| toNumber\(payment\.amount\) < 0\) \{\s*return 'suppliers\.payment\.reversal';/,
+  );
+  assert.match(
+    source,
+    /if \(payment\.payment_method === 'unknown'\) \{\s*return 'suppliers\.paymentMethod\.unknown';/,
+  );
+  // The payment row renders through the key builder, so a method this build
+  // does not know can never reach a till as a raw identifier.
+  assert.match(source, /\{t\(getPaymentLabelKey\(payment\), payment\.payment_method\)\}/);
+  // The method a person can choose is still the shipped five — `unknown` is
+  // what the office writes, never an option in the form.
+  assert.doesNotMatch(source, /<option value="unknown"/);
 });

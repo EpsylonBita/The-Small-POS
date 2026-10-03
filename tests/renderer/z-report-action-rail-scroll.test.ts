@@ -323,14 +323,16 @@ test('Round 321: the Staff tab grid avoids a lonely half-width card (single staf
   // (full width) instead of a half-width column with an empty second track.
   assert.match(
     details,
-    /grid gap-3 \$\{staffReportsSorted\.length > 1 \? 'xl:grid-cols-2' : 'grid-cols-1'\}/,
-    'staff grid columns must depend on the report count',
+    /grid gap-3 \$\{visibleStaffReports\.length > 1 \? 'xl:grid-cols-2' : 'grid-cols-1'\}/,
+    'staff grid columns must depend on the visible report count',
   );
   // The old unconditional two-column staff grid must be gone.
   assert.doesNotMatch(details, /<div className="grid gap-3 xl:grid-cols-2">/, 'staff grid must not be unconditionally two-column');
 
-  // Layout-only: the staff card still renders every report with its badges + stat tiles.
-  assert.match(details, /staffReportsSorted\.map\(\(staff\) => \{/);
+  // Module visibility controls the grid; every visible report keeps its badges and stat tiles.
+  assert.match(source, /const visibleStaffReports = staffReportsSorted\.filter\(staff => staff\.role !== 'driver' \|\| reportSections\.drivers\);/);
+  assert.match(details, /visibleStaffReports\.length > 0/);
+  assert.match(details, /visibleStaffReports\.map\(\(staff\) => \{/);
   assert.match(details, /translateRoleName\(t, staff\.role \|\| ''\)/);
   assert.match(details, /\{statRows\.map\(\(row\) => \(/);
   assert.doesNotMatch(details, /hover:/);

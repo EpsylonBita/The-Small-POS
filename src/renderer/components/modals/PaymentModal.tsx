@@ -18,6 +18,12 @@ import { ActivityTracker } from '../../services/ActivityTracker';
 import type { GiftCardTenderEvent } from '../../services/GiftCardCheckoutService';
 import type { GiftCardScope } from '../../services/GiftCardsApiService';
 import { GiftCardTender } from '../payment/GiftCardTender';
+import { TwintManualQrTender } from '../payment/TwintManualQrTender';
+import { loadTwintManualConfiguration, twintManualMetadata, type TwintManualConfiguration, type TwintConfirmationAction } from '../../services/TwintManualQrService';
+import twintLogo from '../../../../../shared/payments/assets/twint-logo.png';
+import { loadPendingTwintReceipts, saveOriginalTwintReceipt } from '../../services/TwintReceiptRecoveryService';
+import { useOrderStore } from '../../hooks/useOrderStore';
+import type { UnsavedChargedPaymentSummary } from '../../../lib/ipc-adapter';
 import {
   TipModal,
   type TipRecipientRole,
@@ -39,7 +45,7 @@ export interface RoomChargeFallbackPrompt {
   reason?: string;
 }
 
-export type PaymentMethodSelection = 'cash' | 'card' | 'room_charge';
+export type PaymentMethodSelection = 'cash' | 'card' | 'room_charge' | 'twint';
 
 export type PaymentCompletionResult = void | boolean | RoomChargeFallbackPrompt;
 
@@ -47,6 +53,9 @@ export interface PaymentCompletionData {
   method: PaymentMethodSelection;
   amount: number;
   transactionId?: string;
+  idempotencyKey?: string;
+  currency?: string;
+  metadata?: ReturnType<typeof twintManualMetadata>;
   driverId?: string;
   cashReceived?: number;
   change?: number;
@@ -106,6 +115,7 @@ interface PaymentModalProps {
   onSplitPayment?: (tipSelection: TipSelection | null) => void;
   roomChargeContext?: RoomChargeContext | null;
   allowTips?: boolean;
+  allowTwint?: boolean;
   /**
    * Collect the outstanding balance of this existing order: cash/card confirms
    * claim its ordinary collection, and the host may offer a fixed full gift card.
@@ -113,7 +123,7 @@ interface PaymentModalProps {
   existingOrder?: PaymentModalExistingOrder;
 }
 
-type ModalStep = 'minimum_warning' | 'payment_selection' | 'cash_input' | 'gift';
+type ModalStep = 'minimum_warning' | 'payment_selection' | 'cash_input' | 'gift' | 'twint';
 
 type CashChangeBreakdownItem = {
   value: number;
@@ -229,11 +239,33 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   onSplitPayment,
   roomChargeContext = null,
   allowTips = true,
+  allowTwint = true,
   existingOrder,
 }) => {
   const { t } = useTranslation();
   const { isFeatureEnabled, isMobileWaiter, loading: isFeatureLoading } = useFeatures();
   const { hasModule } = useAcquiredModules();
+  const [twintConfiguration, setTwintConfiguration] = useState<TwintManualConfiguration | null>(null);
+  const twintSendRef = useRef(false);
+  const [pendingTwintReceipts,setPendingTwintReceipts] = useState<UnsavedChargedPaymentSummary[]>([]);
+  const [twintRecoveryChecked,setTwintRecoveryChecked] = useState(false);
+  const [twintRecovering,setTwintRecovering] = useState(false);
+  const twintModule = hasModule('plugin_integrations');
+  useEffect(() => {
+    let current = true;
+    setTwintConfiguration(null);
+    if (isOpen && twintModule) {
+      void loadTwintManualConfiguration().then(value => { if (current) setTwintConfiguration(value); });
+    }
+    return () => { current = false; };
+  }, [isOpen, twintModule]);
+  useEffect(() => {
+    let current = true;
+    setPendingTwintReceipts([]); setTwintRecoveryChecked(false);
+    if (isOpen) void loadPendingTwintReceipts(existingOrder?.orderId).then(values => { if(current){setPendingTwintReceipts(values);setTwintRecoveryChecked(true);} }).catch(()=>{});
+    return () => { current=false; };
+  },[isOpen,existingOrder?.orderId]);
+  const canUseTwint = allowTwint && twintModule && twintRecoveryChecked && pendingTwintReceipts.length===0 && Boolean(twintConfiguration) && !roomChargeContext;
   const canUseCash = isFeatureEnabled('cashPayments');
   const canUseCard = isFeatureEnabled('cardPayments');
   const [isProcessingPayment, setIsProcessingPayment] = useState(isProcessing);
@@ -269,9 +301,9 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   // Receipt reentry for an order a gift card already paid: the modal opens on
   // that order's own Tender at a zero amount and offers no way to collect money.
   const giftReceiptRecovery = Boolean(existingOrder?.giftEnabled && existingOrder.giftReceiptRecovery);
-  const hasAnyPaymentMethod = canUseCash || canUseCard || canUseRoomCharge;
+  const hasAnyPaymentMethod = canUseCash || canUseCard || canUseRoomCharge || canUseTwint;
   const paymentOptionCount =
-    2 + (onSplitPayment ? 1 : 0) + (canUseRoomCharge ? 1 : 0) + (canUseGiftCard ? 1 : 0);
+    2 + (onSplitPayment ? 1 : 0) + (canUseRoomCharge ? 1 : 0) + (canUseGiftCard ? 1 : 0) + (canUseTwint ? 1 : 0);
   const paymentGridClass =
     paymentOptionCount >= 4
       ? 'grid-cols-2'
@@ -375,7 +407,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     if (isOpen) {
       // Only the user or the host leaves the gift step: a processing flag
       // change while open keeps the Tender and its pending receipt action.
-      if (!reopened && currentStepRef.current === 'gift') {
+      if (!reopened && (currentStepRef.current === 'gift' || currentStepRef.current === 'twint')) {
         setIsProcessingPayment(isProcessing);
         return;
       }
@@ -400,7 +432,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   }, [isOpen, currentStep]);
 
   // Handle payment method selection
-  const handlePaymentMethodSelect = (method: PaymentMethodSelection) => {
+  const handlePaymentMethodSelect = (method: Exclude<PaymentMethodSelection, 'twint'>) => {
     if (giftReceiptRecovery) return;
     if (method === 'room_charge' && !canUseRoomCharge) return;
     setSelectedPaymentMethod(method);
@@ -423,13 +455,44 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       : t('giftCardCheckout.refusal.admission', 'Earlier gift card attempts must be checked first.');
 
   const handleGiftCardSelect = () => {
-    if (!canUseGiftCard || isProcessingPayment) return;
+    if (pendingTwintReceipts.length || !canUseGiftCard || isProcessingPayment) return;
     setSelectedPaymentMethod(null);
     setCurrentStep('gift');
   };
+  const handleTwintConfirm = async (action: TwintConfirmationAction, idempotencyKey: string): Promise<boolean> => {
+    if (!canUseTwint || twintSendRef.current || giftReceiptRecovery || isProcessingPayment) return false;
+    let ordinaryOwner: OrdinaryCollectionOwner | undefined;
+    if (existingOrder) {
+      const claim = claimOrdinaryCollectionOwner(existingOrder.scope, existingOrder.orderId);
+      if (!claim.claimed) { toast.error(ordinaryClaimRefusalText(claim.code)); return false; }
+      ordinaryOwner = claim.owner;
+    }
+    twintSendRef.current = true; setIsProcessingPayment(true);
+    try {
+      const result = await onPaymentComplete({ method: 'twint', amount: payableTotal, currency: 'CHF',
+        idempotencyKey, metadata: twintManualMetadata(action),
+        tipAmount: tipSelection?.amount, tipRecipientRole: tipSelection?.recipientRole,
+        ...(ordinaryOwner ? { ordinaryOwner } : {}) });
+      if (result === false) {
+        const pending=await loadPendingTwintReceipts(existingOrder?.orderId).catch(()=>[]);
+        if(pending.length) { setPendingTwintReceipts(pending);setCurrentStep('payment_selection'); }
+      }
+      return result !== false && !isRoomChargeFallbackPrompt(result);
+    } catch {
+      const pending=await loadPendingTwintReceipts(existingOrder?.orderId).catch(()=>null);
+      if (pending?.length) { setPendingTwintReceipts(pending);setCurrentStep('payment_selection'); }
+      if (!pending) { setTwintRecoveryChecked(false);setCurrentStep('payment_selection'); }
+      toast.error(t('twintPayment.saveFailed','The payment could not be saved. Check its status before trying again.'));
+      return false;
+    } finally {
+      if (ordinaryOwner && ordinaryCollectionView(ordinaryOwner)?.phase === 'held') releaseOrdinaryOwnerBeforeSend(ordinaryOwner);
+      twintSendRef.current = false; setIsProcessingPayment(false);
+    }
+  };
 
   // Simple payment handler - just method, no amount input needed
-  const handleSimplePayment = async (method: PaymentMethodSelection) => {
+  const handleSimplePayment = async (method: Exclude<PaymentMethodSelection, 'twint'>) => {
+    if (pendingTwintReceipts.length) return;
     // A receipt reentry never collects money.
     if (giftReceiptRecovery) return;
     // Existing-order cash/card: claim the order before any state change or
@@ -593,7 +656,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   };
 
   const handleModalEnter = () => {
-    if (isProcessingPayment || isFeatureLoading) return;
+    if (pendingTwintReceipts.length || isProcessingPayment || isFeatureLoading) return;
 
     if (currentStep === 'minimum_warning') {
       handleSkipMinimumWarning();
@@ -633,7 +696,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       initialFocusRef={currentStep === 'cash_input' ? cashInputRef : undefined}
       onEnterKey={handleModalEnter}
       enterKeyEnabled={!isProcessingPayment && !isFeatureLoading && canSubmitWithEnter}
-      footer={currentStep === 'cash_input' ? (
+      footer={pendingTwintReceipts.length ? undefined : currentStep === 'cash_input' ? (
         <div className="liquid-glass-modal-border flex gap-3 border-t px-6 py-4">
           <button onClick={handleBackToPaymentSelection} disabled={isProcessingPayment}
             className="liquid-glass-modal-button flex-1 font-medium liquid-glass-modal-text">
@@ -709,7 +772,21 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         </div>
 
         {/* Step: Minimum Order Warning */}
-        {currentStep === 'minimum_warning' && (
+        {pendingTwintReceipts.length>0 && <div className="space-y-4" role="alert">
+          <p>{t('twintPayment.receiptRecovery','A TWINT receipt is confirmed but its payment is not saved. Save the original receipt before taking another payment.')}</p>
+          <button type="button" disabled={twintRecovering} className="liquid-glass-modal-button" onClick={async()=>{
+            if(twintRecovering)return; setTwintRecovering(true);
+            try {
+              if(await saveOriginalTwintReceipt(pendingTwintReceipts[0])) {
+                await useOrderStore.getState().silentRefresh().catch(()=>{});
+                toast.success(t('twintPayment.receiptSaved','The original TWINT receipt was saved.'));
+                onClose();
+              } else toast.error(t('twintPayment.saveFailed','The payment could not be saved. Check its status before trying again.'));
+            } catch { toast.error(t('twintPayment.saveFailed','The payment could not be saved. Check its status before trying again.')); }
+            finally {setTwintRecovering(false);}
+          }}>{t('twintPayment.saveOriginal','Save original TWINT receipt')}</button>
+        </div>}
+        {pendingTwintReceipts.length===0 && currentStep === 'minimum_warning' && (
           <div className="space-y-4">
             <div className="flex items-center gap-3 p-4 rounded-2xl bg-orange-500/10 border border-orange-500/30">
               <AlertTriangle className="w-8 h-8 text-orange-400 flex-shrink-0" />
@@ -740,7 +817,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
           </div>
         )}
 
-        {currentStep === 'payment_selection' && (
+        {pendingTwintReceipts.length===0 && currentStep === 'payment_selection' && (
           <div className="relative">
             {allowTips && <button
               type="button"
@@ -849,6 +926,13 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                   )}
                 </button>
 
+                {canUseTwint && (
+                  <button type="button" disabled={isProcessingPayment} onClick={() => setCurrentStep('twint')}
+                    className={`flex flex-col items-center justify-center ${paymentOptionPaddingClass} rounded-2xl border-2 border-amber-400/30 bg-amber-500/10`}>
+                    <img src={twintLogo} alt="" className="h-20 max-w-full mb-3 rounded-lg" />
+                    <span className={paymentMethodLabelBaseClass}>TWINT</span>
+                  </button>
+                )}
                 {canUseRoomCharge && roomChargeContext && (
                   <button
                     onClick={() => handlePaymentMethodSelect('room_charge')}
@@ -952,7 +1036,12 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         )}
 
         {/* Step: Cash Input (only for pickup/in-store) */}
-        {currentStep === 'cash_input' && (
+        {pendingTwintReceipts.length===0 && currentStep === 'twint' && twintConfiguration && (
+          <TwintManualQrTender configuration={twintConfiguration} amount={payableTotal}
+            externalEnabled={hasModule('customer_display')} onConfirm={handleTwintConfirm}
+            onCancel={() => setCurrentStep('payment_selection')} />
+        )}
+        {pendingTwintReceipts.length===0 && currentStep === 'cash_input' && (
           <div className="space-y-6">
             {quickCashAmounts.length > 0 && (
               <div className={cashInputVisualClasses.quickAmountsPanel}>
@@ -1053,7 +1142,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         {/* Step: Gift card (existing order). The Tender owns the debit and its
             receipt action; it stays mounted after a payment until the user or
             the host closes it, and this modal never completes a gift payment. */}
-        {currentStep === 'gift' && existingOrder && (
+        {pendingTwintReceipts.length===0 && currentStep === 'gift' && existingOrder && (
           <GiftCardTender
             orderId={existingOrder.orderId}
             orderSynced={existingOrder.orderSynced}

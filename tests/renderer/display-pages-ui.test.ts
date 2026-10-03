@@ -50,7 +50,10 @@ test('CustomerDisplayPage reads local orders and projects them natively to deskt
     source,
     /bridge\.externalDisplay\.open\(externalOpenParams\(CUSTOMER_DISPLAY_CONTENT_TYPE, display, presentation\.ownedToken\)\)/,
   );
-  assert.match(source, /getBridge\(\)\.invoke\('customer-display-publish', snapshot\)/);
+  assert.match(source, /publishCustomerDisplaySnapshot\(snapshot\)/);
+  const projectionSource = readFileSync(path.join(projectRoot, 'src', 'renderer', 'services', 'CustomerDisplayQrOverlay.ts'), 'utf8');
+  assert.match(projectionSource, /getBridge\(\)\.invoke\('customer-display-publish', snapshot\)/);
+  assert.match(projectionSource, /lease\.scope === currentTwintScope\(\)/);
   assert.match(source, /getBridge\(\)\.invoke\('customer-display-snapshot'\)/);
   assert.match(source, /externalDisplay'\) === CUSTOMER_DISPLAY_CONTENT_TYPE/);
   assert.match(source, /scrollbar-hide/);

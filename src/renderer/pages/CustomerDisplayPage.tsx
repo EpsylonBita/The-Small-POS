@@ -44,6 +44,7 @@ import { useModules } from '../contexts/module-context';
 import { useOrderStore } from '../hooks/useOrderStore';
 import { formatCompactOrderNumberForDisplay } from '../utils/orderNumberUtils';
 import { pageMotionContainer, pageMotionItem } from '../components/ui/page-motion';
+import { publishCustomerDisplaySnapshot, type CustomerTwintQr } from '../services/CustomerDisplayQrOverlay';
 
 type DisplayStatus = 'pending' | 'preparing' | 'ready';
 
@@ -144,7 +145,7 @@ function useCustomerDisplayOwner(pageActive: boolean) {
     return () => {
       displayGeneration.current++;
       coordinator.configure('', false);
-      void bridge.invoke('customer-display-publish', null).catch(() => {});
+      void publishCustomerDisplaySnapshot(null).catch(() => {});
       // Sign-out, identity change or revoked entitlement: close only the presentation this owner holds.
       void presentation.release(bridge).catch(() => {});
     };
@@ -347,7 +348,7 @@ function useCustomerDisplayOwner(pageActive: boolean) {
     // Owning nothing yet (e.g. after a reload), take the running presentation the cashier sees.
     presentation.observe(capabilities);
     setCapabilities(previous => previous ? { ...previous, activePresentations: previous.activePresentations?.filter(item => item.contentType !== CUSTOMER_DISPLAY_CONTENT_TYPE) } : null);
-    await bridge.invoke('customer-display-publish', null).catch(() => {});
+    await publishCustomerDisplaySnapshot(null).catch(() => {});
     setIsDisplayBusy(true);
     setNotice(null);
     setError(null);
@@ -390,7 +391,7 @@ function useCustomerDisplayOwner(pageActive: boolean) {
 }
 
 type DisplayModel = ReturnType<typeof useCustomerDisplayOwner>;
-type DisplaySnapshot = Pick<DisplayModel, 'displayOrders' | 'isLoading' | 'isDark' | 'locale'>;
+type DisplaySnapshot = Pick<DisplayModel, 'displayOrders' | 'isLoading' | 'isDark' | 'locale'> & { twintQr?: CustomerTwintQr };
 const CustomerDisplayContext = createContext<{ model: DisplayModel; attach: () => () => void } | null>(null);
 export function CustomerDisplayProvider({ children }: { children: React.ReactNode }) {
   const [consumers, setConsumers] = useState(0);
@@ -401,7 +402,7 @@ export function CustomerDisplayProvider({ children }: { children: React.ReactNod
     const snapshot: DisplaySnapshot | null = model.activeExternalDisplay ? {
       displayOrders: model.displayOrders, isLoading: model.isLoading, isDark: model.isDark, locale: model.locale,
     } : null;
-    void getBridge().invoke('customer-display-publish', snapshot).catch(() => {});
+    void publishCustomerDisplaySnapshot(snapshot).catch(() => {});
   }, [model.activeExternalDisplay, model.displayOrders, model.isLoading, model.isDark, model.locale]);
   return <CustomerDisplayContext.Provider value={{ model, attach }}>{children}</CustomerDisplayContext.Provider>;
 }
@@ -427,7 +428,16 @@ function ExternalCustomerDisplayPage() {
   }, []);
   useEffect(() => { if (snapshot?.locale && snapshot.locale !== i18n.language) void i18n.changeLanguage(snapshot.locale); }, [snapshot?.locale, i18n]);
   if (!snapshot) return <div className="h-screen bg-black" />;
+  if (snapshot.twintQr) return <CustomerTwintQrView qr={snapshot.twintQr} />;
   return <CustomerDisplayView externalWindow model={{ ...snapshot, capabilities: null, isRefreshing: false, isDisplayBusy: false, notice: null, error: null, loadError: null, activeExternalDisplay: true, externalChoices: [], runningDisplayId: null, canOpenExternal: false, openExternalDisplay: async () => {}, closeExternalDisplay: async () => {} } as unknown as DisplayModel} />;
+}
+function CustomerTwintQrView({ qr }: { qr: CustomerTwintQr }) {
+  const { t } = useTranslation();
+  return <div className="h-screen bg-white text-black flex flex-col items-center justify-center gap-6 p-8">
+    <strong className="text-5xl">TWINT — CHF {qr.amount.toFixed(2)}</strong>
+    <img src={qr.qrImageData} alt={t('twintPayment.qrAlt', 'Official shop TWINT QR')} className="max-h-[60vh] max-w-full" />
+    <p className="text-2xl">{t('twintPayment.exactAmount', 'Scan the shop QR and enter this exact amount in TWINT.')}</p>
+  </div>;
 }
 function CustomerDisplayPage() { return isExternalDisplayWindow() ? <ExternalCustomerDisplayPage /> : <LocalCustomerDisplayPage />; }
 function CustomerDisplayView({ model, externalWindow }: { model: DisplayModel; externalWindow: boolean }) {

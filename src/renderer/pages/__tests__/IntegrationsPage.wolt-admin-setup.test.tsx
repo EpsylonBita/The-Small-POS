@@ -191,7 +191,7 @@ describe('Wolt card is Admin-Dashboard-managed on the till', () => {
   const serve = (items: RemoteItem[]) => {
     mocks.posApiGet.mockResolvedValue({
       success: true,
-      data: { integrations: items },
+      data: { branch_id: 'branch-1', integrations: items },
     })
   }
 

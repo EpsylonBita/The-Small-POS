@@ -500,6 +500,7 @@ export function getLocalizedPaymentMethod(
   method: string,
   t: TFunction,
 ): string {
+  if (method.trim().toLowerCase() === "twint") return "TWINT";
   return t(paymentMethodKey(method), { defaultValue: method || "pending" });
 }
 
@@ -531,6 +532,7 @@ export function getLocalizedPaymentBlockerReason(
   t: TFunction,
   formatMoney: (amount: number) => string = defaultFormatMoney,
 ): string {
+  if (blocker.unsavedPayment?.method === 'twint' && blocker.unsavedPayment.kind.startsWith('manual_twint_')) return t('twintPayment.receiptRecovery');
   return t(blockerSentenceKeys("reasonCodes", blocker), {
     defaultValue: blocker.reasonText,
     ...blockerInterpolation(blocker, t, formatMoney),
@@ -542,6 +544,7 @@ export function getLocalizedPaymentBlockerFix(
   t: TFunction,
   formatMoney: (amount: number) => string = defaultFormatMoney,
 ): string {
+  if (blocker.unsavedPayment?.method === 'twint' && blocker.unsavedPayment.kind.startsWith('manual_twint_')) return t(blocker.unsavedPayment.canSaveAgain ? 'twintPayment.saveOriginal' : 'twintPayment.receiptReconcile');
   return t(blockerSentenceKeys("fixCodes", blocker), {
     defaultValue: blocker.suggestedFix,
     ...blockerInterpolation(blocker, t, formatMoney),
@@ -695,6 +698,10 @@ export function formatPaymentNotSavedMessage(
     const code = firstString(candidate, ["errorCode", "error_code"]);
     if (code !== PAYMENT_NOT_SAVED_ERROR_CODE && code !== PAYMENT_NOT_SAVED_PENDING_ERROR_CODE) {
       continue;
+    }
+    if (candidate.manualReceiptConfirmed === true || candidate.method === 'twint') {
+      if (candidate.manualReceiptConfirmed === false && candidate.method === 'twint') return t('twintPayment.receiptReconcile');
+      return t('twintPayment.receiptRecovery', 'A TWINT receipt is confirmed but its payment is not saved. Save the original receipt before taking another payment.');
     }
     const cents = firstNumber(candidate, ["amountCents", "amount_cents"]);
     const amount =

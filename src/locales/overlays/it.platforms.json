@@ -141,5 +141,23 @@
     "acknowledge": "Ho letto questo avviso",
     "persistPending": "Impossibile salvare questo avviso al momento. Riprova prima di confermare.",
     "retry": "Riprova"
+  },
+  "boxOrder": {
+    "decisionUnconfirmed": "BOX non ha confermato questa decisione. Controlla l’ordine e la connessione, poi riprova se è ancora in attesa.",
+    "testOrder": "TEST · SANDBOX",
+    "reasonLabel": "Motivo inviato a BOX",
+    "reasonPrompt": "BOX accetta solo questi motivi. Scegli quello da inviare.",
+    "reasonRequired": "Scegli un motivo per rifiutare questo ordine BOX.",
+    "reasonSentAs": "Inviato a BOX come: {{value}}",
+    "decisionFinal": "Le decisioni BOX sono definitive. Questo ordine non può essere riaperto qui.",
+    "reasons": {
+      "highOrderVolume": "Volume di ordini elevato",
+      "noCourierAvailable": "Nessun fattorino disponibile",
+      "productUnavailable": "Prodotto non disponibile",
+      "outsideServiceArea": "Fuori dall'area di servizio",
+      "wrongProductPrice": "Prezzo del prodotto errato",
+      "closingSoon": "Chiudiamo a breve",
+      "badWeather": "A causa del maltempo"
+    }
   }
 }

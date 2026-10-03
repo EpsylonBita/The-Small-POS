@@ -141,5 +141,23 @@
     "acknowledge": "I have read this",
     "persistPending": "Could not save this notice yet. Try again before acknowledging.",
     "retry": "Try again"
+  },
+  "boxOrder": {
+    "decisionUnconfirmed": "BOX has not confirmed this decision. Check the order and connection, then retry if it is still pending.",
+    "testOrder": "TEST · SANDBOX",
+    "reasonLabel": "Reason sent to BOX",
+    "reasonPrompt": "BOX accepts only these reasons. Choose the one to send.",
+    "reasonRequired": "Choose a reason to decline this BOX order.",
+    "reasonSentAs": "Sent to BOX as: {{value}}",
+    "decisionFinal": "BOX decisions are final. This order cannot be reopened here.",
+    "reasons": {
+      "highOrderVolume": "High order volume",
+      "noCourierAvailable": "No courier available",
+      "productUnavailable": "Product unavailable",
+      "outsideServiceArea": "Outside the service area",
+      "wrongProductPrice": "Wrong product price",
+      "closingSoon": "Closing soon",
+      "badWeather": "Due to bad weather"
+    }
   }
 }

@@ -227,22 +227,26 @@ export const HourlySalesChart = memo<HourlySalesChartProps>(({ data, isDark, cur
 HourlySalesChart.displayName = 'HourlySalesChart';
 
 interface PaymentMethodChartProps {
+  twintTotal?: number;
+  otherTotal?: number;
   cashTotal: number;
   cardTotal: number;
   isDark: boolean;
   currency: Intl.NumberFormat;
 }
 
-export const PaymentMethodChart = memo<PaymentMethodChartProps>(({ cashTotal, cardTotal, isDark, currency }) => {
+export const PaymentMethodChart = memo<PaymentMethodChartProps>(({ cashTotal, cardTotal, twintTotal = 0, otherTotal = 0, isDark, currency }) => {
   const { t } = useTranslation();
   const data = [
     { name: 'Cash', value: cashTotal },
     { name: 'Card', value: cardTotal },
+    ...(twintTotal !== 0 ? [{ name: 'TWINT', value: twintTotal }] : []),
+    ...(otherTotal !== 0 ? [{ name: 'Other', value: otherTotal }] : []),
   ];
 
-  const COLORS = ['#10b981', '#eab308'];
+  const COLORS = ['#10b981', '#eab308', '#111827', '#94a3b8'];
 
-  const total = cashTotal + cardTotal;
+  const total = cashTotal + cardTotal + twintTotal + otherTotal;
 
   return (
     <ChartContainer title={t('reports.payments.paymentMethods')} isDark={isDark} delay={0.4}>

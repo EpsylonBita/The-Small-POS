@@ -84,6 +84,9 @@ pub(crate) const KIND_COLLECT_OUTSTANDING: &str = "collect_outstanding";
 /// Its `order_id` is that client request id until the order exists (item E,
 /// fix review 30/09/2026).
 pub(crate) const KIND_NEW_ORDER_CHECKOUT: &str = "new_order_checkout";
+/// Cashier-confirmed TWINT money. No terminal or provider approval is claimed.
+pub(crate) const KIND_MANUAL_TWINT_CHECKOUT: &str = "manual_twint_checkout";
+pub(crate) const KIND_MANUAL_TWINT_PAYMENT: &str = "manual_twint_payment";
 
 /// The balance a collect-outstanding write expects (see
 /// `payments::record_payment_with_expected_balance`), kept with its record so
@@ -161,6 +164,8 @@ pub(crate) struct UnsavedChargedPayment {
     pub attempts: u32,
     #[serde(default)]
     pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_scope: Option<String>,
 }
 
 fn str_field(payload: &Value, keys: &[&str]) -> Option<String> {
@@ -231,6 +236,7 @@ impl UnsavedChargedPayment {
             captured_at: captured_at.to_string(),
             attempts: 0,
             last_error: None,
+            manual_scope: None,
         })
     }
 
@@ -288,14 +294,253 @@ impl UnsavedChargedPayment {
             captured_at: captured_at.to_string(),
             attempts: 0,
             last_error: None,
+            manual_scope: None,
         };
         Some((entry, request))
     }
 
     /// A new-order checkout: its order may not exist on this till yet.
     pub(crate) fn is_new_order_checkout(&self) -> bool {
-        self.kind == KIND_NEW_ORDER_CHECKOUT
+        self.kind == KIND_NEW_ORDER_CHECKOUT || self.kind == KIND_MANUAL_TWINT_CHECKOUT
     }
+
+    pub(crate) fn is_manual_twint(&self) -> bool {
+        matches!(
+            self.kind.as_str(),
+            KIND_MANUAL_TWINT_CHECKOUT | KIND_MANUAL_TWINT_PAYMENT
+        ) && self.method == "twint"
+    }
+
+    pub(crate) fn for_manual_twint_payment(
+        db: &DbState,
+        order_id: &str,
+        payload: &Value,
+        captured_at: &str,
+    ) -> Result<Self, String> {
+        let balance = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            crate::payments::load_order_payment_balance_snapshot(&conn, order_id)?
+        };
+        let mut entry = Self::for_payment(order_id, payload, Some(&balance), captured_at)
+            .ok_or("TWINT_MANUAL_CONFIRMATION_REQUIRED")?;
+        entry.kind = KIND_MANUAL_TWINT_PAYMENT.into();
+        entry.manual_scope = Some(manual_twint_scope(db)?);
+        let scope = entry.manual_scope.clone().unwrap();
+        let parts: Vec<_> = scope.split('|').collect();
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let context = manual_order_context(&conn, order_id)?;
+        drop(conn);
+        let request = entry
+            .request
+            .as_object_mut()
+            .ok_or("TWINT_MANUAL_CONFIRMATION_REQUIRED")?;
+        request.insert("method".into(), json!("twint"));
+        request.insert("organizationId".into(), json!(parts[0]));
+        request.insert("branchId".into(), json!(parts[1]));
+        request.insert("terminalId".into(), json!(parts[2]));
+        request.insert("_manualOrderContext".into(), context);
+        validate_manual_twint_entry(db, &entry)?;
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        if let Some(previous) = load(&conn, &entry.idempotency_key)? {
+            if previous.kind != entry.kind
+                || previous.request != entry.request
+                || previous.manual_scope != entry.manual_scope
+            {
+                return Err("TWINT_RECEIPT_ORIGINAL_CONFLICT".into());
+            }
+            return Ok(previous);
+        }
+        Ok(entry)
+    }
+
+    pub(crate) fn for_manual_twint_checkout(
+        db: &DbState,
+        client_request_id: &str,
+        payload: &Value,
+        captured_at: &str,
+    ) -> Result<Self, String> {
+        let (mut entry, _) = Self::for_new_order_checkout(client_request_id, payload, captured_at)
+            .ok_or("TWINT_MANUAL_CONFIRMATION_REQUIRED")?;
+        if entry.method != "twint" {
+            return Err("TWINT_MANUAL_CONFIRMATION_REQUIRED".into());
+        }
+        entry.kind = KIND_MANUAL_TWINT_CHECKOUT.into();
+        entry.manual_scope = Some(manual_twint_scope(db)?);
+        validate_manual_twint_entry(db, &entry)?;
+        Ok(entry)
+    }
+}
+
+fn manual_twint_scope(db: &DbState) -> Result<String, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    manual_twint_scope_in_connection(&conn)
+}
+
+fn manual_twint_scope_in_connection(conn: &Connection) -> Result<String, String> {
+    let terminal = crate::terminal_helpers::resolve_canonical_terminal_identity_in_connection(conn)
+        .ok_or("TWINT_RECEIPT_SCOPE_UNAVAILABLE")?;
+    let org = crate::db::get_setting(&conn, "terminal", "organization_id")
+        .filter(|v| !v.trim().is_empty())
+        .ok_or("TWINT_RECEIPT_SCOPE_UNAVAILABLE")?;
+    let branch = crate::db::get_setting(&conn, "terminal", "branch_id")
+        .filter(|v| !v.trim().is_empty())
+        .ok_or("TWINT_RECEIPT_SCOPE_UNAVAILABLE")?;
+    Ok(format!("{}|{}|{}", org.trim(), branch.trim(), terminal))
+}
+
+pub(crate) fn validate_manual_payment_context_in_connection(
+    conn: &Connection,
+    order_id: &str,
+    payload: &Value,
+) -> Result<(), String> {
+    if let Some(original) = payload.get("_manualOrderContext") {
+        if original != &manual_order_context(conn, order_id)? {
+            return Err("TWINT_RECEIPT_ORDER_CONTEXT_CHANGED".into());
+        }
+        let scope = manual_twint_scope_in_connection(conn)?;
+        let parts: Vec<_> = scope.split('|').collect();
+        if str_field(payload, &["organizationId"]).as_deref() != Some(parts[0])
+            || str_field(payload, &["branchId"]).as_deref() != Some(parts[1])
+            || str_field(payload, &["terminalId"]).as_deref() != Some(parts[2])
+        {
+            return Err("TWINT_RECEIPT_SCOPE_CHANGED".into());
+        }
+        let key = str_field(payload, &["idempotencyKey", "idempotency_key"]);
+        if list(conn, Some(order_id))?
+            .iter()
+            .any(|entry| Some(entry.idempotency_key.as_str()) != key.as_deref())
+        {
+            return Err("TWINT_RECEIPT_PRIOR_UNSAVED_PAYMENT_REQUIRES_RECONCILIATION".into());
+        }
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM orders WHERE id=?1",
+                params![order_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if matches!(status.as_str(), "cancelled" | "canceled" | "refunded") {
+            return Err("TWINT_RECEIPT_ORDER_CONTEXT_CHANGED".into());
+        }
+    }
+    Ok(())
+}
+
+/// A fresh collection must wait for the retained cashier-confirmed receipt.
+/// Existing gift/card reconciliation keeps using its original recovery path.
+pub(crate) fn refuse_new_collection_while_manual_receipt(
+    conn: &Connection,
+    order_id: &str,
+) -> Result<(), String> {
+    if list(conn, Some(order_id))?
+        .iter()
+        .any(|entry| entry.method.trim().eq_ignore_ascii_case("twint"))
+    {
+        return Err("TWINT_RECEIPT_PENDING: Save the original confirmed TWINT receipt before collecting another payment".into());
+    }
+    Ok(())
+}
+
+fn manual_order_context(conn: &Connection, order_id: &str) -> Result<Value, String> {
+    conn.query_row("SELECT id,COALESCE(branch_id,''),COALESCE(total_amount_cents,CAST(ROUND(total_amount*100) AS INTEGER),0),COALESCE(order_context,'') FROM orders WHERE id=?1",params![order_id],|row| {
+        Ok(json!({"orderId":row.get::<_,String>(0)?,"branchId":row.get::<_,String>(1)?,"totalCents":row.get::<_,i64>(2)?,"orderContext":row.get::<_,String>(3)?}))
+    }).map_err(|e|format!("TWINT_RECEIPT_ORDER_CONTEXT_UNAVAILABLE: {e}"))
+}
+
+fn validate_manual_twint_entry(db: &DbState, entry: &UnsavedChargedPayment) -> Result<(), String> {
+    if !entry.is_manual_twint() {
+        return Ok(());
+    }
+    let current = manual_twint_scope(db)?;
+    if entry.manual_scope.as_deref() != Some(current.as_str()) {
+        return Err("TWINT_RECEIPT_SCOPE_CHANGED".into());
+    }
+    let parts: Vec<&str> = current.split('|').collect();
+    let order = &entry.request;
+    if str_field(order, &["organizationId", "organization_id"]).as_deref() != Some(parts[0])
+        || str_field(order, &["branchId", "branch_id"]).as_deref() != Some(parts[1])
+        || str_field(order, &["terminalId", "terminal_id"]).as_deref() != Some(parts[2])
+    {
+        return Err("TWINT_RECEIPT_SCOPE_CHANGED".into());
+    }
+    let payment = if entry.is_new_order_checkout() {
+        if str_field(order, &["clientRequestId", "client_request_id"]).as_deref()
+            != Some(entry.order_id.as_str())
+        {
+            return Err("TWINT_RECEIPT_SCOPE_CHANGED".into());
+        }
+        order
+            .get("initialPayment")
+            .or_else(|| order.get("initial_payment"))
+            .ok_or("TWINT_MANUAL_CONFIRMATION_REQUIRED")?
+    } else {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let context = manual_order_context(&conn, &entry.order_id)?;
+        if str_field(order, &["orderId", "order_id"]).as_deref() != Some(entry.order_id.as_str())
+            || context.get("branchId").and_then(Value::as_str) != Some(parts[1])
+            || order.get("_manualOrderContext") != Some(&context)
+        {
+            return Err("TWINT_RECEIPT_ORDER_CONTEXT_CHANGED".into());
+        }
+        order
+    };
+    let mut keyed_payment = payment.clone();
+    keyed_payment
+        .as_object_mut()
+        .ok_or("TWINT_MANUAL_CONFIRMATION_REQUIRED")?
+        .insert("orderId".into(), json!(entry.order_id));
+    let input = crate::payments::build_payment_record_input(&keyed_payment)?;
+    if input.method != "twint"
+        || input.payment_origin != "manual"
+        || input.transaction_ref.is_some()
+        || input.terminal_device_id.is_some()
+        || Cents::round_half_even(input.amount).as_i64() != entry.amount_cents
+    {
+        return Err("TWINT_RECEIPT_ORIGINAL_CONFLICT".into());
+    }
+    let metadata = payment
+        .get("metadata")
+        .ok_or("TWINT_MANUAL_CONFIRMATION_REQUIRED")?;
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    if entry.currency.as_deref() != Some("CHF")
+        || entry.amount_cents <= 0
+        || entry.transaction_ref.is_some()
+        || entry.terminal_device_id.is_some()
+        || crate::fiscal::payload_builder::resolve_store_currency_code(&conn).as_deref()
+            != Some("CHF")
+        || str_field(payment, &["idempotencyKey", "idempotency_key"]).as_deref()
+            != Some(entry.idempotency_key.as_str())
+        || metadata.as_object().is_none_or(|fields| fields.len() != 4)
+        || metadata.get("provider").and_then(Value::as_str) != Some("twint")
+        || metadata.get("confirmation").and_then(Value::as_str) != Some("cashier")
+        || metadata.get("qr_mode").and_then(Value::as_str) != Some("static_qr_manual")
+        || !matches!(
+            metadata.get("confirmation_action").and_then(Value::as_str),
+            Some("confirm" | "skip")
+        )
+        || payment.get("terminalApproved").and_then(Value::as_bool) == Some(true)
+    {
+        return Err("TWINT_MANUAL_CONFIRMATION_REQUIRED".into());
+    }
+    Ok(())
+}
+
+fn hold_manual_twint_record(db: &DbState, entry: &mut UnsavedChargedPayment) -> Result<(), String> {
+    validate_manual_twint_entry(db, entry)?;
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    if let Some(previous) = load(&conn, &entry.idempotency_key)? {
+        if previous.request != entry.request
+            || previous.manual_scope != entry.manual_scope
+            || previous.expected_balance != entry.expected_balance
+            || previous.kind != entry.kind
+            || !previous.is_manual_twint()
+        {
+            return Err("TWINT_RECEIPT_ORIGINAL_CONFLICT".into());
+        }
+        entry.captured_at = previous.captured_at;
+        entry.attempts = previous.attempts;
+    }
+    crate::db::with_full_sync(&conn, |conn| record(conn, entry))
 }
 
 /// Hold the record: written before the payment row, updated after a failed
@@ -348,6 +593,8 @@ pub(crate) fn list(
              WHERE ls.setting_category = ?1
                AND NOT EXISTS (
                  SELECT 1 FROM order_payments op WHERE op.idempotency_key = ls.setting_key
+                   AND COALESCE(json_extract(ls.setting_value,'$.kind'),'') NOT IN ('manual_twint_checkout','manual_twint_payment')
+                   AND LOWER(TRIM(COALESCE(json_extract(ls.setting_value,'$.method'),''))) <> 'twint'
                )
                AND NOT EXISTS (
                  SELECT 1 FROM order_payments op
@@ -382,6 +629,9 @@ pub(crate) fn list(
         let raw = raw.map_err(|e| format!("read a charged payment not saved: {e}"))?;
         if let Some(entry) = parse(&raw) {
             if order_id.map_or(true, |order_id| entry.order_id == order_id) {
+                if entry.is_manual_twint() && saved_row_for(conn, &entry).ok().flatten().is_some() {
+                    continue;
+                }
                 entries.push(entry);
             }
         }
@@ -435,7 +685,24 @@ fn saved_row_for(
     conn: &Connection,
     entry: &UnsavedChargedPayment,
 ) -> Result<Option<SavedRow>, String> {
+    if entry.method.trim().eq_ignore_ascii_case("twint") && !entry.is_manual_twint() {
+        return Err("TWINT_RECEIPT_ORIGINAL_CONFLICT".into());
+    }
     if let Some(row) = saved_row(conn, &entry.idempotency_key)? {
+        if entry.is_manual_twint() {
+            let payment = if entry.is_new_order_checkout() {
+                entry.request.get("initialPayment")
+            } else {
+                Some(&entry.request)
+            };
+            let metadata = payment
+                .and_then(|v| v.get("metadata"))
+                .map(Value::to_string);
+            let exact: i64=conn.query_row("SELECT count(*) FROM order_payments p JOIN orders o ON o.id=p.order_id WHERE p.id=?1 AND p.method='twint' AND p.currency='CHF' AND p.status='completed' AND p.amount_cents=?2 AND p.transaction_ref IS NULL AND p.payment_origin='manual' AND ((?5=1 AND o.client_request_id=?3) OR (?5=0 AND p.order_id=?3)) AND p.metadata=?4",params![row.payment_id,entry.amount_cents,entry.order_id,metadata,i64::from(entry.is_new_order_checkout())],|r|r.get(0)).map_err(|e|e.to_string())?;
+            if exact != 1 {
+                return Err("TWINT_RECEIPT_ORIGINAL_CONFLICT".into());
+            }
+        }
         return Ok(Some(row));
     }
     let Some(reference) = entry
@@ -546,6 +813,10 @@ pub(crate) fn is_lasting_payment_refusal(error: &str) -> bool {
         "outstanding payment collection is active",
         "Cashier-collected payments require a cashier shift context",
         "is not a cashier or manager drawer",
+        "TWINT_RECEIPT_ORDER_CONTEXT_CHANGED",
+        "TWINT_RECEIPT_SCOPE_CHANGED",
+        "TWINT_RECEIPT_ORIGINAL_CONFLICT",
+        "TWINT_RECEIPT_OUTSTANDING_AMOUNT_CHANGED",
     ];
     LASTING.iter().any(|marker| error.contains(marker))
 }
@@ -565,6 +836,8 @@ pub(crate) fn summary_json(entry: &UnsavedChargedPayment) -> Value {
         "currency": entry.currency.clone().unwrap_or_else(|| "EUR".to_string()),
         "transactionRef": entry.transaction_ref,
         "kind": entry.kind,
+        "manualScope": entry.manual_scope,
+        "manualReceiptConfirmed": entry.is_manual_twint(),
         "capturedAt": entry.captured_at,
         "attempts": entry.attempts,
         "canSaveAgain": can_save_again(entry),
@@ -582,15 +855,23 @@ pub(crate) fn can_save_again(entry: &UnsavedChargedPayment) -> bool {
 /// The answer when the card was charged but the payment is not saved. Never a
 /// generic failure: it says what happened and what not to do.
 pub(crate) fn not_saved_response(entry: &UnsavedChargedPayment, extra: Option<&Value>) -> Value {
-    let message = format!(
+    let twint = entry.method.trim().eq_ignore_ascii_case("twint");
+    let message = if entry.is_manual_twint() {
+        format!("The cashier confirmed TWINT receipt of {} CHF, but {} not saved yet. Save the original receipt again; do not request another payment.",amount_text(entry.amount_cents),if entry.is_new_order_checkout(){"the order and payment are"}else{"the payment is"})
+    } else if twint {
+        "The original retained TWINT payment needs review before it can be saved. Do not collect again or resolve it through a generic local return.".to_string()
+    } else {
+        format!(
         "The card was charged {}, but the payment could not be saved on this till yet. Do not charge again: save the payment again.",
         amount_text(entry.amount_cents)
-    );
+    )
+    };
     let mut answer = json!({
         "success": false,
         "errorCode": PAYMENT_NOT_SAVED_ERROR_CODE,
         "paymentNotSaved": true,
-        "paymentApproved": true,
+        "paymentApproved": if twint { Value::Null } else { Value::Bool(true) },
+        "manualReceiptConfirmed": entry.is_manual_twint(),
         "paymentPersisted": false,
         "requiresReconciliation": true,
         "orderId": entry.order_id,
@@ -627,15 +908,22 @@ pub(crate) fn not_saved_response(entry: &UnsavedChargedPayment, extra: Option<&V
 /// saved. Nothing was charged and nothing was written.
 pub(crate) fn pending_refusal_response(order_id: &str, pending: &[UnsavedChargedPayment]) -> Value {
     let total_cents: i64 = pending.iter().map(|entry| entry.amount_cents).sum();
-    let message = format!(
+    let message = if pending.iter().any(UnsavedChargedPayment::is_manual_twint) {
+        format!(
+        "A confirmed payment of {} on this order is not saved on this till yet. Save the original receipt before taking another payment.",amount_text(total_cents)
+    )
+    } else {
+        format!(
         "A card payment of {} on this order is charged but not saved on this till yet. Save it again before taking another payment; do not charge again.",
         amount_text(total_cents)
-    );
+    )
+    };
     json!({
         "success": false,
         "errorCode": PAYMENT_NOT_SAVED_PENDING_ERROR_CODE,
         "paymentNotSaved": true,
         "paymentApproved": false,
+        "manualReceiptConfirmed": pending.iter().any(UnsavedChargedPayment::is_manual_twint),
         "paymentPersisted": false,
         "orderId": order_id,
         "amount": Cents::new(total_cents).to_f64_dp2(),
@@ -777,7 +1065,28 @@ where
     W: FnMut(&DbState, &UnsavedChargedPayment) -> Result<Value, String> + Send,
 {
     let mut held = entry;
-    hold_record(db, &mut held);
+    if held.is_manual_twint() {
+        if let Err(error) = hold_manual_twint_record(db, &mut held) {
+            held.last_error = Some(error.clone());
+            let retained = db
+                .conn
+                .lock()
+                .ok()
+                .and_then(|conn| load(&conn, &held.idempotency_key).ok().flatten())
+                .is_some();
+            let mut answer = not_saved_response(&held, None);
+            answer["manualReceiptRetained"] = json!(retained);
+            answer["journalError"] = json!(error);
+            if !retained {
+                let message="The cashier confirmed TWINT receipt, but this till could not retain it. Do not collect again. Keep the receipt and contact a manager before closing or restarting the POS.";
+                answer["error"] = json!(message);
+                answer["message"] = json!(message);
+            }
+            return answer;
+        }
+    } else {
+        hold_record(db, &mut held);
+    }
 
     let mut last_error = String::new();
     let mut attempts: u32 = 0;
@@ -794,6 +1103,15 @@ where
         attempts += 1;
         match write(db, &held) {
             Ok(answer) if answer_is_final(&answer) => {
+                // A manual receipt ends only after its exact canonical row is
+                // durable; a nominal order response cannot clear it early.
+                if held.is_manual_twint() {
+                    if let Some(saved) = saved_answer(db, &held) {
+                        return saved;
+                    }
+                    last_error = "TWINT_RECEIPT_CANONICAL_PAYMENT_NOT_SAVED".into();
+                    continue;
+                }
                 clear_quietly(db, &held.idempotency_key);
                 if attempts > 1 {
                     info!(
@@ -844,6 +1162,39 @@ pub(crate) fn write_recorded_payment(
     db: &DbState,
     entry: &UnsavedChargedPayment,
 ) -> Result<Value, String> {
+    if entry.method.trim().eq_ignore_ascii_case("twint") && !entry.is_manual_twint() {
+        return Err("TWINT_RECEIPT_ORIGINAL_CONFLICT".into());
+    }
+    if entry.kind == KIND_MANUAL_TWINT_PAYMENT {
+        validate_manual_twint_entry(db, entry)?;
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let pending = list(&conn, Some(&entry.order_id))?;
+        if pending
+            .iter()
+            .any(|other| other.idempotency_key != entry.idempotency_key)
+        {
+            return Err("TWINT_RECEIPT_PRIOR_UNSAVED_PAYMENT_REQUIRES_RECONCILIATION".into());
+        }
+        crate::commands::ecr::direct_sale_admission(&conn, &entry.order_id, None)?;
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM orders WHERE id=?1",
+                params![entry.order_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if matches!(status.as_str(), "cancelled" | "canceled" | "refunded") {
+            return Err("TWINT_RECEIPT_ORDER_CONTEXT_CHANGED".into());
+        }
+        if crate::payments::payload_collects_outstanding_balance(&entry.request) {
+            crate::commands::payments::validate_manual_twint_outstanding_context(
+                &conn,
+                &entry.order_id,
+                &entry.request,
+            )?;
+        }
+        drop(conn);
+    }
     match entry
         .expected_balance
         .as_ref()
@@ -892,6 +1243,7 @@ pub(crate) fn write_recorded_entry(
     invalidator: &dyn crate::print::PrintQueueInvalidator,
 ) -> Result<Value, String> {
     if entry.is_new_order_checkout() {
+        validate_manual_twint_entry(db, entry)?;
         return write_new_order_checkout(db, &entry.request, invalidator);
     }
     write_recorded_payment(db, entry)
@@ -985,11 +1337,18 @@ pub(crate) fn resolve_in_connection(
         return Ok(ResolveOutcome::NotFound);
     }
     crate::payment_review::with_savepoint(conn, "unsaved_payment_resolve", || {
+        let retained = load(conn, key)?;
+        if retained
+            .as_ref()
+            .is_some_and(|entry| entry.method.trim().eq_ignore_ascii_case("twint"))
+        {
+            return Err("TWINT_ORIGINAL_PROVIDER_REFUND_REQUIRED: A retained TWINT receipt cannot be resolved by a generic local return".into());
+        }
         if saved_row(conn, key)?.is_some() {
             clear(conn, key)?;
             return Ok(ResolveOutcome::Saved);
         }
-        let Some(entry) = load(conn, key)? else {
+        let Some(entry) = retained else {
             let resolved =
                 crate::db::get_setting(conn, UNSAVED_CHARGED_PAYMENT_RESOLVED_CATEGORY, key)
                     .is_some();
@@ -1157,6 +1516,63 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap()
+    }
+
+    #[test]
+    fn twint_retained_receipts_refuse_generic_return_before_audit_clear_or_saved_shortcut() {
+        for kind in [
+            KIND_MANUAL_TWINT_PAYMENT,
+            KIND_MANUAL_TWINT_CHECKOUT,
+            KIND_SINGLE,
+        ] {
+            for conflicting in [false, true] {
+                let db = crate::tests::harness::TestDb::open();
+                seed_order(&db.state, "twint-original", 1200);
+                let payload = json!({"orderId":"twint-original","method":"twint","amount":12,"currency":"CHF","idempotencyKey":"retained-original","metadata":{"provider":"twint","confirmation":"cashier","confirmation_action":"skip","qr_mode":"static_qr_manual"}});
+                let mut entry =
+                    UnsavedChargedPayment::for_payment("twint-original", &payload, None, "now")
+                        .unwrap();
+                entry.kind = kind.into();
+                entry.manual_scope = Some("original-org|branch-1|original-terminal".into());
+                {
+                    let conn = db.state.conn.lock().unwrap();
+                    record(&conn, &entry).unwrap();
+                    if conflicting {
+                        conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,currency,status,payment_origin,idempotency_key,metadata,created_at,updated_at) VALUES ('wrong-row','twint-original','twint',5,500,'CHF','completed','manual','retained-original','{}','now','now')",[]).unwrap();
+                    }
+                }
+                let db = db.restart();
+                let conn = db.state.conn.lock().unwrap();
+                let error =
+                    resolve_in_connection(&conn, "retained-original", Some("manager"), "later")
+                        .unwrap_err();
+                assert!(error.contains("TWINT_ORIGINAL_PROVIDER_REFUND_REQUIRED"));
+                assert_eq!(
+                    load(&conn, "retained-original").unwrap().unwrap().request,
+                    payload
+                );
+                assert!(crate::db::get_setting(
+                    &conn,
+                    UNSAVED_CHARGED_PAYMENT_RESOLVED_CATEGORY,
+                    "retained-original"
+                )
+                .is_none());
+                assert_eq!(conn.query_row("SELECT count(*) FROM recovery_action_log WHERE action_id='payment_not_saved_resolved'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+                assert_eq!(
+                    conn.query_row("SELECT count(*) FROM payment_adjustments", [], |r| r
+                        .get::<_, i64>(0))
+                        .unwrap(),
+                    0
+                );
+                assert_eq!(list(&conn, Some("twint-original")).unwrap().len(), 1);
+                assert_eq!(
+                    crate::payment_integrity::load_payments_not_saved_blockers(&conn, "branch-1")
+                        .unwrap()
+                        .len(),
+                    1
+                );
+            }
+        }
     }
 
     #[test]

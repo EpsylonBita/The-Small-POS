@@ -26,6 +26,7 @@ describe('OutstandingPaymentMethodModal', () => {
         isOpen
         amount={18.5}
         allowSplit={false}
+        allowTwint={false}
         onClose={() => {}}
         onSelect={() => {}}
       />,
@@ -34,6 +35,17 @@ describe('OutstandingPaymentMethodModal', () => {
     expect(capturedPaymentModalProps).not.toBeNull();
     expect(capturedPaymentModalProps?.onSplitPayment).toBeUndefined();
     expect(capturedPaymentModalProps?.allowTips).toBe(false);
+    expect(capturedPaymentModalProps?.allowTwint).toBe(false);
+  });
+
+  it('retains TWINT and the manual original operation without fabricating a provider transaction', async () => {
+    const onSelect = vi.fn().mockResolvedValue(true);
+    render(<OutstandingPaymentMethodModal isOpen amount={18.5} onClose={() => {}} onSelect={onSelect} />);
+    const complete = capturedPaymentModalProps?.onPaymentComplete as (value: Record<string, unknown>) => Promise<boolean>;
+    const metadata = { provider: 'twint', confirmation: 'cashier', confirmation_action: 'skip', qr_mode: 'static_qr_manual' };
+    await expect(complete({ method: 'twint', amount: 18.5, currency: 'CHF', idempotencyKey: 'TWINT-manual-original', metadata })).resolves.toBe(true);
+    expect(onSelect).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ method: 'twint', amount: 18.5, currency: 'CHF', idempotencyKey: 'TWINT-manual-original', metadata }));
+    expect(onSelect.mock.calls[0][0].transactionId).toBeUndefined();
   });
 
   it('uses a synchronous guard so a same-tick second tender cannot collect twice', async () => {

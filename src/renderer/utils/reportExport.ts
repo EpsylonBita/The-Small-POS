@@ -1,5 +1,5 @@
 import type { ZReportData, ZReportDayOrder, StaffPerformance } from '../types/reports';
-import { buildZReportGiftCloseCsvRows, resolveZReportPeriod } from './zReport';
+import { buildZReportGiftCloseCsvRows, resolveZReportPeriod, resolveZReportPresentation, resolveZReportTwintTotal } from './zReport';
 
 export function exportArrayToCSV(data: Record<string, any>[], filename: string) {
   if (!data || data.length === 0) {
@@ -27,6 +27,7 @@ export function exportZReportToCSV(zReport: ZReportData, filename: string = 'z-r
   if (!zReport) return;
   const rows: Record<string, any>[] = [];
   const period = resolveZReportPeriod(zReport);
+  const sections = resolveZReportPresentation(zReport);
   const driverEarnings = zReport.driverEarnings ?? {
     totalDeliveries: 0,
     totalEarnings: 0,
@@ -39,12 +40,13 @@ export function exportZReportToCSV(zReport: ZReportData, filename: string = 'z-r
 
   rows.push({ Section: 'Shifts', Metric: 'Total', Value: zReport.shifts.total });
   rows.push({ Section: 'Shifts', Metric: 'Cashier', Value: zReport.shifts.cashier });
-  rows.push({ Section: 'Shifts', Metric: 'Driver', Value: zReport.shifts.driver });
+  if (sections.drivers) rows.push({ Section: 'Shifts', Metric: 'Driver', Value: zReport.shifts.driver });
 
   rows.push({ Section: 'Sales', Metric: 'Total Orders', Value: zReport.sales.totalOrders });
   rows.push({ Section: 'Sales', Metric: 'Total Sales', Value: zReport.sales.totalSales });
   rows.push({ Section: 'Sales', Metric: 'Cash Sales', Value: zReport.sales.cashSales });
   rows.push({ Section: 'Sales', Metric: 'Card Sales', Value: zReport.sales.cardSales });
+  if (sections.twint) rows.push({ Section: 'Sales', Metric: 'TWINT', Value: resolveZReportTwintTotal(zReport) });
 
   rows.push({ Section: 'Cash Drawer', Metric: 'Total Variance', Value: zReport.cashDrawer.totalVariance });
   rows.push({ Section: 'Cash Drawer', Metric: 'Total Cash Drops', Value: zReport.cashDrawer.totalCashDrops });
@@ -52,12 +54,17 @@ export function exportZReportToCSV(zReport: ZReportData, filename: string = 'z-r
   // Gift card cash is a drawer liability: reconciliation and proof rows only, never sales/tender/tax.
   rows.push(...buildZReportGiftCloseCsvRows(zReport));
 
+  if (sections.expenses) {
   rows.push({ Section: 'Expenses', Metric: 'Total', Value: zReport.expenses.total });
   rows.push({ Section: 'Expenses', Metric: 'Pending Count', Value: zReport.expenses.pendingCount });
 
+  }
+  if (sections.drivers || driverEarnings.unsettledCount > 0) {
   rows.push({ Section: 'Driver Earnings', Metric: 'Total Deliveries', Value: driverEarnings.totalDeliveries });
   rows.push({ Section: 'Driver Earnings', Metric: 'Total Earnings', Value: driverEarnings.totalEarnings });
   rows.push({ Section: 'Driver Earnings', Metric: 'Unsettled Count', Value: driverEarnings.unsettledCount });
+
+  }
 
   const headers = Object.keys(rows[0]);
   const csv = [headers.join(','), ...rows.map(r => headers.map(h => JSON.stringify(r[h] ?? '')).join(','))].join('\n');
@@ -104,7 +111,7 @@ export function exportDayOrdersToCSV(
         ? (order.tableNumber ? `Table ${order.tableNumber}` : '—')
         : '—',
     'Amount': order.amount,
-    'Payment Method': order.paymentMethod || '—',
+    'Payment Method': order.paymentMethod === 'twint' ? 'TWINT' : order.paymentMethod || '—',
     'Status': order.status,
     'Time': order.createdAt,
   }));

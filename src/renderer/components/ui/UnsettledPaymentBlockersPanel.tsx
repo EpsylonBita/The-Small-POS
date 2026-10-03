@@ -13,7 +13,7 @@ import {
 } from "../../../lib/payment-integrity";
 import { formatCurrency, formatDateTime } from "../../utils/format";
 import { setAsideResolvingKey } from "../../utils/paymentSetAside";
-import { unsavedResolvingKey, unsavedSavingKey } from "../../utils/unsavedPayments";
+import { isManualTwintRecord, unsavedResolvingKey, unsavedSavingKey } from "../../utils/unsavedPayments";
 
 interface UnsettledPaymentBlockersPanelProps {
   blockers: UnsettledPaymentBlocker[];
@@ -157,6 +157,7 @@ export function UnsettledPaymentBlockersPanel({
           const unsavedPayment = isPaymentsNotSavedBlocker(blocker)
             ? blocker.unsavedPayment
             : undefined;
+          const formatBlockerAmount=(amount:number)=>unsavedPayment && isManualTwintRecord(unsavedPayment) ? formatCurrency(amount,unsavedPayment.currency || 'CHF') : formatCurrency(amount);
           // Shared rule R4 (round 3, 01/10/2026): an order whose money the
           // delivery platform holds is never offered "Record the payment":
           // the money is restored from the server (Sync Now), never taken at
@@ -248,7 +249,7 @@ export function UnsettledPaymentBlockersPanel({
                       })}
                     </div>
                     <div className="mt-2 text-sm font-bold text-white">
-                      {formatCurrency(blocker.totalAmount || 0)}
+                      {formatBlockerAmount(blocker.totalAmount || 0)}
                     </div>
                   </div>
                 </div>
@@ -256,17 +257,17 @@ export function UnsettledPaymentBlockersPanel({
                 <div className="grid gap-2 sm:grid-cols-3 xl:min-w-[330px]">
                   <div className="rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-3">
                     <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
-                      {t("paymentIntegrity.unsavedPaymentLabel", {
+                      {unsavedPayment.method === 'twint' ? t('twintPayment.receiptNotSaved') : t("paymentIntegrity.unsavedPaymentLabel", {
                         defaultValue: "Charged, not saved",
                       })}
                     </div>
                     <div className="mt-2 text-sm font-bold text-red-200">
-                      {formatCurrency(unsavedPayment.amount || 0)}
+                      {isManualTwintRecord(unsavedPayment) ? formatCurrency(unsavedPayment.amountCents / 100,unsavedPayment.currency || 'CHF') : formatCurrency(unsavedPayment.amount || 0)}
                     </div>
                   </div>
                   <div className="rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-3">
                     <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
-                      {t("paymentIntegrity.chargedAtLabel", {
+                      {unsavedPayment.method === 'twint' ? t('twintPayment.receiptConfirmedAt') : t("paymentIntegrity.chargedAtLabel", {
                         defaultValue: "Charged at",
                       })}
                     </div>
@@ -288,7 +289,7 @@ export function UnsettledPaymentBlockersPanel({
                       })}
                     </div>
                     <div className="mt-2 text-sm font-bold text-white">
-                      {formatCurrency(blocker.totalAmount || 0)}
+                      {formatBlockerAmount(blocker.totalAmount || 0)}
                     </div>
                   </div>
                 </div>
@@ -301,7 +302,7 @@ export function UnsettledPaymentBlockersPanel({
                       })}
                     </div>
                     <div className="mt-2 text-sm font-bold text-white">
-                      {formatCurrency(blocker.totalAmount || 0)}
+                      {formatBlockerAmount(blocker.totalAmount || 0)}
                     </div>
                   </div>
                   <div className="rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-3">
@@ -397,12 +398,12 @@ export function UnsettledPaymentBlockersPanel({
                         ? t("paymentIntegrity.unsavedSaving", {
                             defaultValue: "Saving...",
                           })
-                        : t("paymentIntegrity.unsavedSaveAgainAction", {
+                        : isManualTwintRecord(unsavedPayment) ? t('twintPayment.saveOriginal') : t("paymentIntegrity.unsavedSaveAgainAction", {
                             defaultValue: "Save payment again",
                           })}
                     </button>
                   )}
-                  {typeof onResolveUnsavedPayment === "function" && (
+                  {typeof onResolveUnsavedPayment === "function" && unsavedPayment.method !== 'twint' && (
                     <button
                       type="button"
                       disabled={Boolean(resolvingKey)}

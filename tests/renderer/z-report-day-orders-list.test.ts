@@ -78,7 +78,7 @@ test('Z modal payment filter and labels understand platform tenders', () => {
   const source = read(modalPath);
   assert.match(source, /platform_online: 'platformOnline',\s*platform_cod: 'platformCod',/);
   assert.match(source, /function isPlatformTender\(value: unknown\): boolean/);
-  assert.match(source, /useState<'all' \| 'cash' \| 'card' \| 'platform'>\('all'\)/);
+  assert.match(source, /useState<'all' \| 'cash' \| 'card' \| 'twint' \| 'platform'>\('all'\)/);
   assert.match(source, /paymentMethodFilter === 'platform'\s*\? Boolean\(o\.platform\) \|\| isPlatformTender\(o\.paymentMethod\)\s*: o\.paymentMethod === paymentMethodFilter/, 'the Platforms chip also matches platform orders our own driver delivered');
   assert.match(source, /\{ value: 'platform' as const, label: t\('modals\.zReport\.filters\.platform'\) \}/);
 });

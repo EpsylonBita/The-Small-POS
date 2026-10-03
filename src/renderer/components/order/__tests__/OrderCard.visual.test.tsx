@@ -59,6 +59,22 @@ vi.mock('../OrderStatusControls', () => ({
 
 import OrderCard from '../OrderCard';
 
+describe('BOX sandbox order badge', () => {
+  it.each([
+    { plugin: 'box', is_test: true, integration_environment: 'production' },
+    { plugin: 'box_gr', is_test: 1 },
+    { platform: 'boxgr', integration_environment: 'sandbox' },
+  ])('labels test orders explicitly: %j', (flags) => {
+    const view = render(<OrderCard order={makeOrder(flags)} isSelected={false} onSelect={() => {}} />);
+    expect(view.getByTestId('box-test-order-badge').textContent).toBe('TEST · SANDBOX');
+  });
+
+  it.each([{ plugin: 'box', is_test: false, integration_environment: 'production' }, { plugin: 'efood', is_test: true }])('does not label normal BOX production or other providers: %j', (flags) => {
+    const view = render(<OrderCard order={makeOrder(flags)} isSelected={false} onSelect={() => {}} />);
+    expect(view.queryByTestId('box-test-order-badge')).toBeNull();
+  });
+});
+
 function minutesAgo(minutes: number): string {
   return new Date(Date.now() - minutes * 60_000).toISOString();
 }

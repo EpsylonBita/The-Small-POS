@@ -449,6 +449,9 @@ pub(crate) fn refund_payment_in_connection(
     {
         return Err(crate::payments::GIFT_CARD_REVERSAL_UNSUPPORTED.into());
     }
+    if payment_method.trim().eq_ignore_ascii_case("twint") {
+        return Err("TWINT_ORIGINAL_PROVIDER_REFUND_REQUIRED: Return TWINT money through the original provider; no cash or card refund was performed".into());
+    }
     if pay_status == "voided" {
         return Err("Cannot refund a voided payment".into());
     }
@@ -883,6 +886,9 @@ pub fn void_payment_with_adjustment(
         .eq_ignore_ascii_case(crate::payments::GIFT_CARD_METHOD)
     {
         return Err(crate::payments::GIFT_CARD_REVERSAL_UNSUPPORTED.into());
+    }
+    if pay_method.trim().eq_ignore_ascii_case("twint") {
+        return Err("TWINT_ORIGINAL_PROVIDER_REFUND_REQUIRED: Return TWINT money through the original provider; no cash or card refund was performed".into());
     }
     match pay_status.as_str() {
         "completed" => {}

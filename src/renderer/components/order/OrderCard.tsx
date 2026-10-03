@@ -1,3 +1,4 @@
+import twintLogo from '../../../../../shared/payments/assets/twint-logo.png';
 import React, { memo, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Split } from 'lucide-react';
@@ -25,6 +26,7 @@ import {
   type StoreMapOrigin,
 } from '../../utils/delivery-routing';
 import { getBridge } from '../../../lib';
+import { isBoxOrder } from './box-order-decision';
 import type { LocalPreparationPhase } from '../../services/KdsLocalPhaseStore';
 import { KitchenStageBadge } from './KitchenStageBadge';
 import './OrderCard.css';
@@ -245,6 +247,7 @@ export const OrderCard = memo<OrderCardProps>(({
   const PaymentMethodIcon = ({ method }: { method: string }) => {
     const iconSize = 20;
 
+    if (method === 'twint') return <img src={twintLogo} alt="TWINT" className="h-5 w-auto rounded" />;
     if (method === 'cash') {
       return (
         <svg
@@ -615,6 +618,12 @@ export const OrderCard = memo<OrderCardProps>(({
                   </div>
                 )}
               </>
+            )}
+            {isBoxOrder(order) && (order.is_test === true || order.is_test === 1 || order.isTest === true
+              || order.integration_environment === 'sandbox' || order.integrationEnvironment === 'sandbox') && (
+              <span data-testid="box-test-order-badge" className="mt-1 inline-flex rounded border border-amber-500/50 bg-amber-500/15 px-2 py-0.5 text-xs font-semibold text-amber-700 dark:text-amber-300">
+                {t('boxOrder.testOrder', { defaultValue: 'TEST · SANDBOX' })}
+              </span>
             )}
             {/* Local kitchen handoff stage (this terminal's KDS), shown beside the canonical status, never replacing it */}
             {visibleKitchenStage && <KitchenStageBadge phase={visibleKitchenStage} className="mt-0.5" />}

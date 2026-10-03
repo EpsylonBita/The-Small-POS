@@ -167,6 +167,17 @@ beforeEach(() => {
 });
 
 describe('claimOrdinaryCollectionOwner', () => {
+  it('adopts manual TWINT by the original key, amount and honest completed receipt without a transaction reference',async()=>{
+    const orderId=nextOrderId('manual-twint');
+    const owner=await unknownOwner(orderId,{method:'twint',amount:12.5,idempotencyKey:'original-manual-key'});
+    const payment={...row('twint-row',null),orderId,method:'twint',currency:'CHF',idempotencyKey:'original-manual-key',metadata:{provider:'twint',confirmation:'cashier',confirmation_action:'skip',qr_mode:'static_qr_manual'}};
+    for (const changed of [{orderId:'other-order'},{idempotencyKey:'other-key'},{amount:13},{method:'card'},{currency:'EUR'},{paymentOrigin:'terminal'},{transactionRef:'fake-provider'},{status:'refunded'},{metadata:{provider:'twint',confirmation:'provider'}}]) {
+      expect(ledgerHasOriginalOrdinaryPayment(owner,[{...payment,...changed}])).toBe(false);
+    }
+    expect(ledgerHasOriginalOrdinaryPayment(owner,[payment])).toBe(true);
+    expect(await probeOrdinaryOwner(owner,async()=>({completedPayments:[payment],value:'saved'}))).toMatchObject({status:'completed',value:'saved'});
+    expect(retainedOrdinaryOwner(SCOPE,orderId)).toBeNull();expectNoWrites();
+  });
   it('is refused without an organization or a public terminal, reserving nothing', () => {
     const orderId = nextOrderId('scope');
     const scopes = [

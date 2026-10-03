@@ -10,7 +10,7 @@ import path from 'node:path';
 // platform settles were missing from the number the owner reads first.
 //
 // The headline and its split must come from ONE payment-level source — the Z
-// builder's daySummary (cash + card + platform online + platform COD + other
+// builder's daySummary (cash + card + TWINT + platform online + platform COD + other
 // tender) — never from the order-level sales.totalSales (gross − discounts),
 // which diverges from the tiles as soon as an order is still uncollected or a
 // payment was refunded (adversarial review, 06/09/2026).
@@ -42,9 +42,10 @@ test('Z modal headline is the money collected in the whole day (store + platform
   // One payment-level source for the headline and the tiles.
   assert.match(source, /const platformCollected = platformOnlineCollected \+ platformCodCollected;/);
   assert.match(source, /const otherTenderCollected = zReport\?\.paymentsBreakdown\?\.other\?\.total \?\? 0;/);
+  assert.match(source, /const twintCollected = resolveZReportTwintTotal\(zReport\);/);
   assert.match(
     source,
-    /const collectedTotal = zReport\?\.daySummary\?\.total\s*\?\? \(cashCollected \+ cardCollected \+ platformCollected \+ otherTenderCollected\);/,
+    /const collectedTotal = zReport\?\.daySummary\?\.total\s*\?\? \(cashCollected \+ cardCollected \+ twintCollected \+ platformCollected \+ otherTenderCollected\);/,
   );
   assert.match(source, /text-yellow-300 sm:text-5xl">\s*\{formatMoney\(collectedTotal\)\}/);
   assert.match(source, /data-z-report-earned-source[\s\S]*?\{t\('modals\.zReport\.orders', \{ defaultValue: 'Orders' \}\)\}: \{totalOrders\}/);
@@ -80,7 +81,7 @@ test('Z modal shows the three-way split under the headline: cash in the till + c
 test('Z report types expose the payment-level day summary the modal reads', () => {
   const types = readFileSync(typesPath, 'utf8');
   assert.match(types, /daySummary\?: \{[\s\S]*?platformOnlineTotal\?: number;[\s\S]*?platformCodTotal\?: number;[\s\S]*?total: number;/);
-  assert.match(types, /paymentsBreakdown\?: Partial<[\s\S]*?'cash' \| 'card' \| 'other' \| 'platform_online' \| 'platform_cod'/);
+  assert.match(types, /paymentsBreakdown\?: Partial<[\s\S]*?'cash' \| 'card' \| 'twint' \| 'other' \| 'platform_online' \| 'platform_cod'/);
 });
 
 test('Z modal cash-flow row keys exist in all six locales (no raw keys on the till)', () => {

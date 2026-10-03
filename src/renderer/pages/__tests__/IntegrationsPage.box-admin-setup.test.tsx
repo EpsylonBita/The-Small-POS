@@ -187,7 +187,7 @@ describe('BOX card is Admin-Dashboard-managed on the till', () => {
   const serve = (items: RemoteItem[]) => {
     mocks.posApiGet.mockResolvedValue({
       success: true,
-      data: { integrations: items },
+      data: { branch_id: 'branch-1', integrations: items },
     })
   }
 
@@ -295,7 +295,7 @@ describe('BOX card is Admin-Dashboard-managed on the till', () => {
   it('manual refresh updates direct enable state and the separate legacy reporting flag together', async () => {
     let enabled = true
     mocks.posApiGet.mockImplementation(async (path: string) => path === '/pos/integrations'
-      ? { success: true, data: { integrations: [
+      ? { success: true, data: { branch_id: 'branch-1', integrations: [
         { plugin_id: 'fiscalization_gr', provider: 'fiscalization_gr', name: 'AADE Direct', is_purchased: true, is_enabled: enabled, status: 'connected', read_only_admin_setup: true,
           settings: { environment: enabled ? 'test' : 'production' }, environment: 'production' },
         { plugin_id: 'mydata', provider: 'mydata', name: 'MyData', is_purchased: true, status: 'connected' },

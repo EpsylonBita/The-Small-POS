@@ -62,6 +62,7 @@ vi.mock('../../utils/api-helpers', () => ({
   posApiGet: vi.fn().mockResolvedValue({ success: false }),
   posApiFetch: vi.fn().mockResolvedValue({ success: false }),
 }));
+vi.mock('../../contexts/module-context', () => ({ useModuleAccess: () => ({ isEnabled: true }) }));
 vi.mock('../../contexts/theme-context', () => ({ useTheme: () => ({ resolvedTheme: 'light' }) }));
 
 import en from '../../../locales/en.json';

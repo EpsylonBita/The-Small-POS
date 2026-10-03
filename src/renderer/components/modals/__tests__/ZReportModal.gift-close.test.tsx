@@ -394,3 +394,27 @@ describe('ZReportModal gift card close', () => {
     ).toBeGreaterThan(0));
   });
 });
+
+
+describe('ZReportModal TWINT and conditional sections', () => {
+  it('shows mixed cash/card/TWINT once and omits the empty expense ledger', async () => {
+    serveReports(date => ({...baseReport(date),
+      sales:{totalOrders:1,totalSales:55,cashSales:10,cardSales:20,twintSales:25},
+      daySummary:{total:55},presentation:{deliveryModuleEnabled:false,twintPluginEnabled:false},
+      paymentsBreakdown:{cash:{count:1,total:10},card:{count:1,total:20},twint:{count:1,total:25},other:{count:0,total:0}},
+    }));
+    renderModal(); await waitFor(()=>expect(screen.getByAltText('TWINT')).toBeInTheDocument());
+    const split=document.querySelector<HTMLElement>('[data-z-report-revenue-split]')!;
+    expect(within(split).getByText(formatCurrency(25))).toBeInTheDocument();
+    expect(within(split).getByText(formatCurrency(20))).toBeInTheDocument();
+    expect(screen.queryAllByText(formatCurrency(55)).length).toBeGreaterThan(0);
+    openMoneyTab();expect(screen.queryByText('modals.zReport.expenseLedger')).not.toBeInTheDocument();
+    expect(screen.queryByText('modals.zReport.noExpenseDetails')).not.toBeInTheDocument();
+  });
+  it('shows enabled zero TWINT from the frozen flag', async () => {
+    serveReports(date=>({...baseReport(date),presentation:{twintPluginEnabled:true},sales:{totalOrders:0,totalSales:0,cashSales:0,cardSales:0},daySummary:{total:0}}));
+    renderModal();await waitFor(()=>expect(screen.getByAltText('TWINT')).toBeInTheDocument());
+    const split=document.querySelector<HTMLElement>('[data-z-report-revenue-split]')!;
+    expect(within(split).getAllByText(formatCurrency(0)).length).toBeGreaterThan(0);
+  });
+});

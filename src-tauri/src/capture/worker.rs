@@ -551,6 +551,109 @@ fn read_storage_key(response: &Value) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
+// Recognition, and the office's own recording (R16.1, R16.2, R16.4)
+// ---------------------------------------------------------------------------
+//
+// Spec: `.claude/specs/supplier-invoice-automation/design.md` §4.13, decision
+// **A24**. For a supplier the owner opted in, the server records the invoice
+// *at reading time* and says so in an `automation` block on the recognition
+// response. The client needs no new state for that: it confirms the capture
+// through the `committed` door it already has, storing the block as the
+// server-confirmed result — which is what [`cleanup_committed_captures`] reads
+// before it deletes a page file, and what the queue renders the automatic mark
+// from. The switch itself is never read here: a stale local copy must not be
+// able to record anything, so the decision is the server's, at reading time,
+// on every attempt including an offline replay (R16.4).
+
+/// The block the server adds when it recorded the invoice itself.
+///
+/// Deliberately named `automation` rather than anything shaped like capture
+/// metadata: the desktop's `capture-source-origin-absence` audit proves no
+/// screen here reads a supplier invoice back for its origin, and that stays
+/// true (§4.13).
+const AUTOMATION_KEY: &str = "automation";
+
+/// Maximum source-name length the reading door accepts.
+const MAX_SOURCE_NAME_CHARS: usize = 200;
+
+/// The recognition request body.
+///
+/// `captureId` **and** `sourceKind` together are what open the server's
+/// decision door; a request carrying neither is answered byte-for-byte as it
+/// was before this feature existed. Both are already known to the upload step,
+/// so nothing new is computed here — the same three values that ride outside
+/// the body of every page upload ride inside the body of the reading.
+pub fn ocr_request_body(document: &CaptureDocument, storage_keys: &[String]) -> Value {
+    let mut body = json!({
+        "storageKeys": storage_keys,
+        "captureId": document.id,
+        "sourceKind": document.source_kind,
+    });
+
+    if let Some(name) = document
+        .source_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        // A display string, sent as the person wrote it; only its length is
+        // this client's business (the server caps it at the same 200).
+        let trimmed: String = name.chars().take(MAX_SOURCE_NAME_CHARS).collect();
+        body["sourceName"] = Value::String(trimmed);
+    }
+
+    body
+}
+
+/// The server's own recording, if this response carries one.
+pub fn recorded_automation(response: &Value) -> Option<&Value> {
+    response
+        .get(AUTOMATION_KEY)
+        .filter(|block| block.is_object())
+}
+
+/// Apply one recognition answer to the document, and report the status it now
+/// holds.
+///
+/// Two outcomes, and only two:
+///
+/// - **The office recorded it.** The block is stored through
+///   [`confirm_commit`] — the same `commit_confirmed` event a person's Save
+///   writes — so [`committed_result`] returns it and the local cleanup rule
+///   applies unchanged. The document is `committed`; nothing is queued, because
+///   there is nothing left to send (§4.13).
+/// - **Anything else.** `ready_review`, exactly as today: the person checks the
+///   reading and presses Save (R16.2).
+///
+/// The walk to `committed` goes through `ready_review` and `committing` rather
+/// than jumping the state machine: the document really did become readable and
+/// really was committed, and the lifecycle a screen may render is the same ten
+/// states it has always been (no eleventh status, no CHECK migration).
+pub fn apply_recognition(
+    conn: &Connection,
+    capture_id: &str,
+    response: &Value,
+) -> Result<CaptureStatus, String> {
+    // The reading is stored whichever way the decision went: the drawer opens
+    // from it when the person asks to correct the recorded invoice, and a
+    // stored reading is what makes a restart lose nothing.
+    store::set_recognition_json(conn, capture_id, &response.to_string())?;
+    store::clear_retry(conn, capture_id)?;
+
+    let Some(automation) = recorded_automation(response).cloned() else {
+        store::set_status(conn, capture_id, CaptureStatus::ReadyReview, None)?;
+        return Ok(CaptureStatus::ReadyReview);
+    };
+
+    store::set_status(conn, capture_id, CaptureStatus::ReadyReview, None)?;
+    store::set_status(conn, capture_id, CaptureStatus::Committing, None)?;
+    // No staff id: nobody at this till did this, and the history must not
+    // claim otherwise.
+    confirm_commit(conn, capture_id, &automation, None)?;
+    Ok(CaptureStatus::Committed)
+}
+
+// ---------------------------------------------------------------------------
 // The worker turn
 // ---------------------------------------------------------------------------
 
@@ -716,22 +819,28 @@ async fn advance_document(
         Some(db.as_ref()),
         OCR_PATH,
         "POST",
-        Some(json!({ "storageKeys": ordered })),
+        Some(ocr_request_body(&document, &ordered)),
         OCR_RECOGNITION_TIMEOUT,
     )
     .await;
 
     match recognition {
         Ok(result) => {
-            let conn = lock(db)?;
-            store::set_recognition_json(&conn, &capture_id, &result.to_string())?;
-            store::clear_retry(&conn, &capture_id)?;
-            store::set_status(&conn, &capture_id, CaptureStatus::ReadyReview, None)?;
-            drop(conn);
+            let status = {
+                let conn = lock(db)?;
+                apply_recognition(&conn, &capture_id, &result)?
+            };
             // The finished result surfaces here — nothing had to stay on
             // screen, and nothing was cancelled by walking away (R6.2, R11.9).
-            emit_status(app, &capture_id, CaptureStatus::ReadyReview, None);
-            info!(capture_id = %capture_id, "Captured invoice is ready to check");
+            emit_status(app, &capture_id, status, None);
+            if status == CaptureStatus::Committed {
+                info!(
+                    capture_id = %capture_id,
+                    "Captured invoice was recorded by the office; nothing to check"
+                );
+            } else {
+                info!(capture_id = %capture_id, "Captured invoice is ready to check");
+            }
         }
         Err(error) => {
             // A transient failure re-queues with no reason recorded anywhere
@@ -1610,5 +1719,183 @@ mod tests {
             .find(|event| event.event_type == EVENT_COMMIT_CONFIRMED)
             .expect("the confirmation is in the history");
         assert_eq!(event.staff_id.as_deref(), Some("staff-9"));
+    }
+
+    // -- the office's own recording (R16.1, R16.2, R16.4) ------------------- //
+
+    /// The block `/api/pos/suppliers/import/ocr` adds when the supplier's
+    /// «Καταχώρηση αυτόματα» switch was ON and the reading was complete.
+    fn automation_block() -> Value {
+        json!({
+            "outcome": "recorded_stock_updated",
+            "invoiceId": "invoice-7",
+            "invoiceNumber": "0768596",
+            "invoiceDate": "2026-08-01",
+            "amount": 302.45,
+            "supplierName": "ΟΤΕ Α.Ε.",
+            "kind": "bill",
+            "supplierInvoiceId": "invoice-7",
+            "attachmentUrl": "org/branch/invoice-7/scan-capture-a.pdf",
+            "attachmentPending": false,
+        })
+    }
+
+    fn recognition_response(automation: Option<Value>) -> Value {
+        let mut response = json!({
+            "success": true,
+            "quality": "good",
+            "parsed": { "rows": [], "supplier": { "name": "ΟΤΕ Α.Ε." } },
+            "pages": [],
+        });
+        if let Some(block) = automation {
+            response[AUTOMATION_KEY] = block;
+        }
+        response
+    }
+
+    /// Walk a seeded document up to the point where recognition answers.
+    fn read_document(db: &TestDb, id: &str) {
+        let conn = db.state.conn.lock().expect("lock");
+        for next in [CaptureStatus::Uploading, CaptureStatus::Reading] {
+            store::set_status(&conn, id, next, None).expect("advance");
+        }
+    }
+
+    #[test]
+    fn a_reading_the_office_recorded_is_confirmed_through_the_committed_door() {
+        let db = TestDb::open();
+        seed(&db, "capture-a", "2026-09-08T09:00:00Z", 1);
+        read_document(&db, "capture-a");
+
+        let response = recognition_response(Some(automation_block()));
+        let conn = db.state.conn.lock().expect("lock");
+        let status = apply_recognition(&conn, "capture-a", &response).expect("apply recognition");
+
+        assert_eq!(
+            status,
+            CaptureStatus::Committed,
+            "an invoice the office already recorded is not something to check",
+        );
+        assert_eq!(
+            store::get_document(&conn, "capture-a")
+                .expect("read")
+                .expect("document")
+                .status,
+            CaptureStatus::Committed,
+        );
+
+        // The block is the stored result, verbatim — which is what the queue
+        // renders the automatic mark from.
+        assert_eq!(
+            committed_result(&conn, "capture-a").expect("read"),
+            Some(automation_block()),
+        );
+        // Nobody at this till did this.
+        let event = store::list_events(&conn, "capture-a")
+            .expect("events")
+            .into_iter()
+            .find(|event| event.event_type == EVENT_COMMIT_CONFIRMED)
+            .expect("the confirmation is in the history");
+        assert!(event.staff_id.is_none());
+
+        // The history entry carries the block **itself**, at the top level:
+        // `record_event` stores the value it is handed, so there is no
+        // `automation` wrapper around it here and none in the `details` the
+        // renderer reads back through `capture_get_history`. The queue's mark
+        // is read off this exact JSON, so its shape is the contract between the
+        // two halves — not an implementation detail either side may reshape.
+        let stored: Value =
+            serde_json::from_str(event.details_json.as_deref().expect("the result is stored"))
+                .expect("the stored result is JSON");
+        assert_eq!(stored, automation_block());
+        assert_eq!(stored["outcome"], json!("recorded_stock_updated"));
+        assert!(
+            stored.get(AUTOMATION_KEY).is_none(),
+            "the stored result is the block, never a wrapper around it",
+        );
+
+        // And a person's own Save stores a result with no `outcome` at all,
+        // which is what keeps the human path unmarked.
+        assert!(commit_result(Some("org/branch/invoice-1/scan.pdf"), false)
+            .get("outcome")
+            .is_none());
+
+        // The reading itself is kept, so "open and correct" has something to
+        // open and a restart loses nothing.
+        assert_eq!(
+            store::get_document(&conn, "capture-a")
+                .expect("read")
+                .expect("document")
+                .recognition_json
+                .as_deref(),
+            Some(response.to_string().as_str()),
+        );
+
+        // And the shipped cleanup rule reads the same three fields it always
+        // did, off this block, unchanged.
+        assert!(commit_is_confirmed_with_attachment(&automation_block()));
+        assert_eq!(
+            cleanup_committed_captures(&conn, db.dir()).expect("cleanup"),
+            vec!["capture-a".to_string()],
+        );
+    }
+
+    #[test]
+    fn a_reading_without_the_block_is_ready_to_check_exactly_as_today() {
+        let db = TestDb::open();
+        seed(&db, "capture-a", "2026-09-08T09:00:00Z", 1);
+        read_document(&db, "capture-a");
+
+        let response = recognition_response(None);
+        let conn = db.state.conn.lock().expect("lock");
+        let status = apply_recognition(&conn, "capture-a", &response).expect("apply recognition");
+
+        assert_eq!(status, CaptureStatus::ReadyReview);
+        assert_eq!(
+            store::get_document(&conn, "capture-a")
+                .expect("read")
+                .expect("document")
+                .status,
+            CaptureStatus::ReadyReview,
+        );
+        assert!(
+            committed_result(&conn, "capture-a")
+                .expect("read")
+                .is_none(),
+            "nothing was committed, so nothing may be confirmed",
+        );
+
+        // A block that is not an object is not a recording either — fail
+        // closed, towards the review the person already knows.
+        let mut malformed = recognition_response(None);
+        malformed[AUTOMATION_KEY] = Value::String("recorded".to_string());
+        assert!(recorded_automation(&malformed).is_none());
+        assert!(recorded_automation(&recognition_response(None)).is_none());
+        assert!(recorded_automation(&recognition_response(Some(automation_block()))).is_some());
+    }
+
+    #[test]
+    fn the_recognition_request_names_the_capture_so_the_office_can_decide() {
+        let db = TestDb::open();
+        seed(&db, "capture-a", "2026-09-08T09:00:00Z", 1);
+        let keys = vec!["org/branch/captures/capture-a/page-000.png".to_string()];
+        let body = ocr_request_body(&document(&db, "capture-a"), &keys);
+
+        assert_eq!(body["storageKeys"], json!(keys));
+        assert_eq!(body["captureId"], json!("capture-a"));
+        assert_eq!(body["sourceKind"], json!("watched_folder"));
+        assert_eq!(body["sourceName"], json!("Back office scans"));
+
+        // A source with no name simply omits it; the door only needs the pair.
+        let conn = db.state.conn.lock().expect("lock");
+        conn.execute(
+            "UPDATE capture_documents SET source_name = NULL WHERE id = ?1",
+            rusqlite::params!["capture-a"],
+        )
+        .expect("clear source name");
+        drop(conn);
+        let nameless = ocr_request_body(&document(&db, "capture-a"), &keys);
+        assert!(nameless.get("sourceName").is_none());
+        assert_eq!(nameless["captureId"], json!("capture-a"));
     }
 }

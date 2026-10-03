@@ -415,6 +415,7 @@ pub(crate) struct PaymentRecordInput {
     pub requested_tip_recipient_staff_id: Option<String>,
     pub requested_tip_recipient_staff_shift_id: Option<String>,
     pub collected_by: Option<String>,
+    pub metadata: Option<Value>,
     items: Vec<PaymentItemInput>,
 }
 
@@ -621,6 +622,7 @@ pub(crate) fn normalize_external_payment_method(method: &str) -> Option<String> 
     match method.trim().to_ascii_lowercase().as_str() {
         "cash" => Some("cash".to_string()),
         "card" => Some("card".to_string()),
+        "twint" => Some("twint".to_string()),
         "room_charge" | "room-charge" => Some("room_charge".to_string()),
         "other" | "online" | "digital_wallet" | "digital-wallet" | "wallet" | "split" | "mixed"
         | "pending" => Some("other".to_string()),
@@ -647,7 +649,7 @@ pub(crate) fn prepare_outstanding_collection_payload(
     let method = str_field(payload, "method")
         .map(|value| value.trim().to_ascii_lowercase())
         .ok_or("Missing method")?;
-    if !matches!(method.as_str(), "cash" | "card") {
+    if !matches!(method.as_str(), "cash" | "card" | "twint") {
         return Err("Outstanding balance collection requires cash or card".to_string());
     }
 
@@ -656,6 +658,15 @@ pub(crate) fn prepare_outstanding_collection_payload(
         return Err("Order has no outstanding balance to collect".to_string());
     }
     let outstanding_amount = Cents::new(outstanding_cents).to_f64_dp2();
+    if method == "twint"
+        && payload
+            .get("amount")
+            .and_then(Value::as_f64)
+            .map(|amount| Cents::round_half_even(amount).as_i64())
+            != Some(outstanding_cents)
+    {
+        return Err("TWINT_RECEIPT_OUTSTANDING_AMOUNT_CHANGED".into());
+    }
     let payment = payload.as_object_mut().ok_or("Invalid payment payload")?;
     payment.insert("amount".to_string(), serde_json::json!(outstanding_amount));
 
@@ -729,6 +740,7 @@ pub(crate) fn build_payment_record_input(payload: &Value) -> Result<PaymentRecor
     let method = match raw_method.trim().to_ascii_lowercase().as_str() {
         "cash" => "cash".to_string(),
         "card" => "card".to_string(),
+        "twint" => "twint".to_string(),
         "other" => "other".to_string(),
         "room_charge" | "room-charge" => "room_charge".to_string(),
         _ => {
@@ -834,6 +846,10 @@ pub(crate) fn build_payment_record_input(payload: &Value) -> Result<PaymentRecor
         requested_tip_recipient_staff_shift_id: str_field(payload, "tipRecipientStaffShiftId")
             .or_else(|| str_field(payload, "tip_recipient_staff_shift_id")),
         collected_by,
+        metadata: payload
+            .get("metadata")
+            .filter(|value| value.is_object())
+            .cloned(),
         items: parse_payment_items(payload),
     })
 }
@@ -1023,7 +1039,7 @@ pub(crate) fn load_net_paid_for_order(
 /// Always 0 or 1, never NULL (a NULL inside `NOT (...)` drops every row).
 pub(crate) fn platform_settlement_row_sql(alias: &str) -> String {
     format!(
-        "(COALESCE((LOWER(TRIM(COALESCE({alias}.method, ''))) NOT IN ('cash', 'card') \
+        "(COALESCE((LOWER(TRIM(COALESCE({alias}.method, ''))) NOT IN ('cash', 'card', 'twint') \
           AND (LOWER(TRIM(COALESCE({alias}.payment_origin, ''))) = 'platform_settlement' \
                OR substr(COALESCE({alias}.transaction_ref, ''), 1, 20) = 'platform_settlement:' \
                OR substr(COALESCE({alias}.idempotency_key, ''), 1, 20) = 'platform_settlement:' \
@@ -1950,6 +1966,70 @@ pub(crate) fn record_payment_in_connection(
     input: &PaymentRecordInput,
     options: &PaymentInsertOptions,
 ) -> Result<RecordedPayment, String> {
+    if input.method == "twint" && options.enqueue_sync {
+        if !crate::db::order_payments_support_twint(conn)? {
+            return Err("TWINT_PAYMENT_CAPABILITY_UNAVAILABLE".into());
+        }
+        let metadata = input
+            .metadata
+            .as_ref()
+            .ok_or("TWINT_MANUAL_CONFIRMATION_REQUIRED")?;
+        if input.currency != "CHF"
+            || crate::fiscal::payload_builder::resolve_store_currency_code(conn).as_deref()
+                != Some("CHF")
+            || input.payment_origin != "manual"
+            || metadata.as_object().is_none_or(|fields| fields.len() != 4)
+            || input
+                .transaction_ref
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            || input
+                .idempotency_key
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+            || metadata.get("provider").and_then(Value::as_str) != Some("twint")
+            || metadata.get("confirmation").and_then(Value::as_str) != Some("cashier")
+            || !matches!(
+                metadata.get("confirmation_action").and_then(Value::as_str),
+                Some("confirm" | "skip")
+            )
+            || metadata.get("qr_mode").and_then(Value::as_str) != Some("static_qr_manual")
+        {
+            return Err("TWINT_MANUAL_CONFIRMATION_REQUIRED".to_string());
+        }
+        let prior: Option<(String, String, String, i64, String, String, Option<String>)> = conn.query_row(
+            "SELECT id, order_id, method, COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER)), currency, status, metadata FROM order_payments WHERE idempotency_key = ?1",
+            params![input.idempotency_key],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
+        ).optional().map_err(|e| format!("TWINT replay lookup: {e}"))?;
+        if let Some((id, order, method, cents, currency, status, prior_metadata)) = prior {
+            if order != input.order_id
+                || method != "twint"
+                || cents != Cents::round_half_even(input.amount).as_i64()
+                || currency != "CHF"
+                || status != "completed"
+                || prior_metadata
+                    .as_deref()
+                    .and_then(|value| serde_json::from_str::<Value>(value).ok())
+                    .as_ref()
+                    != Some(metadata)
+            {
+                return Err("TWINT_IDEMPOTENCY_CONFLICT".into());
+            }
+            return Ok(RecordedPayment {
+                payment_id: id,
+                payment_origin: "manual".into(),
+                sync_status: "pending".into(),
+                sync_state: "pending".into(),
+            });
+        }
+        let balance = load_order_payment_balance_snapshot(conn, &input.order_id)?;
+        if Cents::round_half_even(input.amount).as_i64()
+            > Cents::round_half_even(balance.outstanding_amount).as_i64()
+        {
+            return Err("TWINT_AMOUNT_EXCEEDS_OUTSTANDING".into());
+        }
+    }
     let (
         supabase_id,
         order_type,
@@ -2021,7 +2101,7 @@ pub(crate) fn record_payment_in_connection(
     // `None` here and collects normally.
     if matches!(
         input.method.trim().to_ascii_lowercase().as_str(),
-        "cash" | "card"
+        "cash" | "card" | "twint"
     ) {
         if let Some(kind) = platform_settlement_kind(conn, &input.order_id) {
             return Err(format!(
@@ -2235,7 +2315,14 @@ pub(crate) fn record_payment_in_connection(
                 .to_string(),
             ),
         ),
-        None => ("completed", None),
+        None => (
+            "completed",
+            if input.method == "twint" {
+                input.metadata.as_ref().map(Value::to_string)
+            } else {
+                None
+            },
+        ),
     };
     conn.execute(
         "INSERT INTO order_payments (
@@ -2435,6 +2522,7 @@ pub(crate) fn record_payment_in_connection(
             "tipRecipientStaffShiftId": tip_recipient_staff_shift_id,
             "tip_recipient_staff_shift_id": tip_recipient_staff_shift_id,
             "currency": input.currency,
+            "metadata": input.metadata,
             "cashReceived": input.cash_received,
             "cash_received_cents": input.cash_received
                 .map(|v| Cents::round_half_even(v).as_i64()),
@@ -2709,6 +2797,7 @@ pub(crate) fn auto_settle_platform_order(
         requested_tip_recipient_staff_id: None,
         requested_tip_recipient_staff_shift_id: None,
         collected_by: None,
+        metadata: None,
         items: Vec::new(),
     };
 
@@ -2906,7 +2995,11 @@ pub(crate) fn record_payment_with_expected_balance(
 ) -> Result<Value, String> {
     let mut prepared_payload = payload.clone();
     let mut input = build_payment_record_input(&prepared_payload)?;
-    if input.method != "cash" && input.method != "card" && input.method != "room_charge" {
+    if input.method != "cash"
+        && input.method != "card"
+        && input.method != "room_charge"
+        && input.method != "twint"
+    {
         return Err(
             "Only cash, card, and room_charge payments can be recorded locally".to_string(),
         );
@@ -2926,13 +3019,26 @@ pub(crate) fn record_payment_with_expected_balance(
     let money_moved = !collect_outstanding
         && input.method == "card"
         && payload_reports_terminal_approval(&prepared_payload);
+    let manual_receipt = input.method == "twint";
     let mut set_aside_collection: Option<SetAsideCollection> = None;
     let mut persist_transaction =
         || -> Result<(RecordedPayment, OrderSettlementSnapshot), String> {
             conn.execute_batch("BEGIN IMMEDIATE")
                 .map_err(|e| format!("begin transaction: {e}"))?;
             let outcome = (|| -> Result<(RecordedPayment, OrderSettlementSnapshot), String> {
-                if collect_outstanding {
+                if input.method == "twint" {
+                    crate::unsaved_payments::validate_manual_payment_context_in_connection(
+                        &conn,
+                        &input.order_id,
+                        &prepared_payload,
+                    )?;
+                    crate::commands::ecr::direct_sale_admission(&conn, &input.order_id, None)?;
+                    let unresolved:i64=conn.query_row("SELECT count(*) FROM gift_card_redemption_attempts WHERE local_order_id=?1 AND status IN ('pending','remote_applied')",params![input.order_id],|r|r.get(0)).map_err(|e|e.to_string())?;
+                    if unresolved != 0 {
+                        return Err("An earlier gift debit is unresolved; reconcile it before saving the confirmed TWINT receipt".into());
+                    }
+                }
+                if collect_outstanding || (input.method == "twint" && expected_balance.is_some()) {
                     let current = load_order_payment_balance_snapshot(&conn, &input.order_id)?;
                     if let Some(expected) = expected_balance {
                         let expected_generation = (
@@ -2957,10 +3063,12 @@ pub(crate) fn record_payment_with_expected_balance(
                     ));
                         }
                     }
-                    prepare_outstanding_collection_payload(&mut prepared_payload, current)?;
-                    input = build_payment_record_input(&prepared_payload)?;
-                    input.order_id = resolve_order_id(&conn, &input.order_id)
-                        .ok_or_else(|| "Order not found".to_string())?;
+                    if collect_outstanding {
+                        prepare_outstanding_collection_payload(&mut prepared_payload, current)?;
+                        input = build_payment_record_input(&prepared_payload)?;
+                        input.order_id = resolve_order_id(&conn, &input.order_id)
+                            .ok_or_else(|| "Order not found".to_string())?;
+                    }
                 }
 
                 let outstanding_attempt_id = if collect_outstanding {
@@ -3062,7 +3170,7 @@ pub(crate) fn record_payment_with_expected_balance(
                 }
             }
         };
-    let (recorded, settlement) = if collect_outstanding {
+    let (recorded, settlement) = if collect_outstanding || manual_receipt {
         // Both the exact payment representation and the attempt finalization
         // must survive power loss together. The rest of the POS stays on the
         // normal WAL policy; only this high-value commit opts into FULL sync.
@@ -3848,6 +3956,14 @@ pub fn update_payment_method_for_payment(
     // A gift card row mirrors an immutable server payment; converting it would
     // relabel card value as cash or card.
     if completed_payments.iter().any(|(payment_id, method, _)| {
+        method == "twint" && target_payment_id.is_none_or(|target| target == payment_id)
+    }) {
+        return Err(
+            "TWINT_PAYMENT_METHOD_IMMUTABLE: A TWINT payment cannot be changed to cash or card"
+                .into(),
+        );
+    }
+    if completed_payments.iter().any(|(payment_id, method, _)| {
         method == GIFT_CARD_METHOD && target_payment_id.is_none_or(|target| target == payment_id)
     }) {
         return Err(GIFT_CARD_PAYMENT_IMMUTABLE.into());
@@ -4243,6 +4359,21 @@ fn load_order_payment_rows(conn: &Connection, order_id: &str) -> Result<Vec<Valu
                 "remainingRefundable": remaining_refundable,
                 "items": items,
             });
+            if row.2 == "twint" {
+                // A manual receipt is identified by its retained operation,
+                // never by a fabricated provider transaction reference.
+                let (key, metadata): (Option<String>, Option<String>) = conn
+                    .query_row(
+                        "SELECT idempotency_key,metadata FROM order_payments WHERE id=?1",
+                        params![row.0],
+                        |record| Ok((record.get(0)?, record.get(1)?)),
+                    )
+                    .map_err(|e| e.to_string())?;
+                payment["idempotencyKey"] = serde_json::json!(key);
+                payment["metadata"] = metadata
+                    .and_then(|value| serde_json::from_str::<Value>(&value).ok())
+                    .unwrap_or(Value::Null);
+            }
             if let Some(original_gift_split) = original_gift_split {
                 payment["originalGiftSplit"] = original_gift_split;
             }
@@ -4519,6 +4650,140 @@ mod tests {
         }
     }
 
+    fn twint_manual_fixture() -> (DbState, Value) {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("INSERT INTO local_settings(setting_category,setting_key,setting_value) VALUES ('organization','currency','CHF')", []).unwrap();
+            conn.execute("INSERT INTO orders(id,items,total_amount,total_amount_cents,status,order_type,payment_status,sync_status,created_at,updated_at) VALUES ('twint-order','[]',12,1200,'completed','takeaway','pending','pending','now','now')", []).unwrap();
+        }
+        let payload = serde_json::json!({ "orderId":"twint-order", "method":"twint", "amount":12, "currency":"CHF", "idempotencyKey":"twint-manual-original", "paymentOrigin":"manual", "metadata":{"provider":"twint","confirmation":"cashier","confirmation_action":"confirm","qr_mode":"static_qr_manual"} });
+        (db, payload)
+    }
+
+    #[test]
+    fn twint_manual_confirmation_keeps_distinct_tender_and_replays_once() {
+        let (db, payload) = twint_manual_fixture();
+        let first = record_payment(&db, &payload).unwrap();
+        let second = record_payment(&db, &payload).unwrap();
+        assert_eq!(first["paymentId"], second["paymentId"]);
+        let conn = db.conn.lock().unwrap();
+        let row: (String, String, String, Option<String>, String) = conn.query_row("SELECT method,currency,payment_origin,transaction_ref,metadata FROM order_payments WHERE order_id='twint-order'", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).unwrap();
+        assert_eq!(
+            (&row.0, &row.1, &row.2),
+            (&"twint".into(), &"CHF".into(), &"manual".into())
+        );
+        assert!(row.3.is_none());
+        assert_eq!(
+            serde_json::from_str::<Value>(&row.4).unwrap()["confirmation_action"],
+            "confirm"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM order_payments WHERE order_id='twint-order'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            derive_payment_method(&conn, "twint-order").unwrap(),
+            Some("twint".into())
+        );
+    }
+
+    #[test]
+    fn twint_rejects_fabricated_provider_reference_and_missing_cashier_confirmation() {
+        for mutate in ["reference", "metadata", "currency"] {
+            let (db, mut payload) = twint_manual_fixture();
+            if mutate == "reference" {
+                payload["transactionRef"] = serde_json::json!("TWINT-FAKE-PROVIDER");
+            }
+            if mutate == "metadata" {
+                payload["metadata"] = Value::Null;
+            }
+            if mutate == "currency" {
+                payload["currency"] = serde_json::json!("EUR");
+            }
+            assert!(record_payment(&db, &payload)
+                .unwrap_err()
+                .contains("TWINT_MANUAL_CONFIRMATION_REQUIRED"));
+            assert_eq!(
+                db.conn
+                    .lock()
+                    .unwrap()
+                    .query_row("SELECT count(*) FROM order_payments", [], |r| r
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn twint_refuses_replacement_key_after_full_coverage_and_conflicting_original() {
+        let (db, mut payload) = twint_manual_fixture();
+        record_payment(&db, &payload).unwrap();
+        payload["amount"] = serde_json::json!(10);
+        assert!(record_payment(&db, &payload)
+            .unwrap_err()
+            .contains("TWINT_IDEMPOTENCY_CONFLICT"));
+        payload["amount"] = serde_json::json!(12);
+        payload["idempotencyKey"] = serde_json::json!("new-twint-key");
+        assert!(record_payment(&db, &payload)
+            .unwrap_err()
+            .contains("TWINT_AMOUNT_EXCEEDS_OUTSTANDING"));
+    }
+
+    #[test]
+    fn twint_never_collects_platform_held_money_or_changes_tender_to_cash() {
+        let (db, payload) = twint_manual_fixture();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("UPDATE orders SET plugin='efood', ghost_metadata=?1 WHERE id='twint-order'", [r#"{"food_delivery":{"payment_method":"card","prepaid":true,"delivery_provider":"platform_delivery"}}"#]).unwrap();
+        }
+        assert!(record_payment(&db, &payload)
+            .unwrap_err()
+            .contains(PLATFORM_HELD_COLLECTION_ERROR));
+        {
+            db.conn
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE orders SET plugin=NULL, ghost_metadata=NULL WHERE id='twint-order'",
+                    [],
+                )
+                .unwrap();
+        }
+        let paid = record_payment(&db, &payload).unwrap();
+        assert!(update_payment_method(&db, "twint-order", "cash")
+            .unwrap_err()
+            .contains("TWINT_PAYMENT_METHOD_IMMUTABLE"));
+        let payment_id = paid["paymentId"].as_str().unwrap();
+        assert!(crate::refunds::refund_payment(&db,&serde_json::json!({"paymentId":payment_id,"amount":12,"reason":"refund","refundMethod":"cash"})).unwrap_err().contains("TWINT_ORIGINAL_PROVIDER_REFUND_REQUIRED"));
+        assert!(
+            crate::refunds::void_payment_with_adjustment(&db, payment_id, "void", None, None)
+                .unwrap_err()
+                .contains("TWINT_ORIGINAL_PROVIDER_REFUND_REQUIRED")
+        );
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM payment_adjustments", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT status FROM order_payments WHERE id=?1",
+                [payment_id],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "completed"
+        );
+    }
     #[test]
     fn ordinary_payment_rows_keep_the_legacy_json_contract() {
         let db = test_db();
@@ -8774,6 +9039,7 @@ mod tests {
             requested_tip_recipient_staff_id: None,
             requested_tip_recipient_staff_shift_id: None,
             collected_by: None,
+            metadata: None,
             items: Vec::new(),
         }
     }

@@ -66,6 +66,10 @@ import { getBridge } from '../../lib';
 import { getCachedTerminalCredentials } from '../services/terminal-credentials';
 import { useIntegrationRefresh } from '../hooks/useIntegrationRefresh';
 import {
+  isPaymentSetupPlugin, resolvePaymentPluginSetup, PAYMENT_SETUP_COPY,
+  type PaymentPluginSetupView,
+} from '../utils/payment-plugin-setup';
+import {
   MYDATA_FISCAL_DEVICE_ID, DEFAULT_MYDATA_CAP_SETTINGS, readMyDataCapSettings,
   myDataConnectionTypeFromSaved, buildMyDataDeviceSettings, validateMyDataCapSettings,
   verifyAndSaveMyDataDevice, normalizeMyDataProtocol, isMyDataFiscalProtocol,
@@ -114,6 +118,9 @@ interface IntegrationWithStatus extends Integration {
   diagnostics?: Record<string, unknown>;
   lastError?: string | null;
   readOnlyAdminSetup?: boolean;
+  /** Branch whose licence list this card came from (verified against the terminal). */
+  branchId?: string;
+  paymentSetup?: PaymentPluginSetupView;
   /** caller_id only: server facts the terminal-owned card status is resolved from. */
   callerIdHints?: CallerIdServerHints;
   /** caller_id only: the terminal-local card state overlaid by the page. */
@@ -146,6 +153,7 @@ interface RemoteIntegrationPayload {
   status?: string | null;
   requires_partner_credentials?: boolean;
   read_only_admin_setup?: boolean;
+  payment_setup?: unknown;
   settings?: IntegrationWithStatus['settings'];
   last_sync_at?: string | null;
   onboarding_status?: string | null;
@@ -154,6 +162,7 @@ interface RemoteIntegrationPayload {
   diagnostics?: Record<string, unknown> | null;
   last_error?: string | null;
   caller_id?: RemoteCallerIdBlock | null;
+  branch_id?: string | null;
 }
 
 interface IntegrationStats {
@@ -300,6 +309,20 @@ const ALL_INTEGRATIONS: Integration[] = [
     id: 'viva',
     name: 'Viva Wallet',
     description: 'European payment processing',
+    icon: <CreditCard className="w-6 h-6" />,
+    category: 'payment',
+  },
+  {
+    id: 'twint',
+    name: 'TWINT',
+    description: 'TWINT payments',
+    icon: <CreditCard className="w-6 h-6" />,
+    category: 'payment',
+  },
+  {
+    id: 'worldline_terminals',
+    name: 'Worldline Terminals',
+    description: 'Worldline payment terminals',
     icon: <CreditCard className="w-6 h-6" />,
     category: 'payment',
   },
@@ -453,6 +476,25 @@ interface PluginFormState {
   target_terminal_id: string | null;
 }
 
+const createEmptyPluginForm = (): PluginFormState => ({
+  api_key: '',
+  api_secret: '',
+  merchant_id: '',
+  store_id: '',
+  store_url: '',
+  chain_id: '',
+  webhook_secret: '',
+  commission_pct: 20,
+  auto_accept_orders: false,
+  auto_accept_prep_minutes: 20,
+  sync_menu: true,
+  sync_availability: true,
+  sync_products: true,
+  sync_orders: true,
+  sync_inventory: true,
+  target_terminal_id: null,
+});
+
 interface TerminalOption {
   id: string;
   name?: string | null;
@@ -492,6 +534,8 @@ const ADMIN_DASHBOARD_SETUP_PLUGIN_IDS = new Set([
   'efood',
   'box',
   'wolt',
+  'twint',
+  'worldline_terminals',
 ]);
 
 const usesAdminDashboardSetup = (pluginId: string, readOnlyAdminSetup?: boolean): boolean =>
@@ -540,6 +584,9 @@ const getRemoteIntegrationId = (integration: RemoteIntegrationPayload) =>
   );
 
 const mapRemoteStatus = (integration: RemoteIntegrationPayload): IntegrationWithStatus['status'] => {
+  if (isPaymentSetupPlugin(getRemoteIntegrationId(integration))) {
+    return resolvePaymentPluginSetup(integration.payment_setup).status;
+  }
   if (integration.is_enabled === false || integration.is_active === false) return 'disconnected';
   if (getRemoteIntegrationId(integration) === 'fiscalization_gr') {
     return integration.is_enabled === true && integration.status === 'connected'
@@ -560,6 +607,25 @@ const mapRemoteStatus = (integration: RemoteIntegrationPayload): IntegrationWith
   return integration.is_active ? 'connected' : 'disconnected';
 };
 
+const readTerminalBranchId = (value: unknown): string | null =>
+  typeof value === 'string' && value.trim() ? value.trim() : null;
+
+// Plugin licences are per branch. The server derives the branch from the
+// authenticated terminal and echoes it as `branch_id` (on the response and/or on
+// each row). The list is trusted only when an echo exists and every echo names
+// exactly this terminal's branch; a missing or foreign echo rejects the whole
+// list (null). There is never an organization-wide fallback.
+const verifyBranchScopedIntegrations = (
+  data: { branch_id?: unknown; integrations?: unknown } | null | undefined,
+  terminalBranchId: string | null,
+): RemoteIntegrationPayload[] | null => {
+  if (!terminalBranchId || !data) return null;
+  const rows = Array.isArray(data.integrations) ? data.integrations as RemoteIntegrationPayload[] : [];
+  const echoes = [data.branch_id, ...rows.map((row) => row?.branch_id)]
+    .filter((value) => value !== undefined && value !== null);
+  return echoes.length > 0 && echoes.every((value) => value === terminalBranchId) ? rows : null;
+};
+
 const readCallerIdServerHints = (remote: RemoteIntegrationPayload): CallerIdServerHints => {
   const block = remote.caller_id && typeof remote.caller_id === 'object' ? remote.caller_id : null;
   const lineCount = block?.configured_line_count;
@@ -572,7 +638,7 @@ const readCallerIdServerHints = (remote: RemoteIntegrationPayload): CallerIdServ
   };
 };
 
-const mapPurchasedIntegration = (remote: RemoteIntegrationPayload): IntegrationWithStatus | null => {
+const mapPurchasedIntegration = (remote: RemoteIntegrationPayload, branchId: string): IntegrationWithStatus | null => {
   const id = getRemoteIntegrationId(remote);
   if (!id) return null;
 
@@ -591,13 +657,14 @@ const mapPurchasedIntegration = (remote: RemoteIntegrationPayload): IntegrationW
     remote.requires_partner_credentials ?? fallback?.requiresPartnerCredentials
   );
   const environment = remote.settings?.environment ?? remote.environment;
+  const paymentSetup = isPaymentSetupPlugin(id) ? resolvePaymentPluginSetup(remote.payment_setup) : undefined;
 
   return {
     id,
     name: remote.name || fallback?.name || id.replace(/_/g, ' '),
     description: remote.description || fallback?.description || '',
     icon: fallback?.icon || <Plug className="w-6 h-6" />,
-    category: normalizeIntegrationCategory(remote.category, fallback?.category || 'other'),
+    category: paymentSetup ? 'payment' : normalizeIntegrationCategory(remote.category, fallback?.category || 'other'),
     requiredModule: fallback?.requiredModule,
     requiresPartnerCredentials,
     status: isCallerId
@@ -612,7 +679,9 @@ const mapPurchasedIntegration = (remote: RemoteIntegrationPayload): IntegrationW
     diagnostics: remote.diagnostics || undefined,
     lastError: isCallerId ? null : remote.last_error || null,
     readOnlyAdminSetup,
+    paymentSetup,
     ...(isCallerId ? { callerIdHints: readCallerIdServerHints(remote) } : {}),
+    branchId,
   };
 };
 
@@ -1214,6 +1283,10 @@ const IntegrationCard = memo<IntegrationCardProps>(({
   const StatusIcon = isLocked ? AlertCircle : callerIdVisual ? callerIdVisual.icon : getStatusIcon(integration.status);
   const statusColor = isLocked ? '#f59e0b' : callerIdVisual ? callerIdVisual.color : getStatusColor(integration.status);
   const isAdminDashboardSetup = usesAdminDashboardSetup(integration.id, integration.readOnlyAdminSetup);
+  const paymentSetup = integration.paymentSetup;
+  const paymentSetupLabel = paymentSetup
+    ? t(`integrations.paymentSetup.state.${paymentSetup.state}`, PAYMENT_SETUP_COPY[paymentSetup.state].label)
+    : null;
   const isToggleDisabled =
     isLocked ||
     integration.readOnlyAdminSetup === true ||
@@ -1240,11 +1313,11 @@ const IntegrationCard = memo<IntegrationCardProps>(({
     : callerIdCard
     ? callerIdShortLabel(t, callerIdCard.state)
     : isAdminDashboardSetup
-    ? integration.status === 'connected'
+    ? paymentSetupLabel || (integration.status === 'connected'
       ? t('integrations.status.connected', 'Connected')
       : integration.status === 'pending'
       ? t('integrations.status.pending', 'Pending')
-      : t('integrations.status.disconnected', 'Not Connected')
+      : t('integrations.status.disconnected', 'Not Connected'))
     : integration.status === 'pending'
     ? t('common.pending', 'Pending')
     : isEnabled
@@ -1270,7 +1343,7 @@ const IntegrationCard = memo<IntegrationCardProps>(({
             {integration.name}
           </h3>
           <p className={`text-xs mt-1 ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
-            {t(`integrations.plugins.${integration.id}.description`, integration.description)}
+            {t(paymentSetup ? `integrations.paymentSetup.${integration.id}Description` : `integrations.plugins.${integration.id}.description`, integration.description)}
           </p>
 
           {/* Status Badge */}
@@ -1284,18 +1357,19 @@ const IntegrationCard = memo<IntegrationCardProps>(({
               <StatusIcon size={12} className={callerIdCard?.state === 'checking' ? 'animate-spin' : undefined} />
               <span data-testid={callerIdCard ? 'caller-id-card-state' : undefined}>
                 {isLocked && t('integrations.status.partnerRequired', 'Partner credentials required')}
+                {!isLocked && paymentSetupLabel}
                 {!isLocked && callerIdCard && callerIdStateLabel(t, callerIdCard.state)}
-                {!isLocked && !callerIdCard && integration.status === 'connected' && (
+                {!isLocked && !callerIdCard && !paymentSetup && integration.status === 'connected' && (
                   integration.id === 'efood'
                     ? integration.onboardingStatus || t('integrations.status.connected', 'Connected')
                     : t('integrations.status.connected', 'Connected')
                 )}
-                {!isLocked && !callerIdCard && integration.status === 'pending' && (
+                {!isLocked && !callerIdCard && !paymentSetup && integration.status === 'pending' && (
                   integration.id === 'efood'
                     ? integration.onboardingStatus || t('integrations.status.pending', 'Pending')
                     : t('integrations.status.pending', 'Pending')
                 )}
-                {!isLocked && !callerIdCard && integration.status === 'disconnected' && t('integrations.status.disconnected', 'Not Connected')}
+                {!isLocked && !callerIdCard && !paymentSetup && integration.status === 'disconnected' && t('integrations.status.disconnected', 'Not Connected')}
               </span>
             </div>
             {integration.lastSyncedAt && integration.status === 'connected' && (
@@ -1306,6 +1380,11 @@ const IntegrationCard = memo<IntegrationCardProps>(({
           </div>
 
           {callerIdCard && <CallerIdCardDetails view={callerIdCard} isDark={isDark} />}
+          {paymentSetup && (
+            <p className={`mt-2 text-xs font-medium ${isDark ? 'text-amber-300' : 'text-amber-700'}`}>
+              {t(`integrations.paymentSetup.detail.${paymentSetup.state}`, PAYMENT_SETUP_COPY[paymentSetup.state].detail)}
+            </p>
+          )}
 
           {integration.id === 'fiscalization_gr' && integration.environment && (
             <p className={`text-xs mt-2 ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
@@ -1357,7 +1436,7 @@ const IntegrationCard = memo<IntegrationCardProps>(({
               )}
             </p>
           )}
-          {isAdminDashboardSetup && integration.id !== 'efood' && integration.id !== 'caller_id' && integration.id !== 'wolt' && integration.status === 'pending' && (
+          {isAdminDashboardSetup && !paymentSetup && integration.id !== 'efood' && integration.id !== 'caller_id' && integration.id !== 'wolt' && integration.status === 'pending' && (
             <p className={`mt-2 text-xs font-medium ${isDark ? 'text-amber-300' : 'text-amber-700'}`}>
               {t(
                 'integrations.adminSetup.pendingFirstOrder',
@@ -1776,6 +1855,17 @@ export const IntegrationsPage: React.FC = () => {
     }
   }, []);
 
+  // Identity the open plugin form belongs to; null once it closes or is reset.
+  const pluginScopeRef = useRef<string | null>(null);
+  // Closes both configuration modals and drops the values typed into the plugin form.
+  const closeConfigForms = useCallback(() => {
+    setMyDataModalOpen(false);
+    pluginScopeRef.current = null;
+    setPluginModalOpen(false);
+    setActivePlugin(null);
+    setPluginForm(createEmptyPluginForm());
+  }, []);
+
   // Fetch integration statuses
   const loadIntegrations = useCallback(async (isCurrent: () => boolean) => {
     if (!isCurrent()) return false;
@@ -1787,19 +1877,31 @@ export const IntegrationsPage: React.FC = () => {
       }
       setError(null);
 
+      // isCurrent() pins the scope (which includes this branch) across the request.
+      const terminalBranchId = readTerminalBranchId(getSetting('terminal', 'branch_id'));
       const [integrationsResult] = await Promise.all([
-        posApiGet<{ integrations?: RemoteIntegrationPayload[] }>('/pos/integrations'),
+        posApiGet<{ branch_id?: string | null; integrations?: RemoteIntegrationPayload[] }>('/pos/integrations'),
         refreshMyDataReportingFlag(isCurrent),
       ]);
       if (!isCurrent()) return false;
       if (!integrationsResult.success) {
         throw new Error(integrationsResult.error || 'Failed to fetch integrations');
       }
+      const verifiedIntegrations = verifyBranchScopedIntegrations(integrationsResult.data, terminalBranchId);
+      if (!terminalBranchId || !verifiedIntegrations) {
+        // Fail closed: a list not proven to be this branch's licences shows
+        // nothing, and no configuration form opened from the previous list
+        // stays open or keeps its values.
+        setIntegrations([]);
+        closeConfigForms();
+        throw new Error('Failed to fetch integrations');
+      }
 
       const seenIds = new Set<string>();
-      const integrationsWithStatus = (integrationsResult.data?.integrations || [])
-        .filter((integration) => integration.is_purchased === true)
-        .map(mapPurchasedIntegration)
+      const integrationsWithStatus = verifiedIntegrations
+        // Only an explicit licence counts; configured/active status never does.
+        .filter((integration) => integration?.is_purchased === true)
+        .map((integration) => mapPurchasedIntegration(integration, terminalBranchId))
         .filter((integration): integration is IntegrationWithStatus => {
           if (!integration || seenIds.has(integration.id)) return false;
           seenIds.add(integration.id);
@@ -1821,12 +1923,25 @@ export const IntegrationsPage: React.FC = () => {
         setLoading(false);
       }
     }
-  }, [refreshMyDataReportingFlag]);
+  }, [closeConfigForms, getSetting, refreshMyDataReportingFlag]);
 
   const integrationScope = JSON.stringify([
     getSetting('terminal', 'organization_id'), getSetting('terminal', 'branch_id'),
     getSetting('terminal', 'terminal_id'), getSetting('terminal', 'admin_dashboard_url'),
   ]);
+  // Latest terminal identity, read by handlers right before they act.
+  const integrationScopeRef = useRef({ scope: integrationScope, branchId: readTerminalBranchId(getSetting('terminal', 'branch_id')) });
+  integrationScopeRef.current = { scope: integrationScope, branchId: readTerminalBranchId(getSetting('terminal', 'branch_id')) };
+  // Bumped by every identity reset, so a request started under one identity
+  // stays stale even if the terminal later returns to that identity.
+  const scopeEpochRef = useRef(0);
+  // Pins a request to the identity it starts under. The returned check is false
+  // once that identity changed, so a late result touches nothing of the new one.
+  const captureIntegrationScope = useCallback(() => {
+    const { scope } = integrationScopeRef.current;
+    const epoch = scopeEpochRef.current;
+    return () => integrationScopeRef.current.scope === scope && scopeEpochRef.current === epoch;
+  }, []);
   const myDataSetupScope = JSON.stringify([integrationScope, myDataConfig?.mode, myDataConfig?.device_connection]);
   const myDataSetupScopeRef = useRef(myDataSetupScope);
   myDataSetupScopeRef.current = myDataSetupScope;
@@ -1863,7 +1978,14 @@ export const IntegrationsPage: React.FC = () => {
   const fetchIntegrations = useIntegrationRefresh(integrationScope, loadIntegrations, () => {
     setMyDataModalOpen(false);
     setMyDataSaving(false);
+    scopeEpochRef.current += 1;
+    setPluginSaving(false);
+    setAvailableTerminals([]);
+    setTerminalsError(null);
+    setTerminalsLoading(false);
     setMyDataLocalSettingsReady(false);
+    // A plugin form opened for the previous terminal identity never survives it.
+    closeConfigForms();
     setIntegrations([]);
     setMyDataReportingEnabled(null);
     setMyDataConfig(null);
@@ -1950,12 +2072,14 @@ export const IntegrationsPage: React.FC = () => {
   }, [refetchModules, fetchIntegrations, refreshCallerIdObservations, t]);
 
   const loadTerminals = useCallback(async () => {
+    const isRequestCurrent = captureIntegrationScope();
     try {
       setTerminalsLoading(true);
       setTerminalsError(null);
       const branchId = getSetting('terminal', 'branch_id') as string | undefined;
       const endpoint = branchId ? `/pos/terminals?branchId=${branchId}` : '/pos/terminals';
       const result = await posApiGet<{ terminals?: any[] }>(endpoint);
+      if (!isRequestCurrent()) return;
       if (!result.success) {
         throw new Error(result.error || 'Failed to load terminals');
       }
@@ -1966,12 +2090,13 @@ export const IntegrationsPage: React.FC = () => {
       }));
       setAvailableTerminals(terminals);
     } catch (err: any) {
+      if (!isRequestCurrent()) return;
       setTerminalsError(err?.message || 'Failed to load terminals');
       setAvailableTerminals([]);
     } finally {
-      setTerminalsLoading(false);
+      if (isRequestCurrent()) setTerminalsLoading(false);
     }
-  }, [getSetting]);
+  }, [captureIntegrationScope, getSetting]);
 
   useEffect(() => {
     if (pluginModalOpen) {
@@ -1979,10 +2104,13 @@ export const IntegrationsPage: React.FC = () => {
     }
   }, [pluginModalOpen, loadTerminals]);
 
-  const openPluginInAdminDashboard = useCallback(async (pluginId: string) => {
+  const openPluginInAdminDashboard = useCallback(async (pluginId: string, pluginBranchId?: string) => {
+    const branchId = readTerminalBranchId(getSetting('terminal', 'branch_id'));
+    // Only the branch whose licence list produced the card may be opened.
+    if (!branchId || pluginBranchId !== branchId) return;
     const url = buildAdminDashboardPluginUrl(
       pluginId,
-      getSetting('terminal', 'branch_id') as string | undefined,
+      branchId,
       getSetting('terminal', 'organization_id') as string | undefined,
     );
     if (!url) {
@@ -2007,9 +2135,10 @@ export const IntegrationsPage: React.FC = () => {
 
     const integration = integrations.find(i => i.id === id);
     if (!integration) return;
+    if (!integration.branchId || integration.branchId !== integrationScopeRef.current.branchId) return;
 
     if (usesAdminDashboardSetup(integration.id, integration.readOnlyAdminSetup)) {
-      await openPluginInAdminDashboard(integration.id);
+      await openPluginInAdminDashboard(integration.id, integration.branchId);
       return;
     }
 
@@ -2022,8 +2151,11 @@ export const IntegrationsPage: React.FC = () => {
 
     if (integration.id === 'mydata') {
       if (integration.status === 'connected') {
+        // A result that arrives after the identity changed belongs to the old one.
+        const isRequestCurrent = captureIntegrationScope();
         try {
           const result = await posApiPost('/pos/mydata/config', { status: 'inactive' });
+          if (!isRequestCurrent()) return;
           if (!result.success) {
             throw new Error(result.error || 'Failed to disable MyData');
           }
@@ -2032,6 +2164,7 @@ export const IntegrationsPage: React.FC = () => {
           );
           toast.success(t('integrations.disconnectSuccess', '{{name}} disconnected', { name: integration.name }));
         } catch (err: any) {
+          if (!isRequestCurrent()) return;
           toast.error(err?.message || t('integrations.disconnectError', 'Failed to disconnect {{name}}', { name: integration.name }));
         }
       } else {
@@ -2041,11 +2174,14 @@ export const IntegrationsPage: React.FC = () => {
     }
 
     if (integration.status === 'connected') {
+      // A result that arrives after the identity changed belongs to the old one.
+      const isRequestCurrent = captureIntegrationScope();
       try {
         const result = await posApiPost('/pos/integrations', {
           plugin_id: integration.id,
           status: 'inactive',
         });
+        if (!isRequestCurrent()) return;
         if (!result.success) {
           throw new Error(result.error || 'Failed to disable integration');
         }
@@ -2054,6 +2190,7 @@ export const IntegrationsPage: React.FC = () => {
         );
         toast.success(t('integrations.disconnectSuccess', '{{name}} disconnected', { name: integration.name }));
       } catch (err: any) {
+        if (!isRequestCurrent()) return;
         toast.error(err?.message || t('integrations.disconnectError', 'Failed to disconnect {{name}}', { name: integration.name }));
       }
     } else {
@@ -2075,16 +2212,18 @@ export const IntegrationsPage: React.FC = () => {
         sync_inventory: true,
         target_terminal_id: integration.settings?.target_terminal_id ?? null,
       };
+      pluginScopeRef.current = integrationScopeRef.current.scope;
       setActivePlugin(integration);
       setPluginForm(defaults);
       setPluginModalOpen(true);
     }
-  }, [integrations, openPluginInAdminDashboard, t, toggleAction.disabled, toggleAction.message]);
+  }, [captureIntegrationScope, integrations, openPluginInAdminDashboard, t, toggleAction.disabled, toggleAction.message]);
 
   // Handle configure
   const handleConfigure = useCallback((integration: IntegrationWithStatus) => {
+    if (!integration.branchId || integration.branchId !== integrationScopeRef.current.branchId) return;
     if (usesAdminDashboardSetup(integration.id, integration.readOnlyAdminSetup)) {
-      void openPluginInAdminDashboard(integration.id);
+      void openPluginInAdminDashboard(integration.id, integration.branchId);
       return;
     }
     if (integration.requiresPartnerCredentials) {
@@ -2115,6 +2254,7 @@ export const IntegrationsPage: React.FC = () => {
       sync_inventory: true,
       target_terminal_id: integration.settings?.target_terminal_id ?? null,
     };
+    pluginScopeRef.current = integrationScopeRef.current.scope;
     setActivePlugin(integration);
     setPluginForm(defaults);
     setPluginModalOpen(true);
@@ -2190,7 +2330,8 @@ export const IntegrationsPage: React.FC = () => {
 
     setMyDataSaving(true);
     const originalSaveScope = myDataSaveScopeRef.current;
-    const isSaveCurrent = () => myDataSaveScopeRef.current === originalSaveScope;
+    const isRequestCurrent = captureIntegrationScope();
+    const isSaveCurrent = () => myDataSaveScopeRef.current === originalSaveScope && isRequestCurrent();
     try {
       const deviceConnection: Record<string, any> =
         myDataConnectionType === 'network'
@@ -2295,6 +2436,7 @@ export const IntegrationsPage: React.FC = () => {
       if (isSaveCurrent()) setMyDataSaving(false);
     }
   }, [
+    captureIntegrationScope,
     myDataBaudRate,
     myDataBluetoothAddress,
     myDataConnectionType,
@@ -2352,6 +2494,25 @@ export const IntegrationsPage: React.FC = () => {
     }
 
     if (!activePlugin) return;
+    // Re-check the terminal identity right before sending: a form opened for
+    // branch A must never submit A's credentials once the terminal became B.
+    const formScope = pluginScopeRef.current;
+    // The epoch check also rejects a form reopened after switching away and back.
+    const isRequestCurrent = captureIntegrationScope();
+    const isFormScopeCurrent = () =>
+      pluginScopeRef.current === formScope && integrationScopeRef.current.scope === formScope && isRequestCurrent();
+    if (
+      !formScope ||
+      !isFormScopeCurrent() ||
+      !activePlugin.branchId ||
+      activePlugin.branchId !== integrationScopeRef.current.branchId
+    ) {
+      pluginScopeRef.current = null;
+      setPluginModalOpen(false);
+      setActivePlugin(null);
+      setPluginForm(createEmptyPluginForm());
+      return;
+    }
     const config = PLUGIN_FORM_CONFIG[activePlugin.id] || { requiredFields: [] };
     const missing = config.requiredFields.filter((field) => {
       const value = pluginForm[field as keyof PluginFormState] as string;
@@ -2405,6 +2566,8 @@ export const IntegrationsPage: React.FC = () => {
       }
 
       const result = await posApiPost('/pos/integrations', payload);
+      // The identity changed while saving: this result belongs to the old scope.
+      if (!isFormScopeCurrent()) return;
       if (!result.success) {
         throw new Error(result.error || 'Failed to save plugin configuration');
       }
@@ -2425,14 +2588,17 @@ export const IntegrationsPage: React.FC = () => {
         )
       );
       toast.success(t('integrations.saveSuccess', '{{name}} configured', { name: activePlugin.name }));
+      pluginScopeRef.current = null;
       setPluginModalOpen(false);
       setActivePlugin(null);
     } catch (err: any) {
+      if (!isFormScopeCurrent()) return;
       toast.error(err?.message || t('integrations.saveError', 'Failed to save configuration'));
     } finally {
-      setPluginSaving(false);
+      // After an identity reset the busy flag belongs to the new identity.
+      if (isRequestCurrent()) setPluginSaving(false);
     }
-  }, [activePlugin, pluginForm, saveAction.disabled, saveAction.message, t]);
+  }, [activePlugin, captureIntegrationScope, pluginForm, saveAction.disabled, saveAction.message, t]);
 
   // Group integrations by category
   const groupedIntegrations = useMemo(() => {

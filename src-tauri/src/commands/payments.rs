@@ -594,6 +594,20 @@ pub async fn payment_record(
     }
     let requested_input = payments::build_payment_record_input(&payload)?;
     let terminal_approved = payment_payload_has_terminal_approval(&payload);
+    if requested_input.method == "twint" {
+        let order_id = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            resolve_order_id(&conn, &requested_input.order_id).ok_or("Order not found")?
+        };
+        let _reservation = reserve_payment_record(&order_id)?;
+        return save_manual_twint_existing_receipt(
+            &db,
+            &order_id,
+            &payload,
+            &crate::unsaved_payments::MOVED_MONEY_SAVE_DELAYS_MS,
+        )
+        .await;
+    }
     let order_id = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         let order_id =
@@ -860,6 +874,43 @@ pub async fn payment_record(
     } else {
         payments::record_payment(&db, &payload)
     }
+}
+
+pub(crate) async fn save_manual_twint_existing_receipt(
+    db: &db::DbState,
+    order_id: &str,
+    payload: &serde_json::Value,
+    delays: &[u64],
+) -> Result<serde_json::Value, String> {
+    let entry = crate::unsaved_payments::UnsavedChargedPayment::for_manual_twint_payment(
+        db,
+        order_id,
+        payload,
+        &Utc::now().to_rfc3339(),
+    )?;
+    Ok(crate::unsaved_payments::save_charged_payment(
+        db,
+        entry,
+        delays,
+        None,
+        crate::unsaved_payments::write_recorded_payment,
+    )
+    .await)
+}
+
+pub(crate) fn validate_manual_twint_outstanding_context(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+    payload: &serde_json::Value,
+) -> Result<(), String> {
+    let settlement = load_order_settlement_read_transaction(conn, order_id)?;
+    validate_collect_outstanding_generation(payload, &settlement).map_err(|answer| {
+        answer
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("TWINT_RECEIPT_OUTSTANDING_CONTEXT_CHANGED")
+            .to_string()
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -1339,6 +1390,350 @@ pub async fn refund_get_payment_balance(
 #[cfg(test)]
 mod dto_tests {
     use super::*;
+
+    fn manual_existing_fixture(action: &str) -> (crate::tests::harness::TestDb, serde_json::Value) {
+        let db = crate::tests::harness::TestDb::open();
+        let conn = db.state.conn.lock().unwrap();
+        for (key, value) in [
+            ("organization_id", "manual-org"),
+            ("branch_id", "manual-branch"),
+            ("terminal_id", "manual-terminal"),
+        ] {
+            db::set_setting(&conn, "terminal", key, value).unwrap();
+        }
+        db::set_setting(&conn, "organization", "currency", "CHF").unwrap();
+        conn.execute("INSERT INTO staff_shifts(id,staff_id,staff_name,branch_id,terminal_id,role_type,check_in_time,opening_cash_amount,status,sync_status,created_at,updated_at) VALUES ('manual-shift','manual-cashier','Cashier','manual-branch','manual-terminal','cashier','now',0,'active','pending','now','now')",[]).unwrap();
+        conn.execute("INSERT INTO orders(id,branch_id,items,total_amount,total_amount_cents,status,order_type,payment_status,sync_status,created_at,updated_at) VALUES ('manual-order','manual-branch','[]',12,1200,'completed','takeaway','pending','pending','now','now')",[]).unwrap();
+        let generation = payments::settlement_generation_token(
+            &payments::load_order_settlement_snapshot(&conn, "manual-order")
+                .unwrap()
+                .ledger_generation,
+        );
+        drop(conn);
+        let payload = serde_json::json!({"orderId":"manual-order","method":"twint","amount":12,"currency":"CHF","idempotencyKey":"manual-existing-key","paymentOrigin":"manual","staffId":"manual-cashier","staffShiftId":"manual-shift","collectedBy":"cashier_drawer","collectOutstandingBalance":true,"expectedSettlementGeneration":generation,"metadata":{"provider":"twint","confirmation":"cashier","confirmation_action":action,"qr_mode":"static_qr_manual"}});
+        (db, payload)
+    }
+
+    fn fail_manual_write(db: &db::DbState) {
+        db.conn.lock().unwrap().execute_batch("CREATE TRIGGER fail_manual_write BEFORE INSERT ON order_payments WHEN NEW.method='twint' BEGIN SELECT RAISE(ABORT,'injected ledger failure'); END;").unwrap();
+    }
+
+    #[tokio::test]
+    async fn twint_existing_partial_receipt_is_durable_without_expanding_to_outstanding_total() {
+        let (db, mut payload) = manual_existing_fixture("skip");
+        payload["amount"] = serde_json::json!(5);
+        payload
+            .as_object_mut()
+            .unwrap()
+            .remove("collectOutstandingBalance");
+        payload
+            .as_object_mut()
+            .unwrap()
+            .remove("expectedSettlementGeneration");
+        db.state.conn.lock().unwrap().execute_batch("CREATE TRIGGER require_twint_fullsync BEFORE INSERT ON order_payments WHEN NEW.method='twint' AND (SELECT synchronous FROM pragma_synchronous)<>2 BEGIN SELECT RAISE(ABORT,'manual receipt requires FULL synchronous'); END;").unwrap();
+        let saved = save_manual_twint_existing_receipt(&db.state, "manual-order", &payload, &[])
+            .await
+            .unwrap();
+        assert_eq!(saved["success"], true, "{saved}");
+        let db = db.restart();
+        let conn = db.state.conn.lock().unwrap();
+        let balance = payments::load_order_payment_balance_snapshot(&conn, "manual-order").unwrap();
+        assert_eq!(balance.net_paid, 5.0);
+        assert_eq!(balance.outstanding_amount, 7.0);
+        assert_eq!(conn.query_row("SELECT amount_cents FROM order_payments WHERE idempotency_key='manual-existing-key'",[],|r|r.get::<_,i64>(0)).unwrap(),500);
+        assert!(crate::unsaved_payments::list(&conn, Some("manual-order"))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn twint_existing_receipt_failure_restart_saves_original_exactly_once() {
+        for action in ["confirm", "skip"] {
+            let (db, payload) = manual_existing_fixture(action);
+            fail_manual_write(&db.state);
+            let first =
+                save_manual_twint_existing_receipt(&db.state, "manual-order", &payload, &[])
+                    .await
+                    .unwrap();
+            assert_eq!(first["paymentNotSaved"], true);
+            assert_eq!(first["manualReceiptConfirmed"], true);
+            assert!(first["paymentApproved"].is_null());
+            let db = db.restart();
+            let original = {
+                let conn = db.state.conn.lock().unwrap();
+                let held = crate::unsaved_payments::list(&conn, Some("manual-order")).unwrap();
+                assert_eq!(held.len(), 1);
+                let original = held[0].clone();
+                assert_eq!(original.kind, "manual_twint_payment");
+                assert_eq!(original.amount_cents, 1200);
+                assert_eq!(original.idempotency_key, "manual-existing-key");
+                assert_eq!(
+                    original.manual_scope.as_deref(),
+                    Some("manual-org|manual-branch|manual-terminal")
+                );
+                assert_eq!(original.request["metadata"], payload["metadata"]);
+                assert_eq!(original.request["staffShiftId"], "manual-shift");
+                assert_eq!(original.request["staffId"], "manual-cashier");
+                assert_eq!(
+                    original.request["expectedSettlementGeneration"],
+                    payload["expectedSettlementGeneration"]
+                );
+                assert!(original.expected_balance.is_some());
+                assert!(original.transaction_ref.is_none());
+                let blockers = crate::payment_integrity::load_payments_not_saved_blockers(
+                    &conn,
+                    "manual-branch",
+                )
+                .unwrap();
+                assert_eq!(blockers.len(), 1);
+                assert_eq!(blockers[0].payment_method, "twint");
+                assert!(blockers[0].reason_text.contains("cashier confirmed"));
+                assert_eq!(
+                    conn.query_row("SELECT count(*) FROM order_payments", [], |r| r
+                        .get::<_, i64>(0))
+                        .unwrap(),
+                    0
+                );
+                conn.execute_batch("DROP TRIGGER fail_manual_write;")
+                    .unwrap();
+                original
+            };
+            let saved = crate::unsaved_payments::save_unsaved_payments(
+                &db.state,
+                Some("manual-order"),
+                Some(&original.idempotency_key),
+                &[],
+                &crate::print::NoopPrintQueueInvalidator,
+            )
+            .await
+            .unwrap();
+            assert_eq!(saved["success"], true, "{saved}");
+            assert_eq!(saved["saved"], 1);
+            let again =
+                save_manual_twint_existing_receipt(&db.state, "manual-order", &payload, &[])
+                    .await
+                    .unwrap();
+            assert_eq!(again["success"], true, "{again}");
+            let conn = db.state.conn.lock().unwrap();
+            assert!(crate::unsaved_payments::list(&conn, Some("manual-order"))
+                .unwrap()
+                .is_empty());
+            assert_eq!(
+                conn.query_row("SELECT count(*) FROM order_payments", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                conn.query_row("SELECT count(*) FROM orders", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+            let (amount,key,metadata,reference,staff):(i64,String,String,Option<String>,String)=conn.query_row("SELECT amount_cents,idempotency_key,metadata,transaction_ref,staff_id FROM order_payments",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).unwrap();
+            assert_eq!(amount, 1200);
+            assert_eq!(key, original.idempotency_key);
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&metadata).unwrap(),
+                payload["metadata"]
+            );
+            assert!(reference.is_none());
+            assert_eq!(staff, "manual-cashier");
+            let snapshot = payments::load_order_settlement_snapshot(&conn, "manual-order").unwrap();
+            assert_eq!(
+                snapshot.completed_payments[0]["idempotencyKey"],
+                original.idempotency_key
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn twint_existing_receipt_refuses_changed_scope_order_action_and_balance_without_replacing_original(
+    ) {
+        for changed in ["scope", "total", "action", "balance"] {
+            let (db, payload) = manual_existing_fixture("skip");
+            fail_manual_write(&db.state);
+            save_manual_twint_existing_receipt(&db.state, "manual-order", &payload, &[])
+                .await
+                .unwrap();
+            let db = db.restart();
+            let mut replay = payload.clone();
+            {
+                let conn = db.state.conn.lock().unwrap();
+                conn.execute_batch("DROP TRIGGER fail_manual_write;")
+                    .unwrap();
+                match changed {
+                    "scope" => {
+                        db::set_setting(&conn, "terminal", "organization_id", "other-org").unwrap()
+                    }
+                    "total" => {
+                        conn.execute("UPDATE orders SET total_amount=15,total_amount_cents=1500 WHERE id='manual-order'",[]).unwrap();
+                    }
+                    "balance" => {
+                        conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,currency,status,payment_origin,idempotency_key,created_at,updated_at) VALUES ('other-cash','manual-order','cash',2,200,'CHF','completed','manual','other-key','now','now')",[]).unwrap();
+                    }
+                    _ => {
+                        replay["metadata"]["confirmation_action"] = serde_json::json!("confirm");
+                    }
+                }
+            }
+            if changed == "action" {
+                assert!(save_manual_twint_existing_receipt(
+                    &db.state,
+                    "manual-order",
+                    &replay,
+                    &[]
+                )
+                .await
+                .unwrap_err()
+                .contains("ORIGINAL_CONFLICT"));
+            } else {
+                let saved = crate::unsaved_payments::save_unsaved_payments(
+                    &db.state,
+                    Some("manual-order"),
+                    Some("manual-existing-key"),
+                    &[],
+                    &crate::print::NoopPrintQueueInvalidator,
+                )
+                .await
+                .unwrap();
+                assert_eq!(saved["success"], false);
+                assert_eq!(saved["saved"], 0);
+            }
+            let conn = db.state.conn.lock().unwrap();
+            let held = crate::unsaved_payments::list(&conn, Some("manual-order")).unwrap();
+            assert_eq!(held.len(), 1);
+            assert_eq!(held[0].amount_cents, 1200);
+            assert_eq!(held[0].request["metadata"]["confirmation_action"], "skip");
+            assert_eq!(
+                held[0].manual_scope.as_deref(),
+                Some("manual-org|manual-branch|manual-terminal")
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT count(*) FROM order_payments WHERE method='twint'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn twint_existing_receipt_does_not_adopt_a_conflicting_saved_row() {
+        let (db, payload) = manual_existing_fixture("skip");
+        fail_manual_write(&db.state);
+        save_manual_twint_existing_receipt(&db.state, "manual-order", &payload, &[])
+            .await
+            .unwrap();
+        {
+            let conn = db.state.conn.lock().unwrap();
+            conn.execute_batch("DROP TRIGGER fail_manual_write;")
+                .unwrap();
+            let mut wrong = payload["metadata"].clone();
+            wrong["confirmation_action"] = serde_json::json!("confirm");
+            conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,currency,status,payment_origin,idempotency_key,metadata,created_at,updated_at) VALUES ('conflict','manual-order','twint',12,1200,'CHF','completed','manual','manual-existing-key',?1,'now','now')",[wrong.to_string()]).unwrap();
+            assert_eq!(
+                crate::unsaved_payments::list(&conn, Some("manual-order"))
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+        let db = db.restart();
+        let saved = crate::unsaved_payments::save_unsaved_payments(
+            &db.state,
+            Some("manual-order"),
+            Some("manual-existing-key"),
+            &[],
+            &crate::print::NoopPrintQueueInvalidator,
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved["success"], false);
+        assert_eq!(saved["saved"], 0);
+        assert_eq!(
+            crate::unsaved_payments::list(&db.state.conn.lock().unwrap(), Some("manual-order"))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn twint_existing_receipt_keeps_card_unknown_sale_and_platform_guards() {
+        for prior in ["card", "sale", "platform", "gift"] {
+            let (db, payload) = manual_existing_fixture("confirm");
+            {
+                let conn = db.state.conn.lock().unwrap();
+                if prior == "card" {
+                    let entry=crate::unsaved_payments::UnsavedChargedPayment::for_payment("manual-order",&serde_json::json!({"orderId":"manual-order","method":"card","amount":12,"transactionRef":"charged-card","terminalApproved":true}),None,"now").unwrap();
+                    crate::unsaved_payments::record(&conn, &entry).unwrap();
+                } else if prior == "sale" {
+                    conn.execute("INSERT INTO ecr_devices(id,name,device_type,brand,protocol,connection_type,connection_details) VALUES ('device','Reader','payment_terminal','test','test','network','{}')",[]).unwrap();
+                    conn.execute("INSERT INTO ecr_transactions(id,device_id,order_id,transaction_type,amount,currency,status,started_at) VALUES ('prior','device','manual-order','sale',1200,'CHF','timeout','now')",[]).unwrap();
+                } else if prior == "gift" {
+                    conn.execute("INSERT INTO gift_card_redemption_attempts(idempotency_key,organization_id,branch_id,terminal_id,local_order_id,remote_order_id,amount_cents,currency,card_fingerprint,request_fingerprint,status,created_at,updated_at) VALUES ('gift-original','manual-org','manual-branch','manual-terminal','manual-order','remote',1200,'CHF','fingerprint','request','pending','now','now')",[]).unwrap();
+                } else {
+                    conn.execute("UPDATE orders SET plugin='efood',ghost_metadata=?1 WHERE id='manual-order'",[r#"{"food_delivery":{"payment_method":"card","prepaid":true,"delivery_provider":"platform_delivery"}}"#]).unwrap();
+                }
+            }
+            let answer =
+                save_manual_twint_existing_receipt(&db.state, "manual-order", &payload, &[])
+                    .await
+                    .unwrap();
+            assert_eq!(answer["success"], false, "{prior}: {answer}");
+            assert!(answer["paymentApproved"].is_null());
+            let db = db.restart();
+            let conn = db.state.conn.lock().unwrap();
+            assert_eq!(
+                conn.query_row("SELECT count(*) FROM order_payments", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            assert!(crate::unsaved_payments::list(&conn, Some("manual-order"))
+                .unwrap()
+                .iter()
+                .any(|e| e.kind == "manual_twint_payment"));
+            if prior == "card" {
+                assert_eq!(
+                    crate::unsaved_payments::list(&conn, Some("manual-order"))
+                        .unwrap()
+                        .len(),
+                    2
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn twint_existing_receipt_storage_failure_refuses_without_claiming_a_durable_holder() {
+        let (db, payload) = manual_existing_fixture("confirm");
+        db.state.conn.lock().unwrap().execute_batch("CREATE TRIGGER fail_manual_holder BEFORE INSERT ON local_settings WHEN NEW.setting_category='unsaved_charged_payment' BEGIN SELECT RAISE(ABORT,'injected journal failure'); END;").unwrap();
+        let answer = save_manual_twint_existing_receipt(&db.state, "manual-order", &payload, &[])
+            .await
+            .unwrap();
+        assert_eq!(answer["success"], false);
+        assert_eq!(answer["manualReceiptRetained"], false);
+        assert_eq!(answer["paymentPersisted"], false);
+        assert!(answer["message"]
+            .as_str()
+            .unwrap()
+            .contains("could not retain"));
+        let db = db.restart();
+        let conn = db.state.conn.lock().unwrap();
+        assert!(crate::unsaved_payments::list(&conn, None)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM order_payments", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
 
     #[test]
     fn parse_payment_update_status_supports_legacy_args() {

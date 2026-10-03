@@ -461,6 +461,87 @@ fn ensure_order_status_transition_allowed(
     }
 }
 
+#[derive(Clone, Copy)]
+enum BoxOrderMutation<'a> {
+    Generic,
+    Accept(Option<i64>),
+    Reject(Option<&'a str>),
+    NotifyReady,
+}
+
+/// Runs before status, drawer, earnings or network side effects. The canonical
+/// plugin wins; older platform rows can carry it in ghost metadata instead.
+fn is_box_order(conn: &rusqlite::Connection, order_id: &str) -> Result<bool, String> {
+    let (plugin, metadata): (String, String) = conn
+        .query_row(
+            "SELECT COALESCE(plugin, ''), COALESCE(ghost_metadata, '') FROM orders WHERE id = ?1",
+            rusqlite::params![order_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|e| format!("load BOX order context: {e}"))?;
+    let metadata: Value = serde_json::from_str(&metadata).unwrap_or(Value::Null);
+    let platform = if plugin.trim().is_empty() {
+        metadata
+            .pointer("/food_delivery/platform")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+    } else {
+        plugin.as_str()
+    };
+    Ok(matches!(
+        platform.trim().to_ascii_lowercase().as_str(),
+        "box" | "box_gr" | "boxgr"
+    ))
+}
+
+fn ensure_box_order_mutation_allowed(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+    next_status: &str,
+    mutation: BoxOrderMutation<'_>,
+) -> Result<(), String> {
+    if !is_box_order(conn, order_id)? {
+        return Ok(());
+    }
+
+    let current = load_canonical_order_status(conn, order_id)?;
+    let next = normalize_status_for_storage(next_status);
+    let allowed = match mutation {
+        BoxOrderMutation::Accept(estimate) => {
+            current == "pending"
+                && next == "confirmed"
+                && estimate.is_some_and(|minutes| minutes > 0)
+        }
+        BoxOrderMutation::Reject(reason) => {
+            static REASONS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+            let reasons = REASONS.get_or_init(|| {
+                serde_json::from_str(include_str!(
+                    "../../../../shared/box-rejection-reasons.json"
+                ))
+                .expect("shared BOX rejection reasons must be a valid JSON string array")
+            });
+            current == "pending"
+                && next == "cancelled"
+                && reason.is_some_and(|value| reasons.iter().any(|official| official == value))
+        }
+        BoxOrderMutation::NotifyReady => false,
+        BoxOrderMutation::Generic => {
+            if matches!(current.as_str(), "cancelled" | "rejected") {
+                false
+            } else if current == "pending" {
+                next == "pending"
+            } else {
+                !matches!(next.as_str(), "cancelled" | "rejected" | "pending")
+            }
+        }
+    };
+    if allowed {
+        Ok(())
+    } else {
+        Err("BOX requires a pending accept with estimate or an exact rejection reason; decisions are final and platform-ready notification is unsupported".into())
+    }
+}
+
 fn status_requires_payment_integrity_guard(next_status: &str) -> bool {
     matches!(
         normalize_status_for_storage(next_status).as_str(),
@@ -1148,6 +1229,281 @@ fn spawn_immediate_order_accept_patch(
     listener: AcceptAnswerListener,
 ) {
     spawn_immediate_order_status_patches(db, vec![body], Some(listener));
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum BoxDecisionConfirmation {
+    NotBox,
+    PendingLocal,
+    AlreadyApplied,
+}
+
+fn prepare_box_decision_request(
+    conn: &rusqlite::Connection,
+    order_id_raw: &str,
+    status: &str,
+    estimate: Option<i64>,
+    reason: Option<&str>,
+) -> Result<Option<Value>, String> {
+    let (order_id, remote_id) = resolve_order_id_with_remote(conn, order_id_raw)?;
+    if !is_box_order(conn, &order_id)? {
+        return Ok(None);
+    }
+    let mutation = if status == "confirmed" {
+        BoxOrderMutation::Accept(estimate)
+    } else {
+        BoxOrderMutation::Reject(reason)
+    };
+    ensure_box_order_mutation_allowed(conn, &order_id, status, mutation)?;
+    if status == "cancelled" {
+        // The provider must not see a decline the till's money ledger refuses.
+        ensure_no_money_taken_before_cancel(conn, &order_id)?;
+    }
+    let remote_id = remote_id
+        .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+        .ok_or("BOX decision requires a known remote order; refresh before deciding")?;
+    Ok(Some(if status == "confirmed" {
+        serde_json::json!({ "id": remote_id, "status": status, "estimated_time": estimate })
+    } else {
+        serde_json::json!({ "id": remote_id, "status": status, "cancellation_reason": reason })
+    }))
+}
+
+async fn request_box_decision_confirmation(
+    context: &ImmediateOrderStatusSyncContext,
+    body: &Value,
+) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .build()
+        .map_err(|_| "BOX decision requires an online terminal; refresh or retry".to_string())?;
+    let url = format!(
+        "{}/api/pos/orders",
+        crate::api::normalize_admin_url(&context.admin_url)
+    );
+    let response = client
+        .patch(&url)
+        .header("x-pos-api-key", &context.api_key)
+        .header("x-terminal-id", &context.terminal_id)
+        .header("Content-Type", "application/json")
+        .json(body)
+        .send()
+        .await
+        .map_err(|_| {
+            "BOX decision is not confirmed; check connection and retry if still pending".to_string()
+        })?;
+    let status = response.status();
+    let payload: Value = response
+        .json()
+        .await
+        .map_err(|_| "BOX decision response is unknown; refresh before retrying".to_string())?;
+    if !status.is_success() {
+        let code = payload
+            .get("code")
+            .and_then(Value::as_str)
+            .unwrap_or("BOX_DECISION_REFUSED");
+        return Err(format!(
+            "BOX decision refused (HTTP {}, {code}); refresh the order",
+            status.as_u16()
+        ));
+    }
+    let order = payload
+        .get("data")
+        .or_else(|| payload.get("order"))
+        .unwrap_or(&Value::Null);
+    let marker = order.get("box_decision").unwrap_or(&Value::Null);
+    let expected_action = if body.get("status").and_then(Value::as_str) == Some("confirmed") {
+        "accepted"
+    } else {
+        "rejected"
+    };
+    if status.as_u16() != 200
+        || payload.get("success").and_then(Value::as_bool) != Some(true)
+        || order.get("id") != body.get("id")
+        || order.get("status") != body.get("status")
+        || marker.get("state").and_then(Value::as_str) != Some("confirmed")
+        || marker.get("provider_confirmed").and_then(Value::as_bool) != Some(true)
+        || marker.get("action").and_then(Value::as_str) != Some(expected_action)
+    {
+        return Err(
+            "BOX decision is not confirmed; keep the order pending and refresh or retry".into(),
+        );
+    }
+    Ok(())
+}
+
+async fn confirm_box_decision_with_context(
+    db: &db::DbState,
+    order_id_raw: &str,
+    body: &Value,
+    context: &ImmediateOrderStatusSyncContext,
+) -> Result<BoxDecisionConfirmation, String> {
+    request_box_decision_confirmation(context, body).await?;
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    recheck_confirmed_box_decision(&conn, order_id_raw, body)
+}
+
+fn recheck_confirmed_box_decision(
+    conn: &rusqlite::Connection,
+    order_id_raw: &str,
+    body: &Value,
+) -> Result<BoxDecisionConfirmation, String> {
+    let (order_id, remote_id) = resolve_order_id_with_remote(conn, order_id_raw)?;
+    if !is_box_order(conn, &order_id)?
+        || remote_id.as_deref() != body.get("id").and_then(Value::as_str)
+    {
+        return Err("BOX order identity changed; refresh before deciding".into());
+    }
+    let next = body.get("status").and_then(Value::as_str).unwrap_or("");
+    let reason = body.get("cancellation_reason").and_then(Value::as_str);
+    let current = load_canonical_order_status(&conn, &order_id)?;
+    if current == next {
+        if next == "cancelled" {
+            let stored: Option<String> = conn
+                .query_row(
+                    "SELECT cancellation_reason FROM orders WHERE id = ?1",
+                    rusqlite::params![order_id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| format!("load BOX decision reason: {e}"))?;
+            if stored.as_deref() != reason {
+                return Err("BOX order decision changed; refresh before deciding".into());
+            }
+        }
+        return Ok(BoxDecisionConfirmation::AlreadyApplied);
+    }
+    let mutation = if next == "confirmed" {
+        BoxOrderMutation::Accept(body.get("estimated_time").and_then(Value::as_i64))
+    } else {
+        BoxOrderMutation::Reject(reason)
+    };
+    ensure_box_order_mutation_allowed(&conn, &order_id, next, mutation)?;
+    Ok(BoxDecisionConfirmation::PendingLocal)
+}
+
+async fn confirm_box_decision_before_mutation(
+    db: &db::DbState,
+    order_id_raw: &str,
+    status: &str,
+    estimate: Option<i64>,
+    reason: Option<&str>,
+) -> Result<(BoxDecisionConfirmation, Option<Value>), String> {
+    let request = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        prepare_box_decision_request(&conn, order_id_raw, status, estimate, reason)?
+    };
+    let Some(body) = request else {
+        return Ok((BoxDecisionConfirmation::NotBox, None));
+    };
+    let context = resolve_immediate_order_status_sync_context(db)
+        .ok_or("BOX decision requires an online authenticated terminal; refresh or retry")?;
+    let confirmation = confirm_box_decision_with_context(db, order_id_raw, &body, &context).await?;
+    Ok((confirmation, Some(body)))
+}
+
+pub(crate) fn should_print_box_acceptance_backflow(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+    previous_status: Option<&str>,
+    remote_order: &Value,
+) -> bool {
+    if previous_status != Some("pending")
+        || remote_order.get("status").and_then(Value::as_str) != Some("confirmed")
+        || !is_box_order(conn, order_id).unwrap_or(false)
+    {
+        return false;
+    }
+    // Only the authenticated server snapshot's durable own-ACK proof admits
+    // this delayed acceptance print. A pending intent or renderer hint cannot.
+    box_has_confirmed_acceptance_proof(remote_order.get("ghost_metadata").unwrap_or(&Value::Null))
+}
+
+fn box_has_confirmed_acceptance_proof(raw_metadata: &Value) -> bool {
+    let parsed_metadata = raw_metadata
+        .as_str()
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok());
+    let metadata = parsed_metadata.as_ref().unwrap_or(raw_metadata);
+    let intent = metadata.get("_the_small_box_decision");
+    intent.is_some_and(|value| {
+        value.get("version").and_then(Value::as_i64) == Some(1)
+            && value.get("state").and_then(Value::as_str) == Some("confirmed")
+            && value.get("action").and_then(Value::as_str) == Some("accepted")
+    })
+}
+
+pub(crate) fn skip_unconfirmed_box_arrival_print(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+) -> bool {
+    if !is_box_order(conn, order_id).unwrap_or(false) {
+        return false;
+    }
+    let row: Result<(String, String), _> = conn.query_row(
+        "SELECT COALESCE(status, ''), COALESCE(ghost_metadata, '') FROM orders WHERE id = ?1",
+        rusqlite::params![order_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    );
+    let Ok((status, metadata)) = row else {
+        return true;
+    };
+    !matches!(
+        status.as_str(),
+        "confirmed" | "preparing" | "ready" | "delivered" | "completed"
+    ) || !box_has_confirmed_acceptance_proof(&Value::String(metadata))
+}
+
+pub(crate) fn enqueue_after_approve_platform_prints(
+    db: &db::DbState,
+    order_id: &str,
+    invalidator: &dyn crate::print::PrintQueueInvalidator,
+) {
+    let (order_type, is_ghost, plugin, external_order_id, ghost_metadata): (
+        String,
+        i64,
+        String,
+        String,
+        String,
+    ) = {
+        let Ok(conn) = db.conn.lock() else {
+            return;
+        };
+        conn.query_row(
+            "SELECT COALESCE(order_type, ''), COALESCE(is_ghost, 0), COALESCE(plugin, ''), COALESCE(external_plugin_order_id, ''), COALESCE(ghost_metadata, '') FROM orders WHERE id = ?1",
+            rusqlite::params![order_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        ).unwrap_or_default()
+    };
+    let has_food_delivery_metadata = serde_json::from_str::<Value>(&ghost_metadata)
+        .ok()
+        .and_then(|value| value.get("food_delivery").cloned())
+        .is_some();
+    let is_platform_order = crate::print::is_food_delivery_plugin(&plugin)
+        || !external_order_id.trim().is_empty()
+        || has_food_delivery_metadata;
+    if is_ghost == 0
+        && is_platform_order
+        && crate::print::is_print_action_enabled(db, "after_approve")
+    {
+        for entity_type in crate::print::auto_print_entity_types_for_order_type(&order_type) {
+            // A confirmed backflow may win the HTTP await and print before
+            // AlreadyApplied returns. Keep BOX automatic acceptance one-time
+            // even if that existing job finished during the race.
+            let already_printed = db.conn.lock().ok().is_some_and(|conn| {
+                is_box_order(&conn, order_id).unwrap_or(false) && conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM print_jobs WHERE entity_type = ?1 AND entity_id = ?2 AND status IN ('pending', 'printing', 'printed', 'dispatched'))",
+                    rusqlite::params![entity_type, order_id], |row| row.get::<_, bool>(0),
+                ).unwrap_or(false)
+            });
+            if already_printed {
+                continue;
+            }
+            if let Err(error) =
+                crate::print::enqueue_print_job(db, entity_type, order_id, None, invalidator)
+            {
+                tracing::warn!(order_id = %order_id, entity_type = %entity_type, error = %error, "Failed to enqueue after-approve print job");
+            }
+        }
+    }
 }
 
 /// Send several status PATCHes from ONE spawned task, strictly in order. Two
@@ -3039,6 +3395,7 @@ pub(crate) fn apply_order_status_locally(
 ) -> Result<LocalStatusChange, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let (actual_order_id, remote_order_id) = resolve_order_id_with_remote(&conn, order_id_raw)?;
+    ensure_box_order_mutation_allowed(&conn, &actual_order_id, status, BoxOrderMutation::Generic)?;
     let previous_status = ensure_order_status_transition_allowed(&conn, &actual_order_id, status)?;
     // Fix review 30/09/2026 (founder rule, Android parity): money taken on
     // the order is voided or refunded from the order first, or the rest is
@@ -4411,7 +4768,10 @@ pub async fn order_save_from_remote(
         .or_else(|| order_data.get("orderItems"))
         .cloned()
         .unwrap_or_else(|| serde_json::json!([]));
-    let items_json = serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string());
+    let items_json = match &items {
+        Value::String(raw) => raw.clone(),
+        value => serde_json::to_string(value).unwrap_or_else(|_| "[]".to_string()),
+    };
 
     let order_number = value_str(&order_data, &["order_number", "orderNumber"]);
     let display_order_number =
@@ -4684,47 +5044,108 @@ pub async fn order_fetch_items_from_supabase(
     .or(arg1)
     .ok_or("Missing orderId")?;
 
-    let local_order_exists = {
+    fetch_order_items_for_local_cache(&db, &order_id, true).await
+}
+
+/// Shared terminal-authorized read used by the UI and bounded print recovery.
+pub(crate) async fn fetch_order_items_for_local_cache(
+    db: &db::DbState,
+    order_id: &str,
+    enrich_catalog: bool,
+) -> Result<Value, String> {
+    // The underlying REST helper also supports anonymous reads. Food cache
+    // hydration must always have the terminal headers and its complete scope.
+    #[cfg(not(test))]
+    for key in ["terminal_id", "organization_id", "branch_id", "pos_api_key"] {
+        if storage::get_credential(key).is_none_or(|value| value.trim().is_empty()) {
+            return Err(
+                "Food order item fetch requires authenticated terminal configuration".into(),
+            );
+        }
+    }
+    fetch_order_items_for_local_cache_with(
+        db,
+        order_id,
+        enrich_catalog,
+        |path, params| async move { fetch_supabase_rows(&path, &params).await },
+    )
+    .await
+}
+
+async fn fetch_order_items_for_local_cache_with<F, Fut>(
+    db: &db::DbState,
+    order_id: &str,
+    enrich_catalog: bool,
+    fetch_rows: F,
+) -> Result<Value, String>
+where
+    F: Fn(String, Vec<(&'static str, String)>) -> Fut,
+    Fut: std::future::Future<Output = Result<Value, String>>,
+{
+    let (organization_id, branch_id, _) = {
+        let conn = db.conn.lock().map_err(|error| error.to_string())?;
+        food_item_fetch_scope(&conn)?
+    };
+
+    let local_identity: Option<(String, Option<String>)> = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         ensure_renderer_order_is_not_repair_settlement(&conn, &order_id)?;
         conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM orders WHERE id = ?1 OR supabase_id = ?1)",
+            "SELECT id, supabase_id FROM orders WHERE id = ?1 OR supabase_id = ?1 LIMIT 1",
             [&order_id],
-            |row| row.get::<_, bool>(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
+        .optional()
         .map_err(|error| format!("check local order before item fetch: {error}"))?
     };
+    let remote_order_id = local_identity
+        .as_ref()
+        .and_then(|(_, remote)| remote.as_deref())
+        .filter(|remote| !remote.trim().is_empty())
+        .unwrap_or(order_id);
 
-    if !local_order_exists {
-        let remote_orders = match fetch_supabase_rows(
-            "orders",
-            &[
-                ("select", "id,order_context".to_string()),
-                ("id", format!("eq.{order_id}")),
+    {
+        let remote_orders = fetch_rows(
+            "orders".into(),
+            vec![
+                ("select", "id,order_context,organization_id,branch_id,terminal_id,owner_terminal_id,source_terminal_id".to_string()),
+                ("id", format!("eq.{remote_order_id}")),
+                ("organization_id", format!("eq.{organization_id}")),
+                ("branch_id", format!("eq.{branch_id}")),
                 ("limit", "1".to_string()),
             ],
-        )
-        .await
+        ).await?;
+        let remote_order = remote_orders
+            .as_array()
+            .filter(|rows| rows.len() == 1)
+            .and_then(|rows| rows.first())
+            .ok_or("Food item parent order is outside terminal scope or unavailable")?;
+        if remote_order.get("id").and_then(Value::as_str) != Some(remote_order_id)
+            || remote_order.get("organization_id").and_then(Value::as_str)
+                != Some(organization_id.as_str())
+            || remote_order.get("branch_id").and_then(Value::as_str) != Some(branch_id.as_str())
         {
-            Ok(remote_orders) => remote_orders,
-            Err(_) => return Ok(serde_json::json!([])),
-        };
-        if remote_orders.as_array().into_iter().flatten().any(|order| {
-            value_str(order, &["order_context", "orderContext"])
-                .is_some_and(|context| context.trim().eq_ignore_ascii_case("repair_settlement"))
-        }) {
+            return Err("Food item parent order is outside terminal scope".into());
+        }
+        if value_str(remote_order, &["order_context", "orderContext"])
+            .is_some_and(|context| context.trim().eq_ignore_ascii_case("repair_settlement"))
+        {
             return Err(REPAIR_SETTLEMENT_ROUTE_REQUIRED.to_string());
+        }
+        let conn = db.conn.lock().map_err(|error| error.to_string())?;
+        if !sync::remote_order_visible_to_current_terminal(&conn, remote_order)? {
+            return Err("Food item parent order is outside terminal scope".into());
         }
     }
 
-    if let Ok(items_json) = fetch_supabase_rows(
-        "order_items",
-        &[
+    if let Ok(items_json) = fetch_rows(
+        "order_items".into(),
+        vec![
             (
                 "select",
                 "id,menu_item_id,menu_item_name,quantity,unit_price,total_price,notes,customizations".to_string(),
             ),
-            ("order_id", format!("eq.{}", order_id)),
+            ("order_id", format!("eq.{}", remote_order_id)),
         ],
     )
     .await
@@ -4746,10 +5167,10 @@ pub async fn order_fetch_items_from_supabase(
                 std::collections::HashMap::new();
             let mut category_names_by_id: std::collections::HashMap<String, String> =
                 std::collections::HashMap::new();
-            if !ids.is_empty() {
-                if let Ok(menu_items) = fetch_supabase_rows(
-                    "menu_items",
-                    &[
+            if enrich_catalog && !ids.is_empty() {
+                if let Ok(menu_items) = fetch_rows(
+                    "menu_items".into(),
+                    vec![
                         ("select", "id,name,name_en,name_el,category_id".to_string()),
                         ("id", format!("in.({})", ids.join(","))),
                     ],
@@ -4780,9 +5201,9 @@ pub async fn order_fetch_items_from_supabase(
                     .into_iter()
                     .collect();
                 if !category_ids.is_empty() {
-                    if let Ok(categories) = fetch_supabase_rows(
-                        "categories",
-                        &[
+                    if let Ok(categories) = fetch_rows(
+                        "categories".into(),
+                        vec![
                             ("select", "id,name,name_en,name_el".to_string()),
                             ("id", format!("in.({})", category_ids.join(","))),
                         ],
@@ -4843,7 +5264,22 @@ pub async fn order_fetch_items_from_supabase(
                     })
                 })
                 .collect();
-            return Ok(serde_json::json!(transformed));
+            let transformed = serde_json::json!(transformed);
+            if let Some((local_id, _)) = local_identity.as_ref() {
+                let conn = db.conn.lock().map_err(|e| e.to_string())?;
+                if let Some(persisted) = persist_fetched_food_order_items(
+                    &conn, local_id, remote_order_id, &transformed,
+                )? {
+                    return Ok(persisted);
+                }
+                let plugin: String = conn.query_row(
+                    "SELECT COALESCE(plugin, '') FROM orders WHERE id = ?1", [local_id], |row| row.get(0),
+                ).map_err(|error| error.to_string())?;
+                if print::is_food_delivery_plugin(&plugin) {
+                    return Err("Fetched food items could not be persisted under the current order identity and terminal scope".into());
+                }
+            }
+            return Ok(transformed);
         }
     }
 
@@ -4864,6 +5300,117 @@ pub async fn order_fetch_items_from_supabase(
         }
     }
     Ok(serde_json::json!([]))
+}
+
+pub(crate) fn food_item_fetch_scope(
+    conn: &rusqlite::Connection,
+) -> Result<(String, String, String), String> {
+    let read = |key| {
+        let value = db::get_setting(conn, "terminal", key);
+        #[cfg(not(test))]
+        let value = storage::get_credential(key).or(value);
+        value
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                "Food order item fetch requires organization, branch and terminal scope".to_string()
+            })
+    };
+    Ok((
+        read("organization_id")?,
+        read("branch_id")?,
+        read("terminal_id")?,
+    ))
+}
+
+/// Fill only an incomplete external-food cache under its existing remote identity.
+/// This is not an order edit: status, money, timestamps and outbound queues stay intact.
+pub(crate) fn persist_fetched_food_order_items(
+    conn: &rusqlite::Connection,
+    local_id: &str,
+    remote_id: &str,
+    fetched: &Value,
+) -> Result<Option<Value>, String> {
+    let row: Option<(String, String, String, Option<String>, Option<String>)> = conn.query_row(
+        "SELECT COALESCE(plugin, ''), COALESCE(supabase_id, ''), COALESCE(items, '[]'), branch_id, organization_id
+         FROM orders WHERE id = ?1 AND COALESCE(order_context, '') != 'repair_settlement'",
+        [local_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+    ).optional().map_err(|error| format!("read food item cache identity: {error}"))?;
+    let Some((plugin, stored_remote_id, stored_items, branch, org)) = row else {
+        return Ok(None);
+    };
+    if !print::is_food_delivery_plugin(&plugin) || stored_remote_id != remote_id {
+        return Ok(None);
+    }
+    let (organization_id, expected_branch, _) = food_item_fetch_scope(conn)?;
+    if branch.as_deref() != Some(expected_branch.as_str())
+        || org
+            .as_deref()
+            .is_some_and(|org| !org.is_empty() && org != organization_id)
+    {
+        return Ok(None);
+    }
+    if print::has_usable_food_order_items(&stored_items) {
+        return Ok(serde_json::from_str(&stored_items).ok());
+    }
+    let fetched_json = fetched.to_string();
+    if !print::has_usable_food_order_items(&fetched_json) {
+        return Ok(None);
+    }
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|error| error.to_string())?;
+    tx.execute(
+        "UPDATE orders SET items = ?1 WHERE id = ?2 AND supabase_id = ?3",
+        rusqlite::params![fetched_json, local_id, remote_id],
+    )
+    .map_err(|error| format!("persist fetched food order items: {error}"))?;
+    release_food_item_waiting_prints(&tx, local_id)?;
+    tx.commit()
+        .map_err(|error| format!("commit fetched food order items: {error}"))?;
+    Ok(Some(fetched.clone()))
+}
+
+pub(crate) fn release_food_item_waiting_prints(
+    conn: &rusqlite::Connection,
+    local_id: &str,
+) -> Result<(), String> {
+    conn.execute(
+        "UPDATE print_jobs SET next_retry_at = NULL, warning_code = NULL, warning_message = NULL
+         WHERE entity_id = ?1 AND status = 'pending' AND document_snapshot_zlib IS NULL
+           AND warning_code = 'food_order_items_pending'",
+        [local_id],
+    )
+    .map_err(|error| format!("release food item waiting prints: {error}"))?;
+    Ok(())
+}
+
+/// An empty/malformed joined snapshot can precede child insertion. Keep an
+/// already hydrated food list while still applying the snapshot's other fields.
+pub(crate) fn preserve_food_items_on_incomplete_snapshot(
+    conn: &rusqlite::Connection,
+    local_id: &str,
+    incoming: Option<String>,
+) -> Result<Option<String>, String> {
+    let Some(raw) = incoming.as_ref() else {
+        return Ok(incoming);
+    };
+    if print::has_usable_food_order_items(raw) {
+        return Ok(incoming);
+    }
+    let row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT COALESCE(plugin, ''), COALESCE(items, '[]') FROM orders WHERE id = ?1",
+            [local_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|error| format!("read food items before snapshot: {error}"))?;
+    if row.is_some_and(|(plugin, items)| {
+        print::is_food_delivery_plugin(&plugin) && print::has_usable_food_order_items(&items)
+    }) {
+        return Ok(None);
+    }
+    Ok(incoming)
 }
 
 // This classifies only the original CREATE handoff. Payment intent is not a
@@ -5014,6 +5561,14 @@ fn checkout_in_progress_response(client_request_id: &str) -> serde_json::Value {
     })
 }
 
+fn twint_prior_checkout_refusal() -> Value {
+    serde_json::json!({
+        "success": false, "errorCode": "TWINT_PRIOR_CHECKOUT_RECONCILIATION_REQUIRED",
+        "paymentApproved": false, "orderPersisted": false, "requiresReconciliation": true,
+        "error": "Check the earlier checkout payment before collecting TWINT money.",
+    })
+}
+
 /// The new-order checkout: the fiscal checkout (which charges a card on the
 /// fiscal device), then the order and its initial payment in one write.
 ///
@@ -5070,6 +5625,8 @@ pub(crate) async fn create_order_with_initial_payment(
             "client_request_id".to_string(),
             serde_json::Value::String(client_request_id.clone()),
         );
+        order.insert("initialPayment".into(), initial_payment.clone());
+        order.insert("initial_payment".into(), initial_payment.clone());
     }
 
     // One press at a time per checkout: a second press while the first still
@@ -5100,8 +5657,36 @@ pub(crate) async fn create_order_with_initial_payment(
         }
     };
 
+    // A durable cashier-confirmed TWINT receipt is saved only as its original
+    // checkout. A changed cart, method or new checkout must use recovery.
+    let manual_pending = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        crate::unsaved_payments::list(&conn, None)?
+            .into_iter()
+            .find(|entry| entry.is_manual_twint() && entry.is_new_order_checkout())
+    };
+    if let Some(entry) = manual_pending {
+        if entry.order_id != client_request_id || entry.request != normalized {
+            return Ok(crate::unsaved_payments::not_saved_response(&entry, None));
+        }
+        return Ok(crate::unsaved_payments::save_charged_payment(
+            db,
+            entry,
+            save_delays_ms,
+            None,
+            |db, entry| crate::unsaved_payments::write_recorded_entry(db, entry, invalidator),
+        )
+        .await);
+    }
+
     // A card the fiscal device approved for this checkout: money that moved.
     let mut card_money_moved = false;
+    let manual_twint = initial_payment
+        .get("method")
+        .or_else(|| initial_payment.get("paymentMethod"))
+        .or_else(|| initial_payment.get("payment_method"))
+        .and_then(Value::as_str)
+        .is_some_and(|method| method.trim().eq_ignore_ascii_case("twint"));
     if existing_order_id.is_none() {
         // This checkout's charge is held as not saved (item E): replay the
         // held order and payment, the payload the card was charged for.
@@ -5112,6 +5697,9 @@ pub(crate) async fn create_order_with_initial_payment(
                 .find(crate::unsaved_payments::UnsavedChargedPayment::is_new_order_checkout)
         };
         if let Some(entry) = held {
+            if manual_twint {
+                return Ok(twint_prior_checkout_refusal());
+            }
             return Ok(crate::unsaved_payments::save_charged_payment(
                 db,
                 entry,
@@ -5122,6 +5710,28 @@ pub(crate) async fn create_order_with_initial_payment(
             .await);
         }
 
+        if manual_twint {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let prior: i64 = conn.query_row(
+                "SELECT count(*) FROM ecr_transactions WHERE order_id=?1
+                 AND lower(trim(transaction_type)) IN ('sale','fiscal_receipt')
+                 AND lower(trim(status)) NOT IN ('declined','error','cancelled')
+                 AND (CASE WHEN json_valid(receipt_data) THEN json_extract(receipt_data,'$.returnedToCustomer') END) IS NULL",
+                [&client_request_id], |row| row.get(0),
+            ).map_err(|e| format!("inspect prior checkout before TWINT: {e}"))?;
+            if prior != 0
+                || crate::commands::ecr::find_approved_fiscal_transaction(
+                    &conn,
+                    &client_request_id,
+                )?
+                .is_some()
+            {
+                return Ok(twint_prior_checkout_refusal());
+            }
+        }
+    }
+
+    if existing_order_id.is_none() && !manual_twint {
         let checkout = match crate::commands::ecr::fiscal_checkout_for_order_payload(
             db,
             mgr,
@@ -5231,7 +5841,15 @@ pub(crate) async fn create_order_with_initial_payment(
             && crate::commands::payments::payment_payload_has_terminal_approval(checkout_payment);
     }
 
-    let checkout_record = if card_money_moved {
+    let checkout_record = if manual_twint && existing_order_id.is_none() {
+        let entry = crate::unsaved_payments::UnsavedChargedPayment::for_manual_twint_checkout(
+            db,
+            &client_request_id,
+            &normalized,
+            &Utc::now().to_rfc3339(),
+        )?;
+        Some((entry.clone(), entry.request))
+    } else if card_money_moved {
         crate::unsaved_payments::UnsavedChargedPayment::for_new_order_checkout(
             &client_request_id,
             &normalized,
@@ -5363,62 +5981,52 @@ pub async fn order_approve(
 ) -> Result<serde_json::Value, String> {
     let order_id_raw = arg0.ok_or("Missing orderId")?;
     let estimated_time = arg1;
+    let (confirmation, request) =
+        confirm_box_decision_before_mutation(&db, &order_id_raw, "confirmed", estimated_time, None)
+            .await?;
+    let confirmed_box = confirmation != BoxDecisionConfirmation::NotBox;
     let now = Utc::now().to_rfc3339();
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let (order_id, remote_order_id) = resolve_order_id_with_remote(&conn, &order_id_raw)?;
+    if let Some(body) = request.as_ref() {
+        if recheck_confirmed_box_decision(&conn, &order_id_raw, body)?
+            == BoxDecisionConfirmation::AlreadyApplied
+        {
+            drop(conn);
+            enqueue_after_approve_platform_prints(&db, &order_id, &app);
+            return Ok(serde_json::json!({ "success": true, "orderId": order_id_raw }));
+        }
+    }
+    ensure_box_order_mutation_allowed(
+        &conn,
+        &order_id,
+        "confirmed",
+        BoxOrderMutation::Accept(estimated_time),
+    )?;
     ensure_order_status_transition_allowed(&conn, &order_id, "confirmed")?;
     conn.execute(
         "UPDATE orders
          SET status = 'confirmed',
              estimated_time = COALESCE(?1, estimated_time),
-             sync_status = 'pending',
+             sync_status = CASE WHEN ?4 THEN 'synced' ELSE 'pending' END,
              updated_at = ?2
          WHERE id = ?3",
-        rusqlite::params![estimated_time, now, order_id],
+        rusqlite::params![estimated_time, now, order_id, confirmed_box],
     )
     .map_err(|e| format!("approve order: {e}"))?;
-    let (order_type, is_ghost, plugin, external_order_id, ghost_metadata): (
-        String,
-        i64,
-        String,
-        String,
-        String,
-    ) = conn
-        .query_row(
-            "SELECT COALESCE(order_type, ''), COALESCE(is_ghost, 0),
-                    COALESCE(plugin, ''), COALESCE(external_plugin_order_id, ''),
-                    COALESCE(ghost_metadata, '')
-             FROM orders WHERE id = ?1",
-            rusqlite::params![order_id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            },
-        )
-        .unwrap_or((
-            String::new(),
-            0,
-            String::new(),
-            String::new(),
-            String::new(),
-        ));
-
     let payload = serde_json::json!({
         "orderId": order_id,
         "status": "confirmed",
         "estimatedTime": estimated_time
     });
-    let _ = enqueue_order_sync_payload(&conn, &order_id, &payload);
+    if !confirmed_box {
+        let _ = enqueue_order_sync_payload(&conn, &order_id, &payload);
+    }
     drop(conn);
 
     let _ = app.emit("order_status_updated", payload.clone());
     let _ = app.emit("order_realtime_update", payload.clone());
-    if let Some(remote_order_id) = remote_order_id.as_deref() {
+    if let Some(remote_order_id) = remote_order_id.as_deref().filter(|_| !confirmed_box) {
         // The answer says what the order's platform took (a shorter
         // preparation time is told to the cashier by the renderer).
         spawn_immediate_order_accept_patch(
@@ -5430,38 +6038,8 @@ pub async fn order_approve(
             },
         );
     }
-    // THE-434: the accept is the moment the store commits to the order — the
-    // rider slip must come out now, not when the operator remembers to
-    // reprint. Platform orders only: customer web/kiosk orders already
-    // auto-print on arrival, so approving them must not queue a second copy.
-    // Sandbox/test orders are skipped inside the enqueue path.
-    // Same three signals as payments::platform_settlement_kind — legacy rows
-    // can miss the plugin/external columns (pre-v75 schema, `platform` vs
-    // `plugin` broadcast field) but always carry the aggregator metadata.
-    let has_food_delivery_metadata = serde_json::from_str::<serde_json::Value>(&ghost_metadata)
-        .ok()
-        .and_then(|value| value.get("food_delivery").cloned())
-        .is_some();
-    let is_platform_order = crate::print::is_food_delivery_plugin(&plugin)
-        || !external_order_id.trim().is_empty()
-        || has_food_delivery_metadata;
-    if is_ghost == 0
-        && is_platform_order
-        && crate::print::is_print_action_enabled(&db, "after_approve")
-    {
-        for entity_type in crate::print::auto_print_entity_types_for_order_type(&order_type) {
-            if let Err(error) =
-                crate::print::enqueue_print_job(&db, entity_type, &order_id, None, &app)
-            {
-                tracing::warn!(
-                    order_id = %order_id,
-                    entity_type = %entity_type,
-                    error = %error,
-                    "Failed to enqueue after-approve print job"
-                );
-            }
-        }
-    }
+    // Includes acknowledged backflow; the spooler keeps its existing dedup and sandbox gate.
+    enqueue_after_approve_platform_prints(&db, &order_id, &app);
     Ok(
         serde_json::json!({ "success": true, "orderId": order_id_raw, "estimatedTime": estimated_time }),
     )
@@ -5477,8 +6055,47 @@ pub(crate) fn decline_order_locally(
     reason: &str,
     now: &str,
 ) -> Result<(String, Option<String>, serde_json::Value), String> {
+    decline_order_locally_with_box_confirmation(db, order_id_raw, reason, now, None)
+}
+
+fn decline_order_locally_with_box_confirmation(
+    db: &db::DbState,
+    order_id_raw: &str,
+    reason: &str,
+    now: &str,
+    confirmed_request: Option<&Value>,
+) -> Result<(String, Option<String>, serde_json::Value), String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let (order_id, remote_order_id) = resolve_order_id_with_remote(&conn, order_id_raw)?;
+    let payload = serde_json::json!({
+        "orderId": order_id,
+        "status": "cancelled",
+        "reason": reason,
+        "cancellationReason": reason,
+        "cancellation_reason": reason,
+        "cancelled_at": now
+    });
+    let confirmed_box = confirmed_request.is_some();
+    if let Some(body) = confirmed_request {
+        if recheck_confirmed_box_decision(&conn, order_id_raw, body)?
+            == BoxDecisionConfirmation::AlreadyApplied
+        {
+            return Ok((order_id, remote_order_id, payload));
+        }
+        ensure_box_order_mutation_allowed(
+            &conn,
+            &order_id,
+            "cancelled",
+            BoxOrderMutation::Reject(Some(reason)),
+        )?;
+    } else {
+        ensure_box_order_mutation_allowed(
+            &conn,
+            &order_id,
+            "cancelled",
+            BoxOrderMutation::Generic,
+        )?;
+    }
     let previous_status = ensure_order_status_transition_allowed(&conn, &order_id, "cancelled")?;
     if previous_status != "cancelled" {
         ensure_no_money_taken_before_cancel(&conn, &order_id)?;
@@ -5488,22 +6105,16 @@ pub(crate) fn decline_order_locally(
         "UPDATE orders
          SET status = 'cancelled',
              cancellation_reason = ?1,
-             sync_status = 'pending',
+             sync_status = CASE WHEN ?4 THEN 'synced' ELSE 'pending' END,
              updated_at = ?2
          WHERE id = ?3",
-        rusqlite::params![reason, now, order_id],
+        rusqlite::params![reason, now, order_id, confirmed_box],
     )
     .map_err(|e| format!("decline order: {e}"))?;
 
-    let payload = serde_json::json!({
-        "orderId": order_id,
-        "status": "cancelled",
-        "reason": reason,
-        "cancellationReason": reason,
-        "cancellation_reason": reason,
-        "cancelled_at": now
-    });
-    let _ = enqueue_order_sync_payload(&conn, &order_id, &payload);
+    if !confirmed_box {
+        let _ = enqueue_order_sync_payload(&conn, &order_id, &payload);
+    }
     Ok((order_id, remote_order_id, payload))
 }
 
@@ -5516,13 +6127,25 @@ pub async fn order_decline(
 ) -> Result<serde_json::Value, String> {
     let order_id_raw = arg0.ok_or("Missing orderId")?;
     let reason = arg1.unwrap_or_else(|| "Declined".to_string());
+    let (confirmation, request) = confirm_box_decision_before_mutation(
+        &db,
+        &order_id_raw,
+        "cancelled",
+        None,
+        Some(reason.as_str()),
+    )
+    .await?;
+    let confirmed_box = confirmation != BoxDecisionConfirmation::NotBox;
     let now = Utc::now().to_rfc3339();
-    let (_order_id, remote_order_id, payload) =
-        decline_order_locally(&db, &order_id_raw, &reason, &now)?;
+    let (_order_id, remote_order_id, payload) = if let Some(body) = request.as_ref() {
+        decline_order_locally_with_box_confirmation(&db, &order_id_raw, &reason, &now, Some(body))?
+    } else {
+        decline_order_locally(&db, &order_id_raw, &reason, &now)?
+    };
 
     let _ = app.emit("order_status_updated", payload.clone());
     let _ = app.emit("order_realtime_update", payload);
-    if let Some(remote_order_id) = remote_order_id.as_deref() {
+    if let Some(remote_order_id) = remote_order_id.as_deref().filter(|_| !confirmed_box) {
         spawn_immediate_order_status_patch(
             &db,
             build_order_status_patch_body(
@@ -5828,6 +6451,7 @@ pub async fn order_assign_driver(
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let order_id = resolve_renderer_order_id(&conn, &order_id_raw)?;
     let driver_name = resolve_driver_display_name(&conn, &driver_id);
+    ensure_box_order_mutation_allowed(&conn, &order_id, "delivered", BoxOrderMutation::Generic)?;
     let current_status: String = conn
         .query_row(
             "SELECT COALESCE(status, 'pending') FROM orders WHERE id = ?1",
@@ -6074,6 +6698,7 @@ pub async fn order_reset_to_active(
     let (order_id, order_type, driver_was_unassigned, removed_driver_earning) = {
         let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
         let order_id = resolve_renderer_order_id(&conn, &order_id_raw)?;
+        ensure_box_order_mutation_allowed(&conn, &order_id, "pending", BoxOrderMutation::Generic)?;
         let (current_status, order_type, current_driver_id): (String, String, Option<String>) =
             conn.query_row(
                 "SELECT
@@ -6232,6 +6857,7 @@ pub(crate) fn notify_platform_ready_locally(
 ) -> Result<PlatformReadyLocal, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let (order_id, remote_order_id) = resolve_order_id_with_remote(&conn, order_id_raw)?;
+    ensure_box_order_mutation_allowed(&conn, &order_id, "ready", BoxOrderMutation::NotifyReady)?;
     let current_status = load_canonical_order_status(&conn, &order_id)?;
     match current_status.as_str() {
         "out_for_delivery" | "delivered" | "completed" => {
@@ -6410,6 +7036,13 @@ pub async fn order_update_preparation(
     {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         ensure_renderer_order_is_not_repair_settlement(&conn, &order_id)?;
+        let canonical_order_id = resolve_renderer_order_id(&conn, &order_id)?;
+        ensure_box_order_mutation_allowed(
+            &conn,
+            &canonical_order_id,
+            "preparing",
+            BoxOrderMutation::Generic,
+        )?;
     }
     let mut all = read_local_json_array(&db, "order_preparation_states")?;
     all.retain(|item| {
@@ -7040,7 +7673,7 @@ mod dto_tests {
                 "UPDATE orders",
             ),
             (
-                "decline_order_locally",
+                "decline_order_locally_with_box_confirmation",
                 "resolve_order_id_with_remote",
                 "reverse_order_drawer_attribution",
             ),
@@ -7085,6 +7718,7 @@ mod dto_tests {
             let start = source
                 .find(&format!("pub async fn {command}"))
                 .or_else(|| source.find(&format!("pub(crate) fn {command}(")))
+                .or_else(|| source.find(&format!("\nfn {command}(")))
                 .unwrap_or_else(|| panic!("missing command source for {command}"));
             let remainder = &source[start..];
             let end = remainder
@@ -7946,6 +8580,857 @@ mod item_customization_merge_tests {
 }
 
 #[cfg(test)]
+mod box_order_mutation_tests {
+    use super::*;
+
+    const REMOTE_ID: &str = "11111111-1111-4111-8111-111111111111";
+
+    #[derive(Clone)]
+    struct FeedbackDb(std::sync::Arc<crate::tests::harness::TestDb>);
+
+    impl std::ops::Deref for FeedbackDb {
+        type Target = db::DbState;
+
+        fn deref(&self) -> &Self::Target {
+            &self.0.state
+        }
+    }
+
+    fn feedback_db() -> FeedbackDb {
+        let db = FeedbackDb(std::sync::Arc::new(crate::tests::harness::TestDb::open()));
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute_batch("ALTER TABLE orders ADD COLUMN drawer_amount INTEGER;")
+                .unwrap();
+            conn.execute(
+                "INSERT INTO orders (id, order_number, items, status, plugin, ghost_metadata,
+                    drawer_amount, sync_status, supabase_id, order_type, total_amount,
+                    total_amount_cents, payment_status, created_at, updated_at)
+                 VALUES ('box-order', 'BOX-FIXTURE', '[]', 'pending', 'box', '', 795,
+                    'synced', ?1, 'delivery', 7.95, 795, 'pending', ?2, ?2)",
+                rusqlite::params![REMOTE_ID, "2026-10-01T12:00:00Z"],
+            )
+            .unwrap();
+        }
+        db
+    }
+
+    fn feedback_context(url: String) -> ImmediateOrderStatusSyncContext {
+        ImmediateOrderStatusSyncContext {
+            admin_url: url,
+            api_key: "fixture-terminal-key".into(),
+            terminal_id: "fixture-terminal".into(),
+        }
+    }
+
+    fn confirmed_payload(status: &str) -> Value {
+        serde_json::json!({ "success": true, "data": { "id": REMOTE_ID, "status": status,
+            "box_decision": { "state": "confirmed", "provider_confirmed": true, "action": if status == "confirmed" { "accepted" } else { "rejected" }, "retryable": false } } })
+    }
+
+    fn feedback_response_server(
+        http_status: u16,
+        payload: Value,
+    ) -> (String, std::thread::JoinHandle<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0; 4096];
+                let count = stream.read(&mut chunk).unwrap();
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..count]);
+                let text = String::from_utf8_lossy(&request);
+                if let Some(split) = text.find("\r\n\r\n") {
+                    let length = text[..split]
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= split + 4 + length {
+                        break;
+                    }
+                }
+            }
+            let payload = payload.to_string();
+            let response = format!("HTTP/1.1 {http_status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}", payload.len());
+            stream.write_all(response.as_bytes()).unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        (url, handle)
+    }
+
+    #[tokio::test]
+    async fn box_http400_is_refused_before_status_drawer_or_queue_mutation() {
+        let reasons: Vec<String> = serde_json::from_str(include_str!(
+            "../../../../shared/box-rejection-reasons.json"
+        ))
+        .unwrap();
+        for status in ["confirmed", "cancelled"] {
+            let db = feedback_db();
+            let body = prepare_box_decision_request(
+                &db.conn.lock().unwrap(),
+                "box-order",
+                status,
+                Some(25),
+                Some(&reasons[0]),
+            )
+            .unwrap()
+            .unwrap();
+            let before = snapshot(&db.conn.lock().unwrap());
+            let (url, server) = feedback_response_server(
+                400,
+                serde_json::json!({ "success": false, "code": "BOX_DECISION_EXPIRED", "error": "expired" }),
+            );
+            let error =
+                confirm_box_decision_with_context(&db, "box-order", &body, &feedback_context(url))
+                    .await
+                    .unwrap_err();
+            assert!(error.contains("HTTP 400"));
+            assert_eq!(snapshot(&db.conn.lock().unwrap()), before);
+            assert_eq!(
+                db.conn
+                    .lock()
+                    .unwrap()
+                    .query_row("SELECT COUNT(*) FROM print_jobs", [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            let request = server.join().unwrap();
+            assert!(request.starts_with("PATCH /api/pos/orders "));
+            assert!(request
+                .to_ascii_lowercase()
+                .contains("x-pos-api-key: fixture-terminal-key"));
+            assert!(request
+                .to_ascii_lowercase()
+                .contains("x-terminal-id: fixture-terminal"));
+            let sent: Value =
+                serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+            assert_eq!(sent["id"], REMOTE_ID);
+            if status == "confirmed" {
+                assert_eq!(sent["estimated_time"], 25);
+            } else {
+                assert_eq!(sent["cancellation_reason"], reasons[0]);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn box_http202_unknown_or_missing_confirmation_keeps_pending_without_queue() {
+        for (status, payload) in [
+            (
+                202,
+                serde_json::json!({ "success": true, "data": { "id": REMOTE_ID, "status": "pending", "box_decision": { "state": "pending", "provider_confirmed": false, "action": "accepted", "retryable": true } } }),
+            ),
+            (
+                200,
+                serde_json::json!({ "success": true, "data": { "id": REMOTE_ID, "status": "confirmed" } }),
+            ),
+            (200, confirmed_payload("cancelled")),
+            (202, confirmed_payload("confirmed")),
+        ] {
+            let db = feedback_db();
+            let body = prepare_box_decision_request(
+                &db.conn.lock().unwrap(),
+                "box-order",
+                "confirmed",
+                Some(25),
+                None,
+            )
+            .unwrap()
+            .unwrap();
+            let before = snapshot(&db.conn.lock().unwrap());
+            let (url, server) = feedback_response_server(status, payload);
+            assert!(confirm_box_decision_with_context(
+                &db,
+                "box-order",
+                &body,
+                &feedback_context(url)
+            )
+            .await
+            .is_err());
+            assert_eq!(snapshot(&db.conn.lock().unwrap()), before);
+            assert_eq!(
+                db.conn
+                    .lock()
+                    .unwrap()
+                    .query_row("SELECT COUNT(*) FROM print_jobs", [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            server.join().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn box_http200_matching_confirmation_allows_local_commit_without_second_request() {
+        let reasons: Vec<String> = serde_json::from_str(include_str!(
+            "../../../../shared/box-rejection-reasons.json"
+        ))
+        .unwrap();
+        for status in ["confirmed", "cancelled"] {
+            let db = feedback_db();
+            let body = prepare_box_decision_request(
+                &db.conn.lock().unwrap(),
+                "box-order",
+                status,
+                Some(25),
+                Some(&reasons[0]),
+            )
+            .unwrap()
+            .unwrap();
+            let before = snapshot(&db.conn.lock().unwrap());
+            let server =
+                crate::tests::fake_http::MockServer::new(confirmed_payload(status).to_string());
+            assert_eq!(
+                confirm_box_decision_with_context(
+                    &db,
+                    "box-order",
+                    &body,
+                    &feedback_context(server.url.clone())
+                )
+                .await
+                .unwrap(),
+                BoxDecisionConfirmation::PendingLocal
+            );
+            assert_eq!(snapshot(&db.conn.lock().unwrap()), before);
+            assert_eq!(server.count(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn box_acknowledged_same_backflow_succeeds_without_reapplying_side_effects() {
+        let reasons: Vec<String> = serde_json::from_str(include_str!(
+            "../../../../shared/box-rejection-reasons.json"
+        ))
+        .unwrap();
+        for status in ["confirmed", "cancelled"] {
+            let db = feedback_db();
+            let body = prepare_box_decision_request(
+                &db.conn.lock().unwrap(),
+                "box-order",
+                status,
+                Some(25),
+                Some(&reasons[0]),
+            )
+            .unwrap()
+            .unwrap();
+            let callback_db = db.clone();
+            let reason = reasons[0].clone();
+            let server = crate::tests::fake_http::MockServer::new_with_request_hook(
+                confirmed_payload(status).to_string(),
+                move || {
+                    callback_db.conn.lock().unwrap().execute("UPDATE orders SET status = ?1, cancellation_reason = ?2 WHERE id = 'box-order'", rusqlite::params![status, reason]).unwrap();
+                },
+            );
+            assert_eq!(
+                confirm_box_decision_with_context(
+                    &db,
+                    "box-order",
+                    &body,
+                    &feedback_context(server.url.clone())
+                )
+                .await
+                .unwrap(),
+                BoxDecisionConfirmation::AlreadyApplied
+            );
+            let after = snapshot(&db.conn.lock().unwrap());
+            assert_eq!(after.0, status);
+            assert_eq!(after.1, 795);
+            assert_eq!(after.3, 0);
+            if status == "confirmed" {
+                enqueue_after_approve_platform_prints(
+                    &db,
+                    "box-order",
+                    &crate::print::NoopPrintQueueInvalidator,
+                );
+                db.conn
+                    .lock()
+                    .unwrap()
+                    .execute("UPDATE print_jobs SET status = 'printed'", [])
+                    .unwrap();
+                enqueue_after_approve_platform_prints(
+                    &db,
+                    "box-order",
+                    &crate::print::NoopPrintQueueInvalidator,
+                );
+                assert_eq!(
+                    db.conn
+                        .lock()
+                        .unwrap()
+                        .query_row("SELECT COUNT(*) FROM print_jobs", [], |row| row
+                            .get::<_, i64>(0))
+                        .unwrap(),
+                    1
+                );
+            }
+        }
+    }
+
+    fn seed_feedback_payment(conn: &rusqlite::Connection, method: &str) {
+        conn.execute(
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status,
+                 transaction_ref, payment_origin, remote_payment_id, sync_status, sync_state, created_at, updated_at)
+             VALUES ('box-payment', 'box-order', ?1, 7.95, 795, 'completed',
+                 'platform_settlement:online:box-order', 'sync_reconstructed', 'remote-box-payment',
+                 'synced', 'applied', '2026-10-01T12:00:00Z', '2026-10-01T12:00:00Z')",
+            rusqlite::params![method],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn box_extracted_local_helpers_refuse_before_financial_or_status_writes() {
+        let db = feedback_db();
+        let before = snapshot(&db.conn.lock().unwrap());
+        assert!(apply_order_status_locally(
+            &db,
+            "box-order",
+            "completed",
+            None,
+            None,
+            "2026-10-01T12:00:00Z"
+        )
+        .is_err());
+        assert!(
+            decline_order_locally(&db, "box-order", "free text", "2026-10-01T12:00:00Z").is_err()
+        );
+        assert!(notify_platform_ready_locally(&db, "box-order", "2026-10-01T12:00:00Z").is_err());
+        assert_eq!(snapshot(&db.conn.lock().unwrap()), before);
+        assert_eq!(
+            db.conn
+                .lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM order_payments", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn box_decline_payment_preflight_precedes_provider_request() {
+        let reasons: Vec<String> = serde_json::from_str(include_str!(
+            "../../../../shared/box-rejection-reasons.json"
+        ))
+        .unwrap();
+        for (method, label, expected) in [
+            (Some("cash"), "pending", ORDER_HAS_PAYMENTS),
+            (Some("card"), "pending", ORDER_HAS_PAYMENTS),
+            (None, "paid", ORDER_PAYMENT_NOT_RECORDED),
+        ] {
+            let db = feedback_db();
+            let conn = db.conn.lock().unwrap();
+            if let Some(method) = method {
+                // A settlement-like reference cannot hide till CASH/CARD.
+                seed_feedback_payment(&conn, method);
+            }
+            conn.execute("UPDATE orders SET payment_status = ?1", [label])
+                .unwrap();
+            let before = snapshot(&conn);
+            let error = prepare_box_decision_request(
+                &conn,
+                "box-order",
+                "cancelled",
+                None,
+                Some(&reasons[0]),
+            )
+            .expect_err("payment guard must prevent constructing a provider request");
+            assert!(error.starts_with(expected), "{error}");
+            assert_eq!(snapshot(&conn), before);
+        }
+    }
+
+    #[tokio::test]
+    async fn box_confirmed_decline_preserves_platform_settlement_and_skips_duplicate_queue() {
+        let reasons: Vec<String> = serde_json::from_str(include_str!(
+            "../../../../shared/box-rejection-reasons.json"
+        ))
+        .unwrap();
+        let db = feedback_db();
+        let body = {
+            let conn = db.conn.lock().unwrap();
+            seed_feedback_payment(&conn, "other");
+            conn.execute("UPDATE orders SET payment_status = 'paid'", [])
+                .unwrap();
+            prepare_box_decision_request(&conn, "box-order", "cancelled", None, Some(&reasons[0]))
+                .unwrap()
+                .unwrap()
+        };
+        let server =
+            crate::tests::fake_http::MockServer::new(confirmed_payload("cancelled").to_string());
+        assert_eq!(
+            confirm_box_decision_with_context(
+                &db,
+                "box-order",
+                &body,
+                &feedback_context(server.url.clone())
+            )
+            .await
+            .unwrap(),
+            BoxDecisionConfirmation::PendingLocal
+        );
+        decline_order_locally_with_box_confirmation(
+            &db,
+            "box-order",
+            &reasons[0],
+            "2026-10-01T12:00:00Z",
+            Some(&body),
+        )
+        .unwrap();
+        let conn = db.conn.lock().unwrap();
+        let after = snapshot(&conn);
+        assert_eq!(after.0, "cancelled");
+        assert_eq!(after.2, "synced");
+        assert_eq!(after.3, 0);
+        assert_eq!(
+            conn.query_row(
+                "SELECT status FROM order_payments WHERE id = 'box-payment'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "completed"
+        );
+        assert_eq!(server.count(), 1);
+    }
+
+    #[tokio::test]
+    async fn box_decline_rechecks_till_money_after_provider_confirmation() {
+        let reasons: Vec<String> = serde_json::from_str(include_str!(
+            "../../../../shared/box-rejection-reasons.json"
+        ))
+        .unwrap();
+        let db = feedback_db();
+        let body = prepare_box_decision_request(
+            &db.conn.lock().unwrap(),
+            "box-order",
+            "cancelled",
+            None,
+            Some(&reasons[0]),
+        )
+        .unwrap()
+        .unwrap();
+        let server =
+            crate::tests::fake_http::MockServer::new(confirmed_payload("cancelled").to_string());
+        assert_eq!(
+            confirm_box_decision_with_context(
+                &db,
+                "box-order",
+                &body,
+                &feedback_context(server.url.clone())
+            )
+            .await
+            .unwrap(),
+            BoxDecisionConfirmation::PendingLocal
+        );
+        seed_feedback_payment(&db.conn.lock().unwrap(), "cash");
+        let before = snapshot(&db.conn.lock().unwrap());
+        let error = decline_order_locally_with_box_confirmation(
+            &db,
+            "box-order",
+            &reasons[0],
+            "2026-10-01T12:00:00Z",
+            Some(&body),
+        )
+        .expect_err("cash collected during HTTP await must refuse before local effects");
+        assert!(error.starts_with(ORDER_HAS_PAYMENTS), "{error}");
+        assert_eq!(snapshot(&db.conn.lock().unwrap()), before);
+        assert_eq!(server.count(), 1);
+    }
+
+    #[tokio::test]
+    async fn box_opposite_backflow_and_transport_unknown_cannot_commit() {
+        let db = feedback_db();
+        let body = prepare_box_decision_request(
+            &db.conn.lock().unwrap(),
+            "box-order",
+            "confirmed",
+            Some(25),
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        let callback_db = db.clone();
+        let server = crate::tests::fake_http::MockServer::new_with_request_hook(
+            confirmed_payload("confirmed").to_string(),
+            move || {
+                callback_db
+                    .conn
+                    .lock()
+                    .unwrap()
+                    .execute(
+                        "UPDATE orders SET status = 'cancelled' WHERE id = 'box-order'",
+                        [],
+                    )
+                    .unwrap();
+            },
+        );
+        assert!(confirm_box_decision_with_context(
+            &db,
+            "box-order",
+            &body,
+            &feedback_context(server.url.clone())
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            snapshot(&db.conn.lock().unwrap()),
+            ("cancelled".into(), 795, "synced".into(), 0)
+        );
+        let db = feedback_db();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let before = snapshot(&db.conn.lock().unwrap());
+        assert!(
+            confirm_box_decision_with_context(&db, "box-order", &body, &feedback_context(url))
+                .await
+                .is_err()
+        );
+        assert_eq!(snapshot(&db.conn.lock().unwrap()), before);
+    }
+
+    #[test]
+    fn box_remote_identity_required_while_non_box_remains_optimistic() {
+        let db = feedback_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute("UPDATE orders SET supabase_id = NULL", [])
+            .unwrap();
+        assert!(
+            prepare_box_decision_request(&conn, "box-order", "confirmed", Some(25), None).is_err()
+        );
+        conn.execute("UPDATE orders SET plugin = 'efood'", [])
+            .unwrap();
+        assert!(
+            prepare_box_decision_request(&conn, "box-order", "confirmed", None, None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(prepare_box_decision_request(
+            &conn,
+            "box-order",
+            "cancelled",
+            None,
+            Some("free text")
+        )
+        .unwrap()
+        .is_none());
+    }
+
+    #[test]
+    fn box_delayed_acceptance_print_requires_own_confirmed_intent_and_pending_transition() {
+        let db = feedback_db();
+        let conn = db.conn.lock().unwrap();
+        let mut remote = serde_json::json!({ "status": "confirmed", "ghost_metadata": { "_the_small_box_decision": { "version": 1, "state": "confirmed", "action": "accepted" } } });
+        assert!(should_print_box_acceptance_backflow(
+            &conn,
+            "box-order",
+            Some("pending"),
+            &remote
+        ));
+        assert!(!should_print_box_acceptance_backflow(
+            &conn,
+            "box-order",
+            Some("confirmed"),
+            &remote
+        ));
+        remote["ghost_metadata"]["_the_small_box_decision"]["state"] = serde_json::json!("pending");
+        assert!(!should_print_box_acceptance_backflow(
+            &conn,
+            "box-order",
+            Some("pending"),
+            &remote
+        ));
+        remote["ghost_metadata"]["_the_small_box_decision"]["state"] =
+            serde_json::json!("confirmed");
+        remote["ghost_metadata"]["_the_small_box_decision"]["action"] =
+            serde_json::json!("rejected");
+        assert!(!should_print_box_acceptance_backflow(
+            &conn,
+            "box-order",
+            Some("pending"),
+            &remote
+        ));
+        remote["ghost_metadata"]["_the_small_box_decision"]["action"] =
+            serde_json::json!("accepted");
+        remote["ghost_metadata"] = Value::String(remote["ghost_metadata"].to_string());
+        assert!(should_print_box_acceptance_backflow(
+            &conn,
+            "box-order",
+            Some("pending"),
+            &remote
+        ));
+        conn.execute("UPDATE orders SET plugin = 'efood'", [])
+            .unwrap();
+        assert!(!should_print_box_acceptance_backflow(
+            &conn,
+            "box-order",
+            Some("pending"),
+            &remote
+        ));
+    }
+
+    #[tokio::test]
+    async fn box_final_command_lock_recheck_handles_same_opposite_and_identity_backflow() {
+        let db = feedback_db();
+        let body = prepare_box_decision_request(
+            &db.conn.lock().unwrap(),
+            "box-order",
+            "confirmed",
+            Some(25),
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        let server =
+            crate::tests::fake_http::MockServer::new(confirmed_payload("confirmed").to_string());
+        assert_eq!(
+            confirm_box_decision_with_context(
+                &db,
+                "box-order",
+                &body,
+                &feedback_context(server.url.clone())
+            )
+            .await
+            .unwrap(),
+            BoxDecisionConfirmation::PendingLocal
+        );
+        let conn = db.conn.lock().unwrap();
+        conn.execute("UPDATE orders SET status = 'confirmed'", [])
+            .unwrap();
+        assert_eq!(
+            recheck_confirmed_box_decision(&conn, "box-order", &body).unwrap(),
+            BoxDecisionConfirmation::AlreadyApplied
+        );
+        conn.execute("UPDATE orders SET status = 'cancelled'", [])
+            .unwrap();
+        assert!(recheck_confirmed_box_decision(&conn, "box-order", &body).is_err());
+        conn.execute("UPDATE orders SET status = 'confirmed', supabase_id = '22222222-2222-4222-8222-222222222222'", []).unwrap();
+        assert!(recheck_confirmed_box_decision(&conn, "box-order", &body).is_err());
+        assert_eq!(snapshot(&conn).1, 795);
+        assert_eq!(snapshot(&conn).3, 0);
+    }
+
+    fn connection(plugin: &str, status: &str, metadata: &str) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE orders (id TEXT PRIMARY KEY, status TEXT, plugin TEXT, ghost_metadata TEXT, drawer_amount INTEGER, sync_status TEXT); CREATE TABLE sync_queue (id TEXT);").unwrap();
+        conn.execute(
+            "INSERT INTO orders VALUES ('box-order', ?1, ?2, ?3, 795, 'synced')",
+            rusqlite::params![status, plugin, metadata],
+        )
+        .unwrap();
+        conn
+    }
+
+    fn snapshot(conn: &rusqlite::Connection) -> (String, i64, String, i64) {
+        conn.query_row("SELECT status, drawer_amount, sync_status, (SELECT COUNT(*) FROM sync_queue) FROM orders WHERE id = 'box-order'", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).unwrap()
+    }
+
+    #[test]
+    fn box_pending_generic_mutations_fail_before_any_persistence() {
+        for plugin in ["box", " BOX_GR ", "boxgr"] {
+            let conn = connection(plugin, "pending", "");
+            let before = snapshot(&conn);
+            for next in [
+                "confirmed",
+                "preparing",
+                "ready",
+                "delivered",
+                "completed",
+                "cancelled",
+            ] {
+                assert!(ensure_box_order_mutation_allowed(
+                    &conn,
+                    "box-order",
+                    next,
+                    BoxOrderMutation::Generic
+                )
+                .is_err());
+                assert_eq!(snapshot(&conn), before);
+            }
+            assert!(ensure_box_order_mutation_allowed(
+                &conn,
+                "box-order",
+                "ready",
+                BoxOrderMutation::NotifyReady
+            )
+            .is_err());
+            assert_eq!(snapshot(&conn), before);
+        }
+    }
+
+    #[test]
+    fn box_accept_requires_pending_and_positive_estimate() {
+        let conn = connection("box", "pending", "");
+        for estimate in [None, Some(0), Some(-1)] {
+            assert!(ensure_box_order_mutation_allowed(
+                &conn,
+                "box-order",
+                "confirmed",
+                BoxOrderMutation::Accept(estimate)
+            )
+            .is_err());
+        }
+        assert!(ensure_box_order_mutation_allowed(
+            &conn,
+            "box-order",
+            "confirmed",
+            BoxOrderMutation::Accept(Some(30))
+        )
+        .is_ok());
+        let conn = connection("box", "confirmed", "");
+        assert!(ensure_box_order_mutation_allowed(
+            &conn,
+            "box-order",
+            "confirmed",
+            BoxOrderMutation::Accept(Some(30))
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn box_decline_uses_exact_shared_json_reasons_only() {
+        let reasons: Vec<String> = serde_json::from_str(include_str!(
+            "../../../../shared/box-rejection-reasons.json"
+        ))
+        .unwrap();
+        let conn = connection("box", "pending", "");
+        for reason in &reasons {
+            assert!(ensure_box_order_mutation_allowed(
+                &conn,
+                "box-order",
+                "cancelled",
+                BoxOrderMutation::Reject(Some(reason))
+            )
+            .is_ok());
+            let padded = format!(" {reason}");
+            assert!(ensure_box_order_mutation_allowed(
+                &conn,
+                "box-order",
+                "cancelled",
+                BoxOrderMutation::Reject(Some(&padded))
+            )
+            .is_err());
+        }
+        for reason in [None, Some(""), Some("other"), Some("Declined")] {
+            assert!(ensure_box_order_mutation_allowed(
+                &conn,
+                "box-order",
+                "cancelled",
+                BoxOrderMutation::Reject(reason)
+            )
+            .is_err());
+        }
+        let conn = connection("box", "cancelled", "");
+        assert!(ensure_box_order_mutation_allowed(
+            &conn,
+            "box-order",
+            "cancelled",
+            BoxOrderMutation::Reject(Some(&reasons[0]))
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn box_accepted_local_fulfilment_remains_but_cancel_restore_notify_fail() {
+        for status in [
+            "confirmed",
+            "preparing",
+            "ready",
+            "delivered",
+            "completed",
+            "cancelled",
+        ] {
+            let conn = connection("box", status, "");
+            let before = snapshot(&conn);
+            for next in ["cancelled", "pending"] {
+                assert!(ensure_box_order_mutation_allowed(
+                    &conn,
+                    "box-order",
+                    next,
+                    BoxOrderMutation::Generic
+                )
+                .is_err());
+            }
+            assert!(ensure_box_order_mutation_allowed(
+                &conn,
+                "box-order",
+                "ready",
+                BoxOrderMutation::NotifyReady
+            )
+            .is_err());
+            assert_eq!(snapshot(&conn), before);
+        }
+        let conn = connection("box", "confirmed", "");
+        for next in ["preparing", "ready", "delivered", "completed"] {
+            assert!(ensure_box_order_mutation_allowed(
+                &conn,
+                "box-order",
+                next,
+                BoxOrderMutation::Generic
+            )
+            .is_ok());
+        }
+    }
+
+    #[test]
+    fn box_legacy_metadata_fallback_and_non_box_precedence_preserved() {
+        let metadata = r#"{"food_delivery":{"platform":"box"}}"#;
+        let conn = connection("", "pending", metadata);
+        assert!(ensure_box_order_mutation_allowed(
+            &conn,
+            "box-order",
+            "ready",
+            BoxOrderMutation::Generic
+        )
+        .is_err());
+        let conn = connection("efood", "pending", metadata);
+        assert!(ensure_box_order_mutation_allowed(
+            &conn,
+            "box-order",
+            "ready",
+            BoxOrderMutation::Generic
+        )
+        .is_ok());
+        assert!(ensure_box_order_mutation_allowed(
+            &conn,
+            "box-order",
+            "confirmed",
+            BoxOrderMutation::Accept(None)
+        )
+        .is_ok());
+        assert!(ensure_box_order_mutation_allowed(
+            &conn,
+            "box-order",
+            "cancelled",
+            BoxOrderMutation::Reject(Some("free text"))
+        )
+        .is_ok());
+        assert!(ensure_box_order_mutation_allowed(
+            &conn,
+            "box-order",
+            "ready",
+            BoxOrderMutation::NotifyReady
+        )
+        .is_ok());
+    }
+}
+
+#[cfg(test)]
 mod transition_tests {
     use super::*;
     use crate::db;
@@ -7975,6 +9460,360 @@ mod transition_tests {
             params![order_id, status],
         )
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn twint_new_checkout_refuses_held_card_unknown_sale_fiscal_and_orphan_approval() {
+        for prior in ["held", "sale", "fiscal", "orphan"] {
+            for method_key in ["method", "paymentMethod", "payment_method"] {
+                let db = test_db();
+                let reference = format!("twint-checkout-{prior}-{method_key}");
+                {
+                    let conn = db.conn.lock().unwrap();
+                    if prior == "held" {
+                        let card = serde_json::json!({"initialPayment":{"method":"card","amount":12,"currency":"CHF","transactionRef":"approved-card","terminalApproved":true,"paymentOrigin":"terminal"}});
+                        let (entry, _) =
+                            crate::unsaved_payments::UnsavedChargedPayment::for_new_order_checkout(
+                                &reference, &card, "now",
+                            )
+                            .unwrap();
+                        crate::unsaved_payments::record(&conn, &entry).unwrap();
+                    } else if prior == "orphan" {
+                        db::set_setting(&conn,"ecr_orphaned_receipts",&reference,&serde_json::json!({"id":"orphan-approval","status":"approved","deviceId":"device"}).to_string()).unwrap();
+                    } else {
+                        conn.execute("INSERT INTO ecr_devices(id,name,device_type,brand,protocol,connection_type,connection_details) VALUES ('device','Reader','payment_terminal','test','test','network','{}')",[]).unwrap();
+                        conn.execute("INSERT INTO ecr_transactions(id,device_id,order_id,transaction_type,amount,currency,status,started_at) VALUES ('prior','device',?1,?2,1200,'CHF','timeout','now')",params![reference, if prior=="sale" {"sale"} else {"fiscal_receipt"}]).unwrap();
+                    }
+                }
+                let mut tender = serde_json::json!({"amount":12,"currency":"CHF","idempotencyKey":"twint-original","metadata":{"provider":"twint","confirmation":"cashier","confirmation_action":"confirm","qr_mode":"static_qr_manual"}});
+                tender[method_key] = serde_json::json!(" TWINT ");
+                let result = create_order_with_initial_payment(
+                    &db,
+                    &crate::ecr::DeviceManager::new(),
+                    &crate::print::NoopPrintQueueInvalidator,
+                    serde_json::json!({"clientRequestId":reference,"initialPayment":tender}),
+                    &[],
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    result["errorCode"],
+                    "TWINT_PRIOR_CHECKOUT_RECONCILIATION_REQUIRED"
+                );
+                let conn = db.conn.lock().unwrap();
+                assert_eq!(
+                    conn.query_row("SELECT count(*) FROM orders", [], |row| row
+                        .get::<_, i64>(0))
+                        .unwrap(),
+                    0
+                );
+                assert_eq!(
+                    conn.query_row("SELECT count(*) FROM order_payments", [], |row| row
+                        .get::<_, i64>(0))
+                        .unwrap(),
+                    0
+                );
+                if prior == "held" {
+                    assert_eq!(
+                        crate::unsaved_payments::list(&conn, Some(&reference))
+                            .unwrap()
+                            .len(),
+                        1
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn twint_manual_receipt_failure_restart_recovery_saves_original_once_without_provider_approval(
+    ) {
+        let db = crate::tests::harness::TestDb::open();
+        {
+            let conn = db.state.conn.lock().unwrap();
+            for (key, value) in [
+                ("organization_id", "manual-org"),
+                ("branch_id", "manual-branch"),
+                ("terminal_id", "manual-terminal"),
+            ] {
+                db::set_setting(&conn, "terminal", key, value).unwrap();
+            }
+            db::set_setting(&conn, "organization", "currency", "CHF").unwrap();
+        }
+        let payload = serde_json::json!({"clientRequestId":"manual-checkout","organizationId":"manual-org","branchId":"manual-branch","terminalId":"manual-terminal","items":[{"name":"Coffee","quantity":1,"price":12}],"totalAmount":12,"subtotal":12,"status":"completed","orderType":"takeaway","initialPayment":{"method":"twint","amount":12,"currency":"CHF","idempotencyKey":"manual-receipt-key","staffId":"manual-cashier","staffShiftId":"manual-shift","metadata":{"provider":"twint","confirmation":"cashier","confirmation_action":"skip","qr_mode":"static_qr_manual"}}});
+        let mgr = crate::ecr::DeviceManager::new();
+        let first = create_order_with_initial_payment(
+            &db.state,
+            &mgr,
+            &crate::print::NoopPrintQueueInvalidator,
+            payload.clone(),
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(first["errorCode"], "PAYMENT_NOT_SAVED");
+        assert_eq!(first["manualReceiptConfirmed"], true);
+        assert!(first["paymentApproved"].is_null());
+        let db = db.restart();
+        {
+            let conn = db.state.conn.lock().unwrap();
+            let held = crate::unsaved_payments::list(&conn, None).unwrap();
+            assert_eq!(held.len(), 1);
+            assert!(held[0].is_manual_twint());
+            assert_eq!(held[0].amount_cents, 1200);
+            assert_eq!(
+                held[0].request["initialPayment"]["metadata"]["confirmation_action"],
+                "skip"
+            );
+            assert!(held[0].transaction_ref.is_none());
+        }
+        let mut changed = payload.clone();
+        changed["totalAmount"] = serde_json::json!(15);
+        let conflict = create_order_with_initial_payment(
+            &db.state,
+            &mgr,
+            &crate::print::NoopPrintQueueInvalidator,
+            changed,
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(conflict["errorCode"], "PAYMENT_NOT_SAVED");
+        {
+            let conn = db.state.conn.lock().unwrap();
+            assert_eq!(
+                conn.query_row("SELECT count(*) FROM orders", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            conn.execute("INSERT INTO staff_shifts(id,staff_id,staff_name,branch_id,terminal_id,role_type,check_in_time,opening_cash_amount,status,sync_status,created_at,updated_at) VALUES ('manual-shift','manual-cashier','Cashier','manual-branch','manual-terminal','cashier','now',0,'active','pending','now','now')",[]).unwrap();
+        }
+        // Recovery loads the durable original, rather than asking the QR UI
+        // for another scan or cashier receipt confirmation.
+        let saved = crate::unsaved_payments::save_unsaved_payments(
+            &db.state,
+            None,
+            Some("manual-receipt-key"),
+            &[],
+            &crate::print::NoopPrintQueueInvalidator,
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved["success"], true);
+        assert_eq!(saved["saved"], 1);
+        let again = create_order_with_initial_payment(
+            &db.state,
+            &mgr,
+            &crate::print::NoopPrintQueueInvalidator,
+            payload,
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(again["success"], true);
+        let conn = db.state.conn.lock().unwrap();
+        assert!(crate::unsaved_payments::list(&conn, None)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM orders", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        let row:(String,String,Option<String>,String)=conn.query_row("SELECT method,currency,transaction_ref,metadata FROM order_payments WHERE idempotency_key='manual-receipt-key'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
+        assert_eq!((&row.0, &row.1), (&"twint".into(), &"CHF".into()));
+        assert!(row.2.is_none());
+        assert_eq!(
+            serde_json::from_str::<Value>(&row.3).unwrap()["confirmation_action"],
+            "skip"
+        );
+    }
+
+    #[test]
+    fn food_item_readiness_cache_fill_is_durable_scoped_and_preserves_order_edits() {
+        let db = test_db();
+        insert_order(&db, "food-cache", "confirmed");
+        let conn = db.conn.lock().unwrap();
+        let remote_id = uuid::Uuid::new_v4().to_string();
+        for (key, value) in [
+            ("organization_id", "food-org"),
+            ("branch_id", "food-branch"),
+            ("terminal_id", "food-terminal"),
+        ] {
+            db::set_setting(&conn, "terminal", key, value).unwrap();
+        }
+        conn.execute("UPDATE orders SET plugin = 'efood', supabase_id = ?1,
+            branch_id = 'food-branch', estimated_time = 30, updated_at = '2026-10-02T16:08:26Z', notes = ?2
+            WHERE id = 'food-cache'", params![remote_id, "Πολλά σχόλια 🙂\nδεύτερη γραμμή"]).unwrap();
+        let fetched = serde_json::json!([
+            {"name":"Waffle","quantity":1,"unit_price":8,"total_price":8,
+             "notes":"χωρίς ζάχαρη", "customizations":[{"name":"σοκολάτα","quantity":1}]},
+            {"name":"Drink","quantity":1,"unit_price":2,"total_price":2}
+        ]);
+        assert!(
+            persist_fetched_food_order_items(&conn, "food-cache", "wrong-remote", &fetched)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            persist_fetched_food_order_items(&conn, "food-cache", &remote_id, &fetched).unwrap(),
+            Some(fetched.clone())
+        );
+        let stored: (String, String, String, i64, String, f64) = conn
+            .query_row(
+                "SELECT items, status, sync_status, estimated_time, updated_at, total_amount
+             FROM orders WHERE id = 'food-cache'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&stored.0).unwrap(), fetched);
+        assert_eq!(
+            (
+                stored.1.as_str(),
+                stored.2.as_str(),
+                stored.3,
+                stored.4.as_str(),
+                stored.5
+            ),
+            ("confirmed", "pending", 30, "2026-10-02T16:08:26Z", 10.0)
+        );
+        // A transient empty fetch and a competing nonempty fetch cannot replace
+        // the complete local list (which may contain legitimate local edits).
+        assert_eq!(
+            persist_fetched_food_order_items(
+                &conn,
+                "food-cache",
+                &remote_id,
+                &serde_json::json!([])
+            )
+            .unwrap(),
+            Some(fetched.clone())
+        );
+        let competing = serde_json::json!([{"name":"Other","quantity":1}]);
+        assert_eq!(
+            persist_fetched_food_order_items(&conn, "food-cache", &remote_id, &competing).unwrap(),
+            Some(fetched.clone())
+        );
+        for incoming in ["[]", "null", "\"[]\"", "[null]"] {
+            assert!(preserve_food_items_on_incomplete_snapshot(
+                &conn,
+                "food-cache",
+                Some(incoming.into())
+            )
+            .unwrap()
+            .is_none());
+        }
+        conn.execute(
+            "UPDATE orders SET plugin = 'pos' WHERE id = 'food-cache'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            preserve_food_items_on_incomplete_snapshot(&conn, "food-cache", Some("[]".into()))
+                .unwrap(),
+            Some("[]".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn food_item_readiness_authorized_fetch_persists_before_return_and_empty_fetch_keeps_cache(
+    ) {
+        let db = test_db();
+        insert_order(&db, "food-fetch", "confirmed");
+        let remote_id = uuid::Uuid::new_v4().to_string();
+        {
+            let conn = db.conn.lock().unwrap();
+            for (key, value) in [
+                ("organization_id", "food-org"),
+                ("branch_id", "food-branch"),
+                ("terminal_id", "food-terminal"),
+            ] {
+                db::set_setting(&conn, "terminal", key, value).unwrap();
+            }
+            conn.execute(
+                "UPDATE orders SET plugin = 'efood', supabase_id = ?1, branch_id = 'food-branch'
+                WHERE id = 'food-fetch'",
+                [&remote_id],
+            )
+            .unwrap();
+            // Explicit detail hydration remains available after automatic recovery
+            // has exhausted its persisted attempt cap.
+            for _ in 0..6 {
+                conn.execute("INSERT INTO recovery_action_log (id, action_id, issue_code, entity_id, payload_json)
+                    VALUES (?1, 'hydrate_food_print_items', 'food_order_items_pending', 'food-fetch', ?2)",
+                    params![uuid::Uuid::new_v4().to_string(), serde_json::json!({"remoteOrderId":remote_id,"version":1}).to_string()]).unwrap();
+            }
+        }
+        let rows = serde_json::json!([
+            {"id":"waffle-row", "menu_item_name":"Waffle", "quantity":1, "unit_price":8,
+             "total_price":8, "notes":"χωρίς ζάχαρη 🙂", "customizations":[{"name":"σοκολάτα"}]},
+            {"id":"drink-row", "menu_item_name":"Drink", "quantity":1, "unit_price":2, "total_price":2}
+        ]);
+        let empty = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let fetch = |path: String, params: Vec<(&'static str, String)>| {
+            let remote_id = remote_id.clone();
+            let rows = rows.clone();
+            let empty = empty.clone();
+            async move {
+                match path.as_str() {
+                    "orders" => {
+                        assert!(params.contains(&("id", format!("eq.{remote_id}"))));
+                        assert!(params.contains(&("organization_id", "eq.food-org".into())));
+                        assert!(params.contains(&("branch_id", "eq.food-branch".into())));
+                        Ok(
+                            serde_json::json!([{"id":remote_id, "organization_id":"food-org",
+                            "branch_id":"food-branch", "terminal_id":"food-terminal"}]),
+                        )
+                    }
+                    "order_items" => {
+                        assert!(
+                            params.contains(&("order_id", format!("eq.{remote_id}"))),
+                            "must resolve the local ID to its remote ID"
+                        );
+                        Ok(if empty.load(std::sync::atomic::Ordering::SeqCst) {
+                            serde_json::json!([])
+                        } else {
+                            rows
+                        })
+                    }
+                    _ => panic!("unexpected network request: {path}"),
+                }
+            }
+        };
+        let returned = fetch_order_items_for_local_cache_with(&db, "food-fetch", false, &fetch)
+            .await
+            .unwrap();
+        assert_eq!(returned.as_array().unwrap().len(), 2);
+        assert_eq!(returned[0]["notes"], "χωρίς ζάχαρη 🙂");
+        assert_eq!(returned[0]["customizations"], rows[0]["customizations"]);
+        let stored: String = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT items FROM orders WHERE id = 'food-fetch'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&stored).unwrap(), returned);
+        empty.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            fetch_order_items_for_local_cache_with(&db, "food-fetch", false, &fetch)
+                .await
+                .unwrap(),
+            returned
+        );
     }
 
     #[test]

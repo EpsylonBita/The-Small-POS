@@ -141,5 +141,23 @@
     "acknowledge": "J'ai lu ceci",
     "persistPending": "Impossible d'enregistrer cette notification pour le moment. Réessayez avant de confirmer.",
     "retry": "Réessayer"
+  },
+  "boxOrder": {
+    "decisionUnconfirmed": "BOX n’a pas confirmé cette décision. Vérifiez la commande et la connexion, puis réessayez si elle est toujours en attente.",
+    "testOrder": "TEST · SANDBOX",
+    "reasonLabel": "Motif envoyé à BOX",
+    "reasonPrompt": "BOX n'accepte que ces motifs. Choisissez celui à envoyer.",
+    "reasonRequired": "Choisissez un motif pour refuser cette commande BOX.",
+    "reasonSentAs": "Envoyé à BOX comme : {{value}}",
+    "decisionFinal": "Les décisions BOX sont définitives. Cette commande ne peut pas être rouverte ici.",
+    "reasons": {
+      "highOrderVolume": "Volume de commandes élevé",
+      "noCourierAvailable": "Aucun livreur disponible",
+      "productUnavailable": "Produit indisponible",
+      "outsideServiceArea": "Hors zone de livraison",
+      "wrongProductPrice": "Prix du produit erroné",
+      "closingSoon": "Fermeture prochaine",
+      "badWeather": "En raison du mauvais temps"
+    }
   }
 }

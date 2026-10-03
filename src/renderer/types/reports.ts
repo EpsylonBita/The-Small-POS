@@ -107,6 +107,8 @@ export interface PaymentMethodBreakdown {
     count: number;
     total: number;
   };
+  twint?: { count: number; total: number };
+  other?: { count: number; total: number };
 }
 
 export interface OrderTypeBreakdown {
@@ -213,6 +215,9 @@ export interface ZReportData {
     totalSales: number;
     cashSales: number;
     cardSales: number;
+    twintSales?: number;
+    twintPaymentCount?: number;
+    retainedTwintSales?: number;
     /** THE-437: platform-held money — prepaid online platform orders. */
     platformOnlineSales?: number;
     /** THE-437: COD collected by the platform's own rider (banks it to us). */
@@ -320,7 +325,7 @@ export interface ZReportData {
     checkIn?: string;
     checkOut?: string;
     shiftStatus?: string;
-    orders: { count: number; cashAmount: number; cardAmount: number; totalAmount: number };
+    orders: { count: number; cashAmount: number; cardAmount: number; twintAmount?: number; totalAmount: number };
     ordersDetails?: Array<{
       id: string;
       orderNumber: string;
@@ -408,6 +413,7 @@ export interface ZReportData {
   daySummary?: {
     cashTotal: number;
     cardTotal: number;
+    twintTotal?: number;
     platformOnlineTotal?: number;
     platformCodTotal?: number;
     total: number;
@@ -447,8 +453,10 @@ export interface ZReportData {
   fiscalQueue?: ZReportFiscalQueue | { status: 'unavailable' };
   /** Completed-payment buckets (count + total) behind `daySummary`. */
   paymentsBreakdown?: Partial<
-    Record<'cash' | 'card' | 'other' | 'platform_online' | 'platform_cod', { count: number; total: number }>
+    Record<'cash' | 'card' | 'twint' | 'other' | 'platform_online' | 'platform_cod', { count: number; total: number }>
   >;
+  /** Frozen presentation evidence; never payment admission. */
+  presentation?: { deliveryModuleEnabled?: boolean; twintPluginEnabled?: boolean };
   period?: {
     start?: string;
     end?: string;

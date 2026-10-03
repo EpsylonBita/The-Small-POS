@@ -141,5 +141,23 @@
     "acknowledge": "E lexova",
     "persistPending": "Ky njoftim s'u ruajt dot ende. Provo përsëri para se ta konfirmosh.",
     "retry": "Provo përsëri"
+  },
+  "boxOrder": {
+    "decisionUnconfirmed": "BOX nuk e ka konfirmuar këtë vendim. Kontrolloni porosinë dhe lidhjen, pastaj provoni përsëri nëse është ende në pritje.",
+    "testOrder": "TEST · SANDBOX",
+    "reasonLabel": "Arsyeja që dërgohet te BOX",
+    "reasonPrompt": "BOX pranon vetëm këto arsye. Zgjidh atë që do të dërgohet.",
+    "reasonRequired": "Zgjidh një arsye për të refuzuar këtë porosi BOX.",
+    "reasonSentAs": "Dërgohet te BOX si: {{value}}",
+    "decisionFinal": "Vendimet e BOX janë përfundimtare. Kjo porosi nuk mund të rihapet këtu.",
+    "reasons": {
+      "highOrderVolume": "Ngarkesë e lartë porosish",
+      "noCourierAvailable": "Nuk ka korrier të disponueshëm",
+      "productUnavailable": "Produkt i padisponueshëm",
+      "outsideServiceArea": "Jashtë zonës së shërbimit",
+      "wrongProductPrice": "Çmim i gabuar produkti",
+      "closingSoon": "Po mbyllemi së shpejti",
+      "badWeather": "Për shkak të motit të keq"
+    }
   }
 }

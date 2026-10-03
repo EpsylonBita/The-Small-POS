@@ -97,7 +97,7 @@ test('missing-payment repair reports one truthful payment outcome and treats ref
   assert.match(handler, /cashReceived:\s*selection\.cashReceived/);
   assert.match(handler, /changeGiven:\s*selection\.change/);
   assert.match(handler, /transactionRef:\s*selection\.transactionId/);
-  assert.match(handler, /idempotencyKey:\s*selection\.transactionId/);
+  assert.match(handler, /idempotencyKey:\s*selection\.idempotencyKey \?\? selection\.transactionId/);
   assert.doesNotMatch(handler, /idempotencyKey:\s*target\.orderId/);
   // A reconciliation-only selection is a read probe. Only an ordinary collection takes the write
   // owner (the one provided or a claim made before any await), so a probe can never send a payment.

@@ -18,6 +18,7 @@ import { sortOrdersOldestFirst } from '../utils/order-sorting';
 import { debugLog } from '../utils/debugLog';
 import { getVisibleOrderNumber } from '../utils/orderNumberUtils';
 import { orderNeedsApproval } from '../../../../shared/order-approval';
+import { boxOrderStatusMutationAllowed, isBoxOrder, isBoxRejectionReason } from '../components/order/box-order-decision';
 import {
   giftCardCheckoutService,
   giftCardOrderKey,
@@ -51,7 +52,7 @@ export interface OrdinaryCollectionScope {
 
 /** Fixed when the first send starts and never replaced. */
 export interface OrdinaryCollectionOriginal {
-  method: 'cash' | 'card';
+  method: 'cash' | 'card' | 'twint';
   amount: number;
   /** Caller reference; for outstanding collection it is also the idempotency key. */
   transactionRef: string | null;
@@ -525,6 +526,24 @@ export function ledgerHasOriginalOrdinaryPayment(
   if (!record?.original || !Array.isArray(completedPayments)) return false;
   if (record.writes.length > 0) return ledgerHasEveryUncertainWrite(record.writes, completedPayments);
   const paymentId = record.facts?.paymentId ?? null;
+  if (record.original.method === 'twint') {
+    const key = record.original.idempotencyKey;
+    if (!key) return false;
+    return completedPayments.some((row) => {
+      if (!row || typeof row !== 'object') return false;
+      const payment = row as Record<string, any>;
+      return payment.status === 'completed' && payment.method === 'twint'
+        && payment.orderId === owner.orderId
+        && payment.currency === 'CHF' && payment.paymentOrigin === 'manual'
+        && (payment.idempotencyKey ?? payment.idempotency_key) === key
+        && Math.round(Number(payment.amount) * 100) === Math.round(record.original!.amount * 100)
+        && !payment.transactionRef && !payment.terminalDeviceId
+        && payment.metadata?.provider === 'twint' && payment.metadata?.confirmation === 'cashier'
+        && payment.metadata?.qr_mode === 'static_qr_manual'
+        && ['confirm','skip'].includes(payment.metadata?.confirmation_action)
+        && Object.keys(payment.metadata ?? {}).length === 4;
+    });
+  }
   const refs = [record.original.transactionRef, record.original.terminalTransactionId].filter(
     (ref): ref is string => Boolean(ref),
   );
@@ -1512,6 +1531,18 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
           throw ErrorFactory.validation('Order ID is required');
         }
 
+        const targetOrder = [...get().orders, ...get().pendingExternalOrders].find(order => order.id === orderId);
+        if (isBoxOrder(targetOrder) && targetOrder?.status === 'pending' && status === 'cancelled'
+          && isBoxRejectionReason(options?.cancellationReason)) {
+          const success = await get().declineOrder(orderId, options.cancellationReason);
+          get()._setLoading(operation, false);
+          return { success };
+        }
+        if (!boxOrderStatusMutationAllowed(targetOrder, status)) {
+          get()._setLoading(operation, false);
+          return { success: false };
+        }
+
         const orderService = OrderService.getInstance();
 
         // Wrap with timeout
@@ -1937,10 +1968,10 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
          return { success: false, error: 'GIFT_CARD_GENERIC_PAYMENT_REFUSED' };
        }
        try {
-         const normalizedMethod = paymentData.method === 'cash' || paymentData.method === 'card'
+         const normalizedMethod = paymentData.method === 'cash' || paymentData.method === 'card' || paymentData.method === 'twint'
            ? paymentData.method
            : 'other';
-         const transactionId = paymentData.transactionId || paymentData.transactionRef || `txn_${Date.now()}`;
+         const transactionId = paymentData.method === 'twint' ? undefined : paymentData.transactionId || paymentData.transactionRef || `txn_${Date.now()}`;
          const response = await invokeBridgeIpc('payment:record', {
            orderId,
            method: normalizedMethod,
@@ -1949,6 +1980,8 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
            cashReceived: paymentData.cashReceived,
            changeGiven: paymentData.changeGiven,
            transactionRef: transactionId,
+           idempotencyKey: paymentData.idempotencyKey,
+           metadata: paymentData.metadata,
            discountAmount: paymentData.discountAmount,
            terminalApproved: paymentData.terminalApproved,
            terminalDeviceId: paymentData.terminalDeviceId,
@@ -2058,6 +2091,8 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
       const operation = `approveOrder_${orderId}`;
       get()._setLoading(operation, true);
       try {
+        const targetOrder = [...get().orders, ...get().pendingExternalOrders].find(order => order.id === orderId);
+        if (!boxOrderStatusMutationAllowed(targetOrder, 'confirmed', { kind: 'accept', estimatedTime })) return false;
         const result = await bridge.orders.approve(orderId, estimatedTime);
         if (result?.success) {
       set((state) => {
@@ -2088,6 +2123,8 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
       const operation = `declineOrder_${orderId}`;
       get()._setLoading(operation, true);
       try {
+        const targetOrder = [...get().orders, ...get().pendingExternalOrders].find(order => order.id === orderId);
+        if (!boxOrderStatusMutationAllowed(targetOrder, 'cancelled', { kind: 'reject', reason })) return false;
         const result = await bridge.orders.decline(orderId, reason);
         if (result?.success) {
       set((state) => {
@@ -2125,6 +2162,8 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
       const operation = `assignDriver_${orderId}`;
       get()._setLoading(operation, true);
       try {
+        const targetOrder = [...get().orders, ...get().pendingExternalOrders].find(order => order.id === orderId);
+        if (!boxOrderStatusMutationAllowed(targetOrder, 'delivered')) return false;
         const result = await bridge.orders.assignDriver(orderId, driverId, notes) as unknown as IpcResult;
         const driverName = String(result?.driverName || result?.data?.driverName || '').trim();
         if (result?.success) {
@@ -2243,6 +2282,8 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
       const operation = `updateProgress_${orderId}`;
       get()._setLoading(operation, true);
       try {
+        const targetOrder = [...get().orders, ...get().pendingExternalOrders].find(order => order.id === orderId);
+        if (!boxOrderStatusMutationAllowed(targetOrder, 'preparing')) return false;
         const result = await bridge.orders.updatePreparation(orderId, stage, progress);
         if (result?.success) {
       set((state) => {

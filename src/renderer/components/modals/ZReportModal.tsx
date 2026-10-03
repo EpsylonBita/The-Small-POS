@@ -1,3 +1,4 @@
+import twintLogo from '../../../../../shared/payments/assets/twint-logo.png';
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { translateRoleName } from '../../utils/role-labels';
@@ -27,6 +28,8 @@ import {
   resolveShiftWindow,
   resolveZReportGiftClose,
   resolveZReportPeriod,
+  resolveZReportPresentation,
+  resolveZReportTwintTotal,
 } from '../../utils/zReport';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
@@ -127,6 +130,7 @@ function localizeZReportPaymentLabel(
   value: unknown,
   t: ReturnType<typeof useTranslation>['t'],
 ): string {
+  if (normalizeZReportSlug(value) === 'twint') return 'TWINT';
   const key = ({
     cash: 'cash',
     card: 'card',
@@ -243,7 +247,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   }, [branchId, isOpen, selectedDate]);
 
   const [orderTypeFilter, setOrderTypeFilter] = useState<'all' | 'delivery' | 'dine-in' | 'pickup'>('all');
-  const [paymentMethodFilter, setPaymentMethodFilter] = useState<'all' | 'cash' | 'card' | 'platform'>('all');
+  const [paymentMethodFilter, setPaymentMethodFilter] = useState<'all' | 'cash' | 'card' | 'twint' | 'platform'>('all');
 
   const filterOrders = (orders: any[] | null | undefined): any[] => {
     if (!orders || !Array.isArray(orders)) return [];
@@ -260,6 +264,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     });
   };
 
+  const reportSections = resolveZReportPresentation(zReport);
   const staffReportsSorted = useMemo(() => {
     const list = Array.isArray(zReport?.staffReports) ? [...zReport.staffReports] : [];
     if (!list.length) return list;
@@ -896,7 +901,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
 
   const orderTypeFilterOptions = [
     { value: 'all' as const, label: t('modals.zReport.filters.allTypes') },
-    { value: 'delivery' as const, label: t('modals.zReport.filters.delivery') },
+    ...(reportSections.delivery ? [{ value: 'delivery' as const, label: t('modals.zReport.filters.delivery') }] : []),
     { value: 'dine-in' as const, label: t('modals.zReport.filters.dineIn') },
     { value: 'pickup' as const, label: t('modals.zReport.filters.pickup') },
   ];
@@ -905,6 +910,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     { value: 'all' as const, label: t('modals.zReport.filters.allPayments') },
     { value: 'cash' as const, label: t('modals.zReport.filters.cash') },
     { value: 'card' as const, label: t('modals.zReport.filters.card') },
+    ...(reportSections.twint ? [{ value: 'twint' as const, label: 'TWINT' }] : []),
     { value: 'platform' as const, label: t('modals.zReport.filters.platform') },
   ];
 
@@ -1328,9 +1334,11 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     return t('modals.zReport.clarity.statusAttention', { defaultValue: 'Needs attention' });
   };
 
+  const visibleStaffReports = staffReportsSorted.filter(staff => staff.role !== 'driver' || reportSections.drivers);
   const totalOrders = summarySales.totalOrders ?? 0;
   const cashCollected = summarySales.cashSales ?? 0;
   const cardCollected = summarySales.cardSales ?? 0;
+  const twintCollected = resolveZReportTwintTotal(zReport);
   // THE-437: money the delivery platform is holding for us (prepaid online
   // orders, and COD its own riders collected). Revenue, but never drawer cash.
   const platformOnlineCollected = summarySales.platformOnlineSales ?? 0;
@@ -1349,7 +1357,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   // refunded, so the headline and its split read the money actually collected.
   const otherTenderCollected = zReport?.paymentsBreakdown?.other?.total ?? 0;
   const collectedTotal = zReport?.daySummary?.total
-    ?? (cashCollected + cardCollected + platformCollected + otherTenderCollected);
+    ?? (cashCollected + cardCollected + twintCollected + platformCollected + otherTenderCollected);
   const expensesTotal = summaryExpenses.total ?? 0;
   const drawerOpening = summaryCashDrawer.openingTotal ?? 0;
   const drawerDrops = summaryCashDrawer.totalCashDrops ?? 0;
@@ -1372,7 +1380,8 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   const revenueSplitTiles = [
     { key: 'cash', label: t('modals.zReport.cashInTill'), value: formatMoney(cashCollected) },
     { key: 'card', label: t('modals.zReport.cardTotalLabel'), value: formatMoney(cardCollected) },
-    { key: 'platforms', label: t('modals.zReport.platformsTotal'), value: formatMoney(platformCollected) },
+    ...(reportSections.twint ? [{ key: 'twint', label: 'TWINT', value: formatMoney(twintCollected) }] : []),
+    ...(platformCollected !== 0 ? [{ key: 'platforms', label: t('modals.zReport.platformsTotal'), value: formatMoney(platformCollected) }] : []),
     ...(otherCollected >= 0.005
       ? [{ key: 'other', label: t('modals.zReport.otherTender'), value: formatMoney(otherCollected) }]
       : []),
@@ -1423,13 +1432,14 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
       label: t('modals.zReport.cashFlow', { defaultValue: 'Cash Flow' }),
       value: formatMoney(netAfterExpenses),
       tone: strongTextClass,
-      helper: t('modals.zReport.totalExpenses', { defaultValue: 'Total Expenses' }) + `: ${formatMoney(expensesTotal + staffPaymentsTotal)}`,
+      helper: reportSections.expenses ? t('modals.zReport.totalExpenses', { defaultValue: 'Total Expenses' }) + `: ${formatMoney(expensesTotal + staffPaymentsTotal)}` : '',
     },
   ];
   const moneyFlowRows = [
     { key: 'start', label: t('modals.zReport.opening'), value: formatMoney(drawerOpening), tone: strongTextClass },
     { key: 'cash', label: t('modals.zReport.cashSales'), value: `+${formatMoney(cashCollected)}`, tone: 'text-emerald-600 dark:text-emerald-300' },
     { key: 'card', label: t('modals.zReport.cardSales'), value: formatMoney(cardCollected), tone: strongTextClass },
+    ...(reportSections.twint ? [{ key: 'twint', label: 'TWINT', value: formatMoney(twintCollected), tone: strongTextClass }] : []),
     ...(platformOnlineCollected > 0
       ? [{ key: 'platformOnline', label: t('modals.zReport.platformOnlineSales'), value: formatMoney(platformOnlineCollected), tone: strongTextClass }]
       : []),
@@ -1439,7 +1449,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     ...(otherCollected >= 0.005
       ? [{ key: 'other', label: t('modals.zReport.otherTender'), value: formatMoney(otherCollected), tone: strongTextClass }]
       : []),
-    { key: 'out', label: t('modals.zReport.totalExpenses'), value: totalCashOut > 0 ? `-${formatMoney(totalCashOut)}` : formatMoney(0), tone: 'text-rose-600 dark:text-rose-300' },
+    ...(reportSections.expenses || totalCashOut !== 0 ? [{ key: 'out', label: t('modals.zReport.totalExpenses'), value: totalCashOut > 0 ? `-${formatMoney(totalCashOut)}` : formatMoney(0), tone: 'text-rose-600 dark:text-rose-300' },] : []),
     ...(totalCashInAdjustments > 0
       ? [{ key: 'returned', label: t('modals.zReport.driverCashReturned'), value: `+${formatMoney(totalCashInAdjustments)}`, tone: 'text-emerald-600 dark:text-emerald-300' }]
       : []),
@@ -1760,8 +1770,10 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                         <div><div className={softTextClass}>{t('modals.zReport.opening')}</div><div>{formatMoney(drawerOpening)}</div></div>
                         <div className={`hidden md:block ${softTextClass}`}>+</div>
                         <div><div className={softTextClass}>{t('modals.zReport.cashSales')}</div><div>{formatMoney(cashCollected)}</div></div>
-                        <div className={`hidden md:block ${softTextClass}`}>-</div>
-                        <div><div className={softTextClass}>{t('modals.zReport.totalExpenses')}</div><div>{formatMoney(expensesTotal + staffPaymentsTotal)}</div></div>
+                        {reportSections.expenses && <>
+                          <div className={`hidden md:block ${softTextClass}`}>-</div>
+                          <div><div className={softTextClass}>{t('modals.zReport.totalExpenses')}</div><div>{formatMoney(expensesTotal + staffPaymentsTotal)}</div></div>
+                        </>}
                         {giftCloseDrawer && (
                           <>
                             <div className={`hidden md:block ${softTextClass}`}>+</div>
@@ -1893,6 +1905,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                         </div>
                       </div>
 
+                      {reportSections.expenses && (
                       <div className={`rounded-2xl border p-4 ${dashboardInsetClass}`}>
                         <h3 className={`text-lg font-black ${strongTextClass}`}>{t('modals.zReport.expenseLedger')}</h3>
                         <div className="mt-4 space-y-2">
@@ -1909,6 +1922,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                           )}
                         </div>
                       </div>
+                      )}
                     </section>
                   )}
 
@@ -1916,12 +1930,12 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                     <section className={`rounded-xl border p-4 ${dashboardInsetClass}`}>
                       <h3 className={`text-lg font-black ${strongTextClass}`}>{t('modals.zReport.staffPerformance')}</h3>
                       <div className="mt-4">
-                        {staffReportsSorted.length > 0 ? (
+                        {visibleStaffReports.length > 0 ? (
                           /* Round 321: only go two-column when there is more than one staff report -- a lone
                              staff card then uses the full content width instead of rendering as a half-width
                              column with an empty second track and a hard vertical split. */
-                          <div className={`grid gap-3 ${staffReportsSorted.length > 1 ? 'xl:grid-cols-2' : 'grid-cols-1'}`}>
-                            {staffReportsSorted.map((staff) => {
+                          <div className={`grid gap-3 ${visibleStaffReports.length > 1 ? 'xl:grid-cols-2' : 'grid-cols-1'}`}>
+                            {visibleStaffReports.map((staff) => {
                               const shiftWindow = resolveShiftWindow(staff);
                               const statusLabel = formatShiftStatus(staff);
                               const statusValue = String(staff.shiftStatus || (staff.checkOut ? 'closed' : 'active'));
@@ -1933,6 +1947,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                                 { key: 'sales', label: t('modals.zReport.sales'), value: formatMoney(resolveShiftEarnedTotal(staff)), tone: 'text-emerald-600 dark:text-emerald-300' },
                                 { key: 'cash', label: t('modals.zReport.cash'), value: formatMoney(staff.orders?.cashAmount), tone: 'text-amber-600 dark:text-amber-300' },
                                 { key: 'card', label: t('modals.zReport.card'), value: formatMoney(staff.orders?.cardAmount), tone: 'text-amber-600 dark:text-amber-300' },
+                                ...(staff.orders?.twintAmount ? [{ key: 'twint', label: 'TWINT', value: formatMoney(staff.orders.twintAmount), tone: strongTextClass }] : []),
                                 { key: 'return', label: t('modals.zReport.cashToReturn'), value: formatMoney(resolveStaffReturnAmount(staff)), tone: mutedTextClass },
                               ];
                               return (
@@ -2068,7 +2083,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                                 <div data-z-report-revenue-split className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
                                   {revenueSplitTiles.map((tile) => (
                                     <div key={tile.key} className={`min-w-0 rounded-xl border p-2 ${dashboardTileClass}`}>
-                                      <div className={`truncate text-[11px] font-bold ${softTextClass}`}>{tile.label}</div>
+                                      <div className={`truncate text-[11px] font-bold ${softTextClass}`}>{tile.key === 'twint' ? <img src={twintLogo} alt="TWINT" className="h-5 mx-auto rounded" /> : tile.label}</div>
                                       <div className={`mt-0.5 truncate text-base font-black ${strongTextClass}`}>{tile.value}</div>
                                     </div>
                                   ))}

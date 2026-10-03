@@ -1,4 +1,19 @@
 {
+  "twintPayment": {
+    "receiptNotSaved": "Confirmed, not saved",
+    "receiptConfirmedAt": "Cashier confirmed at",
+    "receiptReconcile": "Keep the original manual TWINT receipt for a manager to reconcile. Do not collect again.",
+    "exactAmount": "Scan the shop QR and enter this exact amount in TWINT.",
+    "manualConfirmation": "Check that the payment was received before confirming. There is no automatic payment notification.",
+    "customerDisplay": "The QR is shown on the customer display.",
+    "qrAlt": "Official shop TWINT QR",
+    "saveFailed": "The payment could not be saved. Check its status before trying again.",
+    "confirm": "Confirm payment received",
+    "skip": "Skip — confirm receipt",
+    "receiptRecovery": "A TWINT receipt is confirmed but its payment is not saved. Save the original receipt before taking another payment.",
+    "receiptSaved": "The original TWINT receipt was saved.",
+    "saveOriginal": "Save original TWINT receipt"
+  },
   "displayPurchase": {
     "beforePurchase": "Before you buy",
     "operation": "How it works",
@@ -4826,7 +4841,7 @@
         "payments_not_saved": "Card charged, payment not saved",
         "cancelled_order_claims_payment": "Cancelled order still claims a payment"
       },
-      "revenueSplitHint": "Cash + Card + Platforms = Actual earned",
+      "revenueSplitHint": "Total of received payments",
       "liveShiftBreakdown": "Live Shift Breakdown",
       "liveCurrentWindow": "Live current window",
       "historicalPreview": "Historical preview",
@@ -6428,7 +6443,20 @@
     }
   },
   "suppliers": {
+    "paymentMethod": {
+      "unknown": "Unknown method"
+    },
+    "payment": {
+      "reversal": "Payment undone"
+    },
     "capture": {
+      "automation": {
+        "recordedMark": "Saved on its own",
+        "recordedStockMark": "Saved on its own · stock updated",
+        "billMark": "Bill",
+        "openAndCorrect": "Open and correct",
+        "noSaveNeeded": "No saving needed — this invoice is already filed."
+      },
       "settings": {
         "title": "Scan settings",
         "subtitle": "Where this till gets scanned invoices from.",
@@ -8349,6 +8377,25 @@
     }
   },
   "integrations": {
+    "paymentSetup": {
+      "state": {
+        "manual_ready": "Manual confirmation",
+        "not_configured": "Setup required",
+        "pending_verification": "Awaiting verification",
+        "partner_setup_required": "Partner setup required",
+        "unavailable": "Status unavailable"
+      },
+      "detail": {
+        "manual_ready": "The shop QR is ready. The cashier must confirm every TWINT payment received.",
+        "not_configured": "Set up this payment connection in the Admin Dashboard. Payments are not available yet.",
+        "pending_verification": "The configuration is saved. Payments will be available after the connection is verified.",
+        "partner_setup_required": "Provider onboarding is required before this connection can receive payments. Continue in the Admin Dashboard.",
+        "unavailable": "Payment readiness could not be confirmed. Open the Admin Dashboard to check the setup."
+      },
+      "openAdminFailed": "Could not open payment settings in the Admin Dashboard.",
+      "twintDescription": "TWINT payments",
+      "worldline_terminalsDescription": "Worldline payment terminals"
+    },
     "title": "Plugins",
     "subtitle": "Connect third-party plugins",
     "loading": "Loading plugins...",

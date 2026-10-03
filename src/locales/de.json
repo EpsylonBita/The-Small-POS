@@ -1,4 +1,19 @@
 {
+  "twintPayment": {
+    "receiptNotSaved": "Bestätigt, nicht gespeichert",
+    "receiptConfirmedAt": "Vom Kassierer bestätigt um",
+    "receiptReconcile": "Bewahren Sie den ursprünglichen manuellen TWINT-Zahlungsbeleg zur Prüfung durch eine verantwortliche Person auf. Nehmen Sie keine weitere Zahlung an.",
+    "exactAmount": "Scannen Sie den Geschäfts-QR und geben Sie genau diesen Betrag in TWINT ein.",
+    "manualConfirmation": "Prüfen Sie den Zahlungseingang vor der Bestätigung. Es gibt keine automatische Zahlungsbenachrichtigung.",
+    "customerDisplay": "Der QR wird auf dem Kundendisplay angezeigt.",
+    "qrAlt": "Offizieller TWINT-QR des Geschäfts",
+    "saveFailed": "Die Zahlung konnte nicht gespeichert werden. Prüfen Sie ihren Status vor einem erneuten Versuch.",
+    "confirm": "Zahlungseingang bestätigen",
+    "skip": "Überspringen — Eingang bestätigen",
+    "receiptRecovery": "Der TWINT-Zahlungseingang wurde bestätigt, aber die Zahlung ist nicht gespeichert. Speichern Sie den ursprünglichen Zahlungseingang, bevor Sie eine weitere Zahlung annehmen.",
+    "receiptSaved": "Der ursprüngliche TWINT-Zahlungseingang wurde gespeichert.",
+    "saveOriginal": "Ursprünglichen TWINT-Zahlungseingang speichern"
+  },
   "displayPurchase": {
     "beforePurchase": "Vor dem Kauf",
     "operation": "So funktioniert es",
@@ -4826,7 +4841,7 @@
         "payments_not_saved": "Karte belastet, Zahlung nicht gespeichert",
         "cancelled_order_claims_payment": "Stornierte Bestellung gilt noch als bezahlt"
       },
-      "revenueSplitHint": "Bargeld + Karte + Plattformen = Tatsächlich verdient",
+      "revenueSplitHint": "Summe der erhaltenen Zahlungen",
       "liveShiftBreakdown": "Live-Schichtübersicht",
       "liveCurrentWindow": "Live aktuelles Fenster",
       "historicalPreview": "Historische Vorschau",
@@ -6428,7 +6443,20 @@
     }
   },
   "suppliers": {
+    "paymentMethod": {
+      "unknown": "Unbekannte Zahlungsart"
+    },
+    "payment": {
+      "reversal": "Zahlung rückgängig gemacht"
+    },
     "capture": {
+      "automation": {
+        "recordedMark": "Von allein gespeichert",
+        "recordedStockMark": "Von allein gespeichert · Lager aktualisiert",
+        "billMark": "Abrechnung",
+        "openAndCorrect": "Öffnen und korrigieren",
+        "noSaveNeeded": "Kein Speichern nötig — diese Rechnung ist schon abgelegt."
+      },
       "settings": {
         "title": "Scan-Einstellungen",
         "subtitle": "Woher diese Kasse gescannte Rechnungen bekommt.",
@@ -8349,6 +8377,25 @@
     }
   },
   "integrations": {
+    "paymentSetup": {
+      "state": {
+        "manual_ready": "Manuelle Bestätigung",
+        "not_configured": "Einrichtung erforderlich",
+        "pending_verification": "Verifizierung ausstehend",
+        "partner_setup_required": "Einrichtung durch Anbieter erforderlich",
+        "unavailable": "Status nicht verfügbar"
+      },
+      "detail": {
+        "manual_ready": "Der Geschäfts-QR ist bereit. Der Kassierer muss jede eingegangene TWINT-Zahlung bestätigen.",
+        "not_configured": "Richten Sie diese Zahlungsanbindung im Admin Dashboard ein. Zahlungen sind noch nicht verfügbar.",
+        "pending_verification": "Die Konfiguration wurde gespeichert. Zahlungen sind nach der Verifizierung der Verbindung verfügbar.",
+        "partner_setup_required": "Der Anbieter muss die Anbindung aktivieren, bevor Zahlungen möglich sind. Fahren Sie im Admin Dashboard fort.",
+        "unavailable": "Die Zahlungsbereitschaft konnte nicht bestätigt werden. Prüfen Sie die Einrichtung im Admin Dashboard."
+      },
+      "openAdminFailed": "Die Zahlungseinstellungen im Admin Dashboard konnten nicht geöffnet werden.",
+      "twintDescription": "TWINT-Zahlungen",
+      "worldline_terminalsDescription": "Worldline-Zahlungsterminals"
+    },
     "title": "Plugins",
     "subtitle": "Drittanbieter-Plugins verbinden",
     "loading": "Plugins werden geladen...",

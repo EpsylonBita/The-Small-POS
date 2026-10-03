@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import { useI18n } from '../../contexts/i18n-context';
 import toast from 'react-hot-toast';
 import type { Order } from '../../types/orders';
@@ -10,6 +10,13 @@ import { calculateSubtotalFromItems } from './order-math';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { formatCompactOrderNumberForDisplay } from '../../utils/orderNumberUtils';
 import { getPluginColor, getPluginName, isExternalPlugin } from '../../utils/plugin-icons';
+import {
+  BOX_REJECTION_REASONS,
+  boxRejectionReasonLabelKey,
+  isBoxOrder,
+  isBoxRejectionReason,
+} from './box-order-decision';
+import type { BoxRejectionReason } from './box-order-decision';
 import { INCOMING_ORDER_APPROVAL_MARKER_ATTR } from '../../services/incomingOrderAlert';
 import { usePrepTimePicker } from '../../hooks/usePrepTimePicker';
 
@@ -35,6 +42,13 @@ interface OrderApprovalPanelProps {
   onBeforeDecline?: (orderId: string) => Promise<boolean>;
   onClose: () => void;
   viewOnly?: boolean;
+  /**
+   * Lets the operator close a pending order's panel (X, backdrop, Escape)
+   * without deciding. Never while an approve or decline is in flight.
+   */
+  dismissible?: boolean;
+  /** Opens the decline step as soon as the panel mounts. */
+  initialDeclineOpen?: boolean;
 }
 
 const ESTIMATED_TIME_OPTIONS = [15, 20, 25, 30, 45, 60];
@@ -280,6 +294,24 @@ async function fetchOrderItems(order: Order): Promise<any[]> {
   return [];
 }
 
+/**
+ * The "sent as" line under a translated BOX reason. Only the Greek value is
+ * marked `lang="el"`, so assistive tech reads the rest in the UI language.
+ */
+function renderBoxReasonSentAs(line: string, value: string): React.ReactNode {
+  const valueIndex = line.indexOf(value);
+  if (valueIndex < 0) {
+    return <span lang="el">{line}</span>;
+  }
+  return (
+    <>
+      {line.slice(0, valueIndex)}
+      <span lang="el">{value}</span>
+      {line.slice(valueIndex + value.length)}
+    </>
+  );
+}
+
 export function OrderApprovalPanel({
   order,
   onApprove,
@@ -287,6 +319,8 @@ export function OrderApprovalPanel({
   onBeforeDecline,
   onClose,
   viewOnly = false,
+  dismissible = false,
+  initialDeclineOpen = false,
 }: OrderApprovalPanelProps) {
   const bridge = getBridge();
   const { t } = useI18n();
@@ -296,12 +330,22 @@ export function OrderApprovalPanel({
   const [isApproving, setIsApproving] = useState(false);
   const [isDeclining, setIsDeclining] = useState(false);
   const [isCheckingDecline, setIsCheckingDecline] = useState(false);
-  const [showDeclineModal, setShowDeclineModal] = useState(false);
+  const [showDeclineModal, setShowDeclineModal] = useState(initialDeclineOpen && !viewOnly);
   const [declineReason, setDeclineReason] = useState('');
+  // BOX only accepts its own Greek reasons, so a BOX decline is a choice from
+  // that list instead of free text. Never carried over to another order.
+  const [selectedBoxReason, setSelectedBoxReason] = useState<BoxRejectionReason | null>(null);
   const [isPrinting, setIsPrinting] = useState(false);
   const [isLoadingItems, setIsLoadingItems] = useState(false);
   const [itemsLoadError, setItemsLoadError] = useState<string | null>(null);
-  const canClose = viewOnly;
+  const isBox = isBoxOrder(order);
+  const canClose = viewOnly || (dismissible && !isApproving && !isDeclining && !isCheckingDecline);
+  const showCloseButton = viewOnly || dismissible;
+
+  useEffect(() => {
+    setSelectedBoxReason(null);
+  }, [order.id]);
+
   // Tells the app-shell incoming-order alert that this order's approval is
   // on screen (it hit-tests these marked elements). A view-only panel cannot
   // accept anything, so it carries no marker.
@@ -345,7 +389,7 @@ export function OrderApprovalPanel({
   // The platform's pickup window, when its own fleet delivers: the longer
   // times are locked and the most it takes is offered (shared with Android).
   const { picker: prepTimePicker, minutesToSend } = usePrepTimePicker({
-    ghostMetadata: orderAsRecord['ghost_metadata'] ?? orderAsRecord['ghostMetadata'],
+    ghostMetadata: isBox ? null : orderAsRecord['ghost_metadata'] ?? orderAsRecord['ghostMetadata'],
     options: ESTIMATED_TIME_OPTIONS,
     defaultMinutes: DEFAULT_ESTIMATED_TIME,
     selected: pickedTime,
@@ -697,46 +741,58 @@ export function OrderApprovalPanel({
     setIsApproving(true);
     try {
       // Read the window again now: the most the platform takes keeps shrinking.
-      const approved = await onApprove(order.id, minutesToSend());
+      const approved = await onApprove(order.id, isBox ? estimatedTime : minutesToSend());
       // Not approved: the caller said why, and the order stays open here.
       // Never "Approved" next to that message (round 3 item DR4).
       if (approved === false) return;
       toast.success(t('orderApprovalPanel.approved'));
       onClose();
     } catch (error) {
-      toast.error(t('orderApprovalPanel.approveFailed'));
+      toast.error(t(isBox ? 'boxOrder.decisionUnconfirmed' : 'orderApprovalPanel.approveFailed'));
     } finally {
       setIsApproving(false);
     }
-  }, [order.id, estimatedTime, minutesToSend, onApprove, onClose, t]);
+  }, [isBox, order.id, estimatedTime, minutesToSend, onApprove, onClose, t]);
 
   const handleDecline = useCallback(async () => {
-    const trimmedReason = declineReason.trim();
-    if (!trimmedReason) {
-      toast.error(t('orderApprovalPanel.reasonRequired'));
-      return;
+    let reasonToSend: string;
+    if (isBox) {
+      // Sent verbatim: BOX rejects anything but its exact Greek enum value.
+      if (!isBoxRejectionReason(selectedBoxReason)) {
+        toast.error(t('boxOrder.reasonRequired', { defaultValue: 'Choose a reason to decline this BOX order.' }));
+        return;
+      }
+      reasonToSend = selectedBoxReason;
+    } else {
+      const trimmedReason = declineReason.trim();
+      if (!trimmedReason) {
+        toast.error(t('orderApprovalPanel.reasonRequired'));
+        return;
+      }
+      reasonToSend = trimmedReason;
     }
     setIsDeclining(true);
     try {
-      const declined = await onDecline(order.id, trimmedReason);
+      const declined = await onDecline(order.id, reasonToSend);
       // Not declined (refused, or it failed): the caller said why, and the
       // order stays open here. Never "Declined" next to that message.
       if (declined === false) return;
       toast.success(t('orderApprovalPanel.declined'));
       onClose();
     } catch (error) {
-      toast.error(t('orderApprovalPanel.declineFailed'));
+      toast.error(t(isBox ? 'boxOrder.decisionUnconfirmed' : 'orderApprovalPanel.declineFailed'));
     } finally {
       setIsDeclining(false);
       setShowDeclineModal(false);
     }
-  }, [order.id, declineReason, onDecline, onClose, t]);
+  }, [isBox, selectedBoxReason, order.id, declineReason, onDecline, onClose, t]);
 
   // Founder rule (30/09 and 01/10/2026): an order the till refuses to
   // decline (money was taken on it, or it is labelled paid with no payment
   // record here) is refused BEFORE the reason is asked. A check that cannot
   // run asks the reason anyway: the till refuses the decline itself too.
   const openDeclineModal = useCallback(async () => {
+    setSelectedBoxReason(null);
     if (!onBeforeDecline) {
       setShowDeclineModal(true);
       return;
@@ -883,10 +939,12 @@ export function OrderApprovalPanel({
                   {formatCurrency(totalAmount)}
                 </p>
               </div>
-              {canClose ? (
+              {showCloseButton ? (
                 <button
+                  type="button"
                   onClick={onClose}
-                  className="liquid-glass-modal-button min-h-0 min-w-0 shrink-0 p-2"
+                  disabled={!canClose}
+                  className="liquid-glass-modal-button min-h-0 min-w-0 shrink-0 p-2 disabled:opacity-50"
                   aria-label={t('common.actions.close')}
                 >
                   <X className="h-5 w-5" />
@@ -1204,7 +1262,7 @@ export function OrderApprovalPanel({
             <button
               type="button"
               onClick={handleDecline}
-              disabled={isDeclining || !declineReason.trim()}
+              disabled={isDeclining || (isBox ? !isBoxRejectionReason(selectedBoxReason) : !declineReason.trim())}
               className="liquid-glass-modal-button flex-1 border-red-500/30 bg-red-600/20 text-red-400 active:bg-red-600/30 disabled:opacity-50"
             >
               {isDeclining ? t('orderApprovalPanel.declining', { defaultValue: 'Declining...' }) : t('orderApprovalPanel.confirmDecline', { defaultValue: 'Confirm' })}
@@ -1214,25 +1272,69 @@ export function OrderApprovalPanel({
       >
         <div {...approvalMarker} className="space-y-4">
           <p className="text-sm liquid-glass-modal-text-muted">
-            {t('orderApprovalPanel.declinePromptDescription', {
-              defaultValue: 'Add the reason the customer will see when this order is denied.',
-            })}
+            {isBox
+              ? t('boxOrder.reasonPrompt', { defaultValue: 'BOX accepts only these reasons. Choose the one to send.' })
+              : t('orderApprovalPanel.declinePromptDescription', {
+                  defaultValue: 'Add the reason the customer will see when this order is denied.',
+                })}
           </p>
-          <textarea
-            value={declineReason}
-            onChange={(e) => setDeclineReason(e.target.value)}
-            placeholder={t('orderApprovalPanel.declinePlaceholder', { defaultValue: 'Enter a reason...' })}
-            className="liquid-glass-modal-input min-h-[8rem] w-full resize-none"
-            maxLength={DECLINE_REASON_MAX_LENGTH}
-            disabled={isDeclining}
-          />
-          <div className="text-right text-xs liquid-glass-modal-text-muted">
-            {t('orderApprovalPanel.characterCount', {
-              defaultValue: '{{current}}/{{max}}',
-              current: declineReason.length,
-              max: DECLINE_REASON_MAX_LENGTH,
-            })}
-          </div>
+          {isBox ? (
+            <div
+              role="radiogroup"
+              aria-label={t('boxOrder.reasonLabel', { defaultValue: 'Reason sent to BOX' })}
+              className="flex flex-col gap-2"
+            >
+              {BOX_REJECTION_REASONS.map((reason, index) => {
+                const isSelected = selectedBoxReason === reason;
+                const label = t(boxRejectionReasonLabelKey(reason), { defaultValue: reason });
+                return (
+                  <button
+                    key={reason}
+                    type="button"
+                    role="radio"
+                    aria-checked={isSelected}
+                    data-testid={`box-reject-reason-${index}`}
+                    onClick={() => setSelectedBoxReason(reason)}
+                    disabled={isDeclining}
+                    className={`liquid-glass-modal-button min-h-[2.75rem] w-full justify-between px-4 py-2 text-left disabled:opacity-50 ${
+                      isSelected ? 'border-red-500/60 bg-red-600/20 text-red-400' : ''
+                    }`}
+                  >
+                    <span className="flex min-w-0 flex-col items-start">
+                      <span className="text-sm font-semibold">{label}</span>
+                      {label !== reason ? (
+                        <span className="text-xs font-normal liquid-glass-modal-text-muted">
+                          {renderBoxReasonSentAs(
+                            t('boxOrder.reasonSentAs', { defaultValue: 'Sent to BOX as: {{value}}', value: reason }),
+                            reason,
+                          )}
+                        </span>
+                      ) : null}
+                    </span>
+                    {isSelected ? <Check className="h-4 w-4 flex-shrink-0" aria-hidden="true" /> : null}
+                  </button>
+                );
+              })}
+            </div>
+          ) : (
+            <>
+              <textarea
+                value={declineReason}
+                onChange={(e) => setDeclineReason(e.target.value)}
+                placeholder={t('orderApprovalPanel.declinePlaceholder', { defaultValue: 'Enter a reason...' })}
+                className="liquid-glass-modal-input min-h-[8rem] w-full resize-none"
+                maxLength={DECLINE_REASON_MAX_LENGTH}
+                disabled={isDeclining}
+              />
+              <div className="text-right text-xs liquid-glass-modal-text-muted">
+                {t('orderApprovalPanel.characterCount', {
+                  defaultValue: '{{current}}/{{max}}',
+                  current: declineReason.length,
+                  max: DECLINE_REASON_MAX_LENGTH,
+                })}
+              </div>
+            </>
+          )}
         </div>
       </LiquidGlassModal>
     </>
